@@ -300,7 +300,7 @@ pub async fn record_fork(bucket: &impl Bucket, child: Child, origin: Origin) -> 
 }
 
 /// [`record_fork`], the parent's checkpoint at the fork point authenticated under the DEK `keys`
-/// give, the parent's, if its objects are sealed: its writer's ring, or its deletion's
+/// give, the parent's, if its objects are encrypted: its writer's ring, or its deletion's
 /// ([`crate::keys::Parents`], TASK-411.4).
 pub async fn record_fork_under(
     bucket: &impl Bucket,
@@ -557,10 +557,10 @@ pub async fn delete(
     delete_under(bucket, branch, holder, token, None).await
 }
 
-/// [`delete`], by a host whose KMS is `kms`, if it has one: a sealed branch's forks to other cells
-/// it records get its checkpoint at their fork points authenticated under its DEK, its cell's KEK
-/// unwrapped by `kms` ([`crate::keys::writing`], TASK-411.4); with no KMS, such a deletion fails
-/// ([`Error::Kms`]), rather than write one in the clear that its children refuse.
+/// [`delete`], by a host whose KMS is `kms`, if it has one: an encrypted branch's forks to other
+/// cells it records get its checkpoint at their fork points authenticated under its DEK, its cell's
+/// KEK unwrapped by `kms` ([`crate::keys::writing`], TASK-411.4); with no KMS, such a deletion
+/// fails ([`Error::Kms`]), rather than write one in the clear that its children refuse.
 pub async fn delete_under(
     bucket: &impl Bucket,
     branch: Branch,
@@ -599,8 +599,8 @@ pub async fn delete_under(
             Err(Error::Lost(_)) if lost_is_ok(bucket, branch, &record).await? => Vec::new(),
             Err(error) => return Err(error),
         };
-        // cladefs: under its keys, if it is sealed, for its checkpoints at the fork points of its
-        // forks to other cells, as they are written (TASK-411.4).
+        // cladefs: under its keys, if it is encrypted, for its checkpoints at the fork points of
+        // its forks to other cells, as they are written (TASK-411.4).
         let keys = crate::keys::Parents::Kms(kms, Some(&record));
         for fork in &forks {
             let origin = Origin { parent: branch, at: fork.at };
@@ -718,7 +718,7 @@ pub async fn delete_fork(
 
 /// [`delete_fork`], by a host whose KMS is `kms`, if it has one: a claim of another cell than its
 /// parent's gets the parent's checkpoint at the fork point authenticated under the parent's DEK,
-/// if it is sealed, as [`record_fork_under`] writes it (TASK-411.4).
+/// if it is encrypted, as [`record_fork_under`] writes it (TASK-411.4).
 pub async fn delete_fork_under(
     bucket: &impl Bucket,
     child: Branch,
@@ -752,8 +752,8 @@ pub async fn delete_fork_under(
             // was found holding the segment, as a pass takes it, reads as not held, as there.
             let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
                 true if origin.parent.cell != child.cell => {
-                    // cladefs: under the parent's keys, if it is sealed and the host has a KMS: a
-                    // host with none writes it in the clear, as before, knowing of no sealed
+                    // cladefs: under the parent's keys, if it is encrypted and the host has a KMS:
+                    // a host with none writes it in the clear, as before, knowing of no encrypted
                     // branch (TASK-411.4).
                     let clear = crate::keys::Ring::clear();
                     let keys = match kms {

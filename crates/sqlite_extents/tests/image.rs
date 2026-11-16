@@ -19,17 +19,17 @@ fn a_database_on_an_image_survives_closing() {
     assert!(!found.is_empty(), "no file of the image holds its data in the clear");
 }
 
-/// TASK-411.7 (TASK-411's AC #3): a database on an image of a sealed cell, its tenant's KEK in the
-/// host's KMS, survives closing as one in the clear does; and no file of the image, its store's
-/// nor its bucket's, holds its data in the clear.
+/// TASK-411.7 (TASK-411's AC #3): a database on an image of an encrypted cell, its tenant's KEK in
+/// the host's KMS, survives closing as one in the clear does; and no file of the image, its
+/// store's nor its bucket's, holds its data in the clear.
 #[test]
-fn a_sealed_database_on_an_image_survives_closing() {
+fn an_encrypted_database_on_an_image_survives_closing() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     // The tenant of the images `Storage` makes: the common tenant's, 0.
     kms.create(0).unwrap();
     cladefs::remote::set_kms(Arc::new(kms)).unwrap();
-    assert_eq!(survives_closing("sealed"), Vec::<String>::new());
+    assert_eq!(survives_closing("encrypted"), Vec::<String>::new());
 }
 
 /// Data that compresses not, which a file holding it in the clear holds as it is.

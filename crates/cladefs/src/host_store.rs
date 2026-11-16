@@ -398,8 +398,8 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
 /// made, unless the store is the common tenant's ([`may_fork_into`], TASK-395.9).
 ///
-/// cladefs: a fork of a sealed store into another cell, as every fork here is, gives its child the
-/// keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
+/// cladefs: a fork of an encrypted store into another cell, as every fork here is, gives its child
+/// the keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
 /// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
 /// `ENOTSUP` if the child's tenant has no KEK, its cell in the clear, `EACCES` if the host heard a
 /// tenant whose keys it inherits, or the child's, revoked or destroyed.

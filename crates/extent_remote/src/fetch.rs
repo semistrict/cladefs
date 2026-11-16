@@ -30,12 +30,12 @@
 //! moves say. The footer and the table are tied to one version of an object by their CRCs, which
 //! the trailer and the table hold, and the parts by theirs, which the table holds.
 //!
-//! cladefs: what a host's fetchers keep, they keep as stored, sealed or not, as a reader holding no
-//! key reads it, and open with the keys of every store the host serves ([`Memory::keys`],
+//! cladefs: what a host's fetchers keep, they keep as stored, encrypted or not, as a reader holding
+//! no key reads it, and open with the keys of every store the host serves ([`Memory::keys`],
 //! `keys::HostRing`, TASK-411.3): an object's tail is opened, its MACs checked, once the host holds
-//! its key, and a part unpacked by the tail so opened; a part sealed under a key the host doesn't
-//! hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear, of a
-//! branch whose objects the host's keys say are sealed, is refused, naming it
+//! its key, and a part unpacked by the tail so opened; a part encrypted under a key the host
+//! doesn't hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear, of
+//! a branch whose objects the host's keys say are encrypted, is refused, naming it
 //! ([`Error::Downgrade`]); and an extent's own object whose footer names another extent than its
 //! key, or a moves' that names another object than its key's, is no object of theirs.
 
@@ -266,9 +266,9 @@ impl Tail {
 
     /// cladefs: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
     /// table and footer checked against their MACs, under its key if `ring` holds it, and kept so;
-    /// as read otherwise, a sealed one's unread. Refused if it is in the clear and `ring` holds the
-    /// object's branch sealed ([`Error::Downgrade`]), or authenticated under a key it doesn't hold
-    /// (TASK-411.3).
+    /// as read otherwise, an encrypted one's unread. Refused if it is in the clear and `ring` holds
+    /// the object's branch encrypted ([`Error::Downgrade`]), or authenticated under a key it
+    /// doesn't hold (TASK-411.3).
     fn opened(&self, ring: &HostRing, key: &str) -> Result<Cow<'_, extent_frame::Parts>, Error> {
         if let Some(opened) = self.opened.get() {
             return Ok(Cow::Borrowed(opened));
@@ -447,7 +447,7 @@ enum Part {
 
 /// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
 /// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). cladefs:
-/// opened then, if sealed, in a copy: its stored bytes are what the cache keeps and peers are
+/// opened then, if encrypted, in a copy: its stored bytes are what the cache keeps and peers are
 /// served (TASK-411.2); by the part as its tail is opened then, under the host's keys, a read
 /// failing so, its key not held yet, kept for none (TASK-411.3).
 struct Fetched {

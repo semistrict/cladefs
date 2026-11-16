@@ -22,8 +22,8 @@ pub const TAIL: u64 = 64 << 10;
 
 /// An object's tail: its footer, the table of where its parts are stored, and its trailer, the
 /// object's bytes from where its footer begins to its end; and where its parts are stored, as a
-/// reader holding no key reads them: what the cache keeps, and peers serve, of a sealed object as
-/// of one in the clear. Its readers open it under their keys ([`Tail::open`], TASK-411.2).
+/// reader holding no key reads them: what the cache keeps, and peers serve, of an encrypted object
+/// as of one in the clear. Its readers open it under their keys ([`Tail::open`], TASK-411.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tail {
     pub bytes: Vec<u8>,
@@ -45,7 +45,7 @@ impl Tail {
     }
 
     /// cladefs: its parts, as a reader holding `keys` reads them: its table and footer checked
-    /// against their MACs too, if the object is sealed under a key `keys` holds, and its parts
+    /// against their MACs too, if the object is encrypted under a key `keys` holds, and its parts
     /// opened under it (TASK-411.2).
     pub fn open(&self, keys: &dyn Keys) -> Result<Parts, Error> {
         let parts = Parts::of_suffix(&self.bytes, keys)?;
@@ -161,24 +161,24 @@ mod tests {
         assert_eq!(asked, [first, format!("get {KEY} {range:?}")]);
     }
 
-    /// cladefs: a sealed object's tail is read and checked by a reader holding no key, as the cache
-    /// keeps it; opened under its key, its parts open, and its footer and table are checked
+    /// cladefs: an encrypted object's tail is read and checked by a reader holding no key, as the
+    /// cache keeps it; opened under its key, its parts open, and its footer and table are checked
     /// against their MACs; under another key of its name, refused (TASK-411.2). One in the clear
     /// opens alike under any keys.
     #[test]
-    fn sealed_tails_are_read_keyless_and_opened_under_their_key() {
+    fn encrypted_tails_are_read_keyless_and_opened_under_their_key() {
         let id = extent_frame::KeyId { branch: 1, generation: 0 };
         let dek = extent_frame::Secret::from_bytes(&[7; 32]);
         let footer = layout::encode(&"footer");
         let keys = std::collections::HashMap::from([(id, dek)]);
-        let sealed = extent_frame::framed(&[1; 5000], &footer, Some((&keys[&id], id)));
-        let bucket = holding(sealed.clone());
+        let encrypted = extent_frame::framed(&[1; 5000], &footer, Some((&keys[&id], id)));
+        let bucket = holding(encrypted.clone());
         let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
         assert_eq!(read.footer(), footer);
         assert!(!read.parts.opens());
         let opened = read.open(&keys).unwrap();
         assert!(opened.opens());
-        assert_eq!(opened, Parts::of(&sealed, &keys).unwrap());
+        assert_eq!(opened, Parts::of(&encrypted, &keys).unwrap());
         let wrong =
             std::collections::HashMap::from([(id, extent_frame::Secret::from_bytes(&[8; 32]))]);
         let by_mac = Error::Corrupt("an object's table, by its MAC".into());

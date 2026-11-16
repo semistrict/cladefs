@@ -35,8 +35,8 @@ pub use extent_frame::segment::{
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's lease
 /// were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in a
 /// KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
-/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, sealed under their branch's DEK or
-/// in the clear, own extents' footers naming their extents, and moves' the object they are the
+/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their branch's DEK
+/// or in the clear, own extents' footers naming their extents, and moves' the object they are the
 /// moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints' keys
 /// name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it holds
 /// and its newest checkpoint, replacing its lease, and footers name no segment they follow;
@@ -715,9 +715,9 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
-/// How a writer seals what it frames: under its branch's DEK, the newest, and which it is, or in
-/// the clear ([`crate::keys::Ring::sealing`], TASK-411.3).
-pub type Sealing<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
+/// How a writer encrypts what it frames: under its branch's DEK, the newest, and which it is, or in
+/// the clear ([`crate::keys::Ring::encrypting`], TASK-411.3).
+pub type EncryptionKey<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
 /// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: in the
@@ -726,20 +726,24 @@ pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
     with_footer_under(data, footer, None)
 }
 
-/// cladefs: the bytes of an object of `data` and `footer`, as [`with_footer`], sealed as `sealing`
-/// says (TASK-411.3).
-pub fn with_footer_under<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer), sealing)
+/// cladefs: the bytes of an object of `data` and `footer`, as [`with_footer`], encrypted as
+/// `encryption` says (TASK-411.3).
+pub fn with_footer_under<T: Serialize>(
+    data: &[u8],
+    footer: &T,
+    encryption: EncryptionKey<'_>,
+) -> Vec<u8> {
+    extent_frame::framed(data, &encode(footer), encryption)
 }
 
 /// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
-/// copied to another key, sealed, is refused (TASK-411.3), sealed as `sealing` says.
-pub fn own_extent(extent: ExtentId, data: &[u8], sealing: Sealing<'_>) -> Vec<u8> {
-    with_footer_under(data, &extent, sealing)
+/// copied to another key, encrypted, is refused (TASK-411.3), encrypted as `encryption` says.
+pub fn own_extent(extent: ExtentId, data: &[u8], encryption: EncryptionKey<'_>) -> Vec<u8> {
+    with_footer_under(data, &extent, encryption)
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs: by a reader holding
-/// no key, which reads none of a sealed object's ([`crate::Error::NoKey`], TASK-411.2).
+/// no key, which reads none of an encrypted object's ([`crate::Error::NoKey`], TASK-411.2).
 pub fn data(bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
     data_under(bytes, &extent_frame::NoKeys)
 }
@@ -769,9 +773,9 @@ impl Segment {
         self.encode_under(None)
     }
 
-    /// cladefs: its object, sealed as `sealing` says (TASK-411.3).
-    pub fn encode_under(&self, sealing: Sealing<'_>) -> Vec<u8> {
-        with_footer_under(&self.data, &self.footer, sealing)
+    /// cladefs: its object, encrypted as `encryption` says (TASK-411.3).
+    pub fn encode_under(&self, encryption: EncryptionKey<'_>) -> Vec<u8> {
+        with_footer_under(&self.data, &self.footer, encryption)
     }
 
     /// The footer of a segment's object.

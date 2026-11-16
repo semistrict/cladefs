@@ -2514,14 +2514,14 @@ mod tests {
     }
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here as
-    /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
-    /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
+    /// the test's process's): its cell made encrypted, its branch given a DEK, and no byte of what
+    /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
     /// inherits; the store, the common tenant's, forks into no cell of a tenant with no KEK, in the
     /// clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
     /// forking as before.
     #[test]
-    fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
+    fn encrypted_stores_serve_follow_reopen_and_fork_into_encrypted_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
@@ -2584,7 +2584,7 @@ mod tests {
         let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
         assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
 
-        // The common tenant's, sealed, into a cell of a tenant with no KEK.
+        // The common tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
         let common =
             ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));

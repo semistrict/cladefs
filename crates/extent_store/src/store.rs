@@ -16,7 +16,7 @@ use crate::layout::{
     branch_dir, create_branch_dirs, extent_path, files_of, list_numbers, log_path,
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
-use crate::raw::{RawFile, Sealer};
+use crate::raw::{RawEncryption, RawFile};
 use crate::seals;
 use crate::segments::{
     self, Behind, Preparation, Preparing, SECTOR, Segments, Unframed, Unsectored, footer_last,
@@ -259,8 +259,8 @@ pub struct Store<D: Dir> {
     idle: Arc<Condvar>,
     /// cladefs: its views, which followers read it through ([`Store::view`]).
     views: Arc<Views>,
-    /// cladefs: its keys, which its segments and extents stored on their own are sealed and read
-    /// under (TASK-411.3).
+    /// cladefs: its keys, which its segments and extents stored on their own are encrypted and
+    /// read under (TASK-411.3).
     keys: Arc<Ring>,
 }
 
@@ -323,8 +323,8 @@ struct Logs<F> {
 
 /// A write in progress (see [`Store::begin_write`]): its data goes to its file, by
 /// [`Write::write`], or by a caller's own I/O of what [`Write::stored`] gives. Dropping it before
-/// it is finished abandons it. cladefs: no caller writes its file otherwise: a sealed store's raw
-/// files are encrypted, a sector at a time, as they write them (TASK-411.5).
+/// it is finished abandons it. cladefs: no caller writes its file otherwise: an encrypted store's
+/// raw files are encrypted, a sector at a time, as they write them (TASK-411.5).
 pub struct Write<'a, D: Dir> {
     store: &'a Store<D>,
     extent: ExtentId,
@@ -342,8 +342,8 @@ pub struct Write<'a, D: Dir> {
 }
 
 impl<D: Dir> Write<'_, D> {
-    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is
-    /// sealed, whole sectors then, as what the store takes is (TASK-411.8). cladefs: refused past
+    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is,
+    /// whole sectors then, as what the store takes is (TASK-411.8). cladefs: refused past
     /// the write's end.
     pub fn write(&self, data: &[u8], at: u64) -> Result<(), Error> {
         let len = data.len() as u64;
@@ -352,8 +352,8 @@ impl<D: Dir> Write<'_, D> {
     }
 
     /// cladefs: `data`, the whole write's bytes, as its file is to store them, for a caller writing
-    /// them by an I/O of its own, as an image's device does: encrypted in place if the store is
-    /// sealed (TASK-411.5). They go to the file it names, at the offset it names; written in whole
+    /// them by an I/O of its own, as an image's device does: encrypted in place if the store
+    /// is (TASK-411.5). They go to the file it names, at the offset it names; written in whole
     /// sectors if a write of them stops short, from the last whole sector written, they are what
     /// they are whatever writes them again.
     pub fn stored(&self, mut data: Aligned) -> Result<Stored<'_, D::File>, Error> {
@@ -387,7 +387,7 @@ impl<D: Dir> Write<'_, D> {
 }
 
 /// cladefs: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
-/// in `file`, encrypted if the store is sealed.
+/// in `file`, encrypted if the store is.
 pub struct Stored<'a, F> {
     pub file: &'a Arc<F>,
     pub offset: u64,
@@ -539,15 +539,15 @@ impl<D: Dir> Framer<D> {
     /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
     /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
     /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
-    /// thread of the store's runs outside of. cladefs: of a clear raw file alone: a sealed segment's
-    /// parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
+    /// thread of the store's runs outside of. cladefs: of a clear raw file alone: an encrypted
+    /// segment's parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
     fn look(
         &self,
         raw: &RawFile<D::File>,
         part: u64,
         look: Look,
     ) -> io::Result<(Seen, Option<Hold>)> {
-        assert!(raw.clear().is_some(), "a sealed raw file's part looked at ahead");
+        assert!(raw.clear().is_some(), "an encrypted raw file's part looked at ahead");
         if !self.dir.concurrent() || cfg!(feature = "shuttle") {
             let (seen, packed) = framing::see(raw, part, look)?;
             return Ok((seen, packed.map(|packed| self.held.hold(packed))));
@@ -728,15 +728,16 @@ pub struct Unmade;
 
 /// cladefs: what the bucket holds of the branch a store opens (doc-14, Opening a store;
 /// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
-/// found taking it ([`extent_remote::Taken`]), the head, which the store's write-ahead log is put after,
-/// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
-/// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
-/// one, which what the bucket acknowledged of the store's goes into. cladefs: and the store's keys,
-/// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
-/// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear. And what holds
-/// the parts of its segments packed as they fill, which the process's stores share, so that what
-/// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
-/// one of the store's own, which nothing makes let go. A sealed store holds none (TASK-411.5).
+/// found taking it ([`extent_remote::Taken`]), the head, which the store's write-ahead log is put
+/// after, and its writer's chain there, which stamps the store's footers from then on; or, for a
+/// point, its state alone, which nothing writes. And the host's cache of the bucket's objects, if
+/// it has one, which what the bucket acknowledged of the store's goes into. cladefs: and the
+/// store's keys, its branch's and its ancestors' DEKs, which its segments and extents stored on
+/// their own are encrypted and read under (`extent_remote::keys`, TASK-411.3): none, in the clear.
+/// And what holds the parts of its segments packed as they fill, which the process's stores share,
+/// so that what governs the process's memory lets them go as it runs short (`crate::held`,
+/// TASK-400); without, one of the store's own, which nothing makes let go. An encrypted store holds
+/// none (TASK-411.5).
 pub struct Opening {
     pub state: extent_remote::State,
     pub taken: Option<extent_remote::Taken>,
@@ -1001,7 +1002,7 @@ impl<D: Dir> Recovering<D> {
         }
         let open = segments.open_segment();
         let log = segments.open_log();
-        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt, log.sealer))]);
+        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt, log.encryption))]);
         #[cfg(any(test, feature = "audit"))]
         let replay = {
             let lengths = extents.iter().map(|(extent, entry)| (*extent, entry.len)).collect();
@@ -1262,7 +1263,7 @@ impl<D: Dir> Store<D> {
         self.volume.as_ref()
     }
 
-    /// cladefs: its keys, its branch's and its ancestors' DEKs, which it seals and reads under
+    /// cladefs: its keys, its branch's and its ancestors' DEKs, which it encrypts and reads under
     /// (TASK-411.3): empty, in the clear.
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
@@ -1519,10 +1520,10 @@ impl<D: Dir> Store<D> {
             (grows, to_segment, overwrites)
         };
         // cladefs: whole sectors, which the open segment takes, and its seal, copying it whole from
-        // its start, appends there (TASK-411.8): refused before the extent opens. cladefs: and which
-        // a sealed store's large extents' raw files take, encrypted a sector at a time
+        // its start, appends there (TASK-411.8): refused before the extent opens. cladefs: and
+        // which an encrypted store's large extents' raw files take, encrypted a sector at a time
         // (TASK-411.5).
-        if to_segment || self.keys.sealing().is_some() {
+        if to_segment || self.keys.encrypting().is_some() {
             Unsectored::check(offset, len)?;
         }
         state.check_room(grows, overwrites)?;
@@ -1565,12 +1566,12 @@ impl<D: Dir> Store<D> {
         })
     }
 
-    /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one left
-    /// at its path holds nothing the extent does, as no open extent's writes go to it: a free's, of
-    /// the extent while it was open, which the next commit's flush removes. It makes way, so that
-    /// the extent may be written anew before that flush (TASK-79.5).
-    /// cladefs: sealed, if the store is, under its branch's newest DEK, from a salt of its own kept
-    /// in memory alone, as the file never outlives the process: an opening removes those left
+    /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one
+    /// left at its path holds nothing the extent does, as no open extent's writes go to it: a
+    /// free's, of the extent while it was open, which the next commit's flush removes. It makes
+    /// way, so that the extent may be written anew before that flush (TASK-79.5). cladefs:
+    /// encrypted, if the store is, under its branch's newest DEK, from a salt of its own kept in
+    /// memory alone, as the file never outlives the process: an opening removes those left
     /// (TASK-411.5).
     fn create_raw(&self, extent: ExtentId) -> Result<RawFile<D::File>, Error> {
         let (dir, path) = (&*self.dir, open_extent_path(extent));
@@ -1580,8 +1581,9 @@ impl<D: Dir> Store<D> {
             }
             created => created,
         };
-        let sealer = self.keys.sealing().map(|(dek, key)| Arc::new(Sealer::new(dek, key)));
-        Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, sealer))
+        let encryption =
+            self.keys.encrypting().map(|(dek, key)| Arc::new(RawEncryption::new(dek, key)));
+        Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, encryption))
     }
 
     /// cladefs: makes room in the open segment for a write of `len` bytes, if it has none: writes
@@ -2243,9 +2245,9 @@ impl<D: Dir> Store<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        // cladefs: sealed, no part's packed bytes are its data, and it is framed in a copy
+        // cladefs: encrypted, no part's packed bytes are its data, and it is framed in a copy
         // (TASK-411.2, TASK-411.3); its raw file's are not either, encrypted (TASK-411.5).
-        let mut packer = extent_frame::Packer::new(self.keys.sealing());
+        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
         let clear = raw.clear().filter(|_| packer.key().is_none()).cloned();
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
@@ -2304,7 +2306,7 @@ impl<D: Dir> Store<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        let mut packer = extent_frame::Packer::new(self.keys.sealing());
+        let mut packer = extent_frame::Packer::new(self.keys.encrypting());
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -2971,10 +2973,10 @@ impl<D: Dir> Store<D> {
                 // Its first records: a flush keeps a segment's log while it has one.
                 std::collections::btree_map::Entry::Vacant(vacant) => {
                     let log = self.lock().segments.log_file(&*self.dir, segment)?;
-                    vacant.insert(SegmentLog::new(log.file, log.salt, log.sealer))
+                    vacant.insert(SegmentLog::new(log.file, log.salt, log.encryption))
                 }
             };
-            // Salted as its log's (`wal::LOG_MAGIC`); cladefs: MACed, if sealed (TASK-411.5).
+            // Salted as its log's (`wal::LOG_MAGIC`); cladefs: MACed, if encrypted (TASK-411.5).
             let appended = records[at..at + run].iter().map(|(_, record)| record);
             log.append(appended).context("appending commits' records")?;
             at += run;

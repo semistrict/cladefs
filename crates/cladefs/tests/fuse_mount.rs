@@ -217,12 +217,12 @@ fn a_mount_dropped_unmounts_and_closes() {
     });
 }
 
-/// TASK-411.7 (TASK-411's AC #3, FUSE mounts; Linux): a store of a sealed cell, its tenant's KEK
-/// in the host's KMS (the common tenant's, whose cells `Storage` makes), mounted through the
+/// TASK-411.7 (TASK-411's AC #3, FUSE mounts; Linux): a store of an encrypted cell, its tenant's
+/// KEK in the host's KMS (the common tenant's, whose cells `Storage` makes), mounted through the
 /// kernel: a file written is read back through the mount and, unmounted and closed, from the store
 /// opened again; no file of the store's directory, nor of its bucket's, holds it in the clear.
 #[test]
-fn a_sealed_store_mounted_holds_nothing_in_the_clear() {
+fn an_encrypted_store_mounted_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();

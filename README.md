@@ -392,7 +392,7 @@ branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 **Encryption and shredding** (backlog doc-16). With `CLADEFS_KMS` naming the
 host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
-are sealed: the bucket, the stores' directories and the part cache hold their
+are encrypted: the bucket, the stores' directories and the part cache hold their
 data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
 every host (`cladefsctl forget-tenant-keys TENANT`, the control API's
 `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every

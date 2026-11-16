@@ -452,15 +452,15 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(after, listed);
 }
 
-/// TASK-411.14: `--delete-branch` of a sealed branch whose fork into another cell has no record
+/// TASK-411.14: `--delete-branch` of an encrypted branch whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
 /// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
 /// the KMS `CLADEFS_KMS` names. Without one, it fails, naming the tenant and what it needs, the
 /// branch left as a deletion stopped partway: its record not deleted, the child unrecorded; run
 /// again with one, it finishes.
 #[test]
-fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms() {
-    use extent_frame::{Frame, KeyId, Seal};
+fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
+    use extent_frame::{Encryption, Frame, KeyId};
     use extent_keys::kms::LocalKms;
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::layout::{self, Branch, Cell, Child, Origin};
@@ -497,7 +497,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let written = Batch::from(written).close(&mut writer.chain());
-        let seq = writer.add_segment(written.frame_under(ring.sealing())).unwrap();
+        let seq = writer.add_segment(written.frame_under(ring.encrypting())).unwrap();
         writer.upload(seq).await.unwrap();
         writer.acknowledge().await.unwrap();
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
@@ -505,7 +505,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
         let forked = Child { branch: child, owner: 0x109, point: false };
         let forking = forking.fork(forked, &mut writer.chain());
-        let at = writer.add_segment(forking.frame_under(ring.sealing())).unwrap();
+        let at = writer.add_segment(forking.frame_under(ring.encrypting())).unwrap();
         writer.upload(at).await.unwrap();
         let head = extent_remote::head::get(&*bucket, parent).await.unwrap().unwrap();
         let named = layout::encode(&head.holding(writer.epoch(), at + 1));
@@ -547,8 +547,10 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     let checkpoint = layout::checkpoint(parent, at, 1);
     assert_eq!(checkpoints(), std::slice::from_ref(&checkpoint));
     let bytes = block_on(bucket.get(&checkpoint)).unwrap().bytes;
-    let seal = Frame::of(&bytes).unwrap().seal;
-    let Seal::Authenticated { key, .. } = seal else { panic!("{checkpoint}: {seal:?}") };
+    let encryption = Frame::of(&bytes).unwrap().encryption;
+    let Encryption::Authenticated { key, .. } = encryption else {
+        panic!("{checkpoint}: {encryption:?}")
+    };
     assert_eq!(key, KeyId { branch: 1, generation: keys::FIRST });
 }
 

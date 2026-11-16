@@ -268,9 +268,9 @@ impl Unframed {
         self.frame_under(None)
     }
 
-    /// cladefs: its objects, framed, sealed as `sealing` says (TASK-411.3).
-    pub fn frame_under(self, sealing: layout::Sealing<'_>) -> Objects {
-        self.data.frame_under(&self.footer, sealing)
+    /// cladefs: its objects, framed, encrypted as `encryption` says (TASK-411.3).
+    pub fn frame_under(self, encryption: layout::EncryptionKey<'_>) -> Objects {
+        self.data.frame_under(&self.footer, encryption)
     }
 }
 
@@ -292,16 +292,16 @@ impl Data {
         self.frame_under(footer, None)
     }
 
-    /// cladefs: its objects, as [`Data::frame`], sealed as `sealing` says (TASK-411.3).
-    pub fn frame_under(&self, footer: &Footer, sealing: layout::Sealing<'_>) -> Objects {
+    /// cladefs: its objects, as [`Data::frame`], encrypted as `encryption` says (TASK-411.3).
+    pub fn frame_under(&self, footer: &Footer, encryption: layout::EncryptionKey<'_>) -> Objects {
         let own = (footer.own())
             .map(|(extent, location)| {
                 let data = self.own.get(&extent.sequence).expect("sealed on its own");
-                (location.key.clone(), layout::own_extent(extent, data, sealing).into())
+                (location.key.clone(), layout::own_extent(extent, data, encryption).into())
             })
             .collect();
         let segment = Segment { data: self.segment.clone(), footer: footer.clone() };
-        Objects { footer: footer.clone(), segment: segment.encode_under(sealing).into(), own }
+        Objects { footer: footer.clone(), segment: segment.encode_under(encryption).into(), own }
     }
 }
 

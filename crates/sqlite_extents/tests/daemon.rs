@@ -44,19 +44,19 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     reads_in_place_and_survives_reopening("plain");
 }
 
-/// TASK-411.7 (TASK-411's AC #3, sqlite volumes, Linux): a database on a store of a sealed cell
-/// the daemon serves, its tenant's KEK in the host's KMS (the common tenant's, whose cells the
+/// TASK-411.7 (TASK-411's AC #3, sqlite volumes, Linux): a database on a store of an encrypted
+/// cell the daemon serves, its tenant's KEK in the host's KMS (the common tenant's, whose cells the
 /// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
 /// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
 /// clear.
 #[test]
-fn a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening() {
+fn an_encrypted_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     let keys = tempfile::tempdir().unwrap();
     let kms = keys.path().join("kms");
     extent_keys::kms::LocalKms::open(&kms).unwrap().create(0).unwrap();
     // The daemon's KMS, as a host's is named: SAFETY: before this process starts any other thread.
     unsafe { std::env::set_var("CLADEFS_KMS", format!("local://{}", kms.display())) };
-    assert_eq!(reads_in_place_and_survives_reopening("sealed"), Vec::<String>::new());
+    assert_eq!(reads_in_place_and_survives_reopening("encrypted"), Vec::<String>::new());
 }
 
 /// Data that compresses not, which a file holding it in the clear holds as it is.

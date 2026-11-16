@@ -4,7 +4,7 @@
 
 //! cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
-//! each of which wraps its volumes' DEKs ([`Secret::wrap`]); an object's data is sealed
+//! each of which wraps its volumes' DEKs ([`Secret::wrap`]); an object's data is encrypted
 //! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
 //! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]); raw files on local disk are
 //! encrypted a sector at a time ([`xts::Xts`]). Every primitive the workspace encrypts with is
@@ -38,7 +38,7 @@ pub const MAC_LEN: usize = 32;
 /// The bytes of a key wrapped by another (AES-KW, RFC 3394: the key and 8 bytes).
 pub const WRAPPED_LEN: usize = KEY_LEN + 8;
 
-/// Data, a key or a MAC that is not what was sealed, wrapped or authenticated: tampered with,
+/// Data, a key or a MAC that is not what was encrypted, wrapped or authenticated: tampered with,
 /// corrupt, or under another key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("not authentic: {0}")]
@@ -126,7 +126,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// A salt for [`Secret::derive`]: random, one per object sealed, kept with it in the clear.
+/// A salt for [`Secret::derive`]: random, one per object encrypted, kept with it in the clear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Salt(pub [u8; SALT_LEN]);
 
@@ -237,11 +237,12 @@ mod tests {
         assert_eq!(aead.open(7, b"segments/1/0", &mut data, &flipped), refused);
     }
 
-    /// What objects are sealed with is a format (doc-11): the nonce's layout and the cipher may not
-    /// change unnoticed. The values were checked against other implementations on 2026-11-14: the
-    /// ciphertext as LibreSSL's AES-256 of the nonce and counter 2, the tag by a GHASH in Python.
+    /// What objects are encrypted with is a format (doc-11): the nonce's layout and the cipher may
+    /// not change unnoticed. The values were checked against other implementations on 2026-11-14:
+    /// the ciphertext as LibreSSL's AES-256 of the nonce and counter 2, the tag by a GHASH in
+    /// Python.
     #[test]
-    fn sealing_is_as_it_was() {
+    fn encryption_is_as_it_was() {
         let mut data = [0; 16];
         let tag = Aead::new(&key(1)).seal(7, b"aad", &mut data);
         assert_eq!(hex(&data), "ef922a7cb2a6d40ca3c5567b611615d9");
