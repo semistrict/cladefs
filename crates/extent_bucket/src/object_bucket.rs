@@ -597,7 +597,7 @@ impl ObjectBucket {
         match read.await.map(|bytes| layout::decode::<layout::Marks>(&bytes)) {
             Ok(Ok(marks)) => self.marks.hold(cell, Some((&newest, marks))),
             Ok(Err(error)) => {
-                log::warn!(key = newest.key, error:%; "extent_remote: the collector's marks: {error}");
+                log::warn!(key = newest.key, error:%; "extent_bucket: the collector's marks: {error}");
                 self.marks.hold(cell, None);
             }
             Err(error) => log::debug!(error:%; "object storage: reading {path}: {error}"),
@@ -1339,7 +1339,7 @@ pub(crate) mod tests {
                       branch needs, and would have deleted";
         let reached = |request: &str, key: &str, marks: String, kind: &str, epoch| {
             format!(
-                "WARN extent_remote: {request} {key}: {saying} ({marks}) key={key} kind={kind} \
+                "WARN extent_bucket: {request} {key}: {saying} ({marks}) key={key} kind={kind} \
                  request={request} marks={epoch}"
             )
         };

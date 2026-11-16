@@ -99,7 +99,7 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     match Parts::of_suffix(suffix, keys) {
         Ok(parts) => Ok(Some(parts)),
         Err(extent_frame::Error::Unencrypted) => {
-            let named = extent_remote::Error::Downgrade("a framed file of the store's".into());
+            let named = extent_bucket::Error::Downgrade("a framed file of the store's".into());
             Err(Error::new(named))
         }
         Err(_) => Ok(None),

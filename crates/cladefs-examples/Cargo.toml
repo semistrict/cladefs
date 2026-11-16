@@ -16,7 +16,7 @@ anyhow.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
 # store-bench's stores opened as a host with a KMS opens them, encrypted or not (TASK-411.5).
-extent_remote.workspace = true
+extent_bucket.workspace = true
 extent_store.workspace = true
 # fxfs-metabench's attributes, as Fxfs's API takes them.
 fidl-fuchsia-io.workspace = true

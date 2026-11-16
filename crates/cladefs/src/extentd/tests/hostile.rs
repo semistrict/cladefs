@@ -1810,7 +1810,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     drop(given);
     let point = vms.join("point");
     let given =
-        (super::branch_at(&dir.path().join("given")), (None, extent_remote::cell::Kind::Fxfs));
+        (super::branch_at(&dir.path().join("given")), (None, extent_bucket::cell::Kind::Fxfs));
     control(super::super::stores::create(point, STORE_BYTES, given.0, given.1)).unwrap();
 
     // Alice, on a thread of her own, her guest's, doing what each case asks of her.
@@ -2225,7 +2225,7 @@ fn page_ins_in_flight_are_bounded() {
     const MIB: u64 = 1 << 20;
     host();
     let gated = Arc::new(super::GatedReads::new());
-    super::super::stores::use_bucket(extent_remote::object_bucket::ObjectBucket::new(
+    super::super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -2260,7 +2260,7 @@ fn page_ins_in_flight_are_bounded() {
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let point_branch = super::branch_at(&point);
-    let made = (None, extent_remote::cell::Kind::Fxfs);
+    let made = (None, extent_bucket::cell::Kind::Fxfs);
     control(super::super::stores::create(elsewhere.join("point"), 1 << 30, point_branch, made))
         .unwrap();
     let restored = elsewhere.join("store");

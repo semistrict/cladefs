@@ -377,7 +377,7 @@ fn nice(nice: i32) {
 struct Host {
     encrypted: bool,
     runtime: tokio::runtime::Runtime,
-    bucket: Arc<extent_remote::object_bucket::ObjectBucket>,
+    bucket: Arc<extent_bucket::object_bucket::ObjectBucket>,
     upload: extent_store::upload::Runtime,
     _kms: tempfile::TempDir,
 }
@@ -393,15 +393,15 @@ impl Host {
         let encrypted = std::env::var("CLADEFS_BENCH_ENCRYPTED").ok()?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(extent_remote::object_bucket::ObjectBucket::new(objects, ""));
+        let bucket = Arc::new(extent_bucket::object_bucket::ObjectBucket::new(objects, ""));
         let kms = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::ENCRYPTED).unwrap();
-        let keys = extent_remote::keys::Host {
-            kms: Some(extent_remote::keys::CachingKms::new(Arc::new(local))),
-            ring: extent_remote::fetch::Memory::new().keys().clone(),
+        let keys = extent_bucket::keys::Host {
+            kms: Some(extent_bucket::keys::CachingKms::new(Arc::new(local))),
+            ring: extent_bucket::fetch::Memory::new().keys().clone(),
         };
-        let uploads = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);
+        let uploads = extent_bucket::fetch::Budget::new(extent_bucket::fetch::Limits::UNBOUNDED);
         let upload =
             extent_store::upload::Runtime { handle: runtime.handle().clone(), uploads, keys };
         Some(Self { encrypted: encrypted == "1", runtime, bucket, upload, _kms: kms })
@@ -420,7 +420,7 @@ impl Host {
         let tenant = if self.encrypted { Self::ENCRYPTED } else { Self::CLEAR };
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
-        let kind = extent_remote::cell::Kind::Fxfs;
+        let kind = extent_bucket::cell::Kind::Fxfs;
         let volume = extent_store::Volume { name: format!("v{id}"), kind };
         Store::make(&dir, description, Some("memory:///bench"), Some(volume)).unwrap();
         let recovering = Store::recover_unmade(dir).unwrap();

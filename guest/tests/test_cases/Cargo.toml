@@ -6,7 +6,7 @@ edition = "2024"
 host = [
     "bytes",
     "cladefs",
-    "extent_remote",
+    "extent_bucket",
     "extent_store",
     "follower_history",
     "futures",
@@ -38,7 +38,7 @@ futures = { version = "0.3.34", optional = true }
 # cladefs's extent store, whose directory the crash test takes before it copies it (TASK-129).
 extent_store = { path = "../../../crates/extent_store", optional = true }
 # cladefs's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
-extent_remote = { path = "../../../crates/extent_remote", optional = true }
+extent_bucket = { path = "../../../crates/extent_bucket", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "time", "net", "sync", "macros"] }
 # cladefs's history checker of followers (TASK-42.1), which the followers' torture test's host runs.
 follower_history = { path = "../../../crates/follower_history", optional = true }

@@ -16,8 +16,8 @@
      let made = match uploader.is_point() {
          true => {
              drop(held);
---- a/crates/extent_remote/src/branch.rs
-+++ b/crates/extent_remote/src/branch.rs
+--- a/crates/extent_bucket/src/branch.rs
++++ b/crates/extent_bucket/src/branch.rs
 @@ -233,7 +233,7 @@
          let read =
              found.as_ref().map(|found| Record::decode(child.branch, &found.bytes)).transpose()?;

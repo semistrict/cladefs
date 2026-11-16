@@ -14,8 +14,8 @@ use super::server::Server;
 use crate::error::{Errno, Error};
 use crate::extentd::control::{channel, errno, saying};
 use crate::{Branch, BranchOf, Cell, Filesystem, SetAttr, Storage};
-use extent_remote::cell::{self, Kind};
-use extent_remote::keys;
+use extent_bucket::cell::{self, Kind};
+use extent_bucket::keys;
 use proto::mount_client::MountClient;
 use proto::mount_server::MountServer;
 use proto::*;
@@ -231,7 +231,7 @@ impl proto::mount_server::Mount for Control {
                         let held = cell::hold(&*bucket, cell, (placement, placement), making, None);
                         let (held, object) = held.await?;
                         drop(keys::held(kms.as_ref(), cell, object.clone(), kek));
-                        Ok::<_, extent_remote::Error>((held, object))
+                        Ok::<_, extent_bucket::Error>((held, object))
                     };
                     let held = extent_store::upload::block_on(holding).map_err(Error::new)?;
                     let (_, object) = held.map_err(|err| {
@@ -365,7 +365,7 @@ impl proto::mount_server::Mount for Control {
 
 /// The errno a failure to hold a cell says, as the extent daemon's API has it: `ENOENT` for a cell
 /// the bucket has none of, `ESTALE` for one a later placement holds.
-fn cell_errno(err: &extent_remote::Error) -> Errno {
+fn cell_errno(err: &extent_bucket::Error) -> Errno {
     let failure = extent_store::upload::Failure::Bucket(err.clone());
     crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
 }

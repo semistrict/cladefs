@@ -23,7 +23,7 @@ pub struct Closed<F> {
     pub own: Vec<(String, Arc<F>)>,
     pub restamped: bool,
     /// cladefs: the store's keys, which an encrypted segment is restamped under (TASK-411.3).
-    pub keys: std::sync::Arc<extent_remote::keys::Ring>,
+    pub keys: std::sync::Arc<extent_bucket::keys::Ring>,
 }
 
 impl<F: File> Closed<F> {

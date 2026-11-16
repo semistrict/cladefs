@@ -159,7 +159,7 @@ impl proto::peer_server::Peer for Server {
             let theirs = format!("asked of {bucket}, this host's bucket being {}", self.bucket);
             return Err(Status::failed_precondition(theirs));
         }
-        if !extent_remote::peer::served(&key) {
+        if !extent_bucket::peer::served(&key) {
             return Err(Status::invalid_argument(format!("{key}: no parts served")));
         }
         let asked = Asked { key, part };

@@ -42,11 +42,11 @@
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
-use extent_remote::batch::{Commit, SegmentBuilder};
-use extent_remote::bucket::Bucket as _;
-use extent_remote::layout::{Branch, Cell, Child, Origin};
-use extent_remote::object_bucket::ObjectBucket;
-use extent_remote::{Bytes, Writer, branch, cell};
+use extent_bucket::batch::{Commit, SegmentBuilder};
+use extent_bucket::bucket::Bucket as _;
+use extent_bucket::layout::{Branch, Cell, Child, Origin};
+use extent_bucket::object_bucket::ObjectBucket;
+use extent_bucket::{Bytes, Writer, branch, cell};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -327,7 +327,7 @@ async fn write(cell: Cell, shape: Shape, of: Option<&Point>) -> Result<Written, 
             .map_err(|err| err.to_string())?;
     }
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
-    let failed = |err: extent_remote::Error| err.to_string();
+    let failed = |err: extent_bucket::Error| err.to_string();
     cell::create(&*bucket, cell, WRITER, None).await.map_err(failed)?;
     let id = Branch { cell, id: 1 };
     match of {
@@ -434,10 +434,10 @@ fn point_at(shape: Shape, tenant: u64, n: u64) -> Option<Branch> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extent_remote::collector::Options;
-    use extent_remote::layout::{self, Kind as Key};
-    use extent_remote::object_bucket::Request;
-    use extent_remote::sweep::{Mode, Sweep, Swept};
+    use extent_bucket::collector::Options;
+    use extent_bucket::layout::{self, Kind as Key};
+    use extent_bucket::object_bucket::Request;
+    use extent_bucket::sweep::{Mode, Sweep, Swept};
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| (*arg).to_owned()))

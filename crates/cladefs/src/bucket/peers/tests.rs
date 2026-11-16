@@ -7,12 +7,12 @@
 //! gRPC links are `extentd::peers`'.
 
 use super::*;
-use extent_remote::bucket::{Bucket as _, PutMode};
-use extent_remote::cache::Cache;
-use extent_remote::fetch::{Budget, Fetcher, Limits, Memory, Priority};
-use extent_remote::layout::{self, Contents, Location, test_branch};
-use extent_remote::object_bucket::{ObjectBucket, Request};
-use extent_remote::peer::Peers as _;
+use extent_bucket::bucket::{Bucket as _, PutMode};
+use extent_bucket::cache::Cache;
+use extent_bucket::fetch::{Budget, Fetcher, Limits, Memory, Priority};
+use extent_bucket::layout::{self, Contents, Location, test_branch};
+use extent_bucket::object_bucket::{ObjectBucket, Request};
+use extent_bucket::peer::Peers as _;
 use std::sync::atomic::AtomicBool;
 use storage_device::ExtentId;
 
@@ -267,7 +267,7 @@ fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {
     assert!(peers.owner(&segment, 0).is_none(), "asked itself");
     assert_eq!(peers.addresses(), [me]);
     for key in [layout::record(test_branch(1)), layout::head(test_branch(1))] {
-        assert!(!extent_remote::peer::served(&key), "{key} served");
+        assert!(!extent_bucket::peer::served(&key), "{key} served");
     }
-    assert!(extent_remote::peer::served(&segment));
+    assert!(extent_bucket::peer::served(&segment));
 }

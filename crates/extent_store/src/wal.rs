@@ -50,7 +50,7 @@
 //! (TASK-165.9's crash rounds, cutting openings, and its Shuttle tests, a crash bringing back a
 //! segment's raw data without its log). The footers recovered are
 //! stamped as they were, or provisionally for those closed again: opening the store puts the log
-//! after the branch's end by its commits (`extent_remote::Wal::rebase`), and stamps them anew.
+//! after the branch's end by its commits (`extent_bucket::Wal::rebase`), and stamps them anew.
 
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::framed::{read_frame, read_whole};
@@ -380,7 +380,7 @@ impl LogHeader {
     pub fn encryption(
         &self,
         segment: SegmentId,
-        keys: &extent_remote::keys::Ring,
+        keys: &extent_bucket::keys::Ring,
     ) -> Result<Option<Arc<RawEncryption>>, Error> {
         let Some((key, salt, mac)) = &self.encrypted else { return Ok(None) };
         let keys = keys.of(segment.branch);
@@ -492,7 +492,7 @@ impl Recovered {
         &mut self,
         dir: &D,
         branch: Branch,
-        keys: &extent_remote::keys::Ring,
+        keys: &extent_bucket::keys::Ring,
     ) -> Result<(), Error> {
         if self.closing.is_empty() {
             return Ok(());
@@ -929,7 +929,7 @@ struct Logged {
 fn log_records<D: Dir>(
     dir: &D,
     segment: SegmentId,
-    keys: Option<&extent_remote::keys::Ring>,
+    keys: Option<&extent_bucket::keys::Ring>,
 ) -> Result<Logged, Error> {
     let bytes = match dir.open(&log_path(segment), false) {
         Ok(log) => read_file(&log)?,
@@ -1092,7 +1092,7 @@ mod tests {
     use extent_frame::segment::{Continued, tag};
     use storage_device::ExtentId;
 
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }
@@ -1133,7 +1133,7 @@ mod tests {
     /// a store of no keys opens it (TASK-411.9).
     fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
         let mut recovered = recover(dir, BRANCH)?;
-        recovered.close(dir, BRANCH, &extent_remote::keys::Ring::clear())?;
+        recovered.close(dir, BRANCH, &extent_bucket::keys::Ring::clear())?;
         Ok(recovered)
     }
 
@@ -1228,7 +1228,7 @@ mod tests {
         // Recovered again before it is framed, it holds the same.
         assert_eq!(recover(&dir, BRANCH).unwrap().segments, recovered.segments);
         let dek = extent_frame::Secret::from_bytes(&[3; 32]);
-        let keys = extent_remote::keys::Ring::encrypting_for_tests(BRANCH.id, 1, dek, []);
+        let keys = extent_bucket::keys::Ring::encrypting_for_tests(BRANCH.id, 1, dek, []);
         recovered.close(&dir, BRANCH, &keys).unwrap();
         assert!(recovered.closing.is_empty());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));

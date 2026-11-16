@@ -59,7 +59,7 @@ mod stalling;
 use stalling::{Op, Stalling};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 /// Small segments, so that commits and the closer close several, and an extent of four blocks in
 /// a file of its own.
 const OPTIONS: Options = Options {
@@ -110,7 +110,7 @@ enum Step {
 }
 
 /// The branch the writer forks.
-const CHILD: extent_remote::layout::Branch = extent_remote::layout::test_branch(BRANCH.id + 1);
+const CHILD: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(BRANCH.id + 1);
 
 const STEPS: &[Step] = &[
     Step::Write(1, 1),
@@ -471,15 +471,15 @@ impl Bucket {
     /// The store in `dir`, opened as the bucket holds its branch: its acknowledged footers
     /// replayed, its writer's chain after them.
     fn reopen(&self, dir: MemDir) -> Store<MemDir> {
-        let (mut state, mut chain) = (extent_remote::State::new(BRANCH), WRITER);
+        let (mut state, mut chain) = (extent_bucket::State::new(BRANCH), WRITER);
         for footer in self.1.lock().unwrap().iter() {
             state.apply(footer);
             chain = chain.admit(footer).expect("the footers acknowledged follow each other");
         }
         let head =
-            extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_segment());
-        let taken = extent_remote::TakenBranch::of(head, &state, chain);
-        let keys = extent_remote::keys::Ring::clear();
+            extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
+        let taken = extent_bucket::TakenBranch::of(head, &state, chain);
+        let keys = extent_bucket::keys::Ring::clear();
         let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
         Store::recover(dir).unwrap().open(OPTIONS, opening).unwrap()
     }
@@ -510,7 +510,7 @@ impl Bucket {
 
 /// cladefs: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
 fn bucket_key<F>(closed: &extent_store::Closed<F>) -> String {
-    extent_remote::layout::segment(closed.footer.branch, closed.footer.segment, closed.footer.epoch)
+    extent_bucket::layout::segment(closed.footer.branch, closed.footer.segment, closed.footer.epoch)
 }
 
 /// One run of writes racing commits, as a VM's requests may: a writer writes extents, in segments

@@ -3651,7 +3651,7 @@ mod tests {
 
     /// TASK-92.7: a benchmark of a pass over a base of 100,000 extents and 100 forks of it, none
     /// with a checkpoint of its own: how long the pass takes, and the most memory the process
-    /// held. `cargo nextest run -p extent_remote --run-ignored only bench_passes_over_many_forks
+    /// held. `cargo nextest run -p extent_bucket --run-ignored only bench_passes_over_many_forks
     /// --no-capture`, in a process of its own, which nextest gives each test.
     #[test]
     #[ignore = "a benchmark (TASK-92.7): --run-ignored only, alone"]
@@ -4232,7 +4232,7 @@ mod tests {
         let marks = layout::marks(layout::TEST_CELL, 1);
         let reached = |request: &str| {
             format!(
-                "WARN extent_remote: {request} {key}: {saying} ({marks}) key={key} kind={kind:?} \
+                "WARN extent_bucket: {request} {key}: {saying} ({marks}) key={key} kind={kind:?} \
                  request={request} marks=1"
             )
         };

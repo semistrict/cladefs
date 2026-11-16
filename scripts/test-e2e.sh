@@ -144,7 +144,7 @@ fi
 # fork's steps its seed says (cladefs::faults); with CLADEFS_EXTENTD_FAILPOINTS=1, one built with them,
 # none set, for cases that set their own daemons' (fxfs-guest-soak, TASK-67): in the sim profile
 # (release with debug assertions), a test's build, as a release build, a measurement's, refuses
-# failpoints (extent_remote, TASK-320).
+# failpoints (extent_bucket, TASK-320).
 extentd_features=() extentd_profile=release
 seccomp=${CLADEFS_FIRECRACKER_SECCOMP:-real}
 if [[ -n $prebuilt ]]; then
@@ -171,7 +171,7 @@ extentd_bin="$root_target/$extentd_profile/cladefs-extentd"
 # TASK-111.4); and the bucket's collector, cladefs-gc, for those that collect their bucket
 # (fxfs-guest-soak).
 export CLADEFSCTL_BIN="$root_target/$extentd_profile/cladefsctl"
-(cd "$root" && cargo build --release -p extent_remote --bin cladefs-gc)
+(cd "$root" && cargo build --release -p extent_bucket --bin cladefs-gc)
 export CLADEFS_GC_BIN="$root_target/release/cladefs-gc"
 # As cladefs builds it, with its cladefs feature (scripts/firecracker-cargo.sh), in the copy of
 # vendor/firecracker that builds in, whose .cargo/config.toml sets its target directory, unless

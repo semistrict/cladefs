@@ -17,7 +17,7 @@
 use super::tests::{idle, kept_in};
 use crate::test_data::noise;
 use crate::{ExtentId, ExtentStore, VolatileSlice};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::object_bucket::ObjectBucket;
 use extent_store::Written;
 use std::sync::Arc;
 

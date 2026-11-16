@@ -26,9 +26,9 @@ use crate::pages::Arena;
 use crate::store_requests::{self, Capacity, Close};
 use crate::store_table::{self, StoreTable, Writer as _};
 use crate::{Branch, BranchOf, Cell, Errno, ExtentInfo, ExtentStore};
-use extent_remote::cache::Cache;
-use extent_remote::cell::Kind;
-use extent_remote::object_bucket::Stats;
+use extent_bucket::cache::Cache;
+use extent_bucket::cell::Kind;
+use extent_bucket::object_bucket::Stats;
 use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -988,7 +988,7 @@ pub(super) async fn delete(path: PathBuf) -> Result<(), Errno> {
 /// The bucket the store at `path`, or the fork whose handle it is, keeps its branch in, as its
 /// description names it (TASK-165.6): or, if its description is not there, as for what a
 /// deletion that stopped partway left, which deletes nothing in a bucket, the daemon's.
-fn bucket_of(path: &Path) -> Result<Arc<extent_remote::object_bucket::ObjectBucket>, Errno> {
+fn bucket_of(path: &Path) -> Result<Arc<extent_bucket::object_bucket::ObjectBucket>, Errno> {
     match crate::host_store::bucket_at(path) {
         Ok(Some(bucket)) => Ok(bucket),
         Ok(None) => daemon_bucket(),
@@ -1012,7 +1012,7 @@ pub(super) async fn drop_copy(path: PathBuf) -> Result<(), Errno> {
 /// has it open.
 async fn delete_alone(
     path: PathBuf,
-    bucket: Option<Arc<extent_remote::object_bucket::ObjectBucket>>,
+    bucket: Option<Arc<extent_bucket::object_bucket::ObjectBucket>>,
 ) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
@@ -1135,10 +1135,10 @@ pub(super) async fn stat(path: PathBuf) -> Result<StoreState, Errno> {
 }
 
 /// The bucket [`daemon_bucket`] made, once a store needs it.
-static BUCKET: OnceLock<Arc<extent_remote::object_bucket::ObjectBucket>> = OnceLock::new();
+static BUCKET: OnceLock<Arc<extent_bucket::object_bucket::ObjectBucket>> = OnceLock::new();
 
 /// What the daemon did with its bucket so far, if it made it (`metrics`).
-pub(super) fn bucket_stats() -> Option<extent_remote::object_bucket::Stats> {
+pub(super) fn bucket_stats() -> Option<extent_bucket::object_bucket::Stats> {
     BUCKET.get().map(|bucket| bucket.stats())
 }
 
@@ -1168,7 +1168,7 @@ pub(super) fn follower_views() -> usize {
 
 /// cladefs: the bucket `CLADEFS_EXTENTD_REMOTE` names, which the stores opened keep their branches in:
 /// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
-pub(crate) fn daemon_bucket() -> Result<Arc<extent_remote::object_bucket::ObjectBucket>, Errno> {
+pub(crate) fn daemon_bucket() -> Result<Arc<extent_bucket::object_bucket::ObjectBucket>, Errno> {
     if let Some(bucket) = BUCKET.get() {
         return Ok(bucket.clone());
     }
@@ -1207,7 +1207,7 @@ pub(super) fn uploads_when_asked() {
 /// daemon's stores and their objects. The stores naming `CLADEFS_EXTENTD_REMOTE`'s bucket open it
 /// (`host_store::use_bucket`).
 #[cfg(test)]
-pub(super) fn use_bucket(bucket: extent_remote::object_bucket::ObjectBucket) {
+pub(super) fn use_bucket(bucket: extent_bucket::object_bucket::ObjectBucket) {
     let bucket = Arc::new(bucket);
     let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_store::use_bucket(&host.bucket, bucket.clone());
@@ -1265,7 +1265,7 @@ impl FollowerStats {
 }
 
 /// cladefs: keeps what `bucket` did, its requests by kind and its bytes up and down
-/// (`extent_remote::object_bucket::Stats::line`), what the stores' followers are
+/// (`extent_bucket::object_bucket::Stats::line`), what the stores' followers are
 /// ([`FollowerStats`]), what serving the stores cost ([`daemon_line`]), the requests served
 /// (`super::metrics::requests_line`), what its uploads hold ([`uploads_line`]) and what its process
 /// holds and spent (`super::process::line`, sampled every poll, as the metrics report it, file or
@@ -1273,7 +1273,7 @@ impl FollowerStats {
 /// bench reports (`scripts/bench-report.py`); and the bucket's in the log every [`STATS_EVERY`]
 /// that it changed. cladefs: what it keeps but the bucket's, it looks at only to keep it in the file
 /// (TASK-92.17).
-fn watch_stats(bucket: std::sync::Weak<extent_remote::object_bucket::ObjectBucket>) {
+fn watch_stats(bucket: std::sync::Weak<extent_bucket::object_bucket::ObjectBucket>) {
     let file = std::env::var_os("CLADEFS_EXTENTD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let watching = std::thread::Builder::new().name("extentd stats".into()).spawn(move || {

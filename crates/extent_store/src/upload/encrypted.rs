@@ -14,10 +14,10 @@ use crate::{BucketData, Description, MemDir};
 use extent_frame::{KeyId, Secret};
 use extent_keys::kms::{Kms as _, LocalKms};
 use extent_keys::testing::Counted;
-use extent_remote::Bucket as _;
-use extent_remote::bucket::PutMode;
-use extent_remote::fetch::{Fetcher, Limits, Memory, Priority};
-use extent_remote::layout::{self, Branch, Cell, Location, TEST_CELL, test_branch};
+use extent_bucket::Bucket as _;
+use extent_bucket::bucket::PutMode;
+use extent_bucket::fetch::{Fetcher, Limits, Memory, Priority};
+use extent_bucket::layout::{self, Branch, Cell, Location, TEST_CELL, test_branch};
 use futures::TryStreamExt as _;
 use object_store::ObjectStore as _;
 use std::collections::BTreeSet;
@@ -106,7 +106,7 @@ impl World {
             let mut objects = Vec::new();
             for meta in listed {
                 let key = meta.location.to_string();
-                let object = extent_remote::bucket::get(&*self.bucket, &key).await.unwrap();
+                let object = extent_bucket::bucket::get(&*self.bucket, &key).await.unwrap();
                 objects.push((key, object.bytes.to_vec()));
             }
             objects.sort();
@@ -116,7 +116,7 @@ impl World {
 
     /// The bytes of the object at `key`.
     fn object(&self, key: &str) -> Vec<u8> {
-        let got = self.runtime.block_on(extent_remote::bucket::get(&*self.bucket, key));
+        let got = self.runtime.block_on(extent_bucket::bucket::get(&*self.bucket, key));
         got.unwrap_or_else(|| panic!("no object at {key}")).bytes.to_vec()
     }
 
@@ -127,7 +127,7 @@ impl World {
     }
 
     /// `branch`'s record.
-    fn record(&self, branch: Branch) -> extent_remote::record::Record {
+    fn record(&self, branch: Branch) -> extent_bucket::record::Record {
         self.runtime.block_on(branch::record(&*self.bucket, branch)).unwrap().unwrap()
     }
 
@@ -219,7 +219,7 @@ fn read(
     store: &Store<MemDir>,
     extent: ExtentId,
     len: usize,
-) -> Result<Vec<u8>, extent_remote::Error> {
+) -> Result<Vec<u8>, extent_bucket::Error> {
     let mut buf = vec![0; len];
     let location = match store.read(extent, 0, &mut buf) {
         Ok(()) => return Ok(buf),
@@ -237,7 +237,7 @@ fn fetched(
     memory: &Arc<Memory>,
     extent: ExtentId,
     location: &Location,
-) -> Result<Vec<u8>, extent_remote::Error> {
+) -> Result<Vec<u8>, extent_bucket::Error> {
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), None);
     world.runtime.block_on(fetcher.read(extent, location, 0, location.len, Priority::Demand))
@@ -351,7 +351,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
 fn cells_of_tenants_with_no_kek_are_in_the_clear() {
     let world = World::new();
     let host = world.host(5);
-    let branch = Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 1 }, id: 7 };
+    let branch = Branch { cell: extent_bucket::layout::Cell { tenant: 2, id: 1 }, id: 7 };
     let dir = made(branch, "a");
     let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     let data = noise(1, 4096);
@@ -372,7 +372,7 @@ fn cells_of_tenants_with_no_kek_are_in_the_clear() {
     // and the first again, ask nothing more: the answer is believed for `keys::KEKLESS_FOR`.
     drop((store, uploader));
     let other = Branch { id: 8, ..branch };
-    let elsewhere = Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 2 }, id: 9 };
+    let elsewhere = Branch { cell: extent_bucket::layout::Cell { tenant: 2, id: 2 }, id: 9 };
     let dirs = [made(other, "b"), made(elsewhere, "a"), dir.crash(0)];
     for dir in &dirs {
         let (store, _uploader) = open_on(&world, &host, dir).unwrap();
@@ -396,7 +396,7 @@ fn stores_of_revoked_tenants_open_not() {
     world.kms.inner().revoke(TENANT).unwrap();
     let refused = open_on(&world, &world.host(6), &dir.crash(0)).map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is revoked");
-    assert_eq!(refused, Failure::Bucket(extent_remote::Error::Kms(refused.to_string())));
+    assert_eq!(refused, Failure::Bucket(extent_bucket::Error::Kms(refused.to_string())));
     world.kms.inner().unrevoke(TENANT).unwrap();
     let host = world.host(6);
     let (store, _uploader) = open_on(&world, &host, &dir.crash(0)).unwrap();
@@ -492,7 +492,7 @@ fn objects_of_encrypted_branches_unencrypted_are_refused() {
         extent_frame::footer(&bytes, &keys).unwrap().to_vec(),
     );
     world.put(&at.key, extent_frame::framed(&data, &footer, None));
-    let downgraded = extent_remote::Error::Downgrade(at.key.clone());
+    let downgraded = extent_bucket::Error::Downgrade(at.key.clone());
     assert_eq!(
         downgraded.to_string(),
         format!("{}: unencrypted, of a branch whose objects are encrypted", at.key)
@@ -515,7 +515,7 @@ fn objects_of_encrypted_branches_unencrypted_are_refused() {
     );
     world.put(key, extent_frame::framed(&data, &footer, None));
     let refused = open_on(&world, &world.host(6), &dir.crash(0)).map(drop).unwrap_err();
-    assert_eq!(refused, Failure::Bucket(extent_remote::Error::Downgrade(key.clone())));
+    assert_eq!(refused, Failure::Bucket(extent_bucket::Error::Downgrade(key.clone())));
 }
 
 /// AC #6: the object of an extent stored on its own, copied whole to another extent's key of the
@@ -537,7 +537,7 @@ fn own_extents_copied_to_another_key_are_refused() {
     assert!(matches!(layout::kind(&at_one.key), layout::Kind::Extent { .. }), "{}", at_one.key);
     assert_eq!(read(&world, &host, &store, other, large), Ok(noise(2, large)));
     world.put(&at_other.key, world.object(&at_one.key));
-    let refused = extent_remote::Error::Corrupt(format!("{} holds extent {one:?}", at_other.key));
+    let refused = extent_bucket::Error::Corrupt(format!("{} holds extent {one:?}", at_other.key));
     assert_eq!(fetched(&world, &Memory::new(), other, &at_other), Err(refused.clone()));
     let host = world.host(5);
     let _held = host.memory.keys().hold(store.keys().clone());
@@ -558,15 +558,15 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let at = location(&store, extent);
     // Another host's memory, of no store yet, which keeps what it reads in a cache.
     let cache_dir = tempfile::tempdir().unwrap();
-    let cache = Arc::new(extent_remote::cache::Cache::open(cache_dir.path(), 1 << 30, 0).unwrap());
+    let cache = Arc::new(extent_bucket::cache::Cache::open(cache_dir.path(), 1 << 30, 0).unwrap());
     let memory = Memory::new();
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), Some(cache));
     let reading = || world.runtime.block_on(fetcher.read(extent, &at, 0, 4096, Priority::Demand));
     let key = KeyId { branch: 7, generation: 1 };
-    assert_eq!(reading(), Err(extent_remote::Error::NoKey(key)));
+    assert_eq!(reading(), Err(extent_bucket::Error::NoKey(key)));
     // Served to a peer as stored, encrypted.
-    let tail = world.runtime.block_on(extent_remote::object::tail(&*world.bucket, &at.key));
+    let tail = world.runtime.block_on(extent_bucket::object::tail(&*world.bucket, &at.key));
     let stored = tail.unwrap().unwrap().parts.stored[0];
     let served = world.runtime.block_on(fetcher.stored_part(&at.key, 0)).unwrap();
     assert_eq!(
@@ -670,7 +670,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(kms.in_pool(OTHER), 3);
     let record = world.record(child.branch);
     assert_eq!(record.deks.len(), 1);
-    let inherited = |record: &extent_remote::record::Record| {
+    let inherited = |record: &extent_bucket::record::Record| {
         let had = record.inherited.iter();
         had.map(|had| (had.branch, had.dek.generation, had.dek.kek)).collect::<Vec<_>>()
     };
@@ -773,7 +773,7 @@ fn points_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused(
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
     let clone = child_in(OTHER, 4, 10, false);
     let refused = forked(&copy, &copy_uploader, clone).unwrap_err();
-    let revoked = extent_remote::Error::Kms("tenant 1: its KEK is revoked".into());
+    let revoked = extent_bucket::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert!(!world.has_record(clone.branch) && world.cell_of(clone.branch.cell).is_none());
     assert_eq!(kms.in_pool(OTHER), 4);
@@ -831,7 +831,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     world.kms.reset();
     let child = child_in(OTHER, 5, 8, false);
     let refused = forked(&store, &uploader, child).unwrap_err();
-    let revoked = extent_remote::Error::Kms("tenant 2: its KEK is revoked".into());
+    let revoked = extent_bucket::Error::Kms("tenant 2: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert_eq!(world.calls(), (1, 0));
     assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
@@ -850,7 +850,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert_eq!(kms.in_pool(OTHER), 0);
     let last = child_in(OTHER, 9, 12, false);
     let refused = forked(&store, &uploader, last).unwrap_err();
-    let destroyed = extent_remote::Error::Kms("tenant 2: its KEK is destroyed".into());
+    let destroyed = extent_bucket::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
     assert_eq!(kms.refuses(OTHER), Some(destroyed));
     assert!(!world.has_record(last.branch) && world.cell_of(last.branch.cell).is_none());
@@ -899,7 +899,7 @@ fn forks_in_the_clear_ask_for_nothing_more_and_encrypted_ones_go_into_no_clear_c
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     let child = child_in(3, 9, 8, false);
     let refused = forked(&store, &uploader, child).unwrap_err();
-    let inherited = extent_remote::Error::Inherited { branch: child.branch, from: test_branch(7) };
+    let inherited = extent_bucket::Error::Inherited { branch: child.branch, from: test_branch(7) };
     assert_eq!(refused, Failure::Bucket(inherited));
     assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
 }
@@ -974,7 +974,7 @@ fn segments_closed_again_are_never_in_the_clear() {
 
 /// The branch of a cell of a tenant with no KEK in the tests' KMS: in the clear.
 fn clear_branch() -> Branch {
-    Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 1 }, id: 7 }
+    Branch { cell: extent_bucket::layout::Cell { tenant: 2, id: 1 }, id: 7 }
 }
 
 /// The bytes of the files of `dir` whose paths start with `kind`, by their paths.
@@ -1215,7 +1215,7 @@ fn caching_fetcher(
     memory: &Arc<Memory>,
     dir: &std::path::Path,
 ) -> Fetcher<ObjectBucket> {
-    let cache = Arc::new(extent_remote::cache::Cache::open(dir, 1 << 30, 0).unwrap());
+    let cache = Arc::new(extent_bucket::cache::Cache::open(dir, 1 << 30, 0).unwrap());
     Fetcher::new(world.bucket.clone(), Budget::new(Limits::UNBOUNDED), memory.clone(), Some(cache))
 }
 
@@ -1226,7 +1226,7 @@ fn fetched_by(
     extent: ExtentId,
     location: &Location,
     len: u64,
-) -> Result<Vec<u8>, extent_remote::Error> {
+) -> Result<Vec<u8>, extent_bucket::Error> {
     world.runtime.block_on(fetcher.read(extent, location, 0, len, Priority::Demand))
 }
 
@@ -1323,13 +1323,13 @@ fn shredded_tenants_leave_none_of_their_volumes_readable_on_any_host() {
         assert_eq!(host.runtime.keys.forget(keys::Scope::Tenant(TENANT), why), 1);
         host.memory.forget_kept(keys::Scope::Tenant(TENANT));
         let kms = host.runtime.keys.kms.as_ref().unwrap();
-        assert_eq!(kms.refuses(TENANT), Some(extent_remote::Error::Kms(why.into())));
+        assert_eq!(kms.refuses(TENANT), Some(extent_bucket::Error::Kms(why.into())));
         assert_eq!(kms.in_pool(TENANT), 0);
     }
     // Host 5's fetchers keep the fork's ring, which holds the DEK it inherited of branch 7.
     assert_eq!(writer.memory.keys().ring().branches(), BTreeSet::from([7, 8, 9]));
     assert_eq!(reader.memory.keys().ring().branches(), BTreeSet::from([9]));
-    let refused = extent_remote::Error::NoKey(KeyId { branch: 7, generation: 1 });
+    let refused = extent_bucket::Error::NoKey(KeyId { branch: 7, generation: 1 });
     assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Err(refused));
     assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
     assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
@@ -1395,7 +1395,7 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
     let why = "tenant 1: cell 1/1 is shredded, its KEK gone";
     let untold = world.host(7);
     let refused = open_on(&world, &untold, &dirs[0].crash(0)).map(drop).unwrap_err();
-    assert_eq!(refused, Failure::Bucket(extent_remote::Error::Kms(why.into())));
+    assert_eq!(refused, Failure::Bucket(extent_bucket::Error::Kms(why.into())));
 
     for host in [&writer, &reader] {
         assert_eq!(host.runtime.keys.forget(keys::Scope::Cell(TEST_CELL), why), 1);
@@ -1405,7 +1405,7 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
     let (ours_extent, ours_at) = &at[0];
     let key = KeyId { branch: 7, generation: 1 };
     let unread = fetched_by(&world, &fetcher, *ours_extent, ours_at, 4096);
-    assert_eq!(unread, Err(extent_remote::Error::NoKey(key)));
+    assert_eq!(unread, Err(extent_bucket::Error::NoKey(key)));
     let (sibling_extent, sibling_at) = &at[1];
     assert_eq!(fetched_by(&world, &fetcher, *sibling_extent, sibling_at, 4096), Ok(noise(8, 4096)));
     drop((held, opened));
@@ -1421,9 +1421,9 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
     }
 
     // The collector, with the tenant's KEK at hand, can't have the cell's.
-    let options = extent_remote::collector::Options { compact_below: 1.0, grace: 0 };
+    let options = extent_bucket::collector::Options { compact_below: 1.0, grace: 0 };
     let kms: extent_keys::kms::Shared = world.kms.clone();
-    let mut collector = extent_remote::collector::Collector::new(options).kms(Some(kms));
+    let mut collector = extent_bucket::collector::Collector::new(options).kms(Some(kms));
     let pass = collector.collect_cell(&*world.bucket, TEST_CELL, 0x51);
     let report = world.runtime.block_on(pass).unwrap();
     assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");

@@ -1471,7 +1471,7 @@ mod tests {
 
     /// TASK-92.21: a benchmark of reads of a part kept while others are kept, each evicting one,
     /// in another thread: how long the reads took, the most and in all, which wait for the
-    /// cache's lock. `cargo nextest run -p extent_remote --run-ignored only
+    /// cache's lock. `cargo nextest run -p extent_bucket --run-ignored only
     /// bench_reads_while_parts_are_kept --no-capture`.
     #[test]
     #[ignore = "a benchmark (TASK-92.21): --run-ignored only, alone"]

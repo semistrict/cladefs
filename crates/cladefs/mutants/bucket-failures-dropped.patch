@@ -4,8 +4,8 @@
 # TASK-330.3).
 # Kind: failures
 # Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
---- a/crates/extent_remote/src/object_bucket.rs
-+++ b/crates/extent_remote/src/object_bucket.rs
+--- a/crates/extent_bucket/src/object_bucket.rs
++++ b/crates/extent_bucket/src/object_bucket.rs
 @@ -451,13 +451,7 @@
          let answered = answered.map_err(|failure| {
              let answer = error(&failure);

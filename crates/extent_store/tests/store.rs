@@ -17,7 +17,7 @@ use std::sync::Arc;
 use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 /// The most bytes an extent holds: doc-4's `max_extent`, the store's default.
 const MAX_EXTENT: u64 = 64 << 20;
 
@@ -58,10 +58,10 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 
 /// cladefs: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
 /// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
-fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
-    let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_segment());
-    let taken = extent_remote::TakenBranch::of(head, &state, chain);
-    let keys = extent_remote::keys::Ring::clear();
+fn opened_on(dir: MemDir, state: extent_bucket::State, chain: Chain) -> Store<MemDir> {
+    let head = extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
+    let taken = extent_bucket::TakenBranch::of(head, &state, chain);
+    let keys = extent_bucket::keys::Ring::clear();
     let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
@@ -70,7 +70,7 @@ fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<Me
 fn created_on(
     dir: MemDir,
     capacity: u64,
-    state: extent_remote::State,
+    state: extent_bucket::State,
     chain: Chain,
 ) -> Store<MemDir> {
     let description = Description { block_size: BLOCK as u32, capacity, branch: BRANCH };
@@ -399,7 +399,7 @@ fn extents_the_bucket_holds_are_held_without_their_data() {
     let location =
         bucket_location("segments/0000000000000007/0000000000000003", 8192, 3 * BLOCK as u64);
     let other = bucket_location("extents/0000000000000008/1.2.9", 0, BLOCK as u64);
-    let mut state = extent_remote::State::new(BRANCH);
+    let mut state = extent_bucket::State::new(BRANCH);
     state.extents.insert(extent(5), location.clone());
     state.extents.insert(ExtentId::new(BRANCH.id + 1, 9), other);
     state.next_sequence = 6;
@@ -640,7 +640,7 @@ fn closed_segments_hold_the_branchs_history() {
     store.write(extent(51), 0, &pattern(51, 0, BLOCK)).unwrap();
     store
         .commit_fork(Child {
-            branch: extent_remote::layout::test_branch(BRANCH.id + 1),
+            branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
             owner: 0,
             point: false,
         })
@@ -974,16 +974,16 @@ fn resizes_are_commits_of_their_own() {
 fn segments_close_for_the_writer_of_their_chain() {
     use extent_frame::segment::{Footer, Location, extent_key, tag};
     let dir = MemDir::new();
-    let state = extent_remote::State::new(BRANCH);
+    let state = extent_bucket::State::new(BRANCH);
     let store = created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
     drop(store);
-    let other = extent_remote::State::new(extent_remote::layout::test_branch(BRANCH.id + 1));
-    let opening = Opening::new(extent_remote::layout::test_branch(BRANCH.id + 1));
+    let other = extent_bucket::State::new(extent_bucket::layout::test_branch(BRANCH.id + 1));
+    let opening = Opening::new(extent_bucket::layout::test_branch(BRANCH.id + 1));
     let refused =
         Store::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
     assert_eq!(refused.err().unwrap().to_string(), "branch 1/1/7 opened as 1/1/8");
     let store =
-        opened_on(dir.clone(), extent_remote::State::new(BRANCH), Chain::new(BRANCH, 3, 5, 100));
+        opened_on(dir.clone(), extent_bucket::State::new(BRANCH), Chain::new(BRANCH, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
 
@@ -1037,7 +1037,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
     store
         .commit_fork(Child {
-            branch: extent_remote::layout::test_branch(BRANCH.id + 1),
+            branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
             owner: 0,
             point: false,
         })
@@ -1050,7 +1050,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         (
             vec![tag(3, 2)],
             vec![Child {
-                branch: extent_remote::layout::test_branch(BRANCH.id + 1),
+                branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
                 owner: 0,
                 point: false
             }]
@@ -1337,7 +1337,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     let before = extent_store::written();
     store.commit(None).unwrap();
     // cladefs: its footer names it (TASK-411.3).
-    let footer = extent_remote::layout::encode(&extent(1));
+    let footer = extent_bucket::layout::encode(&extent(1));
     let framed = extent_frame::framed(&data, &footer, None);
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
@@ -1642,7 +1642,7 @@ fn compressible_large_extents_are_framed_in_copies() {
         store.write(extent(sequence), 0, data).unwrap();
         let before = extent_store::written();
         store.commit(None).unwrap();
-        let footer = extent_remote::layout::encode(&extent(sequence));
+        let footer = extent_bucket::layout::encode(&extent(sequence));
         let framed = extent_frame::framed(data, &footer, None);
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
@@ -2010,7 +2010,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = created_on(dir.clone(), 1 << 20, extent_remote::State::new(BRANCH), WRITER);
+    let store = created_on(dir.clone(), 1 << 20, extent_bucket::State::new(BRANCH), WRITER);
     store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
     store.write(extent(2), 0, &pattern(2, 0, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -2031,12 +2031,12 @@ fn segments_upload_before_their_framed_files_are_durable() {
     assert_eq!(store.framing(), [0], "taken for the upload, its framed file not durable");
     let framed = format!("{:016x}", segment.number);
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
-    let mut landed = extent_remote::State::new(BRANCH);
+    let mut landed = extent_bucket::State::new(BRANCH);
     landed.apply(&segment.footer);
     let chain = WRITER.admit(&segment.footer).unwrap();
     // What a store opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
     // or in the bucket, once it landed there.
-    let check = |seed: u64, bucket: &extent_remote::State, chain: Chain| {
+    let check = |seed: u64, bucket: &extent_bucket::State, chain: Chain| {
         let reopened = opened_on(dir.crash(seed), bucket.clone(), chain);
         for sequence in 1..=2 {
             match reopened.place(extent(sequence)).unwrap() {
@@ -2052,7 +2052,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     };
     for seed in 0..16 {
         // Uploaded, not landed.
-        check(seed, &extent_remote::State::new(BRANCH), WRITER);
+        check(seed, &extent_bucket::State::new(BRANCH), WRITER);
         // Landed, its acknowledgement not heard.
         check(seed, &landed, chain);
     }
@@ -3297,7 +3297,7 @@ fn forks_give_their_commits_epoch() {
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
     let forked =
-        Child { branch: extent_remote::layout::test_branch(BRANCH.id + 1), owner: 0, point: false };
+        Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0, point: false };
     assert_eq!(store.commit_fork(forked).unwrap(), 2);
     assert_eq!(store.epoch().unwrap(), 2);
     let forking = closed_one(&store);
@@ -3312,14 +3312,14 @@ fn forks_take_no_id_of_their_lineage() {
     let store = create(MemDir::new(), 1 << 20);
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
-    let elsewhere = extent_remote::layout::Cell { tenant: 9, id: 9 };
-    let child = extent_remote::layout::Branch { cell: elsewhere, id: BRANCH.id };
+    let elsewhere = extent_bucket::layout::Cell { tenant: 9, id: 9 };
+    let child = extent_bucket::layout::Branch { cell: elsewhere, id: BRANCH.id };
     let forked = Child { branch: child, owner: 0, point: false };
     let refused = store.commit_fork(forked).unwrap_err();
     assert_eq!(refused.downcast_ref(), Some(&extent_store::InheritedId(child)));
     assert_eq!(store.epoch().unwrap(), 1);
     let other =
-        Child { branch: extent_remote::layout::Branch { id: BRANCH.id + 1, ..child }, ..forked };
+        Child { branch: extent_bucket::layout::Branch { id: BRANCH.id + 1, ..child }, ..forked };
     assert_eq!(store.commit_fork(other).unwrap(), 2);
 }
 
@@ -3644,7 +3644,7 @@ fn parts_read_again_are_unpacked_once() {
 fn stores_tell_their_own_bytes_from_those_inherited() {
     let parent = BRANCH.id + 1;
     let dir = MemDir::new();
-    let mut state = extent_remote::State::new(BRANCH);
+    let mut state = extent_bucket::State::new(BRANCH);
     for (sequence, blocks) in [(1, 2), (2, 3)] {
         let key = "segments/0000000000000008/0000000000000001";
         let location = bucket_location(key, sequence * 8 * BLOCK as u64, blocks * BLOCK as u64);
@@ -3715,7 +3715,7 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let device = |path: &std::path::Path| std::fs::metadata(path).unwrap().dev();
     assert_ne!(device(cached.path()), device(temp.path()), "two filesystems");
-    let cache = Arc::new(extent_remote::cache::Cache::open(cached.path(), 1 << 20, 0).unwrap());
+    let cache = Arc::new(extent_bucket::cache::Cache::open(cached.path(), 1 << 20, 0).unwrap());
     let cache_dir = cache.dir().to_owned();
     let dir = HostDir::new(temp.path()).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };

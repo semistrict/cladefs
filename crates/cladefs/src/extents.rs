@@ -36,9 +36,9 @@ use crate::pages::{Arena, ArenaId, page_size};
 use crate::profile::{self, Recorder};
 use crate::stats::{self, Counter};
 use crate::store_dir;
-use extent_remote::cell::Kind;
-use extent_remote::layout::{Branch, Cell};
-use extent_remote::trace;
+use extent_bucket::cell::Kind;
+use extent_bucket::layout::{Branch, Cell};
+use extent_bucket::trace;
 use extent_store::{
     HostDir, NoSpace, NotHeld, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unsectored,
 };
@@ -179,7 +179,7 @@ pub struct ExtentStore {
     store: Arc<Store<HostDir>>,
     /// cladefs: the bucket the store's description names, which its branch is kept in
     /// (`host_store::Opened`, TASK-165.6).
-    bucket: Arc<extent_remote::object_bucket::ObjectBucket>,
+    bucket: Arc<extent_bucket::object_bucket::ObjectBucket>,
     /// cladefs: where it was opened: its directory, which keeps what is attached to it (backlog
     /// doc-10), and what it was forked from.
     path: std::path::PathBuf,
@@ -425,7 +425,7 @@ fn upload_errno(failure: extent_store::upload::Failure) -> Errno {
 }
 
 /// cladefs: the span of a commit's wait for object storage to hold the commits up to `epoch`, or
-/// as many of them as its lag allows (`extent_remote::trace`, TASK-258).
+/// as many of them as its lag allows (`extent_bucket::trace`, TASK-258).
 fn upload_wait(epoch: u64) -> trace::Span {
     let span = trace::Span::start("commit.upload_wait");
     span.set_count(trace::EPOCH, epoch);
@@ -503,7 +503,7 @@ impl ExtentStore {
     }
 
     /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of a new branch of `cell`,
-    /// its ID its bucket's to give (`extent_remote::objectid`, TASK-364).
+    /// its ID its bucket's to give (`extent_bucket::objectid`, TASK-364).
     pub fn create_in(path: impl AsRef<Path>, capacity: u64, cell: Cell) -> Result<Self, Error> {
         Self::create_with(path, capacity, BranchOf::New(cell), Opening::here()?)
     }
@@ -523,7 +523,7 @@ impl ExtentStore {
     /// [`ExtentStore::create_for_branch`] makes it, opened as `opening` says
     /// ([`ExtentStore::open_with`]): an Fxfs volume of its branch's cell, named as its directory
     /// is (`host_store::volume_at`, TASK-364). cladefs: in a span of its own, `store.create`
-    /// (`extent_remote::trace`, TASK-258).
+    /// (`extent_bucket::trace`, TASK-258).
     pub fn create_with(
         path: impl AsRef<Path>,
         capacity: u64,
@@ -552,7 +552,7 @@ impl ExtentStore {
     }
 
     /// cladefs: `make`'s making of a new store at `path`, in a span of its own, `store.create`
-    /// (`extent_remote::trace`, TASK-258), which it names the store's branch in once it knows it:
+    /// (`extent_bucket::trace`, TASK-258), which it names the store's branch in once it knows it:
     /// a store made, opened, or made closed ([`ExtentStore::create_placed`]).
     fn creating<T>(
         path: &Path,
@@ -613,7 +613,7 @@ impl ExtentStore {
     /// default arena, without one. Those of public branches' extents, which every tenant's forks of
     /// them share, are of the default arena.
     ///
-    /// cladefs: in a span of its own, `store.open` (`extent_remote::trace`, TASK-258).
+    /// cladefs: in a span of its own, `store.open` (`extent_bucket::trace`, TASK-258).
     pub fn open_with(path: impl AsRef<Path>, opening: Opening) -> Result<Self, Error> {
         let path = path.as_ref();
         let span = trace::Span::start("store.open");
@@ -936,7 +936,7 @@ impl ExtentStore {
     }
 
     /// cladefs: forks the store, as of its last commit, made uploaded first, and returns the fork's
-    /// branch: a new branch of `cell`, its ID the bucket's to give (`extent_remote::objectid`,
+    /// branch: a new branch of `cell`, its ID the bucket's to give (`extent_bucket::objectid`,
     /// TASK-364), holding what it holds, whose store is a new directory at `path`, which
     /// [`ExtentStore::open`] opens: `EEXIST` if anything is at `path`. The fork is made in the
     /// bucket alone, by the store's uploader, which keeps its branch in the bucket its
@@ -950,7 +950,7 @@ impl ExtentStore {
     /// A fork of a point commits nothing in object storage: its child's record is the fork, which
     /// fails with `ENOENT` once the point is deleted (`Uploader::forked`).
     ///
-    /// cladefs: in a span of its own, `store.fork` (`extent_remote::trace`, TASK-258).
+    /// cladefs: in a span of its own, `store.fork` (`extent_bucket::trace`, TASK-258).
     pub fn fork(&self, path: impl AsRef<Path>, cell: Cell) -> Result<Branch, Error> {
         let branch = self.new_child(cell)?;
         self.fork_to(path, branch)?;
@@ -1003,7 +1003,7 @@ impl ExtentStore {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
-        let child = extent_remote::layout::Child { branch, owner: rand::random(), point };
+        let child = extent_bucket::layout::Child { branch, owner: rand::random(), point };
         // cladefs: what is attached to it stays attached to the fork, a restored VM's too; and what
         // is public of it, and what it was forked from.
         let inherited = |to: &Path| -> anyhow::Result<()> {
@@ -1107,7 +1107,7 @@ impl ExtentStore {
     /// with `ESTALE` if a later placement holds its branch in `bucket`.
     pub fn delete(
         path: impl AsRef<Path>,
-        bucket: Option<&extent_remote::object_bucket::ObjectBucket>,
+        bucket: Option<&extent_bucket::object_bucket::ObjectBucket>,
     ) -> Result<(), Error> {
         host_store::delete(path.as_ref(), bucket, crate::bucket::host_token)
     }
@@ -1117,13 +1117,13 @@ impl ExtentStore {
     /// format is refused (`extent_store::Format`).
     pub fn bucket_at(
         path: impl AsRef<Path>,
-    ) -> Result<Option<Arc<extent_remote::object_bucket::ObjectBucket>>, Error> {
+    ) -> Result<Option<Arc<extent_bucket::object_bucket::ObjectBucket>>, Error> {
         host_store::bucket_at(path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: the bucket the store's description names, which its branch is kept in: what its
     /// daemon attaches it to (TASK-165.6).
-    pub fn bucket(&self) -> &Arc<extent_remote::object_bucket::ObjectBucket> {
+    pub fn bucket(&self) -> &Arc<extent_bucket::object_bucket::ObjectBucket> {
         &self.bucket
     }
 
@@ -1278,7 +1278,7 @@ impl ExtentStore {
                         // cladefs: a follower's of an extent its writer freed since its view's
                         // commit, which the bucket's collector reclaimed: it is cut off, as one too
                         // far behind its writer is (doc-8, decision 7; TASK-165.8).
-                        extent_store::upload::Failure::Bucket(extent_remote::Error::Lost(
+                        extent_store::upload::Failure::Bucket(extent_bucket::Error::Lost(
                             ref lost,
                         )) if self.following.is_some() => {
                             log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
@@ -1479,7 +1479,7 @@ impl ExtentStore {
         self.flush_turns.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// cladefs: in a span of its own, `store.commit` (`extent_remote::trace`, TASK-258), whose
+    /// cladefs: in a span of its own, `store.commit` (`extent_bucket::trace`, TASK-258), whose
     /// children are its phases: `commit.seal` and `commit.write`, the store's; then, local or
     /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
     fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
@@ -2251,7 +2251,7 @@ mod tests {
     /// writer lost is EROFS, not EIO (TASK-160.12).
     #[test]
     fn each_uploader_failure_has_its_errno() {
-        use extent_remote::Error;
+        use extent_bucket::Error;
         use extent_store::upload::Failure;
         let cases = [
             (Failure::Bucket(Error::Fenced), Errno::EROFS),
@@ -2261,10 +2261,10 @@ mod tests {
             (Failure::Bucket(Error::Diverged), Errno::ESTALE),
             (Failure::Bucket(Error::NoBranch), Errno::ENOENT),
             (Failure::PointDeleted, Errno::ENOENT),
-            (Failure::Bucket(Error::IdTaken(extent_remote::layout::test_branch(3))), Errno::EEXIST),
+            (Failure::Bucket(Error::IdTaken(extent_bucket::layout::test_branch(3))), Errno::EEXIST),
             (
                 Failure::Bucket(Error::Format {
-                    branch: extent_remote::layout::test_branch(3),
+                    branch: extent_bucket::layout::test_branch(3),
                     format: 99,
                 }),
                 Errno::ENOTSUP,
@@ -2550,7 +2550,7 @@ mod tests {
         let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
         assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
         let record =
-            extent_store::upload::block_on(extent_remote::branch::record(&**fork.bucket(), child));
+            extent_store::upload::block_on(extent_bucket::branch::record(&**fork.bucket(), child));
         let record = record.unwrap().unwrap().unwrap();
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
         assert_eq!((record.deks.len(), inherited), (1, vec![store.branch()]));
@@ -2589,7 +2589,7 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
         assert!(!dir.path().join("into-clear").exists());
         let found =
-            extent_store::upload::block_on(extent_remote::branch::record(&**common.bucket(), into));
+            extent_store::upload::block_on(extent_bucket::branch::record(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
     }
 
@@ -2693,13 +2693,13 @@ mod tests {
             }
             store.commit(None).unwrap();
         });
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
-        let collected = extent_remote::collector::collect(&**store.bucket(), 1, &options);
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let collected = extent_bucket::collector::collect(&**store.bucket(), 1, &options);
         let report = futures::executor::block_on(collected).unwrap();
         // All the checkpoint covers but the writer's fence, which the collector keeps (TASK-371).
         assert_eq!(
             report,
-            extent_remote::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
+            extent_bucket::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
         );
         assert_eq!(read(&follower, a, 0, BLOCK), Err(Errno::ESTALE));
     }
@@ -4039,7 +4039,7 @@ mod tests {
         write(&publisher, extent, 0, data).unwrap();
         publisher.commit(None).unwrap();
         publisher
-            .fork_to(path, extent_remote::layout::test_branch(rand::random::<u64>().max(1)))
+            .fork_to(path, extent_bucket::layout::test_branch(rand::random::<u64>().max(1)))
             .unwrap();
         let ancestry = ExtentStore::open(path).unwrap().ancestry();
         (extent, ancestry)

@@ -13,12 +13,12 @@
 use crate::upload::{self, Clock, Failure, Shared};
 use crate::{Description, MemDir, Place, Recovering, Store};
 use extent_frame::spent::Spent;
-use extent_remote::collector::{self, Options};
-use extent_remote::fetch::{Budget, Limits};
-use extent_remote::layout::{self, Child, Origin, epoch_of, writer_of};
-use extent_remote::record::Kind;
-use extent_remote::testing::{Direct, Fault, SimBucket};
-use extent_remote::{Error, Recovered, Writer, branch, recovery, rules};
+use extent_bucket::collector::{self, Options};
+use extent_bucket::fetch::{Budget, Limits};
+use extent_bucket::layout::{self, Child, Origin, epoch_of, writer_of};
+use extent_bucket::record::Kind;
+use extent_bucket::testing::{Direct, Fault, SimBucket};
+use extent_bucket::{Error, Recovered, Writer, branch, recovery, rules};
 use futures::channel::oneshot;
 use futures::executor::{LocalPool, LocalSpawner, block_on};
 use futures::future::{AbortHandle, FutureExt as _, abortable};
@@ -157,9 +157,9 @@ impl Default for Profile {
 
 /// cladefs: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
 /// or a fork, is (TASK-364).
-fn sim_branch(id: u64) -> extent_remote::layout::Branch {
-    let cell = extent_remote::layout::Cell { tenant: 1, id };
-    extent_remote::layout::Branch { cell, id }
+fn sim_branch(id: u64) -> extent_bucket::layout::Branch {
+    let cell = extent_bucket::layout::Cell { tenant: 1, id };
+    extent_bucket::layout::Branch { cell, id }
 }
 
 /// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
@@ -1514,7 +1514,7 @@ impl World {
         self.restores.get_mut(&child).unwrap().running = Some(running);
     }
 
-    /// A host's stale copy of a point tries to write it, as `extent_remote` allows no one to.
+    /// A host's stale copy of a point tries to write it, as `extent_bucket` allows no one to.
     fn write_point(&mut self) {
         let points = self.points();
         if points.is_empty() {
@@ -1633,7 +1633,7 @@ impl World {
                 branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, forks, holder, 0);
             let taking = async {
                 branch::create(&*bucket, sim_branch(child), owner).await?;
-                let taking = extent_remote::head::take(&*bucket, sim_branch(child), other, 0);
+                let taking = extent_bucket::head::take(&*bucket, sim_branch(child), other, 0);
                 taking.await.map(|held| held.head.epoch)
             };
             let (deleted, taken) = futures::join!(deleting, taking);
@@ -1973,7 +1973,7 @@ impl World {
         for key in self.bucket.keys() {
             text += &format!("  {key}\n");
             if let layout::Kind::Segment { .. } = layout::kind(&key)
-                && let Ok(object) = block_on(extent_remote::bucket::Bucket::get(&direct, &key))
+                && let Ok(object) = block_on(extent_bucket::bucket::Bucket::get(&direct, &key))
                 && let Ok(footer) = layout::Segment::footer(&object.bytes)
             {
                 let short = |extents: &mut dyn Iterator<Item = ExtentId>| {
@@ -2019,11 +2019,11 @@ impl World {
     }
 
     /// Checks that the bucket holds only what live branches need, compacted as the collectors
-    /// could (TASK-44.1): [`extent_remote::testing::uncollected`], its live branches by their records.
+    /// could (TASK-44.1): [`extent_bucket::testing::uncollected`], its live branches by their records.
     fn check_collected(&mut self) {
         let direct = Direct(self.bucket.clone());
         let compact_below = self.profile.options.compact_below;
-        for left in block_on(extent_remote::testing::uncollected(&direct, compact_below)) {
+        for left in block_on(extent_bucket::testing::uncollected(&direct, compact_below)) {
             self.violation(left);
         }
     }
@@ -2098,7 +2098,7 @@ impl World {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
                     let key = layout::segment(branch, segment, epoch);
-                    let Some(object) = block_on(extent_remote::bucket::get(direct, &key)) else {
+                    let Some(object) = block_on(extent_bucket::bucket::get(direct, &key)) else {
                         return Err(format!("branch {:x}: segment {segment:x} gone", branch.id));
                     };
                     let footer = layout::Segment::footer(&object.bytes)
@@ -2127,7 +2127,7 @@ impl World {
             {
                 violations.push(format!("point {id:x} was written"));
             }
-            if let Ok(Some(head)) = block_on(extent_remote::head::get(&*direct, sim_branch(id)))
+            if let Ok(Some(head)) = block_on(extent_bucket::head::get(&*direct, sim_branch(id)))
                 && head.epoch != layout::Head::FINAL
             {
                 violations.push(format!("point {id:x} has a writer's head"));
@@ -2163,8 +2163,8 @@ impl World {
             // No placement took it back from a later one. cladefs: a placement takes the branch's cell,
             // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
-            let cell = block_on(extent_remote::cell::read(&*direct, sim_branch(id).cell));
-            let head = block_on(extent_remote::head::get(&*direct, sim_branch(id)));
+            let cell = block_on(extent_bucket::cell::read(&*direct, sim_branch(id).cell));
+            let head = block_on(extent_bucket::head::get(&*direct, sim_branch(id)));
             match (cell, head) {
                 (Ok(Some(cell)), Ok(Some(head))) => {
                     if cell.token < branch.taken {
@@ -2275,7 +2275,7 @@ impl World {
                 continue;
             }
             for (extent, location) in &state.extents {
-                match block_on(extent_remote::read(&direct, *extent, location)) {
+                match block_on(extent_bucket::read(&direct, *extent, location)) {
                     Ok(bytes) if bytes == extents[extent] => {}
                     Ok(_) => violations.push(format!("branch {id:x}: {extent:?} reads wrong")),
                     Err(error) => violations.push(format!("branch {id:x}: {error}")),
@@ -2289,7 +2289,7 @@ impl World {
                 else {
                     continue;
                 };
-                let head = block_on(extent_remote::head::epoch(&*direct, sim_branch(id)));
+                let head = block_on(extent_bucket::head::epoch(&*direct, sim_branch(id)));
                 if writer.stopped().is_some() || head != Ok(writer.epoch()) {
                     continue;
                 }
@@ -2301,7 +2301,7 @@ impl World {
                     // yet, whose free a collector may already have reclaimed (seed 4116 of
                     // `everything` at 25x, TASK-149.32).
                     let Some(bytes) = session.guest.held.get(extent) else { continue };
-                    match block_on(extent_remote::read(&direct, *extent, location)) {
+                    match block_on(extent_bucket::read(&direct, *extent, location)) {
                         Ok(read) if read == *bytes => {}
                         Ok(_) => violations
                             .push(format!("branch {id:x}'s writer: {extent:?} reads wrong")),
@@ -2322,7 +2322,7 @@ impl World {
                             continue;
                         }
                     };
-                    match block_on(extent_remote::read(&direct, *extent, &location)) {
+                    match block_on(extent_bucket::read(&direct, *extent, &location)) {
                         Ok(read) if read == *bytes => {}
                         Ok(_) => violations
                             .push(format!("branch {id:x}'s store: {extent:?} reads wrong")),
@@ -2344,7 +2344,7 @@ impl World {
         let (bucket, options) = (self.bucket.clone(), self.profile.options);
         let reported = Rc::new(RefCell::new(None));
         let report = reported.clone();
-        let listed = block_on(extent_remote::Bucket::list(&Direct(self.bucket.clone()), ""));
+        let listed = block_on(extent_bucket::Bucket::list(&Direct(self.bucket.clone()), ""));
         let before: BTreeMap<String, u64> =
             listed.unwrap().into_iter().map(|meta| (meta.key, meta.size)).collect();
         self.spawn(async move {

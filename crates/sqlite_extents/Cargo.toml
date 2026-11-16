@@ -26,7 +26,7 @@ extent_store.workspace = true
 rand.workspace = true
 cladefs = { path = "../cladefs", features = ["testing"] }
 tempfile.workspace = true
-extent_remote.workspace = true
+extent_bucket.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

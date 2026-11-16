@@ -26,7 +26,7 @@ use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_frame::PART;
 use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
 use extent_frame::{KeyId, Secret};
-use extent_remote::keys::Ring;
+use extent_bucket::keys::Ring;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -1539,7 +1539,7 @@ fn frame_segment<D: Dir>(
     path: &str,
     (raw_path, raw): (&str, &Arc<RawFile<D::File>>),
     (len, quiet, ahead): (u64, bool, Vec<Option<Looked>>),
-    (footer, encryption): (&[u8], extent_remote::layout::EncryptionKey<'_>),
+    (footer, encryption): (&[u8], extent_bucket::layout::EncryptionKey<'_>),
     timing: &mut Timing<4>,
 ) -> Result<(Arc<Framed<D::File>>, How), Error> {
     let started = Instant::now();
@@ -2068,7 +2068,7 @@ mod tests {
     use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = SECTOR;
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }

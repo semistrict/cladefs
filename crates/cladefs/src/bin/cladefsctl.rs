@@ -87,7 +87,7 @@
 //! of (`cladefs::BUILD_COMMIT`, TASK-111.7).
 //!
 //! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an object
-//! the collector's newest mark-only pass marked, a bug in the collector (`extent_remote::marks`,
+//! the collector's newest mark-only pass marked, a bug in the collector (`extent_bucket::marks`,
 //! TASK-264).
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests

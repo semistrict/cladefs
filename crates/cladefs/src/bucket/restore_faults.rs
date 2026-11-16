@@ -14,9 +14,9 @@ use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
 use crate::faults::RESTORE_STEPS;
 use crate::{Errno, ExtentId, ExtentStore, StoreRole};
-use extent_remote::branch;
-use extent_remote::layout::{self, Kind};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::branch;
+use extent_bucket::layout::{self, Kind};
+use extent_bucket::object_bucket::ObjectBucket;
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -85,17 +85,17 @@ fn in_bucket(
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::bucket::kms();
-        let keys = extent_remote::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
+        let keys = extent_bucket::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
-        let recovering = extent_remote::recovery::recover_under(&**bucket, child, origin, &keys);
+        let recovering = extent_bucket::recovery::recover_under(&**bucket, child, origin, &keys);
         let state = recovering.await.map_err(|err| err.to_string())?.state;
-        let memory = extent_remote::fetch::Memory::new();
+        let memory = extent_bucket::fetch::Memory::new();
         let _held = memory.keys().hold(keys);
-        let budget = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);
-        let fetcher = extent_remote::fetch::Fetcher::new(bucket.clone(), budget, memory, None);
+        let budget = extent_bucket::fetch::Budget::new(extent_bucket::fetch::Limits::UNBOUNDED);
+        let fetcher = extent_bucket::fetch::Fetcher::new(bucket.clone(), budget, memory, None);
         let mut read = Vec::new();
         for (extent, location) in &state.extents {
-            let demand = extent_remote::fetch::Priority::Demand;
+            let demand = extent_bucket::fetch::Priority::Demand;
             let bytes = fetcher.read(*extent, location, 0, location.len, demand).await;
             read.push((*extent, bytes.map_err(|err| err.to_string())?));
         }
@@ -110,7 +110,7 @@ async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
     branch: crate::Branch,
     holder: u64,
-) -> Result<(), extent_remote::Error> {
+) -> Result<(), extent_bucket::Error> {
     let kms = crate::bucket::kms();
     branch::delete_under(&**bucket, branch, holder, u64::MAX, kms.as_ref()).await
 }
@@ -172,14 +172,14 @@ impl Hosts {
     /// delete nothing: a dead cell's pass retires the references the point's origin's cell keeps
     /// the fork point for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(bucket: &Arc<ObjectBucket>, case: &str) {
-        let options = extent_remote::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = extent_remote::testing::collect_until_quiet(&**bucket, &options);
+        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
+        let collected = extent_bucket::testing::collect_until_quiet(&**bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
     /// Asserts nothing wrote the point: no head, but its deletion's, no segment, no checkpoint.
     fn check_unwritten(&self, case: &str) {
-        let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
+        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
         let written = keys.iter().filter(|meta| match layout::kind(&meta.key) {
             Kind::Segment { branch, .. } | Kind::Checkpoint { branch, .. } => branch == self.point,
             Kind::Head { branch } => branch == self.point && !self.deleted.load(Ordering::SeqCst),
@@ -364,7 +364,7 @@ impl Hosts {
         // operator finds among the live branches, and deletes (TASK-165.7).
         let mut named = vec![self.point, self.source.as_ref().unwrap().branch()];
         named.extend(self.children.lock().unwrap().iter().map(|(child, _)| *child));
-        let live = block_on(extent_remote::testing::live(&*self.bucket)).unwrap();
+        let live = block_on(extent_bucket::testing::live(&*self.bucket)).unwrap();
         let orphans: Vec<_> = live.into_keys().filter(|live| !named.contains(live)).collect();
         if !orphans.is_empty() {
             assert!(!told, "{case}: a restore made left orphans: {orphans:x?}");
@@ -416,7 +416,7 @@ impl Hosts {
         let gone = block_on(operator_delete(&self.bucket, branch, rand::random()));
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
-        let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
+        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
         let leaked: Vec<_> = (keys.into_iter().map(|meta| meta.key))
             .filter(|key| match layout::kind(key) {
                 // TASK-395.10: every reference retired, whether its child got a record or not.
@@ -431,10 +431,10 @@ impl Hosts {
                 // cladefs: a cell's object stays, as its branches' records do, its epoch fencing
                 // its volumes' heads (TASK-364): left over only if it names a live branch.
                 Kind::Cell { cell } => {
-                    let object = block_on(extent_remote::cell::read(&*self.bucket, cell));
+                    let object = block_on(extent_bucket::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
                     object.volumes.values().any(|volume| {
-                        let branch = extent_remote::layout::Branch { cell, id: volume.branch };
+                        let branch = extent_bucket::layout::Branch { cell, id: volume.branch };
                         let record = block_on(branch::record(&*self.bucket, branch)).unwrap();
                         record.is_some_and(|record| !record.deleted)
                     })

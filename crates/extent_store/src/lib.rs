@@ -64,7 +64,7 @@
 //! module): the segments framed whole, and those a crash left open or torn closed again from their
 //! raw data and the records of their logs that are whole, which are the commits made durable, at
 //! least. Its branch is the bucket's, recovered by its uploader, after whose end the log is put
-//! by its commits ([`Recovering::open`], `extent_remote::Wal::rebase`); the store's state is the
+//! by its commits ([`Recovering::open`], `extent_bucket::Wal::rebase`); the store's state is the
 //! branch's and its log's segments' after it. cladefs: a closed segment's raw file goes only once
 //! the commits its footer names are durable, so that one closed by a commit not durable has it
 //! still, holding what the commits durable wrote, whatever its framed file holds (TASK-79.33). So

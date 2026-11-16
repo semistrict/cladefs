@@ -6,7 +6,7 @@ use super::client::{DaemonExtentStore, Opening};
 use super::server::{default_tenant, serve, serve_connection};
 use crate::pages::page_size;
 use crate::{Commit, Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut, WriteBarriers};
-use extent_remote::cell::Kind;
+use extent_bucket::cell::Kind;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr::NonNull;
@@ -219,9 +219,9 @@ fn keeps_branches_in_object_storage() {
     let bucket = super::stores::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         let branch = branch_at(&dir.path().join("store"));
-        let state = extent_remote::recover(&*bucket, branch, None).await.unwrap().state;
+        let state = extent_bucket::recover(&*bucket, branch, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
-        let data = extent_remote::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
+        let data = extent_bucket::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
         assert_eq!(data, pattern(1, 2 * BLOCK));
     });
     drop(store);
@@ -248,12 +248,12 @@ fn keeps_branches_in_the_buckets_their_stores_name() {
     let extent = ExtentId { branch: branch.id, sequence: 1 };
     write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let image = extent_remote::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let image = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let daemons = super::stores::daemon_bucket().unwrap();
     futures::executor::block_on(async {
-        let state = extent_remote::recover(&image, branch, None).await.unwrap().state;
+        let state = extent_bucket::recover(&image, branch, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
-        let record = extent_remote::branch::record(&*daemons, branch).await.unwrap();
+        let record = extent_bucket::branch::record(&*daemons, branch).await.unwrap();
         assert_eq!(record, None, "the daemon's bucket has the image's branch");
     });
     drop(store);
@@ -278,7 +278,7 @@ fn keeps_object_storage_and_follower_stats() {
     write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
     let bucket = super::stores::daemon_bucket().unwrap();
-    assert!(bucket.stats().uploaded(extent_remote::object_bucket::Upload::Segments) > 0);
+    assert!(bucket.stats().uploaded(extent_bucket::object_bucket::Upload::Segments) > 0);
     // A follower two commits behind, keeping what the writer freed.
     let (follower, followed) = follow(&path).unwrap();
     store.free(extent(1)).unwrap();
@@ -2482,11 +2482,11 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
             (db_branch, "db.sqlite", Kind::Sqlite),
             (memory_branch, "memory", Kind::Memory),
         ] {
-            let cell = extent_remote::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
-            let volume = extent_remote::cell::Volume { branch: branch.id, kind };
+            let cell = extent_bucket::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
+            let volume = extent_bucket::cell::Volume { branch: branch.id, kind };
             let volumes = std::collections::BTreeMap::from([(name.to_owned(), volume)]);
             assert_eq!((cell.volumes, cell.deleted), (volumes, false), "{name}");
-            let head = extent_remote::head::get(&*bucket, branch).await.unwrap().unwrap();
+            let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
             assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
@@ -2569,15 +2569,15 @@ fn deleted_stores_branches_keep_what_their_forks_need() {
 
     let bucket = super::stores::daemon_bucket().unwrap();
     futures::executor::block_on(async {
-        use extent_remote::branch;
+        use extent_bucket::branch;
         let deleted = branch::record(&*bucket, base_branch).await.unwrap().unwrap();
         assert!(deleted.deleted);
         let record = branch::record(&*bucket, fork_branch).await.unwrap().unwrap();
         assert!(!record.deleted);
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
-        extent_remote::collector::collect(&*bucket, 1, &options).await.unwrap();
-        let state = extent_remote::recover(&*bucket, fork_branch, record.origin()).await.unwrap();
-        let data = extent_remote::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        extent_bucket::collector::collect(&*bucket, 1, &options).await.unwrap();
+        let state = extent_bucket::recover(&*bucket, fork_branch, record.origin()).await.unwrap();
+        let data = extent_bucket::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
         assert_eq!(data, pattern(3, 2 * BLOCK));
     });
     let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
@@ -2669,7 +2669,7 @@ fn the_daemon_waits_for_uploads() {
     wait_uploaded(&path).unwrap();
     let bucket = super::stores::daemon_bucket().unwrap();
     let uploaded = || {
-        futures::executor::block_on(extent_remote::recover(&*bucket, branch_at(&path), None))
+        futures::executor::block_on(extent_bucket::recover(&*bucket, branch_at(&path), None))
             .unwrap()
             .state
             .root
@@ -2750,12 +2750,12 @@ fn what_guests_free_the_collector_compacts() {
     served.join().unwrap();
 
     let bucket = super::stores::daemon_bucket().unwrap();
-    let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
-    let collected = extent_remote::collector::collect(&*bucket, 1, &options);
+    let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+    let collected = extent_bucket::collector::collect(&*bucket, 1, &options);
     let report = futures::executor::block_on(collected).unwrap();
     // The writer's fence, which no extent is in, is kept (TASK-371).
     let counted =
-        extent_remote::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
+        extent_bucket::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
     assert_eq!(report, counted);
     let (store, served) = connect(&path, 16 * extent_bytes);
     for sequence in [1, 17] {
@@ -4178,7 +4178,7 @@ fn restores_open_stores_still_at_their_point() {
 /// or past what it minted.
 fn minted(store: &DaemonExtentStore) -> ExtentId {
     let info = store.info().unwrap();
-    assert!(info.sequence_floor >= 1 << extent_remote::EPOCH_SHIFT, "{info:?}");
+    assert!(info.sequence_floor >= 1 << extent_bucket::EPOCH_SHIFT, "{info:?}");
     ExtentId { branch: store.branch(), sequence: info.next_sequence.max(info.sequence_floor) }
 }
 
@@ -4549,7 +4549,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_remote::object_bucket::ObjectBucket::new(
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4570,7 +4570,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
     wait_uploaded(&path).unwrap();
     // The parent's segments, the fork's among them, which records the fork, held.
-    let segments = format!("branches/{}", extent_remote::layout::segments(parent));
+    let segments = format!("branches/{}", extent_bucket::layout::segments(parent));
     gated.hold_writes(Some(segments));
     let forking = {
         let (path, child) = (path.clone(), child.clone());
@@ -4613,8 +4613,8 @@ fn childs_opened_during_their_forks_wait_for_them() {
     let child_store = opening.join().unwrap();
     assert!(child_store.is_ok(), "opening the child: {:?}", child_store.err());
     assert_eq!(child_store.as_ref().map(|store| store.branch()).ok(), Some(forked.id));
-    let records = extent_remote::object_bucket::ObjectBucket::new(gated.clone(), "branches");
-    let record = control(extent_remote::branch::record(&records, branch_at(&child))).unwrap();
+    let records = extent_bucket::object_bucket::ObjectBucket::new(gated.clone(), "branches");
+    let record = control(extent_bucket::branch::record(&records, branch_at(&child))).unwrap();
     let origin = record.and_then(|record| record.origin()).map(|origin| origin.parent);
     assert_eq!(origin, Some(parent));
     drop((child_store, store));
@@ -4633,7 +4633,7 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_remote::object_bucket::ObjectBucket::new(
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4653,7 +4653,7 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     store.commit(None).unwrap();
     wait_uploaded(&path).unwrap();
     // The next segment's upload, held: the bucket out of reach for what the store has in flight.
-    let segments = format!("branches/{}", extent_remote::layout::segments(branch_at(&path)));
+    let segments = format!("branches/{}", extent_bucket::layout::segments(branch_at(&path)));
     gated.hold_next_write(&segments);
     write(&store, 2);
     store.commit_ordered(None).unwrap();
@@ -4850,7 +4850,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_remote::object_bucket::ObjectBucket::new(
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4964,7 +4964,7 @@ fn a_zygotes_restores_open_its_point_once() {
     // How many writers took the point's branch: its head's epoch.
     let bucket = super::stores::daemon_bucket().unwrap();
     let branch = branch_at(&point);
-    let takings = || control(extent_remote::head::epoch(&*bucket, branch)).unwrap();
+    let takings = || control(extent_bucket::head::epoch(&*bucket, branch)).unwrap();
     let taken = takings();
 
     let restoring: Vec<_> = (0..RESTORES)
@@ -6335,7 +6335,7 @@ fn drains_give_up_past_their_bound() {
 #[test]
 fn imports_read_what_they_made_from_the_hosts_cache() {
     use crate::import::testing::{Entry, Kind, layer};
-    use extent_remote::object_bucket::Request;
+    use extent_bucket::object_bucket::Request;
     host();
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("cache");

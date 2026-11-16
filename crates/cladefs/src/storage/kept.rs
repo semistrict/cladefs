@@ -15,9 +15,9 @@ use super::collect::{self, Collecting};
 use crate::bucket;
 use crate::error::{Error, anyhow_of};
 use crate::host_store::{self, BranchOf, Opened};
-use extent_remote::cache::Cache;
-use extent_remote::cell::Kind;
-use extent_remote::layout::Child;
+use extent_bucket::cache::Cache;
+use extent_bucket::cell::Kind;
+use extent_bucket::layout::Child;
 use extent_store::upload::{self, Uploader};
 use extent_store::{HostDir, Store};
 use std::path::Path;
@@ -138,8 +138,8 @@ mod tests {
     use super::super::{Kind, Storage};
     use super::*;
     use crate::{Filesystem, Owner};
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::record::Kind as Record;
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::record::Kind as Record;
     use futures::executor::block_on;
     use rand::rngs::StdRng;
     use rand::{RngExt as _, SeedableRng as _};
@@ -173,8 +173,8 @@ mod tests {
     /// and its root.
     fn kept(bucket: &ObjectBucket, branch: crate::Branch) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = extent_store::upload::block_on(async {
-            let record = extent_remote::branch::record(bucket, branch).await?;
-            extent_remote::recover(bucket, branch, record.and_then(|record| record.origin())).await
+            let record = extent_bucket::branch::record(bucket, branch).await?;
+            extent_bucket::recover(bucket, branch, record.and_then(|record| record.origin())).await
         });
         let state = recovered.unwrap().unwrap().state;
         let extents = state.extents.iter().map(|(extent, at)| (*extent, at.len)).collect();
@@ -229,7 +229,7 @@ mod tests {
             let child = image(&fork).store().description().branch;
             let bucket = bucket_of(&fork_path);
             assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
-            let record = extent_remote::branch::record(&*bucket, child).await.unwrap().unwrap();
+            let record = extent_bucket::branch::record(&*bucket, child).await.unwrap().unwrap();
             let Record::Fork(origin) = record.kind else { panic!("{record:?}") };
             assert_eq!(origin.parent, parent);
 
@@ -254,7 +254,7 @@ mod tests {
             let child = image(&fork).store().description().branch;
             drop((fork, storage));
             let bucket = bucket_of(&path);
-            let record = |branch| extent_remote::branch::record(&*bucket, branch);
+            let record = |branch| extent_bucket::branch::record(&*bucket, branch);
             assert!(!record(child).await.unwrap().unwrap().deleted);
             Storage::delete(&fork_path).unwrap();
             assert!(record(child).await.unwrap().unwrap().deleted);
@@ -311,8 +311,8 @@ mod tests {
         let made = host_store::create_unmade(
             &path,
             SIZE,
-            BranchOf::Named(extent_remote::layout::test_branch(7)),
-            extent_remote::cell::Kind::Fxfs,
+            BranchOf::Named(extent_bucket::layout::test_branch(7)),
+            extent_bucket::cell::Kind::Fxfs,
             Some("memory:///host"),
             keeping,
         );
@@ -324,7 +324,7 @@ mod tests {
         image.committed().unwrap();
         image.wait_uploaded().unwrap();
         assert_eq!(
-            kept(&bucket_of(&path), extent_remote::layout::test_branch(7)).0,
+            kept(&bucket_of(&path), extent_bucket::layout::test_branch(7)).0,
             BTreeMap::from([(ExtentId::new(7, 1), 4096)])
         );
     }
@@ -337,7 +337,7 @@ mod tests {
         let path = dir.path().join("image");
         let image = KeptImage::create(
             &path,
-            (SIZE, BranchOf::Named(extent_remote::layout::test_branch(7)), true),
+            (SIZE, BranchOf::Named(extent_bucket::layout::test_branch(7)), true),
             host_store::keeping().unwrap(),
         )
         .unwrap();
@@ -368,7 +368,7 @@ mod tests {
         assert!(report.deleted >= 3, "{report:?}");
         let after = bucket_bytes(&own);
         assert!(after < 6 * MIB as u64, "{after} bytes");
-        let (extents, root) = kept(&bucket_of(&path), extent_remote::layout::test_branch(7));
+        let (extents, root) = kept(&bucket_of(&path), extent_bucket::layout::test_branch(7));
         assert_eq!(
             (extents, root),
             (BTreeMap::from([(extent(3), 5 * MIB as u64)]), b"root".into())

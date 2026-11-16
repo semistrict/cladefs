@@ -3,8 +3,8 @@
 # collector_epochs, TASK-407): an acknowledged commit's extent gone (TASK-79.3, TASK-150.1's
 # class), which the check after each step finds, the branch's object missing.
 # Killer: sim::forks_racing_collection
---- a/crates/extent_remote/src/collector.rs
-+++ b/crates/extent_remote/src/collector.rs
+--- a/crates/extent_bucket/src/collector.rs
++++ b/crates/extent_bucket/src/collector.rs
 @@ -1828,7 +1828,7 @@
                      }
                  }

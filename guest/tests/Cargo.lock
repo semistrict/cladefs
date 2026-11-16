@@ -429,9 +429,10 @@ dependencies = [
  "async-trait",
  "bitflags",
  "event-listener",
+ "extent_bucket",
+ "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "fail",
  "flate2",
@@ -707,34 +708,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_frame"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "crc-fast",
- "extent_keys",
- "serde",
- "storage_device",
- "thiserror",
- "zstd",
-]
-
-[[package]]
-name = "extent_keys"
-version = "0.1.0"
-dependencies = [
- "aes",
- "aws-lc-rs",
- "serde",
- "storage_ptr_slice",
- "storage_xts",
- "thiserror",
- "zerocopy",
- "zeroize",
-]
-
-[[package]]
-name = "extent_remote"
+name = "extent_bucket"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -764,15 +738,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "extent_files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "storage_device",
+ "thiserror",
+]
+
+[[package]]
+name = "extent_frame"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "crc-fast",
+ "extent_keys",
+ "serde",
+ "storage_device",
+ "thiserror",
+ "zstd",
+]
+
+[[package]]
+name = "extent_keys"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aws-lc-rs",
+ "serde",
+ "storage_ptr_slice",
+ "storage_xts",
+ "thiserror",
+ "zerocopy",
+ "zeroize",
+]
+
+[[package]]
 name = "extent_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "event-listener",
+ "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "fail",
  "futures",
  "libc",
@@ -3267,7 +3279,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cladefs",
- "extent_remote",
+ "extent_bucket",
  "extent_store",
  "follower_history",
  "futures",

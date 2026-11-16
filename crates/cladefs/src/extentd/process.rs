@@ -96,7 +96,7 @@ pub const FRAMING: u64 = {
 };
 
 /// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_remote::fetch`'s `TAILS`,
+/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_bucket::fetch`'s `TAILS`,
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its stores read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);

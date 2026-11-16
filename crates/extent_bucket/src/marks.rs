@@ -214,11 +214,11 @@ impl Watch {
         match crate::trace::current_ids() {
             Some((trace_id, span_id)) => log::warn!(
                 key, kind:?, request, marks = epoch, trace_id, span_id;
-                "extent_remote: {request} {key}: {saying} ({marks})"
+                "extent_bucket: {request} {key}: {saying} ({marks})"
             ),
             None => log::warn!(
                 key, kind:?, request, marks = epoch;
-                "extent_remote: {request} {key}: {saying} ({marks})"
+                "extent_bucket: {request} {key}: {saying} ({marks})"
             ),
         }
     }
@@ -239,7 +239,7 @@ impl Watch {
             };
             if held.keys.contains(meta.key.as_str()) {
                 let (key, epoch) = (&meta.key, held.epoch);
-                log::debug!(key, prefix, marks = epoch; "extent_remote: listed {key}, marked");
+                log::debug!(key, prefix, marks = epoch; "extent_bucket: listed {key}, marked");
             }
         }
     }

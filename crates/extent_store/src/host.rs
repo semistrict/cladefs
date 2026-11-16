@@ -301,18 +301,18 @@ mod tests {
         let description = Description {
             block_size: BLOCK as u32,
             capacity: 1 << 20,
-            branch: extent_remote::layout::test_branch(3),
+            branch: extent_bucket::layout::test_branch(3),
         };
         create_host(
             &path,
             description,
             BUCKET,
-            crate::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+            crate::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
         )
         .unwrap();
         let store = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
         let store = store
-            .open(Options::default(), crate::Opening::new(extent_remote::layout::test_branch(3)))
+            .open(Options::default(), crate::Opening::new(extent_bucket::layout::test_branch(3)))
             .unwrap();
         store.made().unwrap();
         store.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).unwrap();
@@ -357,7 +357,7 @@ mod tests {
         delete_host(&path, |branch| Ok(called.set(Some(branch)))).unwrap();
         assert_eq!(
             (called.get(), path.exists()),
-            (Some(extent_remote::layout::test_branch(3)), false)
+            (Some(extent_bucket::layout::test_branch(3)), false)
         );
     }
 

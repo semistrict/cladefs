@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use storage_device::{ExtentId, SealedExtent};
 
 pub const BLOCK: usize = 4096;
-pub const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(3);
+pub const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(3);
 /// How many recovering rounds the tests run.
 pub const ROUNDS: u64 = 300;
 const STEPS: usize = 200;

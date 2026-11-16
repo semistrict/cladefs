@@ -7,8 +7,8 @@
 use std::process::Command;
 
 /// Branch `id` of tenant 1's cell 1, the tests'.
-fn test_branch(id: u64) -> extent_remote::layout::Branch {
-    extent_remote::layout::Branch { cell: extent_remote::layout::Cell { tenant: 1, id: 1 }, id }
+fn test_branch(id: u64) -> extent_bucket::layout::Branch {
+    extent_bucket::layout::Branch { cell: extent_bucket::layout::Cell { tenant: 1, id: 1 }, id }
 }
 
 fn gc(args: &[&str]) -> std::process::Output {
@@ -94,9 +94,9 @@ fn lists_and_deletes_branches() {
 /// holding what it freed, the one freeing it), and lists the branch.
 #[test]
 fn collects_a_file_bucket() {
-    use extent_remote::batch::{Commit, SegmentBuilder};
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::{Writer, branch};
+    use extent_bucket::batch::{Commit, SegmentBuilder};
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::{Writer, branch};
     use std::sync::Arc;
     use storage_device::ExtentId;
 
@@ -123,7 +123,7 @@ fn collects_a_file_bucket() {
     let doomed = [0, 1]
         .map(|segment| format!("{at}/segments/0000000000000001/0000000000000001.{segment:016x}"));
     let bytes: u64 = futures::executor::block_on(async {
-        use extent_remote::Bucket as _;
+        use extent_bucket::Bucket as _;
         let listed = ObjectBucket::from_url(&url).unwrap().list("").await.unwrap();
         listed.iter().filter(|meta| doomed.contains(&meta.key)).map(|meta| meta.size).sum()
     });
@@ -142,7 +142,7 @@ fn collects_a_file_bucket() {
     );
     assert!(out.status.success());
     let left = futures::executor::block_on(async {
-        use extent_remote::Bucket as _;
+        use extent_bucket::Bucket as _;
         let bucket = ObjectBucket::from_url(&url).unwrap();
         let listed = bucket.list("").await.unwrap();
         listed
@@ -174,9 +174,9 @@ fn collects_a_file_bucket() {
 /// mark-only pass marks it, deleting nothing; a pass after deletes it, leaving the marks.
 #[test]
 fn dry_runs_and_mark_only_passes_delete_nothing() {
-    use extent_remote::batch::{Commit, SegmentBuilder};
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::{Writer, branch};
+    use extent_bucket::batch::{Commit, SegmentBuilder};
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::{Writer, branch};
     use std::sync::Arc;
     use storage_device::ExtentId;
 
@@ -269,11 +269,11 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     // the objects, the collector's under the cell's prefix.
     let names: Vec<String> = (files().into_iter())
         .map(|(name, _)| name)
-        .filter(|name| !name.starts_with(extent_remote::local::LOCK))
+        .filter(|name| !name.starts_with(extent_bucket::local::LOCK))
         .collect();
     let kept = [
         // The word that the bucket is marked, which an operator removes with the marks.
-        extent_remote::layout::MARKING.to_owned(),
+        extent_bucket::layout::MARKING.to_owned(),
         format!("{at}/branches/{branch}"),
         format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
         format!("{at}/gc/lease"),
@@ -303,11 +303,11 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// writes nothing, the probe of conditional writes neither.
 #[test]
 fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
-    use extent_remote::Bucket as _;
-    use extent_remote::batch::{Commit, SegmentBuilder};
-    use extent_remote::layout::{self, Branch, Cell};
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::{Writer, branch};
+    use extent_bucket::Bucket as _;
+    use extent_bucket::batch::{Commit, SegmentBuilder};
+    use extent_bucket::layout::{self, Branch, Cell};
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::{Writer, branch};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -462,10 +462,10 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
     use extent_frame::{Encryption, Frame, KeyId};
     use extent_keys::kms::LocalKms;
-    use extent_remote::batch::{Commit, SegmentBuilder};
-    use extent_remote::layout::{self, Branch, Cell, Child, Origin};
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::{Bucket as _, Writer, branch, cell, keys};
+    use extent_bucket::batch::{Commit, SegmentBuilder};
+    use extent_bucket::layout::{self, Branch, Cell, Child, Origin};
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::{Bucket as _, Writer, branch, cell, keys};
     use futures::executor::block_on;
     use std::sync::Arc;
     use storage_device::ExtentId;
@@ -507,9 +507,9 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
         let forking = forking.fork(forked, &mut writer.chain());
         let at = writer.add_segment(forking.frame_under(ring.encrypting())).unwrap();
         writer.upload(at).await.unwrap();
-        let head = extent_remote::head::get(&*bucket, parent).await.unwrap().unwrap();
+        let head = extent_bucket::head::get(&*bucket, parent).await.unwrap().unwrap();
         let named = layout::encode(&head.holding(writer.epoch(), at + 1));
-        let overwrite = extent_remote::bucket::PutMode::Overwrite;
+        let overwrite = extent_bucket::bucket::PutMode::Overwrite;
         bucket.put(&layout::head(parent), named.into(), overwrite).await.unwrap();
         at
     });

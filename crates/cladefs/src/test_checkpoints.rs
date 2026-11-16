@@ -10,16 +10,16 @@
 //! CI, `forks_read_what_they_inherited_compacted_twice`).
 
 use crate::ExtentStore;
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::object_bucket::ObjectBucket;
 use std::time::{Duration, Instant};
 
 /// The newest checkpoint of `branch` that `bucket` lists, by its sequence number.
 pub(crate) fn newest(bucket: &ObjectBucket, branch: crate::Branch) -> Option<u64> {
-    let prefix = extent_remote::layout::checkpoints(branch);
-    let listed = futures::executor::block_on(extent_remote::Bucket::list(bucket, &prefix));
+    let prefix = extent_bucket::layout::checkpoints(branch);
+    let listed = futures::executor::block_on(extent_bucket::Bucket::list(bucket, &prefix));
     (listed.unwrap().iter())
-        .filter_map(|meta| match extent_remote::layout::kind(&meta.key) {
-            extent_remote::layout::Kind::Checkpoint { segment, .. } => Some(segment),
+        .filter_map(|meta| match extent_bucket::layout::kind(&meta.key) {
+            extent_bucket::layout::Kind::Checkpoint { segment, .. } => Some(segment),
             _ => None,
         })
         .max()

@@ -4,8 +4,8 @@
 # killer took the daemon (TASK-317, TASK-330.3).
 # Kind: memory
 # Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
---- a/crates/extent_remote/src/bucket.rs
-+++ b/crates/extent_remote/src/bucket.rs
+--- a/crates/extent_bucket/src/bucket.rs
++++ b/crates/extent_bucket/src/bucket.rs
 @@ -219,7 +219,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
      let bytes = Bytes::from(bytes);
      let mut failures = 0;

@@ -25,9 +25,9 @@
 use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, restart, uploaded};
 use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
 use crate::{Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_remote::layout::{self, Kind};
-use extent_remote::object_bucket::ObjectBucket;
-use extent_remote::{EPOCH_SHIFT, branch};
+use extent_bucket::layout::{self, Kind};
+use extent_bucket::object_bucket::ObjectBucket;
+use extent_bucket::{EPOCH_SHIFT, branch};
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -226,7 +226,7 @@ impl World {
                     {
                         taken.store(true, Ordering::SeqCst);
                         let taking =
-                            extent_remote::head::take(&*bucket, child, rand::random(), TOKEN);
+                            extent_bucket::head::take(&*bucket, child, rand::random(), TOKEN);
                         assert_eq!(block_on(taking).map(|held| held.head.epoch), Ok(1));
                     }
                 })
@@ -256,8 +256,8 @@ impl World {
     /// delete nothing: a dead cell's pass retires the references its parent's cell keeps the fork
     /// point for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(&self, case: &str) {
-        let options = extent_remote::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = extent_remote::testing::collect_until_quiet(&*self.bucket, &options);
+        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
+        let collected = extent_bucket::testing::collect_until_quiet(&*self.bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
@@ -287,13 +287,13 @@ impl World {
     }
 
     /// The child's record, if it has one.
-    fn record(&self, child: crate::Branch) -> Option<extent_remote::record::Record> {
+    fn record(&self, child: crate::Branch) -> Option<extent_bucket::record::Record> {
         block_on(branch::record(&*self.bucket, child)).unwrap()
     }
 
     /// The branches live in the bucket.
     fn live(&self) -> Vec<crate::Branch> {
-        block_on(extent_remote::testing::live(&*self.bucket)).unwrap().into_keys().collect()
+        block_on(extent_bucket::testing::live(&*self.bucket)).unwrap().into_keys().collect()
     }
 
     /// The branches live in the bucket that no store holds, of those `named`: what a fork whose
@@ -415,7 +415,7 @@ impl World {
         assert_eq!(self.other.wait_uploaded(), Ok(()), "{case}: another's branch");
         if taken {
             let writer =
-                extent_remote::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
+                extent_bucket::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
             assert_eq!(block_on(writer).map(drop), Ok(()), "{case}: the branch that took the ID");
         }
 
@@ -426,7 +426,7 @@ impl World {
         drop(parent);
         self.delete(&parent_path, case);
         self.collect(case);
-        let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
+        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
         let kept = |branch| branch == self.other.branch() || taken && branch == self.child;
         let leaked: Vec<_> = (keys.into_iter().map(|meta| meta.key))
             .filter(|key| match layout::kind(key) {
@@ -653,7 +653,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let parent = kept_in(&moved, (1 << 30, Some(world.branch)), &world.bucket, options()).unwrap();
     let reopen = moved.clone();
     assert!(world.record(world.child).is_some_and(|record| !record.deleted), "no orphan");
-    let state = block_on(extent_remote::recover(&*world.bucket, world.branch, None));
+    let state = block_on(extent_bucket::recover(&*world.bucket, world.branch, None));
     let key = state.unwrap().state.extents[&large].key.clone();
     assert!(matches!(layout::kind(&key), Kind::Extent { .. }), "{key}");
     for (extent, _) in &world.held {
@@ -663,7 +663,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     assert_eq!(parent.wait_uploaded(), Ok(()));
     drop(parent);
     let stored = || {
-        let listed = block_on(extent_remote::Bucket::list(&*world.bucket, "")).unwrap();
+        let listed = block_on(extent_bucket::Bucket::list(&*world.bucket, "")).unwrap();
         listed.iter().any(|meta| meta.key == key)
     };
     world.collect("orphaned");

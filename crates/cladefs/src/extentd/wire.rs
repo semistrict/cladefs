@@ -149,7 +149,7 @@ pub(crate) const ACK: u32 = 12;
 /// directory at the path the payload holds, nothing there (`EEXIST`)
 /// ([`ExtentStore::fork`](crate::ExtentStore)): a fork the daemon serves, sharing its extents'
 /// pages with the store's. cladefs: the one volume of a new cell of the store's tenant's, its ID the
-/// bucket's to give (`extent_remote::objectid`, TASK-364), which the reply's `args[0]` is. With
+/// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
 /// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
 /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a point
 /// ([`ExtentStore::point`](crate::ExtentStore::point)): what a snapshot of the VM is taken at,
