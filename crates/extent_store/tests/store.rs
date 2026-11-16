@@ -9,8 +9,8 @@ mod common;
 use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_store::{
-    BucketData, Closed, Description, Dir, File as _, HostDir, Located, MemDir, MemFile, NoSpace, Opening,
-    Options, Place, SpentExtent, Store, TooLong, TooSmall, Unsectored,
+    BucketData, Closed, Description, Dir, File as _, HostDir, Located, MemDir, MemFile, NoSpace,
+    Opening, Options, Place, SpentExtent, Store, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

@@ -215,7 +215,11 @@ mod tests {
 
     /// Closes `batch` into the next segment of `writer`, which takes it, and of `wal`: returns its
     /// number.
-    fn close(writer: &Writer<ObjectBucket>, wal: &mut Wal<Data>, batch: impl Into<SegmentBuilder>) -> u64 {
+    fn close(
+        writer: &Writer<ObjectBucket>,
+        wal: &mut Wal<Data>,
+        batch: impl Into<SegmentBuilder>,
+    ) -> u64 {
         let Unframed { footer, data } = batch.into().close(&mut writer.chain());
         let segment = writer.add_segment(data.frame(&footer)).unwrap();
         wal.push(footer, data);
