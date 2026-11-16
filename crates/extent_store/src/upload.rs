@@ -53,7 +53,7 @@ use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
 use extent_remote::wal::Taken;
-use extent_remote::{Body, Objects, Recovered, Writer, branch, cell};
+use extent_remote::{Body, Objects, Recovered, Taking, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
@@ -114,33 +114,66 @@ pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
 }
 
 /// Runs `future` to its end, on the calling thread, as what is called from no runtime's task does:
-/// on the process's runtime for it ([`BLOCKING`]), which lives on after it, with the connections
-/// to buckets it opened.
+/// in the context of the host's remotes' runtime ([`remotes`]), whose workers run what it spawns,
+/// the connections to buckets it opens among them, which live on after it in their buckets' pools.
+/// cladefs: on that runtime, not one of its own (TASK-449's review): a runtime of each call's own
+/// closed the connections it opened as it returned, each call connecting anew (extent_remote's
+/// `requests_on_runtimes_dropped_after_connect_anew`); one of the calls' own beside the host's
+/// served, from its own few threads, the sockets of the connections they left in the pool, which
+/// the host's uploads and fetches went on to use.
 pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
-    let runtime = BLOCKING.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(BLOCKING_WORKERS)
-            .thread_name("cladefs-block-on")
-            .enable_all()
-            .build()
-            .map_err(|err| Failure::local(err, "the runtime of calls from no runtime's task"))
-    });
-    Ok(runtime.as_ref().map_err(Clone::clone)?.block_on(future))
+    Ok(remotes()?.block_on(future))
 }
 
-/// cladefs: the runtime [`block_on`] runs its futures on, one for the process, made by its first
-/// call (TASK-449). A bucket's connections are tasks of the runtime they opened on (`reqwest`'s, as
-/// `object_store` uses it, spawns them there), which stay in the bucket's pool for the next
-/// request, whatever its runtime, for as long as theirs lives. A runtime of each call's own, as
-/// before, closed them as it returned: each call connected anew, a TCP handshake, and a TLS one on
-/// a bucket elsewhere, before its first request, every fork of a point among them
-/// (extent_remote's `requests_on_runtimes_dropped_after_connect_anew` counts them).
-static BLOCKING: std::sync::OnceLock<Result<tokio::runtime::Runtime, Failure>> =
-    std::sync::OnceLock::new();
+/// cladefs: the runtime the host's remotes run on (TASK-34, TASK-449's review), one for the
+/// process: every store's uploader and fetches, and the calls from no runtime's task
+/// ([`block_on`]), so that one runtime serves every connection to the host's buckets. A bucket's
+/// connections are tasks of the runtime they opened on (`reqwest`'s, as `object_store` uses it,
+/// spawns them there), which stay in the bucket's pool for the next request, whatever its
+/// runtime. Sized by the host, not by how many stores it serves, as each store waits on object
+/// storage mostly, and does its disk work in `block_in_place`, which leaves the runtime's threads
+/// to the others. Its threads hold their lists of the shared locks they take from their start
+/// ([`crate::shared`]). Made at its first need; a making that fails, a thread not spawned, is
+/// made anew at the next, not kept failed for the process's life.
+pub fn remotes() -> Result<&'static tokio::runtime::Runtime, Failure> {
+    static REMOTES: Retried<tokio::runtime::Runtime> = Retried::new();
+    REMOTES.get_or_make(|| {
+        failing!("upload::remotes");
+        let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .thread_name("cladefs remote")
+            .on_thread_start(crate::shared::prepare_thread)
+            .enable_all()
+            .build()
+            .map_err(|err| Failure::local(err, "the remotes' runtime"))
+    })
+}
 
-/// How many worker threads [`BLOCKING`] has: its futures run on their callers' threads, its workers
-/// what they spawn, connections mostly, which wait on the network.
-const BLOCKING_WORKERS: usize = 2;
+/// cladefs: a value made at its first need and kept once made, a making that fails keeping
+/// nothing: the next need makes it anew (TASK-449's review), one making at a time.
+struct Retried<T> {
+    made: std::sync::OnceLock<T>,
+    making: Mutex<()>,
+}
+
+impl<T> Retried<T> {
+    const fn new() -> Self {
+        Self { made: std::sync::OnceLock::new(), making: Mutex::new(()) }
+    }
+
+    fn get_or_make<E>(&self, make: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+        if let Some(made) = self.made.get() {
+            return Ok(made);
+        }
+        let _making = self.making.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(made) = self.made.get() {
+            return Ok(made);
+        }
+        let made = make()?;
+        Ok(self.made.get_or_init(|| made))
+    }
+}
 
 /// Deletes `branch` in `bucket` (`extent_remote::branch::delete`), as the placement whose fencing
 /// token is `token`: its writer stops at its next acknowledgement, no writer takes it again, and
@@ -289,12 +322,17 @@ pub fn open<D: Dir>(
     let (started, start) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
+    // What the host learned for this opening, taken as it begins (TASK-449's review).
+    let learned = learned(&*bucket, &recovering);
     UPLOADERS.send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
         // Its conditional writes checked before any is relied on (doc-7, The head).
         match uploads.probed(holder).await {
-            Ok(()) => uploader.run(recovering, store_options, uploads, holder, started).await,
+            Ok(()) => {
+                let recovering = (recovering, learned);
+                uploader.run(recovering, store_options, uploads, holder, started).await
+            }
             Err(err) => started.send(Err(Failure::msg(err))).unwrap(),
         }
         // The store let go of before the uploader says it stopped: so that dropping this returns
@@ -962,9 +1000,11 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         }
     }
 
+    /// Runs the uploader of the store `recovering` recovered, opening it first, with what the host
+    /// learned of its branch for this opening, if anything ([`learned`]).
     pub(crate) async fn run(
         &self,
-        recovering: Recovering<D>,
+        recovering: (Recovering<D>, Option<Learned>),
         options: crate::Options,
         bucket: Arc<B>,
         holder: u64,
@@ -1082,7 +1122,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
         &self,
-        recovering: Recovering<D>,
+        (recovering, learned): (Recovering<D>, Option<Learned>),
         options: crate::Options,
         bucket: &Arc<B>,
         holder: u64,
@@ -1090,7 +1130,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let branch = recovering.branch();
         let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
-        let (found, read, cell) = first_reads(&**bucket, branch, &recovering).await?;
+        let (found, read, cell) = first_reads(&**bucket, branch, learned).await?;
         let found = match found {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
@@ -1166,7 +1206,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         };
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
         let holding = (placement, placement);
-        let holding = cell::hold_from(&**bucket, branch.cell, cell, holding, making, volume);
+        let remembered = matches!(cell, CellFrom::Remembered(_));
+        let holding =
+            cell::hold_from(&**bucket, branch.cell, cell.start(), holding, making, volume);
         let (held, object) = match holding.await.map(|(held, object, _)| (held, object)) {
             Ok(held) => held,
             Err(err) => {
@@ -1185,6 +1227,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             kms.refill(branch.cell.tenant);
         }
         let token = held.epoch;
+        let taking = Taking { holder, token, remembered: remembered.then_some(held) };
         // Its state, once it holds the lease, recovered on from what was found before. cladefs:
         // under its keys, its DEK given it first if its cell is sealed and it has none: a new
         // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
@@ -1195,17 +1238,14 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 failing!("remote::create_branch");
                 branch::create(&**bucket, branch, self.holder()).await?;
                 let keys = keyed(None).await?;
-                Writer::open_keyed(bucket.clone(), branch, (holder, token), keys).await?
+                Writer::open_keyed(bucket.clone(), branch, taking, keys).await?
             }
             Some((record, recovered, before)) => {
                 let keys = keyed(Some(record.clone())).await?;
                 match before.is_empty() && !keys.is_empty() {
-                    true => {
-                        Writer::open_keyed(bucket.clone(), branch, (holder, token), keys).await?
-                    }
+                    true => Writer::open_keyed(bucket.clone(), branch, taking, keys).await?,
                     false => {
                         let found = (recovered, read);
-                        let taking = (holder, token);
                         Writer::open_recovered_from(bucket.clone(), record, found, taking, keys)
                             .await?
                     }
@@ -1407,33 +1447,43 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 }
 
-/// What an opening of the store of `branch`, which `recovering` recovered, reads first, at once
-/// (TASK-165.11, TASK-449): its record ([`resumed`]), its head, which the writer's taking goes on
-/// from and its recovery starts from, and its cell's object, which its holding goes on from,
-/// returning what the holding starts from. Of a branch this host has just made or taken, as the
-/// bucket's [`Known`](extent_remote::known::Known) says ([`Learned`]), what it learned stands for
-/// those reads: its record as it left it, its cell's object, if it held it, and its head, none, if
-/// it knows it has none, a clone made or a point. Each is as a read made then: the head's taking
-/// and the cell's are conditional on what they start from, and the record is read again once the
-/// head is taken (`Writer::take`). Only for a store whose log goes on from nothing the bucket
-/// acknowledged: one that has, learned nothing of here.
-async fn first_reads<B: extent_remote::Bucket, D: Dir>(
+/// What this host learned of the branch `recovering` recovered, which the opening of its store
+/// takes from the bucket's [`Known`](extent_remote::known::Known) as it begins, whatever comes of
+/// it after: so nothing learned for an opening outlives it, a failed one's no later one's
+/// (TASK-449's review). Only for a store whose log goes on from nothing the bucket acknowledged:
+/// one that has, learned nothing of here, its learning dropped.
+fn learned<B: extent_remote::Bucket, D: Dir>(
+    bucket: &B,
+    recovering: &Recovering<D>,
+) -> Option<Learned> {
+    let learned = bucket.known()?.take(recovering.branch());
+    learned.filter(|_| recovering.base().is_none())
+}
+
+/// What an opening of the store of `branch` reads first, at once (TASK-165.11, TASK-449): its
+/// record ([`resumed`]), its head, which the writer's taking goes on from and its recovery starts
+/// from, and its cell's object, which its holding goes on from, returning what the holding starts
+/// from. Of a branch this host has just made or taken, `learned` ([`learned`]) stands for those
+/// reads: its record as it left it, its cell's object, if it held it, and its head, none, if it
+/// knows it has none, a clone made or a point. Each is as a read made then: the head's taking is
+/// conditional on what it starts from, and so is the cell's holding if it writes; the record is
+/// read again once the head is taken, and the cell too if its holding wrote nothing
+/// ([`CellFrom::Remembered`]; `Writer::take`).
+async fn first_reads<B: extent_remote::Bucket>(
     bucket: &B,
     branch: Branch,
-    recovering: &Recovering<D>,
-) -> Result<(Option<Record>, extent_remote::head::Read, branch::Start), Failure> {
+    learned: Option<Learned>,
+) -> Result<(Option<Record>, extent_remote::head::Read, CellFrom), Failure> {
     use extent_remote::head::{self, Read};
     let key = extent_remote::layout::cell(branch.cell);
     let cell_read = || extent_remote::bucket::get(bucket, &key);
-    let known = bucket.known().filter(|_| recovering.base().is_none());
-    let Some(Learned { record, cell, headless }) = known.and_then(|known| known.take(branch))
-    else {
+    let Some(Learned { record, cell, headless }) = learned else {
         let (found, read, cell) = futures::join!(
             async { resumed(bucket, branch, branch::record(bucket, branch).await?).await },
             head::read(bucket, branch),
             cell_read(),
         );
-        return Ok((found?, read, branch::Start::Found(cell)));
+        return Ok((found?, read, CellFrom::Read(cell)));
     };
     // A point, which no writer takes, holds no cell: its opening reads none.
     let point = record.is_point();
@@ -1449,9 +1499,9 @@ async fn first_reads<B: extent_remote::Bucket, D: Dir>(
     };
     let holding = async {
         match cell {
-            Some(cell) => branch::Start::Found(Some(cell)),
-            None if point => branch::Start::Read,
-            None => branch::Start::Found(cell_read().await),
+            Some(cell) => CellFrom::Remembered(cell),
+            None if point => CellFrom::Unread,
+            None => CellFrom::Read(cell_read().await),
         }
     };
     let (found, read, cell) =
@@ -1482,6 +1532,29 @@ fn stored<F: File>(file: &Arc<F>) -> Result<Body, Failure> {
     let size = file.size().map_err(|err| Failure::local(err, "a file to upload"))?;
     let file = file.clone();
     Ok(Body::new(size, move || blocking(|| read_object(&*file))))
+}
+
+/// What the holding of a store's cell starts from ([`first_reads`]).
+enum CellFrom {
+    /// What a read made with the opening's first reads found.
+    Read(Option<extent_remote::bucket::Object>),
+    /// What this host's fork of the branch left, as it held the cell: a read made earlier. Its
+    /// holding, finding it held by this placement already, writes nothing, which no condition
+    /// checks; so the writer's taking reads the cell once the head is taken, which another's
+    /// holding since refuses (`extent_remote::Taking::remembered`, TASK-449's review).
+    Remembered(extent_remote::bucket::Object),
+    /// Nothing: a point's, which holds no cell; read, if held.
+    Unread,
+}
+
+impl CellFrom {
+    fn start(self) -> branch::Start {
+        match self {
+            Self::Read(found) => branch::Start::Found(found),
+            Self::Remembered(found) => branch::Start::Found(Some(found)),
+            Self::Unread => branch::Start::Read,
+        }
+    }
 }
 
 /// cladefs: what a fork made ([`Remote::forked`]): of a point's, the child's record as it left
@@ -1576,6 +1649,35 @@ mod tests {
     use storage_device::ExtentId;
 
     const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+
+    /// TASK-449's review: a failed making of the remotes' runtime, a thread not spawned as under a
+    /// limit of the process's threads, fails the call it was made for, not every call after for
+    /// the process's life: every fork, take and deletion of a host's until its daemon restarted.
+    /// The next call makes it anew. Its own process, as nextest runs each test, whose first call
+    /// makes the runtime.
+    #[test]
+    fn calls_after_a_failed_making_of_the_runtime_make_it_anew() {
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("upload::remotes", "return").unwrap();
+        let failed = block_on(async { 7 }).err().map(|err| err.to_string());
+        fail::remove("upload::remotes");
+        assert_eq!(failed.as_deref(), Some("failpoint upload::remotes"));
+        assert_eq!(block_on(async { 7 }).ok(), Some(7));
+        assert_eq!(block_on(async { 8 }).ok(), Some(8));
+        scenario.teardown();
+    }
+
+    /// TASK-449's review: what a call from no runtime's task spawns, a bucket's connection as it
+    /// connects, runs on the remotes' runtime, which the host's uploaders and fetches run on: so
+    /// the connections such calls leave in the bucket's pool, which the uploads take next, are
+    /// served by its threads, not by a runtime of the calls' own beside it, of fewer.
+    #[test]
+    fn calls_from_no_task_spawn_on_the_remotes_runtime() {
+        let spawned = block_on(async {
+            tokio::spawn(async { std::thread::current().name().map(str::to_owned) }).await.unwrap()
+        });
+        assert_eq!(spawned.unwrap().as_deref(), Some("cladefs remote"));
+    }
 
     /// TASK-92.52: a stall says what it waits for: the bytes past the lag bound, which a stall over
     /// it waits on, and the commits not uploaded and the oldest's age, which a slow upload shows.
@@ -1928,6 +2030,7 @@ mod shuttle_tests {
             let running = {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());
                 shuttle::thread::spawn(move || {
+                    let recovering = (recovering, None);
                     let running = uploader.run(recovering, STORE, bucket, holder, started);
                     shuttle::future::block_on(running)
                 })

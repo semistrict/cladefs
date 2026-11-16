@@ -22,7 +22,7 @@ fn serving(bucket: &Arc<Bucket>, dir: &std::path::Path) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let serving = crate::remote::serving_peers(bucket.clone(), cache);
+    let serving = crate::remote::serving_peers(bucket.clone(), cache).unwrap();
     let server = Server { bucket: URL.to_owned(), serving };
     std::thread::spawn(move || serve(listener, server));
     address
@@ -30,13 +30,14 @@ fn serving(bucket: &Arc<Bucket>, dir: &std::path::Path) -> String {
 
 /// Asks the peer at `address`, serving the bucket at `url`, for `asked`.
 fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, String> {
-    crate::remote::runtime().handle.block_on(link(address, url).get(asked))
+    let runtime = crate::remote::remotes().unwrap();
+    runtime.block_on(link(&runtime, address, url).get(asked))
 }
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
 /// its stored bytes.
 fn asked(bucket: &Bucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
-    let object = crate::remote::runtime().handle.block_on(async {
+    let object = crate::remote::remotes().unwrap().block_on(async {
         use extent_remote::bucket::Bucket as _;
         bucket.get(&location.key).await.unwrap().bytes
     });

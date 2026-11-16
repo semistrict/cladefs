@@ -16,11 +16,14 @@
 //!   fork or take left it, its cell's object as its fork held it, and whether it has no head. The
 //!   branch's store, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
 //!   what a read at the moment of the write would have found: so using it is that read, made
-//!   earlier, which every step after allows for: the head's taking and the cell's are conditional
-//!   on the version found, going on from what is there if another's write came between, and the
-//!   record is read again once the head is taken (`Writer::take`), as after a first read from
-//!   before a deletion (specs/bucket's staleTake, OpenGone). Wrong, it costs requests, never
-//!   safety; it lives in the host's memory alone, and goes with the process.
+//!   earlier, which every step after allows for: the head's taking, and the cell's holding when it
+//!   writes, are conditional on the version found, going on from what is there if another's write
+//!   came between; what decides a step that writes nothing is read again once the head is taken
+//!   (`Writer::take`): the record, as after a first read from before a deletion (specs/bucket's
+//!   staleTake, OpenGone), and the cell, if its holding started from what the fork left
+//!   ([`crate::Taking::remembered`], TASK-449's review: another placement's holding since refuses
+//!   the opening). Wrong, it costs requests, never safety; it lives in the host's memory alone,
+//!   taken by the opening it was learned for as that begins, and goes with the process.
 
 use crate::bucket::Object;
 use crate::layout::Branch;

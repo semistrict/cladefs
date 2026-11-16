@@ -138,6 +138,27 @@ struct Inner {
     stopped: Option<Error>,
 }
 
+/// cladefs: how a writer takes its branch ([`Writer::open_keyed`],
+/// [`Writer::open_recovered_from`]): as `holder`, which must differ from every other taking's, with
+/// the fencing token `token`.
+#[derive(Clone, Copy, Debug)]
+pub struct Taking {
+    pub holder: u64,
+    pub token: u64,
+    /// The holding of the branch's cell whose epoch `token` is, if its host remembers it rather
+    /// than read it before the head's taking: what its fork of the branch left (TASK-449's review).
+    /// A holding found from memory, unchanged, writes nothing, which no condition checks; so the
+    /// taking reads the cell once the head is taken, at once with the record: held still, it held
+    /// it as the head was taken; another's since, the taking is refused ([`Error::Stale`]).
+    pub remembered: Option<crate::cell::Held>,
+}
+
+impl From<(u64, u64)> for Taking {
+    fn from((holder, token): (u64, u64)) -> Self {
+        Self { holder, token, remembered: None }
+    }
+}
+
 struct Pending {
     footer: Footer,
     /// Its object, and those of its extents stored on their own, uploaded first, until they are
@@ -163,11 +184,11 @@ impl<B: Bucket> Writer<B> {
     pub async fn open_keyed(
         bucket: Arc<B>,
         branch: Branch,
-        (holder, token): (u64, u64),
+        taking: impl Into<Taking>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         let record = branch::record(&*bucket, branch).await?.ok_or(Error::NoBranch)?;
-        Self::take(bucket, branch, record, (None, None), (holder, token), keys).await
+        Self::take(bucket, branch, record, (None, None), taking.into(), keys).await
     }
 
     /// Takes over the branch `before` recovered, whose record is `record`, as [`Writer::open`]
@@ -182,7 +203,7 @@ impl<B: Bucket> Writer<B> {
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         let branch = before.state.branch;
-        Self::take(bucket, branch, record, (Some(before), None), (holder, token), keys).await
+        Self::take(bucket, branch, record, (Some(before), None), (holder, token).into(), keys).await
     }
 
     /// Takes over the branch `before` recovered as [`Writer::open_recovered`] does, its head taken
@@ -192,23 +213,23 @@ impl<B: Bucket> Writer<B> {
         bucket: Arc<B>,
         record: Record,
         (before, read): (Recovered, head::Read),
-        (holder, token): (u64, u64),
+        taking: impl Into<Taking>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         let branch = before.state.branch;
         let found = (Some(before), Some(read));
-        Self::take(bucket, branch, record, found, (holder, token), keys).await
+        Self::take(bucket, branch, record, found, taking.into(), keys).await
     }
 
     /// Takes `branch`, whose record is `record`, over, as [`Writer::open`] says: its state
     /// recovered from the head it took, anew, or on from `before`, a recovery of it made before;
-    /// the head taken from `read`, a read of it before, if given.
+    /// the head taken from `read`, a read of it before, if given; as `taking` says.
     async fn take(
         bucket: Arc<B>,
         branch: Branch,
         record: Record,
         (before, read): (Option<Recovered>, Option<head::Read>),
-        (holder, token): (u64, u64),
+        Taking { holder, token, remembered }: Taking,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         // Before the head: a point has none, and nothing writes it, whoever asks.
@@ -223,6 +244,8 @@ impl<B: Bucket> Writer<B> {
         // round trip or more on a real bucket, which every opening of a store pays (TASK-165.11).
         // The record: deleted meanwhile, the branch is gone, whatever its recovery found. And the
         // branch, recovered from the head it took, which nothing changes but a later taking.
+        // cladefs: and the cell whose holding gave the token, if remembered, not read: held still,
+        // or another's taking since refuses this one (TASK-449's review).
         let recovering = async {
             match before {
                 None => {
@@ -233,10 +256,18 @@ impl<B: Bucket> Writer<B> {
                 }
             }
         };
-        let (found, recovered) = futures::join!(branch::record(&*bucket, branch), recovering);
+        let confirming = async {
+            match remembered {
+                Some(held) => crate::cell::still_held(&*bucket, held).await,
+                None => Ok(()),
+            }
+        };
+        let (found, recovered, confirmed) =
+            futures::join!(branch::record(&*bucket, branch), recovering, confirming);
         if found?.is_none_or(|record| record.deleted) {
             return Err(Error::Deleted);
         }
+        confirmed?;
         let Recovered { state, layer, .. } = recovered?;
         // Its sequences minted from its epoch's range, past every earlier writer's: what it
         // recovered is what the head it took names, no later writer's segment among it.

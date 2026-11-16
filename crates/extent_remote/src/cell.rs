@@ -228,6 +228,23 @@ pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<Object>, Er
     }
 }
 
+/// cladefs: whether `held` holds its cell still, read: [`Error::Stale`] if another took it since,
+/// [`Error::Deleted`] if it was deleted, refused if it was shredded. What a writer's taking of a
+/// branch reads once its head is taken, of a holding its host remembers rather than read before,
+/// whose epoch the head was taken with (`Taking::remembered`, TASK-449's review): found so, it
+/// held the cell as the head was taken, as epochs only grow, holding by holding.
+pub async fn still_held(bucket: &impl Bucket, held: Held) -> Result<(), Error> {
+    match read(bucket, held.cell).await? {
+        None => Err(Error::NoCell),
+        Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) if found.shredded => Err(shredded(held.cell)),
+        Some(found) if (found.epoch, found.holder) != (held.epoch, held.holder) => {
+            Err(Error::Stale)
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 /// Changes the object of the cell `held` holds as `step` says, if `held` holds it still:
 /// [`Error::Fenced`] if another took it since, [`Error::Deleted`] if it was deleted.
 async fn change_held<R>(

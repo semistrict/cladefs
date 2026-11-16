@@ -120,39 +120,54 @@ impl From<crate::faults::Failpoint> for Failure {
 }
 
 /// The runtime the host's stores' uploaders run on, and the budget of their uploads; cladefs: and the
-/// host's keys, its KMS and those its fetchers share (TASK-411.3).
-pub fn runtime() -> Runtime {
-    let keys = keys::Host { kms: kms(), ring: MEMORY.keys().clone() };
-    Runtime { handle: RUNTIME.handle().clone(), uploads: UPLOADS.clone(), keys }
+/// host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime can't be
+/// made, a later call making it anew ([`remotes`]).
+pub fn runtime() -> Result<Runtime, Failure> {
+    let keys = keys::Host { kms: kms()?, ring: MEMORY.keys().clone() };
+    Ok(Runtime { handle: remotes()?, uploads: UPLOADS.clone(), keys })
+}
+
+/// The runtime every store's uploader, and its fetches, run on, and the calls from no runtime's
+/// task (`extent_store::upload::remotes`, TASK-34, TASK-449's review): one for the process, so
+/// that one runtime serves the connections to the host's buckets, whichever opened them. Fails if
+/// it can't be made, a later call making it anew.
+pub(crate) fn remotes() -> Result<tokio::runtime::Handle, Failure> {
+    Ok(extent_store::upload::remotes()?.handle().clone())
 }
 
 /// cladefs: the host's KMS, as `CLADEFS_KMS` names it the first time it is asked for, or [`set_kms`]
 /// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
 /// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
-/// or in the clear, rather than make in the clear what its tenants have it seal.
-pub fn kms() -> Option<Arc<keys::Kms>> {
-    KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
+/// or in the clear, rather than make in the clear what its tenants have it seal. Fails, keeping
+/// nothing, if the runtime its pools refill on can't be made ([`remotes`]).
+pub fn kms() -> Result<Option<Arc<keys::Kms>>, Failure> {
+    if let Some(kms) = KMS.get() {
+        return Ok(kms.clone());
+    }
+    let runtime = remotes()?;
+    let kms = KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
         Ok(url) if !url.is_empty() => {
             let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
                 log::error!("cladefs: CLADEFS_KMS: {why}");
                 Arc::new(Unreached(why))
             });
-            Some(host_kms(kms))
+            Some(host_kms(kms, runtime))
         }
         _ => None,
-    })
-    .clone()
+    });
+    Ok(kms.clone())
 }
 
-/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on the uploaders'
-/// runtime, off the paths of forks, which take from them (TASK-411.4).
-fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::Kms> {
-    keys::Kms::pooled(kms, keys::Pooling::on(RUNTIME.handle().clone()))
+/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on `runtime`, the
+/// uploaders', off the paths of forks, which take from them (TASK-411.4).
+fn host_kms(kms: extent_keys::kms::Shared, runtime: tokio::runtime::Handle) -> Arc<keys::Kms> {
+    keys::Kms::pooled(kms, keys::Pooling::on(runtime))
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Some(host_kms(kms))).map_err(|_| "the host's KMS is set already".to_owned())
+    let runtime = remotes().map_err(|err| err.to_string())?;
+    KMS.set(Some(host_kms(kms, runtime))).map_err(|_| "the host's KMS is set already".to_owned())
 }
 
 /// cladefs: the host's KMS ([`kms`]).
@@ -193,7 +208,9 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
         crate::fence::fence_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &fenced);
     let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
     let kept = MEMORY.forget_kept(scope);
-    let rings = runtime().keys.forget(scope, why);
+    // Its KMS, if it made one: one not made yet unwrapped nothing.
+    let kms = KMS.get().cloned().flatten();
+    let rings = keys::Host { kms, ring: MEMORY.keys().clone() }.forget(scope, why);
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
     log::warn!("cladefs: {scope}'s keys forgotten, {why}: {forgotten:?}");
     forgotten
@@ -310,21 +327,6 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.limits().bytes }
 }
 
-/// The runtime every store's uploader, and its fetches, run on (TASK-34): sized by the host, not
-/// by how many stores it serves, as each store waits on object storage mostly, and does its disk
-/// work in `block_in_place`, which leaves the runtime's threads to the others. Its threads hold
-/// their lists of the shared locks they take from their start (`extent_store::shared`).
-static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
-        .thread_name("cladefs remote")
-        .on_thread_start(extent_store::shared::prepare_thread)
-        .enable_all()
-        .build()
-        .expect("the remotes' runtime")
-});
-
 /// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`), at their
 /// locations there, as the store names them, on the remotes' runtime, which their uploads use too,
 /// under the host's budget of GETs.
@@ -336,8 +338,11 @@ pub struct Fetcher {
 impl Fetcher {
     /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
     /// the host's.
-    pub(crate) fn new(bucket: Arc<Bucket>, cache: Option<Arc<Cache>>) -> Arc<Self> {
-        let runtime = RUNTIME.handle().clone();
+    pub(crate) fn new(
+        bucket: Arc<Bucket>,
+        cache: Option<Arc<Cache>>,
+    ) -> Result<Arc<Self>, Failure> {
+        let runtime = remotes()?;
         let runs = runtime.clone();
         // A read ahead is for the guest request whose read started it, if any (TASK-260).
         let spawn: fetch::Spawn = Arc::new(move |future| {
@@ -349,7 +354,7 @@ impl Fetcher {
             Some((_, peers)) => parts.asking(peers.clone()),
             None => parts,
         };
-        Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) })
+        Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
     }
 
     /// `len` bytes at `offset` in `extent`, whose data is at `location` in the bucket: as many as
@@ -390,11 +395,11 @@ pub fn peers() -> Option<Arc<peers::Peers>> {
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
 /// (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its stores'
 /// fetchers do, with them, under the host's budget, and asking no peer.
-pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Serving {
-    Serving {
-        runtime: RUNTIME.handle().clone(),
+pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
+    Ok(Serving {
+        runtime: remotes()?,
         parts: Arc::new(fetch::Fetcher::new(bucket, BUDGET.clone(), MEMORY.clone(), Some(cache))),
-    }
+    })
 }
 
 /// cladefs: what serves the host's peers the parts they ask for ([`serving_peers`]).
@@ -1536,21 +1541,22 @@ mod tests {
         );
     }
 
-    /// Has the remotes' runtime (`RUNTIME`) lock each shard of its list of tasks once, so that
-    /// none allocates after: on macOS, a `std::sync::Mutex` allocates its pthread mutex, 64 bytes,
-    /// as it is first locked, and the runtime locks the shard of a task's id, numbered across the
-    /// process, as it spawns the task and as it ends. Its shards are tokio's: four for each worker,
-    /// rounded up to a power of two (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and
-    /// closing forks spawns uploaders, so a heap counted to the byte grew by 64 bytes now and then
-    /// as they reached shards none had (32 at most on this runtime): nothing of the stores'. The
-    /// other such holder, each of its threads' list of the shared locks it holds, it makes as each
-    /// starts (`extent_store::shared::prepare_thread`).
+    /// Has the remotes' runtime (`extent_store::upload::remotes`) lock each shard of its list of
+    /// tasks once, so that none allocates after: on macOS, a `std::sync::Mutex` allocates its
+    /// pthread mutex, 64 bytes, as it is first locked, and the runtime locks the shard of a task's
+    /// id, numbered across the process, as it spawns the task and as it ends. Its shards are
+    /// tokio's: four for each worker, rounded up to a power of two
+    /// (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and closing forks spawns
+    /// uploaders, so a heap counted to the byte grew by 64 bytes now and then as they reached
+    /// shards none had (32 at most on this runtime): nothing of the stores'. The other such holder,
+    /// each of its threads' list of the shared locks it holds, it makes as each starts
+    /// (`extent_store::shared::prepare_thread`).
     fn every_task_shard_locked() {
-        use super::RUNTIME;
-        let shards = RUNTIME.metrics().num_workers().next_power_of_two() * 4;
+        let runtime = extent_store::upload::remotes().unwrap();
+        let shards = runtime.metrics().num_workers().next_power_of_two() * 4;
         let mut locked = std::collections::HashSet::new();
         while locked.len() < shards {
-            let task = RUNTIME.spawn(async {});
+            let task = runtime.spawn(async {});
             let id: u64 = task.id().to_string().parse().expect("a task's id is its number");
             locked.insert(id % shards as u64);
             futures::executor::block_on(task).unwrap();
@@ -3072,7 +3078,7 @@ mod tests {
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
-        crate::remote::kms().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
+        crate::remote::kms().unwrap().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
         crate::cache::evict_least_used(None, |_| false);
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
@@ -3162,7 +3168,7 @@ mod tests {
             [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
         );
         assert_eq!(cached(), [false, false, true]);
-        assert_eq!(crate::remote::kms().unwrap().in_pool(1), 0);
+        assert_eq!(crate::remote::kms().unwrap().unwrap().in_pool(1), 0);
 
         // Closed by their holders, the stores of the tenant open no more; the other's does.
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();

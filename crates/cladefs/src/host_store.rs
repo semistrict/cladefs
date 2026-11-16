@@ -373,7 +373,7 @@ fn opened(recovering: Recovering<HostDir>, keeping: upload::Options) -> Result<O
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
-    let runtime = crate::remote::runtime();
+    let runtime = crate::remote::runtime()?;
     let holding = (rand::random(), keeping);
     let (store, remote) = upload::open(recovering, options(), bucket.clone(), holding, &runtime)?;
     Ok(Opened { store, bucket, remote })
@@ -555,7 +555,7 @@ pub(crate) fn delete(
         Some(bucket) => {
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
-            let kms = crate::remote::kms();
+            let kms = crate::remote::kms()?;
             extent_store::upload::delete_branch(bucket, branch, token, kms.as_ref())
         }
         None => Ok(()),

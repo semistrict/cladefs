@@ -625,15 +625,17 @@ fn bucket_lifecycle_by_phase() {
 }
 
 /// TASK-449: a restore, a fork of a point and its child's first open, asks the bucket what the
-/// protocol needs, at once where it can: a fork, its child's record created, then its reference
-/// and its cell held at once, the point's record read, the record made from the version its create
-/// left (4 round trips, one after another); the child's open, its head taken from none and its
-/// record read again (2), all else known from the fork (`extent_remote::known`). 7 requests in 6
-/// round trips, where they were 14 in 13. On a host that never saw the point, its store taken
-/// first, opened once, its record read as the take finds it, at once with the collector's marking
-/// looked at, then the base's head and the checkpoint the point names (3): 11 in 9, where they were
-/// 25 in 21. Requests are counted as they reach the object store, round trips as the longest chain
-/// of them each begun once the one before it was answered.
+/// protocol needs, at once where it can: a fork, its child's record created, then its reference and
+/// its cell held at once, the point's record read, the record made from the version its create left
+/// (4 round trips, one after another); the child's open, its head taken from none, then its record
+/// and its cell read again at once (2), all else known from the fork (`extent_remote::known`; the
+/// cell read once the head is taken, as its holding from what the fork left writes nothing:
+/// `restores_refused_to_placements_superseded_since_their_forks`). 8 requests in 6 round trips,
+/// where they were 14 in 13. On a host that never saw the point, its store taken first, opened
+/// once, its record read as the take finds it, at once with the collector's marking looked at, then
+/// the base's head and the checkpoint the point names (3): 12 in 9, where they were 25 in 21.
+/// Requests are counted as they reach the object store, round trips as the longest chain of them
+/// each begun once the one before it was answered.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -658,17 +660,104 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
         [
             ("cold point-open", (4, 3)),
             ("cold fork", (5, 4)),
-            ("cold fork-open", (2, 2)),
+            ("cold fork-open", (3, 2)),
             ("warm fork", (5, 4)),
-            ("warm fork-open", (2, 2)),
+            ("warm fork-open", (3, 2)),
         ]
     );
     drop((vm, cold, taken));
 }
 
+/// TASK-449's review: a host's fork remembers the clone's cell as it held it, which the clone's
+/// first open here starts its holding from, a read less. Another host placed later, its token
+/// higher, holding the cell meanwhile (for another of its volumes, the clone's head not taken),
+/// the open is refused (`ESTALE`), as it was when the open read the cell: the cell's holding found
+/// from memory, not from a read, unchanged, writes nothing, so a read once the clone's head is
+/// taken finds it still held, or the open fails. Opened anyway, this host would write the clone
+/// until the later placement's writer fenced it, what its guest wrote meanwhile lost.
+#[test]
+fn restores_refused_to_placements_superseded_since_their_forks() {
+    let (objects, mut run) = recorded(memory(), 16, Duration::ZERO);
+    let made = Made::new(16, &objects, &mut run);
+    let bucket = Arc::new(Bucket::new(objects.clone(), ""));
+    host(&bucket);
+    let taking = (made.capacity, made.point, None);
+    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    let clone = taken.fork(made.at("vm"), new_cell(NO_TENANT)).unwrap();
+    // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
+    let elsewhere = Bucket::new(objects, "");
+    let later = host_store::keeping().unwrap().token + 1;
+    let volume =
+        extent_remote::cell::Volume { branch: 1 << 40, kind: extent_remote::cell::Kind::Fxfs };
+    let holding = extent_remote::cell::hold(
+        &elsewhere,
+        clone.cell,
+        (later, later),
+        (false, None),
+        Some(("another", volume)),
+    );
+    extent_store::upload::block_on(holding).unwrap().unwrap();
+    let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
+    assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
+    drop(taken);
+}
+
+/// TASK-449's review: how fast a store's uploads go after `CLADEFS_UPLOAD_RESTORES` restores (8),
+/// against the S3 server in memory, over HTTP: the connections the restores' calls from no
+/// runtime's task opened stay in the bucket's pool, which the uploads take first; their sockets
+/// are served by the runtime they opened on. `CLADEFS_UPLOAD_MIB` MiB (256) written, in extents of
+/// 1 MiB, then committed, three times. Lines `UPLOADS`.
+#[test]
+#[ignore = "a benchmark (TASK-449's review): --run-ignored only, alone"]
+fn uploads_after_restores() {
+    let var = |name: &str, default: u64| {
+        std::env::var(name).map_or(default, |value| value.parse().expect(name))
+    };
+    let (restores, mib) = (var("CLADEFS_UPLOAD_RESTORES", 8), var("CLADEFS_UPLOAD_MIB", 256));
+    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let server = serving.block_on(async { extent_remote::s3_server::S3Server::start(None) });
+    let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
+    let made = Made::new(16, &objects, &mut run);
+    let bucket = Arc::new(Bucket::new(server.objects(), ""));
+    host(&bucket);
+    let taking = (made.capacity, made.point, None);
+    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    for restore in 0..restores {
+        let at = made.at(&format!("restore-{restore}"));
+        taken.fork(&at, new_cell(NO_TENANT)).unwrap();
+        drop(open(&at));
+    }
+    let connected = server.connections();
+    let extent = pattern(9, 1 << 20);
+    for round in 0..3 {
+        let at = made.at(&format!("writer-{round}"));
+        taken.fork(&at, new_cell(NO_TENANT)).unwrap();
+        let writer = open(&at);
+        let info = writer.info().unwrap();
+        let first = info.next_sequence.max(info.sequence_floor);
+        for sequence in first..first + mib {
+            let id = ExtentId { branch: writer.branch().id, sequence };
+            writer.write(id, 0, &[VolatileSlice::from(&extent[..])]).unwrap();
+        }
+        let began = Instant::now();
+        writer.commit(None).unwrap();
+        let took = began.elapsed();
+        println!(
+            "UPLOADS restores={restores} round={round} mib={mib} commit-ms={} mib-per-s={:.0} \
+             connections-before={connected} connections-after={}",
+            took.as_millis(),
+            mib as f64 / took.as_secs_f64(),
+            server.connections()
+        );
+        drop(writer);
+    }
+    drop(taken);
+}
+
 /// TASK-449: a restore on a host that has the point open opens no connection to the bucket: those
-/// its requests went on before stay in the bucket's pool, the fork's too, on the runtime of the
-/// calls from no runtime's task, which lives on (`extent_store::upload::block_on`). On a runtime of
+/// its requests went on before stay in the bucket's pool, the fork's too, on the host's remotes'
+/// runtime, which the calls from no runtime's task run in, and which lives on
+/// (`extent_store::upload::block_on`). On a runtime of
 /// each call's own, as before, every fork connected anew for what it asked at once beyond the
 /// connections the host's runtime had left idle in the pool (here one: its reference's write and
 /// its cell's holding), a TCP handshake, and on a bucket elsewhere a TLS one too, before the

@@ -63,10 +63,12 @@ pub fn start(
             .to_owned()
     })?;
     let linked = url.clone();
-    let asking = Peers::new(address, move |peer| link(peer, &linked));
+    let runtime = crate::remote::remotes().map_err(|err| failed(&err.to_string()))?;
+    let asking = Peers::new(address, move |peer| link(&runtime, peer, &linked));
     asking.set(peers);
     crate::remote::ask_peers(bucket.clone(), asking)?;
-    let server = Server { bucket: url, serving: crate::remote::serving_peers(bucket, cache) };
+    let serving = crate::remote::serving_peers(bucket, cache);
+    let server = Server { bucket: url, serving: serving.map_err(|err| failed(&err.to_string()))? };
     listener.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
     let serving = std::thread::Builder::new().name("extentd peers".into()).spawn(move || {
         if let Err(err) = serve(listener, server) {
@@ -181,9 +183,8 @@ impl proto::peer_server::Peer for Server {
 }
 
 /// The link to the peer at `address`, a daemon serving the parts of the bucket at `bucket`, by URL,
-/// connected when first asked, on the remotes' runtime.
-fn link(address: &str, bucket: &str) -> Arc<dyn Link> {
-    let runtime = crate::remote::runtime().handle;
+/// connected when first asked, on `runtime`, the remotes'.
+fn link(runtime: &tokio::runtime::Handle, address: &str, bucket: &str) -> Arc<dyn Link> {
     let _entered = runtime.enter();
     let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
         .expect("a peer's address checked")

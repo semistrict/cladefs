@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:58'
-updated_date: '2026-11-16 07:09'
+updated_date: '2026-11-16 08:03'
 labels:
   - perf
   - review-2026-11-15
@@ -71,6 +71,12 @@ Tests: new restores_ask_the_bucket_what_the_protocol_needs (pins per-phase (requ
 Results: nextest workspace part filtered to extent_remote|extent_store|cladefs: 943 run, 943 passed (74 skipped); sim part 53/53; clippy as test.sh (three invocations) clean; cargo fmt --check clean; scripts/upstream-changes.py --check passes. Decisions in OPEN_QUESTIONS.md. Linux (ubu1) not run: no access in this task.
 
 TLA+ on this Mac: the nine models carrying NamedEpochsStay all PASS (Bucket 7s, BucketTakeovers 525s, BucketDeletions 117s, BucketRemovals 44s, BucketForks 136s, BucketPoints 34s, BucketFences 4s, BucketCompaction 77s, BucketResumes 51s); all 41 bucket mutations violate their invariants as expected (unchanged by this change: actions untouched). Commit e97fb04b5 on branch t449 (pushed; not main).
+
+Review fixes (TASK-449's review, 2026-11-16, macOS):
+1. A stale remembered cell let a superseded host open the clone (confirmed: reproducer restores_refused_to_placements_superseded_since_their_forks opened, errno None, before; ESTALE after). The holding from what the fork left finds our own holder and writes nothing, so no condition checks it. Fix: extent_remote::Taking { holder, token, remembered } (open_keyed/open_recovered_from take impl Into<Taking>); when the cell's holding started from a remembered object (upload.rs CellFrom::Remembered), Writer::take reads the cell once the head is taken, at once with the record (cell::still_held: same epoch and holder, or Stale/Deleted). Epochs only grow, so found unchanged it was held as the head was taken. Learned facts are now taken as upload::open begins (upload::learned), whatever comes of it, and dropped if the log goes on from acknowledged commits; record (read again after the take) and headless (head create conditional) needed no change. Cost: +1 GET, no round trip: warm restore 8 requests in 6 round trips (was 7 in 6), cold 12 in 9 (11 in 9); bucket_lifecycle_by_phase 1,024 extents 30 ms: warm 192 ms, cold 289 ms bucket time, as before. Cells not in specs/bucket (placements give tokens per branch); argued in doc-7; TASK-487 filed (sim learns nothing, model has no cells).
+2. block_on's own runtime served the pooled connections it opened (confirmed by calls_from_no_task_spawn_on_the_remotes_runtime: spawned on 'cladefs-block-on' before). Fix: the remotes' runtime moved from cladefs RUNTIME to extent_store::upload::remotes(); block_on runs in it. Measured (uploads_after_restores, 512 MiB after 8 restores, S3 server in memory over HTTP: the tree has no TLS server; debug, 15 cores): 186 MiB/s after (one runtime, 8 workers) vs 235 before (8 + 2): throughput follows thread count, one runtime of 10 gives 241. TASK-486 filed for the runtime's size.
+3. A failed runtime build was cached (confirmed by hand mutant). Fix: Retried<T> keeps nothing on failure; remote::runtime, kms, Fetcher::new, serving_peers return Result; test calls_after_a_failed_making_of_the_runtime_make_it_anew (failpoint upload::remotes; red under the OnceLock<Result> mutant).
+Results: nextest extent_remote|extent_store|cladefs 946/946 (75 skipped); sim 53/53; shuttle 37, 10, 6, 33, 10, 18 all pass; clippy (three invocations) clean; fmt and upstream-changes --check clean. No TLA+ model touched. Linux not run (no ubu1).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

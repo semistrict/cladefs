@@ -687,7 +687,7 @@ impl ExtentStore {
         let Opening { arena, profiled, keeping } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let forked_from = Arc::new(store_dir::ancestry(path)?);
-        let fetcher = crate::remote::Fetcher::new(bucket.clone(), keeping.cache.clone());
+        let fetcher = crate::remote::Fetcher::new(bucket.clone(), keeping.cache.clone())?;
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
         let branch = store.description().branch;
         Ok(Self {
