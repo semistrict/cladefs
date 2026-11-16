@@ -1195,7 +1195,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     }
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
-    /// changes, as recovered, with the decoded state it shares (TASK-453). No lease: nothing the
+    /// changes, as recovered, with the decoded state it shares (TASK-453). No taking: nothing the
     /// store does goes to the bucket but its forks' records.
     /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
     /// (TASK-411.3).

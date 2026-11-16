@@ -145,8 +145,11 @@ static STATE: Mutex<State> = Mutex::new(State {
 
 struct State {
     sample: Sample,
-    /// The most stores written at once so far, the most the tenants' connections held in flight at
-    /// once, and the most the stores' maps of their extents held at once.
+    /// The most stores written at once so far, and the most the tenants' connections held in
+    /// flight at once.
+=======
+    /// The most stores written at once so far, the most the tenants' connections held in flight
+    /// at once, and the most the stores' maps of their extents held at once.
     writers: u64,
     in_flight: u64,
     extents: u64,

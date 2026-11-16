@@ -551,7 +551,7 @@ cache included, with no kill.
 budget** (`cladefs::extentd::process`): its upload memory, a store's framing and sealing for each
 store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
-tenants' bytes in flight, as many as they held at most, the stores' maps of their extents (TASK-453: each
+tenants' bytes in flight, as much as they held at most, the stores' maps of their extents (TASK-453: each
 decoded state the stores share once, at `extent_bucket::recovery::ENTRY_BYTES` an entry, and what
 each store holds of its own, at `extent_store::OWN_ENTRY_BYTES`, the most so far; and each run of
 changes, side by side, to a map shared with another, a state's made of another's or a store's
