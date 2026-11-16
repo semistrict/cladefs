@@ -1366,7 +1366,7 @@ mod tests {
         const FORKS: usize = 4;
         for point in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let base = kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).unwrap();
             for sequence in 1..=EXTENTS {
                 write(&base, sequence, &pattern(sequence as u8, BLOCK));
@@ -1446,7 +1446,7 @@ mod tests {
         use crate::host_store::fork_child;
         const EXTENTS: u64 = 4160;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * EXTENTS * BLOCK as u64 + (1 << 30);
         let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
         for sequence in 1..=EXTENTS {
@@ -1499,7 +1499,7 @@ mod tests {
         let (extents, rounds) =
             (count("CLADEFS_BENCH_EXTENTS", 32768), count("CLADEFS_BENCH_ROUNDS", 20));
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
         let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
         let data = pattern(1, BLOCK);

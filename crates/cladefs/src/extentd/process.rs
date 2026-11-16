@@ -11,7 +11,7 @@
 //!
 //! Its anonymous memory's budget ([`AnonBudget`]) is the sum of what the daemon holds by design,
 //! each part bounded where it is held (doc-7, Memory): its uploads', its framings', its fetches',
-//! its tenants' rooms', the parts its stores pack ahead of their framings, held, its stores' maps
+//! its tenants' bytes in flight, the parts its stores pack ahead of their framings, held, its stores' maps
 //! of their extents, and its own. A sample past it is memory none of those holds: a copy no
 //! budget counts (TASK-317's per-try copy of each upload), what the allocator kept of what was
 //! freed (TASK-317's glibc arenas), a leak. Each sample is weighed against the budget as of then,
@@ -72,7 +72,7 @@ pub struct AnonBudget {
     /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
     /// (`extent_bucket::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
     /// changes to a shared map, a path of its nodes copied, at its
-    /// (`extent_bucket::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
+    /// (`extent_bucket::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory`
     /// holds them to. Not bounded otherwise: a host's
     /// stores' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).

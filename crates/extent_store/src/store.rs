@@ -407,7 +407,7 @@ impl<D: Dir> Drop for Write<'_, D> {
 fn place_of(entry: Entry<'_>) -> Place {
     let entry = match entry {
         Entry::Own(entry) => entry,
-        Entry::Bucket(location) => return Place::Remote(location.clone()),
+        Entry::Bucket(location) => return Place::Bucket(location.clone()),
     };
     match &entry.data {
         Data::Pieces(pieces) => match pieces[..] {
