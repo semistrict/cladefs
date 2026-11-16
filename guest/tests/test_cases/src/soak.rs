@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what fxfs-guest-soak's host and guests share (TASK-67): a round's plan, a pure function
-//! of the run's seed and the round's number; the bytes its writers write, which the guest that
-//! checks them makes again from their names; and the arithmetic of its verdicts, what of the
-//! writers' acknowledgements a round may lose (doc-12) and when a quantity measured round after
-//! round has grown. No system calls: all of it is tested on any host.
+//! cladefs: what fxfs-guest-soak's host and guests share (TASK-67): a repeat's plan, a pure
+//! function of the run's seed and the repeat's number; the bytes its writers write, which the guest
+//! that checks them makes again from their names; and the arithmetic of its verdicts, what of the
+//! writers' acknowledgements a repeat may lose (doc-12) and when a quantity measured repeat after
+//! repeat has grown. No system calls: all of it is tested on any host.
 
 use crate::script::Rng;
 use std::collections::BTreeSet;
@@ -23,7 +23,7 @@ pub const KEPT_RUNS: usize = 3;
 /// The files the base holds, which every fork reads.
 pub const BASE_FILES: u32 = 32;
 
-/// What a VM does through its round.
+/// What a VM does through its repeat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Load {
     /// Files created and fsynced one after another, by [`WRITERS`] writers, and synced whole
@@ -51,7 +51,7 @@ impl Load {
     }
 }
 
-/// The faults a run's rounds may have, each of which CLADEFS_SOAK_FAULTS may leave out.
+/// The faults a run's repeats may have, each of which CLADEFS_SOAK_FAULTS may leave out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Fault {
     /// A VM's process killed (SIGKILL) mid-write.
@@ -113,26 +113,26 @@ impl Fault {
     }
 }
 
-/// What a VM of the round does.
+/// What a VM of the repeat does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotPlan {
     pub load: Load,
-    /// Whether its store is deleted as the round begins, and forked from the base again.
+    /// Whether its store is deleted as the repeat begins, and forked from the base again.
     pub refork: bool,
-    /// When its VM's process is killed, in seconds from the round's start.
+    /// When its VM's process is killed, in seconds from the repeat's start.
     pub crash_at: Option<u64>,
 }
 
-/// What a round does, which the run's seed and the round's number say.
+/// What a repeat does, which the run's seed and the repeat's number say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
-    pub round: u64,
-    /// The round's own seed, which its VMs' are drawn from.
+    pub repeat: u64,
+    /// The repeat's own seed, which its VMs' are drawn from.
     pub seed: u64,
     /// How long the VMs' loads run.
     pub load_secs: u64,
     pub slots: Vec<SlotPlan>,
-    /// The bucket's latency, in milliseconds, for the round's daemons but the checking one.
+    /// The bucket's latency, in milliseconds, for the repeat's daemons but the checking one.
     pub latency_ms: u64,
     /// The upload after which one fails, its store's uploader stopping: FAILPOINTS'
     /// `writer::upload` ([`Plan::failpoints`]).
@@ -148,23 +148,23 @@ pub struct Plan {
 /// The longest and shortest loads.
 const LOAD_SECS: (u64, u64) = (120, 240);
 
-/// A bucket's latencies a round may have, in milliseconds.
+/// A bucket's latencies a repeat may have, in milliseconds.
 const LATENCIES: [u64; 5] = [0, 0, 25, 250, 1000];
 
 impl Plan {
-    /// Round `round` (from 1) of the run of `seed`, with the faults `faults`, and loads of
-    /// `load_secs` seconds if given. The first round has none: it makes the base, and the first
+    /// Repeat `repeat` (from 1) of the run of `seed`, with the faults `faults`, and loads of
+    /// `load_secs` seconds if given. The first repeat has none: it makes the base, and the first
     /// measures.
-    pub fn new(seed: u64, round: u64, faults: &BTreeSet<Fault>, load_secs: Option<u64>) -> Self {
-        let round_seed = mix(seed, round);
-        let mut rng = Rng::new(round_seed);
+    pub fn new(seed: u64, repeat: u64, faults: &BTreeSet<Fault>, load_secs: Option<u64>) -> Self {
+        let repeat_seed = mix(seed, repeat);
+        let mut rng = Rng::new(repeat_seed);
         let mut chance = |percent: u64| rng.next(100) < percent;
-        let first = round == 1;
+        let first = repeat == 1;
         let on = |fault: Fault| !first && faults.contains(&fault);
-        let mut rng = Rng::new(mix(round_seed, 1));
+        let mut rng = Rng::new(mix(repeat_seed, 1));
         let load_secs =
             load_secs.unwrap_or_else(|| LOAD_SECS.0 + rng.next(LOAD_SECS.1 - LOAD_SECS.0 + 1));
-        // Every load among the first three VMs, in an order of the round's; the others' drawn.
+        // Every load among the first three VMs, in an order of the repeat's; the others' drawn.
         let mut loads = Load::ALL.to_vec();
         for i in (1..loads.len()).rev() {
             loads.swap(i, rng.next(i as u64 + 1) as usize);
@@ -193,8 +193,8 @@ impl Plan {
         let host_lost_at = (on(Fault::HostLoss) && chance(20)).then(|| within(&mut rng));
         let cache_lost = on(Fault::CacheLoss) && chance(15);
         Self {
-            round,
-            seed: round_seed,
+            repeat,
+            seed: repeat_seed,
             load_secs,
             slots,
             latency_ms,
@@ -205,13 +205,13 @@ impl Plan {
         }
     }
 
-    /// The `fail` crate's FAILPOINTS for the round's daemons but the checking one: the upload
+    /// The `fail` crate's FAILPOINTS for the repeat's daemons but the checking one: the upload
     /// after `upload_fails_after` fails, once.
     pub fn failpoints(&self) -> Option<String> {
         self.upload_fails_after.map(|after| format!("writer::upload={after}*off->1*return"))
     }
 
-    /// The seed of slot `slot`'s VM's boot `boot` of the round, which its load is drawn from.
+    /// The seed of slot `slot`'s VM's boot `boot` of the repeat, which its load is drawn from.
     pub fn vm_seed(&self, slot: usize, boot: u32) -> u64 {
         mix(mix(self.seed, slot as u64 + 2), boot as u64)
     }
@@ -247,8 +247,8 @@ impl Plan {
             faults.push("cache lost".to_owned());
         }
         format!(
-            "round {} (seed {}): {} s; {}; {}",
-            self.round,
+            "repeat {} (seed {}): {} s; {}; {}",
+            self.repeat,
             self.seed,
             self.load_secs,
             slots.join(", "),
@@ -272,10 +272,10 @@ pub fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-/// The name of slot's run of boot `boot` of round `round`, of its store's generation `generation`
+/// The name of slot's run of boot `boot` of repeat `repeat`, of its store's generation `generation`
 /// (how many times it was forked again): in the order they were made.
-pub fn run_name(generation: u32, round: u64, boot: u32) -> String {
-    format!("g{generation:03}r{round:04}b{boot}")
+pub fn run_name(generation: u32, repeat: u64, boot: u32) -> String {
+    format!("g{generation:03}r{repeat:04}b{boot}")
 }
 
 /// The key of writer `writer`'s file `index` of the run `run` of slot `slot`.
@@ -389,8 +389,8 @@ pub fn kept(acks: Acks, found: &Found, lossy: bool) -> Result<Option<u32>, Strin
     Ok(kept)
 }
 
-/// Whether a quantity measured after each round grew past its bound: twice the most it was in
-/// the rounds `warm` (from 1) and `slack` more. The rounds before them make what the soak runs
+/// Whether a quantity measured after each repeat grew past its bound: twice the most it was in
+/// the repeats `warm` (from 1) and `slack` more. The repeats before them make what the soak runs
 /// on; the measures after them stay near theirs, or something leaks.
 #[derive(Clone, Copy, Debug)]
 pub struct Bound {
@@ -399,7 +399,7 @@ pub struct Bound {
 }
 
 impl Bound {
-    /// Why the last of `values`, each round's from the first, is past the bound, if it is.
+    /// Why the last of `values`, each repeat's from the first, is past the bound, if it is.
     pub fn grown(&self, what: &str, values: &[u64]) -> Option<String> {
         let (from, to) = self.warm;
         if values.len() <= to {
@@ -410,7 +410,7 @@ impl Bound {
         let last = *values.last()?;
         (last > limit).then(|| {
             format!(
-                "{what} grew to {last} in round {}: more than twice rounds {from}-{to}'s most, \
+                "{what} grew to {last} in repeat {}: more than twice repeats {from}-{to}'s most, \
                  {warm}, and {} more",
                 values.len(),
                 self.slack
@@ -427,7 +427,7 @@ mod tests {
         Fault::ALL.into_iter().collect()
     }
 
-    /// A round's plan is its seed's and number's alone, its first round's without faults.
+    /// A repeat's plan is its seed's and number's alone, its first repeat's without faults.
     #[test]
     fn plans_are_their_seeds() {
         assert_eq!(Plan::new(7, 3, &all(), None), Plan::new(7, 3, &all(), None));
@@ -443,11 +443,11 @@ mod tests {
         assert_eq!((first.host_lost_at, first.cache_lost), (None, false));
     }
 
-    /// Every round runs every load, and over many, every fault comes, within the load's time;
+    /// Every repeat runs every load, and over many, every fault comes, within the load's time;
     /// those left out never.
     #[test]
-    fn rounds_run_every_load_and_fault() {
-        let plans: Vec<Plan> = (2..400).map(|round| Plan::new(11, round, &all(), None)).collect();
+    fn repeats_run_every_load_and_fault() {
+        let plans: Vec<Plan> = (2..400).map(|repeat| Plan::new(11, repeat, &all(), None)).collect();
         for plan in &plans {
             assert_eq!(plan.slots.len(), SLOTS);
             for load in Load::ALL {
@@ -470,13 +470,13 @@ mod tests {
         assert!(some(&|plan| plan.latency_ms == 1000) > 40);
         assert!(some(&|plan| plan.cache_lost) > 30);
         let none: Vec<Plan> =
-            (2..400).map(|round| Plan::new(11, round, &BTreeSet::new(), None)).collect();
+            (2..400).map(|repeat| Plan::new(11, repeat, &BTreeSet::new(), None)).collect();
         for plan in &none {
             assert!(plan.describe().contains("no daemon faults"), "{plan:?}");
             assert!(plan.slots.iter().all(|slot| !slot.refork && slot.crash_at.is_none()));
         }
         let only = Fault::parse("host-loss").unwrap();
-        let lost: Vec<Plan> = (2..400).map(|round| Plan::new(11, round, &only, None)).collect();
+        let lost: Vec<Plan> = (2..400).map(|repeat| Plan::new(11, repeat, &only, None)).collect();
         assert!(lost.iter().all(|plan| plan.daemon_killed_at.is_none() && plan.latency_ms == 0));
         assert!(lost.iter().any(|plan| plan.host_lost_at.is_some()));
     }
@@ -531,7 +531,7 @@ mod tests {
 
     /// What nothing lost keeps every file whose fsync returned.
     #[test]
-    fn rounds_that_lose_nothing_keep_every_fsync() {
+    fn repeats_that_lose_nothing_keep_every_fsync() {
         let told = acks(Some(4), Some(2));
         assert_eq!(kept(told, &found(&[0, 1, 2, 3, 4], &[]), false), Ok(Some(4)));
         // Made after the last fsync told of, whole or torn: not held to.
@@ -544,7 +544,7 @@ mod tests {
     /// What lost the daemon's commits keeps a prefix of the fsyncs, with every file syncfs was
     /// told of, and nothing made after a commit lost.
     #[test]
-    fn rounds_that_lose_commits_keep_a_prefix() {
+    fn repeats_that_lose_commits_keep_a_prefix() {
         let told = acks(Some(6), Some(2));
         assert_eq!(kept(told, &found(&[0, 1, 2, 3], &[]), true), Ok(Some(3)));
         assert_eq!(kept(told, &found(&[0, 1, 2, 3], &[4]), true), Ok(Some(3)));
@@ -558,14 +558,14 @@ mod tests {
     }
 
     #[test]
-    fn growth_past_twice_the_warm_rounds_fails() {
+    fn growth_past_twice_the_warm_repeats_fail() {
         let bound = Bound { warm: (2, 4), slack: 10 };
         assert_eq!(bound.grown("x", &[1000, 50, 60, 55]), None);
         assert_eq!(bound.grown("x", &[1000, 50, 60, 55, 130, 120]), None);
         assert_eq!(
             bound.grown("x", &[1000, 50, 60, 55, 131]),
             Some(
-                "x grew to 131 in round 5: more than twice rounds 2-4's most, 60, and 10 more"
+                "x grew to 131 in repeat 5: more than twice repeats 2-4's most, 60, and 10 more"
                     .to_owned()
             )
         );

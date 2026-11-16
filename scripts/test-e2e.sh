@@ -10,11 +10,11 @@
 # with its cladefs feature), which this builds, and the guest kernel
 # CLADEFS_GUEST_KERNEL names (scripts/build-guest-kernel.sh builds it). Each test's
 # logs are kept under $CLADEFS_E2E_RESULTS (default: a new temporary directory).
-# CLADEFS_E2E_ROUNDS runs each case that many times (default 1), as a soak: it stops
-# at a case's first failing round, whose logs it keeps, in ROUND-K under the
-# case's, and drops the passing rounds' but for what their guests said, in
-# round-K.log there, which measurements repeated round by round need (pgbench's
-# tps). Each round's outcome is kept as data, in round-K.json there, and the run's in summary.json
+# CLADEFS_E2E_REPEATS runs each case that many times (default 1), as a soak, each a
+# repeat: it stops at a case's first failing repeat, whose logs it keeps, in repeat-K
+# under the case's, and drops the passing repeats' but for what their guests said, in
+# repeat-K.log there, which measurements taken repeat by repeat need (pgbench's tps).
+# Each repeat's outcome is kept as data, in repeat-K.json there, and the run's in summary.json
 # and run.json beside the cases' (scripts/guest_results.py, which says what each holds).
 # Firecracker runs under its production seccomp filter (CLADEFS_FIRECRACKER_SECCOMP, real by
 # default; log, or none), and CLADEFS_FIRECRACKER_JAIL=1 in its jailer's jail, as an unprivileged
@@ -30,8 +30,8 @@
 # CLADEFS_FIRECRACKER_SECCOMP=log, whose filter is built per run. With CLADEFS_E2E_PREBUILT,
 # CLADEFS_E2E_HARNESS=DIR takes the harness, the runner and the guest agent, from DIR's artifacts,
 # and what it tests, the extent daemon and its tools and Firecracker, from CLADEFS_E2E_PREBUILT's:
-# so that one harness, a tree's whose cases a pin from before them lacks, drives two pins' builds
-# alike, a qualification's A/B (scripts/qualify.sh, TASK-330.4).
+# so that one harness, a tree's whose cases LangSmith's pin from before them lacks, drives the
+# pin's build and the candidate's alike, a qualification's A/B (scripts/qualify.sh, TASK-330.4).
 # CLADEFS_E2E_ROOT names the tree whose code it builds and boots, and whose helpers it runs (default:
 # this script's), so that this script's modes serve a tree of before them, an A/B's base.
 #
@@ -132,10 +132,15 @@ tests=()
 if [[ -z $build_only ]]; then
     listed=$("$runner" list "${selectors[@]}")
     mapfile -t tests <<< "$listed"
-    rounds=${CLADEFS_E2E_ROUNDS:-1}
-    [[ $rounds =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_E2E_ROUNDS is a count" >&2; exit 2; }
+    repeats=${CLADEFS_E2E_REPEATS:-1}
+    [[ $repeats =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_E2E_REPEATS is a count" >&2; exit 2; }
     # The run as data, its knobs as it was given them, before this sets any (TASK-160.31).
-    "$root/scripts/guest_results.py" start "$results" "$rounds" "${tests[@]}"
+    "$root/scripts/guest_results.py" start "$results" "$repeats" "${tests[@]}"
+    # What a repeat's outcome is called, `repeat`: a runner of before TASK-474, an A/B's base's
+    # (CLADEFS_E2E_ROOT), says `round`, as its tree's guest_results.py reads (round-K.json).
+    repeat_word=repeat
+    runner_test=$("$runner" test --help)
+    if [[ $runner_test != *--repeat* ]]; then repeat_word=round; fi
 fi
 
 # With frame pointers, as every build here has them (.cargo/config.toml), which the bench's perf
@@ -159,7 +164,7 @@ fi
 if [[ -z $prebuilt && -n ${CLADEFS_FAILPOINTS:-}${CLADEFS_FAULT_SEED:-}${CLADEFS_EXTENTD_FAILPOINTS:-} ]]; then
     extentd_features=(--features failpoints) extentd_profile=sim
 fi
-# The run's directory, by which a case that goes on from round to round keys what it keeps
+# The run's directory, by which a case that goes on from repeat to repeat keys what it keeps
 # (fxfs-guest-soak).
 export CLADEFS_E2E_RUN="$results"
 if [[ -z $prebuilt ]]; then
@@ -422,28 +427,28 @@ export CLADEFS_EXTENTD_BIN="$extentd_bin"
 
 status=0
 for test in "${tests[@]}"; do
-    for (( round = 1; round <= rounds; round++ )); do
-        # A single round's logs in the case's directory, where scripts/pgbench-gate.py reads them;
-        # each of several rounds' in one of its own.
+    for (( repeat = 1; repeat <= repeats; repeat++ )); do
+        # A single repeat's logs in the case's directory, where scripts/pgbench-gate.py reads them;
+        # each of several repeats' in one of its own.
         base="$results/$test"
-        (( rounds == 1 )) || base+="/round-$round"
+        (( repeats == 1 )) || base+="/repeat-$repeat"
         passed=1
         "$runner" test --test-case "$test" --base-dir "$base" --keep-all \
-            --outcome "$results/$test/round-$round.json" --run "$results/run.json" \
-            --round "$round" || passed=0
-        if (( passed && rounds > 1 )); then
-            find "$base" -name log.txt -exec cp {} "$results/$test/round-$round.log" \;
+            --outcome "$results/$test/$repeat_word-$repeat.json" --run "$results/run.json" \
+            "--$repeat_word" "$repeat" || passed=0
+        if (( passed && repeats > 1 )); then
+            find "$base" -name log.txt -exec cp {} "$results/$test/repeat-$repeat.log" \;
             rm -r "$base"
         fi
         "$root/scripts/guest_results.py" ended "$results" "$test"
         if (( ! passed )); then
-            echo "$test: failed in round $round of $rounds: see $base" >&2
+            echo "$test: failed in repeat $repeat of $repeats: see $base" >&2
             status=1
             break
         fi
     done
-    if (( passed && rounds > 1 )); then
-        echo "$test: $rounds rounds passed" >&2
+    if (( passed && repeats > 1 )); then
+        echo "$test: $repeats repeats passed" >&2
     fi
 done
 if [[ $seccomp == log ]]; then

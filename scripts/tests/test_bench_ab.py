@@ -218,7 +218,7 @@ class Contaminated(unittest.TestCase):
         self.assertEqual((status, err), (1, "NO RESULT: pin has no clean round of: ext4 read, "
                                             "fxfs read\n"))
 
-    def test_rounds_not_checked_are_said_and_their_timings_kept(self):
+    def test_unchecked_rounds_are_said_and_their_timings_kept(self):
         """A round with no record (one of before it, or run by hand), and one on a host where
         others' I/O can't be told from its own, are not clean: the comparison says which."""
         cgroup = "cgroup v1: no cgroup's io.stat is the round's own"
@@ -227,7 +227,7 @@ class Contaminated(unittest.TestCase):
         status, out, err = compared(a, b)
         self.assertEqual((status, err), (0, ""))
         self.assertEqual(out[:7], [
-            "## NOT CHECKED: whether others wrote beside these rounds is not known; their timings "
+            "## UNCHECKED: whether others wrote beside these rounds is not known; their timings "
             "are kept", "",
             f"- {a[0].name}, {b[0].name}: no record of others' I/O beside it (contamination.json)",
             f"- {a[1].name}: {cgroup}", "",

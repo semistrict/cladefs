@@ -16,7 +16,7 @@
 //! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
 //! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on ubu1 before
-//! each pin handed to LangSmith (scripts/qualify.sh, TASK-330.5).
+//! each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
 //!
 //! Each host imports the sandboxes' image once, as a base: an Alpine root with PostgreSQL and git,
 //! Docker's static binaries and its buildx plugin, and a BusyBox image to build from; each VM
@@ -214,8 +214,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         }
     }
 
-    /// The long mode: before a pin, LangSmith's writers, three builds a builder, pgbench on 5 M
-    /// accounts, the sandbox team's, three times.
+    /// The long mode: before a candidate goes to LangSmith, LangSmith's writers, three builds a
+    /// builder, pgbench on 5 M accounts, the sandbox team's, three times.
     fn long(role: Role) -> Vec<(&'static str, String)> {
         let settings: &[(&str, u64)] = match role {
             Role::Builder => &[("CLADEFS_DOCKER_BUILDS", 3), ("CLADEFS_DOCKER_BUILD_MIB", 512)],
@@ -245,7 +245,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 timeout_secs: 1200,
             }),
             // LangSmith's controlled load's shape (TASK-310): 16 VMs, 8 at a time, each doing more
-            // than a short run's; on ubu1 by hand before each pin (TASK-330.5).
+            // than a short run's; on ubu1 by hand before each candidate (TASK-330.5).
             Ok("long") => Ok(Mode {
                 name: "long",
                 at_once: 8,
@@ -700,7 +700,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                     }
                 }
                 crate::common::say_daemon_stats(test_setup, host.name);
-                // What its kernel counted of it, as any pin's daemon is counted (TASK-330.4).
+                // What its kernel counted of it, as either side's daemon is counted (TASK-330.4).
                 let cost = ProcessCosts::of(host.daemon.id())?;
                 eprintln!("sandboxes: {}: {cost:?}", host.name);
                 costs.push(cost);

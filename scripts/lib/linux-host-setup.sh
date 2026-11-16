@@ -12,23 +12,23 @@
 # and results, the directory it writes to. The Lima VM's tree is a host_tree
 # too, in the VM's home (scripts/lib/lima.sh).
 #
-# A host of one's own, provisioned already (ubu1, by its system-setup.d steps),
-# sets CLADEFS_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the
+# A test host, provisioned already (ubu1, by its system-setup.d steps),
+# sets CLADEFS_TEST_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the
 # caller's Rust (PATH, CARGO_HOME, RUSTUP_HOME) is what builds, and host_need
-# takes a tool there at whatever version it is. CLADEFS_HOST_WORK names the work
+# takes a tool there at whatever version it is. CLADEFS_TEST_HOST_WORK names the work
 # directory, where the trees, guest kernels and artifacts go (default
-# /var/lib/fxdax-test), CLADEFS_HOST_KERNELS a cache of guest kernels that
-# outlasts it (host_kernel), and CLADEFS_HOST_IN_PLACE=1 has each tree build where
+# /var/lib/fxdax-test), CLADEFS_TEST_HOST_KERNELS a cache of guest kernels that
+# outlasts it (host_kernel), and CLADEFS_TEST_HOST_IN_PLACE=1 has each tree build where
 # it is (host_tree): scripts/lib/host.sh's runs set all four.
 #
 # A measurement's run is two jobs of the same work directory (scripts/lib/host.sh's
-# host_job), each a run of the host script, which CLADEFS_HOST_PHASE tells apart,
+# host_job), each a run of the host script, which CLADEFS_TEST_HOST_PHASE tells apart,
 # host_phase here: `build`, as work, its builds alone, into the work directory; then
 # `measure`, alone, under fxjob --bench, against what the build made there, building
 # nothing (host_artifacts, host_prebuilt), which scripts/lib/measurement.sh's guard
 # refuses there (host_cargo, host_kernel). Unset, `all`: one job does both.
 
-work=${CLADEFS_HOST_WORK:-/var/lib/fxdax-test}
+work=${CLADEFS_TEST_HOST_WORK:-/var/lib/fxdax-test}
 # The tools host_need installed, which host_record records.
 host_needed=()
 # This tree, whose scripts build what the host scripts measure.
@@ -39,18 +39,18 @@ source "$host_tools/scripts/lib/measurement.sh"
 # the Rust toolchain and its musl target; and exports the environment the
 # builds and tests run in. It makes results absolute, and sets host_phase.
 host_setup() {
-    host_phase=${CLADEFS_HOST_PHASE:-all}
+    host_phase=${CLADEFS_TEST_HOST_PHASE:-all}
     [[ $host_phase == all || $host_phase == build || $host_phase == measure ]] ||
-        { echo "CLADEFS_HOST_PHASE is build or measure, or unset for both" >&2; return 2; }
+        { echo "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both" >&2; return 2; }
     mkdir -p "$work/tools" "$results"
     results=$(cd "$results" && pwd)
     test "$(uname -m)" = x86_64
     test -c /dev/kvm
 
     host_network
-    if [[ ${CLADEFS_HOST_PROVISIONED:-} == 1 ]]; then
+    if [[ ${CLADEFS_TEST_HOST_PROVISIONED:-} == 1 ]]; then
         command -v cargo > /dev/null ||
-            { echo "CLADEFS_HOST_PROVISIONED: no cargo on PATH" >&2; return 1; }
+            { echo "CLADEFS_TEST_HOST_PROVISIONED: no cargo on PATH" >&2; return 1; }
         return 0
     fi
     export DEBIAN_FRONTEND=noninteractive
@@ -74,7 +74,7 @@ host_setup() {
         touch "$packages_ready"
     fi
 
-    RUSTUP_TOOLCHAIN=$(host_pin rust)
+    RUSTUP_TOOLCHAIN=$(pinned_version rust)
     export CARGO_HOME="$work/tools/cargo" RUSTUP_HOME="$work/tools/rustup" RUSTUP_TOOLCHAIN
     export PATH="$CARGO_HOME/bin:$PATH"
     host_rust
@@ -110,14 +110,14 @@ host_rust() {
     rustup component add clippy
 }
 
-# host_pin TOOL prints the version of TOOL the hosts run: Rust's, or that of a
-# tool cargo installs (host_need).
-host_pin() {
+# pinned_version TOOL prints the version of TOOL the hosts run, its pinned version: Rust's, or
+# that of a tool cargo installs (host_need).
+pinned_version() {
     case $1 in
         rust) echo 1.97.1 ;;
         cargo-nextest) echo 0.9.143 ;;
         cargo-mutants) echo 27.1.0 ;;
-        *) echo "host_pin: $1 has no version pinned" >&2; return 1 ;;
+        *) echo "pinned_version: $1 has no version pinned" >&2; return 1 ;;
     esac
 }
 
@@ -155,10 +155,10 @@ host_apt() {
 }
 
 # host_need TOOL... installs each TOOL, unless it is there: perf, which follows
-# the running kernel and so has no pin, or a cargo subcommand, at its pinned
-# version (host_pin). host_record records them.
+# the running kernel and so has no pinned version, or a cargo subcommand, at its
+# pinned version (pinned_version). host_record records them.
 host_need() {
-    local tool pin
+    local tool pinned
     for tool in "$@"; do
         case $tool in
             perf)
@@ -172,12 +172,12 @@ host_need() {
                     host_apt install -y -qq bpftrace > /dev/null
                 ;;
             *)
-                pin=$(host_pin "$tool")
-                if [[ ${CLADEFS_HOST_PROVISIONED:-} == 1 ]] &&
+                pinned=$(pinned_version "$tool")
+                if [[ ${CLADEFS_TEST_HOST_PROVISIONED:-} == 1 ]] &&
                     host_version "$tool" > /dev/null 2>&1; then
                     :
-                elif [[ "$(host_version "$tool" 2> /dev/null)" != "$tool $pin" ]]; then
-                    cargo install "$tool" --version "$pin" --locked
+                elif [[ "$(host_version "$tool" 2> /dev/null)" != "$tool $pinned" ]]; then
+                    cargo install "$tool" --version "$pinned" --locked
                 fi
                 ;;
         esac
@@ -201,12 +201,12 @@ host_need() {
 # deletes what the source lacks, as the scripts' own before (rsync -a --delete),
 # deletes it.
 #
-# With CLADEFS_HOST_IN_PLACE=1, the source is a tree of the run's own, a worktree
+# With CLADEFS_TEST_HOST_IN_PLACE=1, the source is a tree of the run's own, a worktree
 # whose target directories are its own and go with it (scripts/lib/host.sh's
 # runs): it builds in place, keeping its .git, which the scripts' tests read
 # (git ls-files), and repo stays.
 host_tree() {
-    if [[ ${CLADEFS_HOST_IN_PLACE:-} == 1 ]]; then return 0; fi
+    if [[ ${CLADEFS_TEST_HOST_IN_PLACE:-} == 1 ]]; then return 0; fi
     local tree="$work/$1" compare=--checksum
     mkdir -p "$tree"
     if [[ ! -e $tree/.by-content ]]; then compare=--ignore-times; fi
@@ -225,12 +225,13 @@ host_tree() {
 # kernel and host_kernel_work at where it was built. The kernel's Rust builds on guest/rust's own
 # toolchain, not the host's.
 #
-# With CLADEFS_HOST_KERNELS naming a cache of kernels, as on a host whose runs' work directories
-# come and go (scripts/lib/host.sh), it takes the kernel of KIND built from the same sources
-# (host_kernel_key) from there, if one was, a copy in WORK; else it builds it in the cache's work
-# directory of KIND, which keeps the last kernel's build, so that only what changed since builds,
-# and keeps it, with the last few others. One build of a KIND at a time. A coverage kernel builds in
-# WORK alone, as its counts are read against its build's notes (scripts/guest-coverage.py).
+# With CLADEFS_TEST_HOST_KERNELS naming a cache of kernels, as on a test host whose runs' work
+# directories come and go (scripts/lib/host.sh), it takes the kernel of KIND built from the same
+# sources (host_kernel_key) from there, if one was, a copy in WORK; else it builds it in the cache's
+# work directory of KIND, which keeps the last kernel's build, so that only what changed since
+# builds, and keeps it, with the last few others. One build of a KIND at a time. A coverage kernel
+# builds in WORK alone, as its counts are read against its build's notes
+# (scripts/guest-coverage.py).
 host_kernel() {
     local kind=$1 kernel_work=${2:-$work/guest-kernel-$1} channel key cache built old
     local log=${host_kernel_log:-$results/guest-kernel.log}
@@ -245,14 +246,14 @@ host_kernel() {
     esac
     channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/guest/rust/rust-toolchain.toml")
     rustup toolchain install "$channel" --component rust-src --profile minimal > /dev/null || return
-    if [[ -z ${CLADEFS_HOST_KERNELS:-} || $kind == coverage ]]; then
+    if [[ -z ${CLADEFS_TEST_HOST_KERNELS:-} || $kind == coverage ]]; then
         host_kernel_build "$kernel_work" || return
         # shellcheck disable=SC2034 # The sourcing scripts read them.
         host_kernel_work=$kernel_work host_kernel_image=$kernel_work/out/x86_64/vmlinux
         return 0
     fi
     key=$(host_kernel_key "$kind") || return
-    cache=$CLADEFS_HOST_KERNELS/$kind
+    cache=$CLADEFS_TEST_HOST_KERNELS/$kind
     built=$cache/built/$key/vmlinux
     mkdir -p "$cache/built" "$kernel_work" || return
     exec 7> "$cache.lock"
@@ -315,7 +316,7 @@ host_artifacts() {
 # test-e2e.sh's CLADEFS_E2E_PREBUILT, and its guest kernel, if it holds one.
 host_prebuilt() {
     [[ -f $1/artifacts.txt ]] ||
-        { echo "$1 holds no artifacts: CLADEFS_HOST_PHASE=build makes them" >&2; return 2; }
+        { echo "$1 holds no artifacts: CLADEFS_TEST_HOST_PHASE=build makes them" >&2; return 2; }
     export CLADEFS_E2E_PREBUILT=$1
     if [[ -f $1/vmlinux ]]; then export CLADEFS_GUEST_KERNEL=$1/vmlinux; fi
 }

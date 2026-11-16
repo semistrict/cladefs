@@ -24,7 +24,7 @@
 #
 # Usage: bench-ab-linux-host.sh TOOLS RESULTS A_SOURCE B_SOURCE ROUNDS A_NAME B_NAME
 #
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
 # sides (and the qualification's harness) into the work directory, and stops; `measure` runs the
 # rounds of what a build there made, and compares them; unset, both. scripts/bench-ab-host.sh runs
 # the build as work and the rounds alone as a measurement (fxjob --bench, scripts/lib/host.sh's
@@ -224,7 +224,7 @@ build_sides() {
 # Reads what a build made from $built.
 load_build() {
     local key value made
-    [[ -f $built ]] || { echo "$work holds no build: CLADEFS_HOST_PHASE=build first" >&2; exit 2; }
+    [[ -f $built ]] || { echo "$work holds no build: CLADEFS_TEST_HOST_PHASE=build first" >&2; exit 2; }
     while read -r key value made; do
         case $key in
             a | b) printf -v "tree_$key" '%s' "$value"; printf -v "artifacts_$key" '%s' "$made" ;;

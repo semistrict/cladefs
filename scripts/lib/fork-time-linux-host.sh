@@ -14,7 +14,7 @@
 # fork, stat), RESULTS/LABEL-stat.txt what each fork's stat said, and RESULTS/LABEL-stats.txt the
 # daemon's counters, where its tree keeps them.
 #
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds each
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds each
 # tree's binaries and makes the image, as work; `measure` times them, building nothing; unset,
 # both (scripts/fork-time-host.sh runs the two as jobs of their own, TASK-368).
 #
@@ -67,13 +67,13 @@ if [[ $host_phase != measure ]]; then
     done
     if [[ $host_phase == build ]]; then exit 0; fi
 fi
-[[ -f $layer ]] || { echo "$layer: no image: CLADEFS_HOST_PHASE=build makes it" >&2; exit 2; }
+[[ -f $layer ]] || { echo "$layer: no image: CLADEFS_TEST_HOST_PHASE=build makes it" >&2; exit 2; }
 
 for pair in "$@"; do
     label=${pair%%=*}
     bin=$scratch/target-$label/release
     [[ -x $bin/cladefs-extentd && -x $bin/cladefsctl ]] ||
-        { echo "$label: not built in $bin: CLADEFS_HOST_PHASE=build builds it" >&2; exit 2; }
+        { echo "$label: not built in $bin: CLADEFS_TEST_HOST_PHASE=build builds it" >&2; exit 2; }
     dir=$scratch/$label
     if [[ -e $dir ]]; then rm -r -- "$dir"; fi
     mkdir -p "$dir/stores" "$dir/bucket" "$dir/cache"

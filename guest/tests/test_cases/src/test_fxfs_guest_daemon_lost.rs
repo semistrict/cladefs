@@ -10,7 +10,7 @@
 //! VM's daemon goes as the VM is created, opening its store: a daemon of the test's own, which
 //! takes the VM process's connection and its `OPEN`, and closes it, answering nothing, as one
 //! killed while the store recovers from its bucket does. Its Firecracker exits 158 too, not 1, as
-//! a VM whose store failed to open does (TASK-232, fxfs-guest-soak's GCE r831 round 29).
+//! a VM whose store failed to open does (TASK-232, fxfs-guest-soak's GCE r831 repeat 29).
 
 use macros::{guest, host};
 
@@ -40,7 +40,7 @@ mod host {
     const VMS: [&str; 2] = ["first", "second"];
 
     /// In the temporary directory, as a socket's path is short (SUN_LEN), and a test's directory,
-    /// a round's of a soak, may not be.
+    /// a repeat's of a soak, may not be.
     fn socket(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("cladefs-lost-{}-{name}", std::process::id()))
     }

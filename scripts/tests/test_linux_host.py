@@ -148,7 +148,7 @@ class Tree(Synced, unittest.TestCase):
 
 class InPlace(unittest.TestCase):
     def test_a_runs_own_tree_builds_where_it_is(self):
-        """A host run's worktree (scripts/lib/host.sh, CLADEFS_HOST_IN_PLACE=1) is its own, its
+        """A host run's worktree (scripts/lib/host.sh, CLADEFS_TEST_HOST_IN_PLACE=1) is its own, its
         target directories too: host_tree copies nothing, and repo stays, its .git with it."""
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -157,7 +157,7 @@ class InPlace(unittest.TestCase):
                 ["/bin/bash", "-c",
                  'set -euo pipefail; source "$0"; work=$1 repo=$2; host_tree t; printf %s "$repo"',
                  LIBRARY, Path(directory) / "work", source],
-                env={"PATH": "/usr/bin:/bin", "CLADEFS_HOST_IN_PLACE": "1"},
+                env={"PATH": "/usr/bin:/bin", "CLADEFS_TEST_HOST_IN_PLACE": "1"},
                 capture_output=True, text=True)
             self.assertEqual((done.returncode, done.stdout, done.stderr), (0, str(source), ""))
             self.assertFalse((Path(directory) / "work").exists())
@@ -220,10 +220,10 @@ class Lima(Synced, unittest.TestCase):
         self.assertSynced(self.vm / "cladefs-test", self.start)
 
     def test_the_vms_script_takes_the_cladefs_settings_given(self):
-        # As test-e2e-linux.sh's guest kernel, a path in the VM, and its rounds.
-        settings = {"CLADEFS_GUEST_KERNEL": "/home/me/a kernel/Image", "CLADEFS_E2E_ROUNDS": "3"}
+        # As test-e2e-linux.sh's guest kernel, a path in the VM, and its repeats.
+        settings = {"CLADEFS_GUEST_KERNEL": "/home/me/a kernel/Image", "CLADEFS_E2E_REPEATS": "3"}
         ran = self.lima("lib/lima.sh", "settings.sh", settings=settings)
-        said = "CLADEFS_BUILD_COMMIT=unknown\nCLADEFS_E2E_ROUNDS=3\n"
+        said = "CLADEFS_BUILD_COMMIT=unknown\nCLADEFS_E2E_REPEATS=3\n"
         said += "CLADEFS_GUEST_KERNEL=/home/me/a kernel/Image\n"
         self.assertEqual(ran, (0, said, ""))
 
@@ -377,10 +377,10 @@ class Network(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout.splitlines(), done.stderr), (0, said, ""))
 
 class Provisioned(unittest.TestCase):
-    """A host of one's own, provisioned already (ubu1): CLADEFS_HOST_WORK names the work directory,
-    and with CLADEFS_HOST_PROVISIONED=1 host_need takes a tool there at the version it is, where it
-    would install the pinned one (TASK-276.6). Here cargo is a fake whose nextest says a version
-    other than the pin, and which fails anything else, an install among them."""
+    """A test host, provisioned already (ubu1): CLADEFS_TEST_HOST_WORK names the work directory,
+    and with CLADEFS_TEST_HOST_PROVISIONED=1 host_need takes a tool there at the version it is,
+    where it would install the pinned one (TASK-276.6). Here cargo is a fake whose nextest says a
+    version other than the pinned one, and which fails anything else, an install among them."""
 
     CARGO = """#!/bin/bash
 [[ $1 == nextest && $2 == --version ]] || { echo "cargo: $*" >&2; exit 3; }
@@ -401,14 +401,14 @@ echo "cargo-nextest 0.0.1"
             )
 
     def test_the_work_directory_is_the_callers(self):
-        done = self.run_library('printf %s "$work"', {"CLADEFS_HOST_WORK": "/scratch/work"})
+        done = self.run_library('printf %s "$work"', {"CLADEFS_TEST_HOST_WORK": "/scratch/work"})
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "/scratch/work", ""))
         done = self.run_library('printf %s "$work"', {})
         self.assertEqual((done.returncode, done.stdout), (0, "/var/lib/fxdax-test"))
 
     def test_a_provisioned_hosts_tools_are_taken_as_they_are(self):
         script = 'host_need cargo-nextest; printf "%s\\n" "${host_needed[@]}"'
-        done = self.run_library(script, {"CLADEFS_HOST_PROVISIONED": "1"})
+        done = self.run_library(script, {"CLADEFS_TEST_HOST_PROVISIONED": "1"})
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "cargo-nextest\n", ""))
 
     def test_another_hosts_tools_are_installed_at_their_pins(self):
@@ -511,7 +511,7 @@ fi
 
 class Kernels(unittest.TestCase):
     """host_kernel, a run's guest kernel: built in the run's work directory, or with a cache of
-    kernels on the host (CLADEFS_HOST_KERNELS), taken from there if one was built from the same
+    kernels on the host (CLADEFS_TEST_HOST_KERNELS), taken from there if one was built from the same
     sources. Here a source tree of the kernel's inputs and one that isn't, whose
     build-guest-kernel.sh is a fake that says what it built and where, its kernel naming the
     sources' text; cargo a fake whose metadata, run in the tree's root (scripts/guest-kernel-key.sh),
@@ -574,8 +574,8 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-
              'mkdir -p "$results"; host_kernel "$1"; printf %s "$host_kernel_image"', LIBRARY, kind,
              self.repo],
             env={"PATH": f"{self.directory / 'bin'}:/usr/bin:/bin:/sbin", "CALLS": str(self.calls),
-                 "CLADEFS_HOST_WORK": str(self.directory / work),
-                 **({"CLADEFS_HOST_KERNELS": str(self.cache)} if cached else {})},
+                 "CLADEFS_TEST_HOST_WORK": str(self.directory / work),
+                 **({"CLADEFS_TEST_HOST_KERNELS": str(self.cache)} if cached else {})},
             capture_output=True, text=True, cwd=self.directory,
         )
         built = self.calls.read_text()[len(built_before):].splitlines()

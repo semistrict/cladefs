@@ -117,7 +117,7 @@ class Job(unittest.TestCase):
 
     def test_the_run_is_a_round_recorded_of_the_disk_its_stores_are_on(self):
         # The directory the run wrote in, in the job's temporary one, is the round's disk, and no
-        # other: not the results', which is ubu1's ZFS home under bench-rounds.sh, not checked.
+        # other: not the results', which is ubu1's ZFS home under bench-rounds.sh, unchecked.
         status, errors = self.job("bench-fs-fxfs-guest-dax")
         self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(self.recorded(), [
@@ -218,7 +218,7 @@ exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
 class Rounds(unittest.TestCase):
     """scripts/bench-rounds.sh's runs: in a tree of its own, with fxjob, sudo, test-e2e.sh and
     test-e2e-job.sh that say how they ran, and the host's /proc and /sys a tree of their own
-    (CLADEFS_HOST_PROC, CLADEFS_HOST_SYS); and by its text."""
+    (CLADEFS_TEST_HOST_PROC, CLADEFS_TEST_HOST_SYS); and by its text."""
 
     def rounds(self, env=None):
         """Runs bench-rounds.sh for one round of the case fxfs-guest: its status, errors and the
@@ -249,8 +249,8 @@ class Rounds(unittest.TestCase):
         done = subprocess.run(
             ["/bin/bash", scripts / "bench-rounds.sh", tree / "results", "1", "fxfs-guest"],
             env={"PATH": f"{bin}:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
-                 "CLADEFS_FAKE_SAID": str(tree / "said"), "CLADEFS_HOST_PROC": str(tree / "proc"),
-                 "CLADEFS_HOST_SYS": str(tree / "sys"), **(env or {})},
+                 "CLADEFS_FAKE_SAID": str(tree / "said"), "CLADEFS_TEST_HOST_PROC": str(tree / "proc"),
+                 "CLADEFS_TEST_HOST_SYS": str(tree / "sys"), **(env or {})},
             capture_output=True, text=True)
         return done.returncode, done.stderr, tree
 
