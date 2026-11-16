@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:58'
-updated_date: '2026-11-16 08:03'
+updated_date: '2026-11-16 11:07'
 labels:
   - perf
   - review-2026-11-15
@@ -36,7 +36,7 @@ Measured by TASK-443.5 (cladefs remote::lifecycle::bucket_lifecycle_by_phase, ma
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -77,6 +77,8 @@ Review fixes (TASK-449's review, 2026-11-16, macOS):
 2. block_on's own runtime served the pooled connections it opened (confirmed by calls_from_no_task_spawn_on_the_remotes_runtime: spawned on 'cladefs-block-on' before). Fix: the remotes' runtime moved from cladefs RUNTIME to extent_store::upload::remotes(); block_on runs in it. Measured (uploads_after_restores, 512 MiB after 8 restores, S3 server in memory over HTTP: the tree has no TLS server; debug, 15 cores): 186 MiB/s after (one runtime, 8 workers) vs 235 before (8 + 2): throughput follows thread count, one runtime of 10 gives 241. TASK-486 filed for the runtime's size.
 3. A failed runtime build was cached (confirmed by hand mutant). Fix: Retried<T> keeps nothing on failure; remote::runtime, kms, Fetcher::new, serving_peers return Result; test calls_after_a_failed_making_of_the_runtime_make_it_anew (failpoint upload::remotes; red under the OnceLock<Result> mutant).
 Results: nextest extent_remote|extent_store|cladefs 946/946 (75 skipped); sim 53/53; shuttle 37, 10, 6, 33, 10, 18 all pass; clippy (three invocations) clean; fmt and upstream-changes --check clean. No TLA+ model touched. Linux not run (no ubu1).
+
+2026-11-16: Linux, ubu1 under fxjob, the batch rebased on main ffd513512 (TASK-475's cladefsd) at eb13f8ca7: scripts/test.sh clippy and workspace, 2854 passed, 88 skipped. Pushed to main.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

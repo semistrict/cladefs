@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 08:52'
-updated_date: '2026-11-16 09:05'
+updated_date: '2026-11-16 11:07'
 labels:
   - bug
   - testing
@@ -48,4 +48,6 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 forks-take-branches-claimed: same mutation; host_store's look is now only a writable fork's (TASK-449: a point's fork makes none, fork_point's record create refusing another's), so the hunk keeps the is_point guard and drops only the look's refusal; record_fork_under's two hunks unchanged, re-offset. Header notes the writable-only scope. macOS: mutants.sh forks-take-branches-claimed -> killed (remote.rs:3826 left (Ok(()), true) right (Err(EEXIST), false)); killer alone on the clean tree passes.
 uploads-copied-each-try: same mutation (Bytes::copy_from_slice per try in bucket::create and update), context re-anchored on Created(version)/Updated(version). Compiles on macOS (cargo check -p extent_remote); killer extentd::tests::soak::... is Linux-only (extentd cfg(target_os=linux)): unrun, needs ubu1 under fxjob.
 mutants.sh --check: 22 checked, 0 broken. CLADEFS_TEST_PARTS=scripts scripts/test.sh passes on macOS (501 python tests OK, every mutants check 0 broken).
+
+2026-11-16: Linux, ubu1 under fxjob, the batch rebased on main ffd513512 (TASK-475's cladefsd) at eb13f8ca7: scripts/test.sh clippy and workspace, 2854 passed, 88 skipped. Pushed to main. mutants.sh --check 22 applying. The soak killer's run on ubu1 (317 s) failed on TASK-493's flusher panic, not on its own budget check: AC #2 open until TASK-493 lands and the mutant is rerun.
 <!-- SECTION:NOTES:END -->

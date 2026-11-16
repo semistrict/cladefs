@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 23:44'
-updated_date: '2026-11-16 06:25'
+updated_date: '2026-11-16 11:07'
 labels:
   - bug
   - testing
@@ -30,7 +30,7 @@ Found 2026-11-15 by the Linux workspace run on ubu1 (branch perf-linux at 618403
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -67,4 +67,6 @@ Look around: guest/sim/kernel/device.c's window checks wrap and UNMAP/READ check
 Structure: the range checks now have one owner on the device side (Bounds, in serve, before each store call). What could make the class impossible: Store's methods taking a range type only Bounds makes (a checked offset and length) instead of raw u64s, so a new request kind cannot reach a store unchecked; not done here, as Store's Linux impl (RemoteExtentStore) can't be compiled on this Mac; worth doing with a Linux build.
 
 Results (macOS, 8811f315e): cargo nextest run -p virtio_extent 32/32 passed; PROPTEST_CASES=50000 on the three range tests passed (81 s, 6.7 s); cargo nextest run -p cladefs 365 passed, 9 skipped; CLADEFS_TEST_PARTS=clippy scripts/test.sh clean (fmt, clippy, shuttle, loom); scripts/upstream-changes.py --check passed. Not run: Linux. device.rs, Requests and tests/daemon.rs are Linux-only and uncompiled here (cross clippy for x86_64-unknown-linux-gnu fails on aws-lc-sys's missing x86_64-linux-gnu-gcc); AC #2 and DoD #1 wait for a ubu1 run.
+
+2026-11-16: Linux, ubu1 under fxjob, the batch rebased on main ffd513512 (TASK-475's cladefsd) at eb13f8ca7: scripts/test.sh clippy and workspace, 2854 passed, 88 skipped. Pushed to main.
 <!-- SECTION:NOTES:END -->
