@@ -87,7 +87,8 @@ pub struct Options {
 }
 
 /// Bounds that hold the cache to what a process holds whatever its bucket's backlog (TASK-317):
-/// the backlog is on the disk, what the cache holds a bounded window of it, the latest.
+/// the backlog is on the disk, what the cache holds a bounded window of it, the latest. What a
+/// process with no governor goes by, and the least a governed one does ([`PageCache::size_to`]).
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -118,7 +119,13 @@ pub struct Usage {
 /// thread, or by its writers if it has none, evicted together. One for the process ([`shared`]),
 /// which the extent daemon governs.
 pub struct PageCache {
+    /// What it was made with: its expiry, and the least of its bounds ([`PageCache::size_to`]).
     options: Options,
+    /// Its bounds as they are: [`Options::background`], [`Options::hard`] and [`Options::most`],
+    /// raised from `options`' by a governor as memory allows ([`PageCache::size_to`]).
+    background: AtomicU64,
+    hard: AtomicU64,
+    most: AtomicU64,
     /// Whether a flusher thread writes back for it; if not, its writers do.
     flusher: bool,
     /// Whether its flusher died, a panic unwinding it: nothing writes back for it since.
@@ -174,6 +181,9 @@ impl PageCache {
     fn made(options: Options, flusher: bool) -> Arc<Self> {
         Arc::new(Self {
             options,
+            background: AtomicU64::new(options.background),
+            hard: AtomicU64::new(options.hard),
+            most: AtomicU64::new(options.most),
             flusher,
             flusher_died: AtomicBool::new(false),
             held: AtomicU64::new(0),
@@ -209,9 +219,43 @@ impl PageCache {
         self.flusher_died.load(Ordering::Relaxed)
     }
 
-    /// What it goes by.
+    /// What it goes by now: its bounds as a governor sized them, if one did.
     pub fn options(&self) -> Options {
-        self.options
+        Options {
+            background: self.background(),
+            hard: self.hard(),
+            most: self.most(),
+            expire: self.options.expire,
+        }
+    }
+
+    /// cladefs: sizes the cache to `room`, the bytes the process's governor leaves it, as Linux
+    /// sizes its page cache to the memory free (TASK-433.8): it holds as much as `room`, the
+    /// flusher writes back past a tenth of it dirty, and writers wait past a fifth
+    /// (`vm.dirty_background_ratio` and `vm.dirty_ratio`'s defaults), none less than what it was
+    /// made with ([`Options`]). The governor evicts it to `room` as well ([`PageCache::evict_to`]),
+    /// so that what this allows past `room` under pressure is dirty pages alone, to be written.
+    /// With the fixed bounds alone, a burst of 256 MiB, as store-bench's, was evicted as it was
+    /// written, and read back from the disk to be framed: the commit after it 2-4x slower on
+    /// ubu1 than through the host's page cache.
+    pub fn size_to(&self, room: u64) {
+        let floors = self.options;
+        self.background.store((room / 10).max(floors.background), Ordering::Relaxed);
+        self.hard.store((room / 5).max(floors.hard), Ordering::Relaxed);
+        self.most.store(room.max(floors.most), Ordering::Relaxed);
+        self.drained();
+    }
+
+    fn background(&self) -> u64 {
+        self.background.load(Ordering::Relaxed)
+    }
+
+    fn hard(&self) -> u64 {
+        self.hard.load(Ordering::Relaxed)
+    }
+
+    fn most(&self) -> u64 {
+        self.most.load(Ordering::Relaxed)
     }
 
     /// The bytes it holds: what the extent daemon's governor counts as the process's.
@@ -315,12 +359,12 @@ impl PageCache {
     /// [`Options::background`] as they go ([`PageCache::dirtied`]); what failed to be written
     /// stays dirty, which none waits for. Its flusher dead, it panics, as none would let it go.
     fn throttle(&self) {
-        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.options.hard {
+        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
             return;
         }
         self.wake();
         let mut holding = self.holding.lock().unwrap();
-        while self.dirty.load(Ordering::Relaxed) > self.options.hard {
+        while self.dirty.load(Ordering::Relaxed) > self.hard() {
             assert!(
                 !self.flusher_died(),
                 "the page cache's flusher died: nothing writes back for a writer held at its bound"
@@ -340,15 +384,15 @@ impl PageCache {
     /// dirty, or the writer, with none; and clean ones are evicted once more than
     /// [`Options::most`] is held.
     fn dirtied(&self) {
-        if self.dirty.load(Ordering::Relaxed) > self.options.background {
+        if self.dirty.load(Ordering::Relaxed) > self.background() {
             if self.flusher {
                 self.wake();
             } else {
-                self.write_back_to(self.options.background);
+                self.write_back_to(self.background());
             }
         }
-        if self.bytes() > self.options.most {
-            self.evict_to(self.options.most);
+        if self.bytes() > self.most() {
+            self.evict_to(self.most());
         }
     }
 }
@@ -368,7 +412,7 @@ impl PageCache {
         }
         for file in self.files_by(|file| file.dirtied()) {
             let Some(dirtied) = file.dirtied() else { continue };
-            let over = self.dirty.load(Ordering::Relaxed) > self.options.background;
+            let over = self.dirty.load(Ordering::Relaxed) > self.background();
             if !over && now.duration_since(dirtied) < self.options.expire {
                 break;
             }
@@ -646,20 +690,23 @@ impl<F: File> Shared<F> {
             }
             let start = run[0] * PAGE;
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
-            let mut bytes = Vec::with_capacity((end - start) as usize);
+            // Assembled in memory aligned to blocks, which direct I/O writes as it is: whole
+            // pages, but at the file's end (TASK-433.8).
+            let mut buffer = extent_bucket::direct::Buffer::new(run.len() * PAGE as usize);
             let mut written = Vec::with_capacity(run.len());
-            for &index in &run {
+            for (&index, into) in run.iter().zip(buffer.bytes_mut().chunks_exact_mut(PAGE as usize))
+            {
                 let page = pages.pages.get_mut(&index).unwrap();
                 page.writing = true;
                 written.push((index, page.last));
-                bytes.extend_from_slice(&page.bytes);
+                into.copy_from_slice(&page.bytes);
             }
-            bytes.truncate((end - start) as usize);
+            let bytes = &buffer.bytes()[..(end - start) as usize];
             let len = run.len() as u64 * PAGE;
             self.cache.writing.fetch_add(len, Ordering::Relaxed);
             drop(pages);
             let in_flight = InFlight { shared: self, run: &written, len, ended: false };
-            let wrote = self.file.write_at(&bytes, start);
+            let wrote = self.file.write_at(bytes, start);
             pages = in_flight.end();
             for &(index, last) in &written {
                 let Some(page) = pages.pages.get_mut(&index) else { continue };
@@ -1023,6 +1070,26 @@ mod tests {
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
     }
 
+    /// Sized to a governor's room, the cache's bounds are a tenth, a fifth and all of it, none
+    /// below what it was made with; sized down again, they go back to those (TASK-433.8).
+    #[test]
+    fn caches_size_to_the_room_a_governor_leaves() {
+        let cache = PageCache::without_flusher(Options::default());
+        let made = Options::default();
+        cache.size_to(4 << 30);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most, sized.expire),
+            ((4 << 30) / 10, (4 << 30) / 5, 4 << 30, made.expire)
+        );
+        cache.size_to(64 << 20);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most),
+            (made.background, made.hard, made.most)
+        );
+    }
+
     /// A range written behind is written back by the flusher, ahead of any threshold or expiry,
     /// waiting for none of it: the rest of the file stays dirty (TASK-433.8).
     #[test]
@@ -1237,7 +1304,7 @@ mod tests {
     fn a_dead_flusher_is_known_and_holds_no_writer_for_good() {
         let (cache, _file) = flusher_panicking();
         assert!(died_within(&cache), "the flusher died unsaid");
-        cache.dirty.store(cache.options.hard + 1, Ordering::Relaxed);
+        cache.dirty.store(cache.hard() + 1, Ordering::Relaxed);
         let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cache.throttle()))
             .unwrap_err();
         let said = (held.downcast_ref::<&str>().copied())
