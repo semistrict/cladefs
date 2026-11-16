@@ -4,11 +4,11 @@
 
 //! The collector of the file buckets images keep their branches in, each its own, beside its
 //! directory (backlog doc-14, TASK-165.6): what reclaims what their branches no longer need, and
-//! compacts what is mostly freed, there, the only cleaner of what images free (TASK-165.8). No
-//! `cladefs-gc` collects an image's own bucket, as one does a host's: the processes that have images
-//! of it open do, a pass after an image's commit, on a thread of its own, at most one every
-//! [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
-//! image and its clones, which reads again only the branches' records that changed (`Collector`).
+//! compacts what is mostly freed, there, the only thing that deletes what images free
+//! (TASK-165.8). No `cladefs-gc` collects an image's own bucket, as one does a host's: the
+//! processes that have images of it open do, a pass after an image's commit, on a thread of its
+//! own, at most one every [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
+//! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
 use extent_remote::collector::{Collector, Options, Report};
 use extent_remote::store::Store as Bucket;

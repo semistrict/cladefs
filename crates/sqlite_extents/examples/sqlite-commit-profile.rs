@@ -122,7 +122,7 @@ impl Device for Timing {
 struct TimingWindow(sqlite_extents::daemon::DaemonWindow);
 
 #[cfg(target_os = "linux")]
-impl sqlite_extents::Window for TimingWindow {
+impl sqlite_extents::VolumeWindow for TimingWindow {
     fn memory(&self) -> (std::ptr::NonNull<u8>, u64) {
         self.0.memory()
     }

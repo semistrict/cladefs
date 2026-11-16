@@ -97,8 +97,7 @@ fn in_bucket(
         for (extent, location) in &state.extents {
             let demand = extent_remote::fetch::Priority::Demand;
             let bytes = fetcher.read(*extent, location, 0, location.len, demand).await;
-            let extent = ExtentId { branch: extent.branch, sequence: extent.sequence };
-            read.push((extent, bytes.map_err(|err| err.to_string())?));
+            read.push((*extent, bytes.map_err(|err| err.to_string())?));
         }
         Ok(read)
     })

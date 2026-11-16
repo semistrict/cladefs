@@ -45,10 +45,6 @@ impl RemoteDevice {
     }
 }
 
-fn id(extent: ExtentId) -> crate::ExtentId {
-    crate::ExtentId { branch: extent.branch, sequence: extent.sequence }
-}
-
 #[async_trait]
 impl Device for RemoteDevice {
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
@@ -72,7 +68,7 @@ impl Device for RemoteDevice {
     ) -> Result<(), Error> {
         let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
         let mut slices = [VolatileSliceMut::from(bytes)];
-        let read = self.store.read_async(id(extent), offset, &mut slices).await;
+        let read = self.store.read_async(extent, offset, &mut slices).await;
         read.map_err(Error::new).with_context(|| format!("reading {extent:?} at {offset}"))
     }
 
@@ -95,7 +91,7 @@ impl Device for RemoteDevice {
         };
         let bytes = buffer.try_as_slice().expect("a buffer of the heap's");
         let slices = [VolatileSlice::from(bytes)];
-        let written = self.store.write_with_barriers_async(id(extent), offset, &slices, barriers);
+        let written = self.store.write_with_barriers_async(extent, offset, &slices, barriers);
         written.await.map_err(Error::new).with_context(|| format!("writing {extent:?} at {offset}"))
     }
 
@@ -112,14 +108,13 @@ impl Device for RemoteDevice {
     }
 
     async fn free(&self, extent: ExtentId) -> Result<(), Error> {
-        self.store.free_async(id(extent)).await.map_err(Error::new)
+        self.store.free_async(extent).await.map_err(Error::new)
     }
 
     /// In as few requests as the daemon takes (`FREE_MANY`): if one fails, each is said to have,
     /// those freed before it too, which freeing again does nothing to.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
-        let ids: Vec<_> = extents.iter().map(|extent| id(*extent)).collect();
-        match self.store.free_many_async(&ids).await {
+        match self.store.free_many_async(extents).await {
             Ok(()) => extents.iter().map(|_| Ok(())).collect(),
             Err(errno) => extents.iter().map(|_| Err(Error::new(errno))).collect(),
         }

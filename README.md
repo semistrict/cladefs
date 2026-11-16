@@ -193,15 +193,15 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
-  (fsck), and clones images: a clone is a fork of the image's branch in the
+  (fsck), and forks images: a fork's branch is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFS_EXTENTD_REMOTE`); the clone's directory is a store of its own, which
+  (`CLADEFS_EXTENTD_REMOTE`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
-  deletes clones and images alike: the branch in its bucket, whose collector
-  reclaims what no other branch inherited, and the directory; clones live on.
+  deletes forks and images alike: the branch in its bucket, whose collector
+  reclaims what no other branch inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
-  open (`collect.rs`), the only cleaner of what they free (TASK-165.8).
+  open (`collect.rs`), the only thing that deletes what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
     `FileBackedDevice`: an extent store in a directory, `crates/extent_store`'s.
     Extents' I/O bypasses the host's page cache (`O_DIRECT`, `F_NOCACHE`); on
@@ -212,7 +212,8 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `host_store.rs` makes, opens, forks and deletes both host stacks' extent
   stores in the host's directories, images (`Storage`) and guests' stores
   (`ExtentStore`), with one block size, one set of options and one way of
-  minting branches. Neither stack cleans its stores (TASK-165.8).
+  minting branches. Neither stack collects its stores: the collector alone
+  deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`crates/physmem`): its size, which
   extents' pages come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
@@ -221,10 +222,11 @@ of these stands in with the items the code copied from Fuchsia uses:
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
 store's directory holds one branch; forks, points and deletion are the
-bucket's (`crates/extent_remote`, TASK-165.7). Nothing cleans a store: once a
-segment is acknowledged in the bucket, it and the extents' files it names
-leave the directory, for the host's cache of the bucket's objects, and the
-bucket's collector takes back what no extent is in (TASK-165.8). Its tests run
+bucket's (`crates/extent_remote`, TASK-165.7). Nothing collects in a store:
+once a segment is acknowledged in the bucket, it and the extents' files it
+names leave the directory, for the host's cache of the bucket's objects, and
+the bucket's collector, the only thing that deletes, takes back what no extent
+is in (TASK-165.8). Its tests run
 it on a file system in memory that crashes at random points.
 
 **DAX on Linux.** KVM maps a guest's memory from the host memory backing its
@@ -314,7 +316,7 @@ tenant's ID gets it nothing. A snapshot restored on another host needs its point
 there, which the VM manager makes in the tenant's directory first (`CreateStore`
 of the point's branch), and may drop once done (`DropStore`, which leaves the
 branch in the bucket); the proto says how (TASK-154). A point is immutable: any
-number of hosts restore one at once, and none writes it (TASK-158). A base forked
+number of hosts fork one at once, and none writes it (TASK-158). A base forked
 on several hosts is made a point first (`ForkStore`'s `point`).
 The daemon must be able to kill each VM process (it is the daemon's user's, or
 the daemon has `CAP_KILL`), and refuses a connection whose process it could
@@ -406,9 +408,9 @@ non-current versions: on S3, `NoncurrentVersionExpiration` (with
 object versioning off, or a lifecycle rule deleting non-current versions
 (`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
 old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
-versioning off needs nothing. A host told either fences the stores of the
+versioning off needs nothing. A host told either halts the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
-a fenced store's own keys stay in memory until its VM process closes it.
+a halted store's own keys stay in memory until its VM process closes it.
 
 ### `vendor/firecracker`: the VMM
 

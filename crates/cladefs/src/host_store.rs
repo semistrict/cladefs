@@ -5,7 +5,7 @@
 //! Extent stores in the host's directories, as both of cladefs's host stacks keep them: the images
 //! [`Storage`](crate::Storage) mounts, and the stores [`ExtentStore`](crate::ExtentStore) serves a
 //! guest. Either makes, opens, forks and deletes its stores here, so that both do it alike. Neither
-//! cleans them: what their segments hold that no extent is in leaves with the segments, once
+//! collects them: what their segments hold that no extent is in leaves with the segments, once
 //! acknowledged in the bucket, whose collector takes it back (TASK-165.8).
 //!
 //! Every store keeps its branch in a bucket, which its description names (TASK-165.6): one made on

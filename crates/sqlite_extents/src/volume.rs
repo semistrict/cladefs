@@ -15,7 +15,7 @@
 
 use crate::locks::{Level, Locks};
 use anyhow::{Error, bail};
-use extent_files::{NotFound, Options, Window};
+use extent_files::{NotFound, Options, VolumeWindow};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use storage_device::{DeviceHolder, ExtentId};
@@ -52,7 +52,7 @@ impl Volume {
     /// region each, as many regions as `options` says.
     pub fn open_mapped(
         device: DeviceHolder,
-        window: Box<dyn Window>,
+        window: Box<dyn VolumeWindow>,
         options: Options,
     ) -> Result<Arc<Self>, Error> {
         Ok(Self::new(extent_files::Volume::open_mapped(device, window, options)?))

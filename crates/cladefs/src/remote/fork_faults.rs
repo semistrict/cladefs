@@ -654,7 +654,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let reopen = moved.clone();
     assert!(world.record(world.child).is_some_and(|record| !record.deleted), "no orphan");
     let state = block_on(extent_remote::recover(&*world.bucket, world.branch, None));
-    let key = state.unwrap().state.extents[&storage_device::ExtentId::from(large)].key.clone();
+    let key = state.unwrap().state.extents[&large].key.clone();
     assert!(matches!(layout::kind(&key), Kind::Extent { .. }), "{key}");
     for (extent, _) in &world.held {
         parent.free(*extent).unwrap();

@@ -649,18 +649,18 @@ fn receive(
 
 /// cladefs: what of what a VM process sends past what it was answered the daemon holds, besides its
 /// requests': what it queued for the VM process that is no reply, as stage operations and commits
-/// it is told of, which the protocol's bound on stream data leaves room for (TASK-79.16). And, its
+/// it is told of, which the protocol's bound on stream data allows for (TASK-79.16). And, its
 /// window's, a reply to `MAPPINGS` (TASK-79.43), as many mappings as the window may hold, which
-/// [`Peer::room`] leaves room for besides.
-pub(super) const QUEUED_ROOM: u64 = 16 << 20;
+/// [`Peer::credit`] allows for besides.
+pub(super) const QUEUED_CREDIT: u64 = 16 << 20;
 
 impl Connection {
     /// cladefs: whether its VM process, should it live on, reaches pages still: those its window has
     /// mapped, or those of an operation taking access away it left unacknowledged (TASK-79.100).
     fn reaches_pages(&self) -> bool {
-        // cladefs: a fenced store's window, which a panic may have left half changed, isn't looked
+        // cladefs: a halted store's window, which a panic may have left half changed, isn't looked
         // at: it may, as far as anyone knows (TASK-153.16).
-        if self.store().is_some_and(|store| store.is_fenced()) {
+        if self.store().is_some_and(|store| store.is_halted()) {
             return true;
         }
         let window = self.window.with(Mutex::lock);
@@ -748,11 +748,11 @@ impl Drop for Turn {
 
 /// A request's answer, which it is owed until sent ([`Answer::send`]): its reply, or its error.
 /// cladefs: its bytes of stream data counted in its connection's requests until its reply is queued,
-/// and not after, as its VM process's room counts it then ([`Peer::room`]), rather than both for
-/// a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16); and,
-/// its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
-/// waiting for good, those bytes counted for good; and fences its store, which the panic went
-/// through: past the store's locks, which fence it themselves (`crate::fence`, TASK-153.16).
+/// and not after, as its VM process's credit counts it then ([`Peer::credit`]), rather than both
+/// for a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16);
+/// and, its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
+/// waiting for good, those bytes counted for good; and halts its store, which the panic went
+/// through: past the store's locks, which halt it themselves (`crate::halt`, TASK-153.16).
 /// cladefs: and the request's span, which ends as it is answered (`super::otel`, TASK-258).
 struct Answer {
     connection: Arc<Connection>,
@@ -856,7 +856,7 @@ impl Drop for Answer {
             && let Some(store) = self.connection.store()
         {
             let kind = self.request.kind;
-            store.fence(|| format!("a panic serving request {kind}"));
+            store.halt(|| format!("a panic serving request {kind}"));
         }
         if !self.sent {
             let reply = self.reply_header();
@@ -992,7 +992,7 @@ pub(super) struct Connection {
     /// doc-8).
     store: OnceLock<Arc<ExtentStore>>,
     /// Where it is in its life: whether it has its store, and how (TASK-160.8). Its locks are
-    /// its requests', its teardown's and its window's, beyond what fences its store: a panic
+    /// its requests', its teardown's and its window's, beyond what halts its store: a panic
     /// holding one aborts the daemon (`extent_store::shared`, TASK-149.24).
     phase: SharedLock<Mutex<Phase>>,
     window: SharedLock<Mutex<Option<DaxWindow>>>,
@@ -1147,9 +1147,10 @@ impl Connection {
     /// cladefs: admits a message of `header`, before its payload is read, as the protocol's bounds
     /// allow what its VM process keeps in flight (TASK-79.16): its requests not answered
     /// ([`MAX_REQUESTS`]), and their stream data ([`MAX_STREAM_BYTES`]), with what the connection
-    /// has queued for the VM process, in its room ([`Peer::room`]). Counted in, a request's, until
-    /// its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM process broke the
-    /// protocol, and is let go, rather than held without end in the daemon's memory. cladefs: and its
+    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a
+    /// request's, until its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM
+    /// process broke the protocol, and is let go, rather than held without end in the daemon's
+    /// memory. cladefs: and its
     /// stream data in the room its tenant's connections share, waiting, before its payload is read,
     /// until what they hold leaves room for it (TASK-149.35, [`super::memory::InFlight`]).
     async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<()> {
@@ -1162,7 +1163,7 @@ impl Connection {
             let requests = self.requests.with(Mutex::lock);
             let in_flight = requests.in_flight();
             let held = requests.stream_bytes + bytes + self.peer.sender.queued();
-            if in_flight >= MAX_REQUESTS || held > self.peer.room() {
+            if in_flight >= MAX_REQUESTS || held > self.peer.credit() {
                 let what = format!("{} requests, and {held} bytes, in flight", in_flight + 1);
                 return Err(std::io::Error::new(std::io::ErrorKind::QuotaExceeded, what));
             }
@@ -1213,9 +1214,9 @@ impl Connection {
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
         };
         // cladefs: a store a panic went through serves nothing more, of whatever the panic left half
-        // done (`crate::fence`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
+        // done (`crate::halt`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
         // daemon forgot, `EACCES` (TASK-411.7).
-        if let Some(errno) = self.store().and_then(|store| store.fenced()) {
+        if let Some(errno) = self.store().and_then(|store| store.halted()) {
             return refuse(answer, errno);
         }
         let request = Request::decode(&message).and_then(|request| {
@@ -1444,7 +1445,7 @@ impl Connection {
                         _ => Errno::EINVAL,
                     }
                 })?;
-                // cladefs: its mappings' reply, as many as it may have, its VM process's room
+                // cladefs: its mappings' reply, as many as it may have, its VM process's credit
                 // holds (TASK-79.43).
                 self.peer.set_window(window.size());
                 // cladefs: its gauges, and its runs' budget, as its VM process says (TASK-111.5).
@@ -1795,7 +1796,7 @@ impl Drop for TransferArea {
 /// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
 /// do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the guest frees
 /// leaves the host's disk with the segments acknowledged in the bucket, whose collector takes it
-/// back, not cleaned behind the guest's commits as it was (TASK-79.2, TASK-165.8).
+/// back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
 async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
     while tokio::time::timeout(FLUSH_EVERY, &mut stopped).await.is_err() {
         if !store.flush_pending() {
@@ -1813,7 +1814,7 @@ async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot
             }
             // Its panic logged, which went through the store (TASK-153.16).
             None => {
-                store.fence(|| "a panic making its commits durable".into());
+                store.halt(|| "a panic making its commits durable".into());
                 break;
             }
         }
@@ -2124,7 +2125,7 @@ struct Peer {
     /// Whether the daemon let it go ([`Peer::let_go`]).
     let_go: AtomicBool,
     /// The bytes a reply to `MAPPINGS` of its window takes at most, once it has one (TASK-79.43):
-    /// a mapping a page of it ([`Peer::room`]).
+    /// a mapping a page of it ([`Peer::credit`]).
     mappings: std::sync::atomic::AtomicU64,
 }
 
@@ -2163,16 +2164,16 @@ impl Peer {
 
     /// What of what it sends past what it was answered the daemon holds at most (TASK-79.16): its
     /// requests' stream data, as the protocol bounds it ([`MAX_STREAM_BYTES`]), and what the
-    /// daemon queued for it besides ([`QUEUED_ROOM`]), its window's mappings among them, as many
-    /// as the window may have ([`Peer::set_window`]).
-    fn room(&self) -> u64 {
-        MAX_STREAM_BYTES + QUEUED_ROOM + self.mappings.load(Ordering::Relaxed)
+    /// daemon queued for it besides ([`QUEUED_CREDIT`]), its window's mappings among them, as many
+    /// as the window may have ([`Peer::set_window`]): its credit.
+    fn credit(&self) -> u64 {
+        MAX_STREAM_BYTES + QUEUED_CREDIT + self.mappings.load(Ordering::Relaxed)
     }
 
     /// Its window is of `size` bytes, whose mappings, a page each at most, a reply to `MAPPINGS`
     /// holds (TASK-79.43).
     fn set_window(&self, size: u64) {
-        assert!(size <= MAX_WINDOW, "a window past the most the daemon makes room for");
+        assert!(size <= MAX_WINDOW, "a window past the most the daemon gives credit for");
         let mappings = size / crate::pages::page_size() * MAPPING_BYTES;
         self.mappings.store(mappings, Ordering::Relaxed);
     }
