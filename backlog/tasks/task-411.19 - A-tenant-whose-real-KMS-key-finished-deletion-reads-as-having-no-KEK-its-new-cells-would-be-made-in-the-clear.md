@@ -3,11 +3,11 @@ id: TASK-411.19
 title: >-
   A tenant whose real-KMS key finished deletion reads as having no KEK: its new
   cells would be made in the clear
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:58'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -30,9 +30,9 @@ Found in TASK-411.17 (AWS KMS backend). A real KMS forgets a deleted key: AWS KM
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -67,10 +67,12 @@ Implemented (2026-11-15):
 Simulation sample: sim::one, SIM_SEEDS=10 from SIM_SEED=4119000, for all 23 profiles (collectors, fresh_cells, everything, forks, bases, stale, collected, takeovers, recreated, crashes, taken, children, recovering, failed, restores, forgotten, whole_restores, taking_ids, usurped, deleted_forking, wals, forked_wals, late_checkpoints): all passed. DoD #1 (macOS and Linux ubu1) not checked: Linux not run (Mac only for this task). DoD #3: no upstream code changed beyond fxdax-marked additions; left for review.
 
 TASK-411.28 (2026-11-15) removed the sealed marker (layout::sealed, layout::Kind::Sealed, bucket::put_if_absent and exists, keys::Kms's markers, the bucket KMS's marker read). It told a KEK the KMS forgot from a tenant that never had one, because the second meant the clear; with no plaintext both refuse the tenant alike, for every real backend (NoSuchTenant refused as destroyed). The bucket KMS shreds by tombstone; a KEK object deleted outright, no tombstone, gets a new KEK at the next wrap, what the old one wrapped lost as shredding loses it (bucket_kms test kek_objects_deleted_outright_lose_what_they_wrapped), never a cell in the clear. AC #1 holds without the marker: extent_store upload::encrypted::tenants_whose_kek_the_kms_forgot_get_no_cell and fxdax remote::tests::tenants_with_no_kek_in_the_kms_open_no_store. doc-16 marks the section removed.
+
+On main as dda9ba718 (TASK-411 squashed): macOS and ubu1 suites and encrypted e2e pass; upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-A tenant's sealed marker, tenants/<tenant>/sealed, tells a KEK the KMS forgot (AWS KMS after deletion, a deleted OpenBao key: both NoSuchTenant) from a tenant that never had one. keys::new_cell_kek, which every cell maker calls (store opening, fork into a new cell, FUSE control attach), creates the marker create-only before handing out a KEK, so before any sealed cell object exists; when the KMS says no such key, a present marker refuses the tenant as destroyed (Error::Kms naming tenant and marker, EACCES in fxdax), drops its pool and takings, and refuses forks. Cached per host: present for good, absent for KEKLESS_FOR, so a plaintext tenant costs at most one wrap and one HEAD per host per minute. A refill hearing NoSuchTenant drops the pool. The collector keeps the marker (Kind::Sealed). Verified on macOS: new tests in extent_remote keys (request lists counted), extent_store encrypted (opening, fork, clear twin, sweep keeps marker), fxdax remote (EACCES); a hand mutant without the marker check failed them; 1033 tests of the touched crates passed; 10 seeds of each of the 23 sim profiles passed; clippy clean; upstream-changes check passes. Docs: doc-16 section "A forgotten KEK told from none", AWS/OpenBao workaround text replaced, doc-7 layout row. Filed TASK-411.24 (hosts with no KMS read no marker).
+A tenant whose KEK the KMS forgot is never given a cell in the clear: first by the tenant's marker in the bucket, then, with TASK-411.28, by there being no clear cells at all: every NoSuchTenant refuses the tenant as destroyed, and the marker went. doc-16 keeps the history. On main as dda9ba718 (TASK-411 squashed): macOS and ubu1 suites and encrypted e2e pass; upstream-changes.py --check passes.
 <!-- SECTION:FINAL_SUMMARY:END -->

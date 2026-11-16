@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 14:28'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 documentation:
@@ -35,7 +35,7 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -69,6 +69,8 @@ CI proposal (not added): in ci.yml's object-stores job, a step 'The OpenBao KMS 
 Validation (macOS, bao 2.7.2 present): cargo nextest run -p extent_keys 49/49; final -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))' 966/966 passed (81 skipped); scripts/test-openbao.sh with the release binary 18/18 (before derived_keys_wrap_and_unwrap was added; that test passes in the 49); skip without bao and failure under FXDAX_REQUIRE_OPENBAO checked; clippy --all-targets on extent_keys and extent_store: no warnings in touched files; fmt clean; upstream-changes.py --check and license-headers.py pass; firecracker-cargo.sh --check passes; guest/tests cargo metadata --locked passes. Commit 5ef520491.
 AC #2 left unchecked: every refusal maps as the AC says except a key deleted, which OpenBao forgets: an unwrap says Destroyed (the header says the key existed), but a wrap can only say NoSuchTenant, as for a key never made; OpenBao has no 'scheduled for deletion' (soft-delete is restorable, mapped Revoked). Doc-16 says how to keep a shredded tenant refused. Needs the parent's/user's call whether that is acceptable.
 AC #4 left unchecked: Linux not run (ubu1 out of this task's scope); CI step proposed, not added. DoD #1 (Linux) likewise.
+
+On main as dda9ba718 (TASK-411 squashed): macOS and ubu1 suites and encrypted e2e pass; upstream-changes.py --check passes. The unchecked acceptance criteria stay open: not verified in this session.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

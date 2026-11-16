@@ -4,11 +4,11 @@ title: >-
   The bucket KMS: tenants' KEKs kept in the bucket, wrapped by a master key from
   CLADEFS_MASTER_KEY or CLADEFS_MASTER_KEY_FILE, made on a tenant's first use;
   the default KMS
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 11:09'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 documentation:
@@ -38,7 +38,7 @@ The user's decisions (2026-11-15): when no CLADEFS_KMS is configured, the defaul
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -69,10 +69,12 @@ Decisions (2026-11-15):
 - Linux-only code (control.rs, fxdaxctl through(), tests/control.rs) checked and clippy-clean with cargo clippy --target x86_64-unknown-linux-gnu (zig cc as the C cross compiler); the new tests/control.rs test is NOT run (needs Linux FUSE/extentd: ubu1).
 
 Validation (macOS, 2026-11-15): cargo nextest run -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 1061 passed (extent_keys 80, extent_frame 33, extent_remote 327, extent_store 238, sqlite_extents 23, fxdax 360), 0 failed, 1 leaky (kms::names, pre-existing). sim::one, --cargo-profile sim, 10 seeds (0-9) of each of the 23 profiles: all pass. Hand mutants (no marker read; racing create keeping its own KEK; no tombstone) each fail 2-3 bucket_kms tests. clippy --all-targets clean on touched code (macOS, and --target x86_64-unknown-linux-gnu for fxdax). go/generate.sh --check passes; go build/vet pass. scripts/upstream-changes.py --check passes. Not run: Linux (ubu1) suite, incl. tests/control.rs tenants_sealed_under_the_bucket_kms_and_shredded_through_the_control_api (DoD #1 left unchecked).
+
+main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added the bucket KMS. Tenants' KEKs live at tenants/<t>/kek, wrapped (AES-KW, bound to tenant, KEK ID and master key ID) by master keys from FXDAX_MASTER_KEY or FXDAX_MASTER_KEY_FILE (newest first; IDs are short hashes). A KEK is made create-only on a tenant's first wrap, and racing hosts take the one that landed. Shredding replaces the object with a tombstone, so the tenant reads as destroyed and never gets a new KEK; a KEK object deleted outright reads destroyed when the sealed marker exists. A wrong master key is refused naming its ID (kms::Error::UnknownMasterKey). Cached KEKs are re-read after 60 s and dropped by the new Kms::forget. extent_remote::bucket_kms::from_env is the single KMS choice (FXDAX_KMS, else bucket KMS given a master key, else none, which TASK-411.28 will refuse), wired into fxdax::remote::kms and fxdax-gc. Added fxdax-gc --rotate-master-key, and control API ShredTenant / fxdaxctl shred-tenant (Go regenerated). Docs: doc-16 The bucket KMS, doc-7 Layout, README. Verified by the macOS suite (1061 pass), 230 sim seeds, mutants and a Linux cross clippy; the Linux run is still owed.
+The bucket KMS, the default: tenants' KEKs at tenants/<t>/kek under a master key (CLADEFS_MASTER_KEY or _FILE, several for rotation), made on first use, a tombstone for a shredded tenant; cladefs-gc --rotate-master-key; ShredTenant. Verified: main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:FINAL_SUMMARY:END -->

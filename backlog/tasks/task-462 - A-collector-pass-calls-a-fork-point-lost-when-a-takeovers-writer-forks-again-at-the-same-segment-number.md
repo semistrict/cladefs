@@ -3,11 +3,11 @@ id: TASK-462
 title: >-
   A collector pass calls a fork point lost when a takeover's writer forks again
   at the same segment number
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 14:53'
-updated_date: '2026-11-15 23:29'
+updated_date: '2026-11-16 18:28'
 labels:
   - bug
   - collector
@@ -31,9 +31,9 @@ Found by TASK-411.28's run of extent_store's simulation (Mac): sim::restores_tak
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -48,4 +48,12 @@ Found by TASK-411.28's run of extent_store's simulation (Mac): sim::restores_tak
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-15 (on t3/explore-tenant-encryption-keys, after TASK-411.28 merged): fixed in collector::keep_points by recovering a lost referenced fork point again once a living child is found. Test passes_finding_a_fork_point_lost_then_a_child_forked_there_recover_it_again fails without it (Err(Lost("..., which 1/2/2 lives on"))). macOS: SIM_SEED=180 SIM_PROFILE=taking_ids sim::one passes; scripts/test.sh sim part 50/50; extent_remote 327/327. ubu1's sim part on 9fc2eaa46 (before the fix) failed only restores_taking_forks_ids at seed 180. Linux workspace and sim on the fix pending.
+
+main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A collector pass that finds a referenced fork point's state lost and then a child living on it recovers the state again, keeping the point (the fork checkpoints before it refers), failing only if it is still lost. Direct test passes_finding_a_fork_point_lost_then_a_child_forked_there_recover_it_again fails without it; sim seed 180 passes. It also removes the violation main's seed 2655 of restores showed (TASK-497). Verified: main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
+<!-- SECTION:FINAL_SUMMARY:END -->

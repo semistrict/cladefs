@@ -3,11 +3,11 @@ id: TASK-411.15
 title: >-
   Guest e2e tests run encrypted: scripts/test-e2e.sh's extentd has a KMS and its
   tenants KEKs, every case sealed
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 documentation:
@@ -36,7 +36,7 @@ TASK-411's AC #3: the VMM and guest end-to-end paths (scripts/test-e2e.sh, guest
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -62,10 +62,12 @@ Full run, ubu1 2026-11-15, 04d5b312, scripts/test-e2e.sh --tag e2e built (not pr
 S3 (scripts/test-e2e-rustfs.sh, RustFS): fxfs-guest and fxfs-guest-checks-dax pass sealed, the check listing and reading s3://fxdax/e2e.
 scripts/sandboxes.sh short (what qualify.sh runs, long): runs sealed, the run-end check over the S3 bucket finds 0 in the clear, but the case fails its own budgets: writes 1.90 and 1.87 times the guests' bytes against 1.5, and once framings over 1000 ms (1093.9 ms). Same artifacts with a KMS holding no KEK (clear): 1.16 times, passes. Cause: sealed stores never frame in place (segments_framed_in_place 0 against 55-58; written_framed 3.7-3.8 GB a host against 0.32-0.36 GB). Filed TASK-411.23 (parent TASK-411). The sandboxes case drops its stores before it ends: its own per-case check found 0 stores; the run-end check over the whole bucket caught the clear run (512 findings), so that path is covered there.
 Mac: cargo clippy -p extent_store --all-targets (no new warnings), extent_store sealed_stores_raw_files_and_logs_hold_no_plaintext passes, python3 -m unittest discover -s scripts/tests 317 OK, scripts/test.sh scripts part OK, scripts/upstream-changes.py --check OK. Not run: cargo nextest --workspace (DoD #1).
+
+main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Guest e2e runs sealed only. test-e2e.sh makes a run-local LocalKms (KEKs for tenants 0-15, tenant 0 included: it is the default tenant's and the in-process stores', doc-16 allows it) and exports FXDAX_KMS and FXDAX_E2E_SEALED to every process of the run; builds predating encryption run clear, unchecked, said in encryption.txt. A keyless check (test_cases::sealed over the new extent_store::on_disk) fails a passed case whose stores aren't sealed (cells without KEKs, written branches' records without DEKs, clear frames or logs, or the canary the cases now write found in any file or object), and runner sealed checks the run's bucket and part cache at its end. Verified on ubu1: --tag e2e 16/16 pass sealed with 0 findings, guest checks within budget (times in notes); a negative control with no KEKs fails with 21 findings; S3 via RustFS passes. qualify/sandboxes/bench/nightly run encrypted through test-e2e.sh, but sandboxes fails its writes budget sealed (1.87-1.90x vs 1.5; clear 1.16x): TASK-411.23. DoD #1 (workspace nextest) not run.
+Guest e2e runs encrypted only: test-e2e.sh makes a local KMS with KEKs for tenants 0-15 and exports CLADEFS_KMS to every process of the run; the runner checks each passed case's stores, and the run's bucket and part cache at its end, holding no key (test_cases::encrypted): wrapped KEKs, DEKs, every framed object encrypted or authenticated, no known plaintext anywhere. Verified: main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:FINAL_SUMMARY:END -->

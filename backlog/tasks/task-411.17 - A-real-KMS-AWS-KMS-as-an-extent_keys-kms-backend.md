@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 14:28'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 documentation:
@@ -35,7 +35,7 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -66,6 +66,8 @@ Filed: TASK-411.19 (a tenant whose key finished deletion reads NoSuchTenant: new
 
 Validation (8f59f2536, macOS): scripts/test-local-kms.sh 9/9 (8 extent_keys kms::aws local_kms_*, 1 extent_store upload::encrypted::local_kms_sealed_stores_open_through_aws_kms), also from a fresh install of local-kms; 6 non-emulator kms::aws unit tests pass; cargo nextest run -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))' 953/953 passed, 90 skipped; clippy --all-targets on extent_keys (testing) and extent_store: no new warnings; cargo fmt --check clean; shellcheck clean.
 Left unchecked: AC #1, as only the environment leg of the credential chain was exercised (profile, web identity, ECS, instance role are aws-config's, untested here, no AWS account); AC #4, as CI's object-stores step is added but has not run (not pushed); DoD #1, Linux (ubu1) not run per the brief.
+
+On main as dda9ba718 (TASK-411 squashed): macOS and ubu1 suites and encrypted e2e pass; upstream-changes.py --check passes. The unchecked acceptance criteria stay open: not verified in this session.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

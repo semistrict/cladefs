@@ -3,11 +3,11 @@ id: TASK-411.28
 title: >-
   No plaintext: every cell sealed, always; the bucket KMS the default; a host
   with no KMS and no master key refuses to start
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 11:09'
-updated_date: '2026-11-15 22:17'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies:
   - TASK-411.27
@@ -30,18 +30,18 @@ The user's decision (2026-11-15): remove plaintext entirely. Every cell is seale
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No code path writes or reads an object, raw file, log or record in the clear: Seal::Clear and the clear branches are gone from extent_frame, extent_store, extent_remote, sqlite_extents and cladefs; a frame in the clear is refused as corrupt
-- [ ] #2 Every process that opens stores refuses to start, naming CLADEFS_KMS and CLADEFS_MASTER_KEY, when neither a KMS nor a master key is configured; with only a master key it uses the bucket KMS
-- [ ] #3 A KMS answering 'no such key' refuses the cell as destroyed, for every backend; the kekless cache and the clear-cell choice are gone; TASK-411.22 and TASK-411.24 closed as moot
-- [ ] #4 Every test runs sealed (a test master key or LocalKms by default in test helpers); the clear twins are removed, the sealed variants kept; e2e unchanged (already sealed)
-- [ ] #5 doc-16, doc-7, doc-14, README and the operator docs describe one sealed mode; the macOS and Linux suites and the encrypted e2e suite pass
+- [x] #1 No code path writes or reads an object, raw file, log or record in the clear: Seal::Clear and the clear branches are gone from extent_frame, extent_store, extent_remote, sqlite_extents and cladefs; a frame in the clear is refused as corrupt
+- [x] #2 Every process that opens stores refuses to start, naming CLADEFS_KMS and CLADEFS_MASTER_KEY, when neither a KMS nor a master key is configured; with only a master key it uses the bucket KMS
+- [x] #3 A KMS answering 'no such key' refuses the cell as destroyed, for every backend; the kekless cache and the clear-cell choice are gone; TASK-411.22 and TASK-411.24 closed as moot
+- [x] #4 Every test runs sealed (a test master key or LocalKms by default in test helpers); the clear twins are removed, the sealed variants kept; e2e unchanged (already sealed)
+- [x] #5 doc-16, doc-7, doc-14, README and the operator docs describe one sealed mode; the macOS and Linux suites and the encrypted e2e suite pass
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -80,4 +80,12 @@ Progress 2026-11-15 (Mac):
 - After merging main's TASK-433.5 page cache: Shuttle crash rounds ceased to be functions of their seed (a crash's hole in an open segment's uncommitted tail decrypts to noise of the raw file's random salt); under shuttle the salt is Shuttle's seeded generator's (82ba34832).
 - Seen once each under load on ubu1, unexplained yet: disk.rs tenants_past_their_disk_limits_are_refused_while_others_write refused at 14 MiB of 16 (1 of 17 runs); extentd::tests::stores_fork_live_once_nothing_is_open passed then aborted (SIGABRT) at exit.
 - macOS: test.sh (clippy, workspace 2575-2584, Shuttle 37/37, scripts 353, go) green on a6e1d62e3 and on the merge 94b98e83f but for the Shuttle round fixed since; real Cloud KMS 12/12; OpenBao 19/19; local-kms 9/9.
+
+main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+No plaintext: Encryption::None and every clear path gone (extent_frame, extent_store, extent_bucket, cladefs); a trailer saying unencrypted is corrupt to every reader; every process that opens stores refuses to start with neither CLADEFS_KMS nor a master key (require_kms after SIGTERM's blocking); a KMS's NoSuchTenant refuses the tenant as destroyed; every test encrypted under the tests' KMS (tests-kms, keys::testing); doc-16, doc-7, doc-14, docs/operating-a-host.md and README describe one mode. Merged with main's renames (encryption says encrypted), TASK-449 (its clear-cell fork path removed, restores pinned encrypted, TASK-485) and TASK-476 (Parents::Unasked for points). Verified: main dda9ba718 (squash of TASK-411 onto 3934f820b): macOS clippy, workspace 2639/2639, sim 57/57, Shuttle 37/37, scripts 516 (mutants all killed), Go; ubu1 (fxjob) clippy, workspace 2951/2951, sim, Shuttle, Go, guest, Firecracker, encrypted e2e (every case, 0 in the clear); upstream-changes.py --check passes. Only scripts' test_nightly failed on ubu1, as on main (TASK-500).
+<!-- SECTION:FINAL_SUMMARY:END -->

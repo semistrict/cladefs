@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 14:28'
+updated_date: '2026-11-16 18:28'
 labels: []
 dependencies: []
 documentation:
@@ -35,7 +35,7 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -61,6 +61,8 @@ GCP resources (project echophase-connectome-test): enabled cloudkms.googleapis.c
 Filed: TASK-411.21 (rotated tenant KEK: old version destroyed shreds older cells; no rewrap), TASK-411.22 (misnamed key ring reads as NoSuchTenant: cells in the clear).
 
 Validation (macOS, 2026-11-15, FXDAX_KMS_GCP_TOKEN set): cargo nextest run -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 962 run, 961 passed, 1 killed: fxdax storage::image::tests::flipped_bytes_fail_reads hung >3200 s under load (no KMS on its path; alone 30/30 pass in 0.35 s), filed TASK-425. The 4 kms::gcp::service tests and fxdax sealed_stores_open_through_google_cloud_kms passed in it (rotation 127 s and disable 61 s under load: state changes take effect eventually), and in 2 earlier runs of their own (3-5 s). Without the token they pass, printing why they skip. clippy --all-targets on extent_keys and fxdax: nothing in touched files. Locks: Cargo.lock, vendor/firecracker.lock (scripts/firecracker-cargo.sh --lock; --check passes), guest/tests/Cargo.lock (cargo metadata --locked passes): extent_keys' dependency lists only, no new package. Not done: Linux/ubu1 (not allowed here), scripts/upstream-changes.py --check, the ADC credential path against the service (AC #1 left unchecked for that). Billing caveat: DESTROYED versions are not billed; whether DESTROY_SCHEDULED ones are (a day each here) was not confirmed from the pricing page.
+
+On main as dda9ba718 (TASK-411 squashed): macOS and ubu1 suites and encrypted e2e pass; upstream-changes.py --check passes. The unchecked acceptance criteria stay open: not verified in this session.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
