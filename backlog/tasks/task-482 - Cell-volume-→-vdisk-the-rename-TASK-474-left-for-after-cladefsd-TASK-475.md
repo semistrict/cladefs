@@ -1,11 +1,11 @@
 ---
 id: TASK-482
 title: 'Cell volume → vdisk: the rename TASK-474 left for after cladefsd (TASK-475)'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16 04:50'
-updated_date: '2026-11-16 11:49'
+updated_date: '2026-11-16 13:33'
 labels:
   - naming
 dependencies: []
@@ -50,3 +50,9 @@ Formats: extent_store description FORMAT 'cladefs extent store 12' (field 'vdisk
 
 Checks (Mac): cargo fmt; CLADEFS_TEST_PARTS='clippy go' exit 0; scripts 516 OK (after TASK-494); workspace 2535 passed, 80 skipped; upstream-changes.py --check exit 0. Linux: cargo clippy --workspace --tests -A clippy::all -D warnings in OrbStack fxdax-linux-rust, exit 0. Left for DoD #1: nextest on ubu1.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Landed on main 29dec3ee1 (CONTEXT.md, the grilled word choices; renames across code, protos, wire, specs, scripts, docs). macOS: clippy, 2547 workspace tests, 516 script tests, mutants, TLC bucket and follower models and mutations. Linux (ubu1 t474d): 2824 workspace tests passed; guest cases passed but the pgbench pair, which fails main alike (TASK-492). The final merges were checked on macOS and with Linux clippy; ubu1 run t474e was still running at landing.
+<!-- SECTION:FINAL_SUMMARY:END -->
