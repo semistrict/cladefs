@@ -23,9 +23,10 @@ use storage_device::ExtentId;
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
-/// with its tenant's cell, `TENANT/CELL/ID` in hexadecimal (TASK-364). A store of another format is
-/// refused ([`Format`]): nothing reads, converts or upgrades it.
-pub(crate) const FORMAT: &str = "cladefs extent store 11";
+/// with its tenant's cell, `TENANT/CELL/ID` in hexadecimal (TASK-364); 12's names the vdisk of its
+/// cell it is as `vdisk NAME`, not `volume NAME` (TASK-482). A store of another format is refused
+/// ([`Format`]): nothing reads, converts or upgrades it.
+pub(crate) const FORMAT: &str = "cladefs extent store 12";
 
 /// cladefs: the error of a store whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -58,15 +59,15 @@ pub(crate) struct StoreFile {
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
-    /// cladefs: the volume of its branch's cell it is, if it is kept in a bucket: its name there,
+    /// cladefs: the vdisk of its branch's cell it is, if it is kept in a bucket: its name there,
     /// and its kind (TASK-364).
-    pub volume: Option<Volume>,
+    pub vdisk: Option<Vdisk>,
 }
 
-/// cladefs: what a store kept in a bucket is of its branch's cell: a volume, of a name and a kind
+/// cladefs: what a store kept in a bucket is of its branch's cell: a vdisk, of a name and a kind
 /// (`extent_bucket::cell`, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Volume {
+pub struct Vdisk {
     pub name: String,
     pub kind: Kind,
 }
@@ -96,14 +97,14 @@ impl StoreFile {
         }
         let fields = fields(text, FORMAT)?;
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
-        let volume = match (fields.get("volume"), fields.get("kind")) {
+        let vdisk = match (fields.get("vdisk"), fields.get("kind")) {
             (None, None) => None,
             (Some(name), Some(kind)) => {
-                ensure!(extent_bucket::cell::valid_name(name), "bad volume {name:?}");
+                ensure!(extent_bucket::cell::valid_name(name), "bad vdisk {name:?}");
                 let kind = Kind::named(kind).ok_or_else(|| anyhow!("bad kind {kind:?}"))?;
-                Some(Volume { name: name.clone(), kind })
+                Some(Vdisk { name: name.clone(), kind })
             }
-            _ => bail!("a volume needs a name and a kind"),
+            _ => bail!("a vdisk needs a name and a kind"),
         };
         Ok(Self {
             block_size: number(&fields, "block_size")?.try_into().context("bad block_size")?,
@@ -113,12 +114,12 @@ impl StoreFile {
             bucket: fields.get("bucket").cloned(),
             capacity: number(&fields, "capacity")?,
             token,
-            volume,
+            vdisk,
         })
     }
 
     pub(crate) fn text(&self) -> String {
-        let Self { block_size, branch, bucket, capacity, token, volume } = self;
+        let Self { block_size, branch, bucket, capacity, token, vdisk } = self;
         let mut text = format!("{FORMAT}\nblock_size {block_size}\nbranch {branch}\n");
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
@@ -127,8 +128,8 @@ impl StoreFile {
         if let Some(token) = token {
             text += &format!("token {token}\n");
         }
-        if let Some(Volume { name, kind }) = volume {
-            text += &format!("volume {name}\nkind {}\n", kind.name());
+        if let Some(Vdisk { name, kind }) = vdisk {
+            text += &format!("vdisk {name}\nkind {}\n", kind.name());
         }
         text
     }
@@ -538,7 +539,7 @@ mod tests {
             bucket: None,
             capacity: 1,
             token: None,
-            volume: None,
+            vdisk: None,
         };
         assert_eq!(StoreFile::parse(&file.text()).unwrap(), file);
         // cladefs: a host's store names its bucket (TASK-165.6), and a placed one its placement's
@@ -548,7 +549,7 @@ mod tests {
         assert_eq!(StoreFile::parse(&kept.text()).unwrap(), kept);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
-        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 10"]
+        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 11"]
         {
             let refused = StoreFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
@@ -563,15 +564,15 @@ mod tests {
         let bare = format!("{FORMAT}\nblock_size 4096\nbranch 1\n{capacity}");
         let refused = StoreFile::parse(&bare).unwrap_err().to_string();
         assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in hexadecimal: 1");
-        // cladefs: a store kept in a bucket names the volume of its cell it is, by name and kind.
-        let volume = Some(Volume { name: "db".into(), kind: Kind::Sqlite });
-        let named = StoreFile { volume, ..kept.clone() };
-        assert!(named.text().ends_with("volume db\nkind sqlite\n"));
+        // cladefs: a store kept in a bucket names the vdisk of its cell it is, by name and kind.
+        let vdisk = Some(Vdisk { name: "db".into(), kind: Kind::Sqlite });
+        let named = StoreFile { vdisk, ..kept.clone() };
+        assert!(named.text().ends_with("vdisk db\nkind sqlite\n"));
         assert_eq!(StoreFile::parse(&named.text()).unwrap(), named);
         for (wrong, refused) in [
-            ("volume db\n", "a volume needs a name and a kind"),
-            ("volume db\nkind ext4\n", "bad kind \"ext4\""),
-            ("volume a/b\nkind fxfs\n", "bad volume \"a/b\""),
+            ("vdisk db\n", "a vdisk needs a name and a kind"),
+            ("vdisk db\nkind ext4\n", "bad kind \"ext4\""),
+            ("vdisk a/b\nkind fxfs\n", "bad vdisk \"a/b\""),
         ] {
             let text = format!("{}{wrong}", kept.text());
             assert_eq!(StoreFile::parse(&text).unwrap_err().to_string(), refused, "{wrong}");

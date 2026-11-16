@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-16 04:09'
+updated_date: '2026-11-16 11:25'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -157,7 +157,7 @@ Settled with the user on 2026-10-16:
 
 ## Layout
 
-*Rewritten 2026-11-11 (TASK-364, format 5):* every branch is a volume of a tenant's **cell**, and
+*Rewritten 2026-11-11 (TASK-364, format 5):* every branch is a vdisk of a tenant's **cell**, and
 its objects are under the cell's prefix, `tenants/<tenant>/cells/<cell>/`, the tenant and the cell
 each an ID in 16 hexadecimal digits, which callers keep the meaning of. The flat layout before it,
 `segments/<branch>/...` at the bucket's root, is refused by format (`layout::FORMAT` 5): nothing
@@ -167,7 +167,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 
 | Key | What | Written |
 |---|---|---|
-| `<C>cell` | the cell's object: who holds it, at what epoch, by which placement's fencing token, its volumes by name (each a branch of the cell's, and a kind: `fxfs` or `sqlite`), whether it was deleted (Cells) | created, then updated with a condition |
+| `<C>cell` | the cell's object: who holds it, at what epoch, by which placement's fencing token, its vdisks by name (each a branch of the cell's, and a kind: `fxfs` or `sqlite`), whether it was deleted (Cells) | created, then updated with a condition |
 | `<C>segments/<branch>/<epoch>.<segment>` | sealed extents and a footer; `segment` dense from 0, `epoch` its writer's (The head) | create-only, by the writer of `epoch` alone |
 | `<C>extents/<branch>/<epoch>.<segment>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `segment`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
 | `<C>checkpoints/<branch>/<epoch>.<segment>` | the branch's state as of segment `segment`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
@@ -202,38 +202,38 @@ neither, nor does any pass, which lists a cell's prefix.
 
 ### Cells
 
-A cell is a tenant's unit of placement: one host at a time holds it, and writes every volume of
-it, each a branch of its own with a log, a head and uploads of its own (one log per volume, the
+A cell is a tenant's unit of placement: one host at a time holds it, and writes every vdisk of
+it, each a branch of its own with a log, a head and uploads of its own (one log per vdisk, the
 user's choice of 2026-11-11, over one log per cell, which would have had the store multiplex
-volumes). Taking a cell is one compare-and-swap of its object (`extent_bucket::cell::take`): the
+vdisks). Taking a cell is one compare-and-swap of its object (`extent_bucket::cell::take`): the
 epoch after its last taking's, refused to a placement of a lower token than the one holding it
-(`Stale`), refused once deleted. A volume's writer takes its branch's head with the cell's epoch as
-its token (`extent_store::upload`): a later taking of the cell, elsewhere, takes the volumes' heads
+(`Stale`), refused once deleted. A vdisk's writer takes its branch's head with the cell's epoch as
+its token (`extent_store::upload`): a later taking of the cell, elsewhere, takes the vdisks' heads
 from it as any later writer does, and its writers learn of it at their next acknowledgement; it
 takes none back, its epoch lower. So a cell moves whole, fenced by the branches' own heads, which cells change
 nothing of (specs/bucket's model holds as it is). Every process of the host holding a cell takes it
 as one holder, its placement's token, so that a second taking by that holder goes on at its epoch
-rather than fencing the first: the extent daemon serving a cell's volumes to VMs and a FUSE mount
+rather than fencing the first: the extent daemon serving a cell's vdisks to VMs and a FUSE mount
 showing others share it.
 
 A writer's opening of a store takes its cell (not a point's, which no writer takes and any
 number of hosts open), making it if it has no object yet (a new branch, or a fork's child), and
-has it hold its volume, named as its description says (`volume NAME`, `kind KIND`) unless the cell
-names its branch already: a volume's name is its branch's from its first, whatever directory a
+has it hold its vdisk, named as its description says (`vdisk NAME`, `kind KIND`) unless the cell
+names its branch already: a vdisk's name is its branch's from its first, whatever directory a
 store of it is taken into. All in one compare-and-swap of the cell's object (`cell::hold`), a read
-alone when nothing changes. Only the holder changes a cell's volumes, conditional on the epoch and
+alone when nothing changes. Only the holder changes a cell's vdisks, conditional on the epoch and
 holder it took it at (`Fenced` otherwise). Deleting a branch takes its cell first, deletes the
-branch with the cell's epoch, and takes its volume out of the cell. *(TASK-455: but with its cell,
+branch with the cell's epoch, and takes its vdisk out of the cell. *(TASK-455: but with its cell,
 dead, removed whole: Dead cells removed whole.)* A cell's object stays, as
-branches' records do: its epoch fences its volumes' heads, so made anew at epoch 1 it would leave
+branches' records do: its epoch fences its vdisks' heads, so made anew at epoch 1 it would leave
 a branch whose head a higher epoch took unopenable.
 
-A store made alone, a VM's disk or an image, is the one volume of a new cell; a fork of one is the
-one volume of a new cell of its tenant's. Forking a cell of several volumes whole, at one cut, is
+A store made alone, a VM's disk or an image, is the one vdisk of a new cell; a fork of one is the
+one vdisk of a new cell of its tenant's. Forking a cell of several vdisks whole, at one cut, is
 the next step (TASK-364.1).
 
 The extent daemon's tenants are the bucket's: a tenant's grant (the control API's `Grant`) names
-its ID, and the stores in its directory are volumes of its own cells. Its VM processes make stores
+its ID, and the stores in its directory are vdisks of its own cells. Its VM processes make stores
 of new cells of its own, and its VM manager the same (`CreateStore` and `ImportImage` of a new cell
 there of another tenant are refused, `EPERM`; `ForkStore` into its directory makes a cell of its
 own, whatever the parent's); they open no store of another tenant's cell (`EACCES`), refused by its
@@ -246,7 +246,7 @@ make stores of the default tenant.
 
 Every new branch's ID is an object ID of its bucket's (`extent_bucket::objectid`, TASK-364), which
 no other branch of the bucket has, nor will: a store made, a fork, a point, a point's fork, a
-volume a FUSE mount makes. Nothing names a new branch's ID itself: a VM process's `FORK` and the
+vdisk a FUSE mount makes. Nothing names a new branch's ID itself: a VM process's `FORK` and the
 control API's `ForkStore` name none, and are told the one given; `CreateStore` of a branch the
 bucket has not is refused (`ENOENT`). Before cells, a branch's record, keyed by its ID alone, was
 what refused a second branch of one ID; under cells, records are keyed by their cells too, and two
@@ -1063,7 +1063,7 @@ exact, but a protocol across cells every pass.
   fails `Lost`. A failed fork's claim whose fork point is gone is deleted from the first.
 - **The model's recoveries are atomic; the code's are not.** A point's fork being made whose recovery fails
   is given up on if its point's record, read again, says deleted, rather than failing the pass.
-- **Several volumes in a cell:** retirement waits for the whole cell, so a deleted volume of a
+- **Several vdisks in a cell:** retirement waits for the whole cell, so a deleted vdisk of a
   cell forked whole (TASK-364.1) keeps its parent's fork point until the cell goes.
 - **A writable fork's writer reads its child's record before its reference** (TASK-395.3): a child
   deleted, or another's, gets no reference, as nothing inherits through it and nothing would retire

@@ -426,8 +426,8 @@ impl Host {
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
         let kind = extent_bucket::cell::Kind::Fxfs;
-        let volume = extent_store::Volume { name: format!("v{id}"), kind };
-        Store::make(&dir, description, Some("memory:///bench"), Some(volume)).unwrap();
+        let vdisk = extent_store::Vdisk { name: format!("v{id}"), kind };
+        Store::make(&dir, description, Some("memory:///bench"), Some(vdisk)).unwrap();
         let recovering = Store::recover_unmade(dir).unwrap();
         let interval = Duration::from_secs(3600);
         let uploading =

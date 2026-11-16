@@ -27,7 +27,7 @@ use extent_bucket::layout::{Branch, Cell, Child};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::{branch, cell};
 use extent_store::upload::{self, Failure, Uploader};
-use extent_store::{Description, HostDir, Options, Recovering, Store, Volume};
+use extent_store::{Description, HostDir, Options, Recovering, Store, Vdisk};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -47,7 +47,7 @@ pub fn new_cell(tenant: u64) -> Cell {
     Cell { tenant, id: rand::random::<u64>().max(1) }
 }
 
-/// The cell of a fork of `parent`, a new one of its tenant's, whose one volume the fork is.
+/// The cell of a fork of `parent`, a new one of its tenant's, whose one vdisk the fork is.
 pub(crate) fn fork_cell(parent: Branch) -> Cell {
     new_cell(parent.cell.tenant)
 }
@@ -92,7 +92,7 @@ pub(crate) fn new_alone() -> Branch {
 }
 
 /// A child of a fork of `parent`, of a random ID no allocator gave, for tests that name it
-/// (`ExtentStore::fork_to`): the one volume of a new cell of its tenant's. Random, not next to its
+/// (`ExtentStore::fork_to`): the one vdisk of a new cell of its tenant's. Random, not next to its
 /// parent's: an allocator gives the IDs of its block in order, the next to another store.
 #[cfg(test)]
 pub(crate) fn fork_child(parent: Branch) -> Branch {
@@ -113,13 +113,13 @@ pub enum BranchOf {
     Named(Branch),
 }
 
-/// The volume of its cell the store at `path` is, of `kind`: named as its directory is, which must
-/// be a name a volume may have (`extent_bucket::cell::valid_name`), else `EINVAL`.
-pub(crate) fn volume_at(path: &Path, kind: cell::Kind) -> Result<Volume, Failure> {
+/// The vdisk of its cell the store at `path` is, of `kind`: named as its directory is, which must
+/// be a name a vdisk may have (`extent_bucket::cell::valid_name`), else `EINVAL`.
+pub(crate) fn vdisk_at(path: &Path, kind: cell::Kind) -> Result<Vdisk, Failure> {
     let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     match cell::valid_name(name) {
-        true => Ok(Volume { name: name.to_owned(), kind }),
-        false => Err(extent_bucket::Error::VolumeName(name.to_owned()).into()),
+        true => Ok(Vdisk { name: name.to_owned(), kind }),
+        false => Err(extent_bucket::Error::VdiskName(name.to_owned()).into()),
     }
 }
 
@@ -267,7 +267,7 @@ pub(crate) fn options() -> Options {
 
 /// Makes a new store at `path`, which must not exist, holding at most `capacity` bytes, of the
 /// branch `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), a
-/// volume of `kind` of its branch's cell named as its directory is ([`volume_at`]), and opens it,
+/// vdisk of `kind` of its branch's cell named as its directory is ([`vdisk_at`]), and opens it,
 /// its uploader as `keeping` says ([`open`]): whole, as made. Its directory entry is as durable as
 /// it is. A store that is not made whole is removed; what is at `path` already is left as it is.
 pub(crate) fn create(
@@ -294,7 +294,7 @@ pub(crate) fn create_unmade(
     bucket: Option<&str>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    let volume = volume_at(path, kind)?;
+    let vdisk = vdisk_at(path, kind)?;
     std::fs::create_dir(path)
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = || -> Result<Opened, Failure> {
@@ -310,7 +310,7 @@ pub(crate) fn create_unmade(
             BranchOf::Named(branch) => branch,
         };
         let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-        extent_store::create_host(path, description, &url, volume)?;
+        extent_store::create_host(path, description, &url, vdisk)?;
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
         let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
             .and_then(|parent| parent.sync_all());
@@ -504,7 +504,7 @@ fn taken(branch: Branch) -> anyhow::Error {
 
 /// Makes the store of `branch`, a fork of `parent`'s branch the bucket has the record of, in the
 /// directory at `path`, made empty: `prepare` writes into it first; then the store's directory, of
-/// the parent's capacity, naming the parent's bucket, the volume of its cell the parent is of its
+/// the parent's capacity, naming the parent's bucket, the vdisk of its cell the parent is of its
 /// own, whole (TASK-364). It holds nothing of its own: opening it recovers the child from the
 /// bucket, as any store's opening does (TASK-165.9), and holds its cell, making it.
 fn make_child(
@@ -517,11 +517,11 @@ fn make_child(
     let capacity = parent.description().capacity;
     let named = || anyhow::anyhow!("{} names no bucket", parent.dir().path().display());
     let url = parent.bucket().map(str::to_owned).ok_or_else(named)?;
-    let volume = parent.volume().cloned().ok_or_else(|| {
-        anyhow::anyhow!("{} is no volume of a cell", parent.dir().path().display())
+    let vdisk = parent.vdisk().cloned().ok_or_else(|| {
+        anyhow::anyhow!("{} is no vdisk of a cell", parent.dir().path().display())
     })?;
     let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-    extent_store::create_host(path, description, &url, volume)?;
+    extent_store::create_host(path, description, &url, vdisk)?;
     extent_store::made_host(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
     std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;

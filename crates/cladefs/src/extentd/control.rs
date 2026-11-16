@@ -326,10 +326,10 @@ impl Extentd for Control {
         let CreateStoreRequest { path: store, capacity, branch, token, tenant, cell, kind } =
             request.into_inner();
         let store = path(store)?;
-        let kind = match VolumeKind::try_from(kind) {
-            Ok(VolumeKind::Fxfs) => Kind::Fxfs,
-            Ok(VolumeKind::Sqlite) => Kind::Sqlite,
-            Ok(VolumeKind::Memory) => Kind::Memory,
+        let kind = match VdiskKind::try_from(kind) {
+            Ok(VdiskKind::Fxfs) => Kind::Fxfs,
+            Ok(VdiskKind::Sqlite) => Kind::Sqlite,
+            Ok(VdiskKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {
@@ -741,7 +741,7 @@ impl Client {
         Ok(Self { runtime, client })
     }
 
-    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs volume of its cell:
+    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs vdisk of its cell:
     /// of a new cell if its cell's ID is 0, and a new branch there if its ID is; placed at `token`
     /// if given; and returns its branch (`CreateStore`, TASK-364).
     pub fn create_store(
@@ -758,7 +758,7 @@ impl Client {
             token,
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
-            kind: VolumeKind::Fxfs.into(),
+            kind: VdiskKind::Fxfs.into(),
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
@@ -768,7 +768,7 @@ impl Client {
     }
 
     /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
-    /// `reference` names in it if given, the one volume of a new cell of the default tenant's, and
+    /// `reference` names in it if given, the one vdisk of a new cell of the default tenant's, and
     /// returns its branch (`ImportImage`).
     pub fn import_image(
         &self,

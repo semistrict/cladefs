@@ -1082,14 +1082,14 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         // cladefs: its cell, held by this placement, whose epoch is the token the branch's head is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
         // branch whose cell has no object yet, new or a fork's child, makes it; one deleted takes
-        // no writer (`Deleted`). The store, a volume of its cell, is one of its volumes from now
+        // no writer (`Deleted`). The store, a vdisk of its cell, is one of its vdisks from now
         // on, under the name its description gives it unless the cell names its branch already:
         // all in one compare-and-swap of the cell's object, a read alone when nothing changes. Not
         // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
         // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
         // of a branch with DEKs is there already (TASK-411.3).
-        let volume = recovering.volume().map(|volume| {
-            (volume.name.as_str(), cell::Volume { branch: branch.id, kind: volume.kind })
+        let vdisk = recovering.vdisk().map(|vdisk| {
+            (vdisk.name.as_str(), cell::Vdisk { branch: branch.id, kind: vdisk.kind })
         });
         let kms = &self.keys.kms;
         let kek = match &found {
@@ -1097,7 +1097,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             _ => Some(keys::new_cell_kek(kms, branch.cell.tenant).await?),
         };
         let making = kek.as_ref().map(|(_, kek)| kek);
-        let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, volume);
+        let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, vdisk);
         let (held, object) = match holding.await {
             Ok(held) => held,
             Err(err) => {
@@ -1454,7 +1454,7 @@ mod tests {
     }
 
     /// TASK-364: a store opened takes its branch's cell, making it for a new branch, and is its
-    /// volume from then on; its branch's head is taken with the cell's epoch. A later placement's
+    /// vdisk from then on; its branch's head is taken with the cell's epoch. A later placement's
     /// taking of the cell, and of the branch's head with the epoch it took it at, fences the
     /// store's writer: its next commit's upload fails, and a placement of a lower token takes the
     /// cell back no more.
@@ -1470,8 +1470,8 @@ mod tests {
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch: BRANCH };
-        let volume = crate::Volume { name: "root".into(), kind: cell::Kind::Fxfs };
-        Store::make(&dir, description, Some("memory:///cells"), Some(volume)).unwrap();
+        let vdisk = crate::Vdisk { name: "root".into(), kind: cell::Kind::Fxfs };
+        Store::make(&dir, description, Some("memory:///cells"), Some(vdisk)).unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = Store::recover_unmade(dir).unwrap();
         let (store, uploader) =
@@ -1480,8 +1480,8 @@ mod tests {
         store.made().unwrap();
         let object = runtime.block_on(cell::read(&*bucket, BRANCH.cell)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
-        let root = cell::Volume { branch: BRANCH.id, kind: cell::Kind::Fxfs };
-        assert_eq!(object.volumes, std::collections::BTreeMap::from([("root".to_owned(), root)]));
+        let root = cell::Vdisk { branch: BRANCH.id, kind: cell::Kind::Fxfs };
+        assert_eq!(object.vdisks, std::collections::BTreeMap::from([("root".to_owned(), root)]));
         let head = runtime.block_on(extent_bucket::head::get(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((head.epoch, head.token), (1, 1));
 

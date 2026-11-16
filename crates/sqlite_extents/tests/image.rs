@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a volume on an cladefs image: an extent store on disk, its branch kept in a bucket
+//! SQLite on a file set on an cladefs image: an extent store on disk, its branch kept in a bucket
 //! beside it (TASK-296).
 
 mod common;
 
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Options, Registration, Volume, register};
+use sqlite_extents::{FileSet, Options, Registration, register};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -56,12 +56,12 @@ fn survives_closing(name: &str) -> Vec<String> {
     let (write, read) =
         (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
     {
-        let volume = Volume::open(
+        let file_set = FileSet::open(
             Storage::create(&path, 256 << 20).unwrap().into_device(),
             Options::default(),
         )
         .unwrap();
-        let registration = register(&write, volume.clone()).unwrap();
+        let registration = register(&write, file_set.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), write.as_str())
                 .unwrap();
@@ -81,13 +81,13 @@ fn survives_closing(name: &str) -> Vec<String> {
         connection.execute("INSERT INTO t VALUES (?1, ?2)", params![1000, marker]).unwrap();
         drop(connection);
         drop(registration);
-        volume.close().unwrap();
+        file_set.close().unwrap();
     }
 
-    let volume =
-        Volume::open(Storage::open(&path).unwrap().into_device(), Options::default()).unwrap();
-    assert_eq!(volume.files().unwrap(), vec!["app.db".to_owned()]);
-    let registration = register(&read, volume.clone()).unwrap();
+    let file_set =
+        FileSet::open(Storage::open(&path).unwrap().into_device(), Options::default()).unwrap();
+    assert_eq!(file_set.files().unwrap(), vec!["app.db".to_owned()]);
+    let registration = register(&read, file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), read.as_str()).unwrap();
     let check: String =
@@ -106,37 +106,37 @@ fn survives_closing(name: &str) -> Vec<String> {
     assert!(read_marker == marker, "the row of noise reads back otherwise");
     drop(connection);
     drop(registration);
-    volume.close().unwrap();
+    file_set.close().unwrap();
 
     cladefs::testing::files_holding(dir.path(), &[&marker[..64]])
 }
 
-/// A volume on `storage`, registered as the VFS `vfs`, and a connection to its database.
-fn mount(storage: Storage, vfs: &str) -> (Arc<Volume>, Registration, Connection) {
-    let volume = Volume::open(storage.into_device(), Options::default()).unwrap();
-    let registration = register(vfs, volume.clone()).unwrap();
+/// A file set on `storage`, registered as the VFS `vfs`, and a connection to its database.
+fn mount(storage: Storage, vfs: &str) -> (Arc<FileSet>, Registration, Connection) {
+    let file_set = FileSet::open(storage.into_device(), Options::default()).unwrap();
+    let registration = register(vfs, file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
-    (volume, registration, connection)
+    (file_set, registration, connection)
 }
 
-fn unmount((volume, registration, connection): (Arc<Volume>, Registration, Connection)) {
+fn unmount((file_set, registration, connection): (Arc<FileSet>, Registration, Connection)) {
     drop(connection);
-    held(&volume);
+    held(&file_set);
     drop(registration);
-    volume.close().unwrap();
+    file_set.close().unwrap();
 }
 
-/// Checks the device holds every extent the volume names, those it references and those it has yet
-/// to free: so that none it frees, or failed to, is one the device never held, which it would try
-/// to free again at each commit.
-fn held(volume: &Volume) {
-    let device = volume.device();
+/// Checks the device holds every extent the file set names, those it references and those it has
+/// yet to free: so that none it frees, or failed to, is one the device never held, which it would
+/// try to free again at each commit.
+fn held(file_set: &FileSet) {
+    let device = file_set.device();
     let mut buffer =
         futures::executor::block_on(device.allocate_buffer(device.block_size() as usize));
-    for extent in volume.extents().unwrap() {
+    for extent in file_set.extents().unwrap() {
         futures::executor::block_on(device.read(extent, 0, buffer.as_mut()))
-            .unwrap_or_else(|error| panic!("{extent:?} the volume names: {error:#}"));
+            .unwrap_or_else(|error| panic!("{extent:?} the file set names: {error:#}"));
     }
 }
 

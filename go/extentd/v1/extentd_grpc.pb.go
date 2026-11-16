@@ -80,8 +80,8 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364): every branch is a volume of a tenant's cell, kept under the cell's prefix in
-// the bucket, and a host takes a cell whole, the heads of its volumes' branches with it. A branch
+// Cells (TASK-364): every branch is a vdisk of a tenant's cell, kept under the cell's prefix in
+// the bucket, and a host takes a cell whole, the heads of its vdisks' branches with it. A branch
 // is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
 // tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
@@ -254,9 +254,9 @@ type ExtentdClient interface {
 	// HOST:PORT.
 	SetPeers(ctx context.Context, in *SetPeersRequest, opts ...grpc.CallOption) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
-	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// daemon's bucket, by a conditional update, so that its vdisks' keys unwrap no more and no host
 	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
-	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// tenant. Call it on every host that may hold the cell or serve its vdisks: the first call
 	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
 	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
 	// versions. A cell with no object, NOT_FOUND (ENOENT).
@@ -676,9 +676,9 @@ type ExtentdServer interface {
 	// HOST:PORT.
 	SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
-	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// daemon's bucket, by a conditional update, so that its vdisks' keys unwrap no more and no host
 	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
-	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// tenant. Call it on every host that may hold the cell or serve its vdisks: the first call
 	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
 	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
 	// versions. A cell with no object, NOT_FOUND (ENOENT).

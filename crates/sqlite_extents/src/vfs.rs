@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A volume as a SQLite VFS ([`register`]): its databases' files are the volume's, by the names
-//! SQLite opens them by, and their journals and temporary files are memory (see `volume`).
+//! A file set as a SQLite VFS ([`register`]): its databases' files are the file set's, by the names
+//! SQLite opens them by, and their journals and temporary files are memory (see `file_set`).
 //!
-//! With `PRAGMA mmap_size`, SQLite reads pages in place, in the volume's window, if it has one,
+//! With `PRAGMA mmap_size`, SQLite reads pages in place, in the file set's window, if it has one,
 //! with nothing copied (`xFetch`); otherwise, or for pages changed since the last commit, it reads
 //! them as it would without.
 //!
@@ -14,49 +14,49 @@
 //! a crash loses, and SQLite then keeps to the rollback journal; nor does the VFS give SQLite the
 //! shared memory WAL mode needs otherwise. Randomness, sleeping and the time are the default VFS's.
 
+use crate::file_set::{FileSet, MemoryFile};
 use crate::locks::Level;
-use crate::volume::{MemoryFile, Volume};
 use anyhow::{Error, bail};
 use extent_files::{Failed, NotFound};
 use rusqlite::ffi;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::{Arc, Mutex};
 
-/// The longest name a file of a volume has.
+/// The longest name a file of a file set has.
 const MAX_PATHNAME: c_int = 512;
 
 /// What the VFS's functions find in it.
 struct App {
-    volume: Arc<Volume>,
+    file_set: Arc<FileSet>,
     /// The default VFS, which randomness, sleeping and the time are of.
     default: *mut ffi::sqlite3_vfs,
 }
 
-/// A volume registered as a SQLite VFS, until dropped, which only a volume none of whose files is
-/// open may be.
+/// A file set registered as a SQLite VFS, until dropped, which only a file set none of whose files
+/// is open may be.
 pub struct Registration {
     vfs: Box<ffi::sqlite3_vfs>,
     _name: CString,
     app: Box<App>,
 }
 
-// SAFETY: SQLite's VFS functions may be called from any thread; what they share is the volume's,
+// SAFETY: SQLite's VFS functions may be called from any thread; what they share is the file set's,
 // behind its lock.
 unsafe impl Send for Registration {}
 unsafe impl Sync for Registration {}
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let opens = self.app.volume.opens();
-        assert_eq!(opens, 0, "unregistering a volume whose files are open");
+        let opens = self.app.file_set.opens();
+        assert_eq!(opens, 0, "unregistering a file set whose files are open");
         // SAFETY: registered, and no connection uses it.
         unsafe { ffi::sqlite3_vfs_unregister(&mut *self.vfs) };
     }
 }
 
-/// Registers `volume` as the SQLite VFS `name`, which no other is, not as the default: a
+/// Registers `file_set` as the SQLite VFS `name`, which no other is, not as the default: a
 /// connection opens databases on it as `rusqlite::Connection::open_with_flags_and_vfs` does.
-pub fn register(name: &str, volume: Arc<Volume>) -> Result<Registration, Error> {
+pub fn register(name: &str, file_set: Arc<FileSet>) -> Result<Registration, Error> {
     let name = CString::new(name)?;
     // SAFETY: what SQLite asks before registering.
     let initialized = unsafe { ffi::sqlite3_initialize() };
@@ -68,7 +68,7 @@ pub fn register(name: &str, volume: Arc<Volume>) -> Result<Registration, Error> 
     if unsafe { !ffi::sqlite3_vfs_find(name.as_ptr()).is_null() } {
         bail!("a SQLite VFS named {name:?} is registered already");
     }
-    let mut app = Box::new(App { volume, default });
+    let mut app = Box::new(App { file_set, default });
     let mut vfs = Box::new(ffi::sqlite3_vfs {
         iVersion: 2,
         szOsFile: size_of::<Handle>() as c_int,
@@ -104,7 +104,7 @@ pub fn register(name: &str, volume: Arc<Volume>) -> Result<Registration, Error> 
 
 /// What a connection has open.
 enum Open {
-    Database { volume: Arc<Volume>, name: String, lock: Level },
+    Database { file_set: Arc<FileSet>, name: String, lock: Level },
     Memory(MemoryFile),
 }
 
@@ -200,16 +200,16 @@ unsafe extern "C" fn x_open(
         }
         Some(name) if flags & ffi::SQLITE_OPEN_MAIN_DB != 0 => {
             let create = flags & ffi::SQLITE_OPEN_CREATE != 0;
-            let volume = app.volume.clone();
-            volume.open_file(&name, create).map(|()| Open::Database {
-                volume,
+            let file_set = app.file_set.clone();
+            file_set.open_file(&name, create).map(|()| Open::Database {
+                file_set,
                 name,
                 lock: Level::None,
             })
         }
         Some(name) if flags & ffi::SQLITE_OPEN_DELETEONCLOSE == 0 => {
             let create = flags & ffi::SQLITE_OPEN_CREATE != 0;
-            app.volume.memory_file(&name, create).map(Open::Memory)
+            app.file_set.memory_file(&name, create).map(Open::Memory)
         }
         _ => Ok(Open::Memory(Arc::new(Mutex::new(Vec::new())))),
     };
@@ -238,7 +238,7 @@ unsafe extern "C" fn x_delete(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let (app, name) = unsafe { (app(vfs), name_of(name).unwrap_or_default()) };
-    match app.volume.delete(&name) {
+    match app.file_set.delete(&name) {
         Ok(true) => ffi::SQLITE_OK,
         Ok(false) => ffi::SQLITE_IOERR_DELETE_NOENT,
         Err(error) => code_of(Err(error), ffi::SQLITE_IOERR_DELETE),
@@ -253,7 +253,7 @@ unsafe extern "C" fn x_access(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let (app, name) = unsafe { (app(vfs), name_of(name).unwrap_or_default()) };
-    match app.volume.exists(&name) {
+    match app.file_set.exists(&name) {
         Ok(exists) => {
             unsafe { *out = exists as c_int };
             ffi::SQLITE_OK
@@ -331,10 +331,10 @@ unsafe extern "C" fn x_get_last_error(
 unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
     // SAFETY: SQLite closes what it opened once; its memory is SQLite's after.
     let handle = unsafe { std::ptr::read(file as *mut Handle) };
-    if let Open::Database { volume, name, lock } = handle.open {
+    if let Open::Database { file_set, name, lock } = handle.open {
         let mut lock = lock;
-        let unlocked = volume.unlock_file(&name, &mut lock, Level::None);
-        volume.close_file(&name);
+        let unlocked = file_set.unlock_file(&name, &mut lock, Level::None);
+        file_set.close_file(&name);
         return code_of(unlocked, ffi::SQLITE_IOERR_CLOSE);
     }
     ffi::SQLITE_OK
@@ -349,7 +349,7 @@ unsafe extern "C" fn x_read(
     // SAFETY: as SQLite calls it: `buf` holds `len` bytes.
     let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
     let read = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.read(name, offset as u64, buf),
+        Open::Database { file_set, name, .. } => file_set.read(name, offset as u64, buf),
         Open::Memory(data) => {
             let data = data.lock().unwrap();
             let start = (offset as usize).min(data.len());
@@ -377,7 +377,7 @@ unsafe extern "C" fn x_write(
     // SAFETY: as SQLite calls it: `data` holds `len` bytes.
     let data = unsafe { std::slice::from_raw_parts(data as *const u8, len as usize) };
     let written = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.write(name, offset as u64, data),
+        Open::Database { file_set, name, .. } => file_set.write(name, offset as u64, data),
         Open::Memory(file) => {
             let mut file = file.lock().unwrap();
             let end = offset as usize + data.len();
@@ -394,7 +394,7 @@ unsafe extern "C" fn x_write(
 unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: ffi::sqlite3_int64) -> c_int {
     // SAFETY: as SQLite calls it.
     let truncated = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.truncate(name, size as u64),
+        Open::Database { file_set, name, .. } => file_set.truncate(name, size as u64),
         Open::Memory(file) => {
             file.lock().unwrap().truncate(size as usize);
             Ok(())
@@ -406,7 +406,9 @@ unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: ffi::sqlite3
 unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int {
     // SAFETY: as SQLite calls it.
     match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => code_of(volume.sync(name), ffi::SQLITE_IOERR_FSYNC),
+        Open::Database { file_set, name, .. } => {
+            code_of(file_set.sync(name), ffi::SQLITE_IOERR_FSYNC)
+        }
         Open::Memory(_) => ffi::SQLITE_OK,
     }
 }
@@ -417,7 +419,7 @@ unsafe extern "C" fn x_file_size(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let size = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.size(name),
+        Open::Database { file_set, name, .. } => file_set.size(name),
         Open::Memory(file) => Ok(file.lock().unwrap().len() as u64),
     };
     match size {
@@ -433,7 +435,7 @@ unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, level: c_int) -> c_int
     let want = Level::from_sqlite(level).expect("a lock level");
     // SAFETY: as SQLite calls it.
     match unsafe { open(file) } {
-        Open::Database { volume, name, lock } => match volume.lock_file(name, lock, want) {
+        Open::Database { file_set, name, lock } => match file_set.lock_file(name, lock, want) {
             Ok(true) => ffi::SQLITE_OK,
             Ok(false) => ffi::SQLITE_BUSY,
             Err(error) => code_of(Err(error), ffi::SQLITE_IOERR_LOCK),
@@ -446,8 +448,8 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_i
     let want = Level::from_sqlite(level).expect("a lock level");
     // SAFETY: as SQLite calls it.
     match unsafe { open(file) } {
-        Open::Database { volume, name, lock } => {
-            code_of(volume.unlock_file(name, lock, want), ffi::SQLITE_IOERR_UNLOCK)
+        Open::Database { file_set, name, lock } => {
+            code_of(file_set.unlock_file(name, lock, want), ffi::SQLITE_IOERR_UNLOCK)
         }
         Open::Memory(_) => ffi::SQLITE_OK,
     }
@@ -456,7 +458,7 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, level: c_int) -> c_i
 unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *mut c_int) -> c_int {
     // SAFETY: as SQLite calls it.
     let reserved = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.reserved(name),
+        Open::Database { file_set, name, .. } => file_set.reserved(name),
         Open::Memory(_) => Ok(false),
     };
     match reserved {
@@ -479,7 +481,7 @@ unsafe extern "C" fn x_file_control(
 unsafe extern "C" fn x_sector_size(file: *mut ffi::sqlite3_file) -> c_int {
     // SAFETY: as SQLite calls it.
     match unsafe { open(file) } {
-        Open::Database { volume, .. } => volume.device().block_size() as c_int,
+        Open::Database { file_set, .. } => file_set.device().block_size() as c_int,
         Open::Memory(_) => 512,
     }
 }
@@ -500,7 +502,7 @@ unsafe extern "C" fn x_fetch(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let fetched = match unsafe { open(file) } {
-        Open::Database { volume, name, .. } => volume.fetch(name, offset as u64, len as u64),
+        Open::Database { file_set, name, .. } => file_set.fetch(name, offset as u64, len as u64),
         Open::Memory(_) => Ok(None),
     };
     match fetched {
@@ -524,8 +526,9 @@ unsafe extern "C" fn x_unfetch(
 ) -> c_int {
     // SAFETY: as SQLite calls it. A page of none is SQLite asking for its mapping to go, which the
     // window keeps in step with the file whatever it holds.
-    if let (Open::Database { volume, name, .. }, false) = (unsafe { open(file) }, page.is_null()) {
-        volume.unfetch(name);
+    if let (Open::Database { file_set, name, .. }, false) = (unsafe { open(file) }, page.is_null())
+    {
+        file_set.unfetch(name);
     }
     ffi::SQLITE_OK
 }

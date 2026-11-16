@@ -4,7 +4,7 @@
 
 //! cladefs: a store the daemon serves as a device (`storage_device::Device`), the interface a
 //! filesystem keeps itself on: for what keeps itself on the host's daemon from outside a VM, as a
-//! SQLite volume does (crates/sqlite_extents, TASK-300). Its reads of sealed extents are the
+//! SQLite vdisk does (crates/sqlite_extents, TASK-300). Its reads of sealed extents are the
 //! daemon's, from its cache, which every store and VM it serves shares; its writes, frees and
 //! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are local,
 //! synced to the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not

@@ -1436,7 +1436,7 @@ impl std::fmt::Display for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::{self, Kind as Volume};
+    use crate::cell;
     use crate::layout::{Origin, TEST_CELL, test_branch};
     use crate::record::Kind;
     use crate::testing::{Direct, SimBucket};
@@ -1542,8 +1542,8 @@ mod tests {
         let bucket = Direct(SimBucket::new());
         let kek = block_on(new_cell_kek(&kms, TEST_CELL.tenant)).unwrap();
         let (secret, wrapped) = (kek.0.expose(), &kek.1);
-        let volume = Some(("root", cell::Volume { branch: 7, kind: Volume::Fxfs }));
-        let made = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), Some(wrapped), volume));
+        let vdisk = Some(("root", cell::Vdisk { branch: 7, kind: cell::Kind::Fxfs }));
+        let made = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), Some(wrapped), vdisk));
         let (_, object) = made.unwrap();
         assert_eq!(&object.keks, std::slice::from_ref(wrapped));
         assert!(!holds(&crate::layout::encode(&object), secret));

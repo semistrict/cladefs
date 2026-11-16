@@ -1752,7 +1752,7 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        // A volume of a cell of the tenant's (TASK-364).
+        // A vdisk of a cell of the tenant's (TASK-364).
         let cell = crate::host_store::new_cell(tenant.id());
         let store = ExtentStore::create_in(&parent, 1 << 24, cell).unwrap();
         let extent = ExtentId { branch: store.branch().id, sequence: 1 };
@@ -2450,13 +2450,13 @@ fn stores_are_deleted_while_their_forks_are_open() {
     assert_eq!(missing.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
 }
 
-/// TASK-364: a store a connection makes is the one volume of a new cell, named as its directory
+/// TASK-364: a store a connection makes is the one vdisk of a new cell, named as its directory
 /// is: an Fxfs one, or, made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite
 /// one, which a host's FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory
 /// (TASK-456.2). The cell's object, under its tenant's prefix in the bucket, says so; and the
 /// store's branch's head was taken with the cell's epoch.
 #[test]
-fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
+fn stores_made_are_vdisks_of_their_cells_of_their_kinds() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("extentd.sock");
@@ -2482,21 +2482,21 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
             (memory_branch, "memory", Kind::Memory),
         ] {
             let cell = extent_bucket::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
-            let volume = extent_bucket::cell::Volume { branch: branch.id, kind };
-            let volumes = std::collections::BTreeMap::from([(name.to_owned(), volume)]);
-            assert_eq!((cell.volumes, cell.deleted), (volumes, false), "{name}");
+            let vdisk = extent_bucket::cell::Vdisk { branch: branch.id, kind };
+            let vdisks = std::collections::BTreeMap::from([(name.to_owned(), vdisk)]);
+            assert_eq!((cell.vdisks, cell.deleted), (vdisks, false), "{name}");
             let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
             assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
 }
 
-/// TASK-456.2: a memory volume's pages and holes, committed at once, read back once it is opened
+/// TASK-456.2: a memory vdisk's pages and holes, committed at once, read back once it is opened
 /// again; a fork of it reads its pages and stores only those it writes, each page of the parent
 /// it leaves as it was, and its holes nothing.
 #[test]
-fn memory_volumes_commit_pages_and_holes_and_forks_store_only_their_own() {
-    use crate::memory_volume::MemoryVolume;
+fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
+    use crate::memory_vdisk::MemoryVdisk;
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("extentd.sock");
@@ -2504,7 +2504,7 @@ fn memory_volumes_commit_pages_and_holes_and_forks_store_only_their_own() {
     std::thread::spawn(move || serve(listener));
     const PAGES: u64 = 256;
     let path = dir.path().join("memory");
-    let memory = MemoryVolume::open(&socket, &path, PAGES * 4096).unwrap();
+    let memory = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
     let page = memory.page_size();
     assert_eq!(page, 4096);
     let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
@@ -2518,13 +2518,13 @@ fn memory_volumes_commit_pages_and_holes_and_forks_store_only_their_own() {
 
     let mut expected = filled(1, PAGES);
     expected[(100 * page) as usize..(120 * page) as usize].fill(0);
-    let reopened = MemoryVolume::open(&socket, &path, PAGES * 4096).unwrap();
+    let reopened = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
     let mut image = filled(0xee, PAGES);
     reopened.read(0, &mut image).unwrap();
     assert!(image == expected, "the image committed");
     reopened.close().unwrap();
 
-    let child = MemoryVolume::open(&socket, &fork, PAGES * 4096).unwrap();
+    let child = MemoryVdisk::open(&socket, &fork, PAGES * 4096).unwrap();
     assert_eq!(child.branch(), forked);
     let mut image = filled(0xee, PAGES);
     child.read(0, &mut image).unwrap();
@@ -2606,8 +2606,8 @@ fn earlier_placements_open_no_stores() {
     std::fs::create_dir(&earlier).unwrap();
     let description =
         extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
-    let volume = extent_store::Volume { name: "earlier".into(), kind: Kind::Fxfs };
-    extent_store::create_host(&earlier, description, "memory:///branches", volume).unwrap();
+    let vdisk = extent_store::Vdisk { name: "earlier".into(), kind: Kind::Fxfs };
+    extent_store::create_host(&earlier, description, "memory:///branches", vdisk).unwrap();
     extent_store::made_host(&earlier).unwrap();
     ExtentStore::place(&earlier, 3).unwrap();
     let refused = DaemonExtentStore::connect(&socket, &earlier, 1 << 24);

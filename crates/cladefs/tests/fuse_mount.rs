@@ -434,10 +434,10 @@ fn cladefsctl_mount(socket: &str, args: &[&str]) -> String {
 }
 
 /// One mount of many stores (TASK-302), of tenants' cells (TASK-364), cladefsd's (TASK-475.2): a cell
-/// attached through its control socket shows each Fxfs volume of it at TENANT/CELL/VOLUME, a filesystem of its own
+/// attached through its control socket shows each Fxfs vdisk of it at TENANT/CELL/VDISK, a filesystem of its own
 /// (nothing renamed between them, nothing made in the mount's directories of its own); its cell's
 /// objects in the bucket under its tenant's prefix. A cell detached goes, written back, so that it
-/// attaches again from its stores, or, those gone, from the bucket; a volume with a file open is
+/// attaches again from its stores, or, those gone, from the bucket; a vdisk with a file open is
 /// detached once the file is closed.
 #[test]
 fn one_mount_attaches_and_detaches_many_stores() {
@@ -447,7 +447,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
     assert_eq!(names(&m), Vec::<String>::new());
     let capacity = STORE_SIZE.to_string();
     let (one, two) = ("0000000000000001", "0000000000000002");
-    // A new cell of each tenant's, of no volumes: nothing shown.
+    // A new cell of each tenant's, of no vdisks: nothing shown.
     let attach = |tenant: &str, cell: &str| {
         cladefsctl_mount(socket, &["attach", tenant, cell]).lines().map(str::to_owned).collect()
     };
@@ -456,13 +456,11 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let new: Vec<String> = attach("2", "0");
     let b = new[0].clone();
     assert_eq!(names(&m), Vec::<String>::new());
-    let volume = |tenant: &str, cell: &str, name: &str| {
-        cladefsctl_mount(socket, &["create-volume", tenant, cell, name, &capacity])
-            .trim()
-            .to_owned()
+    let vdisk = |tenant: &str, cell: &str, name: &str| {
+        cladefsctl_mount(socket, &["create-vdisk", tenant, cell, name, &capacity]).trim().to_owned()
     };
     let (root, data, other) =
-        (volume("1", &a, "root"), volume("1", &a, "data"), volume("2", &b, "root"));
+        (vdisk("1", &a, "root"), vdisk("1", &a, "data"), vdisk("2", &b, "root"));
     assert_eq!(names(&m), [one, two]);
     assert_eq!(names(&m.join(one)), [a.as_str()]);
     assert_eq!(names(&m.join(one).join(&a)), ["data", "root"]);
@@ -490,7 +488,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let listed = format!("{one} {a}\n  data {data}\n  root {root}\n{two} {b}\n  root {other}\n");
     assert_eq!(cladefsctl_mount(socket, &["list"]), listed);
     // The cells' objects are under their tenants' prefixes: their cells' objects, and their
-    // volumes' branches.
+    // vdisks' branches.
     let bucket = dir.path().join("bucket");
     let cell_a = bucket.join(format!("tenants/{one}/cells/{a}"));
     assert!(cell_a.join("cell").exists(), "no cell object at {}", cell_a.display());
@@ -513,7 +511,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
     assert_eq!(again, [b.clone(), format!("root {other}")]);
     assert_eq!(std::fs::read_to_string(at_b.join("root/file")).unwrap(), "in b");
 
-    // A file open holds its volume, and its cell's detach, until it is closed.
+    // A file open holds its vdisk, and its cell's detach, until it is closed.
     let open = std::fs::File::open(at_a.join("data/file")).unwrap();
     let mut detach = KillOnDrop(
         cladefsctl_mount_command(socket, &["detach", "1", &a])
@@ -548,7 +546,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
 
 /// SIGTERM drains cladefsd's VMs' stores and its mount of cells alike, within one bound
 /// (TASK-475.2): a VM process's store closed, its last commit durable; the mount gone, its
-/// volume's write written back and uploaded, so that a later placement's daemon, with none of the
+/// vdisk's write written back and uploaded, so that a later placement's daemon, with none of the
 /// stores, attaches the cell from the bucket and reads it; the daemon exits 0.
 #[test]
 fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
@@ -560,9 +558,9 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let socket = socket.to_str().unwrap();
     let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
     let capacity = STORE_SIZE.to_string();
-    cladefsctl_mount(socket, &["create-volume", "1", &cell, "root", &capacity]);
-    let volume = m.join("0000000000000001").join(&cell).join("root");
-    std::fs::write(volume.join("file"), "drained").unwrap();
+    cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &capacity]);
+    let vdisk = m.join("0000000000000001").join(&cell).join("root");
+    std::fs::write(vdisk.join("file"), "drained").unwrap();
 
     let vm = cladefs::DaemonExtentStore::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
     let vm = vm.unwrap();
@@ -579,8 +577,8 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let (child, socket, m) = cladefsd_mounting(&second, &bucket, 2);
     let socket = socket.to_str().unwrap();
     assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]).lines().count(), 2);
-    let volume = m.join("0000000000000001").join(&cell).join("root");
-    assert_eq!(std::fs::read_to_string(volume.join("file")).unwrap(), "drained");
+    let vdisk = m.join("0000000000000001").join(&cell).join("root");
+    assert_eq!(std::fs::read_to_string(vdisk.join("file")).unwrap(), "drained");
     terminate(child, &m);
 }
 
@@ -603,16 +601,16 @@ fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
     );
 }
 
-/// A volume cladefsd's mount has attached is the mount's alone (TASK-475.3): a VM process opening
+/// A vdisk cladefsd's mount has attached is the mount's alone (TASK-475.3): a VM process opening
 /// its store, and the control API forking it, each fail with `EBUSY` at once, not after waiting
 /// for it to be let go; detached, its store forks.
 #[test]
-fn a_volume_mounted_is_the_mounts_alone() {
+fn a_vdisk_mounted_is_the_mounts_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
     let socket = socket.to_str().unwrap();
     let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
-    cladefsctl_mount(socket, &["create-volume", "1", &cell, "root", &STORE_SIZE.to_string()]);
+    cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &STORE_SIZE.to_string()]);
     let store = dir.path().join("stores").join("0000000000000001").join(&cell).join("root");
 
     let started = std::time::Instant::now();

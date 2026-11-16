@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A volume: files on an extent device, by name, each committed alone: a SQLite database's
+//! A file set: files on an extent device, by name, each committed alone: a SQLite database's
 //! (sqlite_extents), or a VM's memory (TASK-456).
 //!
-//! **Commits.** A file's changes are committed alone ([`Volume::sync`]): its plan's extents are
+//! **Commits.** A file's changes are committed alone ([`FileSet::sync`]): its plan's extents are
 //! written, then the root, naming every file's tree as the last commit of each left it, is
 //! committed with the device's `commit_root`, a durable barrier. So a crash leaves each file as of
 //! a commit of its own, whatever another file had written meanwhile. A commit that fails before
 //! its root leaves the file as it was, the extents it wrote freed; one that fails committing the
-//! root fails the volume, which may or may not hold it, until it is opened again.
+//! root fails the file set, which may or may not hold it, until it is opened again.
 //!
 //! **Freeing.** What a commit leaves unreferenced is freed once a root naming it as dying is
 //! durable, so that the next opening frees it if a crash came between: [`FREE_BATCH`] of them at a
@@ -21,22 +21,22 @@
 //! extents past it a crash left, written for a commit whose root it lost, are freed by the next
 //! opening, as Fxfs's allocator frees its orphans.
 //!
-//! **The window.** A volume opened with a window ([`Volume::open_mapped`]) gives each file it
+//! **The window.** A file set opened with a window ([`FileSet::open_mapped`]) gives each file it
 //! opens a region of it, which maps what reads and fetches reach of the file, as its last commit
 //! has it (`window`), as they first reach it (TASK-440); and maps again what commits changed, a
 //! batch at a time ([`REMAP_BATCH`]), or as pages are fetched: reads of what they changed go to
-//! the device meanwhile. Reads of the rest copy from the window, and fetches ([`Volume::fetch`])
+//! the device meanwhile. Reads of the rest copy from the window, and fetches ([`FileSet::fetch`])
 //! read it in place, as SQLite's memory-mapped reads do. While pages fetched are held, nothing is
 //! mapped again, as SQLite's own unix VFS remaps nothing while pages are out.
 //!
 //! **Opening** reads the root alone: a file's tree is read as it is used (`pages`, TASK-440).
 //!
 //! I/O to the device blocks the calling thread ([`futures::executor::block_on`]), as SQLite's
-//! calls do: a volume is not to be called from a thread whose executor the device needs.
+//! calls do: a file set is not to be called from a thread whose executor the device needs.
 
 use crate::format::{self, Root};
 use crate::pages::{Failure, Pages, Plan};
-use crate::window::{Run, VolumeWindow};
+use crate::window::{FileSetWindow, Run};
 use anyhow::{Context as _, Error, bail};
 use futures::executor::block_on;
 use std::collections::BTreeMap;
@@ -61,18 +61,18 @@ const REMAP_BATCH: u64 = 1024;
 /// each.
 const FREE_BATCH: usize = 64;
 
-/// The error of opening a database file the volume doesn't hold.
+/// The error of opening a database file the file set doesn't hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the volume holds no file {0}")]
+#[error("the file set holds no file {0}")]
 pub struct NotFound(pub String);
 
-/// The error of using a volume whose commit failed as it committed its root: whether the device
+/// The error of using a file set whose commit failed as it committed its root: whether the device
 /// holds that commit, its next opening finds.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the volume failed: {0}")]
+#[error("the file set failed: {0}")]
 pub struct Failed(pub String);
 
-/// How a volume lays out what it writes.
+/// How a file set lays out what it writes.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// The most blocks an extent holds: a commit writing more writes several.
@@ -88,7 +88,7 @@ impl Default for Options {
     }
 }
 
-/// A file of a volume.
+/// A file of a file set.
 struct File {
     pages: Pages,
     /// How many connections have it open.
@@ -97,7 +97,7 @@ struct File {
     committed: bool,
     /// Where its region of the window is, if it has one.
     region: Option<u64>,
-    /// How many pages of its region are held, fetched ([`Volume::fetch`]).
+    /// How many pages of its region are held, fetched ([`FileSet::fetch`]).
     fetches: u32,
 }
 
@@ -107,7 +107,7 @@ impl File {
     }
 }
 
-/// What a volume holds, under its lock.
+/// What a file set holds, under its lock.
 struct Inner {
     files: BTreeMap<String, File>,
     /// The sequence number the next extent minted gets.
@@ -119,13 +119,13 @@ struct Inner {
     regions: Vec<u64>,
 }
 
-/// A volume on a device. See the module docs.
-pub struct Volume {
+/// A file set on a device. See the module docs.
+pub struct FileSet {
     device: DeviceHolder,
     options: Options,
     inner: Mutex<Inner>,
     /// The window, if any, and the bytes of each of its regions.
-    window: Option<(Box<dyn VolumeWindow>, u64)>,
+    window: Option<(Box<dyn FileSetWindow>, u64)>,
     /// How many times pages were fetched to read in place.
     fetched: AtomicU64,
 }
@@ -153,8 +153,8 @@ fn orphans(minted: u64, next: u64) -> impl Iterator<Item = u64> {
     first.chain(last)
 }
 
-impl Volume {
-    /// The volume on `device`, made if the device's root is empty.
+impl FileSet {
+    /// The file set on `device`, made if the device's root is empty.
     pub fn open(device: DeviceHolder, options: Options) -> Result<Arc<Self>, Error> {
         assert!(options.max_extent_blocks > 0, "extents of no blocks");
         let inner = block_on(Self::recover(&**device))?;
@@ -162,11 +162,11 @@ impl Volume {
         Ok(Arc::new(Self { device, options, inner: Mutex::new(inner), window: None, fetched }))
     }
 
-    /// The volume on `device`, as [`Volume::open`] opens it, its files mapped into `window`, a
+    /// The file set on `device`, as [`FileSet::open`] opens it, its files mapped into `window`, a
     /// region each, as many regions as `options` says.
     pub fn open_mapped(
         device: DeviceHolder,
-        window: Box<dyn VolumeWindow>,
+        window: Box<dyn FileSetWindow>,
         options: Options,
     ) -> Result<Arc<Self>, Error> {
         assert!(options.max_extent_blocks > 0 && options.window_regions > 0);
@@ -199,7 +199,7 @@ impl Volume {
         };
         let Some(root) = root else {
             let made = Root { minted: inner.mint, ..Root::default() };
-            device.commit_root(&made.encode()).await.context("making the volume")?;
+            device.commit_root(&made.encode()).await.context("making the file set")?;
             return Ok(inner);
         };
         inner.mint = inner.mint.max(root.minted);
@@ -383,7 +383,7 @@ impl Volume {
     }
 
     /// Where the `len` bytes of file `name` at `offset` are in the window, if it maps them as
-    /// they read: to read in place until given back ([`Volume::unfetch`]).
+    /// they read: to read in place until given back ([`FileSet::unfetch`]).
     pub fn fetch(&self, name: &str, offset: u64, len: u64) -> Result<Option<*const u8>, Error> {
         let mut inner = self.lock()?;
         let inner = &mut *inner;
@@ -399,12 +399,12 @@ impl Volume {
         Ok(fetched)
     }
 
-    /// How many times pages were fetched to read in place ([`Volume::fetch`]).
+    /// How many times pages were fetched to read in place ([`FileSet::fetch`]).
     pub fn fetched(&self) -> u64 {
         self.fetched.load(Ordering::Relaxed)
     }
 
-    /// Gives back a page of file `name` fetched ([`Volume::fetch`]).
+    /// Gives back a page of file `name` fetched ([`FileSet::fetch`]).
     pub fn unfetch(&self, name: &str) {
         let mut inner = self.inner.lock().unwrap();
         let file = inner.files.get_mut(name).expect("a file open");
@@ -533,7 +533,7 @@ impl Volume {
     /// Commits the root: each file committed as it is, but `changed`, if given, as it says, `plan`'s
     /// extents written first, the last write carrying the root; and `dead` among the dying, freed
     /// once a batch of them waits ([`FREE_BATCH`]), their root durable. A failure before the root
-    /// changes nothing, but that what it wrote is freed; one committing it fails the volume.
+    /// changes nothing, but that what it wrote is freed; one committing it fails the file set.
     fn commit_root(
         &self,
         inner: &mut Inner,
@@ -590,7 +590,7 @@ impl Volume {
                 return Err(error);
             }
             Err(Failure::Committing(error)) => {
-                let error = error.context("committing the volume's root");
+                let error = error.context("committing the file set's root");
                 inner.failed = Some(format!("{error:#}"));
                 return Err(error);
             }
@@ -604,16 +604,16 @@ impl Volume {
         Ok(())
     }
 
-    /// Fails unless the volume is usable: what its users see as an error of their own.
+    /// Fails unless the file set is usable: what its users see as an error of their own.
     pub fn check(&self) -> Result<(), Error> {
         self.lock().map(drop)
     }
 }
 
-impl std::fmt::Debug for Volume {
+impl std::fmt::Debug for FileSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.inner.lock().map_err(|_| std::fmt::Error)?;
-        f.debug_struct("Volume")
+        f.debug_struct("FileSet")
             .field("files", &inner.files.keys().collect::<Vec<_>>())
             .field("mint", &inner.mint)
             .field("failed", &inner.failed)
@@ -629,7 +629,7 @@ mod tests {
 
     const BLOCK: usize = 512;
 
-    /// A volume's opening reads its root and none of its files' trees; a read of a page reads
+    /// A file set's opening reads its root and none of its files' trees; a read of a page reads
     /// the nodes on its path and the page, and the file holds those nodes alone (TASK-440).
     #[test]
     fn an_opening_reads_no_tree_and_a_read_one_path() {
@@ -642,20 +642,20 @@ mod tests {
             }
             Ok(())
         });
-        let volume = Volume::open(DeviceHolder::new(device), Options::default()).unwrap();
-        volume.open_file("a.db", true).unwrap();
-        volume.write("a.db", 0, &vec![3; BLOCK * 401]).unwrap();
-        volume.sync("a.db").unwrap();
-        volume.close_file("a.db");
+        let file_set = FileSet::open(DeviceHolder::new(device), Options::default()).unwrap();
+        file_set.open_file("a.db", true).unwrap();
+        file_set.write("a.db", 0, &vec![3; BLOCK * 401]).unwrap();
+        file_set.sync("a.db").unwrap();
+        file_set.close_file("a.db");
 
         let before = reads.load(Ordering::Relaxed);
-        let mut inner = block_on(Volume::recover(&***volume.device())).unwrap();
+        let mut inner = block_on(FileSet::recover(&***file_set.device())).unwrap();
         // The root, which the fake device counts as a read, alone.
         assert_eq!(reads.load(Ordering::Relaxed) - before, 1, "reads at the opening");
         let file = inner.files.get_mut("a.db").unwrap();
         assert_eq!((file.pages.root().height, file.pages.nodes_held()), (3, 0));
         let mut page = vec![0; BLOCK];
-        block_on(file.pages.read(&***volume.device(), BLOCK as u64 * 250, &mut page)).unwrap();
+        block_on(file.pages.read(&***file_set.device(), BLOCK as u64 * 250, &mut page)).unwrap();
         assert_eq!(page, vec![3; BLOCK]);
         assert_eq!(reads.load(Ordering::Relaxed) - before, 1 + 4, "reads of one page");
         assert_eq!(file.pages.nodes_held(), 3);

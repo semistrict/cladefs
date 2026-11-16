@@ -482,7 +482,7 @@ pub(super) struct New {
     pub capacity: u64,
     /// What it holds.
     pub kind: Kind,
-    /// The tenant whose new cell it is the one volume of (TASK-364): the connection's.
+    /// The tenant whose new cell it is the one vdisk of (TASK-364): the connection's.
     pub tenant: u64,
 }
 
@@ -678,7 +678,7 @@ pub(super) async fn create(
 }
 
 /// Makes a store at `path`, which must not exist (`EEXIST`), of `capacity` bytes, holding a
-/// filesystem of the container image at `image` (`cladefs::import::store`), the one volume of a new
+/// filesystem of the container image at `image` (`cladefs::import::store`), the one vdisk of a new
 /// cell of `tenant`'s (TASK-364), and returns its branch.
 pub(super) async fn import(
     path: PathBuf,
@@ -748,7 +748,7 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
 /// that is no point, kept open since an earlier restore whose fork fails, as once another host, or
 /// this one's cladefsctl, took its branch, which fences it, is let go of, and opened anew for a fork
 /// once more, which takes the branch back, as each restore's did before stores were kept open: a
-/// restore fails only if the store it opened fails it. The fork is the one volume of a new cell of
+/// restore fails only if the store it opened fails it. The fork is the one vdisk of a new cell of
 /// `tenant`'s, if given, the granted tenant's whose VM process restores, or of the point's tenant's
 /// (TASK-364).
 pub(super) async fn fork_from(
@@ -802,7 +802,7 @@ async fn fork_point(
         Ok(point) => point,
         Err(errno) => return (Err(errno), Opened::Now),
     };
-    // cladefs: the one volume of a new cell of `tenant`'s, or the point's tenant's (TASK-364).
+    // cladefs: the one vdisk of a new cell of `tenant`'s, or the point's tenant's (TASK-364).
     let tenant = tenant.unwrap_or(point.store.branch().cell.tenant);
     let forked = point.store.fork(path, crate::host_store::new_cell(tenant));
     let forked = forked.map(drop).map_err(|err| {
@@ -866,7 +866,7 @@ async fn point(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), E
 /// another host took its branch, is opened anew for a fork once more, as a restore's
 /// ([`fork_from`], TASK-79.103). The fork is a point if `point` ([`ExtentStore::point`],
 /// TASK-158), live or not, once nothing is open; and shared, if `shared` too, once made
-/// ([`share`]): if sharing it fails, the point stands, not shared. It is the one volume of a new
+/// ([`share`]): if sharing it fails, the point stands, not shared. It is the one vdisk of a new
 /// cell of `tenant`'s, if given: the granted tenant's whose directory `to` is in; or of `from`'s
 /// tenant's; its ID the bucket's to give (TASK-364). A point not shared forks to no cell of another
 /// tenant's than its own (`EACCES`, TASK-395.7); nor does a store with a writer, unless it is the
@@ -897,7 +897,7 @@ async fn fork_from_store(
 ) -> Result<Branch, Errno> {
     let _child = hold_to_fork(to).await?;
     let key = store_key(from);
-    // cladefs: the one volume of a new cell of `tenant`'s, or the store's tenant's (TASK-364).
+    // cladefs: the one vdisk of a new cell of `tenant`'s, or the store's tenant's (TASK-364).
     let from_branch = extent_store::host_branch(from).map_err(|_| Errno::ENOENT)?;
     let cell = || crate::host_store::new_cell(tenant.unwrap_or(from_branch.cell.tenant));
     let was_kept = kept(&key).is_some();
@@ -1624,7 +1624,9 @@ mod tests {
             set(bytes);
             assert_eq!(
                 cache_config(),
-                Err(format!("CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: {bytes:?}"))
+                Err(format!(
+                    "CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
+                ))
             );
         }
         set("");

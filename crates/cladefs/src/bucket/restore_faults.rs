@@ -428,12 +428,12 @@ impl Hosts {
                     .unwrap()
                     .is_some_and(|record| record.deleted),
                 // cladefs: a cell's object stays, as its branches' records do, its epoch fencing
-                // its volumes' heads (TASK-364): left over only if it names a live branch.
+                // its vdisks' heads (TASK-364): left over only if it names a live branch.
                 Kind::Cell { cell } => {
                     let object = block_on(extent_bucket::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
-                    object.volumes.values().any(|volume| {
-                        let branch = extent_bucket::layout::Branch { cell, id: volume.branch };
+                    object.vdisks.values().any(|vdisk| {
+                        let branch = extent_bucket::layout::Branch { cell, id: vdisk.branch };
                         let record = block_on(branch::record(&*self.bucket, branch)).unwrap();
                         record.is_some_and(|record| !record.deleted)
                     })

@@ -5,11 +5,11 @@
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
 // cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
 // mount, however many stores: one OS mount, not one per store (TASK-475.2). Attach takes a cell of
-// the daemon's bucket, as its holder, and every Fxfs volume of it into a store at
-// DIR/TENANT/CELL/VOLUME, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and
+// the daemon's bucket, as its holder, and every Fxfs vdisk of it into a store at
+// DIR/TENANT/CELL/VDISK, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VDISK, TENANT and
 // CELL in 16 hexadecimal digits as the bucket's keys have them; Detach writes them back, so that
-// another host may take the cell. A cell's other volumes are not shown: its SQLite volumes'
-// databases open through sqlite_extents' VFS alone, and its volumes VMs attach are theirs, in the
+// another host may take the cell. A cell's other vdisks are not shown: its SQLite vdisks'
+// databases open through sqlite_extents' VFS alone, and its vdisks VMs attach are theirs, in the
 // same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
@@ -52,10 +52,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Mount_Attach_FullMethodName       = "/cladefs.mount.v1.Mount/Attach"
-	Mount_CreateVolume_FullMethodName = "/cladefs.mount.v1.Mount/CreateVolume"
-	Mount_Detach_FullMethodName       = "/cladefs.mount.v1.Mount/Detach"
-	Mount_List_FullMethodName         = "/cladefs.mount.v1.Mount/List"
+	Mount_Attach_FullMethodName      = "/cladefs.mount.v1.Mount/Attach"
+	Mount_CreateVdisk_FullMethodName = "/cladefs.mount.v1.Mount/CreateVdisk"
+	Mount_Detach_FullMethodName      = "/cladefs.mount.v1.Mount/Detach"
+	Mount_List_FullMethodName        = "/cladefs.mount.v1.Mount/List"
 )
 
 // MountClient is the client API for Mount service.
@@ -64,25 +64,25 @@ const (
 //
 // The control API of a FUSE mount of many stores.
 type MountClient interface {
-	// Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs volume of it
-	// into a store at DIR/TENANT/CELL/VOLUME, opened again where one is, its lease with it, each
-	// shown at MOUNTPOINT/TENANT/CELL/VOLUME. A cell of 0 is a new one, of no volumes yet.
+	// Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs vdisk of it
+	// into a store at DIR/TENANT/CELL/VDISK, opened again where one is, its lease with it, each
+	// shown at MOUNTPOINT/TENANT/CELL/VDISK. A cell of 0 is a new one, of no vdisks yet.
 	// ALREADY_EXISTS if the cell is attached; EBUSY if it is being attached or detached; NOT_FOUND if
 	// the bucket has no such cell; ESTALE if a later placement holds it. A cell attached part way
 	// detaches what it attached, at once, and fails.
 	Attach(ctx context.Context, in *AttachRequest, opts ...grpc.CallOption) (*AttachResponse, error)
-	// Makes a new Fxfs volume of a cell attached: a new branch of it, its filesystem empty, its
+	// Makes a new Fxfs vdisk of a cell attached: a new branch of it, its filesystem empty, its
 	// root directory the mounting user's, in a store at DIR/TENANT/CELL/NAME, shown at
 	// MOUNTPOINT/TENANT/CELL/NAME. NOT_FOUND if the cell is not attached; ALREADY_EXISTS if it has
-	// a volume of the name; INVALID_ARGUMENT for a name no volume has.
-	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
-	// Detaches a cell: its volumes go from the mount at once; each store is unmounted, what is
+	// a vdisk of the name; INVALID_ARGUMENT for a name no vdisk has.
+	CreateVdisk(ctx context.Context, in *CreateVdiskRequest, opts ...grpc.CallOption) (*CreateVdiskResponse, error)
+	// Detaches a cell: its vdisks go from the mount at once; each store is unmounted, what is
 	// dirty written back, once the kernel has let go of every file and directory of it, as once
 	// whatever has one open, or as its current directory, lets it go: the call returns then.
 	// NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,
 	// to attach again.
 	Detach(ctx context.Context, in *DetachRequest, opts ...grpc.CallOption) (*DetachResponse, error)
-	// The cells attached, and their volumes shown.
+	// The cells attached, and their vdisks shown.
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
 }
 
@@ -104,10 +104,10 @@ func (c *mountClient) Attach(ctx context.Context, in *AttachRequest, opts ...grp
 	return out, nil
 }
 
-func (c *mountClient) CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error) {
+func (c *mountClient) CreateVdisk(ctx context.Context, in *CreateVdiskRequest, opts ...grpc.CallOption) (*CreateVdiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateVolumeResponse)
-	err := c.cc.Invoke(ctx, Mount_CreateVolume_FullMethodName, in, out, cOpts...)
+	out := new(CreateVdiskResponse)
+	err := c.cc.Invoke(ctx, Mount_CreateVdisk_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -140,25 +140,25 @@ func (c *mountClient) List(ctx context.Context, in *ListRequest, opts ...grpc.Ca
 //
 // The control API of a FUSE mount of many stores.
 type MountServer interface {
-	// Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs volume of it
-	// into a store at DIR/TENANT/CELL/VOLUME, opened again where one is, its lease with it, each
-	// shown at MOUNTPOINT/TENANT/CELL/VOLUME. A cell of 0 is a new one, of no volumes yet.
+	// Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs vdisk of it
+	// into a store at DIR/TENANT/CELL/VDISK, opened again where one is, its lease with it, each
+	// shown at MOUNTPOINT/TENANT/CELL/VDISK. A cell of 0 is a new one, of no vdisks yet.
 	// ALREADY_EXISTS if the cell is attached; EBUSY if it is being attached or detached; NOT_FOUND if
 	// the bucket has no such cell; ESTALE if a later placement holds it. A cell attached part way
 	// detaches what it attached, at once, and fails.
 	Attach(context.Context, *AttachRequest) (*AttachResponse, error)
-	// Makes a new Fxfs volume of a cell attached: a new branch of it, its filesystem empty, its
+	// Makes a new Fxfs vdisk of a cell attached: a new branch of it, its filesystem empty, its
 	// root directory the mounting user's, in a store at DIR/TENANT/CELL/NAME, shown at
 	// MOUNTPOINT/TENANT/CELL/NAME. NOT_FOUND if the cell is not attached; ALREADY_EXISTS if it has
-	// a volume of the name; INVALID_ARGUMENT for a name no volume has.
-	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
-	// Detaches a cell: its volumes go from the mount at once; each store is unmounted, what is
+	// a vdisk of the name; INVALID_ARGUMENT for a name no vdisk has.
+	CreateVdisk(context.Context, *CreateVdiskRequest) (*CreateVdiskResponse, error)
+	// Detaches a cell: its vdisks go from the mount at once; each store is unmounted, what is
 	// dirty written back, once the kernel has let go of every file and directory of it, as once
 	// whatever has one open, or as its current directory, lets it go: the call returns then.
 	// NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,
 	// to attach again.
 	Detach(context.Context, *DetachRequest) (*DetachResponse, error)
-	// The cells attached, and their volumes shown.
+	// The cells attached, and their vdisks shown.
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	mustEmbedUnimplementedMountServer()
 }
@@ -173,8 +173,8 @@ type UnimplementedMountServer struct{}
 func (UnimplementedMountServer) Attach(context.Context, *AttachRequest) (*AttachResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Attach not implemented")
 }
-func (UnimplementedMountServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
+func (UnimplementedMountServer) CreateVdisk(context.Context, *CreateVdiskRequest) (*CreateVdiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateVdisk not implemented")
 }
 func (UnimplementedMountServer) Detach(context.Context, *DetachRequest) (*DetachResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Detach not implemented")
@@ -221,20 +221,20 @@ func _Mount_Attach_Handler(srv interface{}, ctx context.Context, dec func(interf
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Mount_CreateVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateVolumeRequest)
+func _Mount_CreateVdisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateVdiskRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(MountServer).CreateVolume(ctx, in)
+		return srv.(MountServer).CreateVdisk(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Mount_CreateVolume_FullMethodName,
+		FullMethod: Mount_CreateVdisk_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MountServer).CreateVolume(ctx, req.(*CreateVolumeRequest))
+		return srv.(MountServer).CreateVdisk(ctx, req.(*CreateVdiskRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -287,8 +287,8 @@ var Mount_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Mount_Attach_Handler,
 		},
 		{
-			MethodName: "CreateVolume",
-			Handler:    _Mount_CreateVolume_Handler,
+			MethodName: "CreateVdisk",
+			Handler:    _Mount_CreateVdisk_Handler,
 		},
 		{
 			MethodName: "Detach",

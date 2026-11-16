@@ -191,7 +191,7 @@ pub use host::{
     create_host, delete_host, host_branch, host_bucket, host_token, made_host, place_host,
     unmade_host,
 };
-pub use layout::{Description, Format, Place, Volume};
+pub use layout::{Description, Format, Place, Vdisk};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};

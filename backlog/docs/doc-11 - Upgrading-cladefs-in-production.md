@@ -3,7 +3,7 @@ id: doc-11
 title: Upgrading cladefs in production
 type: other
 created_date: '2026-10-31 20:30'
-updated_date: '2026-11-16 04:05'
+updated_date: '2026-11-16 11:25'
 ---
 # Upgrading cladefs in production (TASK-141)
 
@@ -14,7 +14,7 @@ AGENTS.md's rule, the user's (2026-11-05): **no migrations, ever**. A format cha
 | Layer | How it is versioned | What a mismatch does today |
 |---|---|---|
 | Fxfs format (guest kernel, `crates/fxfs`) | `LATEST_VERSION` 63; `EARLIEST_SUPPORTED_VERSION` is `LATEST_VERSION` (`serialized_types/types.rs`) | A filesystem of any other version is refused at mount, its version named (`FxfsError::InvalidVersion`, `EINVAL` in the guest), writing nothing; so are a manifest, and a base's layers, of another (TASK-141.1) |
-| Store files (`extent_store`) | `FORMAT`, "cladefs extent store 11" (6 named the bucket, TASK-165.6; 7 places bucket data by its location there and holds one branch, no branch records, TASK-165.7, TASK-165.8; 8 has no index, TASK-165.9; 9 a commit spanning segments, TASK-92.41; 10 logs whose headers name their segments, TASK-341; 11 a branch named with its tenant's cell, TASK-364), matched exactly | Refused, opened or deleted, by its format (`extent_store::Format`, `ENOTSUP`) |
+| Store files (`extent_store`) | `FORMAT`, "cladefs extent store 12" (6 named the bucket, TASK-165.6; 7 places bucket data by its location there and holds one branch, no branch records, TASK-165.7, TASK-165.8; 8 has no index, TASK-165.9; 9 a commit spanning segments, TASK-92.41; 10 logs whose headers name their segments, TASK-341; 11 a branch named with its tenant's cell, TASK-364; 12 the vdisk named `vdisk NAME`, not `volume NAME`, TASK-482), matched exactly | Refused, opened or deleted, by its format (`extent_store::Format`, `ENOTSUP`) |
 | Branches in a bucket (`extent_bucket`) | `layout::FORMAT` 11 (a key written once, TASK-407), first in each branch's record (TASK-165.3); each framed object's trailer ends with its frame's, `extent_frame::FORMAT` 2 (TASK-141.2, TASK-411.2) | A daemon refuses a branch of any other format, older ones too, naming it, reading nothing else of it; the collector's pass stops, deleting nothing |
 | VM process and daemon (`extentd/wire.rs`) | `wire::VERSION` 9, in `OPEN`'s `args[4]` and its reply's (TASK-141.3); `the_wire_is_its_version` fails on a change to the wire without a new one | The daemon refuses a VM process of another (`EPROTONOSUPPORT`, logging both), and the VM process a daemon of another, naming both; every request is required: a refusal of `BUILD` or `TRANSFER` fails the connection |
 | Guest and device (virtio) | `VIRTIO_EXTENT_VERSION` 1, the configuration's first field (doc-4, TASK-141.3); a snapshot's device's in its state | The driver refuses a device of another at probe, naming both; the device refuses a driver that didn't take every feature it offers (features say its configuration, no negotiation); a VMM refuses a snapshot whose device was of another |

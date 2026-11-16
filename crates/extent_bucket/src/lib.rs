@@ -163,17 +163,17 @@ pub enum Error {
     /// cladefs: the cell has no object: no such cell (TASK-364).
     #[error("no such cell")]
     NoCell,
-    /// cladefs: the cell has a volume of that name already.
-    #[error("the cell has a volume {0} already")]
-    VolumeExists(String),
-    /// cladefs: no volume may have that name ([`cell::valid_name`]).
+    /// cladefs: the cell has a vdisk of that name already.
+    #[error("the cell has a vdisk {0} already")]
+    VdiskExists(String),
+    /// cladefs: no vdisk may have that name ([`cell::valid_name`]).
     #[error(
-        "{0:?} names no volume: 1 to 64 letters, digits, '.', '_' or '-', not starting with '.'"
+        "{0:?} names no vdisk: 1 to 64 letters, digits, '.', '_' or '-', not starting with '.'"
     )]
-    VolumeName(String),
-    /// cladefs: the cell has no volume of that name.
-    #[error("the cell has no volume {0}")]
-    NoVolume(String),
+    VdiskName(String),
+    /// cladefs: the cell has no vdisk of that name.
+    #[error("the cell has no vdisk {0}")]
+    NoVdisk(String),
     /// cladefs: a fork of the point to a branch of another tenant's cell than the point's, which the
     /// point's record doesn't say is shared ([`record::Record::shared`], TASK-395.7).
     #[error("branch {0} is a point of another tenant's, not shared")]

@@ -209,6 +209,10 @@ _Avoid_: volume, virtual disk, disk
 One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
 _Avoid_: volume for a vdisk
 
+**File set**:
+Named files kept straight on an extent device, with no filesystem between, each committed alone: what a SQLite or memory vdisk holds (`extent_files`).
+_Avoid_: volume
+
 **Fork**:
 A new branch made from a parent's commit or a point, sharing its extents, in O(1).
 _Avoid_: clone (git's alone), restore (a VM snapshot's alone), copy
@@ -496,9 +500,9 @@ code does not have yet are said so.
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
 - **remote**: retired, in code too; say **bucket** or **daemon client** (`CLADEFSD_BUCKET`).
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
-- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code still says
-  volume (`cell::Volume`, `CreateVolume`); `cell::Vdisk`, `CreateVdisk` once renamed, TASK-475 having
-  landed.
+- **volume**: Fxfs's alone; a cell's named branch is a **vdisk** (`cell::Vdisk`, `CreateVdisk`,
+  `VdiskKind`, `MemoryVdisk`). Named files on an extent device, with no filesystem, are a
+  **file set** (`extent_files::FileSet`).
 - **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
   StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
