@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   Log appends make one O_DIRECT write and one ftruncate per record since
   TASK-433.2: measure, then batch a flush into one write
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:56'
-updated_date: '2026-11-16 02:12'
+updated_date: '2026-11-16 03:25'
 labels: []
 dependencies: []
 references:
@@ -34,9 +34,9 @@ Found by the verifying-reviewer agent (TASK-444.9) on 0ef6fa1b4; unconfirmed unt
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -52,6 +52,8 @@ Found by the verifying-reviewer agent (TASK-444.9) on 0ef6fa1b4; unconfirmed unt
 
 <!-- SECTION:NOTES:BEGIN -->
 A/B run 2026-11-15 on ubu1, one fxjob --bench job, sides A 39f34921c (parent), B 0ef6fa1b4, C c78d0dbf2 (main), each its own worktree and target, binaries checked for a side-only string (direct.rs's 'a block-aligned layout': A 0, B 1, C 1); 4 rounds interleaved, TMPDIR on ext4 /mnt/fxdax-scratch (a ZFS zvol). Medians rounds 2-4: durable flush A 5.6 / B 6.3 / C 5.4 ms; burst commit flush A 42.8 / B 46.6 / C 235.2 ms; burst write A 295 / B 297 / C 690 us. B vs A within spread (+3.8 ms over ~1024 records): no batching. AC #2 not applicable (burst latency does not grow with records per flush). C's burst regression filed as TASK-433.8. Results: docs/measurements/ubu1-log-appends-ab-2026-11-15.md.
+
+DoD: no code changed; main at 41e2ce9af passes the workspace on macOS and ubu1 (TASK-433.6's runs); upstream check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
