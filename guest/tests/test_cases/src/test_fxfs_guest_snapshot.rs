@@ -240,15 +240,14 @@ mod host {
     /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
     /// point isn't (TASK-154): the tenant granted `dir`, and the point's branch, as the daemon says
     /// it, not as the snapshot does, made a store at `point` in it. Returns the tenant's socket,
-    /// given to the jail's user, if Firecracker runs in one. The tenant is named and of an ID in
-    /// the bucket (TASK-364); the point stays the snapshot's tenant's, and the restores are the
-    /// tenant's.
+    /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
+    /// (TASK-364); the point stays the snapshot's tenant's, and the restores are the tenant's.
     fn take_for_tenant(
         extentd: &Path,
         snapshot: &Path,
         point: &Path,
         dir: &Path,
-        tenant: (&str, u64),
+        tenant: u64,
     ) -> anyhow::Result<PathBuf> {
         let control = crate::common::control(extentd)?;
         let mut taken = snapshot.as_os_str().to_owned();
@@ -409,14 +408,8 @@ mod host {
                     Mode::TenantMigrate => {
                         std::fs::create_dir_all(&elsewhere)?;
                         let point = elsewhere.join("point");
-                        let tenant = format!("restored-{name}");
-                        let socket = take_for_tenant(
-                            &extentd,
-                            &snapshot,
-                            &point,
-                            &elsewhere,
-                            (&tenant, id),
-                        )?;
+                        let socket =
+                            take_for_tenant(&extentd, &snapshot, &point, &elsewhere, id)?;
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),

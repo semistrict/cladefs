@@ -26,7 +26,7 @@ fn a_database_on_an_image_survives_closing() {
 fn an_encrypted_database_on_an_image_survives_closing() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
-    // The tenant of the images `Storage` makes: the common tenant's, 0.
+    // The tenant of the images `Storage` makes: the default tenant's, 0.
     kms.create(0).unwrap();
     cladefs::remote::set_kms(Arc::new(kms)).unwrap();
     assert_eq!(survives_closing("encrypted"), Vec::<String>::new());

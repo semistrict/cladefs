@@ -580,13 +580,13 @@ fn each_write_of_a_restore_going_wrong() {
     }));
 }
 
-/// TASK-411.4: the host's KMS holding the common tenant's KEK, which every store, point and
+/// TASK-411.4: the host's KMS holding the default tenant's KEK, which every store, point and
 /// restore here is of: their cells encrypted, each restore's child keeping the keys it inherits
 /// rewrapped under its own cell's KEK. Returns what keeps the KMS's directory.
 fn encrypted() -> tempfile::TempDir {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
-    kms.create(crate::host_store::NO_TENANT).unwrap();
+    kms.create(crate::host_store::DEFAULT_TENANT).unwrap();
     crate::remote::set_kms(Arc::new(kms)).unwrap();
     keys
 }

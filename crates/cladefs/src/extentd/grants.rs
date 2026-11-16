@@ -15,13 +15,10 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// The longest name a tenant has.
-const NAME_MAX: usize = 64;
-
-/// The tenants granted, by name, and the directory their sockets are in.
+/// The tenants granted, by ID, and the directory their sockets are in.
 pub(super) struct Grants {
     sockets: PathBuf,
-    granted: Mutex<HashMap<String, Granted>>,
+    granted: Mutex<HashMap<u64, Granted>>,
 }
 
 /// A tenant granted its socket.
@@ -38,39 +35,34 @@ impl Grants {
         Self { sockets, granted: Mutex::new(HashMap::new()) }
     }
 
-    /// Grants the tenant `name`, of the ID `id` in the bucket (TASK-364), not 0 (`EINVAL`),
-    /// whose stores are in `dir`, its socket, given to `uid` and `gid` (the daemon's own, where not
-    /// given), and returns its path: a new tenant's, which a thread of its own serves; or, granted
-    /// already, its socket, given again (`EEXIST` with another directory or ID). A tenant revoked
-    /// whose VM processes live on is the one granted again, its socket new: those it connects then
-    /// share its arena with them, and the stores they have open (TASK-79.36), which, another
-    /// tenant's, they could not; of another ID, `EEXIST`.
+    /// Grants the tenant of the ID `id` in the bucket (TASK-364), not the default tenant's
+    /// (`EINVAL`), whose stores are in `dir`, its socket, given to `uid` and `gid` (the daemon's
+    /// own, where not given), and returns its path: a new tenant's, which a thread of its own
+    /// serves; or, granted already, its socket, given again (`EEXIST` with another directory). A
+    /// tenant revoked whose VM processes live on is the one granted again, its socket new: those it
+    /// connects then share its arena with them, and the stores they have open (TASK-79.36), which,
+    /// another tenant's, they could not.
     pub fn grant(
         &self,
-        name: &str,
         id: u64,
         dir: &Path,
         (uid, gid): (Option<u32>, Option<u32>),
     ) -> Result<PathBuf, Errno> {
-        check_name(name)?;
-        if id == crate::host_store::NO_TENANT {
-            return Err(Errno::EINVAL);
-        }
+        check_tenant(id)?;
         let dir = dir.canonicalize().map_err(errno)?;
         let mut granted = self.granted.lock().unwrap();
-        if let Some(grant) = granted.get(name) {
-            if grant.tenant.dir() != Some(&dir) || grant.tenant.id() != id {
+        if let Some(grant) = granted.get(&id) {
+            if grant.tenant.dir() != Some(&dir) {
                 return Err(Errno::EEXIST);
             }
             give(&grant.socket, uid, gid)?;
             return Ok(grant.socket.clone());
         }
-        let tenant = match super::memory::alive(name, &dir) {
-            Some(tenant) if tenant.id() != id => return Err(Errno::EEXIST),
+        let tenant = match super::memory::alive(id, &dir) {
             Some(tenant) => tenant,
-            None => Tenant::new(name, id, &dir).map_err(errno)?,
+            None => Tenant::new(id, &dir).map_err(errno)?,
         };
-        let socket = self.sockets.join(format!("{name}.sock"));
+        let socket = self.sockets.join(socket_name(id));
         remove_stale(&socket)?;
         // Its mode and owner from the moment it is there, not the umask's until given (TASK-159).
         let listener = super::bind_given(&socket, MODE, uid, gid).map_err(errno)?;
@@ -86,7 +78,7 @@ impl Grants {
             return Err(errno);
         }
         let grant = Granted { tenant, socket: socket.clone(), listener };
-        granted.insert(name.to_owned(), grant);
+        granted.insert(id, grant);
         Ok(socket)
     }
 
@@ -108,10 +100,10 @@ impl Grants {
         tenant_of(one) == tenant_of(other)
     }
 
-    /// Revokes the tenant `name`'s grant (`ENOENT` if it has none): its socket goes, and takes no
-    /// more connections. The tenant goes once its VM processes connected do.
-    pub fn revoke(&self, name: &str) -> Result<(), Errno> {
-        let grant = self.granted.lock().unwrap().remove(name).ok_or(Errno::ENOENT)?;
+    /// Revokes the grant of the tenant of the ID `id` (`ENOENT` if it has none): its socket goes,
+    /// and takes no more connections. The tenant goes once its VM processes connected do.
+    pub fn revoke(&self, id: u64) -> Result<(), Errno> {
+        let grant = self.granted.lock().unwrap().remove(&id).ok_or(Errno::ENOENT)?;
         if let Err(err) = std::fs::remove_file(&grant.socket) {
             log::warn!("extentd: removing {}: {err}", grant.socket.display());
         }
@@ -121,12 +113,19 @@ impl Grants {
     }
 }
 
-/// `EINVAL` unless `name` is a tenant's: letters, digits, `-`, `_` and `.`, not first, at most
-/// [`NAME_MAX`], so that its socket's name is plain.
-pub(super) fn check_name(name: &str) -> Result<(), Errno> {
-    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
-    let fits = (1..=NAME_MAX).contains(&name.len()) && !name.starts_with('.');
-    if fits && name.chars().all(allowed) { Ok(()) } else { Err(Errno::EINVAL) }
+/// `EINVAL` if `tenant` is the default tenant's ID, which no grant has, and so no limit, weight or
+/// bytes in flight of its own: the default tenant is every tenant's with them.
+pub(super) fn check_tenant(tenant: u64) -> Result<(), Errno> {
+    match tenant {
+        crate::host_store::DEFAULT_TENANT => Err(Errno::EINVAL),
+        _ => Ok(()),
+    }
+}
+
+/// The name of the socket of the tenant `tenant`, in the daemon's directory of them: its ID, in
+/// hexadecimal, as cells name it.
+pub(super) fn socket_name(tenant: u64) -> String {
+    format!("{tenant:x}.sock")
 }
 
 /// A tenant's socket's mode: its owner and group alone connect, those it is given to.
@@ -158,17 +157,15 @@ fn errno(err: std::io::Error) -> Errno {
 
 #[cfg(test)]
 mod tests {
-    use super::check_name;
+    use super::{check_tenant, socket_name};
     use crate::Errno;
 
-    /// Tenants' names name their sockets, plainly.
+    /// Tenants' IDs name their sockets, in hexadecimal; the default tenant's is refused.
     #[test]
-    fn names_are_plain() {
-        for name in ["acme", "acme-2", "a_b.c", &"a".repeat(64)] {
-            assert_eq!(check_name(name), Ok(()), "{name}");
-        }
-        for name in ["", ".", "..", ".hidden", "a/b", "a b", "ä", &"a".repeat(65)] {
-            assert_eq!(check_name(name), Err(Errno::EINVAL), "{name}");
-        }
+    fn ids_name_sockets() {
+        assert_eq!(socket_name(0xa), "a.sock");
+        assert_eq!(socket_name(u64::MAX), "ffffffffffffffff.sock");
+        assert_eq!(check_tenant(1), Ok(()));
+        assert_eq!(check_tenant(crate::host_store::DEFAULT_TENANT), Err(Errno::EINVAL));
     }
 }

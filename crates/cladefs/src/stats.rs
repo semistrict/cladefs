@@ -5,12 +5,12 @@
 //! What serving extent stores cost this process, counted since it started, and what its VM
 //! processes' changes to their windows cost them, as they told it: the extent daemon's, which it
 //! reports to whoever asks ([`crate::extentd::stats`]), for benchmarks to compare.
-//! Counters only grow; a measurement is the difference of two snapshots ([`Stats::since`]).
+//! Counters only grow; a measurement is the difference of two readings ([`Stats::since`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-/// A snapshot of the counters.
+/// The counters, as read at one moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// `MAP` requests.
@@ -148,7 +148,7 @@ pub(crate) enum Counter {
 /// The counters [`Counter`] names, which this module keeps.
 const COUNTED: usize = 32;
 
-/// The counters a snapshot holds: those it keeps, and the extent store's.
+/// The counters a reading holds: those it keeps, and the extent store's.
 const COUNTERS: usize = COUNTED + 3;
 
 static COUNTS: [AtomicU64; COUNTED] = [const { AtomicU64::new(0) }; COUNTED];

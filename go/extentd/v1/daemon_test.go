@@ -109,7 +109,7 @@ func TestDaemon(t *testing.T) {
 	if err := os.Mkdir(stores, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	granted, err := client.Grant(ctx, &extentdv1.GrantRequest{Tenant: "a", Dir: stores, Id: 1})
+	granted, err := client.Grant(ctx, &extentdv1.GrantRequest{Tenant: 0xa, Dir: stores})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestDaemon(t *testing.T) {
 		t.Errorf("Grant's socket = %q, want %q", granted.Socket, want)
 	}
 	// Granting the tenant again, of another directory.
-	_, err = client.Grant(ctx, &extentdv1.GrantRequest{Tenant: "a", Dir: dir, Id: 1})
+	_, err = client.Grant(ctx, &extentdv1.GrantRequest{Tenant: 0xa, Dir: dir})
 	if !errors.Is(err, syscall.EEXIST) {
 		t.Errorf("Grant of another directory: errors.Is(%v, EEXIST) = false", err)
 	}

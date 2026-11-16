@@ -216,7 +216,7 @@ impl Keys for HashMap<KeyId, Secret> {
 /// DEK's subkeys, from which salt (TASK-411.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Encryption {
-    /// In the clear: an object of a cell with no key (tenant 0, tests).
+    /// In the clear: an object of a cell with no key (the default tenant's, tests).
     None,
     /// Its parts encrypted with AES-256-GCM, its footer and table authenticated with HMAC-SHA256,
     /// under subkeys HKDF-SHA256 derives from the DEK `key` names and `salt`.

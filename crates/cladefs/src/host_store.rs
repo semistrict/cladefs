@@ -36,10 +36,10 @@ use std::sync::{Arc, Mutex};
 /// of it.
 pub(crate) const BLOCK_SIZE: u32 = 4096;
 
-/// The tenant of stores made for no tenant of the host's (TASK-364), the common tenant: the cladefs
+/// The default tenant (TASK-364), of the stores made for no tenant of the host's: the cladefs
 /// CLI's images, an ungranted caller's stores, public bases, tests'. Its stores with writers alone
 /// fork into other tenants' cells ([`may_fork_into`], TASK-395.9).
-pub(crate) const NO_TENANT: u64 = 0;
+pub(crate) const DEFAULT_TENANT: u64 = 0;
 
 /// A new cell of `tenant`'s, for a store made alone or a fork (TASK-364): random, so that cells
 /// made apart are apart.
@@ -54,9 +54,9 @@ pub(crate) fn fork_cell(parent: Branch) -> Cell {
 
 /// cladefs: whether a fork of `parent`, whose uploader is `remote`, may make a branch of `cell`
 /// (TASK-395.9): `EACCES` if `parent` has a writer and `cell` is another tenant's than its own,
-/// unless its own is the common tenant's ([`NO_TENANT`]), as the daemon's own stores and public
-/// bases are. Inheritance across tenants is the common tenant's and shared points' alone: a fork of
-/// a point is checked at the read of the point's record its child's making makes instead
+/// unless its own is the default tenant's ([`DEFAULT_TENANT`]), as the daemon's own stores and
+/// public bases are. Inheritance across tenants is the default tenant's and shared points' alone: a
+/// fork of a point is checked at the read of the point's record its child's making makes instead
 /// (`branch::finish_point_fork`, TASK-395.7).
 pub(crate) fn may_fork_into(
     parent: Branch,
@@ -64,12 +64,12 @@ pub(crate) fn may_fork_into(
     cell: Cell,
 ) -> Result<(), Error> {
     let tenant = parent.cell.tenant;
-    if remote.is_point() || tenant == NO_TENANT || tenant == cell.tenant {
+    if remote.is_point() || tenant == DEFAULT_TENANT || tenant == cell.tenant {
         return Ok(());
     }
     let refused = format!(
         "forking branch {parent} to a cell of tenant {}: a branch with a writer forks to another \
-         tenant's cell only from the common tenant's",
+         tenant's cell only from the default tenant's",
         cell.tenant
     );
     Err(Error::new(anyhow::Error::new(Errno::EACCES).context(refused)))
@@ -83,12 +83,12 @@ pub(crate) fn new_branch(bucket: &Bucket, cell: Cell) -> Result<Branch, Failure>
     Ok(Branch { cell, id })
 }
 
-/// A branch of a new cell of no tenant's, of a random ID no allocator gave: for tests that write
-/// a branch's objects themselves, as no store does, or name a fork's child
+/// A branch of a new cell of the default tenant's, of a random ID no allocator gave: for tests
+/// that write a branch's objects themselves, as no store does, or name a fork's child
 /// (`ExtentStore::fork_to`).
 #[cfg(test)]
 pub(crate) fn new_alone() -> Branch {
-    Branch { cell: new_cell(NO_TENANT), id: rand::random::<u64>().max(1) }
+    Branch { cell: new_cell(DEFAULT_TENANT), id: rand::random::<u64>().max(1) }
 }
 
 /// A child of a fork of `parent`, of a random ID no allocator gave, for tests that name it
@@ -396,7 +396,7 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// once the point is deleted (`Remote::forked`), and with `EACCES` if the child is of another
 /// tenant's cell than the point, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
-/// made, unless the store is the common tenant's ([`may_fork_into`], TASK-395.9).
+/// made, unless the store is the default tenant's ([`may_fork_into`], TASK-395.9).
 ///
 /// cladefs: a fork of an encrypted store into another cell, as every fork here is, gives its child
 /// the keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
@@ -574,9 +574,9 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
-    /// A new branch of a new cell of no tenant's.
+    /// A new branch of a new cell of the default tenant's.
     fn new() -> BranchOf {
-        BranchOf::New(new_cell(NO_TENANT))
+        BranchOf::New(new_cell(DEFAULT_TENANT))
     }
 
     /// TASK-196: a store its maker never made whole is no store: it refuses to open, and
@@ -620,7 +620,7 @@ mod tests {
         let taken = extent_remote::layout::objectid_block(block);
         assert!(upload::block_on(extent_remote::bucket::get(&*bucket, &taken)).unwrap().is_some());
 
-        let absent = Branch { cell: new_cell(NO_TENANT), id: second.id + 1 };
+        let absent = Branch { cell: new_cell(DEFAULT_TENANT), id: second.id + 1 };
         let path = dir.path().join("absent");
         let refused = create_unmade(
             &path,
