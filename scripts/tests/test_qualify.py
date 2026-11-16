@@ -2,10 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of the qualification before a pin (TASK-330.4): scripts/qualify-budgets.py's summary of
-the daemons' budgets, scripts/bench-ab.py's report of what moved and what failed between a pin
-and a candidate, and what scripts/qualify.sh and scripts/test-e2e.sh's CLADEFS_E2E_HARNESS refuse
-before they run anything."""
+"""Tests of the qualification before a candidate goes to LangSmith (TASK-330.4):
+scripts/qualify-budgets.py's summary of the daemons' budgets, scripts/bench-ab.py's report of what
+moved and what failed between LangSmith's pin and a candidate, and what scripts/qualify.sh and
+scripts/test-e2e.sh's CLADEFS_E2E_HARNESS refuse before they run anything."""
 
 import contextlib
 import io
@@ -102,8 +102,8 @@ class Budgets(unittest.TestCase):
                          "qualify-budgets.py: no CPU budget for nightly: CPU_BUDGETS")
 
     def test_a_budget_passed_and_a_daemon_that_says_none_fail(self):
-        """A pin's daemon from before TASK-330.2 says nothing its budgets weigh: no check passes it,
-        and the summary says so rather than nothing."""
+        """LangSmith's pin's daemon from before TASK-330.2 says nothing its budgets weigh: no check
+        passes it, and the summary says so rather than nothing."""
         self.part("sandboxes", daemon("fxfs-guest-sandboxes/host-a-stats.txt"),
                   daemon("extentd-stats.txt", checks=[("memory", False, "anonymous memory 4 GiB")]))
         status, said, report = self.summary("sandboxes", "soak")

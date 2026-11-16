@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 
@@ -29,7 +30,7 @@ type fake struct {
 }
 
 func (fake) Grant(_ context.Context, req *extentdv1.GrantRequest) (*extentdv1.GrantResponse, error) {
-	return &extentdv1.GrantResponse{Socket: "/run/tenants/" + req.Tenant + ".sock"}, nil
+	return &extentdv1.GrantResponse{Socket: "/run/tenants/" + strconv.FormatUint(req.Tenant, 16) + ".sock"}, nil
 }
 
 func (fake) StatStore(ctx context.Context, req *extentdv1.StatStoreRequest) (*extentdv1.StatStoreResponse, error) {
@@ -74,7 +75,7 @@ func client(t *testing.T, socket string) *extentdv1.Client {
 
 func TestCalls(t *testing.T) {
 	client := client(t, serve(t))
-	granted, err := client.Grant(t.Context(), &extentdv1.GrantRequest{Tenant: "a", Dir: "/stores/a", Id: 1})
+	granted, err := client.Grant(t.Context(), &extentdv1.GrantRequest{Tenant: 0xa, Dir: "/stores/a"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 const MIB: usize = 1 << 20;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
 /// Segments of a few parts, and extents on their own from 8 MiB.
 const OPTIONS: Options = Options {

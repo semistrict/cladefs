@@ -31,7 +31,7 @@
 //!   its memory, each a mapping the host's `vm.max_map_count` limits, as it last said with its
 //!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, as it said as
 //!   it made its window, from the limit the daemon told it (TASK-172).
-//! - `cladefsd_<counter>_total`: the counters the control API's `GetStats` reports
+//! - `cladefsd_<counter>_total`: the counters the control API's `GetCounters` reports
 //!   (`crate::stats::Stats::named`, its dashes underscores): maps, faults, page-ins, reads and
 //!   their nanoseconds and bytes; the VM processes' changes to their windows (`stage_ops`) and
 //!   their nanoseconds in them (`stage_ns`), whose ratio is what a window change costs a VM process.
@@ -39,12 +39,12 @@
 //!   `cladefsd_memory_capacity_bytes`: the memory the daemon's cached extents' pages
 //!   hold, every tenant's together, its limit, if any, and the most the daemon's kernel has
 //!   (TASK-50.3); `cladefsd_tenant_memory_bytes{tenant}` and
-//!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by a hash of its name
-//!   (`super::memory::label`), not the name.
+//!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
+//!   hexadecimal, as cells name it.
 //! - `cladefsd_disk_bytes` and `cladefsd_disk_limit_bytes`: the host's disk every
 //!   tenant's directory takes together, as last counted, and its limit, if any (TASK-94);
 //!   `cladefsd_tenant_disk_bytes{tenant}` and `cladefsd_tenant_disk_limit_bytes{tenant}`:
-//!   each tenant's alive, by a hash of its name (`super::disk`).
+//!   each tenant's alive, by its ID (`super::disk`).
 //! - `cladefsd_upload_pending_bytes{branch}`, `cladefsd_upload_oldest_pending_seconds
 //!   {branch}` and `cladefsd_upload_stalls_total{branch}`: for each open store whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
@@ -53,10 +53,10 @@
 //! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
 //!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
 //!   every store's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
-//!   (`crate::remote::upload_memory`, TASK-317).
+//!   (`crate::bucket::upload_memory`, TASK-317).
 //! - cladefs: `cladefsd_part_cache_bytes` and `cladefsd_part_cache_capacity_bytes`: what
 //!   the host's part cache keeps, once a store opened it, and its budget,
-//!   `CLADEFSD_CACHE_BYTES` (TASK-406.1).
+//!   `CLADEFSD_PART_CACHE_BYTES` (TASK-406.1).
 //! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the stores' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
 //!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
@@ -224,7 +224,7 @@ pub fn render() -> String {
          built of, as they said."
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
-    for ((branch, commit), count) in super::snapshot::vm_builds() {
+    for ((branch, commit), count) in super::stats::vm_builds() {
         let _ = writeln!(out, "{name}{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}");
     }
 
@@ -240,8 +240,8 @@ pub fn render() -> String {
     let _ = writeln!(out, "{name} {}", crate::extents::open_maps_refused());
 
     // cladefs: each VM process's (TASK-111.5).
-    let vms = super::snapshot::vms();
-    type Gauge = fn(&super::snapshot::Vm) -> Option<u64>;
+    let vms = super::stats::vms();
+    type Gauge = fn(&super::stats::Vm) -> Option<u64>;
     let series: [(&str, &str, Gauge); 6] = [
         ("vm_window_mappings", "Ranges a VM's DAX window maps.", |vm| Some(vm.window?.mappings)),
         ("vm_window_mapped_bytes", "Bytes those ranges span.", |vm| Some(vm.window?.mapped_bytes)),
@@ -277,18 +277,17 @@ pub fn render() -> String {
 
     let tenants = super::memory::tenants();
     let name = "cladefsd_tenant_memory_bytes";
-    let _ =
-        writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its name's hash.");
+    let _ = writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
-        let _ = writeln!(out, "{name}{{tenant=\"{}\"}} {}", tenant.label, tenant.bytes);
+        let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
     }
     let name = "cladefsd_tenant_memory_limit_bytes";
-    let _ = writeln!(out, "# HELP {name} The limit of a tenant's memory, by its name's hash.");
+    let _ = writeln!(out, "# HELP {name} The limit of a tenant's memory, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
         if let Some(limit) = tenant.limit {
-            let _ = writeln!(out, "{name}{{tenant=\"{}\"}} {limit}", tenant.label);
+            let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {limit}", tenant.tenant);
         }
     }
     // cladefs: their disks' (TASK-94).
@@ -296,31 +295,30 @@ pub fn render() -> String {
     let name = "cladefsd_tenant_disk_bytes";
     let _ = writeln!(
         out,
-        "# HELP {name} The host's disk a tenant's directory takes, as last counted, by its name's \
-         hash."
+        "# HELP {name} The host's disk a tenant's directory takes, as last counted, by its ID."
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
-        let _ = writeln!(out, "{name}{{tenant=\"{}\"}} {}", tenant.label, tenant.bytes);
+        let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
     }
     let name = "cladefsd_tenant_disk_limit_bytes";
-    let _ = writeln!(out, "# HELP {name} The limit of a tenant's disk, by its name's hash.");
+    let _ = writeln!(out, "# HELP {name} The limit of a tenant's disk, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
         if let Some(limit) = tenant.limit {
-            let _ = writeln!(out, "{name}{{tenant=\"{}\"}} {limit}", tenant.label);
+            let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {limit}", tenant.tenant);
         }
     }
 
     for (name, value) in crate::stats::stats().named() {
         let name = format!("cladefsd_{}_total", name.replace('-', "_"));
-        let _ = writeln!(out, "# HELP {name} As the control API's GetStats reports it.");
+        let _ = writeln!(out, "# HELP {name} As the control API's GetCounters reports it.");
         let _ = writeln!(out, "# TYPE {name} counter");
         let _ = writeln!(out, "{name} {value}");
     }
 
     // cladefs: what the uploads hold of the objects they upload (TASK-317).
-    let memory = crate::remote::upload_memory();
+    let memory = crate::bucket::upload_memory();
     for (name, help, value) in [
         (
             "cladefsd_upload_held_bytes",
@@ -460,7 +458,7 @@ pub fn render() -> String {
     }
 
     if let Some(stats) = super::stores::bucket_stats() {
-        use extent_remote::store::{Request, Upload};
+        use extent_bucket::object_bucket::{Request, Upload};
         let name = "cladefsd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
         let _ = writeln!(out, "# TYPE {name} counter");
@@ -503,7 +501,7 @@ pub fn render() -> String {
 }
 
 /// The daemon's gauges, as of now, each with its name, without `cladefsd_`, and what it is:
-/// what its metrics and snapshots report (TASK-111.4). The memory's limit only if it has one, and
+/// what its metrics and stats report (TASK-111.4). The memory's limit only if it has one, and
 /// the disk's.
 pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
     let (entries, live) = (crate::cache::entries(), crate::dax::live());

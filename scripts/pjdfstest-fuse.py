@@ -33,23 +33,23 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN = ROOT / "scripts" / "lib" / "pjdfstest.sh"
+PINNED = ROOT / "scripts" / "lib" / "pjdfstest.sh"
 KNOWN = ROOT / "scripts" / "pjdfstest-fuse-known"
 # The stores' size: room for what pjdfstest makes, which is little.
 CAPACITY = 1 << 30
 
 
-def pin():
+def pinned_version():
     """The repository and commit scripts/lib/pjdfstest.sh pins, unless the environment says."""
-    text = PIN.read_text()
+    text = PINNED.read_text()
     found = {name: re.search(rf"{name}=\$\{{{name}:-([^}}]+)\}}", text).group(1)
              for name in ("PJDFSTEST_REPO", "PJDFSTEST_COMMIT")}
     return tuple(os.environ.get(name, value) for name, value in found.items())
 
 
 def build(work):
-    """pjdfstest built at the pin in `work`, unless it is already: its directory."""
-    repo, commit = pin()
+    """pjdfstest built at its pinned version in `work`, unless it is already: its directory."""
+    repo, commit = pinned_version()
     source = work / "pjdfstest"
     built = work / "pjdfstest.commit"
     if built.exists() and built.read_text() == commit and (source / "pjdfstest").exists():

@@ -5,11 +5,11 @@
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
 // cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
 // mount, however many stores: one OS mount, not one per store (TASK-475.2). Attach takes a cell of
-// the daemon's bucket, as its holder, and every Fxfs volume of it into a store at
-// DIR/TENANT/CELL/VOLUME, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and
+// the daemon's bucket, as its holder, and every Fxfs vdisk of it into a store at
+// DIR/TENANT/CELL/VDISK, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VDISK, TENANT and
 // CELL in 16 hexadecimal digits as the bucket's keys have them; Detach writes them back, so that
-// another host may take the cell. A cell's other volumes are not shown: its SQLite volumes'
-// databases open through sqlite_extents' VFS alone, and its volumes VMs attach are theirs, in the
+// another host may take the cell. A cell's other vdisks are not shown: its SQLite vdisks'
+// databases open through sqlite_extents' VFS alone, and its vdisks VMs attach are theirs, in the
 // same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
@@ -40,25 +40,25 @@ option go_package = "github.com/semistrict/cladefs/go/mount/v1;mountv1";
 
 // The control API of a FUSE mount of many stores.
 service Mount {
-  // Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs volume of it
-  // into a store at DIR/TENANT/CELL/VOLUME, opened again where one is, its lease with it, each
-  // shown at MOUNTPOINT/TENANT/CELL/VOLUME. A cell of 0 is a new one, of no volumes yet.
+  // Attaches a cell of the mount's bucket: takes it, as its holder, and every Fxfs vdisk of it
+  // into a store at DIR/TENANT/CELL/VDISK, opened again where one is, its lease with it, each
+  // shown at MOUNTPOINT/TENANT/CELL/VDISK. A cell of 0 is a new one, of no vdisks yet.
   // ALREADY_EXISTS if the cell is attached; EBUSY if it is being attached or detached; NOT_FOUND if
   // the bucket has no such cell; ESTALE if a later placement holds it. A cell attached part way
   // detaches what it attached, at once, and fails.
   rpc Attach(AttachRequest) returns (AttachResponse);
-  // Makes a new Fxfs volume of a cell attached: a new branch of it, its filesystem empty, its
+  // Makes a new Fxfs vdisk of a cell attached: a new branch of it, its filesystem empty, its
   // root directory the mounting user's, in a store at DIR/TENANT/CELL/NAME, shown at
   // MOUNTPOINT/TENANT/CELL/NAME. NOT_FOUND if the cell is not attached; ALREADY_EXISTS if it has
-  // a volume of the name; INVALID_ARGUMENT for a name no volume has.
-  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
-  // Detaches a cell: its volumes go from the mount at once; each store is unmounted, what is
+  // a vdisk of the name; INVALID_ARGUMENT for a name no vdisk has.
+  rpc CreateVdisk(CreateVdiskRequest) returns (CreateVdiskResponse);
+  // Detaches a cell: its vdisks go from the mount at once; each store is unmounted, what is
   // dirty written back, once the kernel has let go of every file and directory of it, as once
   // whatever has one open, or as its current directory, lets it go: the call returns then.
   // NOT_FOUND if the cell is not attached; EBUSY if it is being attached or detached. DIR stays,
   // to attach again.
   rpc Detach(DetachRequest) returns (DetachResponse);
-  // The cells attached, and their volumes shown.
+  // The cells attached, and their vdisks shown.
   rpc List(ListRequest) returns (ListResponse);
 }
 
@@ -76,12 +76,12 @@ message AttachRequest {
 message AttachResponse {
   // The cell: the one asked for, or the new one made.
   uint64 cell = 1;
-  // Its volumes shown, by name.
-  repeated Volume volumes = 2;
+  // Its vdisks shown, by name.
+  repeated Vdisk vdisks = 2;
 }
 
-// What volume to make, and in what cell.
-message CreateVolumeRequest {
+// What vdisk to make, and in what cell.
+message CreateVdiskRequest {
   // The tenant.
   uint64 tenant = 1;
   // Its cell, attached.
@@ -93,8 +93,8 @@ message CreateVolumeRequest {
   uint64 capacity = 4;
 }
 
-// The volume made.
-message CreateVolumeResponse {
+// The vdisk made.
+message CreateVdiskResponse {
   // Its branch, a new one of the cell's.
   uint64 branch = 1;
 }
@@ -128,12 +128,12 @@ message AttachedCell {
   uint64 tenant = 1;
   // Its cell.
   uint64 cell = 2;
-  // Its volumes shown, by name.
-  repeated Volume volumes = 3;
+  // Its vdisks shown, by name.
+  repeated Vdisk vdisks = 3;
 }
 
-// A volume of a cell, shown in the mount.
-message Volume {
+// A vdisk of a cell, shown in the mount.
+message Vdisk {
   // Its name in the cell.
   string name = 1;
   // The branch its store holds.

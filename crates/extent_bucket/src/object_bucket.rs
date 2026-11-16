@@ -1,0 +1,2066 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! A bucket of S3 or GCS, or of anything else the `object_store` crate reaches, under a prefix.
+//!
+//! Branches rely on conditional writes (doc-7, The head): a create where an object is must fail,
+//! and an update of a version that is not the object's. `object_store` sends S3's `If-None-Match`
+//! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a store honours them
+//! before anything relies on it, once for each bucket ([`ObjectBucket::probed`]).
+//!
+//! A bucket counts the requests it makes, by kind, those that fail too, which object storage bills,
+//! and the bytes it uploads, by kind of object, and downloads ([`ObjectBucket::stats`]).
+//!
+//! cladefs: requests that fail, which the helpers of [`crate::bucket`] retry until they answer, it
+//! counts by kind ([`Stats::failures`]) and logs, a warning naming the store's error, the first of
+//! a run of failures of a kind and then every [`FAILING_EVERY`], with how many failed, and once
+//! the kind answers again (TASK-314): a bucket that keeps failing, full, out of reach or refusing
+//! its credentials, stalls its stores' guests' commits at their lag bound (doc-7, decision 3),
+//! which the log says why of. And once a write fails, writes of its kind take turns ([`Turns`],
+//! TASK-382): one at a time, probing the bucket, until one is answered, then more as more are.
+//!
+//! cladefs: a level of keys listed by delimiter, it lists a page a request where the store pages
+//! (S3, GCS and Azure, [`PaginatedListStore`]), as many prefixes and objects as the page asks, never
+//! the whole level (TASK-395.5): a tenant's millions of cells are listed a page at a time. Files
+//! and memory list a level whole, which their pages are cut out of: a directory is read whole by
+//! any listing of it, and memory has nothing cheaper.
+//!
+//! cladefs: every reader of a bucket reads it through an `ObjectBucket`, which warns of reading
+//! what the collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a
+//! marks object is, as a bucket reads the newest every [`crate::marks::REFRESH`] alongside a read
+//! of its own.
+
+use crate::bucket::{
+    Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Version,
+};
+use crate::client::Client;
+use crate::layout::{self, Kind};
+use futures::{StreamExt as _, TryStreamExt as _, stream};
+use object_store::list::{PaginatedListOptions, PaginatedListStore};
+use object_store::path::Path;
+use object_store::{
+    GetOptions, GetRange, ObjectMeta, ObjectStore, PutOptions, PutPayload, UpdateVersion,
+};
+use std::future::Future;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A bucket's objects under a prefix.
+pub struct ObjectBucket {
+    store: Arc<dyn ObjectStore>,
+    /// cladefs: the same store, which lists a level of keys a page a request, if it does (S3, GCS,
+    /// Azure): none for files and memory, which list it whole (TASK-395.5).
+    pages: Option<Arc<dyn PaginatedListStore>>,
+    prefix: String,
+    counts: Counts,
+    /// Whether [`ObjectBucket::probed`] found it honours conditional writes: what it found holds.
+    honoured: std::sync::atomic::AtomicBool,
+    /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
+    decoded: crate::recovery::Decoded,
+    /// cladefs: what this host knows of the bucket without asking it again ([`Bucket::known`]).
+    known: crate::known::Known,
+    /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
+    /// (TASK-264).
+    marks: crate::marks::Watch,
+    /// cladefs: what gives this process's new branches their IDs, out of blocks of the bucket's
+    /// (TASK-364).
+    objectids: crate::objectid::Allocator,
+}
+
+/// The kinds of request a bucket makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Request {
+    Get,
+    /// A GET of a range of an object.
+    GetRange,
+    Head,
+    List,
+    /// A PUT where no object is.
+    Create,
+    /// A PUT of an object's version.
+    Update,
+    Overwrite,
+    Delete,
+    /// cladefs: a listing of one level of keys, by delimiter (TASK-395.5).
+    ListDelimited,
+    /// cladefs: a batch of deletes (TASK-395.5): one request where the store deletes many at once
+    /// (S3's DeleteObjects, of up to 1,000; Azure's, of 256 each), one an object behind it
+    /// where it does not (GCS, files, memory), which `object_store` does not say.
+    DeleteBatch,
+}
+
+impl Request {
+    pub const ALL: [Self; 10] = [
+        Self::Get,
+        Self::GetRange,
+        Self::Head,
+        Self::List,
+        Self::Create,
+        Self::Update,
+        Self::Overwrite,
+        Self::Delete,
+        Self::ListDelimited,
+        Self::DeleteBatch,
+    ];
+
+    /// cladefs: the name of its span ([`crate::trace`], TASK-258).
+    pub fn span_name(self) -> &'static str {
+        match self {
+            Self::Get => "bucket.get",
+            Self::GetRange => "bucket.get_range",
+            Self::Head => "bucket.head",
+            Self::List => "bucket.list",
+            Self::Create => "bucket.create",
+            Self::Update => "bucket.update",
+            Self::Overwrite => "bucket.overwrite",
+            Self::Delete => "bucket.delete",
+            Self::ListDelimited => "bucket.list_delimited",
+            Self::DeleteBatch => "bucket.delete_batch",
+        }
+    }
+
+    /// Its name in [`Stats::line`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::GetRange => "get-range",
+            Self::Head => "head",
+            Self::List => "list",
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Overwrite => "overwrite",
+            Self::Delete => "delete",
+            Self::ListDelimited => "list-delimited",
+            Self::DeleteBatch => "delete-batch",
+        }
+    }
+}
+
+/// The kinds of object a bucket uploads, by their keys (doc-7, Layout).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Upload {
+    Segments,
+    /// Extents stored on their own.
+    Extents,
+    Checkpoints,
+    /// The collector's moves of what it compacted.
+    Moves,
+    /// Branches' records and heads, and whatever else.
+    Other,
+}
+
+impl Upload {
+    pub const ALL: [Self; 5] =
+        [Self::Segments, Self::Extents, Self::Checkpoints, Self::Moves, Self::Other];
+
+    fn of(key: &str) -> Self {
+        match layout::kind(key) {
+            Kind::Segment { .. } => Self::Segments,
+            Kind::Extent { .. } => Self::Extents,
+            Kind::Checkpoint { .. } => Self::Checkpoints,
+            Kind::Moves { .. } => Self::Moves,
+            _ => Self::Other,
+        }
+    }
+
+    /// Its name in [`Stats::line`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Segments => "segments",
+            Self::Extents => "extents",
+            Self::Checkpoints => "checkpoints",
+            Self::Moves => "moves",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Default)]
+struct Counts {
+    requests: [AtomicU64; Request::ALL.len()],
+    /// The nanoseconds the requests of each kind took, each from its start to its answer.
+    request_ns: [AtomicU64; Request::ALL.len()],
+    uploaded: [AtomicU64; Upload::ALL.len()],
+    downloaded: AtomicU64,
+    /// cladefs: the requests of each kind that failed, unanswered (TASK-314).
+    failures: [AtomicU64; Request::ALL.len()],
+    /// cladefs: the run of failures of each kind going on, if one is.
+    failing: [Failing; Request::ALL.len()],
+    /// cladefs: the turns the writes of each kind take, since one failed (TASK-382).
+    turns: [Turns; Request::ALL.len()],
+}
+
+/// cladefs: the writes of a kind in flight at once once one failed (TASK-382): one, a probe of the
+/// bucket, after [`backoff`] of the failures in a row since the last answer, until one is
+/// answered; then one more for each answered, as TCP's slow start opens its window, doubling each
+/// round trip, until [`Turns::OPEN`], when none waits for a turn any more.
+///
+/// Each write sends its object whole, every try of it (and `object_store` tries each several times
+/// before it says it failed). Every write of a host's uploads, as many as its upload memory holds,
+/// sending its object to a full or failing bucket again and again, each as its own backoff said,
+/// was most of the extent daemon's CPU in the qualification's bucket soak: the kernel's copies into
+/// the sockets and the pages it zeroed for them, 1,200 of its 1,580 s on ubu1. And as the bucket
+/// answers again, those waiting don't all go at once: RustFS on a slow disk refused such a rush
+/// (`SlowDown`), failing each write it refused again, until the soak ran out of time.
+#[derive(Default)]
+struct Turns {
+    window: std::sync::Mutex<Window>,
+    /// Told as a write's turn ends, the window opens, or a write fails.
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Window {
+    /// The writes that may be in flight at once, taking turns; none, if no write takes a turn.
+    limit: Option<u64>,
+    /// The writes in flight with a turn.
+    in_flight: u64,
+    /// The writes that failed in a row, and when the latest did, which the next probe goes
+    /// [`backoff`] after.
+    failed: u32,
+    last: Option<tokio::time::Instant>,
+}
+
+impl Turns {
+    /// The window at which no write waits for its turn any more: the host's uploads' PUTs at once
+    /// (`cladefs::bucket`'s `UPLOADS`).
+    const OPEN: u64 = 64;
+
+    fn window(&self) -> std::sync::MutexGuard<'_, Window> {
+        self.window.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Waits for a write's turn, if writes take turns: until fewer than the window are in flight,
+    /// and, after a failure, [`backoff`] of the failures in a row passed since the latest. Its turn
+    /// lasts until what it returns is dropped, as the write is answered.
+    async fn turn(&self) -> Option<Turn<'_>> {
+        loop {
+            // Told of a change from before the window is looked at, so that none goes unseen.
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let due = {
+                let mut window = self.window();
+                let Some(limit) = window.limit else { return None };
+                let due = window.last.map(|last| last + backoff(window.failed));
+                let now = tokio::time::Instant::now();
+                if window.in_flight < limit && due.is_none_or(|due| due <= now) {
+                    window.in_flight += 1;
+                    return Some(Turn(self));
+                }
+                due.filter(|due| *due > now)
+            };
+            match due {
+                Some(due) => tokio::select! {
+                    () = tokio::time::sleep_until(due) => {}
+                    () = &mut changed => {}
+                },
+                None => changed.await,
+            }
+        }
+    }
+
+    /// A write of the kind failed: one at a time from now on, each after [`backoff`].
+    fn failed(&self) {
+        let mut window = self.window();
+        window.limit = Some(1);
+        window.failed = window.failed.saturating_add(1);
+        window.last = Some(tokio::time::Instant::now());
+        drop(window);
+        self.changed.notify_waiters();
+    }
+
+    /// A write of the kind was answered: one more in flight at once, or none waiting from
+    /// [`Turns::OPEN`] on.
+    fn answered(&self) {
+        let mut window = self.window();
+        let Some(limit) = window.limit else { return };
+        (window.failed, window.last) = (0, None);
+        window.limit = Some(limit + 1).filter(|limit| *limit < Self::OPEN);
+        drop(window);
+        self.changed.notify_waiters();
+    }
+}
+
+/// A write's turn ([`Turns::turn`]), until it drops.
+struct Turn<'a>(&'a Turns);
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.0.window().in_flight -= 1;
+        self.0.changed.notify_waiters();
+    }
+}
+
+/// cladefs: how often a run of failures of requests of a kind is logged again, with how many failed,
+/// after its first (TASK-314).
+pub const FAILING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// cladefs: the run of failures of requests of one kind going on, if one is: since its first, until
+/// one of the kind is answered (TASK-314).
+#[derive(Default)]
+struct Failing {
+    /// Whether one is going on, which an answer looks at alone.
+    on: std::sync::atomic::AtomicBool,
+    run: std::sync::Mutex<Option<Run>>,
+}
+
+struct Run {
+    began: tokio::time::Instant,
+    failed: u64,
+    /// When it was last logged, and how many had failed then.
+    logged: tokio::time::Instant,
+    failed_logged: u64,
+}
+
+impl Failing {
+    /// A request of `request`'s kind, of `object`, failed with `error`, which it logs if it is the
+    /// first of a run, or the run was last logged [`FAILING_EVERY`] ago.
+    fn failed(&self, request: Request, object: &str, error: &object_store::Error) {
+        let now = tokio::time::Instant::now();
+        let mut run = self.run.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.on.store(true, Ordering::Relaxed);
+        let kind = request.name();
+        let Some(run) = run.as_mut() else {
+            *run = Some(Run { began: now, failed: 1, logged: now, failed_logged: 1 });
+            let error = cause(error);
+            log::warn!(
+                kind, object, error:%;
+                "object storage: {kind} requests failing, retried until they answer: {object}: \
+                 {error}"
+            );
+            return;
+        };
+        run.failed += 1;
+        if now.duration_since(run.logged) >= FAILING_EVERY {
+            let (failed, since) = (run.failed, now.duration_since(run.began).as_secs());
+            let lately = run.failed - run.failed_logged;
+            (run.logged, run.failed_logged) = (now, run.failed);
+            let error = cause(error);
+            log::warn!(
+                kind, object, failed, error:%;
+                "object storage: {kind} requests still failing: {failed} failed in {since} s, \
+                 {lately} since last said; the latest, {object}: {error}"
+            );
+        }
+    }
+
+    /// A request of `request`'s kind was answered: a run of failures going on ends, which it logs.
+    fn answered(&self, request: Request) {
+        if !self.on.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut run = self.run.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.on.store(false, Ordering::Relaxed);
+        if let Some(run) = run.take() {
+            let (kind, failed) = (request.name(), run.failed);
+            let since = run.began.elapsed().as_secs();
+            log::info!(
+                kind, failed;
+                "object storage: {kind} requests answered again, {failed} having failed in \
+                 {since} s"
+            );
+        }
+    }
+}
+
+/// cladefs: what `error` says, and each error it says it came from that it does not say already: a
+/// file bucket's full disk is an `io::Error` behind `object_store`'s own, which may not say it.
+fn cause(error: &object_store::Error) -> String {
+    let mut said = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        let says = error.to_string();
+        if !said.contains(&says) {
+            said = format!("{said}: {says}");
+        }
+        source = error.source();
+    }
+    said
+}
+
+/// What a bucket did so far: its requests by kind and how long they took, the bytes it uploaded by
+/// kind of object, and the bytes it downloaded; cladefs: and the requests that failed, by kind.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub requests: [u64; Request::ALL.len()],
+    pub request_ns: [u64; Request::ALL.len()],
+    pub uploaded: [u64; Upload::ALL.len()],
+    pub downloaded: u64,
+    pub failures: [u64; Request::ALL.len()],
+}
+
+impl Stats {
+    pub fn requests(&self, request: Request) -> u64 {
+        self.requests[request as usize]
+    }
+
+    /// cladefs: the requests of kind `request` that failed, unanswered, each retried (TASK-314):
+    /// not those the protocol answers (no object, one there, another version), which are answers.
+    pub fn failures(&self, request: Request) -> u64 {
+        self.failures[request as usize]
+    }
+
+    /// The nanoseconds the requests of kind `request` took in all, each from its start to its
+    /// answer (TASK-165.11): what waiting for the bucket costs, by kind.
+    pub fn request_ns(&self, request: Request) -> u64 {
+        self.request_ns[request as usize]
+    }
+
+    pub fn uploaded(&self, upload: Upload) -> u64 {
+        self.uploaded[upload as usize]
+    }
+
+    /// The stats as one line, which `scripts/bench-report.py` reads from the extent daemon's log:
+    /// `object-store:`, then `NAME=COUNT` for each kind of request, `up-NAME=BYTES` for each kind
+    /// of object, `down=BYTES`, `NAME-ns=NANOSECONDS` for each kind of request, and cladefs's
+    /// `failed-NAME=COUNT` for each kind of request (TASK-314).
+    pub fn line(&self) -> String {
+        let mut line = "object-store:".to_owned();
+        for request in Request::ALL {
+            line += &format!(" {}={}", request.name(), self.requests(request));
+        }
+        for upload in Upload::ALL {
+            line += &format!(" up-{}={}", upload.name(), self.uploaded(upload));
+        }
+        line += &format!(" down={}", self.downloaded);
+        for request in Request::ALL {
+            line += &format!(" {}-ns={}", request.name(), self.request_ns(request));
+        }
+        for request in Request::ALL {
+            line += &format!(" failed-{}={}", request.name(), self.failures(request));
+        }
+        line
+    }
+}
+
+impl Counts {
+    /// Counts a request of kind `request`, made now, for the object at `path` (or the objects
+    /// under it), and, once what it returns is dropped, as the request is answered, how long it
+    /// took. cladefs: its span starts, a child of what made the request (TASK-258).
+    fn request<'a>(&'a self, request: Request, path: Option<&'a Path>) -> Timed<'a> {
+        self.requests[request as usize].fetch_add(1, Ordering::Relaxed);
+        let span = crate::trace::Span::start(request.span_name());
+        if let Some(path) = path {
+            span.set_with(crate::trace::OBJECT_KEY, || path.to_string());
+        }
+        Timed { counts: self, request, started: std::time::Instant::now(), span, path }
+    }
+}
+
+/// A request counted ([`Counts::request`]), whose time is counted as this drops; cladefs: and its
+/// span ended, which [`Timed::answered`] tells how it went (TASK-258).
+struct Timed<'a> {
+    counts: &'a Counts,
+    request: Request,
+    started: std::time::Instant,
+    span: crate::trace::Span,
+    /// cladefs: its object, or the objects under it, as [`Timed::answered`] logs it.
+    path: Option<&'a Path>,
+}
+
+impl Timed<'_> {
+    /// `answered`, the request's answer, as branches take it ([`error`]), said on its span: its
+    /// bytes, as `bytes` counts those of what it answered, or its error. cladefs: and logged, at
+    /// debug, with its kind, object, time, and bytes or error (TASK-260): in the extent daemon,
+    /// its log gives the record the guest request the work is for, if any (`cladefs::request`). A
+    /// failure, unanswered, is counted and logged as [`Failing`] says, with the store's error
+    /// (TASK-314); an answer ends a run of them.
+    fn answered<T>(
+        &self,
+        answered: object_store::Result<T>,
+        bytes: impl Fn(&T) -> usize,
+    ) -> Result<T, Error> {
+        let kind = self.request.name();
+        let object = || self.path.map_or_else(String::new, |path| path.to_string());
+        let answered = answered.map_err(|failure| {
+            let answer = error(&failure);
+            if answer == Error::Unavailable {
+                self.counts.failures[self.request as usize].fetch_add(1, Ordering::Relaxed);
+                self.counts.turns[self.request as usize].failed();
+                self.counts.failing[self.request as usize].failed(
+                    self.request,
+                    &object(),
+                    &failure,
+                );
+            }
+            answer
+        });
+        if !matches!(answered, Err(Error::Unavailable)) {
+            self.counts.failing[self.request as usize].answered(self.request);
+            self.counts.turns[self.request as usize].answered();
+        }
+        let logged = log::log_enabled!(log::Level::Debug).then(object);
+        let ms = || self.started.elapsed().as_secs_f64() * 1e3;
+        match &answered {
+            Ok(answer) => {
+                let bytes = bytes(answer) as u64;
+                self.span.set_count(crate::trace::BYTES, bytes);
+                if let Some(object) = &logged {
+                    let ms = ms();
+                    log::debug!(kind, object:%, ms, bytes; "object storage: {kind} {object}");
+                }
+            }
+            Err(error) => {
+                self.span.fail(error);
+                if let Some(object) = &logged {
+                    let ms = ms();
+                    log::debug!(
+                        kind, object:%, ms, error:%; "object storage: {kind} {object}: {error}"
+                    );
+                }
+            }
+        }
+        answered
+    }
+}
+
+impl Drop for Timed<'_> {
+    fn drop(&mut self) {
+        let ns = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.counts.request_ns[self.request as usize].fetch_add(ns, Ordering::Relaxed);
+    }
+}
+impl ObjectBucket {
+    /// The objects of `store` under `prefix`, a path of segments separated by `/`, or empty.
+    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
+    pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
+        Self::paged(store, None, prefix)
+    }
+
+    /// cladefs: the objects of `store` under `prefix`, a level of which `pages`, the same store,
+    /// lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
+    pub fn paged(
+        store: Arc<dyn ObjectStore>,
+        pages: Option<Arc<dyn PaginatedListStore>>,
+        prefix: &str,
+    ) -> Self {
+        let prefix = prefix.trim_matches('/').to_owned();
+        let (counts, honoured, decoded, known) = Default::default();
+        let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
+        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids }
+    }
+
+    /// cladefs: a new object ID of the bucket's, which no other branch of it has, nor will
+    /// ([`crate::objectid`], TASK-364).
+    pub async fn new_objectid(&self) -> u64 {
+        self.objectids.next(self).await
+    }
+
+    /// Checks that it honours the conditional writes branches rely on ([`probe`]), with an object
+    /// of `nonce`'s, unless it found it does before: a host's stores share their bucket, which it
+    /// checks once, at their first attach, not at each (doc-7, The head).
+    pub async fn probed(&self, nonce: u64) -> Result<(), String> {
+        if !self.honoured.load(Ordering::Relaxed) {
+            probe(self, nonce).await?;
+            self.honoured.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// What it did so far.
+    pub fn stats(&self) -> Stats {
+        let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
+        Stats {
+            requests: self.counts.requests.each_ref().map(load),
+            request_ns: self.counts.request_ns.each_ref().map(load),
+            uploaded: self.counts.uploaded.each_ref().map(load),
+            downloaded: load(&self.counts.downloaded),
+            failures: self.counts.failures.each_ref().map(load),
+        }
+    }
+
+    /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if it
+    /// is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
+    /// `gc/marks/`, then a read of the newest. A bucket does every [`crate::marks::REFRESH`] for
+    /// each cell it reads, alongside a read of it; its requests go uncounted
+    /// ([`ObjectBucket::stats`]), being no reader's. A request failed, it keeps what it held, until
+    /// the next; marks it can't decode, it warns of, holding none.
+    pub async fn refresh_marks(&self, cell: layout::Cell) {
+        let prefix = self.path(layout::marks_of(cell).trim_end_matches('/'));
+        let listed = match self.store.list(Some(&prefix)).try_collect::<Vec<_>>().await {
+            Ok(listed) => listed,
+            Err(error) => {
+                log::debug!(error:%; "object storage: listing the collector's marks: {error}");
+                return;
+            }
+        };
+        let newest = (listed.into_iter().map(|meta| self.meta(meta)))
+            .filter(|meta| matches!(layout::kind(&meta.key), Kind::Marks { .. }))
+            .max_by(|a, b| a.key.cmp(&b.key));
+        let Some(newest) = newest else { return self.marks.hold(cell, None) };
+        if self.marks.holds(cell, &newest) {
+            return;
+        }
+        let path = self.path(&newest.key);
+        let read = async { self.store.get_opts(&path, GetOptions::default()).await?.bytes().await };
+        match read.await.map(|bytes| layout::decode::<layout::Marks>(&bytes)) {
+            Ok(Ok(marks)) => self.marks.hold(cell, Some((&newest, marks))),
+            Ok(Err(error)) => {
+                log::warn!(key = newest.key, error:%; "extent_bucket: the collector's marks: {error}");
+                self.marks.hold(cell, None);
+            }
+            Err(error) => log::debug!(error:%; "object storage: reading {path}: {error}"),
+        }
+    }
+
+    /// cladefs: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD, which
+    /// says whether readers watch the cells' marks at all (TASK-395.4's review). A request failed,
+    /// it keeps what it held, until the next.
+    pub async fn refresh_marking(&self) {
+        let head = GetOptions { head: true, ..GetOptions::default() };
+        match self.store.get_opts(&self.path(layout::MARKING), head).await {
+            Ok(_) => self.marks.hold_marking(true),
+            Err(object_store::Error::NotFound { .. }) => self.marks.hold_marking(false),
+            Err(error) => {
+                log::debug!(error:%; "object storage: reading whether the bucket is marked: {error}")
+            }
+        }
+    }
+
+    /// The reading of whether the bucket is marked again, if it is due, and of the marks of the
+    /// cell `key` is under, a key or a prefix, if the bucket is marked and they are due
+    /// ([`ObjectBucket::refresh_marks`]), which a read goes alongside: nothing, if neither is.
+    fn marks_due(
+        &self,
+        key: &str,
+    ) -> futures::future::OptionFuture<impl Future<Output = ()> + Send + '_> {
+        let marking = self.marks.take_marking_refresh();
+        let cell = layout::cell_of(key).filter(|&cell| self.marks.take_refresh(cell));
+        (marking || cell.is_some())
+            .then(|| async move {
+                if marking {
+                    self.refresh_marking().await;
+                }
+                if let Some(cell) = cell {
+                    self.refresh_marks(cell).await;
+                }
+            })
+            .into()
+    }
+
+    /// The bucket at `url`: `s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix`
+    /// (Azure Blob Storage, TASK-46), `memory:///prefix`, or `file:///dir`, the directory `dir` of
+    /// the host's filesystem ([`crate::local`], TASK-165.1), configured, credentials included, from
+    /// the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: for Azure, the account
+    /// (`AZURE_STORAGE_ACCOUNT_NAME`) and its key (`AZURE_STORAGE_ACCOUNT_KEY`), a SAS token, or a
+    /// service principal's or managed identity's, as `object_store`'s `MicrosoftAzureBuilder`
+    /// reads them; the emulator, Azurite, with `AZURE_STORAGE_USE_EMULATOR=true`. Blob Storage's
+    /// conditional writes (If-None-Match: *, If-Match on ETags) are those doc-7 relies on.
+    pub fn from_url(url: &str) -> Result<Self, String> {
+        let Reached { objects, pages, prefix } = reach(url, std::env::vars(), &Client::DEFAULT)?;
+        Ok(Self::paged(objects, pages, &prefix))
+    }
+
+    fn path(&self, key: &str) -> Path {
+        if self.prefix.is_empty() {
+            Path::from(key)
+        } else {
+            Path::from(format!("{}/{key}", self.prefix))
+        }
+    }
+
+    /// The path of the objects under the prefix `prefix` of keys, empty or ending with `/`, as
+    /// `object_store` lists by them: whole segments, none for every object of the store.
+    fn prefix_path(&self, prefix: &str) -> Option<Path> {
+        assert!(prefix.is_empty() || prefix.ends_with('/'), "a prefix of keys: {prefix}");
+        match (self.prefix.is_empty(), prefix.trim_end_matches('/')) {
+            (true, "") => None,
+            (_, prefix) => Some(self.path(prefix)),
+        }
+    }
+
+    /// The key at `location`, under its prefix.
+    fn key<'a>(&self, location: &'a str) -> &'a str {
+        match self.prefix.is_empty() {
+            true => location,
+            false => location
+                .strip_prefix(&self.prefix)
+                .map_or(location, |key| key.trim_start_matches('/')),
+        }
+    }
+
+    fn meta(&self, meta: ObjectMeta) -> Meta {
+        Meta {
+            key: self.key(meta.location.as_ref()).to_owned(),
+            version: Version { e_tag: meta.e_tag, version: meta.version },
+            size: meta.size,
+            modified: meta.last_modified.timestamp_millis().max(0) as u64,
+        }
+    }
+}
+
+/// The object store at `url`, as [`ObjectBucket::from_url`] reaches it, and the prefix the URL
+/// names in it: for tests that put themselves between a store and its objects. cladefs: a degraded
+/// one, if the environment says so (`CLADEFS_BUCKET_LATENCY_MS`, `CLADEFS_BUCKET_FAULTS`:
+/// [`crate::faults`]): an object store as far as a host's own may be, as the sandbox team's RustFS,
+/// 25 ms away, which made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while
+/// (TASK-330.3).
+pub fn object_store_at(url: &str) -> Result<(Arc<dyn ObjectStore>, String), String> {
+    object_store_with(url, std::env::vars(), &Client::DEFAULT)
+}
+
+/// The object store at `url`, configured by `options` as `object_store::parse_url_opts` would
+/// configure it, but for its HTTP client: `client`'s, cladefs's own (TASK-205).
+pub(crate) fn object_store_with(
+    url: &str,
+    options: impl IntoIterator<Item = (String, String)>,
+    client: &Client,
+) -> Result<(Arc<dyn ObjectStore>, String), String> {
+    let Reached { objects, prefix, .. } = reach(url, options, client)?;
+    Ok((objects, prefix))
+}
+
+/// cladefs: a store as it lists a level of keys a page a request, if it does
+/// ([`ObjectBucket::paged`]).
+type Pages = Option<Arc<dyn PaginatedListStore>>;
+
+/// cladefs: what a bucket's URL reaches ([`reach`]).
+pub(crate) struct Reached {
+    pub objects: Arc<dyn ObjectStore>,
+    /// The same store, which lists a level of keys a page a request, if it does: S3's, GCS's and
+    /// Azure's; not a degraded one's ([`crate::faults`]), whose pages would go around its faults,
+    /// which lists a level whole as files and memory do.
+    pub pages: Pages,
+    /// The prefix the URL names in it.
+    pub prefix: String,
+}
+
+/// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a level
+/// of keys a page at a time, if it does (TASK-395.5).
+pub(crate) fn reach(
+    url: &str,
+    options: impl IntoIterator<Item = (String, String)>,
+    client: &Client,
+) -> Result<Reached, String> {
+    let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
+    let (store, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
+        // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
+        "file" => {
+            let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
+            let local =
+                crate::local::Local::new(&dir).map_err(|error| format!("{url}: {error}"))?;
+            (Arc::new(local), None, Path::default())
+        }
+        _ => cloud(&url, options, client).map_err(|error| format!("{url}: {error}"))?,
+    };
+    let (objects, pages): (Arc<dyn ObjectStore>, _) = match crate::faults::Faults::from_env()? {
+        Some(faults) => (Arc::new(crate::faults::Faulty::new(store, faults)), None),
+        None => (store, pages),
+    };
+    Ok(Reached { objects, pages, prefix: path.as_ref().to_owned() })
+}
+
+/// The store of a URL of a cloud's, or of memory, the same store as it lists a level of keys a
+/// page a request, if it does, and the path it names in it, as `object_store::parse_url_opts`
+/// makes them, but with `client`.
+fn cloud(
+    url: &url::Url,
+    options: impl IntoIterator<Item = (String, String)>,
+    client: &Client,
+) -> object_store::Result<(Arc<dyn ObjectStore>, Pages, Path)> {
+    use object_store::ObjectStoreScheme as Scheme;
+    let (scheme, path) = Scheme::parse(url)?;
+    let path = Path::parse(path)?;
+    // The client's options first, which the environment's add to.
+    macro_rules! built {
+        ($builder:ty) => {{
+            let builder = (<$builder>::new().with_url(url.as_str()))
+                .with_client_options(client.options())
+                .with_http_connector(*client);
+            let builder = options.into_iter().fold(builder, |builder, (key, value)| {
+                match key.to_ascii_lowercase().parse() {
+                    Ok(key) => builder.with_config(key, value),
+                    Err(_) => builder,
+                }
+            });
+            let built = Arc::new(builder.build()?);
+            (built.clone() as Arc<dyn ObjectStore>, Some(built as Arc<dyn PaginatedListStore>))
+        }};
+    }
+    let (store, pages) = match scheme {
+        Scheme::Memory => {
+            (Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>, None)
+        }
+        Scheme::AmazonS3 => built!(object_store::aws::AmazonS3Builder),
+        Scheme::GoogleCloudStorage => built!(object_store::gcp::GoogleCloudStorageBuilder),
+        Scheme::MicrosoftAzure => built!(object_store::azure::MicrosoftAzureBuilder),
+        other => {
+            let source = format!("no buckets of {other:?}").into();
+            return Err(object_store::Error::Generic { store: "cladefs", source });
+        }
+    };
+    Ok((store, pages, path))
+}
+
+/// What a request's failure means to branches. Failures other than the ones the protocol answers
+/// are retried: the store may be unreachable for a while, and branches wait (doc-7, decision 3).
+fn error(error: &object_store::Error) -> Error {
+    match error {
+        object_store::Error::NotFound { .. } => Error::NotFound,
+        object_store::Error::AlreadyExists { .. } => Error::AlreadyExists,
+        object_store::Error::Precondition { .. } | object_store::Error::NotModified { .. } => {
+            Error::Precondition
+        }
+        _ => Error::Unavailable,
+    }
+}
+
+impl Bucket for ObjectBucket {
+    fn decoded(&self) -> Option<&crate::recovery::Decoded> {
+        Some(&self.decoded)
+    }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        Some(&self.known)
+    }
+
+    fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+        self.marks.reached(Request::Get, key);
+        let refresh = self.marks_due(key);
+        let (store, path) = (self.store.clone(), self.path(key));
+        let get = async move {
+            let timed = self.counts.request(Request::Get, Some(&path));
+            let got = async {
+                let result = store.get_opts(&path, GetOptions::default()).await?;
+                let meta = self.meta(result.meta.clone());
+                let bytes = result.bytes().await?;
+                self.counts.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                Ok(Object { bytes: bytes.to_vec(), meta })
+            };
+            timed.answered(got.await, |object| object.bytes.len())
+        };
+        async move { futures::join!(get, refresh).0 }
+    }
+
+    fn get_range(
+        &self,
+        key: &str,
+        range: ByteRange,
+    ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
+        self.marks.reached(Request::GetRange, key);
+        let refresh = self.marks_due(key);
+        let (store, path) = (self.store.clone(), self.path(key));
+        let range = match range {
+            ByteRange::Bounded(range) => GetRange::Bounded(range),
+            ByteRange::Suffix(n) => GetRange::Suffix(n),
+        };
+        let get = async move {
+            let timed = self.counts.request(Request::GetRange, Some(&path));
+            let got = async {
+                let options = GetOptions { range: Some(range.clone()), ..GetOptions::default() };
+                let result = match store.get_opts(&path, options).await {
+                    // A store that reads no suffix of an object (Azure Blob Storage, TASK-46),
+                    // which it says before any request: the object's size first, then the range
+                    // it ends with.
+                    Err(object_store::Error::NotSupported { .. })
+                        if matches!(range, GetRange::Suffix(_)) =>
+                    {
+                        let GetRange::Suffix(len) = range else { unreachable!() };
+                        let _head = self.counts.request(Request::Head, Some(&path));
+                        let head = GetOptions { head: true, ..GetOptions::default() };
+                        let size = store.get_opts(&path, head).await?.meta.size;
+                        let range = GetRange::Bounded(size.saturating_sub(len)..size);
+                        let options = GetOptions { range: Some(range), ..GetOptions::default() };
+                        store.get_opts(&path, options).await?
+                    }
+                    result => result?,
+                };
+                let bytes = result.bytes().await?;
+                self.counts.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                Ok(bytes.to_vec())
+            };
+            timed.answered(got.await, Vec::len)
+        };
+        async move { futures::join!(get, refresh).0 }
+    }
+
+    fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+        self.marks.reached(Request::Head, key);
+        let refresh = self.marks_due(key);
+        let (store, path) = (self.store.clone(), self.path(key));
+        let head = async move {
+            let timed = self.counts.request(Request::Head, Some(&path));
+            let options = GetOptions { head: true, ..GetOptions::default() };
+            let result = store.get_opts(&path, options).await;
+            timed.answered(result.map(|result| self.meta(result.meta)), |_| 0)
+        };
+        async move { futures::join!(head, refresh).0 }
+    }
+
+    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+        let store = self.store.clone();
+        let path = self.prefix_path(prefix);
+        let refresh = self.marks_due(prefix);
+        let prefix = prefix.to_owned();
+        let list = async move {
+            // A listing of many objects takes a request for each page of them (1,000 on S3 and
+            // GCS), which `object_store` does not say: counted as its pages (TASK-455).
+            let timed = self.counts.request(Request::List, path.as_ref());
+            let listed = store.list(path.as_ref()).try_collect::<Vec<ObjectMeta>>().await;
+            let listed = timed.answered(listed, |_| 0)?;
+            let more = crate::bucket::list_pages(listed.len()) - 1;
+            self.counts.requests[Request::List as usize].fetch_add(more, Ordering::Relaxed);
+            timed.span.set_count(crate::trace::OBJECTS, listed.len() as u64);
+            let mut metas: Vec<Meta> = listed.into_iter().map(|meta| self.meta(meta)).collect();
+            metas.sort_by(|a, b| a.key.cmp(&b.key));
+            Ok(metas)
+        };
+        async move {
+            let listed = futures::join!(list, refresh).0;
+            if let Ok(metas) = &listed {
+                self.marks.listed(&prefix, metas);
+            }
+            listed
+        }
+    }
+
+    /// cladefs: a page a request where the store pages ([`ObjectBucket::paged`]); else the level
+    /// whole, which the page is cut out of ([`Listing::page`]).
+    fn list_delimited(
+        &self,
+        prefix: &str,
+        page: Page<'_>,
+    ) -> impl Future<Output = Result<Listing, Error>> + Send {
+        assert!((1..=LIST_PAGE).contains(&page.max), "a page of 1 to {LIST_PAGE}: {}", page.max);
+        let (store, pages) = (self.store.clone(), self.pages.clone());
+        let path = self.prefix_path(prefix);
+        let refresh = self.marks_due(prefix);
+        let prefix = prefix.to_owned();
+        let (after, max) = (page.after.map(str::to_owned), page.max);
+        let list = async move {
+            let timed = self.counts.request(Request::ListDelimited, path.as_ref());
+            let listed = match &pages {
+                Some(pages) => {
+                    let options = PaginatedListOptions {
+                        delimiter: Some("/".into()),
+                        max_keys: Some(max),
+                        page_token: after.clone(),
+                        ..PaginatedListOptions::default()
+                    };
+                    // The prefix with its delimiter, which a paged listing adds not.
+                    let under = path.as_ref().map(|path| format!("{path}/"));
+                    let paged = pages.list_paginated(under.as_deref(), options).await;
+                    paged.map(|paged| (paged.result, paged.page_token))
+                }
+                // A request for each page of the level, which `object_store` does not say.
+                None => store.list_with_delimiter(path.as_ref()).await.map(|whole| (whole, None)),
+            };
+            let (listed, next) = timed.answered(listed, |_| 0)?;
+            let mut prefixes: Vec<String> = (listed.common_prefixes.iter())
+                .map(|path| format!("{}/", self.key(path.as_ref())))
+                .collect();
+            prefixes.sort();
+            let mut objects: Vec<Meta> =
+                listed.objects.into_iter().map(|meta| self.meta(meta)).collect();
+            objects.sort_by(|a, b| a.key.cmp(&b.key));
+            let listing = match &pages {
+                Some(_) => Listing { prefixes, objects, next },
+                None => Listing { prefixes, objects, next: None }
+                    .page(Page { after: after.as_deref(), max }),
+            };
+            timed.span.set_count(crate::trace::OBJECTS, listing.objects.len() as u64);
+            timed.span.set_count(crate::trace::PREFIXES, listing.prefixes.len() as u64);
+            Ok(listing)
+        };
+        async move {
+            let listed = futures::join!(list, refresh).0;
+            if let Ok(listing) = &listed {
+                self.marks.listed(&prefix, &listing.objects);
+            }
+            listed
+        }
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: bytes::Bytes,
+        mode: PutMode,
+    ) -> impl Future<Output = Result<Version, Error>> + Send {
+        let (store, path) = (self.store.clone(), self.path(key));
+        let (request, mode) = match mode {
+            PutMode::Overwrite => (Request::Overwrite, object_store::PutMode::Overwrite),
+            PutMode::Create => (Request::Create, object_store::PutMode::Create),
+            PutMode::Update(Version { e_tag, version }) => {
+                (Request::Update, object_store::PutMode::Update(UpdateVersion { e_tag, version }))
+            }
+        };
+        let upload = Upload::of(key);
+        async move {
+            // cladefs: its turn, once a write of its kind failed (TASK-382).
+            let _turn = self.counts.turns[request as usize].turn().await;
+            let timed = self.counts.request(request, Some(&path));
+            let len = bytes.len() as u64;
+            let options = PutOptions { mode, ..PutOptions::default() };
+            let result = store.put_opts(&path, PutPayload::from(bytes), options).await;
+            let result = timed.answered(result, |_| len as usize)?;
+            self.counts.uploaded[upload as usize].fetch_add(len, Ordering::Relaxed);
+            Ok(Version { e_tag: result.e_tag, version: result.version })
+        }
+    }
+
+    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+        let (store, path) = (self.store.clone(), self.path(key));
+        async move {
+            let timed = self.counts.request(Request::Delete, Some(&path));
+            let deleting = path.clone();
+            let mut deleted =
+                store.delete_stream(stream::once(async move { Ok(deleting) }).boxed());
+            let deleted = match deleted.next().await {
+                Some(Err(object_store::Error::NotFound { .. })) | Some(Ok(_)) | None => Ok(()),
+                Some(Err(other)) => Err(other),
+            };
+            timed.answered(deleted, |_| 0)
+        }
+    }
+
+    /// cladefs: through `object_store`'s `delete_stream`, which deletes in batches where the store
+    /// has a batch delete (S3's DeleteObjects, Azure's), and several at once where it has not
+    /// (TASK-395.5); cladefs's buckets of files take their lock once a batch ([`crate::local`]).
+    fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
+        let store = self.store.clone();
+        let paths: Vec<object_store::Result<Path>> =
+            keys.iter().map(|key| Ok(self.path(key))).collect();
+        async move {
+            let timed = self.counts.request(Request::DeleteBatch, None);
+            let objects = paths.len();
+            // Every answer awaited, the first failure kept: the rest took effect, or failed too.
+            let deleted = store
+                .delete_stream(stream::iter(paths).boxed())
+                .fold(Ok(()), |result, deleted| {
+                    std::future::ready(match deleted {
+                        Ok(_) | Err(object_store::Error::NotFound { .. }) => result,
+                        Err(failure) => result.and(Err(failure)),
+                    })
+                })
+                .await;
+            timed.span.set_count(crate::trace::OBJECTS, objects as u64);
+            timed.answered(deleted, |_| 0)
+        }
+    }
+
+    fn now(&self) -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
+    }
+
+    fn pause(&self, failures: u32) -> impl Future<Output = ()> + Send {
+        tokio::time::sleep(backoff(failures))
+    }
+}
+
+/// How long a request that failed `failures` times in a row waits before it goes again: from 50 ms,
+/// doubling, to 5 s.
+fn backoff(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_millis((50u64 << failures.saturating_sub(1).min(7)).min(5_000))
+}
+
+/// Checks that `bucket` honours the conditional writes branches rely on, with an object of its
+/// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
+/// of a version that is not the object's, and one of the object's version succeeds.
+pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
+    let key = format!("probe/{nonce:016x}");
+    let refused = |what: &str, result: &dyn std::fmt::Debug| {
+        format!("the store does not honour conditional writes: {what} gave {result:?}")
+    };
+    let created = bucket.put(&key, bytes::Bytes::from_static(b"probe"), PutMode::Create).await;
+    let version = created.map_err(|error| format!("creating {key}: {error}"))?;
+    let again = bucket.put(&key, bytes::Bytes::from_static(b"again"), PutMode::Create).await;
+    if again != Err(Error::AlreadyExists) {
+        return Err(refused("a create where an object is", &again));
+    }
+    // No store makes this ETag; GCS's generation 0 is no object's.
+    let other =
+        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
+    let stale = bucket.put(&key, bytes::Bytes::from_static(b"stale"), PutMode::Update(other)).await;
+    if stale != Err(Error::Precondition) {
+        return Err(refused("an update of another version", &stale));
+    }
+    let updated =
+        bucket.put(&key, bytes::Bytes::from_static(b"updated"), PutMode::Update(version)).await;
+    if updated.is_err() {
+        return Err(refused("an update of the object's version", &updated));
+    }
+    bucket.delete(&key).await.map_err(|error| format!("removing {key}: {error}"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::layout::test_branch;
+
+    /// Requests that failed wait from 50 ms, doubling, to at most 5 s.
+    #[test]
+    fn failed_requests_back_off() {
+        let waits: Vec<_> = (1..=10).map(|failures| backoff(failures).as_millis()).collect();
+        assert_eq!(waits, [50, 100, 200, 400, 800, 1600, 3200, 5000, 5000, 5000]);
+    }
+
+    /// TASK-382: a host's uploads, as many as its upload memory holds, each sending its object whole
+    /// every try, to a full bucket: 48 creates failing for 92.5 s. Each tried on its own, they
+    /// failed 25 times each, 1,200 objects sent; taking turns, the first fails and the others wait,
+    /// the bucket probed as one create alone would try it. Answering again, a second a write, they
+    /// go as more are answered: one, then two, four, and so on, not all at once.
+    #[tokio::test(start_paused = true)]
+    async fn writes_failing_take_turns_until_they_land() {
+        use crate::faults::{Failing, Fault, Faults, Faulty};
+        let faults = Faults::new(std::time::Duration::ZERO, None);
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
+        let start = tokio::time::Instant::now();
+        let creates: Vec<_> = (0..48)
+            .map(|segment| {
+                let (store, key) = (store.clone(), layout::segment(test_branch(1), segment, 1));
+                tokio::spawn(async move {
+                    let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
+                    assert!(matches!(created, crate::bucket::Created::Created(_)), "{key}");
+                    start.elapsed()
+                })
+            })
+            .collect();
+        tokio::time::sleep(std::time::Duration::from_millis(92_500)).await;
+        // Reads answer meanwhile, a full bucket's, and take no turn.
+        assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
+        let second = std::time::Duration::from_secs(1);
+        faults.set(Fault { latency: second, failing: Failing::Not });
+        let mut landed = Vec::new();
+        for create in creates {
+            landed.push(create.await.unwrap());
+        }
+        landed.sort();
+        // Failed at 0 s, then probed at 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to
+        // 91.35 s; the probe at 96.35 s lands a second later, then two, four, eight, 16, and the
+        // last 17 at once, each a second after the last.
+        let stats = store.stats();
+        assert_eq!((stats.requests(Request::Create), stats.failures(Request::Create)), (73, 25));
+        let probe = std::time::Duration::from_millis(97_350);
+        let rounds = [1, 2, 4, 8, 16, 17];
+        let expected: Vec<_> = (rounds.iter().enumerate())
+            .flat_map(|(round, writes)| std::iter::repeat_n(probe + second * round as u32, *writes))
+            .collect();
+        assert_eq!(landed, expected);
+    }
+
+    /// TASK-314: a bucket whose writes keep failing, its disk full, which `object_store` says only
+    /// as a generic error: a create goes again, backing off to 5 s apart, until it lands once the
+    /// bucket has room. Its failures are counted, and logged with the filesystem's error, the
+    /// first at once, then every 30 s with how many failed, and as creates answer again; reads
+    /// answer meanwhile, which ends no run of the creates'.
+    #[tokio::test(start_paused = true)]
+    async fn writes_failing_say_why_until_they_land() {
+        let log = crate::marks::captured();
+        use crate::faults::{Failing, Fault, Faults, Faulty};
+        let faults = Faults::new(std::time::Duration::ZERO, None);
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
+        let key = layout::segment(test_branch(1), 0, 1);
+        let creating = tokio::spawn({
+            let (store, key) = (store.clone(), key.clone());
+            async move { crate::bucket::create(&*store, &key, vec![1, 2, 3]).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(40)).await;
+        assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
+        tokio::time::sleep(std::time::Duration::from_secs(55)).await;
+        faults.set(Fault::default());
+        assert!(matches!(creating.await.unwrap(), crate::bucket::Created::Created(_)));
+        assert_eq!(store.get(&key).await.unwrap().bytes, [1, 2, 3]);
+
+        // Failed at 0 s, 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to 91.35 s; landed at
+        // 96.35 s.
+        let stats = store.stats();
+        assert_eq!((stats.requests(Request::Create), stats.failures(Request::Create)), (26, 25));
+        assert_eq!(stats.failures(Request::Get), 0);
+        assert!(stats.line().ends_with(
+            " failed-get=0 failed-get-range=0 failed-head=0 failed-list=0 failed-create=25 \
+             failed-update=0 failed-overwrite=0 failed-delete=0 failed-list-delimited=0 \
+             failed-delete-batch=0"
+        ));
+        let object = format!("object={key}");
+        let enospc = "error=Generic Faulty error: No space left on device (os error 28)";
+        let lines: Vec<String> = (log.lock().unwrap().iter())
+            .filter(|line| line.contains("object storage"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                format!(
+                    "WARN object storage: create requests failing, retried until they answer: \
+                     {key}: Generic Faulty error: No space left on device (os error 28) kind=create \
+                     {object} {enospc}"
+                ),
+                format!(
+                    "WARN object storage: create requests still failing: 13 failed in 31 s, 12 \
+                     since last said; the latest, {key}: Generic Faulty error: No space left on \
+                     device (os error 28) kind=create {object} failed=13 {enospc}"
+                ),
+                format!(
+                    "WARN object storage: create requests still failing: 19 failed in 61 s, 6 \
+                     since last said; the latest, {key}: Generic Faulty error: No space left on \
+                     device (os error 28) kind=create {object} failed=19 {enospc}"
+                ),
+                format!(
+                    "WARN object storage: create requests still failing: 25 failed in 91 s, 6 \
+                     since last said; the latest, {key}: Generic Faulty error: No space left on \
+                     device (os error 28) kind=create {object} failed=25 {enospc}"
+                ),
+                "INFO object storage: create requests answered again, 25 having failed in 96 s \
+                 kind=create failed=25"
+                    .to_owned(),
+            ]
+        );
+    }
+    use crate::batch::{Commit, SegmentBuilder};
+    use crate::bucket::Bucket;
+    use crate::layout::Origin;
+    use crate::s3_server::S3Server;
+    use crate::writer::Writer;
+    use crate::{Error as BranchError, branch, collector, recovery};
+    use object_store::memory::InMemory;
+    use storage_device::ExtentId;
+
+    fn memory() -> Arc<ObjectBucket> {
+        Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cladefs/test"))
+    }
+
+    /// CLADEFS_BUCKET_LATENCY_MS adds its milliseconds to each request, as a farther object store's
+    /// would (TASK-62): a put and a get, two of them; and each request's time is counted, by its
+    /// kind (TASK-165.11).
+    #[test]
+    fn requests_wait_the_latency_set() {
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
+        let store = ObjectBucket::from_url("memory:///latency").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let start = std::time::Instant::now();
+        runtime.block_on(async {
+            store.put("a", vec![1].into(), PutMode::Create).await.unwrap();
+            assert_eq!(store.get("a").await.unwrap().bytes, vec![1]);
+        });
+        let took = start.elapsed();
+        assert!(took >= std::time::Duration::from_millis(100), "two requests took {took:?}");
+        let stats = store.stats();
+        let timed = |request| std::time::Duration::from_nanos(stats.request_ns(request));
+        for request in [Request::Create, Request::Get] {
+            assert!(timed(request) >= std::time::Duration::from_millis(50), "{request:?}");
+        }
+        assert_eq!(timed(Request::List), std::time::Duration::ZERO);
+    }
+
+    /// TASK-208: so does a file bucket's, its reads whole and ranged as well as its writes:
+    /// object_store's throttle, which put the latency before a bucket until TASK-330.3, took a
+    /// stream, not the file `LocalFileSystem` gives, which it panicked on (`unimplemented!`),
+    /// every read of every pgbench case's bucket.
+    #[test]
+    fn file_buckets_wait_the_latency_set() {
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("file://{}/", dir.path().canonicalize().unwrap().display());
+        let store = ObjectBucket::from_url(&url).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let start = std::time::Instant::now();
+        runtime.block_on(async {
+            store.put("a", vec![1, 2, 3, 4].into(), PutMode::Create).await.unwrap();
+            assert_eq!(store.get("a").await.unwrap().bytes, vec![1, 2, 3, 4]);
+            let range = ByteRange::Bounded(1..3);
+            assert_eq!(store.get_range("a", range).await.unwrap(), vec![2, 3]);
+        });
+        let took = start.elapsed();
+        assert!(took >= std::time::Duration::from_millis(150), "three requests took {took:?}");
+    }
+
+    /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its
+    /// first read, alongside it, and warns as it gets or heads a key they name, of no other key; nor
+    /// of one listed, which a caller may pass over. With no marks, it warns of nothing. TASK-395.2:
+    /// a cell's marks, under its prefix, of each cell it reads, read at its first read of the cell.
+    #[test]
+    fn stores_warn_of_reading_what_the_newest_marks_name() {
+        use crate::layout::{Branch, Cell, Marked, Marks, TEST_CELL};
+        let log = crate::marks::captured();
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (old, marked) =
+            (layout::checkpoint(test_branch(1), 3, 1), layout::checkpoint(test_branch(1), 4, 1));
+        let other = Cell { tenant: 1, id: 2 };
+        let theirs = layout::checkpoint(Branch { cell: other, id: 2 }, 1, 1);
+        let warned = || -> Vec<String> { log.lock().unwrap().clone() };
+        futures::executor::block_on(async {
+            let writer = ObjectBucket::new(objects.clone(), "p");
+            for key in [&old, &marked, &layout::checkpoint(test_branch(1), 5, 1), &theirs] {
+                writer.put(key, vec![1, 2].into(), PutMode::Create).await.unwrap();
+            }
+            let unmarked = ObjectBucket::new(objects.clone(), "p");
+            unmarked.get(&marked).await.unwrap();
+            unmarked.get(&marked).await.unwrap();
+            assert_eq!(warned(), Vec::<String>::new());
+
+            let at = |key: &String| Marked {
+                key: key.clone(),
+                size: 2,
+                e_tag: None,
+                version: None,
+                modified: 0,
+            };
+            let (older, newest) = (Marks { epoch: 6, grace: 0, marked: vec![at(&old)] }, 7);
+            let marks = Marks { epoch: newest, grace: 0, marked: vec![at(&marked)] };
+            let put = |marks: &Marks| layout::encode(marks);
+            let theirs_marks = Marks { epoch: 3, grace: 0, marked: vec![at(&theirs)] };
+            for (cell, epoch, marks) in
+                [(TEST_CELL, 6, &older), (TEST_CELL, newest, &marks), (other, 3, &theirs_marks)]
+            {
+                let key = layout::marks(cell, epoch);
+                writer.put(&key, put(marks).into(), PutMode::Create).await.unwrap();
+            }
+            // The marks there, but the bucket not said marked: a reader watches no cell's
+            // (TASK-395.4's review).
+            let blind = ObjectBucket::new(objects.clone(), "p");
+            blind.get(&marked).await.unwrap();
+            blind.get(&marked).await.unwrap();
+            assert!(!blind.marks.marking() && blind.marks.cells_watched() == 0);
+            assert_eq!(warned(), Vec::<String>::new());
+            writer.put(layout::MARKING, vec![1].into(), PutMode::Create).await.unwrap();
+
+            let reader = ObjectBucket::new(objects.clone(), "p");
+            // Its first read reads the marks, alongside: what it reads after, it warns of.
+            reader.head(&layout::checkpoint(test_branch(1), 5, 1)).await.unwrap();
+            assert_eq!(reader.stats().requests(Request::List), 0);
+            assert_eq!(reader.stats().requests(Request::Head), 1);
+            reader.get(&old).await.unwrap();
+            reader.list(&layout::checkpoints(test_branch(1))).await.unwrap();
+            assert_eq!(warned(), Vec::<String>::new());
+            reader.head(&marked).await.unwrap();
+            let range = ByteRange::Bounded(0..1);
+            reader.get_range(&marked, range).await.unwrap();
+            reader.get(&marked).await.unwrap();
+            // The other cell's, at its first read of it, which it warns of.
+            reader.get(&theirs).await.unwrap();
+            reader.get(&theirs).await.unwrap();
+            assert_eq!(reader.stats().requests(Request::List), 1, "its own listing alone");
+        });
+        let saying = "a reader reached what the collector's newest mark-only pass found no live \
+                      branch needs, and would have deleted";
+        let reached = |request: &str, key: &str, marks: String, kind: &str, epoch| {
+            format!(
+                "WARN extent_bucket: {request} {key}: {saying} ({marks}) key={key} kind={kind} \
+                 request={request} marks={epoch}"
+            )
+        };
+        let ours = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, segment: 4, epoch: 1 }";
+        let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
+        let other = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, segment: 1, epoch: 1 }";
+        let theirs = reached("get", &theirs, layout::marks(Cell { tenant: 1, id: 2 }, 3), other, 3);
+        assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
+    }
+
+    /// A bucket counts its requests by kind, failed ones too, and the bytes it uploads, by kind of
+    /// object, and downloads.
+    #[test]
+    fn counts_requests_and_bytes() {
+        let store = memory();
+        futures::executor::block_on(async {
+            let segment = layout::segment(test_branch(1), 0, 1);
+            let version = store.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
+            assert!(store.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
+            store.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
+            store
+                .put(&layout::checkpoint(test_branch(1), 0, 1), vec![4; 30].into(), PutMode::Create)
+                .await
+                .unwrap();
+            store
+                .put(&layout::head(test_branch(1)), vec![5; 9].into(), PutMode::Overwrite)
+                .await
+                .unwrap();
+            let extent =
+                layout::extent(layout::TEST_CELL, 1, 0, storage_device::ExtentId::new(1, 5));
+            store.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
+            store
+                .put(&layout::moves(&segment, 1).unwrap(), vec![7; 13].into(), PutMode::Create)
+                .await
+                .unwrap();
+            assert_eq!(store.get(&segment).await.unwrap().bytes.len(), 50);
+            let range = ByteRange::Bounded(10..30);
+            assert_eq!(store.get_range(&segment, range).await.unwrap().len(), 20);
+            assert!(store.get(&layout::segment(test_branch(1), 9, 1)).await.is_err());
+            store.head(&segment).await.unwrap();
+            store.list("segments/").await.unwrap();
+            store.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
+            store.delete(&segment).await.unwrap();
+            store.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
+        });
+        let stats = store.stats();
+        let requests: Vec<_> =
+            Request::ALL.iter().map(|request| (request.name(), stats.requests(*request))).collect();
+        assert_eq!(
+            requests,
+            [
+                ("get", 2),
+                ("get-range", 1),
+                ("head", 1),
+                ("list", 1),
+                ("create", 5),
+                ("update", 1),
+                ("overwrite", 1),
+                ("delete", 1),
+                ("list-delimited", 1),
+                ("delete-batch", 1),
+            ]
+        );
+        assert_eq!(stats.uploaded, [150, 11, 30, 13, 9]);
+        assert_eq!(stats.downloaded, 70);
+        // cladefs: what the protocol answers fails no request (TASK-314): the create where an object
+        // was, the get of none.
+        assert_eq!(stats.failures, [0; Request::ALL.len()]);
+        // Its line, each kind of request's time after the rest, then its failures: as of times
+        // and failures set here, as each request's time is its own.
+        let failures = [0, 1, 0, 0, 3, 0, 0, 2, 0, 4];
+        let request_ns = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        let stats = Stats { request_ns, failures, ..stats };
+        assert_eq!(
+            stats.line(),
+            "object-store: get=2 get-range=1 head=1 list=1 create=5 update=1 overwrite=1 delete=1 \
+             list-delimited=1 delete-batch=1 \
+             up-segments=150 up-extents=11 up-checkpoints=30 up-moves=13 up-other=9 down=70 \
+             get-ns=10 get-range-ns=20 head-ns=30 list-ns=40 create-ns=50 update-ns=60 \
+             overwrite-ns=70 delete-ns=80 list-delimited-ns=90 delete-batch-ns=100 failed-get=0 \
+             failed-get-range=1 failed-head=0 failed-list=0 failed-create=3 failed-update=0 \
+             failed-overwrite=0 failed-delete=2 failed-list-delimited=0 failed-delete-batch=4"
+        );
+    }
+
+    /// A bucket that writes whatever it is asked to, conditions or not.
+    struct Careless(crate::testing::Direct);
+
+    impl Bucket for Careless {
+        fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+            self.0.get(key)
+        }
+
+        fn get_range(
+            &self,
+            key: &str,
+            range: ByteRange,
+        ) -> impl Future<Output = Result<Vec<u8>, Error>> + Send {
+            self.0.get_range(key, range)
+        }
+
+        fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+            self.0.head(key)
+        }
+
+        fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+            self.0.list(prefix)
+        }
+
+        fn list_delimited(
+            &self,
+            prefix: &str,
+            page: crate::bucket::Page<'_>,
+        ) -> impl Future<Output = Result<Listing, crate::bucket::Error>> + Send {
+            self.0.list_delimited(prefix, page)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: bytes::Bytes,
+            _mode: PutMode,
+        ) -> impl Future<Output = Result<Version, Error>> + Send {
+            self.0.put(key, bytes, PutMode::Overwrite)
+        }
+
+        fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+            self.0.delete(key)
+        }
+
+        fn now(&self) -> u64 {
+            self.0.now()
+        }
+    }
+
+    /// The probe passes a bucket that honours conditional writes, and fails one that does not.
+    #[test]
+    fn probes_find_buckets_without_conditional_writes() {
+        use crate::testing::{Direct, SimBucket};
+        let sim = SimBucket::new();
+        futures::executor::block_on(async {
+            assert_eq!(probe(&Direct(sim.clone()), 1).await, Ok(()));
+            let refused = probe(&Careless(Direct(sim.clone())), 2).await.unwrap_err();
+            assert!(refused.starts_with("the store does not honour conditional writes: a create"));
+        });
+        assert_eq!(sim.keys(), ["probe/0000000000000002"]);
+    }
+
+    #[test]
+    fn honours_conditional_writes() {
+        futures::executor::block_on(probe(&*memory(), 1)).unwrap();
+    }
+
+    /// TASK-92.6: a bucket probed once is not probed again: the second asks nothing.
+    #[test]
+    fn stores_are_probed_once() {
+        let store = memory();
+        futures::executor::block_on(store.probed(1)).unwrap();
+        let probing = store.stats();
+        let writes = [Request::Create, Request::Update, Request::Delete];
+        let asked = writes.map(|request| (request.name(), probing.requests(request)));
+        assert_eq!(asked, [("create", 2), ("update", 2), ("delete", 1)]);
+        futures::executor::block_on(store.probed(2)).unwrap();
+        assert_eq!(store.stats(), probing);
+    }
+
+    #[test]
+    fn keys_are_under_the_prefix() {
+        let store = memory();
+        futures::executor::block_on(async {
+            for key in ["segments/01/00", "segments/01/01", "segments/02/00", "heads/01"] {
+                store.put(key, key.as_bytes().to_vec().into(), PutMode::Create).await.unwrap();
+            }
+            let listed: Vec<String> = store
+                .list("segments/01/")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|meta| meta.key)
+                .collect();
+            assert_eq!(listed, ["segments/01/00", "segments/01/01"]);
+            assert_eq!(store.list("").await.unwrap().len(), 4);
+            let object = store.get("heads/01").await.unwrap();
+            assert_eq!(
+                (object.bytes.as_slice(), object.meta.key.as_str()),
+                (&b"heads/01"[..], "heads/01")
+            );
+            assert_eq!(store.get("heads/02").await.map(|_| ()), Err(Error::NotFound));
+            store.delete("heads/01").await.unwrap();
+            store.delete("heads/01").await.unwrap();
+            assert_eq!(store.head("heads/01").await.map(|_| ()), Err(Error::NotFound));
+        });
+    }
+
+    /// TASK-92.55: recoveries through a host's bucket decode a checkpoint once: the forks of a
+    /// base opened one after another start from its newest checkpoint, the second reading it not
+    /// again, but the head, and the same state: kept by its key, which names one object, ever
+    /// (TASK-407).
+    #[test]
+    fn recoveries_share_the_checkpoints_they_decode() {
+        let bucket = memory();
+        futures::executor::block_on(async {
+            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
+            let extent = ExtentId::new(1, writer.chain().next_sequence());
+            let commit = Commit { tag: 1, extents: vec![(extent, vec![1])], ..Commit::default() };
+            let segment = add(&writer, commit);
+            writer.upload(segment).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(writer.checkpoint().await, Ok(Some(segment)));
+            let gets = || bucket.stats().requests(Request::Get);
+            let mut read = Vec::new();
+            let mut states = Vec::new();
+            for _ in 0..2 {
+                let before = gets();
+                states.push(recovery::recover(&*bucket, test_branch(1), None).await.unwrap().state);
+                read.push(gets() - before);
+            }
+            assert_eq!(read, [2, 1], "the head's and the checkpoint's GETs, by recovery");
+            assert_eq!(states[0], states[1]);
+            assert_eq!(states[0].extents.keys().copied().collect::<Vec<_>>(), [extent]);
+        });
+    }
+
+    /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
+    fn add<B: Bucket>(writer: &Writer<B>, commit: Commit) -> u64 {
+        writer.add_segment(SegmentBuilder::from(commit).close(&mut writer.chain()).frame()).unwrap()
+    }
+
+    /// A branch's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
+    /// then what it and its fork freed, reclaimed.
+    pub(crate) async fn branch_lifecycle(bucket: Arc<impl Bucket>, root: u64) {
+        let child = root + 1;
+        branch::create(&*bucket, test_branch(root), 0).await.unwrap();
+        let first = Writer::open(bucket.clone(), test_branch(root), 10, 1).await.unwrap();
+        let small = ExtentId::new(root, first.chain().next_sequence());
+        let large = ExtentId::new(root, small.sequence + 1);
+        let commit = Commit {
+            tag: 1,
+            extents: vec![(small, b"small".to_vec())],
+            own: vec![(large.sequence, vec![7; 4096])],
+            ..Commit::default()
+        };
+        let segment = add(&first, commit);
+        first.upload(segment).await.unwrap();
+        assert_eq!(first.acknowledge().await, Ok(Some(segment)));
+        let forking = SegmentBuilder::default()
+            .fork(crate::layout::child(test_branch(child)), &mut first.chain())
+            .frame();
+        let fork = first.add_segment(forking).unwrap();
+        first.upload(fork).await.unwrap();
+        first.acknowledge().await.unwrap();
+        let segment = add(&first, Commit { tag: 2, frees: vec![small], ..Commit::default() });
+        first.upload(segment).await.unwrap();
+        first.acknowledge().await.unwrap();
+        assert_eq!(first.checkpoint().await, Ok(Some(segment)));
+        // Looked up a block at a time, by ranged reads, by a host's fetcher.
+        let checkpoint = crate::layout::checkpoint(test_branch(root), segment, 1);
+        let tail = crate::object::tail(&*bucket, &checkpoint).await.unwrap().unwrap();
+        let table = crate::checkpoint::Table::decode(tail.footer()).unwrap();
+        assert_eq!(table.state().last_commit, Some(2));
+        let budget = crate::fetch::Budget::new(crate::fetch::Limits::UNBOUNDED);
+        let fetcher =
+            crate::fetch::Fetcher::new(bucket.clone(), budget, crate::fetch::Memory::new(), None);
+        assert!(fetcher.lookup(&checkpoint, large).await.unwrap().is_some());
+        assert_eq!(fetcher.lookup(&checkpoint, small).await, Ok(None));
+
+        // Another writer takes the branch; the first one's next segment is not the branch's.
+        let second = Writer::open(bucket.clone(), test_branch(root), 11, 2).await.unwrap();
+        let segment = add(&first, Commit { tag: 3, frees: vec![large], ..Commit::default() });
+        let taken = match first.upload(segment).await {
+            Ok(()) => first.acknowledge().await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        assert_eq!(taken, Err(BranchError::Fenced));
+        assert_eq!(second.state().last_commit, Some(2));
+
+        let state = recovery::recover(&*bucket, test_branch(root), None).await.unwrap().state;
+        assert_eq!(state.extents.keys().copied().collect::<Vec<_>>(), [large]);
+        let origin = Some(Origin { parent: test_branch(root), at: fork });
+        assert_eq!(
+            branch::record(&*bucket, test_branch(child)).await.unwrap().unwrap().origin(),
+            origin
+        );
+        let inherited =
+            recovery::recover(&*bucket, test_branch(child), origin).await.unwrap().state;
+        assert_eq!(inherited.extents.keys().copied().collect::<Vec<_>>(), [small, large]);
+
+        // The collector keeps what the child inherited, though the parent freed it.
+        let options = collector::Options { compact_below: 0.5, grace: 0 };
+        collector::collect(&*bucket, 20, &options).await.unwrap();
+        let location = &inherited.extents[&small];
+        assert_eq!(crate::read(&bucket, small, location).await.unwrap(), b"small");
+        let location = &inherited.extents[&large];
+        assert_eq!(crate::read(&bucket, large, location).await.unwrap(), vec![7; 4096]);
+
+        // Freed by the parent's writer, and by the child, which inherited them, nothing reaches
+        // them: the collector reclaims their objects.
+        let segment = add(&second, Commit { tag: 4, frees: vec![large], ..Commit::default() });
+        second.upload(segment).await.unwrap();
+        second.acknowledge().await.unwrap();
+        second.checkpoint().await.unwrap();
+        let heir = Writer::open(bucket.clone(), test_branch(child), 12, 1).await.unwrap();
+        let segment = add(&heir, Commit { tag: 1, frees: vec![small, large], ..Commit::default() });
+        heir.upload(segment).await.unwrap();
+        heir.acknowledge().await.unwrap();
+        heir.checkpoint().await.unwrap();
+        collector::collect(&*bucket, 21, &options).await.unwrap();
+        for extent in [small, large] {
+            let key = &inherited.extents[&extent].key;
+            assert_eq!(bucket.head(key).await.map(|_| ()), Err(Error::NotFound), "{extent:?}");
+        }
+    }
+
+    #[test]
+    fn branches_on_a_memory_store() {
+        futures::executor::block_on(branch_lifecycle(memory(), 1));
+    }
+
+    /// cladefs: the bucket of the directory `dir`, by its URL (TASK-165.1).
+    pub(crate) fn file(dir: &std::path::Path) -> Arc<ObjectBucket> {
+        let url = url::Url::from_directory_path(dir).unwrap();
+        Arc::new(ObjectBucket::from_url(url.as_str()).unwrap())
+    }
+
+    #[test]
+    fn memory_buckets_conform() {
+        futures::executor::block_on(crate::bucket::conformance(&*memory(), "conformance"));
+    }
+
+    /// cladefs: a bucket on the host's filesystem does what every bucket must (TASK-165.1).
+    #[test]
+    fn file_buckets_conform() {
+        let dir = tempfile::tempdir().unwrap();
+        futures::executor::block_on(crate::bucket::conformance(&*file(dir.path()), "conformance"));
+    }
+
+    #[test]
+    fn simulated_buckets_conform() {
+        let bucket = crate::testing::Direct(crate::testing::SimBucket::new());
+        futures::executor::block_on(crate::bucket::conformance(&bucket, "conformance"));
+    }
+
+    /// cladefs: `object_store`'s own bucket of a directory refuses conditional updates, which the
+    /// probe finds; cladefs's honours them (TASK-165.1).
+    #[test]
+    fn file_buckets_honour_conditional_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+        let theirs = ObjectBucket::new(Arc::new(files), "");
+        let refused = futures::executor::block_on(probe(&theirs, 1)).unwrap_err();
+        assert_eq!(
+            refused,
+            "the store does not honour conditional writes: an update of another version gave \
+             Err(Unavailable)"
+        );
+        futures::executor::block_on(probe(&*file(dir.path()), 2)).unwrap();
+    }
+
+    #[test]
+    fn branches_on_a_file_store() {
+        let dir = tempfile::tempdir().unwrap();
+        futures::executor::block_on(branch_lifecycle(file(dir.path()), 1));
+    }
+
+    /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
+    fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
+        let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
+        let Reached { objects, pages, prefix } = reach(&url, server.options(), client).unwrap();
+        Arc::new(ObjectBucket::paged(objects, pages, &prefix))
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as
+    /// `object_store` uses it, spawns each on the runtime it is asked on): requests each on a runtime
+    /// of their own, dropped after, as `extent_store::upload::block_on`'s were, connect anew each
+    /// time, the one before closed with its runtime, a handshake more a request (TCP's, and on a
+    /// bucket elsewhere TLS's too); on one runtime that lives on, they share one (TASK-449).
+    #[test]
+    fn requests_on_runtimes_dropped_after_connect_anew() {
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let bucket = s3(&server, "connections", &Client::DEFAULT);
+        let get = || async { crate::bucket::get(&*bucket, "absent").await };
+        let own = || {
+            let own = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            assert!(own.block_on(get()).is_none());
+        };
+        // The first, which looks at the collector's marking too, at once.
+        own();
+        let connects = |request: &dyn Fn()| {
+            let before = server.connections();
+            request();
+            server.connections() - before
+        };
+        assert_eq!([(); 3].map(|()| connects(&own)), [1, 1, 1]);
+        let shared = runtime();
+        let on_shared = || assert!(shared.block_on(get()).is_none());
+        assert_eq!([(); 3].map(|()| connects(&on_shared)), [1, 0, 0]);
+    }
+
+    /// cladefs: S3 over HTTP, through cladefs's client, does what every bucket must, and branches live
+    /// there: the server in memory the tests below slow is as S3 is to them (TASK-205).
+    #[test]
+    fn s3_buckets_conform() {
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            let bucket = s3(&server, "conformance", &Client::DEFAULT);
+            crate::bucket::conformance(&*bucket, "conformance").await;
+            branch_lifecycle(s3(&server, "branches", &Client::DEFAULT), 1).await;
+        });
+    }
+
+    /// cladefs: over S3, deletes go in DeleteObjects of 1,000 keys each, and a listing by delimiter
+    /// is one ListObjectsV2 by `delimiter=/`, listing none of the objects under the prefixes it
+    /// finds (TASK-395.5): as the server serves them, and the store counts them.
+    #[test]
+    fn s3_deletes_in_batches_and_lists_by_delimiter() {
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            let bucket = s3(&server, "batches", &Client::DEFAULT);
+            let keys: Vec<String> =
+                (0..2500).map(|n| format!("cells/{:02}/objects/{n:05}", n % 10)).collect();
+            futures::stream::iter(&keys)
+                .for_each_concurrent(64, |key| async {
+                    bucket.put(key, vec![1].into(), PutMode::Create).await.unwrap();
+                })
+                .await;
+            let level = bucket.list_delimited("cells/", Page::FIRST).await.unwrap();
+            let cells: Vec<String> = (0..10).map(|n| format!("cells/{n:02}/")).collect();
+            assert_eq!((level.prefixes, level.objects, level.next), (cells, vec![], None));
+            // A level of 250 objects, pages of 100 asked: three requests, each going on from the
+            // one before by S3's continuation token (TASK-395.5).
+            let (mut pages, mut after) = (Vec::new(), None);
+            loop {
+                let page = Page { after: after.as_deref(), max: 100 };
+                let listing = bucket.list_delimited("cells/03/objects/", page).await.unwrap();
+                pages.push(listing.objects.into_iter().map(|meta| meta.key).collect::<Vec<_>>());
+                match listing.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(pages.iter().map(Vec::len).collect::<Vec<_>>(), [100, 100, 50]);
+            let mut third: Vec<String> =
+                keys.iter().filter(|key| key.starts_with("cells/03/")).cloned().collect();
+            third.sort();
+            assert_eq!(pages.concat(), third);
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            crate::bucket::delete_all(&*bucket, &keys).await;
+            assert_eq!(bucket.list("cells/").await.unwrap(), vec![]);
+            let served = server.requests();
+            let served = ["list-delimited", "delete-objects", "delete"]
+                .map(|kind| served.get(kind).copied().unwrap_or(0));
+            assert_eq!(served, [4, 3, 0]);
+            let stats = bucket.stats();
+            let counted = [Request::ListDelimited, Request::DeleteBatch, Request::Delete]
+                .map(|request| stats.requests(request));
+            assert_eq!(counted, [4, 3, 0]);
+        });
+    }
+
+    /// TASK-208: the latency every request to `bucket` waits, CLADEFS_BUCKET_LATENCY_MS, set before
+    /// it was made.
+    const LATE: u64 = 5;
+
+    /// TASK-208: a bucket made under CLADEFS_BUCKET_LATENCY_MS, `bucket`, does what every bucket
+    /// must, its requests each [`LATE`] ms late, one after another.
+    async fn conforms_late(bucket: &ObjectBucket) {
+        let started = std::time::Instant::now();
+        crate::bucket::conformance(bucket, "conformance").await;
+        let requests: u64 = bucket.stats().requests.iter().sum();
+        let took = started.elapsed();
+        assert!(
+            took >= std::time::Duration::from_millis(requests * LATE),
+            "{requests} requests took {took:?}"
+        );
+    }
+
+    /// TASK-208: sets CLADEFS_BUCKET_LATENCY_MS to [`LATE`].
+    fn late() {
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", LATE.to_string()) };
+    }
+
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket in memory conforms, late.
+    #[test]
+    fn memory_buckets_conform_late() {
+        late();
+        let bucket = ObjectBucket::from_url("memory:///late").unwrap();
+        runtime().block_on(conforms_late(&bucket));
+    }
+
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket of files conforms, late: its reads,
+    /// which object_store's throttle, before TASK-330.3, panicked on (`unimplemented!`), as well as
+    /// its writes.
+    #[test]
+    fn file_buckets_conform_late() {
+        late();
+        let dir = tempfile::tempdir().unwrap();
+        runtime().block_on(conforms_late(&file(dir.path())));
+    }
+
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket over S3 conforms, late.
+    #[test]
+    fn s3_buckets_conform_late() {
+        late();
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            conforms_late(&s3(&server, "conformance", &Client::DEFAULT)).await;
+        });
+    }
+
+    /// `len` bytes that do not compress, from a xorshift generator seeded with `seed`.
+    fn noise(len: usize, mut seed: u64) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as u8
+            })
+            .collect()
+    }
+
+    /// TASK-205: a writer's uploads over a link slower than what they have in flight at once, by
+    /// the stall time, a host's upstream that its uploads share: each lands at its first attempt,
+    /// and every commit is acknowledged. Under `object_store`'s timeout of a whole request, which
+    /// they all ran out of together, part sent, none ever did.
+    ///
+    /// What a connection's socket buffers counts as sent ([`crate::client`]): over loopback, whose
+    /// segments are 64 KiB, Linux lets a socket that the server reads slowly buffer up to 4 MiB,
+    /// which took a request's 2 MiB whole and left nothing to move for seconds. So objects larger
+    /// than that, and a stall longer than it takes a request's share of the link to carry it.
+    #[test]
+    fn uploads_land_over_a_slow_link() {
+        const RATE: u64 = 16 << 20;
+        const SEGMENTS: u64 = 8;
+        const EXTENT: usize = 16 << 20;
+        let client = Client { stall: std::time::Duration::from_secs(4), ..Client::DEFAULT };
+        assert!(SEGMENTS * EXTENT as u64 >= 2 * RATE * client.stall.as_secs());
+        assert!(RATE / SEGMENTS * client.stall.as_secs() >= 2 * (4 << 20));
+        runtime().block_on(async {
+            let server = S3Server::start(Some(RATE));
+            let bucket = s3(&server, "slow", &client);
+            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
+            let segments: Vec<u64> = (1..=SEGMENTS)
+                .map(|tag| {
+                    let sequence = writer.chain().next_sequence();
+                    let own = vec![(sequence, noise(EXTENT, tag))];
+                    add(&writer, Commit { tag, own, ..Commit::default() })
+                })
+                .collect();
+            let creates = bucket.stats().requests(Request::Create);
+            let uploads =
+                futures::future::join_all(segments.iter().map(|segment| writer.upload(*segment)));
+            let wait = std::time::Duration::from_secs(30);
+            let uploaded = tokio::time::timeout(wait, uploads).await.expect("uploads landed");
+            assert_eq!(uploaded, vec![Ok(()); SEGMENTS as usize]);
+            assert_eq!(writer.acknowledge().await, Ok(segments.last().copied()));
+            // A segment and its extent each, each once.
+            let created = bucket.stats().requests(Request::Create) - creates;
+            assert_eq!(created, 2 * SEGMENTS);
+        });
+    }
+
+    /// TASK-205: an upload to a server that reads nothing of it fails, once it moved no bytes for
+    /// the stall time, rather than wait for ever.
+    #[test]
+    fn stalled_uploads_time_out() {
+        let client = Client { stall: std::time::Duration::from_secs(1), ..Client::DEFAULT };
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let server = S3Server::at(listener.local_addr().unwrap());
+            tokio::spawn(async move {
+                let mut held = vec![];
+                loop {
+                    held.push(listener.accept().await.unwrap().0);
+                }
+            });
+            let bucket = s3(&server, "stalled", &client);
+            let start = tokio::time::Instant::now();
+            let put = bucket.put("object", noise(32 << 20, 1).into(), PutMode::Create);
+            let put = tokio::time::timeout(10 * client.stall, put).await.expect("the upload ended");
+            let took = start.elapsed();
+            assert_eq!(put, Err(Error::Unavailable));
+            assert!(took >= client.stall && took < 5 * client.stall, "failed after {took:?}");
+        });
+    }
+
+    /// TASK-205: what cladefs's client costs at a bandwidth nothing limits, against `object_store`'s
+    /// own: 32 objects of 16 MiB uploaded at once to the S3 server in memory, by each in turn,
+    /// 25 times, then their median. Run with `--run-ignored only --no-capture`, in release.
+    #[test]
+    #[ignore = "a benchmark (TASK-205): --run-ignored only, in release"]
+    fn client_throughput() {
+        const OBJECTS: usize = 32;
+        const SIZE: usize = 16 << 20;
+        const ROUNDS: usize = 25;
+        runtime().block_on(async {
+            let server = S3Server::start(None);
+            let theirs = |prefix: &str| {
+                let builder = object_store::aws::AmazonS3Builder::new()
+                    .with_url(format!("s3://{}/{prefix}", crate::s3_server::BUCKET))
+                    .with_client_options(Client::DEFAULT.options());
+                let builder =
+                    server.options().into_iter().fold(builder, |builder, (key, value)| {
+                        builder.with_config(key.parse().unwrap(), value)
+                    });
+                Arc::new(ObjectBucket::new(Arc::new(builder.build().unwrap()), prefix))
+            };
+            let stores = [
+                ("cladefs's", s3(&server, "ours", &Client::DEFAULT)),
+                ("object_store's", theirs("theirs")),
+            ];
+            let body = noise(SIZE, 1);
+            let mut rates = [vec![], vec![]];
+            for round in 0..ROUNDS {
+                for ((name, store), rates) in stores.iter().zip(&mut rates) {
+                    let start = std::time::Instant::now();
+                    let puts = (0..OBJECTS).map(|object| {
+                        let (store, body) = (&store, body.clone());
+                        async move {
+                            store.put(&format!("{object}"), body.into(), PutMode::Create).await
+                        }
+                    });
+                    for put in futures::future::join_all(puts).await {
+                        put.unwrap();
+                    }
+                    let took = start.elapsed();
+                    let rate = (OBJECTS * SIZE) as f64 / took.as_secs_f64() / 1e6;
+                    eprintln!("round {round}: {name} client: {took:?}, {rate:.0} MB/s");
+                    rates.push(rate);
+                    for object in 0..OBJECTS {
+                        store.delete(&format!("{object}")).await.unwrap();
+                    }
+                }
+            }
+            for ((name, _), rates) in stores.iter().zip(&mut rates) {
+                rates.sort_by(f64::total_cmp);
+                eprintln!("{name} client: median {:.0} MB/s", rates[ROUNDS / 2]);
+            }
+        });
+    }
+
+    /// Probes the bucket at `url`'s conditional writes, and runs branches' lifecycle there.
+    fn over_a_real_store(url: &str) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = Arc::new(ObjectBucket::from_url(url).unwrap());
+            probe(&*store, std::process::id().into()).await.unwrap();
+            // Each run its own branches, and objects.
+            let root = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+            crate::bucket::conformance(&*store, &format!("conformance-{root:x}")).await;
+            branch_lifecycle(store, root & !1).await;
+        });
+    }
+
+    /// The same over a real S3 server: `scripts/test-rustfs.sh` starts RustFS and runs this with
+    /// `CLADEFS_S3_URL` naming a bucket of it, and the `AWS_*` variables to reach it.
+    #[test]
+    #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
+    fn rustfs() {
+        over_a_real_store(
+            &std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket"),
+        );
+    }
+
+    /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a bucket
+    /// and a prefix, under which the run leaves its branches, reached with the environment's
+    /// credentials. Then 32 objects of 8 MiB uploaded at once, which a host's upstream below
+    /// 9 MB/s took longer to carry than `object_store`'s 30 s: each lands at its first attempt.
+    #[test]
+    #[ignore = "needs a GCS bucket and its credentials: CLADEFS_GCS_URL (TASK-205)"]
+    fn gcs() {
+        let url = std::env::var("CLADEFS_GCS_URL").expect("CLADEFS_GCS_URL names the bucket");
+        over_a_real_store(&url);
+        const OBJECTS: u64 = 32;
+        const SIZE: usize = 8 << 20;
+        runtime().block_on(async {
+            let store = ObjectBucket::from_url(&url).unwrap();
+            let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let keys: Vec<String> = (0..OBJECTS).map(|n| format!("uploads-{run:x}/{n}")).collect();
+            let start = std::time::Instant::now();
+            let puts = keys
+                .iter()
+                .zip(1..)
+                .map(|(key, seed)| store.put(key, noise(SIZE, seed).into(), PutMode::Create));
+            let landed: Vec<bool> =
+                futures::future::join_all(puts).await.iter().map(Result::is_ok).collect();
+            let took = start.elapsed();
+            let rate = (OBJECTS as usize * SIZE) as f64 / took.as_secs_f64() / 1e6;
+            eprintln!("{OBJECTS} objects of {SIZE} bytes at once: {took:?}, {rate:.1} MB/s");
+            assert_eq!(landed, vec![true; OBJECTS as usize]);
+            for key in &keys {
+                store.delete(key).await.unwrap();
+            }
+        });
+    }
+
+    /// The same over Azure Blob Storage, as its emulator, Azurite, serves it (TASK-46):
+    /// `scripts/test-azurite.sh` starts it and runs this with `CLADEFS_AZURE_URL` naming a container
+    /// of it, and the `AZURE_*` variables to reach it.
+    #[test]
+    #[ignore = "needs Azurite: scripts/test-azurite.sh, CI's object-stores job"]
+    fn azurite() {
+        let url =
+            std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
+        over_a_real_store(&url);
+    }
+}

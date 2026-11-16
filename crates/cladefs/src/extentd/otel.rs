@@ -5,7 +5,7 @@
 //! cladefs: the daemon's spans, exported over OTLP (TASK-258, `docs/tracing.md`): of each request it
 //! serves, and of what serving it costs its store, its commits and their phases, its opens and
 //! forks, its page-ins, its uploads and their bucket requests, and its relief of memory
-//! (`extent_remote::trace`, which makes them).
+//! (`extent_bucket::trace`, which makes them).
 //!
 //! Off unless `CLADEFSD_TRACES` is `otlp` ([`from_env`]); then, configured by
 //! OpenTelemetry's own variables: `OTEL_EXPORTER_OTLP_ENDPOINT` (or
@@ -77,13 +77,13 @@ pub fn install(provider: SdkTracerProvider) {
         return;
     }
     opentelemetry::global::set_tracer_provider(provider);
-    extent_remote::trace::enable(true);
+    extent_bucket::trace::enable(true);
 }
 
 /// Stops the daemon's spans, and exports those it made and didn't export yet, as it exits.
 pub fn shutdown() {
     let Some(provider) = PROVIDER.get() else { return };
-    extent_remote::trace::enable(false);
+    extent_bucket::trace::enable(false);
     if let Err(err) = provider.shutdown() {
         log::warn!("extentd: exporting the last spans: {err}");
     }
@@ -124,8 +124,8 @@ pub(super) fn request_span(
     header: &Header,
     branch: Option<crate::Branch>,
     guest: Option<&crate::request::RequestId>,
-) -> extent_remote::trace::Span {
-    use extent_remote::trace::{self, Span};
+) -> extent_bucket::trace::Span {
+    use extent_bucket::trace::{self, Span};
     if !trace::enabled() {
         return Span::none();
     }
@@ -177,7 +177,7 @@ mod tests {
             from_env(),
             Err("CLADEFSD_TRACES must be `otlp` or unset, not `jaeger`".to_owned())
         );
-        assert!(!extent_remote::trace::enabled());
+        assert!(!extent_bucket::trace::enabled());
     }
 
     #[test]
@@ -185,9 +185,9 @@ mod tests {
         set(OPTION, Some("otlp"));
         set("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://localhost:4318"));
         assert_eq!(from_env(), Ok(true));
-        assert!(extent_remote::trace::enabled());
+        assert!(extent_bucket::trace::enabled());
         shutdown();
-        assert!(!extent_remote::trace::enabled());
+        assert!(!extent_bucket::trace::enabled());
     }
 
     #[test]

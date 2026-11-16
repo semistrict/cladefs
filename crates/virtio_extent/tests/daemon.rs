@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
-use cladefs::{Errno, ExtentStore, RemoteExtentStore};
+use cladefs::{DaemonExtentStore, Errno, ExtentStore};
 use virtio_extent::protocol::*;
 use virtio_extent::{
     BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Notices, WindowVm, handle,
@@ -41,7 +41,7 @@ fn bounds() -> Bounds {
 /// why (cladefs TASK-220).
 fn host() {
     let _ = cladefs::extentd::logging::to_stderr();
-    for (name, value) in [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
+    for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.
@@ -86,13 +86,13 @@ fn daemon() -> TestDir {
 }
 
 /// A store of `capacity` bytes, which a daemon of the test's serves.
-fn store_of(capacity: u64) -> (RemoteExtentStore, TestDir) {
+fn store_of(capacity: u64) -> (DaemonExtentStore, TestDir) {
     let dir = daemon();
-    let store = RemoteExtentStore::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
+    let store = DaemonExtentStore::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
     (store, dir)
 }
 
-fn store() -> (RemoteExtentStore, TestDir) {
+fn store() -> (DaemonExtentStore, TestDir) {
     store_of(1 << 20)
 }
 
@@ -140,7 +140,7 @@ fn buffers(readable: &mut [u8], written: &mut [u8], split: usize) -> Buffers {
 /// response included, split into descriptors of at most `split` bytes; returns how much the device
 /// says it wrote, and the `writable` bytes it was given.
 fn serve(
-    store: &RemoteExtentStore,
+    store: &DaemonExtentStore,
     readable: &[u8],
     writable: usize,
     split: usize,
@@ -157,7 +157,7 @@ fn serve(
 /// Serves a request as [`serve`] does, and returns what the device wrote, the response apart, and
 /// the response's status.
 fn request_split(
-    store: &RemoteExtentStore,
+    store: &DaemonExtentStore,
     readable: &[u8],
     writable: usize,
     split: usize,
@@ -169,7 +169,7 @@ fn request_split(
     (written, u32::from_le(response.status))
 }
 
-fn request(store: &RemoteExtentStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
+fn request(store: &DaemonExtentStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
     request_split(store, readable, writable, usize::MAX)
 }
 
@@ -177,7 +177,7 @@ fn read<T: FromBytes>(bytes: &[u8]) -> T {
     T::read_from_prefix(bytes).unwrap().0
 }
 
-fn io(store: &RemoteExtentStore, sequence: u64, offset: u64, len: usize) -> IoArgs {
+fn io(store: &DaemonExtentStore, sequence: u64, offset: u64, len: usize) -> IoArgs {
     IoArgs {
         id: ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() },
         offset: offset.to_le(),
@@ -227,7 +227,7 @@ fn writes_and_reads() {
     assert_eq!(request(&store, &missing, BLOCK + RESPONSE), (vec![0; BLOCK], errno(Errno::ENOENT)));
     let commit = bytes(
         VIRTIO_EXTENT_T_COMMIT,
-        VIRTIO_EXTENT_COMMIT_DURABLE,
+        VIRTIO_EXTENT_COMMIT_UPLOADED,
         Some(CommitArgs::default()),
         &[],
     );
@@ -246,7 +246,7 @@ fn writes_and_reads() {
     // WRITE's.
     let committed = bytes(
         VIRTIO_EXTENT_T_WRITE,
-        VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE,
+        VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED,
         Some(io(&store, 5, 0, BLOCK)),
         &data[..BLOCK],
     );
@@ -256,7 +256,7 @@ fn writes_and_reads() {
     assert_eq!(request(&store, &after, RESPONSE).1, errno(Errno::EPERM));
     let unknown = bytes(
         VIRTIO_EXTENT_T_WRITE,
-        VIRTIO_EXTENT_WRITE_DURABLE,
+        VIRTIO_EXTENT_WRITE_UPLOADED,
         Some(io(&store, 6, 0, BLOCK)),
         &data[..BLOCK],
     );
@@ -336,7 +336,7 @@ fn roots_and_info() {
             available: (1u64 << 20).to_le(),
             next_sequence: 0,
             // The store's branch is kept in the daemon's bucket: its writer mints from its range,
-            // its first lease's (cladefs's doc-7, The head).
+            // its first taking's (cladefs's doc-7, The head).
             sequence_floor: (1u64 << 40).to_le(),
             branch: store.branch().to_le(),
         }
@@ -376,29 +376,36 @@ fn roots_and_info() {
 #[test]
 fn follows_a_writer() {
     let (store, dir) = store();
-    let follower = RemoteExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
+    let follower = DaemonExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
     let (heard, commits) = mpsc::channel();
-    follower.on_committed(move |epoch| {
+    follower.on_committed(move |committed| {
         // Unheard once the test stops listening.
-        let _ = heard.send(epoch);
+        let _ = heard.send(committed);
     });
     let data = vec![7; BLOCK];
     let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
     store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
     store.commit(None).unwrap();
-    let epoch = commits.recv().unwrap();
+    let committed = commits.recv().unwrap();
     let read_ = bytes(VIRTIO_EXTENT_T_READ, 0, Some(io(&store, 1, 0, BLOCK)), &[]);
     assert_eq!(
         request(&follower, &read_, BLOCK + RESPONSE),
         (vec![0; BLOCK], errno(Errno::ENOENT))
     );
-    let advance = bytes::<Epoch>(VIRTIO_EXTENT_T_ADVANCE, 0, None, &[]);
-    let (written, status) = request(&follower, &advance, size_of::<Epoch>() + RESPONSE);
+    let advance = bytes::<CommitNumber>(VIRTIO_EXTENT_T_ADVANCE, 0, None, &[]);
+    let (written, status) = request(&follower, &advance, size_of::<CommitNumber>() + RESPONSE);
     assert_eq!(status, 0);
-    assert_eq!(read::<Epoch>(&written), Epoch { epoch: epoch.to_le(), reserved: 0 });
+    assert_eq!(
+        read::<CommitNumber>(&written),
+        CommitNumber { commit: committed.to_le(), reserved: 0 }
+    );
     assert_eq!(request(&follower, &read_, BLOCK + RESPONSE), (data.clone(), 0));
-    let let_go =
-        bytes(VIRTIO_EXTENT_T_LET_GO, 0, Some(Epoch { epoch: epoch.to_le(), reserved: 0 }), &[]);
+    let let_go = bytes(
+        VIRTIO_EXTENT_T_LET_GO,
+        0,
+        Some(CommitNumber { commit: committed.to_le(), reserved: 0 }),
+        &[],
+    );
     assert_eq!(request(&follower, &let_go, RESPONSE), (vec![], 0));
     let id = io(&store, 1, 0, 0).id;
     for type_ in [VIRTIO_EXTENT_T_PIN, VIRTIO_EXTENT_T_UNPIN] {
@@ -410,7 +417,10 @@ fn follows_a_writer() {
     assert_eq!(request(&follower, &write, RESPONSE).1, errno(Errno::EROFS));
     let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
     assert_eq!(request(&follower, &commit, RESPONSE).1, errno(Errno::EROFS));
-    assert_eq!(request(&store, &advance, size_of::<Epoch>() + RESPONSE).1, errno(Errno::EINVAL));
+    assert_eq!(
+        request(&store, &advance, size_of::<CommitNumber>() + RESPONSE).1,
+        errno(Errno::EINVAL)
+    );
 }
 
 /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
@@ -490,8 +500,8 @@ fn refuses_bad_requests() {
             })
             .collect()
     };
-    let many = entries(&[VIRTIO_EXTENT_MAP_AHEAD, 0]);
-    for flags in [0, VIRTIO_EXTENT_MAP_AHEAD] {
+    let many = entries(&[VIRTIO_EXTENT_MAP_PREFAULT, 0]);
+    for flags in [0, VIRTIO_EXTENT_MAP_PREFAULT] {
         let map = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(MapArgs::default()), &[]);
         assert_eq!(request(&store, &map, RESPONSE).1, errno(Errno::ENOSYS));
         let flags = flags | VIRTIO_EXTENT_MAP_MANY;

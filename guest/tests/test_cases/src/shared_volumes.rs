@@ -83,7 +83,7 @@ pub mod host {
     ) -> anyhow::Result<Generation> {
         let manifest = receive(stream)?;
         control.fork_store(publisher, &path)?;
-        control.make_generation_public(&path)?;
+        control.make_public_attach_only(&path)?;
         stream.write_all(b"forked\n")?;
         Ok(Generation { path, manifest })
     }

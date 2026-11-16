@@ -13,7 +13,7 @@ use std::path::Path;
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 const OPTIONS: Options = Options {
     max_extent: 64 << 20,
     segment_size: 64 << 10,
@@ -32,7 +32,7 @@ fn create(path: &Path) -> extent_store::Store<HostDir> {
         path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap();
     let store = Store::recover_unmade(HostDir::new(path).unwrap()).unwrap();
@@ -93,7 +93,7 @@ fn stores_unmade_refuse_to_open() {
         &path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap();
     let making = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
@@ -127,7 +127,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
         &path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap_err();
     scenario.teardown();
@@ -140,7 +140,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
 }
 
 /// cladefs: a store's placement's token is its description's, placed durably, which opening it
-/// takes its branch's lease with (TASK-39.7, TASK-165.9); none, never placed.
+/// takes its branch's cell with (TASK-39.7, TASK-165.9); none, never placed.
 #[test]
 fn placements_name_their_token_in_the_description() {
     let dir = tempfile::tempdir().unwrap();

@@ -29,10 +29,11 @@
 //! so, and holds it packed in memory ([`crate::held`]), which its framing takes; a part let go of
 //! meanwhile, the host's memory short, its framing reads back and packs, as before.
 //!
-//! cladefs: a sealed store's segments are neither looked at ahead nor held (TASK-411.5): their raw
-//! files' bytes are XTS ciphertext, their framings never frame in place, and packing a part ahead
-//! would seal it under a framed object's key not drawn until its framing. Their framings read every
-//! part through the raw file ([`crate::RawFile`]), decrypting, and pack and seal it then.
+//! cladefs: an encrypted store's segments are neither looked at ahead nor held (TASK-411.5): their
+//! raw files' bytes are XTS ciphertext, their framings never frame in place, and packing a part
+//! ahead would encrypt it under a framed object's key not drawn until its framing. Their framings
+//! read every part through the raw file ([`crate::RawFile`]), decrypting, and pack and encrypt it
+//! then.
 
 use crate::dir::File;
 use crate::held::{Hold, Pending};
@@ -51,11 +52,11 @@ use std::sync::{Condvar, Mutex};
 const KEPT: usize = 2 * 32;
 
 /// cladefs: what [`KEPT`] keeps, taken by framings and given back.
-struct Kept<T> {
+struct Pool<T> {
     kept: Mutex<Vec<T>>,
 }
 
-impl<T> Kept<T> {
+impl<T> Pool<T> {
     const fn new() -> Self {
         Self { kept: Mutex::new(Vec::new()) }
     }
@@ -75,8 +76,8 @@ impl<T> Kept<T> {
     }
 }
 
-static BUFFERS: Kept<Vec<u8>> = Kept::new();
-static PACKERS: Kept<PartPacker> = Kept::new();
+static BUFFERS: Pool<Vec<u8>> = Pool::new();
+static PACKERS: Pool<PartPacker> = Pool::new();
 
 /// cladefs: the bytes of a part of a segment's data, read, in a buffer of a part's bytes kept for
 /// the framings after it once it goes, if there is room ([`KEPT`]).
@@ -209,7 +210,7 @@ pub(crate) struct Looked {
 }
 
 /// cladefs: a part of a segment's data packed ([`PartPacker::pack`]), as a framing in a copy stores
-/// it: compressed (or sealed, framing), or raw, then its bytes in `raw` if they are held with it
+/// it: compressed (or encrypted, framing), or raw, then its bytes in `raw` if they are held with it
 /// ([`see`]).
 #[derive(Debug)]
 pub(crate) struct Stored {
@@ -271,9 +272,9 @@ pub(crate) fn look_ahead<F: File>(
     Ok((seen, packs.then_some(data)))
 }
 
-/// cladefs: `data`, part `index` of a segment's data, packed by `packer`, as a framing in a copy of a
-/// clear store stores it (a sealed store's are never packed ahead): compressed, holding only what of
-/// the buffer compressing took the compressed bytes need, or raw, its bytes kept.
+/// cladefs: `data`, part `index` of a segment's data, packed by `packer`, as a framing in a copy of
+/// a clear store stores it (an encrypted store's are never packed ahead): compressed, holding only
+/// what of the buffer compressing took the compressed bytes need, or raw, its bytes kept.
 fn stored(index: u64, data: Buffer, packer: &mut PartPacker) -> Stored {
     let mut part = packer.pack(index, &data, None);
     let raw = match part.stored_bytes() {
@@ -527,9 +528,9 @@ fn read_part<F: File>(raw: &F, len: u64, part: u64) -> io::Result<Buffer> {
 }
 
 /// cladefs: packs those of `parts`, a segment's data, read ([`read`], [`fill`]), not packed ahead,
-/// on threads ([`on_threads`]), sealed under `key`, its framed file's, if it is sealed
+/// on threads ([`on_threads`]), encrypted under `key`, its framed file's, if it is encrypted
 /// (TASK-411.2); and returns the longest any thread waited to run, in nanoseconds. Those packed
-/// ahead are a clear store's, in the clear: a sealed store packs none ahead.
+/// ahead are a clear store's, in the clear: an encrypted store packs none ahead.
 pub(crate) fn pack(parts: &mut [Read], key: Option<&ObjectKey>) -> u64 {
     let unpacked: Vec<usize> = (0..parts.len()).filter(|&at| parts[at].packed.is_none()).collect();
     let (packed, waited) = {
@@ -591,7 +592,7 @@ mod tests {
 
     const MIB: usize = 1 << 20;
 
-    /// The key the tests' sealed segments are sealed under.
+    /// The key the tests' encrypted segments are encrypted under.
     const KEY: extent_frame::KeyId = extent_frame::KeyId { branch: 1, generation: 0 };
 
     /// `len` bytes that don't compress, of `seed`'s.
@@ -677,7 +678,7 @@ mod tests {
             assert_eq!(read.seen.crc, extent_frame::crc(part));
             assert_eq!(read.seen.look, Look::at(part, &mut packer));
         }
-        let mut sealed = read(&raw, len as u64, true, Vec::new()).unwrap();
+        let mut encrypted = read(&raw, len as u64, true, Vec::new()).unwrap();
         pack(&mut parts, None);
         let packed: Vec<PackedPart> =
             parts.iter().map(|read| read.packed.as_ref().unwrap().part.clone()).collect();
@@ -687,17 +688,20 @@ mod tests {
         assert_eq!(packed, each);
         let encodings = (packed[2].encoding(), packed[0].encoding());
         assert_eq!(encodings, (extent_frame::Encoding::Zstd, extent_frame::Encoding::Raw));
-        // TASK-411.2: sealed under a segment's key, each as one packer seals it.
-        let sealing = extent_frame::Packer::new(Some((&extent_frame::Secret::random(), KEY)));
-        pack(&mut sealed, sealing.key());
-        let sealed: Vec<PackedPart> =
-            sealed.iter().map(|read| read.packed.as_ref().unwrap().part.clone()).collect();
+        // TASK-411.2: encrypted under a segment's key, each as one packer encrypts it.
+        let encrypting = extent_frame::Packer::new(Some((&extent_frame::Secret::random(), KEY)));
+        pack(&mut encrypted, encrypting.key());
+        let encrypted: Vec<PackedPart> =
+            encrypted.iter().map(|read| read.packed.as_ref().unwrap().part.clone()).collect();
         let each: Vec<PackedPart> = (data.chunks(PART as usize).enumerate())
-            .map(|(index, part)| packer.pack(index as u64, part, sealing.key()))
+            .map(|(index, part)| packer.pack(index as u64, part, encrypting.key()))
             .collect();
-        assert_eq!(sealed, each);
+        assert_eq!(encrypted, each);
         let crcs = |packed: &[PackedPart]| packed.iter().map(PackedPart::crc).collect::<Vec<_>>();
-        assert!((crcs(&sealed).iter().zip(crcs(&packed))).all(|(sealed, clear)| *sealed != clear));
+        assert!(
+            (crcs(&encrypted).iter().zip(crcs(&packed)))
+                .all(|(encrypted, clear)| *encrypted != clear)
+        );
         let parts = read(&raw, len as u64, false, Vec::new()).unwrap();
         assert!(parts.iter().all(|read| read.seen == Seen::default()));
         assert!(read(&raw, 0, true, Vec::new()).unwrap().is_empty(), "no data, no parts");

@@ -25,42 +25,27 @@
 //! write: a store to a page gives the window a private copy of it (`crate::dax`), which no extent
 //! names, so that no commit changes anything in a window.
 
-use crate::cache::{self, CachedExtent, Placement};
+use crate::cache::{self, CachedExtent, CachedIn};
 use crate::dax::{Dax, DaxMapping, DaxWindow, SecondStage, Source};
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
-use crate::fence::{Fence, Held, StoreMutex, StoreRwLock};
+use crate::halt::{Halt, StoreGuard, StoreMutex, StoreRwLock};
 use crate::host_store::{self, BranchOf};
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
 use crate::profile::{self, Recorder};
 use crate::stats::{self, Counter};
 use crate::store_dir;
-use extent_remote::cell::Kind;
-use extent_remote::layout::{Branch, Cell};
-use extent_remote::trace;
+use extent_bucket::cell::Kind;
+use extent_bucket::layout::{Branch, Cell};
+use extent_bucket::trace;
 use extent_store::{
-    HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned, Unsectored,
+    HostDir, NoSpace, NotHeld, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unsectored,
 };
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use storage_device::{NoExtent, OtherBranch, SealedExtent};
-
-/// An extent's ID: the branch that wrote it, and the sequence number that branch gave it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ExtentId {
-    /// The branch that wrote it: the store's, or one it was forked from.
-    pub branch: u64,
-    /// Its sequence number, which its branch gives each extent it writes once.
-    pub sequence: u64,
-}
-
-impl From<ExtentId> for storage_device::ExtentId {
-    fn from(id: ExtentId) -> Self {
-        Self::new(id.branch, id.sequence)
-    }
-}
+use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
 
 /// What a store holds, as doc-4's `INFO` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +62,7 @@ pub struct ExtentInfo {
     /// (TASK-165.9).
     pub next_sequence: u64,
     /// cladefs: the lowest sequence number the guest may mint from: its writer's range's start, with
-    /// a remote (doc-7, The head), past which the store need hold nothing.
+    /// an uploader (doc-7, The head), past which the store need hold nothing.
     pub sequence_floor: u64,
 }
 
@@ -131,9 +116,8 @@ pub enum MappingContents {
 
 /// cladefs: what a store opened is: who writes it, and whether every tenant reads it. It says what
 /// may be done to it, which each of its methods that changes it checks, rather than each caller
-/// (TASK-160.10). Fixed once it is open and its remote attached ([`ExtentStore::attach_remote`]),
-/// which says whether it is a point, as the extent daemon has it before anything asks it to do
-/// anything (`extentd::stores`).
+/// (TASK-160.10). Fixed once it is open, with its uploader, which says whether it is a point, as
+/// the extent daemon has it before anything asks it to do anything (`extentd::stores`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreAccess {
     /// Who writes it.
@@ -195,7 +179,7 @@ pub struct ExtentStore {
     store: Arc<Store<HostDir>>,
     /// cladefs: the bucket the store's description names, which its branch is kept in
     /// (`host_store::Opened`, TASK-165.6).
-    bucket: Arc<extent_remote::store::Store>,
+    bucket: Arc<extent_bucket::object_bucket::ObjectBucket>,
     /// cladefs: where it was opened: its directory, which keeps what is attached to it (backlog
     /// doc-10), and what it was forked from.
     path: std::path::PathBuf,
@@ -207,9 +191,9 @@ pub struct ExtentStore {
     /// cladefs: the stores it was forked from, nearest first, as of the forks ([`store_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
     /// cladefs: the uploader of the store's branch to object storage, which opened it, taking its
-    /// lease, or holds its point: durable commits are uploaded ones (doc-4's `COMMIT_DURABLE`).
+    /// head, or holds its point: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
-    remote: Option<extent_store::upload::Remote<HostDir>>,
+    uploader: Option<extent_store::upload::Uploader<HostDir>>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
     /// base that has none yet, and what writes it at the window's end, which closing stops early.
     profiling: Option<(Arc<Recorder>, std::sync::mpsc::Sender<()>)>,
@@ -224,16 +208,16 @@ pub struct ExtentStore {
     /// cladefs: the window's latest changes, which a refused fault's log tells of the page it was
     /// on ([`ExtentStore::refused`], TASK-44.12).
     changes: StoreMutex<WindowChanges>,
-    /// cladefs: the turns its daemon has taken at making its commits durable behind them
+    /// cladefs: the turns its daemon has taken at making its commits local behind them
     /// ([`ExtentStore::flush_turned`]): how a commit's lag is told in turns, which the daemon's
     /// load stretches, rather than in time (TASK-110).
     flush_turns: std::sync::atomic::AtomicU64,
     /// cladefs: what each of its locks is locked through: set by a panic holding one, after which it
-    /// serves nothing more (`crate::fence`, TASK-153.16).
-    fence: Fence,
+    /// serves nothing more (`crate::halt`, TASK-153.16).
+    halt: Halt,
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader keeps
     /// the branch in, keeping what it fetches in the host's cache, if it has one.
-    fetcher: Arc<crate::remote::Fetcher>,
+    fetcher: Arc<crate::bucket::HostFetcher>,
 }
 
 /// cladefs: how a store is opened ([`ExtentStore::open_with`], TASK-165.9).
@@ -243,7 +227,7 @@ pub struct Opening {
     /// Whether its base's boot profile is read into the extent cache, or recorded
     /// ([`ExtentStore::profile`]).
     pub profiled: bool,
-    /// How its uploader keeps its branch in its bucket, taking its lease.
+    /// How its uploader keeps its branch in its bucket, taking its head.
     pub keeping: extent_store::upload::Options,
 }
 
@@ -421,29 +405,41 @@ pub struct WriteBarriers<'a> {
 /// When a commit completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Commit {
-    /// Once ordered: the store makes it durable soon after.
+    /// Once ordered: the store makes it local soon after.
     Ordered,
-    /// cladefs: once durable on the host's disk, not waiting for object storage (`COMMIT_LOCAL`):
+    /// cladefs: once local, synced to the host's disk, not waiting for the bucket (`COMMIT_LOCAL`):
     /// what a database's commit waits for, as SQLite's own does on a local filesystem (TASK-301).
     Local,
-    /// Once durable (`COMMIT_DURABLE`): uploaded, if the store has a remote.
-    Durable,
+    /// Once uploaded (`COMMIT_UPLOADED`): its segments acknowledged by the bucket, if the store has
+    /// one; local, if not.
+    Uploaded,
+}
+
+impl Commit {
+    /// Its level's name, as doc-12 and the traces say it.
+    pub fn level(self) -> &'static str {
+        match self {
+            Commit::Ordered => "ordered",
+            Commit::Local => "local",
+            Commit::Uploaded => "uploaded",
+        }
+    }
 }
 
 /// cladefs: the errno of the uploader's failure (`Failure::errno`): `EIO`, logged, for one the
 /// store failed to read or write.
-fn remote_errno(failure: extent_store::upload::Failure) -> Errno {
-    crate::remote::errno(&failure).unwrap_or_else(|| {
+fn upload_errno(failure: extent_store::upload::Failure) -> Errno {
+    crate::bucket::errno(&failure).unwrap_or_else(|| {
         log::error!("cladefs: uploading the store's commits: {failure}");
         Errno::EIO
     })
 }
 
 /// cladefs: the span of a commit's wait for object storage to hold the commits up to `epoch`, or
-/// as many of them as its lag allows (`extent_remote::trace`, TASK-258).
+/// as many of them as its lag allows (`extent_bucket::trace`, TASK-258).
 fn upload_wait(epoch: u64) -> trace::Span {
     let span = trace::Span::start("commit.upload_wait");
-    span.set_count(trace::EPOCH, epoch);
+    span.set_count(trace::COMMIT, epoch);
     span
 }
 
@@ -463,7 +459,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         // A follower's too, of one written after its view's commit: as Fxfs's journal replay
         // finds the end of the commit.
         Errno::ENOENT
-    } else if error.is::<SealedExtent>() || error.is::<Spent>() || error.is::<OtherBranch>() {
+    } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherBranch>() {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
@@ -485,9 +481,9 @@ impl Drop for ExtentStore {
         {
             log::warn!("cladefs: writing a boot profile: {err}");
         }
-        // cladefs: its uploader first, which closes its open segment, uploads what it made durable
+        // cladefs: its uploader first, which closes its open segment, uploads what it made local
         // and stops (TASK-192); then the store. A follower's store is its writer's.
-        drop(self.remote.take());
+        drop(self.uploader.take());
         if self.following.is_none()
             && let Err(err) = self.store.close()
         {
@@ -514,11 +510,11 @@ impl ExtentStore {
     /// file bucket of its own, which its description names (`host_store::create`, TASK-165.6),
     /// opened as this process opens stores ([`Opening::here`]).
     pub fn create(path: impl AsRef<Path>, capacity: u64) -> Result<Self, Error> {
-        Self::create_in(path, capacity, host_store::new_cell(host_store::NO_TENANT))
+        Self::create_in(path, capacity, host_store::new_cell(host_store::DEFAULT_TENANT))
     }
 
     /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of a new branch of `cell`,
-    /// its ID its bucket's to give (`extent_remote::objectid`, TASK-364).
+    /// its ID its bucket's to give (`extent_bucket::objectid`, TASK-364).
     pub fn create_in(path: impl AsRef<Path>, capacity: u64, cell: Cell) -> Result<Self, Error> {
         Self::create_with(path, capacity, BranchOf::New(cell), Opening::here()?)
     }
@@ -536,9 +532,9 @@ impl ExtentStore {
 
     /// cladefs: a new store at `path`, of the branch `of` says, as [`ExtentStore::create_in`] or
     /// [`ExtentStore::create_for_branch`] makes it, opened as `opening` says
-    /// ([`ExtentStore::open_with`]): an Fxfs volume of its branch's cell, named as its directory
-    /// is (`host_store::volume_at`, TASK-364). cladefs: in a span of its own, `store.create`
-    /// (`extent_remote::trace`, TASK-258).
+    /// ([`ExtentStore::open_with`]): an Fxfs vdisk of its branch's cell, named as its directory
+    /// is (`host_store::vdisk_at`, TASK-364). cladefs: in a span of its own, `store.create`
+    /// (`extent_bucket::trace`, TASK-258).
     pub fn create_with(
         path: impl AsRef<Path>,
         capacity: u64,
@@ -548,7 +544,7 @@ impl ExtentStore {
         Self::create_kind_with(path, capacity, (of, Kind::Fxfs), opening)
     }
 
-    /// cladefs: a new store at `path`, as [`ExtentStore::create_with`] makes, a volume of `kind` of
+    /// cladefs: a new store at `path`, as [`ExtentStore::create_with`] makes, a vdisk of `kind` of
     /// its branch's cell (TASK-364): a SQLite one, which the sqlite_extents VFS alone opens, as a
     /// store a database is made in through the daemon is.
     pub fn create_kind_with(
@@ -567,7 +563,7 @@ impl ExtentStore {
     }
 
     /// cladefs: `make`'s making of a new store at `path`, in a span of its own, `store.create`
-    /// (`extent_remote::trace`, TASK-258), which it names the store's branch in once it knows it:
+    /// (`extent_bucket::trace`, TASK-258), which it names the store's branch in once it knows it:
     /// a store made, opened, or made closed ([`ExtentStore::create_placed`]).
     fn creating<T>(
         path: &Path,
@@ -619,7 +615,7 @@ impl ExtentStore {
     }
 
     /// cladefs: the store at `path`, as of its last commit, opened as `opening` says: its uploader
-    /// takes its branch's lease, with the token its placement names or `opening`'s, and recovers
+    /// takes its branch's head, with the token its placement names or `opening`'s, and recovers
     /// it, the store's write-ahead log put after its end (TASK-165.9); a log another writer's
     /// commits moved past refuses (`ESTALE`) until `cladefsctl take` drops it. A tenant's (TASK-43):
     /// the pages of its own extents, and of those it inherited from other branches but public ones
@@ -628,7 +624,7 @@ impl ExtentStore {
     /// default arena, without one. Those of public branches' extents, which every tenant's forks of
     /// them share, are of the default arena.
     ///
-    /// cladefs: in a span of its own, `store.open` (`extent_remote::trace`, TASK-258).
+    /// cladefs: in a span of its own, `store.open` (`extent_bucket::trace`, TASK-258).
     pub fn open_with(path: impl AsRef<Path>, opening: Opening) -> Result<Self, Error> {
         let path = path.as_ref();
         let span = trace::Span::start("store.open");
@@ -683,11 +679,11 @@ impl ExtentStore {
     fn new(path: &Path, opened: host_store::Opened, opening: Opening) -> Result<Self, Error> {
         cache::relieve_pressure();
         let public = store_dir::public_branches(path)?;
-        let host_store::Opened { store, bucket, remote } = opened;
+        let host_store::Opened { store, bucket, uploader } = opened;
         let Opening { arena, profiled, keeping } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let forked_from = Arc::new(store_dir::ancestry(path)?);
-        let fetcher = crate::remote::Fetcher::new(bucket.clone(), keeping.cache.clone())?;
+        let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), keeping.cache.clone())?;
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
         let branch = store.description().branch;
         Ok(Self {
@@ -699,13 +695,13 @@ impl ExtentStore {
             path: path.to_owned(),
             bases: Default::default(),
             dax: StoreMutex::new("dax", None),
-            remote: Some(remote),
+            uploader: Some(uploader),
             opening: StoreRwLock::new("opening", ()),
             following: None,
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(path, branch),
+            halt: Halt::new(path, branch),
             fetcher,
         })
     }
@@ -727,13 +723,13 @@ impl ExtentStore {
             path: self.path.clone(),
             bases: self.bases.clone(),
             dax: StoreMutex::new("dax", None),
-            remote: None,
+            uploader: None,
             opening: StoreRwLock::new("opening", ()),
             following: Some(following),
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(&self.path, self.branch()),
+            halt: Halt::new(&self.path, self.branch()),
             fetcher: self.fetcher.clone(),
         }
     }
@@ -742,7 +738,11 @@ impl ExtentStore {
     pub fn access(&self) -> StoreAccess {
         let role = match &self.following {
             Some(_) => StoreRole::Follower,
-            None if self.remote.as_ref().is_some_and(extent_store::upload::Remote::is_point) => {
+            None if self
+                .uploader
+                .as_ref()
+                .is_some_and(extent_store::upload::Uploader::is_point) =>
+            {
                 StoreRole::Point
             }
             None => StoreRole::Writer,
@@ -750,28 +750,28 @@ impl ExtentStore {
         StoreAccess { role, public: self.is_public() }
     }
 
-    /// cladefs: fences the store, as `why` says, unless it is already: a panic went through it past
+    /// cladefs: halts the store, as `why` says, unless it is already: a panic went through it past
     /// its locks, as one serving a request of it, which a panic holding one of them does itself.
-    /// It serves nothing more ([`crate::fence`], TASK-153.16).
+    /// It serves nothing more ([`crate::halt`], TASK-153.16).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn fence(&self, why: impl FnOnce() -> String) {
-        self.fence.fence(why);
+    pub(crate) fn halt(&self, why: impl FnOnce() -> String) {
+        self.halt.halt(why);
     }
 
-    /// cladefs: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`,
-    /// or `EACCES` once its host forgot its tenant's or cell's keys (`crate::remote::forget`).
+    /// cladefs: whether the store is halted ([`ExtentStore::halt`]): its requests fail with `EIO`,
+    /// or `EACCES` once its host forgot its tenant's or cell's keys (`crate::bucket::forget`).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn is_fenced(&self) -> bool {
-        self.fence.is_fenced()
+    pub(crate) fn is_halted(&self) -> bool {
+        self.halt.is_halted()
     }
 
-    /// cladefs: the errno the store's requests fail with, if it is fenced ([`ExtentStore::is_fenced`]).
+    /// cladefs: the errno the store's requests fail with, if it is halted ([`ExtentStore::is_halted`]).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn fenced(&self) -> Option<Errno> {
-        self.fence.errno()
+    pub(crate) fn halted(&self) -> Option<Errno> {
+        self.halt.errno()
     }
 
     /// cladefs: makes the store a new writer's, which its followers go on following: one opened for
@@ -784,11 +784,11 @@ impl ExtentStore {
         if !self.is_quiescent()? {
             return Err(Errno::EBUSY);
         }
-        let window = self.dax.lock(&self.fence)?.take();
+        let window = self.dax.lock(&self.halt)?.take();
         drop(window);
         // cladefs: its uploader goes on, its going no writer's to wait for (TASK-216).
-        if let Some(remote) = &self.remote {
-            remote.drain_on_stop();
+        if let Some(uploader) = &self.uploader {
+            uploader.drain_on_stop();
         }
         Ok(())
     }
@@ -797,8 +797,8 @@ impl ExtentStore {
     /// its write-ahead log keeps for its next opening (TASK-216): what extentd has a writer that
     /// waits for its going connection's store to close call. None for a store with no uploader.
     pub fn cut_short(&self) -> Option<crate::store_table::Wanted> {
-        let remote = self.remote.as_ref()?;
-        Some(std::sync::Arc::new(remote.cut_short()))
+        let uploader = self.uploader.as_ref()?;
+        Some(std::sync::Arc::new(uploader.cut_short()))
     }
 
     /// cladefs: cuts the store's followers off: their reads, advances and pins fail with `ESTALE`
@@ -809,35 +809,35 @@ impl ExtentStore {
     }
 
     /// cladefs: a follower's view, or `EINVAL` if it is a writer's store.
-    fn view(&self) -> Result<Held<'_, MutexGuard<'_, extent_store::View>>> {
+    fn view(&self) -> Result<StoreGuard<'_, MutexGuard<'_, extent_store::View>>> {
         let following = self.following.as_ref().ok_or(Errno::EINVAL)?;
-        following.view.lock(&self.fence)
+        following.view.lock(&self.halt)
     }
 
-    /// The epoch of the store's latest commit: its writer's, if a follower's.
+    /// The number of the store's latest commit: its writer's, if a follower's.
     pub fn committed(&self) -> Result<u64> {
-        self.store.epoch().map_err(errno)
+        self.store.last_commit().map_err(errno)
     }
 
-    /// cladefs: the epoch of the commit a follower's view is as of.
-    pub fn epoch(&self) -> Result<u64> {
-        Ok(self.view()?.epoch())
+    /// cladefs: the number of the commit a follower's view is as of.
+    pub fn view_commit(&self) -> Result<u64> {
+        Ok(self.view()?.commit())
     }
 
     /// cladefs: moves a follower's view to the writer's latest commit, holding what the commits
     /// since the one it was as of held, until it lets go of them ([`ExtentStore::let_go`]): what
-    /// its guest's follower reads as it applies them. Returns the commit's epoch.
+    /// its guest's follower reads as it applies them. Returns the commit's number.
     pub fn advance(&self) -> Result<u64> {
         let mut view = self.view()?;
         view.advance_keeping().map_err(errno)?;
-        Ok(view.epoch())
+        Ok(view.commit())
     }
 
-    /// cladefs: lets go of what a follower's view held of the commits before the commit of
-    /// `epoch`, at most its own: their frees go, but for its pins. One of an earlier epoch than
-    /// it holds since, coming after its next advance, changes nothing.
-    pub fn let_go(&self, epoch: u64) -> Result<()> {
-        self.view()?.let_go(epoch);
+    /// cladefs: lets go of what a follower's view held of the commits before the one
+    /// numbered `commit`, at most its own: their frees go, but for its pins. One of an earlier
+    /// commit than it holds since, coming after its next advance, changes nothing.
+    pub fn let_go(&self, commit: u64) -> Result<()> {
+        self.view()?.let_go(commit);
         Ok(())
     }
 
@@ -848,19 +848,19 @@ impl ExtentStore {
         if self.bases.routes(extent.branch) {
             return Ok(());
         }
-        self.view()?.pin(extent.into()).map_err(errno)
+        self.view()?.pin(extent).map_err(errno)
     }
 
     /// cladefs: lets go of `extent`, pinned.
     pub fn unpin(&self, extent: ExtentId) -> Result<()> {
-        self.view()?.unpin(extent.into());
+        self.view()?.unpin(extent);
         Ok(())
     }
 
-    /// cladefs: waits at most `timeout` for a commit of the store after the commit of `epoch`,
-    /// returning the latest commit's epoch, if one came: what tells its followers.
-    pub fn newer(&self, epoch: u64, timeout: std::time::Duration) -> Option<u64> {
-        self.store.newer(epoch, timeout)
+    /// cladefs: waits at most `timeout` for a commit of the store after the one numbered
+    /// `commit`, returning the latest commit's number, if one came: what tells its followers.
+    pub fn newer(&self, commit: u64, timeout: std::time::Duration) -> Option<u64> {
+        self.store.newer(commit, timeout)
     }
 
     /// cladefs: what says when the store's writer next commits ([`ExtentStore::newer`] then has it),
@@ -887,7 +887,7 @@ impl ExtentStore {
     /// cladefs: what reads the extents the store holds whose data is in the bucket, at their
     /// locations there, keeping what it fetches in the host's cache, if its uploader has one
     /// (TASK-165.8): a follower's, its writer's.
-    fn fetcher(&self) -> Arc<crate::remote::Fetcher> {
+    fn fetcher(&self) -> Arc<crate::bucket::HostFetcher> {
         self.fetcher.clone()
     }
 
@@ -898,7 +898,7 @@ impl ExtentStore {
         store: &Arc<Store<HostDir>>,
         arenas: &Arenas,
         forked_from: &[(u64, std::path::PathBuf)],
-        fetcher: &Arc<crate::remote::Fetcher>,
+        fetcher: &Arc<crate::bucket::HostFetcher>,
     ) -> Option<(Arc<Recorder>, std::sync::mpsc::Sender<()>)> {
         let (base, dir) = forked_from.first()?;
         // A base deleted since has no profile, and records none.
@@ -946,8 +946,8 @@ impl ExtentStore {
         Some((recorder, stop))
     }
 
-    /// cladefs: forks the store, as of its last commit, made durable first, and returns the fork's
-    /// branch: a new branch of `cell`, its ID the bucket's to give (`extent_remote::objectid`,
+    /// cladefs: forks the store, as of its last commit, made uploaded first, and returns the fork's
+    /// branch: a new branch of `cell`, its ID the bucket's to give (`extent_bucket::objectid`,
     /// TASK-364), holding what it holds, whose store is a new directory at `path`, which
     /// [`ExtentStore::open`] opens: `EEXIST` if anything is at `path`. The fork is made in the
     /// bucket alone, by the store's uploader, which keeps its branch in the bucket its
@@ -959,9 +959,9 @@ impl ExtentStore {
     /// `path`.
     ///
     /// A fork of a point commits nothing in object storage: its child's record is the fork, which
-    /// fails with `ENOENT` once the point is deleted (`Remote::forked`).
+    /// fails with `ENOENT` once the point is deleted (`Uploader::forked`).
     ///
-    /// cladefs: in a span of its own, `store.fork` (`extent_remote::trace`, TASK-258).
+    /// cladefs: in a span of its own, `store.fork` (`extent_bucket::trace`, TASK-258).
     pub fn fork(&self, path: impl AsRef<Path>, cell: Cell) -> Result<Branch, Error> {
         let branch = self.new_child(cell)?;
         self.fork_to(path, branch)?;
@@ -970,12 +970,12 @@ impl ExtentStore {
 
     /// cladefs: a fork's child, a new branch of `cell` of the store's bucket's. A follower's uploader
     /// is its writer's, which forks nothing of it (`EROFS`). A store with a writer forks to no cell
-    /// of another tenant's than its own unless it is the common tenant's (`EACCES`,
+    /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_store::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     fn new_child(&self, cell: Cell) -> Result<Branch, Error> {
-        let remote = self.remote.as_ref().ok_or(Errno::EROFS)?;
-        host_store::may_fork_into(self.branch(), remote, cell)?;
-        Ok(host_store::new_branch(remote.bucket(), cell).map_err(remote_errno)?)
+        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        host_store::may_fork_into(self.branch(), uploader, cell)?;
+        Ok(host_store::new_branch(uploader.bucket(), cell).map_err(upload_errno)?)
     }
 
     /// cladefs: forks the store as [`ExtentStore::fork`] does, to `branch`, whatever its ID: so the
@@ -984,11 +984,11 @@ impl ExtentStore {
     pub(crate) fn fork_to(&self, path: impl AsRef<Path>, branch: Branch) -> Result<(), Error> {
         self.fork_span(branch, false).run(|| {
             self.access().may_manage()?;
-            self.make_durable()?;
-            failpoint!("fork::durable");
+            self.make_uploaded()?;
+            failpoint!("fork::uploaded");
             // None comes between the look and the fork's commit.
-            let opening = self.opening.write(&self.fence)?;
-            self.fork_durable(path.as_ref(), branch, false, Some(opening))
+            let opening = self.opening.write(&self.halt)?;
+            self.fork_uploaded(path.as_ref(), branch, false, Some(opening))
         })
     }
 
@@ -1001,28 +1001,28 @@ impl ExtentStore {
         span
     }
 
-    /// cladefs: forks the store, as [`ExtentStore::fork`] says, its commits made durable: `opening`,
-    /// if given, held until the fork's commit is made, and not as the fork's upload goes. The child
-    /// is a point if `point`.
-    fn fork_durable(
+    /// cladefs: forks the store, as [`ExtentStore::fork`] says, its commits made uploaded:
+    /// `opening`, if given, held until the fork's commit is made, and not as the fork's upload
+    /// goes. The child is a point if `point`.
+    fn fork_uploaded(
         &self,
         path: &Path,
         branch: Branch,
         point: bool,
-        opening: Option<Held<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
+        opening: Option<StoreGuard<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
     ) -> Result<(), Error> {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
-        let child = extent_remote::layout::Child { branch, owner: rand::random(), point };
+        let child = extent_bucket::layout::Child { branch, owner: rand::random(), point };
         // cladefs: what is attached to it stays attached to the fork, a restored VM's too; and what
         // is public of it, and what it was forked from.
         let inherited = |to: &Path| -> anyhow::Result<()> {
             Ok(store_dir::inherit(&self.path, self.branch().id, &self.forked_from, to)?)
         };
         // A follower's uploader is its writer's, which forks nothing of it.
-        let remote = self.remote.as_ref().ok_or(Errno::EROFS)?;
-        host_store::fork(&self.store, remote, path, child, inherited, opening)
+        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
+        host_store::fork(&self.store, uploader, path, child, inherited, opening)
     }
 
     /// cladefs: takes `branch` into the store at `path`, of `capacity` bytes until a commit of the
@@ -1068,11 +1068,12 @@ impl ExtentStore {
     }
 
     /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the branch
-    /// `of` says, a volume of `kind` of its branch's cell (TASK-364), its uploader as `keeping`
+    /// `of` says, a vdisk of `kind` of its branch's cell (TASK-364), its uploader as `keeping`
     /// says, placed at `token`'s placement if given, closes it, and returns its branch: what
-    /// [`ExtentStore::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its lease is taken as it is made with the
-    /// token of the placement it is given, not `keeping`'s, this host's: a new copy placed later
-    /// took no branch from an earlier placement (`ESTALE`), the lease taken before the placement
+    /// [`ExtentStore::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its
+    /// cell, and so its head, is taken as it is made with the token of the placement it is given,
+    /// not `keeping`'s, this host's: a new copy placed later
+    /// took no branch from an earlier placement (`ESTALE`), the head taken before the placement
     /// was recorded (TASK-149.20, TASK-266).
     pub fn create_placed(
         path: impl AsRef<Path>,
@@ -1106,10 +1107,10 @@ impl ExtentStore {
     }
 
     /// cladefs: places the store at `path` at the placement
-    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its writer takes its branch's
-    /// lease in object storage with that token from then on, which a later placement's exceeds, so
-    /// a placement cut off takes no branch back from the one after it (`ESTALE`), and its commits
-    /// fail once a later one takes it (`EROFS`).
+    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its branch's
+    /// cell with that token from then on, and its writer the branch's head with that taking's
+    /// epoch; a later placement's token exceeds it, so a placement cut off takes no branch back
+    /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
         extent_store::place_host(path.as_ref(), token).map_err(Error::new)
     }
@@ -1130,9 +1131,9 @@ impl ExtentStore {
     /// with `ESTALE` if a later placement holds its branch in `bucket`.
     pub fn delete(
         path: impl AsRef<Path>,
-        bucket: Option<&extent_remote::store::Store>,
+        bucket: Option<&extent_bucket::object_bucket::ObjectBucket>,
     ) -> Result<(), Error> {
-        host_store::delete(path.as_ref(), bucket, crate::remote::host_token)
+        host_store::delete(path.as_ref(), bucket, crate::bucket::host_token)
     }
 
     /// cladefs: the bucket the description of the store at `path` names, which its branch is kept
@@ -1140,20 +1141,20 @@ impl ExtentStore {
     /// format is refused (`extent_store::Format`).
     pub fn bucket_at(
         path: impl AsRef<Path>,
-    ) -> Result<Option<Arc<extent_remote::store::Store>>, Error> {
+    ) -> Result<Option<Arc<extent_bucket::object_bucket::ObjectBucket>>, Error> {
         host_store::bucket_at(path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: the bucket the store's description names, which its branch is kept in: what its
     /// daemon attaches it to (TASK-165.6).
-    pub fn bucket(&self) -> &Arc<extent_remote::store::Store> {
+    pub fn bucket(&self) -> &Arc<extent_bucket::object_bucket::ObjectBucket> {
         &self.bucket
     }
 
     /// cladefs: the store's uploader, if it has one.
     #[cfg(test)]
-    pub(crate) fn remote(&self) -> Option<&extent_store::upload::Remote<HostDir>> {
-        self.remote.as_ref()
+    pub(crate) fn uploader(&self) -> Option<&extent_store::upload::Uploader<HostDir>> {
+        self.uploader.as_ref()
     }
 
     /// cladefs: whether its store's map of the extents the bucket holds of its branch is `other`'s,
@@ -1195,8 +1196,8 @@ impl ExtentStore {
     /// What the store holds (`INFO`).
     pub fn info(&self) -> Result<ExtentInfo> {
         let info = self.store.info().map_err(errno)?;
-        // cladefs: from its writer's range, with a remote (doc-7, The head).
-        let floor = self.remote.as_ref().map_or(0, extent_store::upload::Remote::next_sequence);
+        // cladefs: from its writer's range, with an uploader (doc-7, The head).
+        let floor = self.uploader.as_ref().map_or(0, extent_store::upload::Uploader::next_sequence);
         Ok(ExtentInfo {
             capacity: info.capacity,
             used: info.used,
@@ -1217,9 +1218,9 @@ impl ExtentStore {
         })
     }
 
-    /// Sets the most bytes the store's extents may hold, durably: grows it, or shrinks it no lower
-    /// than what its extents hold (`ENOSPC`). The guest's filesystem, which may hold more, agrees
-    /// to a shrink first (the extent daemon's `RESIZE` asks it).
+    /// Sets the most bytes the store's extents may hold, in a commit of its own: grows it, or
+    /// shrinks it no lower than what its extents hold (`ENOSPC`). The guest's filesystem, which may
+    /// hold more, agrees to a shrink first (the extent daemon's `RESIZE` asks it).
     pub fn set_capacity(&self, capacity: u64) -> Result<()> {
         self.access().may_resize()?;
         self.store.set_capacity(capacity).map_err(errno)
@@ -1236,8 +1237,8 @@ impl ExtentStore {
         let len = buffers.iter().map(VolatileSliceMut::len).sum::<usize>();
         stats::add(Counter::Reads, 1);
         stats::add(Counter::ReadBytes, len as u64);
-        // cladefs: nothing a panic went through is read (`crate::fence`).
-        self.fence.check()?;
+        // cladefs: nothing a panic went through is read (`crate::halt`).
+        self.halt.check()?;
         let base = self.base_holding(extent)?;
         // cladefs: a piece at a time, as the extent daemon's memory holds no more of a request
         // (TASK-149.17); once at least, as a read of nothing finds whether the extent is there.
@@ -1272,7 +1273,7 @@ impl ExtentStore {
         if self.following.is_some() {
             return Ok(false);
         }
-        let Some((len, false)) = self.store.extent(extent.into()).map_err(errno)? else {
+        let Some((len, false)) = self.store.extent(extent).map_err(errno)? else {
             return Ok(false);
         };
         let end = offset.checked_add(data.len() as u64).ok_or(Errno::EINVAL)?;
@@ -1303,29 +1304,29 @@ impl ExtentStore {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
         let read = match &self.following {
             Some(following) => {
-                let view = following.view.lock(&self.fence)?;
-                self.store.read_view(&view, extent.into(), offset, data)
+                let view = following.view.lock(&self.halt)?;
+                self.store.read_view(&view, extent, offset, data)
             }
-            None => self.store.read(extent.into(), offset, data),
+            None => self.store.read(extent, offset, data),
         };
         match read {
             Err(ref error)
-                if let Some(remote) = error.downcast_ref::<extent_store::RemoteData>() =>
+                if let Some(in_bucket) = error.downcast_ref::<extent_store::BucketData>() =>
             {
-                let (location, len) = (remote.location.clone(), data.len() as u64);
-                let fetched = self.fetcher().read(extent.into(), location, offset, len);
+                let (location, len) = (in_bucket.location.clone(), data.len() as u64);
+                let fetched = self.fetcher().read(extent, location, offset, len);
                 let fetched = futures::executor::block_on(fetched).map_err(|failure| {
                     match failure {
                         // cladefs: a follower's of an extent its writer freed since its view's
                         // commit, which the bucket's collector reclaimed: it is cut off, as one too
                         // far behind its writer is (doc-8, decision 7; TASK-165.8).
-                        extent_store::upload::Failure::Remote(extent_remote::Error::Lost(
+                        extent_store::upload::Failure::Bucket(extent_bucket::Error::Lost(
                             ref lost,
                         )) if self.following.is_some() => {
                             log::info!("cladefs: a follower's {extent:?} is gone: {lost}");
                             Errno::ESTALE
                         }
-                        failure => remote_errno(failure),
+                        failure => upload_errno(failure),
                     }
                 })?;
                 data[..fetched.len()].copy_from_slice(&fetched);
@@ -1367,22 +1368,22 @@ impl ExtentStore {
     pub fn write(&self, extent: ExtentId, offset: u64, buffers: &[VolatileSlice]) -> Result<()> {
         self.access().may_write()?;
         let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
-        let _opening = self.opening.read(&self.fence)?;
+        let _opening = self.opening.read(&self.halt)?;
         // cladefs: from `buffers` to the store's file, a piece at a time, as the extent daemon's
         // memory holds no more of a request (TASK-149.17).
         let fill = |at: u64, piece: &mut [u8]| {
             gather(buffers, at as usize, piece);
         };
-        let written = self.store.write_with(extent.into(), offset, len as u64, Self::PIECE, fill);
+        let written = self.store.write_with(extent, offset, len as u64, Self::PIECE, fill);
         written.map_err(errno)
     }
 
     /// Frees `extent`, if the store holds it (`FREE`).
     pub fn free(&self, extent: ExtentId) -> Result<()> {
         self.access().may_write()?;
-        // cladefs: nothing a panic went through is changed (`crate::fence`).
-        self.fence.check()?;
-        self.store.free(extent.into()).map_err(errno)?;
+        // cladefs: nothing a panic went through is changed (`crate::halt`).
+        self.halt.check()?;
+        self.store.free(extent).map_err(errno)?;
         // cladefs: its pages, unless another store that asked for them holds it still, which reads
         // them through itself (TASK-79.7): one that holds it reads them anew.
         let Some(cached) = cache::freed(&self.store, self.arenas.of(extent), extent) else {
@@ -1392,34 +1393,34 @@ impl ExtentStore {
         // rewriting the same blocks, sealing each version (a database's log, fsynced at each
         // transaction), filled the cache with pages only the window's mappings kept, which no
         // eviction could take (ENOMEM).
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let Some(dax) = dax.as_mut() else { return Ok(()) };
         let freed = dax.map_zeros_over(&cached);
-        let mut changes = self.changes.lock(&self.fence)?;
+        let mut changes = self.changes.lock(&self.halt)?;
         for range in freed {
             changes.record(range.start, range.end - range.start, Change::Freed);
         }
         Ok(())
     }
 
-    /// Commits what was written and freed, and `root` as the store's root if given, durably
-    /// (`COMMIT` with `COMMIT_DURABLE`). It seals the extents written before it; cladefs: no window
-    /// maps any of them, and nothing in a window changes.
+    /// Commits what was written and freed, and `root` as the store's root if given, uploaded
+    /// (`COMMIT` with `COMMIT_UPLOADED`). It seals the extents written before it; cladefs: no
+    /// window maps any of them, and nothing in a window changes.
     pub fn commit(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
-        self.commit_with(root, Commit::Durable)
+        self.commit_with(root, Commit::Uploaded)
     }
 
-    /// cladefs: commits as [`ExtentStore::commit`] does, completing once durable on the host's disk,
-    /// not waiting for object storage (`COMMIT_LOCAL`, TASK-301).
+    /// cladefs: commits as [`ExtentStore::commit`] does, completing once local, synced to the
+    /// host's disk, not waiting for the bucket (`COMMIT_LOCAL`, TASK-301).
     pub fn commit_local(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
         self.commit_with(root, Commit::Local)
     }
 
-    /// cladefs: commits as [`ExtentStore::commit`] does, but without waiting for durability: a
+    /// cladefs: commits as [`ExtentStore::commit`] does, but completing once ordered: a
     /// barrier, ordering what came before before what comes after (`COMMIT` without
-    /// `COMMIT_DURABLE`). [`ExtentStore::flush`] makes the commits ordered so far durable.
+    /// `COMMIT_UPLOADED`). [`ExtentStore::flush`] makes the commits ordered so far local.
     pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
         self.commit_with(root, Commit::Ordered)
@@ -1434,102 +1435,102 @@ impl ExtentStore {
         self.store.wait_framed().map_err(errno)
     }
 
-    /// Makes the commits ordered so far durable.
+    /// Makes the commits ordered so far local.
     pub fn flush(&self) -> Result<()> {
         self.store.flush().map_err(errno)
     }
 
     /// cladefs: `Ok` unless the store's uploader stopped, failed: the store's commits are its
     /// branch's no more, as once a later placement took its cell (`EROFS`, TASK-364), so a commit
-    /// durable on the host's disk alone fails rather than be taken for one a bucket will hold, as
+    /// local alone fails rather than be taken for one a bucket will hold, as
     /// a kept image's does (`storage::kept`).
     fn uploading(&self) -> Result<()> {
-        match self.remote.as_ref().and_then(|remote| remote.failed()) {
-            Some(failure) => Err(remote_errno(failure)),
+        match self.uploader.as_ref().and_then(|uploader| uploader.failed()) {
+            Some(failure) => Err(upload_errno(failure)),
             None => Ok(()),
         }
     }
 
-    /// Makes the commits ordered so far durable: uploaded, if the store has a remote.
-    fn make_durable(&self) -> Result<()> {
-        let epoch = self.durable_epoch()?;
-        match self.remote.as_ref() {
-            Some(remote) => {
-                upload_wait(epoch).run(|| remote.wait_uploaded(epoch).map_err(remote_errno))
+    /// Makes the commits ordered so far uploaded, if the store has an uploader; local, if not.
+    fn make_uploaded(&self) -> Result<()> {
+        let epoch = self.make_local()?;
+        match self.uploader.as_ref() {
+            Some(uploader) => {
+                upload_wait(epoch).run(|| uploader.wait_uploaded(epoch).map_err(upload_errno))
             }
             None => Ok(()),
         }
     }
 
-    /// cladefs: makes every commit ordered so far durable, and returns the epoch they are of: what
-    /// [`ExtentStore::uploaded`] waits for. It blocks on the store's I/O.
-    pub fn durable_epoch(&self) -> Result<u64> {
-        let epoch = self.store.epoch().map_err(errno)?;
+    /// cladefs: makes every commit ordered so far local, and returns the commit number of the
+    /// latest: what [`ExtentStore::uploaded`] waits for. It blocks on the store's I/O.
+    pub fn make_local(&self) -> Result<u64> {
+        let epoch = self.store.last_commit().map_err(errno)?;
         self.flush()?;
         Ok(epoch)
     }
 
-    /// cladefs: returns once the commits up to `epoch` ([`ExtentStore::durable_epoch`]) are in
+    /// cladefs: returns once the commits up to `epoch` ([`ExtentStore::make_local`]) are in
     /// object storage, as [`ExtentStore::wait_uploaded`] does: a future, which holds no thread
-    /// while it waits (TASK-43.6). `ENOTSUP` without a remote.
+    /// while it waits (TASK-43.6). `ENOTSUP` without an uploader.
     pub fn uploaded(
         &self,
         epoch: u64,
     ) -> impl std::future::Future<Output = Result<()>> + Send + use<> {
-        let waiting = self.remote.as_ref().map(|remote| remote.uploaded(epoch));
+        let waiting = self.uploader.as_ref().map(|uploader| uploader.uploaded(epoch));
         async move {
             match waiting {
-                Some(waiting) => waiting.await.map_err(remote_errno),
+                Some(waiting) => waiting.await.map_err(upload_errno),
                 None => Err(Errno::ENOTSUP),
             }
         }
     }
 
     /// cladefs: what the store's uploader has done, and has left to do, if it has one
-    /// ([`ExtentStore::attach_remote`], TASK-50.5).
+    /// (TASK-50.5).
     pub fn upload_status(&self) -> Result<Option<extent_store::upload::UploadStatus>> {
-        let uploading = self.remote.as_ref().filter(|remote| !remote.is_point());
-        uploading.map(|remote| remote.status().map_err(remote_errno)).transpose()
+        let uploading = self.uploader.as_ref().filter(|uploader| !uploader.is_point());
+        uploading.map(|uploader| uploader.status().map_err(upload_errno)).transpose()
     }
 
-    /// cladefs: waits until every commit ordered so far is durable and in object storage, as before
-    /// a clean stop (TASK-39.7). `ENOTSUP` without a remote ([`ExtentStore::attach_remote`]).
+    /// cladefs: waits until every commit ordered so far is uploaded, as before
+    /// a clean stop (TASK-39.7). `ENOTSUP` without an uploader.
     pub fn wait_uploaded(&self) -> Result<()> {
-        if self.remote.as_ref().is_none() {
+        if self.uploader.as_ref().is_none() {
             return Err(Errno::ENOTSUP);
         }
-        self.make_durable()
+        self.make_uploaded()
     }
 
-    /// Whether commits ordered are not durable yet: waiting for [`ExtentStore::flush`], or taken
+    /// Whether commits ordered are not local yet: waiting for [`ExtentStore::flush`], or taken
     /// by a flush in flight, which it waits for.
     pub fn flush_pending(&self) -> bool {
         self.store.flush_pending()
     }
 
-    /// cladefs: counts a turn its daemon took at making its commits durable, whether or not it
-    /// flushed: a commit made before a turn began is durable once the turn ends (TASK-110).
+    /// cladefs: counts a turn its daemon took at making its commits local, whether or not it
+    /// flushed: a commit made before a turn began is local once the turn ends (TASK-110).
     pub fn flush_turned(&self) {
         self.flush_turns.fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
-    /// cladefs: the turns its daemon has taken at making its commits durable ([`flush_turned`]).
+    /// cladefs: the turns its daemon has taken at making its commits local ([`flush_turned`]).
     ///
     /// [`flush_turned`]: ExtentStore::flush_turned
     pub fn flush_turns(&self) -> u64 {
         self.flush_turns.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// cladefs: in a span of its own, `store.commit` (`extent_remote::trace`, TASK-258), whose
-    /// children are its phases: `commit.seal` and `commit.write`, the store's; then, durable,
-    /// `store.flush`, and `commit.upload_wait` as it waits for object storage.
+    /// cladefs: in a span of its own, `store.commit` (`extent_bucket::trace`, TASK-258), whose
+    /// children are its phases: `commit.seal` and `commit.write`, the store's; then, local or
+    /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
     fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let span = trace::Span::start("store.commit");
         span.set_branch(self.branch());
-        span.set(trace::DURABLE, commit != Commit::Ordered);
+        span.set(trace::LEVEL, commit.level());
         span.run(|| {
-            // cladefs: nothing a panic went through is committed (`crate::fence`).
-            self.fence.check()?;
+            // cladefs: nothing a panic went through is committed (`crate::halt`).
+            self.halt.check()?;
             let started = std::time::Instant::now();
             let committed = self.commit_and_wait(root, commit);
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
@@ -1537,7 +1538,7 @@ impl ExtentStore {
         })
     }
 
-    /// Commits, and waits as `commit` says: for the remote's lag, the host's disk, or object
+    /// Commits, and waits as `commit` says: for the uploader's lag, the host's disk, or object
     /// storage; the commit's phases, each counted ([`stats::Stats::commits`]).
     fn commit_and_wait(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let committing = std::time::Instant::now();
@@ -1546,13 +1547,13 @@ impl ExtentStore {
         stats::add_since(Counter::CommitStoreNs, committing);
         let waiting = std::time::Instant::now();
         let waited = match commit {
-            Commit::Durable => self.make_durable(),
+            Commit::Uploaded => self.make_uploaded(),
             Commit::Local => self.flush().and_then(|()| self.uploading()),
-            Commit::Ordered => match self.remote.as_ref() {
-                // Within the lag the remote allows.
-                Some(remote) => {
-                    let epoch = self.store.epoch().map_err(errno)?;
-                    upload_wait(epoch).run(|| remote.wait_lag(epoch).map_err(remote_errno))
+            Commit::Ordered => match self.uploader.as_ref() {
+                // Within the lag the uploader allows.
+                Some(uploader) => {
+                    let epoch = self.store.last_commit().map_err(errno)?;
+                    upload_wait(epoch).run(|| uploader.wait_lag(epoch).map_err(upload_errno))
                 }
                 None => Ok(()),
             },
@@ -1564,7 +1565,7 @@ impl ExtentStore {
     /// The root as of the last commit, empty if none set one (`ROOT`).
     pub fn root(&self) -> Result<Vec<u8>> {
         match &self.following {
-            Some(following) => Ok(following.view.lock(&self.fence)?.root().to_vec()),
+            Some(following) => Ok(following.view.lock(&self.halt)?.root().to_vec()),
             None => self.store.root().map_err(errno),
         }
     }
@@ -1604,7 +1605,7 @@ impl ExtentStore {
     /// cladefs: the private pages the DAX window holds (backlog doc-13): none without a window, or
     /// with one that doesn't copy on write.
     pub fn private_pages(&self) -> Result<u64> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         Ok(dax.as_ref().map_or(0, Dax::private_pages))
     }
 
@@ -1613,7 +1614,7 @@ impl ExtentStore {
     /// there, and serves the faults on the rest with userfaultfd, on a thread of its own.
     /// `prefault`, if the hypervisor can map pages for the guest ahead of its accesses, is told of
     /// the pages mapped. All in this process, as tests have it: a VM process's window is the
-    /// daemon's ([`RemoteExtentStore`](crate::RemoteExtentStore)'s of the same name).
+    /// daemon's ([`DaemonExtentStore`](crate::DaemonExtentStore)'s of the same name).
     ///
     /// # Safety
     ///
@@ -1643,7 +1644,7 @@ impl ExtentStore {
         &self,
         create: impl FnOnce() -> Result<(Dax, DaxWindow), Error>,
     ) -> Result<DaxWindow, Error> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         if dax.is_some() {
             return Err(Errno::EEXIST.into());
         }
@@ -1665,7 +1666,7 @@ impl ExtentStore {
         stats::count_since(Counter::Maps, Counter::MapNs, start);
         let result = mapped.as_ref().map(|_| ()).map_err(|errno| *errno);
         let change = Change::Map { extent, offset, result };
-        self.changes.lock(&self.fence)?.record(window_offset, len, change);
+        self.changes.lock(&self.halt)?.record(window_offset, len, change);
         mapped
     }
 
@@ -1677,7 +1678,7 @@ impl ExtentStore {
         window_offset: u64,
     ) -> Result<()> {
         let (cached, within) = self.mapped_of(extent, offset, len, window_offset)?;
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         if within > 0 {
             dax.map(window_offset, &cached, offset, within);
@@ -1705,12 +1706,12 @@ impl ExtentStore {
             (Some((_, len)), _) => *len,
             // A follower's view holds sealed extents alone.
             (None, Some(following)) => {
-                let view = following.view.lock(&self.fence)?;
-                self.store.view_extent(&view, extent.into()).map_err(errno)?
+                let view = following.view.lock(&self.halt)?;
+                self.store.view_extent(&view, extent).map_err(errno)?
             }
             // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
             // (`open_maps_refused`).
-            (None, None) => match self.store.extent(extent.into()).map_err(errno)? {
+            (None, None) => match self.store.extent(extent).map_err(errno)? {
                 Some((_, true)) => return Err(refuse_open_map(extent)),
                 Some((len, false)) => len,
                 None => return Err(Errno::ENOENT),
@@ -1762,10 +1763,10 @@ impl ExtentStore {
                 break;
             }
         }
-        self.dax.lock(&self.fence)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
+        self.dax.lock(&self.halt)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
         // Each recorded as its own MAP would have it, the one that failed too, but zeros'.
         let tried = failed.map_or(mappings.len(), |(at, _)| at + 1);
-        let mut changes = self.changes.lock(&self.fence)?;
+        let mut changes = self.changes.lock(&self.halt)?;
         let mut maps = 0;
         for (at, mapping) in mappings[..tried].iter().enumerate() {
             let result = match failed {
@@ -1790,17 +1791,17 @@ impl ExtentStore {
     /// Checks the DAX window's range for a mapping of `len` bytes at `window_offset`: `ENOSYS`
     /// without a window.
     fn dax_range_checked(&self, window_offset: u64, len: u64) -> Result<()> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         dax.as_ref().ok_or(Errno::ENOSYS)?.check_range(window_offset, len)
     }
 
     /// Maps zeros, read-only, at `len` bytes of the DAX window at `window_offset`, as a mapping a
     /// snapshot recorded did ([`MappingContents::Zeros`]).
     pub fn map_zeros_at(&self, window_offset: u64, len: u64) -> Result<()> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         dax.check_range(window_offset, len)?;
-        self.changes.lock(&self.fence)?.record(window_offset, len, Change::Zeros);
+        self.changes.lock(&self.halt)?.record(window_offset, len, Change::Zeros);
         dax.map_zeros(window_offset, len);
         Ok(())
     }
@@ -1810,7 +1811,7 @@ impl ExtentStore {
     /// window, none. cladefs: `EBUSY` while the window holds private pages, which no mapping names
     /// the bytes of, as a snapshot's point is refused then (TASK-203).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         match dax.as_ref() {
             Some(dax) if dax.private_pages() > 0 => Err(Errno::EBUSY),
             dax => Ok(dax.map_or_else(Vec::new, Dax::mappings)),
@@ -1820,7 +1821,7 @@ impl ExtentStore {
     /// cladefs: the DAX window's mappings, as [`ExtentStore::window_mappings`] has them, its private
     /// pages or not: what a log says of a page.
     fn mapped(&self) -> Result<Vec<WindowMapping>> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         Ok(dax.as_ref().map_or_else(Vec::new, Dax::mappings))
     }
 
@@ -1831,8 +1832,8 @@ impl ExtentStore {
     /// (TASK-44.12).
     pub fn refused(&self, window_offset: u64, what: &str) -> String {
         let mapped = self.describe_mapping(window_offset);
-        let Ok(mut changes) = self.changes.lock(&self.fence) else {
-            return format!("{mapped}; the store is fenced");
+        let Ok(mut changes) = self.changes.lock(&self.halt) else {
+            return format!("{mapped}; the store is halted");
         };
         let history = changes.of(window_offset);
         changes.refuse(window_offset, what, mapped.clone());
@@ -1843,7 +1844,7 @@ impl ExtentStore {
     /// store, said for a log.
     fn describe_mapping(&self, window_offset: u64) -> String {
         let Ok(mappings) = self.mapped() else {
-            return "the store is fenced".into();
+            return "the store is halted".into();
         };
         let mapping = mappings.into_iter().find(|mapping| {
             (mapping.window_offset..mapping.window_offset + mapping.len).contains(&window_offset)
@@ -1854,7 +1855,7 @@ impl ExtentStore {
         let MappingContents::Extent { extent, offset } = mapping.contents else {
             return format!("zeros, {:#x} bytes from {:#x}", mapping.len, mapping.window_offset);
         };
-        let stored = self.store.extent(extent.into()).map(|stored| {
+        let stored = self.store.extent(extent).map(|stored| {
             stored.map(|(len, open)| {
                 format!("{len:#x} bytes, {}", if open { "open" } else { "sealed" })
             })
@@ -1933,14 +1934,14 @@ impl ExtentStore {
             let refused = "a point names a state already: fork it rather than make a point of it";
             return Err(Error::new(anyhow::Error::new(Errno::EINVAL).context(refused)));
         }
-        let _opening = self.opening.write(&self.fence)?;
+        let _opening = self.opening.write(&self.halt)?;
         if !self.is_quiescent()? {
             let open = "an extent written since the last commit is open";
             return Err(Error::new(anyhow::Error::new(Errno::EBUSY).context(open)));
         }
-        self.make_durable()?;
-        failpoint!("fork::durable");
-        self.fork_durable(path, branch, point, None)
+        self.make_uploaded()?;
+        failpoint!("fork::uploaded");
+        self.fork_uploaded(path, branch, point, None)
     }
 
     /// cladefs: whether the store holds what `other` does, as of their last commits: the same root,
@@ -1957,17 +1958,17 @@ impl ExtentStore {
     /// store as of that commit would not hold; as with its guest's filesystem frozen, a point a
     /// snapshot of its VM is taken at.
     pub fn is_quiescent(&self) -> Result<bool> {
-        // cladefs: not, as far as anyone knows, once a panic went through it (`crate::fence`).
-        self.fence.check()?;
+        // cladefs: not, as far as anyone knows, once a panic went through it (`crate::halt`).
+        self.halt.check()?;
         self.store.has_open().map(|open| !open).map_err(errno)
     }
 
     /// Unmaps `len` bytes of the DAX window at `window_offset` (`UNMAP`).
     pub fn unmap(&self, window_offset: u64, len: u64) -> Result<()> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         dax.check_range(window_offset, len)?;
-        self.changes.lock(&self.fence)?.record(window_offset, len, Change::Unmap);
+        self.changes.lock(&self.halt)?.record(window_offset, len, Change::Unmap);
         dax.unmap(window_offset, len);
         Ok(())
     }
@@ -1975,13 +1976,13 @@ impl ExtentStore {
     /// The sealed `extent`, of `len` bytes, in the cache: read from this store if no other store
     /// has it cached.
     fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
-        let remote = Some(self.fetcher());
+        let fetcher = Some(self.fetcher());
         let recorder = self.profiling.as_ref().map(|(recorder, _)| recorder.clone());
-        let placement = match self.public_reach(extent) {
-            Some(reach) => Placement::Public(reach),
-            None => Placement::Arena(self.arenas.of(extent)),
+        let cached_in = match self.public_reach(extent) {
+            Some(reach) => CachedIn::Public(reach),
+            None => CachedIn::Arena(self.arenas.of(extent)),
         };
-        cache::cached(&self.store, placement, remote, recorder, extent, len)
+        cache::cached(&self.store, cached_in, fetcher, recorder, extent, len)
     }
 
     /// cladefs: that `extent` is reachable from a published generation, if it is: the store is
@@ -1990,7 +1991,7 @@ impl ExtentStore {
         if !self.is_public() {
             return None;
         }
-        let held = self.store.extent(extent.into());
+        let held = self.store.extent(extent);
         matches!(held, Ok(Some((_, false)))).then_some(PublicReach(extent))
     }
 
@@ -2004,10 +2005,10 @@ impl ExtentStore {
     }
 
     /// cladefs: makes the store's branch public, but not those it inherited from: a fork pinning a
-    /// generation of a store that goes on being written, which attaches to tenants' stores rather
-    /// than being forked by them (backlog doc-10). Its pages are of the default arena through it
+    /// state of a store that goes on being written, which attaches to tenants' stores rather than
+    /// being forked by them (backlog doc-10). Its pages are of the default arena through it
     /// ([`ExtentStore::open_base`]).
-    pub fn make_generation_public(&self) -> Result<()> {
+    pub fn make_public_attach_only(&self) -> Result<()> {
         self.access().may_manage()?;
         self.mark_public(&[self.branch().id])
     }
@@ -2023,9 +2024,9 @@ impl ExtentStore {
     }
 
     /// cladefs: attaches the store at `base`, a fork pinning what it holds, to this one, which
-    /// `branches` of ([`ExtentStore::ancestry`]), durably: `READ` and `MAP` of its extents read
-    /// through to it from now on, and in forks of this store, which a VM restored is. Attached
-    /// already, it does nothing. The guest has no part in this (backlog doc-10).
+    /// `branches` of ([`ExtentStore::ancestry`]), recorded in its directory: `READ` and `MAP` of
+    /// its extents read through to it from now on, and in forks of this store, which a VM restored
+    /// is. Attached already, it does nothing. The guest has no part in this (backlog doc-10).
     pub fn attach_base(&self, base: &Path, branches: &[u64]) -> Result<()> {
         self.access().may_manage()?;
         store_dir::attach(&self.path, base, branches)?;
@@ -2053,7 +2054,7 @@ impl ExtentStore {
     /// cladefs: how many of what is attached to it are open.
     #[cfg(test)]
     pub(crate) fn bases_opened(&self) -> usize {
-        self.bases.opened(&self.fence)
+        self.bases.opened(&self.halt)
     }
 
     /// cladefs: the base attached that holds `extent`, with its length, if one does.
@@ -2061,7 +2062,7 @@ impl ExtentStore {
         let Some(bases) = self.bases.of(extent.branch) else { return Ok(None) };
         for base in bases {
             let store = base.store(self)?;
-            if let Some((len, false)) = store.store.extent(extent.into()).map_err(errno)? {
+            if let Some((len, false)) = store.store.extent(extent).map_err(errno)? {
                 return Ok(Some((store, len)));
             }
         }
@@ -2084,7 +2085,7 @@ impl ExtentStore {
 /// generation or a base, holds it, so that every tenant attaching or forking it may read it. Only
 /// a store makes one, having found so ([`ExtentStore::public_reach`]): its field is this module's.
 /// The extent cache moves a tenant's copy of an extent to the default arena, which every VM
-/// process maps, only with one naming that extent (`cache::Placement::Public`).
+/// process maps, only with one naming that extent (`cache::CachedIn::Public`).
 pub(crate) struct PublicReach(ExtentId);
 
 impl PublicReach {
@@ -2133,7 +2134,7 @@ impl Base {
 
     /// The fork, opened for `attached_to`, which is attached to it, once.
     fn store(&self, attached_to: &ExtentStore) -> Result<Arc<ExtentStore>> {
-        let mut store = self.store.lock(&attached_to.fence)?;
+        let mut store = self.store.lock(&attached_to.halt)?;
         if let Some(store) = &*store {
             return Ok(store.clone());
         }
@@ -2159,8 +2160,8 @@ impl Base {
 #[derive(Default)]
 struct Bases {
     open: OnceLock<OpenBase>,
-    /// Shared by a store and its followers; unlike their locks, not fenced
-    /// ([`crate::fence`]): nothing that may panic is called holding it.
+    /// Shared by a store and its followers; unlike their locks, not halted
+    /// ([`crate::halt`]): nothing that may panic is called holding it.
     by_branch: std::sync::RwLock<HashMap<u64, Vec<Arc<Base>>>>,
 }
 
@@ -2196,9 +2197,9 @@ impl Bases {
 
     /// How many of those attached are open.
     #[cfg(test)]
-    fn opened(&self, fence: &Fence) -> usize {
+    fn opened(&self, halt: &Halt) -> usize {
         let mut opened: Vec<_> = (self.by_branch.read().unwrap().values().flatten())
-            .filter(|base| base.store.lock(fence).unwrap().is_some())
+            .filter(|base| base.store.lock(halt).unwrap().is_some())
             .map(Arc::as_ptr)
             .collect();
         opened.sort();
@@ -2217,7 +2218,7 @@ const REPLAY_THREADS: usize = 4;
 fn replay(
     store: Arc<Store<HostDir>>,
     arenas: Arenas,
-    fetcher: Arc<crate::remote::Fetcher>,
+    fetcher: Arc<crate::bucket::HostFetcher>,
     units: Vec<profile::Unit>,
 ) {
     let units = Arc::new(units);
@@ -2226,12 +2227,11 @@ fn replay(
         let fetcher = fetcher.clone();
         let spawned = std::thread::Builder::new().name("cladefs replay".into()).spawn(move || {
             for unit in units.iter().skip(first).step_by(REPLAY_THREADS) {
-                let id: storage_device::ExtentId = unit.extent.into();
-                let Ok(Some((len, false))) = store.extent(id) else { continue };
+                let Ok(Some((len, false))) = store.extent(unit.extent) else { continue };
                 let arena = arenas.of(unit.extent);
                 let fetcher = Some(fetcher.clone());
-                let placement = Placement::Arena(arena);
-                let extent = cache::cached(&store, placement, fetcher, None, unit.extent, len);
+                let cached_in = CachedIn::Arena(arena);
+                let extent = cache::cached(&store, cached_in, fetcher, None, unit.extent, len);
                 let Ok(extent) = extent else { continue };
                 match extent.read(unit.offset, &mut [0; 1]) {
                     Ok(()) => stats::add(Counter::Prefetches, 1),
@@ -2258,29 +2258,29 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// An error of a read of `extent`, whose data is in the bucket.
-    fn remote_data(extent: storage_device::ExtentId) -> extent_store::RemoteData {
+    fn bucket_data(extent: ExtentId) -> extent_store::BucketData {
         let location = extent_frame::segment::Location { key: "k".to_owned(), offset: 0, len: 1 };
-        extent_store::RemoteData { extent, location }
+        extent_store::BucketData { extent, location }
     }
 
     /// Each of the store's errors has its errno, as doc-4 has them, a follower's among them, in
     /// context or not; any other is EIO (TASK-160.12).
     #[test]
     fn each_store_error_has_its_errno() {
-        let extent = ExtentId { branch: 1, sequence: 2 }.into();
+        let extent = ExtentId { branch: 1, sequence: 2 };
         let cases: [(anyhow::Error, Errno); 13] = [
             (extent_store::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
             (SealedExtent(extent).into(), Errno::EPERM),
-            (Spent(extent).into(), Errno::EPERM),
+            (SpentExtent(extent).into(), Errno::EPERM),
             (OtherBranch(extent).into(), Errno::EPERM),
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),
             (Unaligned { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (Unsectored { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (TooLong { offset: 1, len: 2 }.into(), Errno::EINVAL),
-            (remote_data(extent).into(), Errno::EIO),
+            (bucket_data(extent).into(), Errno::EIO),
             (anyhow::anyhow!("the disk"), Errno::EIO),
         ];
         for (error, expected) in cases {
@@ -2293,32 +2293,32 @@ mod tests {
     /// writer lost is EROFS, not EIO (TASK-160.12).
     #[test]
     fn each_uploader_failure_has_its_errno() {
-        use extent_remote::Error;
+        use extent_bucket::Error;
         use extent_store::upload::Failure;
         let cases = [
-            (Failure::Remote(Error::Fenced), Errno::EROFS),
-            (Failure::Remote(Error::Deleted), Errno::EROFS),
-            (Failure::Remote(Error::Point), Errno::EROFS),
-            (Failure::Remote(Error::Stale), Errno::ESTALE),
-            (Failure::Remote(Error::Diverged), Errno::ESTALE),
-            (Failure::Remote(Error::NoBranch), Errno::ENOENT),
+            (Failure::Bucket(Error::Fenced), Errno::EROFS),
+            (Failure::Bucket(Error::Deleted), Errno::EROFS),
+            (Failure::Bucket(Error::Point), Errno::EROFS),
+            (Failure::Bucket(Error::Stale), Errno::ESTALE),
+            (Failure::Bucket(Error::Diverged), Errno::ESTALE),
+            (Failure::Bucket(Error::NoBranch), Errno::ENOENT),
             (Failure::PointDeleted, Errno::ENOENT),
-            (Failure::Remote(Error::IdTaken(extent_remote::layout::test_branch(3))), Errno::EEXIST),
+            (Failure::Bucket(Error::IdTaken(extent_bucket::layout::test_branch(3))), Errno::EEXIST),
             (
-                Failure::Remote(Error::Format {
-                    branch: extent_remote::layout::test_branch(3),
+                Failure::Bucket(Error::Format {
+                    branch: extent_bucket::layout::test_branch(3),
                     format: 99,
                 }),
                 Errno::ENOTSUP,
             ),
-            (Failure::Remote(Error::Lost("a segment".into())), Errno::EIO),
-            (Failure::Remote(Error::Corrupt("a footer".into())), Errno::EIO),
-            (Failure::Remote(Error::Read("a file".into())), Errno::EIO),
+            (Failure::Bucket(Error::Lost("a segment".into())), Errno::EIO),
+            (Failure::Bucket(Error::Corrupt("a footer".into())), Errno::EIO),
+            (Failure::Bucket(Error::Read("a file".into())), Errno::EIO),
             (Failure::msg("the uploader stopped"), Errno::EIO),
         ];
         for (failure, expected) in cases {
             let said = failure.to_string();
-            assert_eq!(remote_errno(failure), expected, "{said}");
+            assert_eq!(upload_errno(failure), expected, "{said}");
         }
     }
 
@@ -2368,7 +2368,7 @@ mod tests {
     }
 
     /// A new store, as [`store`] makes, whose uploader uploads nothing until a commit waits for it
-    /// or the hour is up: what commits made durable on the host alone ([`committed_here`]) seal
+    /// or the hour is up: what commits made local alone ([`committed_here`]) seal
     /// stays in its files, rather than leave for the bucket (TASK-165.9).
     fn held(capacity: u64) -> (ExtentStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -2389,7 +2389,7 @@ mod tests {
         (held.unwrap(), dir)
     }
 
-    /// Commits what `store` wrote, durable on the host alone: its uploader not waited for.
+    /// Commits what `store` wrote, local alone: its uploader not waited for.
     fn committed_here(store: &ExtentStore) {
         store.commit_ordered(None).unwrap();
         store.flush().unwrap();
@@ -2452,7 +2452,7 @@ mod tests {
         let branch = store.branch().id;
         let held = store.store.extents().unwrap();
         let own: Vec<_> = held.iter().filter(|(extent, _)| extent.branch == branch).collect();
-        let bytes = |held: &mut dyn Iterator<Item = &(storage_device::ExtentId, u64)>| -> u64 {
+        let bytes = |held: &mut dyn Iterator<Item = &(ExtentId, u64)>| -> u64 {
             held.map(|(_, len)| len).sum()
         };
         let (own_bytes, all_bytes) = (bytes(&mut own.iter().copied()), bytes(&mut held.iter()));
@@ -2489,7 +2489,6 @@ mod tests {
                         let held = store.store.extents().unwrap();
                         if !held.is_empty() {
                             let (extent, _) = held[pick.index(held.len())];
-                            let extent = ExtentId { branch: extent.branch, sequence: extent.sequence };
                             store.free(extent).unwrap();
                         }
                     }
@@ -2545,19 +2544,19 @@ mod tests {
     }
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here as
-    /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
-    /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
+    /// the test's process's): its cell made encrypted, its branch given a DEK, and no byte of what
+    /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
-    /// inherits; the store, the common tenant's, forks into no cell of a tenant with no KEK, in the
-    /// clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
+    /// inherits; the store, the default tenant's, forks into no cell of a tenant with no KEK, in
+    /// the clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
     /// forking as before.
     #[test]
-    fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
+    fn encrypted_stores_serve_follow_reopen_and_fork_into_encrypted_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
-        kms.create(host_store::NO_TENANT).unwrap();
-        crate::remote::set_kms(Arc::new(kms)).unwrap();
+        kms.create(host_store::DEFAULT_TENANT).unwrap();
+        crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
@@ -2593,7 +2592,7 @@ mod tests {
         let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
         assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
         let record =
-            extent_store::upload::block_on(extent_remote::branch::record(&**fork.bucket(), child));
+            extent_store::upload::block_on(extent_bucket::branch::record(&**fork.bucket(), child));
         let record = record.unwrap().unwrap().unwrap();
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
         assert_eq!((record.deks.len(), inherited), (1, vec![store.branch()]));
@@ -2615,10 +2614,13 @@ mod tests {
         let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
         assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
 
-        // The common tenant's, sealed, into a cell of a tenant with no KEK.
+        // The default tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
-        let common =
-            ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));
+        let common = ExtentStore::create_in(
+            &common,
+            1 << 20,
+            host_store::new_cell(host_store::DEFAULT_TENANT),
+        );
         let common = common.unwrap();
         assert!(!common.store.keys().is_empty());
         write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
@@ -2629,7 +2631,7 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
         assert!(!dir.path().join("into-clear").exists());
         let found =
-            extent_store::upload::block_on(extent_remote::branch::record(&**common.bucket(), into));
+            extent_store::upload::block_on(extent_bucket::branch::record(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
     }
 
@@ -2681,19 +2683,19 @@ mod tests {
         assert_eq!(read(&follower, b, 0, BLOCK), Err(Errno::ENOENT));
         assert_eq!(follower.root(), Ok(b"one".to_vec()));
 
-        let epoch = follower.advance().unwrap();
-        assert_eq!(follower.epoch(), Ok(epoch));
+        let commit = follower.advance().unwrap();
+        assert_eq!(follower.view_commit(), Ok(commit));
         assert_eq!(follower.root(), Ok(b"two".to_vec()));
         assert_eq!(read(&follower, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
-        follower.let_go(epoch).unwrap();
+        follower.let_go(commit).unwrap();
         assert_eq!(read(&follower, a, 0, BLOCK), Err(Errno::EIO));
         // Pinned, an extent stays, whatever commit the follower is as of.
         follower.pin(b).unwrap();
         store.free(b).unwrap();
         store.commit(None).unwrap();
-        let epoch = follower.advance().unwrap();
-        follower.let_go(epoch).unwrap();
+        let commit = follower.advance().unwrap();
+        follower.let_go(commit).unwrap();
         assert_eq!(read(&follower, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
         follower.unpin(b).unwrap();
         assert_eq!(read(&follower, b, 0, BLOCK), Err(Errno::EIO));
@@ -2733,13 +2735,13 @@ mod tests {
             }
             store.commit(None).unwrap();
         });
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
-        let collected = extent_remote::collector::collect(&**store.bucket(), 1, &options);
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let collected = extent_bucket::collector::collect(&**store.bucket(), 1, &options);
         let report = futures::executor::block_on(collected).unwrap();
         // All the checkpoint covers but the writer's fence, which the collector keeps (TASK-371).
         assert_eq!(
             report,
-            extent_remote::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
+            extent_bucket::collector::Report { deleted: 64, compacted: 0, retired: 0, ..report }
         );
         assert_eq!(read(&follower, a, 0, BLOCK), Err(Errno::ESTALE));
     }
@@ -2825,11 +2827,11 @@ mod tests {
         let store = Arc::new(store);
         store.commit(None).unwrap();
         let follower = store.follow();
-        let epoch = follower.epoch().unwrap();
-        assert_eq!(follower.newer(epoch, std::time::Duration::from_millis(10)), None);
+        let commit = follower.view_commit().unwrap();
+        assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)), None);
         write(&store, id(&store, 1), 0, &pattern(1, BLOCK)).unwrap();
         store.commit(None).unwrap();
-        let newer = follower.newer(epoch, std::time::Duration::from_secs(10));
+        let newer = follower.newer(commit, std::time::Duration::from_secs(10));
         assert_eq!(newer, Some(follower.advance().unwrap()));
     }
 
@@ -2905,12 +2907,12 @@ mod tests {
     const ROUNDS: u64 = 2000;
 
     /// TASK-153.16: a panic holding a lock of the store's, as a lazily made resource's `expect`
-    /// was in TASK-104, TASK-105 and TASK-150.20, fences the store: what it was serving, and each
+    /// was in TASK-104, TASK-105 and TASK-150.20, halts the store: what it was serving, and each
     /// request after it, fails with `EIO`, rather than panicking at the lock's poison; those that
     /// take none of the locks the panic held too, so that nothing reads what it left half done.
     /// Closed, the store opens anew as of its last commit, and serves.
     #[test]
-    fn a_panic_holding_a_lock_fences_the_store() {
+    fn a_panic_holding_a_lock_halts_the_store() {
         let (store, dir) = store(1 << 26);
         let ps = page_size();
         let window = store.create_dax_window(2 * ps, None).unwrap();
@@ -2919,10 +2921,10 @@ mod tests {
         store.commit(None).unwrap();
         write(&store, open, 0, &pattern(2, BLOCK)).unwrap();
 
-        crate::fence::tests::panic_holding("opening");
+        crate::halt::tests::panic_holding("opening");
         let writing = std::panic::AssertUnwindSafe(|| write(&store, open, 0, &pattern(3, BLOCK)));
         assert!(std::panic::catch_unwind(writing).is_err(), "the write didn't panic");
-        assert!(store.is_fenced());
+        assert!(store.is_halted());
         assert_eq!(read(&store, open, 0, BLOCK), Err(Errno::EIO));
         assert_eq!(read(&store, sealed, 0, BLOCK), Err(Errno::EIO));
         assert_eq!(write(&store, next, 0, &pattern(4, BLOCK)), Err(Errno::EIO));
@@ -2938,7 +2940,7 @@ mod tests {
         drop((window, store));
 
         let store = ExtentStore::open(dir.path().join("store")).unwrap();
-        assert!(!store.is_fenced());
+        assert!(!store.is_halted());
         assert_eq!(read(&store, sealed, 0, BLOCK), Ok(pattern(1, BLOCK)));
         assert_eq!(read(&store, open, 0, BLOCK), Err(Errno::ENOENT));
         write(&store, next, 0, &pattern(5, BLOCK)).unwrap();
@@ -2957,7 +2959,7 @@ mod tests {
         race(&store, ROUNDS, |_| {}, &[&write, &commit], &data);
     }
 
-    /// Commits ordered wait for a flush, which makes them durable.
+    /// Commits ordered wait for a flush, which makes them local.
     #[test]
     fn ordered_commits_wait_for_a_flush() {
         let (store, _dir) = store(1 << 20);
@@ -3574,7 +3576,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ps = page_size();
         let len = ps as usize + BLOCK;
-        let url = format!("memory:///maps-remote-{:016x}", rand::random::<u64>());
+        let url = format!("memory:///maps-bucket-{:016x}", rand::random::<u64>());
         let first = ExtentStore::create_kept_in(dir.path().join("first"), 1 << 20, &url).unwrap();
         let extent = id(&first, 1);
         write(&first, extent, 0, &pattern(7, len)).unwrap();
@@ -3884,8 +3886,8 @@ mod tests {
         store.map(id(&store, 1), 0, ps, 0).unwrap();
         for sequence in 2..=20 {
             let extent = id(&store, sequence);
-            let placement = Placement::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, placement, None, None, extent, ps).unwrap());
+            let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
+            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
         }
         let mut kept: Vec<u64> = cache::keys().iter().map(|(_, extent)| extent.sequence).collect();
         kept.sort_unstable();
@@ -3914,8 +3916,8 @@ mod tests {
         let before = stats::stats();
         for sequence in mapped + 1..=mapped + looked_up {
             let extent = id(&store, sequence);
-            let placement = Placement::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, placement, None, None, extent, ps).unwrap());
+            let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
+            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
         }
         let trims = stats::stats().since(&before).cache_trims;
         assert!(trims <= looked_up / (MOST as u64 / 8) + 1, "{trims} trims of the cache");
@@ -4032,9 +4034,9 @@ mod tests {
     }
 
     /// What this process logs, kept: for tests of what a failure says.
-    struct Kept(Mutex<Vec<String>>);
+    struct KeptLog(Mutex<Vec<String>>);
 
-    impl log::Log for Kept {
+    impl log::Log for KeptLog {
         fn enabled(&self, _: &log::Metadata) -> bool {
             true
         }
@@ -4051,7 +4053,7 @@ mod tests {
     /// index placed in the bucket and that could not be read (TASK-217, GCE r757 round 40).
     #[test]
     fn failed_page_ins_say_why() {
-        static KEPT: Kept = Kept(Mutex::new(Vec::new()));
+        static KEPT: KeptLog = KeptLog(Mutex::new(Vec::new()));
         log::set_logger(&KEPT).unwrap();
         log::set_max_level(log::LevelFilter::Error);
         let extent = Arc::new(CachedExtent::new(
@@ -4079,7 +4081,7 @@ mod tests {
         write(&publisher, extent, 0, data).unwrap();
         publisher.commit(None).unwrap();
         publisher
-            .fork_to(path, extent_remote::layout::test_branch(rand::random::<u64>().max(1)))
+            .fork_to(path, extent_bucket::layout::test_branch(rand::random::<u64>().max(1)))
             .unwrap();
         let ancestry = ExtentStore::open(path).unwrap().ancestry();
         (extent, ancestry)
@@ -4188,7 +4190,7 @@ mod tests {
         publisher.commit(None).unwrap();
         publisher.fork_to(&base, crate::host_store::fork_child(publisher.branch())).unwrap();
         drop(publisher);
-        ExtentStore::open(&base).unwrap().make_generation_public().unwrap();
+        ExtentStore::open(&base).unwrap().make_public_attach_only().unwrap();
         let tenant = Arena::new();
         let publisher = ExtentStore::open_in(&publisher_path, Some(tenant.clone())).unwrap();
         // The publisher's VM maps its first page, from the tenant's copy.
@@ -4267,8 +4269,8 @@ mod tests {
         let (reached, other) = (id(&store, 1), id(&store, 2));
         write(&store, other, 0, &[1; BLOCK]).unwrap();
         store.commit(None).unwrap();
-        let placement = Placement::Public(PublicReach(reached));
-        drop(cache::cached(&store.store, placement, None, None, other, BLOCK as u64));
+        let cached_in = CachedIn::Public(PublicReach(reached));
+        drop(cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64));
     }
 
     /// doc-10: what a generation pins stays, whatever its store does next.
@@ -4420,7 +4422,7 @@ mod tests {
         assert_eq!(store.map(open, 0, ps, 0), Err(Errno::EPERM));
         assert_eq!(open_maps_refused(), 1, "an open extent's MAP uncounted");
         assert_eq!(store.map(never, 0, ps, 0), Err(Errno::ENOENT));
-        assert_eq!(store.store.extent(open.into()).map_err(errno), Ok(Some((BLOCK as u64, true))));
+        assert_eq!(store.store.extent(open).map_err(errno), Ok(Some((BLOCK as u64, true))));
         assert_eq!(read(&store, open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
         store.map(sealed, 0, ps, 0).unwrap();

@@ -73,12 +73,14 @@ impl Header {
 /// [`Header`]'s layout, [`OPEN`]'s and [`REPLY`]'s kinds and a reply's status, is what no version
 /// moves. `the_wire_is_its_version` (codec.rs) fails on a change to the wire without a new one.
 /// Version 4: a request may say the guest request it is a call for ([`REQUEST`], TASK-260).
-/// Version 5: a commit may complete once durable on the host's disk ([`COMMIT_LOCAL`],
-/// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite volume of its cell
-/// ([`OPEN_SQLITE`], TASK-364), and stores are cells' volumes, in their cells' prefixes. Version
+/// Version 5: a commit may complete once local, synced to the host's disk ([`COMMIT_LOCAL`],
+/// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite vdisk of its cell
+/// ([`OPEN_SQLITE`], TASK-364), and stores are cells' vdisks, in their cells' prefixes. Version
 /// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364). Version 8:
-/// an [`OPEN`] may make a memory volume of its cell ([`OPEN_MEMORY`], TASK-456.2).
-pub(crate) const VERSION: u64 = 8;
+/// an [`OPEN`] may make a memory vdisk of its cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
+/// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
+/// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474).
+pub(crate) const VERSION: u64 = 9;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -91,18 +93,18 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 // Requests, from a VM process. A reply ([`REPLY`]) answers each, but for [`ACK`].
 
 /// Opens the store at the path the payload holds, creating it with `args[0]` bytes of capacity if
-/// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK_FROM`], forking it from the store
-/// at the path after the payload's first NUL byte if it doesn't exist (TASK-39.1: a VM restored
-/// from a snapshot, whose store point that is), or is a fork that failed, whose deletion it
-/// finishes first (TASK-79.84). That point, if it doesn't exist either, is taken
-/// from the daemon's bucket: a store of branch `args[1]`, of `args[0]` bytes, as on another host
-/// than the snapshot's: `ENOENT` for a tenant's VM process, whose `args[1]` is ignored, its VM
-/// manager making the point first (TASK-154). The reply's `args[0]` is its branch, and it carries
-/// the kernel's physical memory. cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog
-/// doc-8), as of its latest commit, whose epoch is the reply's `args[2]`. The reply's `args[3]` is
-/// how many mappings the host lets a process make, 0 if it doesn't limit them, which a VM process
-/// in a jail without /proc can't read (TASK-172). cladefs: its `args[4]` is the VM process's wire
-/// [`VERSION`], and its reply's the daemon's.
+/// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK_FROM`], forking it from the store at
+/// the path after the payload's first NUL byte if it doesn't exist (TASK-39.1: a VM restored from a
+/// snapshot, whose store point that is), or is a fork that failed, whose deletion it finishes first
+/// (TASK-79.84). That point, if it doesn't exist either, is taken from the daemon's bucket: a store
+/// of branch `args[1]`, of `args[0]` bytes, as on another host than the snapshot's: `ENOENT` for a
+/// tenant's VM process, whose `args[1]` is ignored, its VM manager making the point first
+/// (TASK-154). The reply's `args[0]` is its branch, and it carries the kernel's physical memory.
+/// cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog doc-8), as of its latest
+/// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
+/// the host lets a process make, 0 if it doesn't limit them, which a VM process in a jail without
+/// /proc can't read (TASK-172). cladefs: its `args[4]` is the VM process's wire [`VERSION`], and
+/// its reply's the daemon's.
 pub(crate) const OPEN: u32 = 1;
 /// Reads `args[3]` bytes at `args[2]` in extent `args[0..2]` (`READ`): the reply's payload; or,
 /// with [`READ_TRANSFER`], into the connection's transfer area at `args[4]` ([`TRANSFER`]).
@@ -143,15 +145,15 @@ pub(crate) const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
 pub(crate) const ACK: u32 = 12;
-/// Forks the store, as of its last commit made durable, to a new branch, whose handle is a new
+/// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
 /// directory at the path the payload holds, nothing there (`EEXIST`)
 /// ([`ExtentStore::fork`](crate::ExtentStore)): a fork the daemon serves, sharing its extents'
-/// pages with the store's. cladefs: the one volume of a new cell of the store's tenant's, its ID the
-/// bucket's to give (`extent_remote::objectid`, TASK-364), which the reply's `args[0]` is. With
+/// pages with the store's. cladefs: the one vdisk of a new cell of the store's tenant's, its ID the
+/// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
 /// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
 /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a point
 /// ([`ExtentStore::point`](crate::ExtentStore::point)): what a snapshot of the VM is taken at,
-/// which any number of hosts restore at once, and none writes.
+/// which any number of hosts fork at once, and none writes.
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.
@@ -166,13 +168,13 @@ pub(crate) const MAPPINGS: u32 = 17;
 pub(crate) const MAPPING_BYTES: u64 = 6 * 8;
 // 14, 15 and 18 to 20 were requests the host's tools made, of the daemon's stats, and to resize,
 // fork, delete and sync stores by path: the control API's now (TASK-43.5), not reused.
-/// cladefs: moves a follower's view to the writer's latest commit, whose epoch is the reply's
+/// cladefs: moves a follower's view to the writer's latest commit, whose number is the reply's
 /// `args[0]`, holding what the commits since the one it was as of held, until [`LET_GO`]
 /// ([`ExtentStore::advance`](crate::ExtentStore::advance)).
 pub(crate) const ADVANCE: u32 = 21;
-/// cladefs: lets go of what a follower's view held of the commits before the commit of epoch
+/// cladefs: lets go of what a follower's view held of the commits before commit number
 /// `args[0]`, which an [`ADVANCE`] returned ([`ExtentStore::let_go`](crate::ExtentStore::let_go)):
-/// the epoch named, a let-go served after the next advance lets go of no more.
+/// the commit named, a let-go served after the next advance lets go of no more.
 pub(crate) const LET_GO: u32 = 22;
 /// cladefs: keeps extent `args[0..2]`, which a follower's view holds, whatever commit it advances
 /// to, until [`UNPIN`] ([`ExtentStore::pin`](crate::ExtentStore::pin)).
@@ -259,30 +261,37 @@ pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
 pub(crate) const OPEN_FORK_FROM: u32 = 1 << 1;
 pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
-/// cladefs: with [`OPEN_CREATE`], the store made is a SQLite volume of its cell, which the
+/// cladefs: with [`OPEN_CREATE`], the store made is a SQLite vdisk of its cell, which the
 /// sqlite_extents VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
-/// cladefs: with [`OPEN_CREATE`], the store made is a memory volume of its cell, a VM's memory
+/// cladefs: with [`OPEN_CREATE`], the store made is a memory vdisk of its cell, a VM's memory
 /// (TASK-456.2), not an Fxfs one.
 pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
-pub(crate) const MAP_ZEROS: u32 = 1 << 1;
+/// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,
+/// `MAP_MANY` and `MAP_PREFAULT`, are no flags here: [`MAP_MANY`] is a request of its own, and a VM
+/// process prefaults by itself.
+pub(crate) const MAP_ZEROS: u32 = 1 << 3;
 pub(crate) const FORK_QUIESCENT: u32 = 1 << 0;
 pub(crate) const MAPPING_ZEROS: u64 = 1 << 1;
-pub(crate) const COMMIT_ROOT: u32 = 1 << 0;
-/// cladefs: a `COMMIT` that completes once durable, not once ordered.
-pub(crate) const COMMIT_DURABLE: u32 = 1 << 1;
-/// cladefs: a `COMMIT` that completes once durable on the host's disk, not waiting for object
-/// storage (TASK-301): not with [`COMMIT_DURABLE`].
+/// cladefs: a `COMMIT` that completes once uploaded, not once ordered: doc-4's `COMMIT_UPLOADED`,
+/// at its bit, as every flag doc-4 has too is here.
+pub(crate) const COMMIT_UPLOADED: u32 = 1 << 0;
+/// A `COMMIT` that sets the root: doc-4's `COMMIT_ROOT`, at its bit.
+pub(crate) const COMMIT_ROOT: u32 = 1 << 1;
+/// cladefs: a `COMMIT` that completes once local, synced to the host's disk, not waiting for the
+/// bucket (TASK-301): not with [`COMMIT_UPLOADED`]. Not doc-4's.
 pub(crate) const COMMIT_LOCAL: u32 = 1 << 2;
 pub(crate) const WRITE_BARRIER: u32 = 1 << 0;
 pub(crate) const WRITE_COMMIT: u32 = 1 << 1;
-/// A `WRITE`'s commit completes once durable.
-pub(crate) const WRITE_DURABLE: u32 = 1 << 2;
-pub(crate) const WRITE_TRANSFER: u32 = 1 << 3;
+/// A `WRITE`'s commit completes once uploaded: doc-4's `WRITE_UPLOADED`, at its bit, as are
+/// [`WRITE_BARRIER`], [`WRITE_COMMIT`] and [`WRITE_ROOT`].
+pub(crate) const WRITE_UPLOADED: u32 = 1 << 2;
 /// cladefs: a `WRITE`'s commit sets the root.
-pub(crate) const WRITE_ROOT: u32 = 1 << 4;
-/// cladefs: a `WRITE`'s commit completes once durable on the host's disk (TASK-301): not with
-/// [`WRITE_DURABLE`].
+pub(crate) const WRITE_ROOT: u32 = 1 << 3;
+/// Not doc-4's: a `WRITE`'s data is in the transfer area.
+pub(crate) const WRITE_TRANSFER: u32 = 1 << 4;
+/// cladefs: a `WRITE`'s commit completes once local, synced to the host's disk (TASK-301): not
+/// with [`WRITE_UPLOADED`]. Not doc-4's.
 pub(crate) const WRITE_LOCAL: u32 = 1 << 5;
 pub(crate) const READ_TRANSFER: u32 = 1 << 0;
 pub(crate) const FAULT_WRITE: u32 = 1 << 0;
@@ -317,7 +326,7 @@ pub(crate) const STAGE_PRIVATE: u32 = 108;
 /// [`CAPACITY_ASK`], the guest is asked to shrink to `args[0]` bytes, and answers ([`RESIZED`]).
 pub(crate) const CAPACITY: u32 = 104;
 pub(crate) const CAPACITY_ASK: u32 = 1 << 0;
-/// cladefs: the writer of a follower's store committed: its latest commit's epoch is `args[0]`,
+/// cladefs: the writer of a follower's store committed: its latest commit's number is `args[0]`,
 /// which the follower may [`ADVANCE`] to. Sent once for each run of commits.
 pub(crate) const COMMITTED: u32 = 105;
 /// cladefs: asks the VM process for its stats and its guest's, as of now: ask `args[0]`, which its

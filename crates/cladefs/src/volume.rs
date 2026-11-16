@@ -33,9 +33,9 @@ use std::sync::{Arc, Mutex, Weak};
 
 /// What the host gives Fxfs's POSIX layer: the host's VFS keeps nothing the layer writes back,
 /// and its devices make each commit durable as they write it.
-pub(crate) struct Host;
+pub(crate) struct HostPlatform;
 
-impl Platform for Host {
+impl Platform for HostPlatform {
     const KEEPS_DIRECTORY_TIMES: bool = false;
 
     type Durable = ();
@@ -48,7 +48,7 @@ impl Platform for Host {
 }
 
 /// A volume of Fxfs, as the host serves it.
-pub(crate) type HostFxfs = Fxfs<Host>;
+pub(crate) type HostFxfs = Fxfs<HostPlatform>;
 
 /// A mounted volume of an image. See the module docs.
 pub(crate) struct Volume {
@@ -190,7 +190,7 @@ impl Volume {
     /// directory.
     pub fn new(image: Arc<ImageShared>, store: Arc<ObjectStore>) -> (Arc<Self>, Hold) {
         let (store_id, object_id) = (store.store_object_id(), store.root_directory_object_id());
-        let fxfs = HostFxfs::new(store.filesystem(), store, false, Host);
+        let fxfs = HostFxfs::new(store.filesystem(), store, false, HostPlatform);
         let held = HeldNode {
             file_type: FileType::Directory,
             unlinked: false,
@@ -386,7 +386,7 @@ impl Volume {
                     fxfs.evict(object_id, held.unlinked);
                 }
                 let filesystem = fxfs.filesystem().clone();
-                let Host = fxfs.close().await;
+                let HostPlatform = fxfs.close().await;
                 filesystem.graveyard().flush().await;
                 filesystem.sync(SyncOptions { flush_device: true, ..Default::default() }).await
             }

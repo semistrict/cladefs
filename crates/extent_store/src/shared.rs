@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: locks shared beyond one store, whose poison no fence contains (TASK-149.24). A store's
-//! own locks fence the store a panic holding one went through (cladefs's `fence`): it fails each
+//! cladefs: locks shared beyond one store, whose poison no halt contains (TASK-149.24). A store's
+//! own locks halt the store a panic holding one went through (cladefs's `halt`): it fails each
 //! request after with `EIO`, the others serve on. A lock shared beyond it, as the process's cache
 //! of extents, a store's state, which its followers share with its writer, or a window's, which its
 //! connection and the guest's faults share, would be found poisoned by every user after, one panic
@@ -16,7 +16,7 @@
 //! guard a [`Shared`]: the thread's locks held are what the panic hook looks at. A thread whose
 //! work is the process's, as the page cache's flusher, which every store's files wait on, holds
 //! that work as it would such a lock, for as long as it does it ([`Holding::work`]): its death too
-//! no fence contains (TASK-493). Elsewhere, as in tests, a panic holding one unwinds as any panic
+//! no halt contains (TASK-493). Elsewhere, as in tests, a panic holding one unwinds as any panic
 //! does.
 
 use std::cell::RefCell;
@@ -67,7 +67,7 @@ pub fn abort_on_panics() {
             if !held.is_empty() {
                 let locks = held.join(", ");
                 log::error!(
-                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no fence \
+                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no halt \
                      contains it (TASK-149.24)"
                 );
                 // As the log may not reach stderr, nor be flushed before the abort.
@@ -124,7 +124,7 @@ impl Holding {
     }
 
     /// The calling thread doing the process's work called `name`, until this drops: work every
-    /// store waits on, as the page cache's flusher's, whose death no store's fence contains, so
+    /// store waits on, as the page cache's flusher's, whose death no store's halt contains, so
     /// that a panic doing it aborts the process as one holding a [`SharedLock`] does.
     pub fn work(name: &'static str) -> Self {
         Self::new(name)

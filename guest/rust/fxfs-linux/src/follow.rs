@@ -35,12 +35,12 @@ mod ffi {
     use core::ffi::c_void;
 
     unsafe extern "C" {
-        pub fn fxfs_vfs_follow_fill_begin(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_fill_end(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_assert_filling(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_barrier_take(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_barrier_release(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_epoch(vfs: *mut c_void, which: u32, epoch: u64);
+        pub fn fxfs_vfs_fill_begin_extern(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_end_extern(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_assert_held(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_take(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_release(vfs: *mut c_void);
+        pub fn fxfs_vfs_follow_commit(vfs: *mut c_void, which: u32, commit: u64);
         pub fn fxfs_vfs_follow_failing() -> bool;
         pub fn fxfs_vfs_drop_file(vfs: *mut c_void, ino: u64, ranges: *const Range, count: usize);
         pub fn fxfs_vfs_drop_entries(vfs: *mut c_void, ino: u64);
@@ -56,9 +56,9 @@ mod ffi {
     }
 }
 
-/// The follower's state is as of a commit no later than this epoch's: its batch applied.
+/// The follower's state is as of a commit no later than this one: its batch applied.
 const FOLLOW_APPLIED: u32 = 0;
-/// The follower's state is as of a commit no earlier than this epoch's: its batch settled.
+/// The follower's state is as of a commit no earlier than this one: its batch settled.
 const FOLLOW_SETTLED: u32 = 1;
 
 /// The kernel's primitives, as fs/fxfs's C has them for the superblock `vfs`, for the volume
@@ -75,12 +75,12 @@ unsafe impl Send for GuestKernel {}
 // SAFETY: As above.
 unsafe impl Sync for GuestKernel {}
 
-/// What a batch changed, the attributes its apply left the objects it changed with, and the epoch
+/// What a batch changed, the attributes its apply left the objects it changed with, and the number
 /// of the commit it applied.
 pub struct GuestChanges {
     changes: Changes,
     attrs: Mutex<Vec<(u64, Option<Attr>)>>,
-    epoch: AtomicU64,
+    commit: AtomicU64,
 }
 
 impl GuestChanges {
@@ -99,17 +99,17 @@ impl GuestChanges {
 }
 
 impl GuestKernel {
-    /// Says the follower's state is as of `epoch`'s commit, as `which` says (FOLLOW_*).
-    fn epoch(&self, which: u32, epoch: u64) {
+    /// Says the follower's state is as of commit `commit`, as `which` says (FOLLOW_*).
+    fn as_of(&self, which: u32, commit: u64) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_epoch(self.vfs, which, epoch) };
+        unsafe { ffi::fxfs_vfs_follow_commit(self.vfs, which, commit) };
     }
 
     /// Checks, in a debug kernel (lockdep), that the current task holds the fill barrier: as a
     /// read of the trees must, on behalf of a reader.
     pub fn assert_filling(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_assert_filling(self.vfs) };
+        unsafe { ffi::fxfs_vfs_fill_barrier_assert_held(self.vfs) };
     }
 
     fn ours<'a>(&self, objects: impl IntoIterator<Item = &'a StoreObject>) -> Vec<u64> {
@@ -123,22 +123,22 @@ impl Kernel for GuestKernel {
 
     fn fill_begin(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_fill_begin(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_begin_extern(self.vfs) }
     }
 
     fn fill_end(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_fill_end(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_end_extern(self.vfs) }
     }
 
     fn barrier_take(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_barrier_take(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_barrier_take(self.vfs) }
     }
 
     fn barrier_release(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_barrier_release(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_barrier_release(self.vfs) }
     }
 
     fn drop_cached(&self, changes: &Arc<GuestChanges>) {
@@ -172,7 +172,7 @@ impl Kernel for GuestKernel {
             // SAFETY: The superblock outlives the filesystem, and `attr` the call.
             unsafe { ffi::fxfs_vfs_settle_file(self.vfs, *ino, attr, gone) };
         }
-        self.epoch(FOLLOW_SETTLED, changes.epoch.load(Ordering::Acquire));
+        self.as_of(FOLLOW_SETTLED, changes.commit.load(Ordering::Acquire));
     }
 
     fn fail(&self) {
@@ -189,7 +189,7 @@ impl Kernel for GuestKernel {
 pub struct Following {
     protocol: Protocol<GuestKernel>,
     holds: Mutex<FxHashMap<u64, (u32, Hold)>>,
-    /// The epoch of the commit its device last advanced to.
+    /// The number of the commit its device last advanced to.
     advanced: Arc<AtomicU64>,
 }
 
@@ -198,7 +198,7 @@ impl Following {
     /// device advancing as `advanced` says, as of a commit no later than `latest`'s.
     pub fn new(vfs: *mut c_void, volume: u64, advanced: Arc<AtomicU64>, latest: u64) -> Self {
         let kernel = GuestKernel { vfs, volume, failed: AtomicBool::new(false) };
-        kernel.epoch(FOLLOW_APPLIED, latest);
+        kernel.as_of(FOLLOW_APPLIED, latest);
         Self { protocol: Protocol::new(kernel), holds: Mutex::default(), advanced }
     }
 
@@ -246,9 +246,9 @@ impl GuestFollow<'_> {
         *changes.attrs.lock().unwrap() = attrs;
         // The batch's commit: what the device advanced to as it was fetched.
         let following = self.0.following().expect("a follower's batch");
-        let epoch = following.advanced.load(Ordering::Acquire);
-        changes.epoch.store(epoch, Ordering::Release);
-        following.protocol.kernel().epoch(FOLLOW_APPLIED, epoch);
+        let commit = following.advanced.load(Ordering::Acquire);
+        changes.commit.store(commit, Ordering::Release);
+        following.protocol.kernel().as_of(FOLLOW_APPLIED, commit);
         Ok(())
     }
 }
@@ -261,7 +261,7 @@ impl Follow for GuestFollow<'_> {
     async fn fetch(&self) -> Result<(Self::Batch, Self::Changes), Error> {
         let (batch, changes) = self.0.filesystem().fetch().await?;
         let changes =
-            Arc::new(GuestChanges { changes, attrs: Mutex::default(), epoch: AtomicU64::new(0) });
+            Arc::new(GuestChanges { changes, attrs: Mutex::default(), commit: AtomicU64::new(0) });
         Ok(((batch, changes.clone()), changes))
     }
 

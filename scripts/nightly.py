@@ -22,8 +22,8 @@ main, and its head is tonight's baseline.
       same base (TASK-489).
   room
       `BUILD MEASURE`, the bytes a night needs free on the scratch disk before it builds and
-      before it measures (scripts/lib/host.sh's CLADEFS_HOST_ROOM and CLADEFS_HOST_ROOM_MEASURE):
-      each the larger of its setting and a fifth more than the most the last ROOM_NIGHTS nights
+      before it measures (scripts/lib/host.sh's CLADEFS_TEST_HOST_ROOM and
+      CLADEFS_TEST_HOST_ROOM_MEASURE): each the larger of its setting and a fifth more than the most the last ROOM_NIGHTS nights
       took (their room.txt and rounds-size.txt), the build's with the measurement's added. The
       settings, CLADEFS_NIGHTLY_ROOM_BUILD and CLADEFS_NIGHTLY_ROOM_MEASURE (ROOM's comment
       says why their defaults), take bytes or K, M, G and T.

@@ -9,14 +9,14 @@
 //! service (every request failing, 503), then answering again, 300 ms a request, each a fraction
 //! of CLADEFS_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
 //! of service longer than its S3 client retries a request, about a minute). Through a proxy, not
-//! the daemon's own faults (`CLADEFS_REMOTE_FAULTS`), so that a pin's daemon from before them meets
-//! the same bucket, a qualification's A/B comparing them (TASK-330.4). CLADEFS_BUCKET_SOAK_VMS
-//! VMs (4), each on a store of its own, write files of 16 MiB that don't compress and fsync each,
-//! deleting each once 16 newer are written, at the rate that writes past every store's lag bound
-//! while the bucket fails, until the run's end; then sync, every commit uploaded, and exit. As
-//! `cladefs::extentd::tests::soak` does with VM processes of its own in CI, in seconds a phase, this
-//! does with guests' kernels and their Fxfs, the daemon a process of its own. It fails, saying each
-//! check that failed, unless:
+//! the daemon's own faults (`CLADEFS_BUCKET_FAULTS`), so that LangSmith's pin's daemon from before
+//! them meets the same bucket, a qualification's A/B comparing them (TASK-330.4).
+//! CLADEFS_BUCKET_SOAK_VMS VMs (4), each on a store of its own, write files of 16 MiB that don't
+//! compress and fsync each, deleting each once 16 newer are written, at the rate that writes past
+//! every store's lag bound while the bucket fails, until the run's end; then sync, every commit
+//! uploaded, and exit. As `cladefs::extentd::tests::soak` does with VM processes of its own in CI,
+//! in seconds a phase, this does with guests' kernels and their Fxfs, the daemon a process of its
+//! own. It fails, saying each check that failed, unless:
 //!
 //! - the daemon's anonymous memory stays within its budget, every sample of it (its stats'
 //!   `process:` line, `over-budget`), its upload memory set to 1.5 GiB, as much as its uploads hold
@@ -55,7 +55,7 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
-    use extent_remote::faults::Fault;
+    use extent_bucket::faults::Fault;
     use std::ffi::CString;
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ mod host {
     const MIN_SECS: u64 = 1200;
 
     /// The phases, each a fraction of the run, and what the bucket does through it, as
-    /// `extent_remote::faults::Fault`'s words say it, answering again as slowly as before it
+    /// `extent_bucket::faults::Fault`'s words say it, answering again as slowly as before it
     /// failed, each PUT of what waited holding its object as long; and whether it fails.
     const PHASES: [(&str, f64, &str, bool); 5] = [
         ("answering", 0.1, "latency-ms=0 failing=not", false),
@@ -167,10 +167,10 @@ mod host {
                 "CLADEFS_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
                  longer than its client retries a request"
             );
-            let remote = std::env::var("CLADEFSD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap_or_default();
             ensure!(
-                remote.starts_with("s3://"),
-                "CLADEFSD_REMOTE is {remote:?}, not an S3 server's bucket: \
+                bucket_url.starts_with("s3://"),
+                "CLADEFSD_BUCKET is {bucket_url:?}, not an S3 server's bucket: \
                  scripts/test-e2e-rustfs.sh starts one"
             );
             let server =
@@ -232,7 +232,9 @@ mod host {
                 ended += fraction;
                 let ends = began + run.mul_f64(ended);
                 while Instant::now() < ends {
-                    std::thread::sleep(Duration::from_secs(1).min(ends.saturating_duration_since(Instant::now())));
+                    std::thread::sleep(
+                        Duration::from_secs(1).min(ends.saturating_duration_since(Instant::now())),
+                    );
                     // Said once, the first sample past it, or that none is weighed.
                     let process = stats_line(&stats, "process");
                     if !memory_said {
@@ -309,7 +311,7 @@ mod host {
                 measured.lower("soak.daemon.max_anon", "MiB", (anon >> 20) as f64);
             }
             crate::common::say_daemon_stats(test_setup, "extentd");
-            // What its kernel counted of it, as any pin's daemon is counted (TASK-330.4).
+            // What its kernel counted of it, as either side's daemon is counted (TASK-330.4).
             measured.costs("soak.daemon", ProcessCosts::of(daemon.id())?);
             daemon.kill()?;
             daemon.wait()?;
@@ -438,7 +440,7 @@ mod guest {
                     std::thread::sleep(ahead.min(run.saturating_sub(started.elapsed())));
                 }
             }
-            // Every commit uploaded, as at its host's stop (`COMMIT_DURABLE`).
+            // Every commit uploaded, as at its host's stop (`COMMIT_UPLOADED`).
             let dir = fs::File::open(MNT).unwrap();
             let ret = unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
             assert_eq!(ret, 0, "syncfs: {}", std::io::Error::last_os_error());

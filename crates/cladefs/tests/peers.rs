@@ -11,7 +11,7 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::extentd::control::Client;
-use cladefs::{ExtentId, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -46,9 +46,9 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
-        .env("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
-        .env("CLADEFSD_CACHE", dir.join("cache"))
+        .env("CLADEFSD_PART_CACHE", dir.join("cache"))
         .env("CLADEFSD_STATS", &stats)
         .env("CLADEFSD_GRPC", &control);
     if let Some(peers) = peers {
@@ -130,7 +130,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let second = daemon(&hosts[1], &bucket, peered.then_some(&second_peers[..]));
 
     let base = hosts[0].join("base");
-    let store = RemoteExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
     let branch = store.branch();
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { branch, sequence };
@@ -144,7 +144,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let (copy, fork) = (hosts[1].join("point"), hosts[1].join("fork"));
     second.control.create_store(&copy, CAPACITY, point, None).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
-    let store = RemoteExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
         let extent = ExtentId { branch, sequence };
@@ -206,16 +206,16 @@ fn a_cache_budget_the_daemon_cant_take_stops_it() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(dir.path().join("extentd.sock"))
-        .env("CLADEFSD_REMOTE", format!("file://{}/", dir.path().display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}/", dir.path().display()))
         .env("CLADEFSD_TOKEN", "1")
-        .env("CLADEFSD_CACHE", dir.path().join("cache"))
-        .env("CLADEFSD_CACHE_BYTES", "1G")
+        .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))
+        .env("CLADEFSD_PART_CACHE_BYTES", "1G")
         .output()
         .unwrap();
     assert!(!output.status.success(), "the daemon started");
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(
-        said.contains("CLADEFSD_CACHE_BYTES must be a positive number of bytes: \"1G\""),
+        said.contains("CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: \"1G\""),
         "{said}"
     );
 }

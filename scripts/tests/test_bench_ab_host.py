@@ -30,13 +30,13 @@ class Rounds(unittest.TestCase):
 
     def test_a_phase_is_the_build_or_the_rounds(self):
         """The driver builds the sides as work, then runs the rounds as a measurement, each a phase
-        of the host script (CLADEFS_HOST_PHASE, scripts/lib/host.sh's host_job, TASK-368); another
-        phase is refused before anything runs."""
+        of the host script (CLADEFS_TEST_HOST_PHASE, scripts/lib/host.sh's host_job, TASK-368);
+        another phase is refused before anything runs."""
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"
         status, _, err = bash(f"{host} {SCRIPTS.parent} {tempfile.mkdtemp()} a b 2 a b",
-                              {"CLADEFS_HOST_PHASE": "rounds"})
+                              {"CLADEFS_TEST_HOST_PHASE": "rounds"})
         self.assertEqual((status, err),
-                         (2, "CLADEFS_HOST_PHASE is build or measure, or unset for both\n"))
+                         (2, "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both\n"))
 
     def test_sourced_it_does_nothing_but_define(self):
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"

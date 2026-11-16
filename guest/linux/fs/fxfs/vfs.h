@@ -104,7 +104,7 @@ struct fxfs_vfs_info {
 	/*
 	 * cladefs: the commits a follower's state is as of, as its readers may find it: every batch up
 	 * to `follow_settled`'s commit settled, none past `follow_applied`'s applied
-	 * (FXFS_IOC_FOLLOW_EPOCHS). Written by its batches alone.
+	 * (FXFS_IOC_FOLLOW_COMMITS). Written by its batches alone.
 	 */
 	u64 follow_settled;
 	u64 follow_applied;
@@ -118,22 +118,22 @@ struct fxfs_vfs_info {
 	 * mmap_lock, which a fault holds, and before an inode's invalidate_lock; a batch takes no
 	 * i_rwsem. How long batches waited for it, and how many did (FXFS_IOC_FOLLOW_STATS).
 	 */
-	struct rw_semaphore follow_barrier;
+	struct rw_semaphore fill_barrier;
 	u64 follow_batches;
-	u64 follow_barrier_wait_ns;
-	u64 follow_barrier_wait_max_ns;
+	u64 fill_barrier_wait_ns;
+	u64 fill_barrier_wait_max_ns;
 };
 
 /*
- * cladefs: FXFS_IOC_FOLLOW_EPOCHS, on a follower's directory: the commits its state is as of. A read
- * between two calls was of a state as of a commit from the first's `settled` to the second's
+ * cladefs: FXFS_IOC_FOLLOW_COMMITS, on a follower's directory: the commits its state is as of. A
+ * read between two calls was of a state as of a commit from the first's `settled` to the second's
  * `applied` (the followers' history checker, TASK-42.7).
  */
-struct fxfs_follow_epochs {
+struct fxfs_follow_commits {
 	__u64 settled;
 	__u64 applied;
 };
-#define FXFS_IOC_FOLLOW_EPOCHS _IOR('x', 0x42, struct fxfs_follow_epochs)
+#define FXFS_IOC_FOLLOW_COMMITS _IOR('x', 0x42, struct fxfs_follow_commits)
 
 /*
  * cladefs: FXFS_IOC_FOLLOW_STATS, on a follower's directory: its batches, and how long they waited
@@ -209,7 +209,7 @@ DECLARE_STATIC_KEY_FALSE(fxfs_vfs_followers);
  */
 extern unsigned int fxfs_follow_apply_delay_us;
 extern unsigned int fxfs_follow_iomap_delay_us;
-extern bool fxfs_follow_skip_invalidate;
+extern bool fxfs_follow_skip_drop;
 extern bool fxfs_follow_skip_barrier;
 extern bool fxfs_follow_read_faults;
 extern bool fxfs_follow_fail_batch;
@@ -228,20 +228,20 @@ static inline bool fxfs_vfs_follows(struct super_block *sb)
 static inline void fxfs_vfs_fill_begin(struct super_block *sb)
 {
 	if (fxfs_vfs_follows(sb) && !fxfs_follow_skip_barrier)
-		down_read(&fxfs_vfs_info(sb)->follow_barrier);
+		down_read(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 /* As fxfs_vfs_fill_begin, but only if no batch holds the barrier, or waits for it. */
 static inline bool fxfs_vfs_fill_try(struct super_block *sb)
 {
 	return !fxfs_vfs_follows(sb) || fxfs_follow_skip_barrier ||
-	       down_read_trylock(&fxfs_vfs_info(sb)->follow_barrier);
+	       down_read_trylock(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 static inline void fxfs_vfs_fill_end(struct super_block *sb)
 {
 	if (fxfs_vfs_follows(sb) && !fxfs_follow_skip_barrier)
-		up_read(&fxfs_vfs_info(sb)->follow_barrier);
+		up_read(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 /*
@@ -384,8 +384,8 @@ int fxfs_dax_settle(struct fxfs_dax *dax);
 void fxfs_dax_stop(struct fxfs_dax *dax);
 void fxfs_dax_start(struct fxfs_dax *dax);
 /*
- * cladefs: the filesystem is frozen, durably, nothing dirty: every private page is mapped back to
- * its extent's, for a snapshot to take the window (doc-13). fxfs_dax_thaw ends it.
+ * cladefs: the filesystem is frozen, its commits uploaded, nothing dirty: every private page is
+ * rebound to its extent's, for a snapshot to take the window (doc-13). fxfs_dax_thaw ends it.
  */
 void fxfs_dax_frozen(struct fxfs_dax *dax);
 /*

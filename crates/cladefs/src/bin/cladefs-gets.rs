@@ -5,20 +5,20 @@
 //! cladefs's measurement of ranged GETs from object storage (TASK-28.11; doc-7, decision 9): the
 //! throughput a host gets reading parts of objects, by the parts' size and how many GETs it keeps
 //! in flight, which choose the size of the parts stores frame their data in (`extent_frame::PART`)
-//! and a host's budget of GETs in flight (`cladefs::remote`'s).
+//! and a host's budget of GETs in flight (`cladefs::bucket`'s).
 //!
 //! ```sh
 //! cladefs-gets URL [OBJECT_MIB] [SECS]
 //! ```
 //!
 //! It puts an object of OBJECT_MIB MiB (default 512) of bytes that don't compress under URL (a
-//! bucket and prefix, as `CLADEFSD_REMOTE` names them: `gs://bucket/prefix`), then, for each
+//! bucket and prefix, as `CLADEFSD_BUCKET` names them: `gs://bucket/prefix`), then, for each
 //! part size from 256 KiB to 4 MiB and each number of GETs in flight from 1 to 128, GETs parts of
 //! it at random for SECS seconds (default 10), and prints a Markdown table of what each did: MiB/s,
 //! GETs/s, and their latencies' median and 99th percentile. Then it deletes the object.
 
-use extent_remote::bucket::{Bucket, ByteRange, PutMode};
-use extent_remote::store::Store;
+use extent_bucket::bucket::{Bucket, ByteRange, PutMode};
+use extent_bucket::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ fn incompressible(len: usize) -> Vec<u8> {
 /// GETs parts of `part` bytes of the object of `len` bytes, at random, `in_flight` at once, for
 /// `secs`.
 async fn measure(
-    store: &Arc<Store>,
+    store: &Arc<ObjectBucket>,
     len: u64,
     part: u64,
     in_flight: usize,
@@ -106,7 +106,7 @@ fn main() -> Result<(), String> {
     };
     let len = number(1, 512)? << 20;
     let secs = Duration::from_secs(number(2, 10)?);
-    let store = Arc::new(Store::from_url(url)?);
+    let store = Arc::new(ObjectBucket::from_url(url)?);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

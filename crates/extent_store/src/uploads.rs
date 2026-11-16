@@ -22,13 +22,13 @@ pub struct Closed<F> {
     pub file: Arc<F>,
     pub own: Vec<(String, Arc<F>)>,
     pub restamped: bool,
-    /// cladefs: the store's keys, which a sealed segment is restamped under (TASK-411.3).
-    pub keys: std::sync::Arc<extent_remote::keys::Ring>,
+    /// cladefs: the store's keys, which an encrypted segment is restamped under (TASK-411.3).
+    pub keys: std::sync::Arc<extent_bucket::keys::Ring>,
 }
 
 impl<F: File> Closed<F> {
     /// The segment's bytes: the object it is, checked ([`read_object`]), with its footer, stamped
-    /// anew if it was (`extent_frame::restamp`): cladefs: one sealed, its new footer and table
+    /// anew if it was (`extent_frame::restamp`): cladefs: one encrypted, its new footer and table
     /// authenticated under its key, which restamping it needs, and fails without (TASK-411.2).
     pub fn bytes(&self) -> io::Result<Vec<u8>> {
         let object = read_object(&*self.file)?;

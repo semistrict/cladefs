@@ -51,11 +51,12 @@ void fxfs_device_put(struct fxfs_device *dev);
 
 /*
  * A request: its type (VIRTIO_EXTENT_T_*) and flags, the extent it names (READ, WRITE, FREE, PIN,
- * UNPIN), and where in it (READ, WRITE), or LET_GO's epoch (offset), and its data: READ's buffer,
- * WRITE's data, COMMIT's root, ROOT's buffer (max_root bytes, and a struct virtio_extent_root_len
- * after them), INFO's struct virtio_extent_info, or ADVANCE's struct virtio_extent_epoch. The data
- * must be kmalloc'd or vmalloc'd, and stay until the request is done. A WRITE with
- * VIRTIO_EXTENT_WRITE_ROOT has a root too, which its commit sets, of root_len bytes: kmalloc'd.
+ * UNPIN), and where in it (READ, WRITE), or LET_GO's commit number (offset), and its data: READ's
+ * buffer, WRITE's data, COMMIT's root, ROOT's buffer (max_root bytes, and a struct
+ * virtio_extent_root_len after them), INFO's struct virtio_extent_info, or ADVANCE's struct
+ * virtio_extent_commit_number. The data must be kmalloc'd or vmalloc'd, and stay until the request
+ * is done. A WRITE with VIRTIO_EXTENT_WRITE_ROOT has a root too, which its commit sets, of root_len
+ * bytes: kmalloc'd.
  */
 struct fxfs_device_op {
 	u32 type;
@@ -131,12 +132,12 @@ u64 fxfs_device_private_max(struct fxfs_device *dev);
 bool fxfs_device_read_only(struct fxfs_device *dev);
 /*
  * Maps `len` bytes at `offset` in the extent {branch, sequence} at `window_offset` in the window,
- * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. cladefs: `ahead`
- * if the guest accesses the pages next, as a read does, which the device then maps for it ahead of
- * its accesses, if it can (MAP_AHEAD, TASK-112.1).
+ * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. cladefs:
+ * `prefault` if the guest accesses the pages next, as a read does, which the device then maps for
+ * it ahead of its accesses, if it can (MAP_PREFAULT, TASK-112.1).
  */
 int fxfs_device_map(struct fxfs_device *dev, u64 branch, u64 sequence, u64 offset, u64 len,
-		    u64 window_offset, bool ahead);
+		    u64 window_offset, bool prefault);
 
 /*
  * cladefs: one of fxfs_device_map_many's maps, as fxfs_device_map's arguments say it; or, with
@@ -148,7 +149,7 @@ struct fxfs_device_map {
 	u64 offset;
 	u64 len;
 	u64 window_offset;
-	bool ahead;
+	bool prefault;
 	bool zeros;
 };
 

@@ -383,9 +383,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     _ => (extentd.clone(), None),
                 };
                 let daemon_stats = crate::common::control(&socket)?;
-                let before = daemon_stats.stats()?;
+                let before = daemon_stats.counters()?;
                 role(test_setup, "fork", &fork, &socket, None)?;
-                let counted = daemon_stats.stats()?.since(&before);
+                let counted = daemon_stats.counters()?.since(&before);
                 for (name, value) in counted.named() {
                     println!("OBSERVED extentd-{name} {value}");
                 }
@@ -456,10 +456,10 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
 
         /// The store at `store`, which the daemon at `extentd` serves: once the daemon has seen the
         /// VM that had it open go.
-        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::RemoteExtentStore> {
+        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::RemoteExtentStore::connect(extentd, store, IMAGE_SIZE) {
+                match cladefs::DaemonExtentStore::connect(extentd, store, IMAGE_SIZE) {
                     Ok(store) => return Ok(store),
                     Err(err)
                         if Instant::now() < deadline
@@ -713,7 +713,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
             ) && std::env::var_os("CLADEFSD_BIN").is_none()
             {
-                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon's binary");
+                return ShouldRun::No(
+                    "CLADEFSD_BIN does not name the extent daemon's binary",
+                );
             }
             match self.backend {
                 Backend::FxfsGuest

@@ -15,7 +15,7 @@ use super::grants::Grants;
 use super::memory;
 use super::stores;
 use crate::Errno;
-use extent_remote::cell::Kind;
+use extent_bucket::cell::Kind;
 use proto::extentd_client::ExtentdClient;
 use proto::extentd_server::{Extentd, ExtentdServer};
 use proto::*;
@@ -85,12 +85,12 @@ pub fn serve_control(
     })
 }
 
-/// cladefs: `snapshot`, as the API has it (TASK-111.4).
-fn snapshot_response(snapshot: super::snapshot::Snapshot) -> GetSnapshotResponse {
+/// cladefs: `stats`, as the API has it (TASK-111.4).
+fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
     let named = |pairs: &[(&str, u64)]| -> std::collections::HashMap<String, u64> {
         pairs.iter().map(|(name, value)| ((*name).to_owned(), *value)).collect()
     };
-    let vms = snapshot.vms.into_iter().map(|vm| VmSnapshot {
+    let vms = stats.vms.into_iter().map(|vm| VmStats {
         connection: vm.connection,
         branch: vm.branch,
         path: vm.path.to_string_lossy().into_owned(),
@@ -101,7 +101,7 @@ fn snapshot_response(snapshot: super::snapshot::Snapshot) -> GetSnapshotResponse
         window: vm.window().map_or_else(Default::default, |window| named(&window)),
         answered: vm.answered.is_some(),
         answer_ns: vm.answered.map_or(0, |took| took.as_nanos() as u64),
-        guest: vm.guest.map(|guest| GuestSnapshot {
+        guest: vm.guest.map(|guest| GuestStats {
             build: guest.build.unwrap_or_default(),
             counters: guest.counters.into_iter().collect(),
             histograms: (guest.histograms.into_iter())
@@ -109,12 +109,12 @@ fn snapshot_response(snapshot: super::snapshot::Snapshot) -> GetSnapshotResponse
                 .collect(),
         }),
     });
-    let taken = snapshot.taken.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    GetSnapshotResponse {
+    let taken = stats.taken.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    GetStatsResponse {
         taken_unix_ns: taken.as_nanos() as u64,
-        build: snapshot.build.to_owned(),
-        counters: snapshot.counters.into_iter().collect(),
-        gauges: named(&snapshot.gauges),
+        build: stats.build.to_owned(),
+        counters: stats.counters.into_iter().collect(),
+        gauges: named(&stats.gauges),
         vms: vms.collect(),
     }
 }
@@ -242,7 +242,7 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
 /// What StatStore says of a store that is and holds `state`.
 fn stat_response(state: stores::StoreState) -> StatStoreResponse {
     let upload = state.upload.unwrap_or(extent_store::upload::UploadStatus {
-        lease: None,
+        taking: None,
         uploaded: 0,
         pending_bytes: 0,
         oldest_pending: None,
@@ -269,9 +269,9 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
         inherited_extents: state.holding.extents.inherited,
         committed: state.committed,
         uploading: state.upload.is_some(),
-        lease_token: upload.lease.map_or(0, |lease| lease.token),
-        lease_epoch: upload.lease.map_or(0, |lease| lease.epoch),
-        lease_taken_unix_ms: upload.lease.map_or(0, |lease| millis(lease.taken)),
+        taken_token: upload.taking.map_or(0, |taking| taking.token),
+        taken_epoch: upload.taking.map_or(0, |taking| taking.epoch),
+        taken_unix_ms: upload.taking.map_or(0, |taking| millis(taking.taken)),
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
@@ -308,7 +308,7 @@ impl Control {
     /// processes write no store of it (`Tenant::reaches`), and its restores are of their own.
     fn new_cell_at(&self, path: &Path, tenant: u64) -> Result<u64, Status> {
         match self.grants.tenant_at(path) {
-            Some(granted) if tenant == crate::host_store::NO_TENANT || tenant == granted => {
+            Some(granted) if tenant == crate::host_store::DEFAULT_TENANT || tenant == granted => {
                 Ok(granted)
             }
             Some(_) => Err(status(Errno::EPERM)),
@@ -326,10 +326,10 @@ impl Extentd for Control {
         let CreateStoreRequest { path: store, capacity, branch, token, tenant, cell, kind } =
             request.into_inner();
         let store = path(store)?;
-        let kind = match VolumeKind::try_from(kind) {
-            Ok(VolumeKind::Fxfs) => Kind::Fxfs,
-            Ok(VolumeKind::Sqlite) => Kind::Sqlite,
-            Ok(VolumeKind::Memory) => Kind::Memory,
+        let kind = match VdiskKind::try_from(kind) {
+            Ok(VdiskKind::Fxfs) => Kind::Fxfs,
+            Ok(VdiskKind::Sqlite) => Kind::Sqlite,
+            Ok(VdiskKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {
@@ -415,9 +415,9 @@ impl Extentd for Control {
         &self,
         request: Request<MakePublicRequest>,
     ) -> Result<Response<MakePublicResponse>, Status> {
-        let MakePublicRequest { path: store, generation } = request.into_inner();
+        let MakePublicRequest { path: store, attach_only } = request.into_inner();
         let store = path(store)?;
-        reply(stores::make_public(store, generation).await.map(|()| MakePublicResponse {}))
+        reply(stores::make_public(store, attach_only).await.map(|()| MakePublicResponse {}))
     }
 
     async fn share_point(
@@ -433,7 +433,7 @@ impl Extentd for Control {
         &self,
         request: Request<AttachBaseRequest>,
     ) -> Result<Response<AttachBaseResponse>, Status> {
-        let AttachBaseRequest { store, base } = request.into_inner();
+        let AttachBaseRequest { path: store, base } = request.into_inner();
         let (store, base) = (path(store)?, path(base)?);
         let grants = self.grants.clone();
         let allowed = move |store: &Path, base: &Path| grants.same_tenant(store, base);
@@ -470,10 +470,10 @@ impl Extentd for Control {
         reply(listed)
     }
 
-    async fn get_stats(
+    async fn get_counters(
         &self,
-        _request: Request<GetStatsRequest>,
-    ) -> Result<Response<GetStatsResponse>, Status> {
+        _request: Request<GetCountersRequest>,
+    ) -> Result<Response<GetCountersResponse>, Status> {
         let crate::stats::Stats {
             maps,
             map_ns,
@@ -520,8 +520,8 @@ impl Extentd for Control {
             vm_private_requests: _,
             vm_private_request_ns: _,
         } = crate::stats::stats();
-        use extent_remote::store::{Request, Upload};
-        let bucket = stores::remote_bucket().map_err(status)?.stats();
+        use extent_bucket::object_bucket::{Request, Upload};
+        let bucket = stores::daemon_bucket().map_err(status)?.stats();
         let object_storage = Some(ObjectStorageStats {
             requests: (Request::ALL.into_iter())
                 .map(|request| (request.name().to_owned(), bucket.requests(request)))
@@ -534,7 +534,7 @@ impl Extentd for Control {
                 .map(|request| (request.name().to_owned(), bucket.failures(request)))
                 .collect(),
         });
-        Ok(Response::new(GetStatsResponse {
+        Ok(Response::new(GetCountersResponse {
             maps,
             map_ns,
             faults,
@@ -557,26 +557,26 @@ impl Extentd for Control {
         }))
     }
 
-    async fn get_snapshot(
+    async fn get_stats(
         &self,
-        request: Request<GetSnapshotRequest>,
-    ) -> Result<Response<GetSnapshotResponse>, Status> {
+        request: Request<GetStatsRequest>,
+    ) -> Result<Response<GetStatsResponse>, Status> {
         let wait = match request.into_inner().wait_ms {
-            0 => super::snapshot::WAIT,
+            0 => super::stats::WAIT,
             ms => std::time::Duration::from_millis(ms.into()),
         };
-        Ok(Response::new(snapshot_response(super::snapshot::take(wait).await)))
+        Ok(Response::new(stats_response(super::stats::take(wait).await)))
     }
 
     async fn grant(
         &self,
         request: Request<GrantRequest>,
     ) -> Result<Response<GrantResponse>, Status> {
-        let GrantRequest { tenant, dir, uid, gid, id } = request.into_inner();
+        let GrantRequest { tenant, dir, uid, gid } = request.into_inner();
         let dir = path(dir)?;
         let grants = self.grants.clone();
         let granted = stores::blocking(move || {
-            let socket = grants.grant(&tenant, id, &dir, (uid, gid))?;
+            let socket = grants.grant(tenant, &dir, (uid, gid))?;
             let socket = socket.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
             Ok(GrantResponse { socket })
         });
@@ -589,7 +589,7 @@ impl Extentd for Control {
     ) -> Result<Response<RevokeResponse>, Status> {
         let tenant = request.into_inner().tenant;
         let grants = self.grants.clone();
-        reply(stores::blocking(move || grants.revoke(&tenant).map(|()| RevokeResponse {})).await)
+        reply(stores::blocking(move || grants.revoke(tenant).map(|()| RevokeResponse {})).await)
     }
 
     async fn set_memory_limit(
@@ -597,8 +597,7 @@ impl Extentd for Control {
         request: Request<SetMemoryLimitRequest>,
     ) -> Result<Response<SetMemoryLimitResponse>, Status> {
         let SetMemoryLimitRequest { tenant, bytes } = request.into_inner();
-        let tenant = Some(tenant).filter(|tenant| !tenant.is_empty());
-        reply(memory::set_limit(tenant.as_deref(), bytes).map(|()| SetMemoryLimitResponse {}))
+        reply(memory::set_limit(tenant, bytes).map(|()| SetMemoryLimitResponse {}))
     }
 
     async fn set_memory_weight(
@@ -606,16 +605,15 @@ impl Extentd for Control {
         request: Request<SetMemoryWeightRequest>,
     ) -> Result<Response<SetMemoryWeightResponse>, Status> {
         let SetMemoryWeightRequest { tenant, weight } = request.into_inner();
-        reply(memory::set_weight(&tenant, weight).map(|()| SetMemoryWeightResponse {}))
+        reply(memory::set_weight(tenant, weight).map(|()| SetMemoryWeightResponse {}))
     }
 
-    async fn set_tenant_room(
+    async fn set_tenant_in_flight(
         &self,
-        request: Request<SetTenantRoomRequest>,
-    ) -> Result<Response<SetTenantRoomResponse>, Status> {
-        let SetTenantRoomRequest { tenant, bytes } = request.into_inner();
-        let tenant = Some(tenant).filter(|tenant| !tenant.is_empty());
-        reply(memory::set_room(tenant.as_deref(), bytes).map(|()| SetTenantRoomResponse {}))
+        request: Request<SetTenantInFlightRequest>,
+    ) -> Result<Response<SetTenantInFlightResponse>, Status> {
+        let SetTenantInFlightRequest { tenant, bytes } = request.into_inner();
+        reply(memory::set_in_flight(tenant, bytes).map(|()| SetTenantInFlightResponse {}))
     }
 
     async fn shrink_memory(
@@ -623,8 +621,7 @@ impl Extentd for Control {
         request: Request<ShrinkMemoryRequest>,
     ) -> Result<Response<ShrinkMemoryResponse>, Status> {
         let ShrinkMemoryRequest { tenant, target_bytes } = request.into_inner();
-        let tenant = Some(tenant).filter(|tenant| !tenant.is_empty());
-        let shrunk = stores::blocking(move || memory::shrink(tenant.as_deref(), target_bytes));
+        let shrunk = stores::blocking(move || memory::shrink(tenant, target_bytes));
         reply(shrunk.await.map(|bytes| ShrinkMemoryResponse { bytes }))
     }
 
@@ -633,16 +630,15 @@ impl Extentd for Control {
         request: Request<SetDiskLimitRequest>,
     ) -> Result<Response<SetDiskLimitResponse>, Status> {
         let SetDiskLimitRequest { tenant, bytes } = request.into_inner();
-        let tenant = Some(tenant).filter(|tenant| !tenant.is_empty());
-        reply(disk::set_limit(tenant.as_deref(), bytes).map(|()| SetDiskLimitResponse {}))
+        reply(disk::set_limit(tenant, bytes).map(|()| SetDiskLimitResponse {}))
     }
 
     async fn get_tenant_disk(
         &self,
         request: Request<GetTenantDiskRequest>,
     ) -> Result<Response<GetTenantDiskResponse>, Status> {
-        let tenant = Some(request.into_inner().tenant).filter(|tenant| !tenant.is_empty());
-        let counted = stores::blocking(move || disk::count(tenant.as_deref()));
+        let tenant = request.into_inner().tenant;
+        let counted = stores::blocking(move || disk::count(tenant));
         let response = |(bytes, limit_bytes)| GetTenantDiskResponse { bytes, limit_bytes };
         reply(counted.await.map(response))
     }
@@ -661,10 +657,10 @@ impl Extentd for Control {
     ) -> Result<Response<ShredCellResponse>, Status> {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::Cell { tenant, id: cell };
-        let bucket = stores::remote_bucket().map_err(status)?;
-        let shredded = crate::remote::shred_cell(&bucket, cell).await.map_err(|err| {
-            let failure = extent_store::upload::Failure::Remote(err);
-            let errno = crate::remote::errno(&failure).unwrap_or(Errno::EIO);
+        let bucket = stores::daemon_bucket().map_err(status)?;
+        let shredded = crate::bucket::shred_cell(&bucket, cell).await.map_err(|err| {
+            let failure = extent_store::upload::Failure::Bucket(err);
+            let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
             log::error!("extentd: shredding cell {cell}: {failure}");
             saying(errno, format!("shredding cell {cell}: {failure}"))
         })?;
@@ -687,8 +683,8 @@ impl Extentd for Control {
             }
             false => why,
         };
-        let scope = extent_remote::keys::Scope::Tenant(tenant);
-        let forgotten = stores::blocking(move || Ok(crate::remote::forget(scope, &why))).await;
+        let scope = extent_bucket::keys::Scope::Tenant(tenant);
+        let forgotten = stores::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
                 forgotten: Some(forgotten_of(forgotten)),
@@ -698,9 +694,9 @@ impl Extentd for Control {
 }
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
-fn forgotten_of(forgotten: crate::remote::Forgotten) -> Forgotten {
+fn forgotten_of(forgotten: crate::bucket::Forgotten) -> Forgotten {
     let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
-    let crate::remote::Forgotten { stores, rings, kept, extents, bytes } = forgotten;
+    let crate::bucket::Forgotten { stores, rings, kept, extents, bytes } = forgotten;
     Forgotten { stores: count(stores), rings: count(rings), kept: count(kept), extents, bytes }
 }
 
@@ -729,7 +725,7 @@ impl Client {
         Ok(Self { runtime, client })
     }
 
-    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs volume of its cell:
+    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs vdisk of its cell:
     /// of a new cell if its cell's ID is 0, and a new branch there if its ID is; placed at `token`
     /// if given; and returns its branch (`CreateStore`, TASK-364).
     pub fn create_store(
@@ -746,7 +742,7 @@ impl Client {
             token,
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
-            kind: VolumeKind::Fxfs.into(),
+            kind: VdiskKind::Fxfs.into(),
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
@@ -756,8 +752,8 @@ impl Client {
     }
 
     /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
-    /// `reference` names in it if given, the one volume of a new cell of no tenant's, and returns
-    /// its branch (`ImportImage`).
+    /// `reference` names in it if given, the one vdisk of a new cell of the default tenant's, and
+    /// returns its branch (`ImportImage`).
     pub fn import_image(
         &self,
         path: &Path,
@@ -770,7 +766,7 @@ impl Client {
             capacity,
             image: name(image)?,
             reference: reference.unwrap_or_default().to_owned(),
-            tenant: crate::host_store::NO_TENANT,
+            tenant: crate::host_store::DEFAULT_TENANT,
         };
         let response = self.call(format!("importing {}", image.display()), |mut c| async move {
             c.import_image(request).await
@@ -838,15 +834,16 @@ impl Client {
 
     /// Makes the store at `path` a public base (`MakePublic`).
     pub fn make_public(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = MakePublicRequest { path: name(path)?, generation: false };
+        let request = MakePublicRequest { path: name(path)?, attach_only: false };
         let what = format!("making the store at {} public", path.display());
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
     }
 
-    /// Makes the fork at `path` a public generation: its branch alone (`MakePublic`).
-    pub fn make_generation_public(&self, path: &Path) -> Result<(), crate::Error> {
-        let request = MakePublicRequest { path: name(path)?, generation: true };
-        let what = format!("making the generation at {} public", path.display());
+    /// Makes the fork at `path` public, its branch alone, to attach to stores, not to fork
+    /// (`MakePublic` with `attach_only`).
+    pub fn make_public_attach_only(&self, path: &Path) -> Result<(), crate::Error> {
+        let request = MakePublicRequest { path: name(path)?, attach_only: true };
+        let what = format!("making the fork at {} public to attach", path.display());
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
     }
 
@@ -863,7 +860,7 @@ impl Client {
 
     /// Attaches the fork at `base` to the store at `path` (`AttachBase`).
     pub fn attach_base(&self, path: &Path, base: &Path) -> Result<(), crate::Error> {
-        let request = AttachBaseRequest { store: name(path)?, base: name(base)? };
+        let request = AttachBaseRequest { path: name(path)?, base: name(base)? };
         let what = format!("attaching {} to {}", base.display(), path.display());
         self.call(what, |mut c| async move { c.attach_base(request).await }).map(drop)
     }
@@ -890,7 +887,7 @@ impl Client {
         Ok(branched(stat.tenant, stat.cell, stat.branch))
     }
 
-    /// The epoch of the latest commit of the store at `path` (`StatStore`'s `committed`).
+    /// The commit number of the latest commit of the store at `path` (`StatStore`'s `committed`).
     pub fn committed(&self, path: &Path) -> Result<u64, crate::Error> {
         Ok(self.stat_store(path)?.committed)
     }
@@ -902,26 +899,26 @@ impl Client {
         self.call(what, |mut c| async move { c.sync_store(request).await }).map(drop)
     }
 
-    /// Grants the tenant `tenant`, of the ID `id` in the bucket (TASK-364), whose stores are in
-    /// `dir`, its VM socket, given to `uid` and `gid` where named, and returns its path (`Grant`).
+    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
+    /// its VM socket, given to `uid` and `gid` where named, and returns its path (`Grant`).
     pub fn grant(
         &self,
-        (tenant, id): (&str, u64),
+        tenant: u64,
         dir: &Path,
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<PathBuf, crate::Error> {
-        let request = GrantRequest { tenant: tenant.to_owned(), dir: name(dir)?, uid, gid, id };
-        let response =
-            self.call(format!("granting {tenant}"), |mut c| async move { c.grant(request).await })?;
+        let request = GrantRequest { tenant, dir: name(dir)?, uid, gid };
+        let what = format!("granting tenant {tenant:x}");
+        let response = self.call(what, |mut c| async move { c.grant(request).await })?;
         Ok(response.socket.into())
     }
 
     /// Revokes the tenant `tenant`'s grant: its VM socket goes, its VM processes connected keep
     /// their stores (`Revoke`).
-    pub fn revoke(&self, tenant: &str) -> Result<(), crate::Error> {
-        let request = RevokeRequest { tenant: tenant.to_owned() };
-        let what = format!("revoking {tenant}");
+    pub fn revoke(&self, tenant: u64) -> Result<(), crate::Error> {
+        let request = RevokeRequest { tenant };
+        let what = format!("revoking tenant {tenant:x}");
         self.call(what, |mut c| async move { c.revoke(request).await }).map(drop)
     }
 
@@ -929,43 +926,40 @@ impl Client {
     /// lifts the limit without them (`SetMemoryLimit`).
     pub fn set_memory_limit(
         &self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         bytes: Option<u64>,
     ) -> Result<(), crate::Error> {
-        let request =
-            SetMemoryLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
-        let what = format!("limiting the memory of {}", tenant.unwrap_or("every tenant"));
+        let request = SetMemoryLimitRequest { tenant, bytes };
+        let what = format!("limiting the memory of {}", whom(tenant, "every tenant"));
         self.call(what, |mut c| async move { c.set_memory_limit(request).await }).map(drop)
     }
 
     /// cladefs: weighs the memory of the tenant `tenant` against the others' (`SetMemoryWeight`,
     /// TASK-358).
-    pub fn set_memory_weight(&self, tenant: &str, weight: u64) -> Result<(), crate::Error> {
-        let request = SetMemoryWeightRequest { tenant: tenant.to_owned(), weight };
-        let what = format!("weighing the memory of {tenant}");
+    pub fn set_memory_weight(&self, tenant: u64, weight: u64) -> Result<(), crate::Error> {
+        let request = SetMemoryWeightRequest { tenant, weight };
+        let what = format!("weighing the memory of tenant {tenant:x}");
         self.call(what, |mut c| async move { c.set_memory_weight(request).await }).map(drop)
     }
 
-    /// cladefs: sets the room the connections of the tenant `tenant`, or of every tenant without one,
-    /// share to `bytes`, or to the default without them (`SetTenantRoom`, TASK-149.35).
-    pub fn set_tenant_room(
+    /// cladefs: sets the bytes in flight the connections of the tenant `tenant`, or of every tenant
+    /// without one, share to `bytes`, or to the default without them (`SetTenantInFlight`,
+    /// TASK-149.35).
+    pub fn set_tenant_in_flight(
         &self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         bytes: Option<u64>,
     ) -> Result<(), crate::Error> {
-        let request = SetTenantRoomRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
-        let what = format!("setting the room of {}", tenant.unwrap_or("every tenant"));
-        self.call(what, |mut c| async move { c.set_tenant_room(request).await }).map(drop)
+        let request = SetTenantInFlightRequest { tenant, bytes };
+        let what = format!("setting the bytes in flight of {}", whom(tenant, "every tenant"));
+        self.call(what, |mut c| async move { c.set_tenant_in_flight(request).await }).map(drop)
     }
 
     /// Evicts pages until the tenant `tenant`, or the daemon without one, holds at most `target`
     /// bytes, or none is left to evict, and returns what it holds then (`ShrinkMemory`).
-    pub fn shrink_memory(&self, tenant: Option<&str>, target: u64) -> Result<u64, crate::Error> {
-        let request = ShrinkMemoryRequest {
-            tenant: tenant.unwrap_or_default().to_owned(),
-            target_bytes: target,
-        };
-        let what = format!("shrinking the memory of {}", tenant.unwrap_or("the daemon"));
+    pub fn shrink_memory(&self, tenant: Option<u64>, target: u64) -> Result<u64, crate::Error> {
+        let request = ShrinkMemoryRequest { tenant, target_bytes: target };
+        let what = format!("shrinking the memory of {}", whom(tenant, "the daemon"));
         let response = self.call(what, |mut c| async move { c.shrink_memory(request).await })?;
         Ok(response.bytes)
     }
@@ -974,11 +968,11 @@ impl Client {
     /// or lifts the limit without them (`SetDiskLimit`, TASK-94).
     pub fn set_disk_limit(
         &self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         bytes: Option<u64>,
     ) -> Result<(), crate::Error> {
-        let request = SetDiskLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
-        let what = format!("limiting the disk of {}", tenant.unwrap_or("every tenant"));
+        let request = SetDiskLimitRequest { tenant, bytes };
+        let what = format!("limiting the disk of {}", whom(tenant, "every tenant"));
         self.call(what, |mut c| async move { c.set_disk_limit(request).await }).map(drop)
     }
 
@@ -1014,31 +1008,31 @@ impl Client {
 
     /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes, counted
     /// now, in bytes, and its limit, if it has one (`GetTenantDisk`, TASK-94).
-    pub fn tenant_disk(&self, tenant: Option<&str>) -> Result<(u64, Option<u64>), crate::Error> {
-        let request = GetTenantDiskRequest { tenant: tenant.unwrap_or_default().to_owned() };
-        let what = format!("counting the disk of {}", tenant.unwrap_or("every tenant"));
+    pub fn tenant_disk(&self, tenant: Option<u64>) -> Result<(u64, Option<u64>), crate::Error> {
+        let request = GetTenantDiskRequest { tenant };
+        let what = format!("counting the disk of {}", whom(tenant, "every tenant"));
         let response = self.call(what, |mut c| async move { c.get_tenant_disk(request).await })?;
         Ok((response.bytes, response.limit_bytes))
     }
 
     /// cladefs: what the daemon, its VM processes and their guests counted, as of one moment, each
-    /// with its build (`GetSnapshot`, TASK-111.4): the VM processes' answers waited for `wait` at
+    /// with its build (`GetStats`, TASK-111.4): the VM processes' answers waited for `wait` at
     /// most, the daemon's default if none.
-    pub fn snapshot(
+    pub fn stats(
         &self,
         wait: Option<std::time::Duration>,
-    ) -> Result<GetSnapshotResponse, crate::Error> {
+    ) -> Result<GetStatsResponse, crate::Error> {
         let wait_ms = wait.map_or(0, |wait| u32::try_from(wait.as_millis()).unwrap_or(u32::MAX));
-        self.call("asking the extent daemon for a snapshot".to_owned(), |mut c| async move {
-            c.get_snapshot(GetSnapshotRequest { wait_ms }).await
+        self.call("asking the extent daemon for its stats".to_owned(), |mut c| async move {
+            c.get_stats(GetStatsRequest { wait_ms }).await
         })
     }
 
-    /// The daemon's counters (`GetStats`).
-    pub fn stats(&self) -> Result<crate::stats::Stats, crate::Error> {
+    /// The daemon's counters (`GetCounters`).
+    pub fn counters(&self) -> Result<crate::stats::Stats, crate::Error> {
         let response = self
-            .call("asking the extent daemon for its stats".to_owned(), |mut c| async move {
-                c.get_stats(GetStatsRequest {}).await
+            .call("asking the extent daemon for its counters".to_owned(), |mut c| async move {
+                c.get_counters(GetCountersRequest {}).await
             })?;
         Ok(crate::stats::Stats {
             maps: response.maps,
@@ -1100,6 +1094,12 @@ impl Client {
             })),
         }
     }
+}
+
+/// The tenant `tenant`, as an error says it, in hexadecimal as cells say it; or, without one,
+/// `none`.
+fn whom(tenant: Option<u64>, none: &str) -> String {
+    tenant.map_or_else(|| none.to_owned(), |tenant| format!("tenant {tenant:x}"))
 }
 
 /// `path`, as a request names it: `EINVAL` unless it is UTF-8.

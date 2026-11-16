@@ -3,27 +3,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Move a VM between hosts through a bucket (TASK-28.11), on Linux hosts of one's own, over ssh
-# (scripts/lib/host.sh). On the first, the guest test fxfs-guest-migrate-dax runs a VM whose store's
-# branch its extent daemon keeps in the bucket, and snapshots it, the snapshot, its memory and the
-# VM's root filesystem left in a bundle; then the run there ends, its directory gone; on the
-# second, which has nothing of the store, the same test restores the VM from the bundle, its store
-# forked from the snapshot's point, whose branch the daemon takes from the bucket, and the guest
-# checks what it wrote before, and writes and reads more (test_fxfs_guest_snapshot.rs). Both run
-# the commit from the same paths, as the restored VM goes on reading its root filesystem where it
-# was. The hosts' results go to RESULTS/a and RESULTS/b; the bundle, and the bucket if it is the
-# run's own, go as the run ends, whatever happens.
+# Move a VM between hosts through a bucket (TASK-28.11), on test hosts, Linux machines of one's own,
+# over ssh (scripts/lib/host.sh). On the first, the guest test fxfs-guest-migrate-dax runs a VM
+# whose store's branch its extent daemon keeps in the bucket, and snapshots it, the snapshot, its
+# memory and the VM's root filesystem left in a bundle; then the run there ends, its directory gone;
+# on the second, which has nothing of the store, the same test restores the VM from the bundle, its
+# store forked from the snapshot's point, whose branch the daemon takes from the bucket, and the
+# guest checks what it wrote before, and writes and reads more (test_fxfs_guest_snapshot.rs). Both
+# run the commit from the same paths, as the restored VM goes on reading its root filesystem where
+# it was. The test hosts' results go to RESULTS/a and RESULTS/b; the bundle, and the bucket if it is
+# the run's own, go as the run ends, whatever happens.
 #
 #   scripts/migrate-host.sh [RESULTS]
 #
-# CLADEFS_MIGRATE_HOSTS names the two hosts, as ssh does (default: CLADEFS_HOST twice, ubu1's, the
-# second run on the same host as the first, after it): of one CPU model, which a snapshot restores
-# on. CLADEFS_MIGRATE_BUCKET names the bucket and prefix the run keeps its branches under, an object
-# store's URL both hosts reach, under a prefix of the run's own, which the run leaves; by default,
-# with one host for both, a directory of the run's own there (file://). CLADEFS_GUEST_KERNEL names
-# cladefs's x86-64 guest kernel here, or CLADEFS_GUEST_KERNEL_BUILD the one each host builds (release by
-# default, scripts/test-host.sh). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches
-# the hosts too (scripts/lib/host.sh).
+# CLADEFS_MIGRATE_HOSTS names the two test hosts, as ssh does (default: CLADEFS_TEST_HOST twice,
+# ubu1's, the second run on the same test host as the first, after it): of one CPU model, which a
+# snapshot restores on. CLADEFS_MIGRATE_BUCKET names the bucket and prefix the run keeps its
+# branches under, an object store's URL both test hosts reach, under a prefix of the run's own,
+# which the run leaves; by default, with one test host for both, a directory of the run's own there
+# (file://). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here, or
+# CLADEFS_GUEST_KERNEL_BUILD the one each test host builds (release by default,
+# scripts/test-host.sh). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches
+# the test hosts too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"
@@ -75,7 +76,7 @@ migrate() {
     trap cleanup EXIT
     (( status == 0 )) || return "$status"
     host_ssh "mkdir -p $(printf %q "$held")" || return
-    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_REMOTE=$remote/branches" \
+    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_BUCKET=$remote/branches" \
         "CLADEFSD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
         test-linux-host.sh fxfs-guest-migrate-dax > "$results/remote.log" 2>&1 || status=$?
     if [[ $host_state == ended ]]; then

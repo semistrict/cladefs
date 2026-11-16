@@ -7,12 +7,12 @@
 //! concurrency with the writer is tests/shuttle/main.rs's.
 
 use extent_frame::segment::Location;
-use extent_store::{CutOff, Description, MemDir, NotHeld, Options, RemoteData, Store, View};
+use extent_store::{BucketData, CutOff, Description, MemDir, NotHeld, Options, Store, View};
 use std::time::Duration;
 use storage_device::{ExtentId, NoExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
 /// Small segments and large extents, so that tests make several of each.
 const OPTIONS: Options = Options {
@@ -81,7 +81,7 @@ fn store_bytes(store: &Store<MemDir>) -> u64 {
 
 /// cladefs: a view reads what its commit holds that the writer freed after it in the bucket, once
 /// the segment holding it is acknowledged there, and leaves the store: its read fails saying where
-/// in the bucket the data is ([`RemoteData`]), for the fetcher to read there, as the store's own
+/// in the bucket the data is ([`BucketData`]), for the fetcher to read there, as the store's own
 /// do (TASK-165.8). What the uploader kept of the frees, the view keeps, as before.
 #[test]
 fn views_read_frees_acknowledged_in_the_bucket() {
@@ -96,9 +96,9 @@ fn views_read_frees_acknowledged_in_the_bucket() {
     let closed = store.closed(usize::MAX).unwrap();
     let keys: Vec<String> = (closed.iter())
         .map(|closed| {
-            extent_remote::layout::segment(
+            extent_bucket::layout::segment(
                 closed.footer.branch,
-                closed.footer.seq,
+                closed.footer.segment,
                 closed.footer.epoch,
             )
         })
@@ -108,7 +108,7 @@ fn views_read_frees_acknowledged_in_the_bucket() {
     }
     assert_eq!(store.usage().unwrap().segments, 1);
     let location = Location { key: keys[0].clone(), offset: 0, len: 2 * BLOCK as u64 };
-    error_is(read(&store, &view, 1, 2), RemoteData { extent: extent(1), location });
+    error_is(read(&store, &view, 1, 2), BucketData { extent: extent(1), location });
 }
 
 /// A view reads the commit it is of, and its root, while the writer frees what it holds, in
@@ -122,7 +122,7 @@ fn views_read_the_commit_they_are_of() {
     write(&store, 3, 1);
     store.commit(Some(b"one")).unwrap();
     let view = store.view();
-    assert_eq!((view.epoch(), view.root()), (1, &b"one"[..]));
+    assert_eq!((view.commit(), view.root()), (1, &b"one"[..]));
 
     store.free(extent(1)).unwrap();
     store.free(extent(2)).unwrap();
@@ -134,10 +134,10 @@ fn views_read_the_commit_they_are_of() {
     assert_eq!(read(&store, &view, 1, 2).unwrap(), pattern(1, 2));
     assert_eq!(read(&store, &view, 2, 10).unwrap(), pattern(2, 10));
     assert_eq!(read(&store, &view, 3, 1).unwrap(), pattern(3, 1));
-    assert_eq!((view.epoch(), view.root()), (1, &b"one"[..]));
+    assert_eq!((view.commit(), view.root()), (1, &b"one"[..]));
     // A view opened now is of the latest commit, and its root.
     let latest = store.view();
-    assert_eq!((latest.epoch(), latest.root()), (3, &b"two"[..]));
+    assert_eq!((latest.commit(), latest.root()), (3, &b"two"[..]));
     assert_eq!(read(&store, &latest, 4, 3).unwrap(), pattern(4, 3));
 }
 
@@ -154,7 +154,7 @@ fn kept_frees_go_once_views_advance_or_drop() {
     assert_eq!(kept(&store), 3 * BLOCK as u64);
 
     view.advance().unwrap();
-    assert_eq!(view.epoch(), 2);
+    assert_eq!(view.commit(), 2);
     store.commit(None).unwrap();
     assert_eq!(kept(&store), 0);
     error_is(read(&store, &view, 1, 3), NoExtent(extent(1)));
@@ -271,7 +271,7 @@ fn duplicates_keep_what_their_commit_holds() {
     let view = store.view();
     view.pin(extent(2)).unwrap();
     let copy = view.duplicate().unwrap();
-    assert_eq!((copy.epoch(), copy.root()), (view.epoch(), view.root()));
+    assert_eq!((copy.commit(), copy.root()), (view.commit(), view.root()));
     store.free(extent(1)).unwrap();
     store.free(extent(2)).unwrap();
     store.commit(None).unwrap();
@@ -315,11 +315,11 @@ fn views_advanced_keeping_hold_the_commits_between() {
     store.free(extent(2)).unwrap();
     store.commit(None).unwrap();
     view.advance_keeping().unwrap();
-    assert_eq!(view.epoch(), store.epoch().unwrap());
+    assert_eq!(view.commit(), store.last_commit().unwrap());
     assert_eq!(read(&store, &view, 1, 1).unwrap(), pattern(1, 1));
     assert_eq!(read(&store, &view, 2, 1).unwrap(), pattern(2, 1));
-    view.let_go(view.epoch());
-    assert_eq!(view.since(), view.epoch());
+    view.let_go(view.commit());
+    assert_eq!(view.since(), view.commit());
     error_is(read(&store, &view, 1, 1), NoExtent(extent(1)));
     error_is(read(&store, &view, 2, 1), NoExtent(extent(2)));
     store.commit(None).unwrap();
@@ -336,11 +336,11 @@ fn views_let_go_of_the_commits_before_the_one_named() {
     write(&store, 2, 1);
     store.commit(None).unwrap();
     let mut view = store.view();
-    let first = view.epoch();
+    let first = view.commit();
     store.free(extent(1)).unwrap();
     store.commit(None).unwrap();
     view.advance_keeping().unwrap();
-    let second = view.epoch();
+    let second = view.commit();
     store.free(extent(2)).unwrap();
     store.commit(None).unwrap();
     view.advance_keeping().unwrap();
@@ -352,7 +352,7 @@ fn views_let_go_of_the_commits_before_the_one_named() {
     view.let_go(first);
     assert_eq!(view.since(), second);
     view.let_go(u64::MAX);
-    assert_eq!(view.since(), view.epoch());
+    assert_eq!(view.since(), view.commit());
     error_is(read(&store, &view, 2, 1), NoExtent(extent(2)));
 }
 
@@ -384,7 +384,7 @@ fn views_wait_for_newer_commits() {
         std::thread::spawn(move || {
             write(&store, 2, 1);
             store.commit(None).unwrap();
-            store.epoch().unwrap()
+            store.last_commit().unwrap()
         })
     };
     let newer = view.newer(Duration::from_secs(60)).unwrap();
@@ -435,7 +435,7 @@ fn views_lagging_too_long_are_cut_off() {
     assert_eq!(kept(&store), 0);
     let fresh = store.view();
     write(&store, 2, 1);
-    assert_eq!(fresh.epoch(), 2);
+    assert_eq!(fresh.commit(), 2);
     error_is(read(&store, &fresh, 2, 1), NoExtent(extent(2)));
 }
 
@@ -477,7 +477,7 @@ fn views_cut_off_by_the_store_fail() {
     store.commit(None).unwrap();
     assert_eq!(kept(&store), 0);
     let fresh = store.view();
-    assert_eq!(fresh.epoch(), 2);
+    assert_eq!(fresh.commit(), 2);
     assert_eq!(fresh.newer(Duration::ZERO).unwrap(), None);
 }
 

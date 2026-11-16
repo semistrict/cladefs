@@ -13,7 +13,7 @@ pub mod device;
 #[cfg(feature = "shuttle")]
 pub mod history;
 
-/// The branch of the simulations' stores: of a cell of no tenant's (TASK-364).
+/// The branch of the simulations' stores: of a cell of the default tenant's (TASK-364).
 #[cfg(feature = "shuttle")]
 pub const BRANCH: extent_store::Branch =
     extent_store::Branch { cell: extent_store::Cell { tenant: 0, id: 1 }, id: 1 };

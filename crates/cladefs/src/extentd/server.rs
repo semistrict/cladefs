@@ -10,14 +10,14 @@ use super::codec::{
     Told, stream_bytes,
 };
 use super::pool::Pool;
-use super::snapshot;
+use super::stats;
 use super::stores::{self, open_store, store_key};
 use super::wire::*;
 use crate::store_requests::{self, Guest, Resizes, Shrinking};
 use crate::store_table::Writer;
 use crate::{Commit, MappingContents, VolatileSlice, VolatileSliceMut, WindowMapping};
 use crate::{DaxWindow, Errno, ExtentStore, SecondStage};
-use extent_remote::trace;
+use extent_bucket::trace;
 use extent_store::shared::SharedLock;
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -57,8 +57,8 @@ pub(super) static IO: std::sync::LazyLock<tokio::runtime::Runtime> =
             .expect("extentd's runtime")
     });
 
-/// cladefs: how long a commit only ordered (`COMMIT` without `COMMIT_DURABLE`) waits at most to be
-/// made durable: the host's lag, which doc-2's requirement 11 bounds.
+/// cladefs: how long a commit only ordered (`COMMIT` without `COMMIT_UPLOADED`) waits at most to be
+/// made local: the host's lag, which doc-2's requirement 11 bounds.
 const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// cladefs: how long a follower's connection waits for a commit before it looks whether it is
@@ -186,9 +186,9 @@ pub(super) fn stop_accepting() {
 /// Its arena goes, and the extents cached in it, once it is gone, as its VM processes are, and the
 /// stores opened in its arena, and what reads into the extent cache for them (`pages::Arena`).
 pub struct Tenant {
-    name: String,
-    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are volumes of: a granted
-    /// tenant's, its grant's; the default tenant's, [`NO_TENANT`](crate::host_store::NO_TENANT).
+    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are vdisks of, which names
+    /// it in every call of the control API: a granted tenant's, its grant's; the default tenant's,
+    /// [`DEFAULT_TENANT`](crate::host_store::DEFAULT_TENANT).
     id: u64,
     policy: Policy,
     memory: Memory,
@@ -243,7 +243,7 @@ struct Memory {
     /// cladefs: how many connections the tenant's VM processes have ([`MAX_CONNECTIONS`]).
     connections: Arc<std::sync::atomic::AtomicUsize>,
     /// cladefs: what its connections have the daemon hold of its VM processes' requests together,
-    /// within the room they share (TASK-149.35).
+    /// within the bytes in flight they share (TASK-149.35).
     in_flight: Arc<super::memory::InFlight>,
 }
 
@@ -294,8 +294,8 @@ pub(super) fn default_tenant_made() -> Option<Arc<Tenant>> {
 }
 
 /// cladefs: the default tenant, of the daemon's own socket, which its user's VM processes connect to
-/// (TASK-155), made as the first does, for as long as the daemon runs: nameless, as no granted
-/// tenant is, and limited by no name. Its policy is its own ([`Policy::default_tenant`]); its
+/// (TASK-155), made as the first does, for as long as the daemon runs: granted by no one, and
+/// limited by every tenant's limits alone. Its policy is its own ([`Policy::default_tenant`]); its
 /// memory is as a granted tenant's (TASK-79.17): an arena of its own, so that the default arena
 /// holds public bases' pages, which every VM process holds read-only, and nothing of a VM
 /// process's own. `EIO`, logged, if its memory can't be made.
@@ -307,45 +307,37 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
         log::error!("extentd: the default tenant's memory: {err}");
         Errno::EIO
     })?;
-    let (name, policy, disk) = (String::new(), Policy::default_tenant(), None);
-    let id = crate::host_store::NO_TENANT;
-    let tenant = Tenant { name, id, policy, memory, disk };
+    let (policy, disk) = (Policy::default_tenant(), None);
+    let id = crate::host_store::DEFAULT_TENANT;
+    let tenant = Tenant { id, policy, memory, disk };
     Ok(DEFAULT.get_or_init(|| Arc::new(tenant)).clone())
 }
 
 impl Tenant {
-    /// A new tenant named `name`, granted, of the ID `id` in the bucket (TASK-364), whose stores
-    /// are in `dir`, with an arena of its own.
-    pub fn new(
-        name: impl Into<String>,
-        id: u64,
-        dir: impl AsRef<Path>,
-    ) -> std::io::Result<Arc<Self>> {
-        let (name, dir) = (name.into(), dir.as_ref().canonicalize()?);
-        let disk = Some(super::disk::Disk::new(&name, &dir));
+    /// A new tenant, granted, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`,
+    /// with an arena of its own.
+    pub fn new(id: u64, dir: impl AsRef<Path>) -> std::io::Result<Arc<Self>> {
+        let dir = dir.as_ref().canonicalize()?;
+        let disk = Some(super::disk::Disk::new(id, &dir));
         let policy = Policy::granted(dir);
-        let tenant = Arc::new(Self { name, id, policy, memory: Memory::new()?, disk });
+        let tenant = Arc::new(Self { id, policy, memory: Memory::new()?, disk });
         super::memory::register(&tenant);
         Ok(tenant)
     }
 
-    /// Its name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// cladefs: its ID in the bucket (TASK-364).
+    /// cladefs: its ID in the bucket (TASK-364), which names it.
     pub fn id(&self) -> u64 {
         self.id
     }
 
     /// cladefs: its ID, if it is granted (TASK-364): the default tenant's VM processes are the
-    /// daemon's user's (TASK-155), which reach any tenant's stores, and make them of tenant 0.
+    /// daemon's user's (TASK-155), which reach any tenant's stores, and make them of the default
+    /// tenant's.
     fn granted(&self) -> Option<u64> {
         self.dir().map(|_| self.id)
     }
 
-    /// cladefs: `EACCES` if it is granted and the store at `path` is a volume of another tenant's
+    /// cladefs: `EACCES` if it is granted and the store at `path` is a vdisk of another tenant's
     /// cell (TASK-364), as its description says, read before it is opened, which would take its
     /// branch from its writer: the daemon makes its own cells' stores alone in its directory, but
     /// for the points of others' its VM manager gives it, which it restores from, as forks of its
@@ -374,7 +366,7 @@ impl Tenant {
     }
 
     /// cladefs: what its connections have the daemon hold of its VM processes' requests, within the
-    /// room they share (TASK-149.35).
+    /// bytes in flight they share (TASK-149.35).
     pub(super) fn in_flight(&self) -> &Arc<super::memory::InFlight> {
         &self.memory.in_flight
     }
@@ -463,7 +455,7 @@ pub(super) fn connections() -> usize {
 async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
     let sender = match stream.try_clone().and_then(|clone| {
         clone.set_nonblocking(true)?;
-        // cladefs: what it queues held in its tenant's room too (TASK-149.35).
+        // cladefs: what it queues held in its tenant's bytes in flight too (TASK-149.35).
         AsyncSender::counting(clone, tenant.in_flight().clone())
     }) {
         Ok(sender) => Arc::new(sender),
@@ -494,7 +486,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         closing: AtomicBool::new(false),
         requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
         drained: Arc::new(event_listener::Event::new()),
-        report: snapshot::Report::new(&peer.sender),
+        report: stats::Report::new(&peer.sender),
         page_ins: tokio::sync::Semaphore::new(PAGE_INS),
         named: OnceLock::new(),
         _alive: alive,
@@ -649,18 +641,18 @@ fn receive(
 
 /// cladefs: what of what a VM process sends past what it was answered the daemon holds, besides its
 /// requests': what it queued for the VM process that is no reply, as stage operations and commits
-/// it is told of, which the protocol's bound on stream data leaves room for (TASK-79.16). And, its
+/// it is told of, which the protocol's bound on stream data allows for (TASK-79.16). And, its
 /// window's, a reply to `MAPPINGS` (TASK-79.43), as many mappings as the window may hold, which
-/// [`Peer::room`] leaves room for besides.
-pub(super) const QUEUED_ROOM: u64 = 16 << 20;
+/// [`Peer::credit`] allows for besides.
+pub(super) const QUEUED_CREDIT: u64 = 16 << 20;
 
 impl Connection {
     /// cladefs: whether its VM process, should it live on, reaches pages still: those its window has
     /// mapped, or those of an operation taking access away it left unacknowledged (TASK-79.100).
     fn reaches_pages(&self) -> bool {
-        // cladefs: a fenced store's window, which a panic may have left half changed, isn't looked
+        // cladefs: a halted store's window, which a panic may have left half changed, isn't looked
         // at: it may, as far as anyone knows (TASK-153.16).
-        if self.store().is_some_and(|store| store.is_fenced()) {
+        if self.store().is_some_and(|store| store.is_halted()) {
             return true;
         }
         let window = self.window.with(Mutex::lock);
@@ -748,11 +740,11 @@ impl Drop for Turn {
 
 /// A request's answer, which it is owed until sent ([`Answer::send`]): its reply, or its error.
 /// cladefs: its bytes of stream data counted in its connection's requests until its reply is queued,
-/// and not after, as its VM process's room counts it then ([`Peer::room`]), rather than both for
-/// a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16); and,
-/// its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
-/// waiting for good, those bytes counted for good; and fences its store, which the panic went
-/// through: past the store's locks, which fence it themselves (`crate::fence`, TASK-153.16).
+/// and not after, as its VM process's credit counts it then ([`Peer::credit`]), rather than both
+/// for a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16);
+/// and, its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
+/// waiting for good, those bytes counted for good; and halts its store, which the panic went
+/// through: past the store's locks, which halt it themselves (`crate::halt`, TASK-153.16).
 /// cladefs: and the request's span, which ends as it is answered (`super::otel`, TASK-258).
 struct Answer {
     connection: Arc<Connection>,
@@ -856,7 +848,7 @@ impl Drop for Answer {
             && let Some(store) = self.connection.store()
         {
             let kind = self.request.kind;
-            store.fence(|| format!("a panic serving request {kind}"));
+            store.halt(|| format!("a panic serving request {kind}"));
         }
         if !self.sent {
             let reply = self.reply_header();
@@ -883,7 +875,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Free(_) => (None, Some(1)),
         Request::FreeMany { rest, .. } => (None, Some(1 + rest.len() as u64)),
         Request::Commit { commit, .. } => {
-            span.set(trace::DURABLE, *commit == Commit::Durable);
+            span.set(trace::LEVEL, commit.level());
             (None, None)
         }
         Request::Open { path, .. } | Request::Fork { path, .. } => {
@@ -988,7 +980,7 @@ pub(super) struct Connection {
     /// doc-8).
     store: OnceLock<Arc<ExtentStore>>,
     /// Where it is in its life: whether it has its store, and how (TASK-160.8). Its locks are
-    /// its requests', its teardown's and its window's, beyond what fences its store: a panic
+    /// its requests', its teardown's and its window's, beyond what halts its store: a panic
     /// holding one aborts the daemon (`extent_store::shared`, TASK-149.24).
     phase: SharedLock<Mutex<Phase>>,
     window: SharedLock<Mutex<Option<DaxWindow>>>,
@@ -1006,7 +998,7 @@ pub(super) struct Connection {
     drained: Arc<event_listener::Event>,
     /// cladefs: what the daemon reports of its VM process (TASK-111.4): its store, its build, what
     /// it says of its window's second stage, and its answers to asks for its stats.
-    report: Arc<snapshot::Report>,
+    report: Arc<stats::Report>,
     /// cladefs: its faults and `PRIVATE`s resolving, [`PAGE_INS`] at most (TASK-149.34).
     page_ins: tokio::sync::Semaphore,
     /// cladefs: its store's path, once open, which names the guest requests it serves calls for
@@ -1143,11 +1135,12 @@ impl Connection {
     /// cladefs: admits a message of `header`, before its payload is read, as the protocol's bounds
     /// allow what its VM process keeps in flight (TASK-79.16): its requests not answered
     /// ([`MAX_REQUESTS`]), and their stream data ([`MAX_STREAM_BYTES`]), with what the connection
-    /// has queued for the VM process, in its room ([`Peer::room`]). Counted in, a request's, until
+    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a request's, until
     /// its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM process broke the
     /// protocol, and is let go, rather than held without end in the daemon's memory. cladefs: and its
-    /// stream data in the room its tenant's connections share, waiting, before its payload is read,
-    /// until what they hold leaves room for it (TASK-149.35, [`super::memory::InFlight`]).
+    /// stream data in the bytes in flight its tenant's connections share, waiting, before its
+    /// payload is read, until what they hold leaves enough for it (TASK-149.35,
+    /// [`super::memory::InFlight`]).
     async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<()> {
         // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16).
         if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
@@ -1158,7 +1151,7 @@ impl Connection {
             let requests = self.requests.with(Mutex::lock);
             let in_flight = requests.in_flight();
             let held = requests.stream_bytes + bytes + self.peer.sender.queued();
-            if in_flight >= MAX_REQUESTS || held > self.peer.room() {
+            if in_flight >= MAX_REQUESTS || held > self.peer.credit() {
                 let what = format!("{} requests, and {held} bytes, in flight", in_flight + 1);
                 return Err(std::io::Error::new(std::io::ErrorKind::QuotaExceeded, what));
             }
@@ -1209,9 +1202,9 @@ impl Connection {
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
         };
         // cladefs: a store a panic went through serves nothing more, of whatever the panic left half
-        // done (`crate::fence`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
+        // done (`crate::halt`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
         // daemon forgot, `EACCES` (TASK-411.7).
-        if let Some(errno) = self.store().and_then(|store| store.fenced()) {
+        if let Some(errno) = self.store().and_then(|store| store.halted()) {
             return refuse(answer, errno);
         }
         let request = Request::decode(&message).and_then(|request| {
@@ -1316,9 +1309,9 @@ impl Connection {
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
             let branch = self.follow(path)?;
-            let epoch = self.store().ok_or(Errno::EBADF)?.epoch()?;
+            let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
-            reply.args = Opened { branch, arena: self.arena_id(), epoch, max_map_count }.args();
+            reply.args = Opened { branch, arena: self.arena_id(), commit, max_map_count }.args();
             fds.extend(self.memories());
             return Ok(());
         }
@@ -1378,22 +1371,24 @@ impl Connection {
                 Ok(())
             }
             Request::Unmap { window_offset, len } => store.unmap(*window_offset, *len),
-            Request::Commit { commit: Commit::Durable, root } => store.commit(*root),
+            Request::Commit { commit: Commit::Uploaded, root } => store.commit(*root),
             Request::Commit { commit: Commit::Local, root } => store.commit_local(*root),
             Request::Commit { commit: Commit::Ordered, root } => store.commit_ordered(*root),
             Request::Root => store.root().map(|root| *payload = root),
-            Request::Advance => store.advance().map(|epoch| reply.args = Advanced { epoch }.args()),
-            Request::LetGo { epoch } => store.let_go(*epoch),
+            Request::Advance => {
+                store.advance().map(|commit| reply.args = Advanced { commit }.args())
+            }
+            Request::LetGo { commit } => store.let_go(*commit),
             Request::Pin(extent) => store.pin(*extent),
             Request::Unpin(extent) => store.unpin(*extent),
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
             Request::Fork { path, quiescent } => {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
-                // cladefs: a snapshot's point, refused while the window holds private pages, whose
-                // bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
+                // cladefs: a VM snapshot's point, refused while the window holds private pages,
+                // whose bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
                 // here, as the VMM's error can't (TASK-92.14).
-                // cladefs: the one volume of a new cell of the store's tenant, of an ID of the
+                // cladefs: the one vdisk of a new cell of the store's tenant, of an ID of the
                 // bucket's giving, which the reply says (TASK-364).
                 let cell = crate::host_store::fork_cell(store.branch());
                 let forked =
@@ -1415,7 +1410,7 @@ impl Connection {
             // No larger than the daemon makes room for, the codec has it (TASK-150.3).
             Request::Window { size, private_max, budget } => {
                 let (sender, acks) = (self.peer.sender.clone(), self.peer.acks.clone());
-                let stage = Arc::new(RemoteStage {
+                let stage = Arc::new(VmProcessStage {
                     sender,
                     acks,
                     change: SharedLock::new("stage change", Mutex::default()),
@@ -1438,7 +1433,7 @@ impl Connection {
                         _ => Errno::EINVAL,
                     }
                 })?;
-                // cladefs: its mappings' reply, as many as it may have, its VM process's room
+                // cladefs: its mappings' reply, as many as it may have, its VM process's credit
                 // holds (TASK-79.43).
                 self.peer.set_window(window.size());
                 // cladefs: its gauges, and its runs' budget, as its VM process says (TASK-111.5).
@@ -1533,8 +1528,9 @@ impl Connection {
             return Err(Errno::EPERM);
         }
         let store = Arc::new(follower);
-        let (epoch, sender, told) = (store.epoch()?, self.peer.sender.clone(), store.clone());
-        self.start_behind(move |stopped| tell_commits(told, epoch, sender, stopped));
+        let (commit, sender, told) =
+            (store.view_commit()?, self.peer.sender.clone(), store.clone());
+        self.start_behind(move |stopped| tell_commits(told, commit, sender, stopped));
         let branch = store.branch().id;
         opening.opened(path, store, Phase::Following);
         Ok(branch)
@@ -1563,7 +1559,7 @@ impl Connection {
         let fds = match &opened {
             Ok(branch) => {
                 let (branch, arena, max_map_count) = (*branch, self.arena_id(), max_map_count());
-                reply.args = Opened { branch, arena, epoch: 0, max_map_count }.args();
+                reply.args = Opened { branch, arena, commit: 0, max_map_count }.args();
                 Vec::from(self.memories())
             }
             Err(_) => Vec::new(),
@@ -1788,7 +1784,7 @@ impl Drop for TransferArea {
 /// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
 /// do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the guest frees
 /// leaves the host's disk with the segments acknowledged in the bucket, whose collector takes it
-/// back, not cleaned behind the guest's commits as it was (TASK-79.2, TASK-165.8).
+/// back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
 async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
     while tokio::time::timeout(FLUSH_EVERY, &mut stopped).await.is_err() {
         if !store.flush_pending() {
@@ -1806,7 +1802,7 @@ async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot
             }
             // Its panic logged, which went through the store (TASK-153.16).
             None => {
-                store.fence(|| "a panic making its commits durable".into());
+                store.halt(|| "a panic making its commits durable".into());
                 break;
             }
         }
@@ -1829,27 +1825,27 @@ static FLUSHERS: std::sync::LazyLock<Pool> =
     std::sync::LazyLock::new(|| Pool::new("extentd flush", FLUSHES));
 
 /// cladefs: tells the VM process at the other end of `sender` of each commit of its follower's
-/// store after the commit of `epoch` ([`COMMITTED`]): the latest, of each run of them; until
+/// store after the one numbered `commit` ([`COMMITTED`]): the latest, of each run of them; until
 /// `stopped` says to stop. It waits for the writer's commits holding no thread (TASK-34), or
 /// [`COMMITS_POLL`] at most, for commits made otherwise. What it tells a VM process that stopped
 /// reading waits for it as one message, the latest commit's, rather than one for each, which the
 /// daemon would hold for it without end, the writer's commits going on (TASK-79.9).
 async fn tell_commits(
     store: Arc<ExtentStore>,
-    mut epoch: u64,
+    mut commit: u64,
     sender: Arc<AsyncSender>,
     mut stopped: tokio::sync::oneshot::Receiver<()>,
 ) {
     use tokio::sync::oneshot::error::TryRecvError;
     while let Err(TryRecvError::Empty) = stopped.try_recv() {
         let committed = store.commits();
-        let Some(latest) = store.newer(epoch, std::time::Duration::ZERO) else {
+        let Some(latest) = store.newer(commit, std::time::Duration::ZERO) else {
             let _ = tokio::time::timeout(COMMITS_POLL, committed).await;
             continue;
         };
-        epoch = latest;
+        commit = latest;
         // Sent holding no thread, as a send never waits (TASK-79.9).
-        if let Err(err) = sender.send_latest(Told::Committed { epoch: latest }.encode()) {
+        if let Err(err) = sender.send_latest(Told::Committed { commit: latest }.encode()) {
             log::warn!("extentd: telling a VM process of a commit: {err}");
             return;
         }
@@ -1914,7 +1910,7 @@ struct Watched {
 
 impl Acks {
     /// The ID of `op`, the next stage operation sent, which the caller queues to send before it
-    /// gives another ([`RemoteStage::send_now`]).
+    /// gives another ([`VmProcessStage::send_now`]).
     fn sent(&self, op: &StageOp) -> u64 {
         self.state.lock().unwrap().next(op.taking())
     }
@@ -2117,7 +2113,7 @@ struct Peer {
     /// Whether the daemon let it go ([`Peer::let_go`]).
     let_go: AtomicBool,
     /// The bytes a reply to `MAPPINGS` of its window takes at most, once it has one (TASK-79.43):
-    /// a mapping a page of it ([`Peer::room`]).
+    /// a mapping a page of it ([`Peer::credit`]).
     mappings: std::sync::atomic::AtomicU64,
 }
 
@@ -2156,16 +2152,16 @@ impl Peer {
 
     /// What of what it sends past what it was answered the daemon holds at most (TASK-79.16): its
     /// requests' stream data, as the protocol bounds it ([`MAX_STREAM_BYTES`]), and what the
-    /// daemon queued for it besides ([`QUEUED_ROOM`]), its window's mappings among them, as many
-    /// as the window may have ([`Peer::set_window`]).
-    fn room(&self) -> u64 {
-        MAX_STREAM_BYTES + QUEUED_ROOM + self.mappings.load(Ordering::Relaxed)
+    /// daemon queued for it besides ([`QUEUED_CREDIT`]), its window's mappings among them, as many
+    /// as the window may have ([`Peer::set_window`]): its credit.
+    fn credit(&self) -> u64 {
+        MAX_STREAM_BYTES + QUEUED_CREDIT + self.mappings.load(Ordering::Relaxed)
     }
 
     /// Its window is of `size` bytes, whose mappings, a page each at most, a reply to `MAPPINGS`
     /// holds (TASK-79.43).
     fn set_window(&self, size: u64) {
-        assert!(size <= MAX_WINDOW, "a window past the most the daemon makes room for");
+        assert!(size <= MAX_WINDOW, "a window past the most the daemon gives credit for");
         let mappings = size / crate::pages::page_size() * MAPPING_BYTES;
         self.mappings.store(mappings, Ordering::Relaxed);
     }
@@ -2458,7 +2454,7 @@ async fn watch() {
 /// good (TASK-79.9): one that takes access to pages away is acknowledged, and the guest has no
 /// access to a page the kernel frees, reuses or shares next, as what was freed waits for it
 /// ([`quarantine`]).
-struct RemoteStage {
+struct VmProcessStage {
     sender: Arc<AsyncSender>,
     acks: Arc<Acks>,
     /// cladefs: the operations of the change the window is making, if it is, held back to be sent
@@ -2469,7 +2465,7 @@ struct RemoteStage {
     change: SharedLock<Mutex<Option<Vec<StageOp>>>>,
 }
 
-impl RemoteStage {
+impl VmProcessStage {
     /// Sends the stage operation `op`, or holds it back with the change being made.
     fn send(&self, op: StageOp) {
         let mut change = self.change.with(Mutex::lock);
@@ -2489,7 +2485,7 @@ impl RemoteStage {
     }
 }
 
-impl SecondStage for RemoteStage {
+impl SecondStage for VmProcessStage {
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
         self.send(StageOp::Map { offset, phys, len });
         crate::stats::add(crate::stats::Counter::StageMaps, 1);

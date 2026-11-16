@@ -2,22 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a fork into a new cell costs, in the clear and sealed (TASK-411.4, backlog
-//! doc-16): N forks (200) of a store of 64 extents of 64 KiB, each into a new cell of its tenant's,
-//! as every fork a host makes is, timed each, on a memory bucket of the process's, so that what is
-//! timed is the host's own work, the protocol's and the keys'; and the bucket's requests each fork
-//! makes, which a real bucket's round trips multiply. Then the first opening of ten of the forks.
-//! Say:
+//! cladefs's own: what a fork into a new cell costs, in the clear and encrypted (TASK-411.4,
+//! backlog doc-16): N forks (200) of a store of 64 extents of 64 KiB, each into a new cell of its
+//! tenant's, as every fork a host makes is, timed each, on a memory bucket of the process's, so
+//! that what is timed is the host's own work, the protocol's and the keys'; and the bucket's
+//! requests each fork makes, which a real bucket's round trips multiply. Then the first opening of
+//! ten of the forks. Say:
 //!
 //! ```sh
 //! cargo run --release -p cladefs-examples --example fork-bench -- [N] [--no-kms]
 //! ```
 //!
 //! With a KMS (a `local:///` one of its own, `CLADEFS_KMS`, keeping tenant 5's KEK, not 6's), it
-//! forks a store of tenant 5, sealed, whose forks keep the DEKs they inherit rewrapped under their
-//! own cells' KEKs, taken from the host's pool, and one of tenant 6, in the clear. With
+//! forks a store of tenant 5, encrypted, whose forks keep the DEKs they inherit rewrapped under
+//! their own cells' KEKs, taken from the host's pool, and one of tenant 6, in the clear. With
 //! `--no-kms`, a host with none: tenant 6's alone, as hosts forked before TASK-411.3. Each request
-//! of the bucket's waits `CLADEFS_REMOTE_LATENCY_MS` more, if set, as a bucket elsewhere's round
+//! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
 //! trips do.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice};
@@ -40,14 +40,14 @@ fn main() {
     }
     // SAFETY: before any thread of the process's reads the environment.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///fork-bench");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///fork-bench");
         std::env::set_var("CLADEFSD_TOKEN", "1");
         if kms {
             std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display()));
         }
     }
     let tenants: &[(u64, &str)] = match kms {
-        true => &[(5, "sealed"), (6, "clear, host with a KMS")],
+        true => &[(5, "encrypted"), (6, "clear, host with a KMS")],
         false => &[(6, "clear, host with no KMS")],
     };
     println!(
@@ -71,7 +71,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
     store.commit(Some(b"root")).unwrap();
-    if let Some(kms) = cladefs::remote::kms().unwrap() {
+    if let Some(kms) = cladefs::bucket::kms().unwrap() {
         // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
         futures::executor::block_on(kms.filled(tenant));
     }

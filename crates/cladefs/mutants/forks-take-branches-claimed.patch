@@ -3,23 +3,25 @@
 # is (TASK-364) but a fork's named so is, wedges that branch's writer (TASK-79.82, TASK-165.7).
 # A writable fork's: a point's makes no look since TASK-449, its record's create refusing alike.
 # Kind: commits wedged
-# Killer: remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist
+# Killer: bucket::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist
 --- a/crates/cladefs/src/host_store.rs
 +++ b/crates/cladefs/src/host_store.rs
-@@ -470,8 +470,8 @@
+@@ -470,10 +470,8 @@
      };
      // A fork of a point needs no look first: its child's record's create refuses a record there
-     // alike (`Remote::child_free`, TASK-449).
--    if !remote.is_point() && !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+     // alike (`Uploader::child_free`, TASK-449).
+-    if !uploader.is_point()
+-        && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?
+-    {
 -        return Err(Error::new(taken(branch)));
-+    if !remote.is_point() {
-+        let _ = remote.child_free(branch).map_err(|err| Error::new(failed(err)))?;
++    if !uploader.is_point() {
++        let _ = uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?;
      }
-     let made = match remote.is_point() {
+     let made = match uploader.is_point() {
          true => {
---- a/crates/extent_remote/src/branch.rs
-+++ b/crates/extent_remote/src/branch.rs
-@@ -364,7 +364,7 @@
+--- a/crates/extent_bucket/src/branch.rs
++++ b/crates/extent_bucket/src/branch.rs
+@@ -365,7 +365,7 @@
          let read =
              found.as_ref().map(|found| Record::decode(child.branch, &found.bytes)).transpose()?;
          match read {
@@ -28,7 +30,7 @@
                  take_back(bucket, origin, child.branch, &found).await;
                  return match found.deleted {
                      true => Ok(()),
-@@ -392,7 +392,7 @@
+@@ -393,7 +393,7 @@
          failpoint!("branch::recorded_fork");
          return Ok(());
      };

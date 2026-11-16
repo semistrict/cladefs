@@ -4,7 +4,7 @@
 
 //! cladefsd, cladefs's daemon, one a host (TASK-475): serves the extent stores of the VMs on this
 //! host, from one memory, to VM processes that connect to its socket (`cladefs::extentd`); and, if
-//! told to, mounts tenants' cells with FUSE (`cladefs::extentd::mount`). A cell's volumes are held
+//! told to, mounts tenants' cells with FUSE (`cladefs::extentd::mount`). A cell's vdisks are held
 //! by this one process, whichever serves them.
 //!
 //! ```sh
@@ -23,10 +23,10 @@
 //! stop (TASK-50.3). A VMM's extent device
 //! connects to the socket its configuration names (cladefs's Firecracker's `extentd_socket`).
 //!
-//! It runs as a host of cladefs's multi-node system: `CLADEFSD_REMOTE` names the bucket its
+//! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its
 //! stores' branches are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
 //! the system's control plane gives it, and which fences earlier placements' writes and deletes;
-//! without them, it refuses to start (`cladefs::remote::Host`, TASK-45). Tests and development use
+//! without them, it refuses to start (`cladefs::bucket::Host`, TASK-45). Tests and development use
 //! an in-memory bucket (`memory:///NAME`).
 //!
 //! One daemon serves every VM on a host. Connections to SOCKET are of the default tenant: with
@@ -58,32 +58,32 @@
 //! (TASK-302, TASK-364, TASK-475.2), and serves its Mount service on the control socket
 //! (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount`), which `CLADEFSD_GRPC` must name.
 //! Attaching a cell (`Attach`; a cell of 0, a new one) takes it from the daemon's bucket, at the
-//! placement of the token the call gives, the daemon's if none, and every Fxfs volume of it into
-//! a store at `STORES/TENANT/CELL/VOLUME`, shown at `MOUNT/TENANT/CELL/VOLUME`, TENANT and CELL
-//! in 16 hexadecimal digits; its other volumes, its SQLite databases and what VMs attach, are not
-//! shown. `CreateVolume` makes a new Fxfs volume of a cell attached; `Detach` takes a cell's
-//! volumes away once nothing uses them, written back, or at once if forced; `List` says what is
+//! placement of the token the call gives, the daemon's if none, and every Fxfs vdisk of it into
+//! a store at `STORES/TENANT/CELL/VDISK`, shown at `MOUNT/TENANT/CELL/VDISK`, TENANT and CELL
+//! in 16 hexadecimal digits; its other vdisks, its SQLite databases and what VMs attach, are not
+//! shown. `CreateVdisk` makes a new Fxfs vdisk of a cell attached; `Detach` takes a cell's
+//! vdisks away once nothing uses them, written back, or at once if forced; `List` says what is
 //! attached. The mount is the daemon's user's; with `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may
 //! use it as its permissions say (for a user other than root, `/etc/fuse.conf` must have
 //! `user_allow_other`). Root mounts with mount(2), any other user through libfuse's
-//! `fusermount3`. The drain closes it: unmounted lazily, its volumes written back and their
+//! `fusermount3`. The drain closes it: unmounted lazily, its vdisks written back and their
 //! stores closed once nothing uses it, within the drain's bound.
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics
 //! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::extentd::metrics`,
 //! TASK-47).
 //!
-//! `CLADEFSD_REMOTE` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
+//! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
 //! `az://container/prefix`) each store it opens keeps its branch in (backlog doc-7), with
 //! credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded behind them, within a second. With
-//! `CLADEFSD_CACHE` naming a directory too, what stores read from the bucket is kept there,
+//! `CLADEFSD_PART_CACHE` naming a directory too, what stores read from the bucket is kept there,
 //! sparse, leaving 4 GiB of its filesystem free, and kept across the daemon's restarts: one daemon
-//! at a time has the directory. `CLADEFSD_CACHE_BYTES` caps what it keeps there, in bytes, as
+//! at a time has the directory. `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in bytes, as
 //! a host whose cache shares a disk with its stores needs (TASK-406.1): those read least recently
 //! go first.
 //!
 //! With `CLADEFSD_PEER_ADDRESS` naming this host's `HOST:PORT` among the hosts sharing its
-//! bucket, and `CLADEFSD_CACHE` a cache, the daemon serves them parts of the bucket's objects
+//! bucket, and `CLADEFSD_PART_CACHE` a cache, the daemon serves them parts of the bucket's objects
 //! there, over gRPC (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask the host that
 //! owns a part, by rendezvous hashing over them, before the bucket (TASK-406.2): a part many hosts
 //! read comes from the bucket about once for them all. `CLADEFSD_PEERS` names them at start,
@@ -96,9 +96,10 @@
 //! holds in memory is what it uploads at once, `CLADEFSD_UPLOAD_MEMORY` bytes at most (512 MiB
 //! by default, 64 MiB at least: an extent, which goes alone), every store's together (TASK-317).
 //! With `CLADEFSD_STATS` naming a file too, the daemon keeps there what it did with the
-//! bucket, its requests by kind and its bytes up and down (`extent_remote::store::Stats::line`),
-//! what the stores' followers are, what serving the stores cost it (`cladefs::stats::Stats`), and
-//! the VM processes' requests it served, by kind, rewritten as they change.
+//! bucket, its requests by kind and its bytes up and down
+//! (`extent_bucket::object_bucket::Stats::line`), what the stores' followers are, what serving the
+//! stores cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
+//! rewritten as they change.
 //!
 //! With `CLADEFSD_TRACES` set to `otlp`, the daemon exports spans of what it does, over OTLP,
 //! to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names, OpenTelemetry's variables configuring
@@ -107,9 +108,9 @@
 //! It logs to standard error, a line a record (`cladefs::extentd::logging`): text by default, or,
 //! with `CLADEFS_LOG_FORMAT=json`, a JSON object a line, of the record's `timestamp`, `level`,
 //! `target`, `message` and key-values (TASK-259). `CLADEFS_LOG_LEVEL` says how much, `info` by
-//! default, by target too: `info,extent_remote::store=debug` logs each request of object storage.
-//! A record about a VM's request names it, `request_id`, the guest's number of it, with its
-//! `store` (TASK-260).
+//! default, by target too: `info,extent_bucket::object_bucket=debug` logs each request of object
+//! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
+//! its `store` (TASK-260).
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
@@ -118,7 +119,7 @@ fn main() -> anyhow::Result<()> {
     cladefs::extentd::logging::to_stderr()?;
     // cladefs: its large buffers given back as they are freed, before any thread is made (TASK-317).
     cladefs::extentd::memory::return_large_allocations();
-    // cladefs: a panic holding a lock shared beyond one store, which no fence contains, stops the
+    // cladefs: a panic holding a lock shared beyond one store, which no halt contains, stops the
     // daemon, rather than poison the lock for every user after (TASK-149.24).
     extent_store::shared::abort_on_panics();
     // cladefs: the failpoints FAILPOINTS sets, in a daemon built with them (TASK-44.10).
@@ -135,7 +136,7 @@ fn main() -> anyhow::Result<()> {
     }
     cladefs::extentd::raise_open_files_limit().context("raising the limit of open files")?;
     // A host of the multi-node system: the bucket and this host's placement token named.
-    let host = cladefs::remote::Host::from_env().map_err(anyhow::Error::msg)?;
+    let host = cladefs::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     cladefs::extentd::cache_config().map_err(anyhow::Error::msg)?;
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
@@ -153,7 +154,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(bytes) = std::env::var_os("CLADEFSD_UPLOAD_MEMORY").filter(|b| !b.is_empty()) {
         let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
         let bytes = bytes.context("CLADEFSD_UPLOAD_MEMORY must be a number of bytes")?;
-        cladefs::remote::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
+        cladefs::bucket::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
     }
     let mut args = std::env::args().skip(1);
     let socket = args.next().context("usage: cladefsd SOCKET [MEMORY_BYTES]")?;

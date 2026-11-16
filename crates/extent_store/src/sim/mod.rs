@@ -5,14 +5,14 @@
 //! A deterministic simulation of branches in object storage (TASK-28.1): doc-7's protocol run by
 //! hosts' stores, this crate's, and their uploaders (`upload`), writing, committing, forking,
 //! taken over and crashing, and by deletions and collectors, over a bucket that delays, reorders
-//! and fails requests (TASK-88: extent_remote's until then, whose writers made their segments
-//! with `Batch`, so that the store's choice of what a segment seals, frees and forks never met a
-//! takeover or a collector), checked after every step against what each branch's guests did and
-//! were told, every object a branch's acknowledged segments name there, and what its live writer
-//! and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
+//! and fails requests (TASK-88: extent_bucket's until then, whose writers made their segments
+//! with `SegmentBuilder`, so that the store's choice of what a segment seals, frees and forks never
+//! met a takeover or a collector), checked after every step against what each branch's guests did
+//! and were told, every object a branch's acknowledged segments name there, and what its live
+//! writer and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
 //! stops, for garbage left behind, for tasks still waiting, a checkpoint, a deletion or anything
 //! else nothing will wake, and for uploaders that upload no more what they are asked to. A host's
-//! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/extent_remote/mutants.sh` puts
+//! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/extent_bucket/mutants.sh` puts
 //! back a bug of each kind, and sees a test fail.
 //!
 //! Each case doc-7 lists is a profile that makes it likely, run over many seeds; each rule of the
@@ -20,7 +20,7 @@
 
 mod world;
 
-use extent_remote::{Rules, set_rules};
+use extent_bucket::{Rules, set_rules};
 use std::ops::Range;
 use world::{Profile, Weights, World};
 
@@ -357,7 +357,7 @@ fn collected() -> Profile {
 
 test_holds!(forks_racing_collection, collected());
 
-/// Forks whose children open soon after, while collectors run: a child's record and lease come
+/// Forks whose children open soon after, while collectors run: a child's record and head come
 /// while a pass reads branches.
 fn children() -> Profile {
     weights(|weights| {
@@ -484,7 +484,7 @@ fn late_checkpoints() -> Profile {
 test_holds!(late_checkpoints_landing_past_takeovers, late_checkpoints());
 
 // The rule `ways_from_seals` (TASK-175), a writer taken over checkpointing late past where the
-// next recovered from, has no search here: extent_remote's simulation reached its case at one seed
+// next recovered from, has no search here: extent_bucket's simulation reached its case at one seed
 // of 20,000 of `recreated` (677, where it was found), and this one, its writers the stores', at
 // none of 40,000 of `recreated` or of `late_checkpoints` (TASK-88). The collector's
 // `writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals` shows it
@@ -659,24 +659,24 @@ test_leaks!(forgotten_restores_need_clones_record_first, clones_record_first, fo
 
 // A reference whose child's ID another branch took stays for ever, no record naming it, when no
 // recorder takes it back (TASK-395.10); `uncollected` excused one until retirements were marked
-// (TASK-395.13). Its direct test is extent_remote's
+// (TASK-395.13). Its direct test is extent_bucket's
 // `forks_whose_childrens_ids_are_taken_need_references_taken_back`.
 test_leaks!(restores_need_references_taken_back, references_taken_back, restores());
 
 // A stale recorder's reference, written after its take-back or its retirement, stays for ever
 // unmarked: no recorder, nor pass of its child's cell, skipping it, looks at it again
-// (TASK-395.13, TASK-395.14). Its direct test is extent_remote's
+// (TASK-395.13, TASK-395.14). Its direct test is extent_bucket's
 // `stale_recorders_references_need_retirements_marked`.
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 
 // cladefs: a clone's reference retired unmarked while it is being made, its host writing it after,
 // stays for ever: no record names it, and no mark has its parent's cell's pass delete it
-// (TASK-455). Its model is specs/bucket's NoClonesMadeUnmarked.
+// (TASK-455). Its model is specs/bucket's NoForksMadeUnmarked.
 test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores());
 
 // cladefs: a clone a store resumed, its host having died after its record, made with no reference:
 // once its point goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
-// direct test is extent_remote's `clones_resumed_need_resumes_refer`; its model specs/bucket's
+// direct test is extent_bucket's `clones_resumed_need_resumes_refer`; its model specs/bucket's
 // NoResumesRefer.
 test_needs!(restores_need_resumes_refer, resumes_refer, restores());
 
@@ -737,7 +737,7 @@ test_needs!(collection_needs_references_held, references_held, forks());
 // reads its point, have no search here: collector::tests' direct ones show them needed
 // (`deletions_referring_before_they_mark_parents_deleted_need_references_first`,
 // `clones_keeping_what_they_inherit_as_their_points_go_need_clones_refer_first`), as do
-// specs/bucket's NoReferencesFirst and NoClonesReferFirst; references listed after the states,
+// specs/bucket's NoReferencesFirst and NoForksReferFirst; references listed after the states,
 // NoReferencesRelisted alone.
 
 /// Restores as [`restores`] makes them, but no host dying, no collector stopped and no request

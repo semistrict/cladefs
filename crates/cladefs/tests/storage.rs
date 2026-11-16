@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tests of image storage: direct I/O, and clones of closed and mounted filesystems.
+//! Tests of image storage: direct I/O, and forks of closed and mounted filesystems.
 //!
 //! Images live under the build's temporary directory, which is on the repository's filesystem,
 //! where direct I/O works, rather than on a `/tmp` that may be a tmpfs.
@@ -54,24 +54,24 @@ fn images_bypass_the_page_cache() {
     assert!(!Storage::memory(IMAGE_SIZE).bypasses_page_cache());
 }
 
-/// A clone of closed storage is a separate image with the same contents, which shares the image's
+/// A fork of closed storage is a separate image with the same contents, which shares the image's
 /// data rather than copies it.
 #[test]
-fn clone_closed_storage() {
+fn fork_closed_storage() {
     block_on(async {
         let dir = images();
-        let (path, clone_path): (PathBuf, PathBuf) =
-            (dir.path().join("image"), dir.path().join("clone"));
+        let (path, fork_path): (PathBuf, PathBuf) =
+            (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"file", b"original").await;
         let before = allocated(&path);
-        let clone = storage.clone_to(&clone_path).await.expect("clone failed");
+        let fork = storage.fork_to(&fork_path).await.expect("fork failed");
         // A handle naming the image, and a record of the fork in it.
-        assert!(allocated(&clone_path) <= 16 << 10, "{} bytes", allocated(&clone_path));
+        assert!(allocated(&fork_path) <= 16 << 10, "{} bytes", allocated(&fork_path));
         assert!(allocated(&path) <= before + (64 << 10), "{} > {before}", allocated(&path));
-        assert!(storage.clone_to(&clone_path).await.is_err(), "cloned over an image");
+        assert!(storage.fork_to(&fork_path).await.is_err(), "forked over an image");
 
         // Each changes independently of the other.
-        let fs = Filesystem::mount(clone.check().await.unwrap()).await.unwrap();
+        let fs = Filesystem::mount(fork.check().await.unwrap()).await.unwrap();
         assert_eq!(read(&fs, b"file").await, b"original");
         let (file, _) = fs.root().lookup(b"file").await.unwrap();
         file.write(0, b"modified").await.unwrap();
@@ -83,64 +83,64 @@ fn clone_closed_storage() {
     })
 }
 
-/// A clone of a mounted filesystem has what was written before it, even if never synced, and not
+/// A fork of a mounted filesystem has what was written before it, even if never synced, and not
 /// what is written after.
 #[test]
-fn clone_mounted_filesystem() {
+fn fork_mounted_filesystem() {
     block_on(async {
         let dir = images();
-        let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+        let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"before", b"synced").await;
         let fs = Filesystem::mount(storage).await.unwrap();
         let (file, _) = fs.root().create(b"unsynced", 0o644, OWNER).await.unwrap();
         file.write(0, b"dirty pages").await.unwrap();
 
-        let clone = fs.clone_storage_to(&clone_path).await.expect("clone failed");
-        file.write(0, b"after clone").await.unwrap();
+        let fork = fs.fork_storage_to(&fork_path).await.expect("fork failed");
+        file.write(0, b"after fork").await.unwrap();
         fs.close().await.unwrap().check().await.unwrap();
 
-        let fs = Filesystem::mount(clone.check().await.unwrap()).await.unwrap();
+        let fs = Filesystem::mount(fork.check().await.unwrap()).await.unwrap();
         assert_eq!(read(&fs, b"before").await, b"synced");
         assert_eq!(read(&fs, b"unsynced").await, b"dirty pages");
         fs.close().await.unwrap();
     })
 }
 
-/// An image deleted while a clone of it lives goes, its directory with it: the clone mounts as
+/// An image deleted while a fork of it lives goes, its directory with it: the fork mounts as
 /// before, reading what it inherited in the image's bucket, which is beside the image's directory,
-/// not in it (TASK-39.4, TASK-165.7). Before, the image's directory stayed, holding what the clone
-/// shared of it, and went with the clone.
+/// not in it (TASK-39.4, TASK-165.7). Before, the image's directory stayed, holding what the fork
+/// shared of it, and went with the fork.
 #[test]
-fn delete_images_and_their_clones() {
+fn delete_images_and_their_forks() {
     block_on(async {
         let dir = images();
-        let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+        let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = image_with(&path, b"file", b"original").await;
-        let clone = storage.clone_to(&clone_path).await.unwrap();
-        assert!(Storage::delete(&clone_path).is_err(), "deleted an open clone");
+        let fork = storage.fork_to(&fork_path).await.unwrap();
+        assert!(Storage::delete(&fork_path).is_err(), "deleted an open fork");
         assert!(Storage::delete(&path).is_err(), "deleted an open image");
-        drop((clone, storage));
+        drop((fork, storage));
         Storage::delete(&path).unwrap();
         assert!(!path.exists());
         assert!(Storage::open(&path).is_err(), "opened a deleted image");
-        let fs = Filesystem::mount(Storage::open(&clone_path).unwrap()).await.unwrap();
+        let fs = Filesystem::mount(Storage::open(&fork_path).unwrap()).await.unwrap();
         assert_eq!(read(&fs, b"file").await, b"original");
         fs.close().await.unwrap();
-        Storage::delete(&clone_path).unwrap();
-        assert!(!clone_path.exists());
+        Storage::delete(&fork_path).unwrap();
+        assert!(!fork_path.exists());
     })
 }
 
 #[test]
-fn memory_cannot_be_cloned() {
+fn memory_cannot_be_forked() {
     block_on(async {
         let dir = images();
         let storage = Storage::memory(IMAGE_SIZE);
-        let error = storage.clone_to(dir.path().join("clone")).await.expect_err("cloned memory");
-        assert_eq!(error.to_string(), "memory cannot be cloned to an image");
+        let error = storage.fork_to(dir.path().join("fork")).await.expect_err("forked memory");
+        assert_eq!(error.to_string(), "memory cannot be forked to an image");
         let fs = Filesystem::format(storage).await.unwrap();
-        let error = fs.clone_storage_to(dir.path().join("clone")).await.expect_err("cloned memory");
-        assert_eq!(error.to_string(), "memory cannot be cloned to an image");
+        let error = fs.fork_storage_to(dir.path().join("fork")).await.expect_err("forked memory");
+        assert_eq!(error.to_string(), "memory cannot be forked to an image");
         fs.close().await.unwrap();
     })
 }

@@ -3,7 +3,8 @@
 # found in the LICENSE file.
 
 """Tests of scripts/pjdfstest-fuse.py (TASK-149.38): the failures it reads from prove's summary,
-its list of known ones, what it fails on, the pin it builds, and CI's job running it as root."""
+its list of known ones, what it fails on, the pinned version it builds, and CI's job running it as
+root."""
 
 import re
 import unittest
@@ -56,7 +57,7 @@ class PjdfstestFuseTest(unittest.TestCase):
         self.assertEqual(fuse.unexpected(found, listed, ["chown", "open"]), (["chown/00.t:9"], []))
 
     def test_the_pin_is_the_guest_cases(self):
-        self.assertEqual(fuse.pin(), ("https://github.com/pjd/pjdfstest",
+        self.assertEqual(fuse.pinned_version(), ("https://github.com/pjd/pjdfstest",
                                       "85a8aea9e685999ef0540392fd80535f873d7ff7"))
         # Its one owner, which the script that builds the guest's cases sources (TASK-284: GitHub's
         # runs of test-e2e.sh's artifacts, built without it, skipped pjdfstest's cases); and none

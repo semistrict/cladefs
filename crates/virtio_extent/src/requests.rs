@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 //! Serving the device's requests: each request's buffers ([`Buffers`]) read, the store asked
-//! ([`Store`]), and what it returns and the response written back. The device applies requests in
+//! ([`Backend`]), and what it returns and the response written back. The device applies requests in
 //! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
-//! durable commits queued before it: each is served as a future ([`handle`]), several at once. On
+//! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
 //! them, completing each request (`cladefs::extentd::spawn_on_replies`): no thread is woken between
 //! the reply and the guest's interrupt, nor waits for the store's I/O (TASK-41).
@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cladefs::{Commit, Errno};
 use log::{error, info};
 
+use crate::backend::Backend;
 use crate::buffers::{Buffers, Reader, Writer};
 use crate::config::CacheType;
 use crate::notices::Notices;
 use crate::protocol::*;
-use crate::store::Store;
 
 /// The requests served, and the time serving them took, by type, logged as a VMM's worker stops:
 /// against what the guest waits for a request (its driver's request_ns), what the transport
@@ -70,7 +70,7 @@ impl Served {
 /// refusing what is out of the device's `bounds` before `store` sees it, and returns the length of
 /// what the device writes to it: its writable buffers, whose last bytes hold the response. The VMM
 /// returns the request to the driver with that length.
-pub async fn handle<S: Store>(
+pub async fn handle<S: Backend>(
     store: &S,
     notices: &Notices,
     cache: CacheType,
@@ -98,7 +98,7 @@ pub async fn handle<S: Store>(
 
 /// Serves the request `reader` holds, within `bounds`, writing what it returns with `writer`, which
 /// has `room` bytes for it, and returns how many it wrote.
-async fn serve<S: Store>(
+async fn serve<S: Backend>(
     store: &S,
     notices: &Notices,
     cache: CacheType,
@@ -111,7 +111,7 @@ async fn serve<S: Store>(
     let type_ = u32::from_le(header.type_);
     let flags = match cache {
         CacheType::Writeback => u32::from_le(header.flags),
-        CacheType::Unsafe => undurable(type_, u32::from_le(header.flags)),
+        CacheType::Unsafe => ordered_only(type_, u32::from_le(header.flags)),
     };
     match type_ {
         VIRTIO_EXTENT_T_READ => {
@@ -135,8 +135,9 @@ async fn serve<S: Store>(
             }
             bounds.io(offset, len.into())?;
             let data = reader.slices(len as usize)?;
-            // A barrier before orders, without waiting for durability (doc-4); one after, with
-            // WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either way.
+            // A barrier before orders, without waiting for the disk or the bucket (doc-4); one
+            // after, with WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either
+            // way.
             let mut barriers = write_barriers(flags).ok_or(Errno::EINVAL)?;
             // cladefs: the root that commit sets, after the data (WRITE_ROOT).
             let root;
@@ -176,7 +177,7 @@ async fn serve<S: Store>(
             let args: MapArgs = reader.obj()?;
             // cladefs: every map is read-only; a window that copies on write, a writer's, maps
             // zeros, and a follower's none (backlog doc-13).
-            let map_flags = VIRTIO_EXTENT_MAP_AHEAD
+            let map_flags = VIRTIO_EXTENT_MAP_PREFAULT
                 | if store.copies_on_write() { VIRTIO_EXTENT_MAP_ZEROS } else { 0 };
             if flags & !(map_flags | VIRTIO_EXTENT_MAP_MANY) != 0 {
                 return Err(Errno::EINVAL);
@@ -209,7 +210,7 @@ async fn serve<S: Store>(
             }
             // Sent to the daemon at once, each as it would be alone: the first error fails the
             // request, whichever others it mapped (`F_MAP_MANY`). cladefs: what the guest reads
-            // next (`F_MAP_AHEAD`) is then mapped for it (TASK-112.1).
+            // next (`F_MAP_PREFAULT`) is then mapped for it (TASK-112.1).
             futures::future::try_join_all(maps.iter().map(|(args, flags)| async move {
                 let (window_offset, len) =
                     (u64::from_le(args.window_offset), u64::from_le(args.len));
@@ -219,7 +220,7 @@ async fn serve<S: Store>(
                     let offset = u64::from_le(args.offset);
                     store.map(args.id.into(), offset, len, window_offset).await?;
                 }
-                if flags & VIRTIO_EXTENT_MAP_AHEAD != 0 {
+                if flags & VIRTIO_EXTENT_MAP_PREFAULT != 0 {
                     store.prefault(window_offset, len);
                 }
                 Ok::<_, Errno>(())
@@ -255,10 +256,10 @@ async fn serve<S: Store>(
                 }
                 root = Some(reader.bytes(len as usize)?);
             }
-            // Without COMMIT_DURABLE, the commit completes once ordered: the daemon makes it
-            // durable soon after (doc-4).
-            let commit = if flags & VIRTIO_EXTENT_COMMIT_DURABLE != 0 {
-                Commit::Durable
+            // Without COMMIT_UPLOADED, the commit completes once ordered: the daemon makes it
+            // local soon after (doc-4).
+            let commit = if flags & VIRTIO_EXTENT_COMMIT_UPLOADED != 0 {
+                Commit::Uploaded
             } else {
                 Commit::Ordered
             };
@@ -320,16 +321,16 @@ async fn serve<S: Store>(
         }
         // cladefs: a follower's (doc-4's F_READ_ONLY); a writer's store refuses them (EINVAL).
         VIRTIO_EXTENT_T_ADVANCE => {
-            if room < size_of::<Epoch>() {
+            if room < size_of::<CommitNumber>() {
                 return Err(Errno::EINVAL);
             }
-            let epoch = Epoch { epoch: store.advance().await?.to_le(), reserved: 0 };
-            writer.obj(0, &epoch);
-            Ok(size_of::<Epoch>())
+            let number = CommitNumber { commit: store.advance().await?.to_le(), reserved: 0 };
+            writer.obj(0, &number);
+            Ok(size_of::<CommitNumber>())
         }
         VIRTIO_EXTENT_T_LET_GO => {
-            let epoch: Epoch = reader.obj()?;
-            store.let_go(u64::from_le(epoch.epoch)).await?;
+            let number: CommitNumber = reader.obj()?;
+            store.let_go(u64::from_le(number.commit)).await?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_PIN => {
@@ -368,7 +369,7 @@ mod linux {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Instant;
 
-    use cladefs::RemoteExtentStore;
+    use cladefs::DaemonExtentStore;
     use log::error;
 
     use super::{Served, handle, type_of};
@@ -382,9 +383,9 @@ mod linux {
     /// receiving the daemon's replies, which complete them. Counts those in flight, which the
     /// worker waits for as it stops ([`Requests::wait_idle`]), and what it served of each type.
     pub struct Requests {
-        store: Arc<RemoteExtentStore>,
+        store: Arc<DaemonExtentStore>,
         notices: Arc<Notices>,
-        /// cladefs: what it does with the guest's asks for durability (TASK-363).
+        /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
         cache: CacheType,
         /// cladefs: the device's, past which a request is refused (TASK-470).
         bounds: Bounds,
@@ -410,7 +411,7 @@ mod linux {
         /// Requests served with `store`, as `notices`, `cache` and `bounds` say: those of a device
         /// ([`Device::requests`](crate::Device::requests)).
         pub fn new(
-            store: Arc<RemoteExtentStore>,
+            store: Arc<DaemonExtentStore>,
             notices: Arc<Notices>,
             cache: CacheType,
             bounds: Bounds,
@@ -505,7 +506,7 @@ mod tests {
     /// does (extent_store's `check_io`, the window's `check_range`), and records any doc-4 calls
     /// out of range, which the device refuses before (TASK-470).
     #[derive(Default)]
-    struct FakeStore {
+    struct FakeBackend {
         copies_on_write: bool,
         state: Mutex<FakeState>,
     }
@@ -578,7 +579,7 @@ mod tests {
         }
     }
 
-    impl FakeStore {
+    impl FakeBackend {
         /// Its state, whatever case panicked holding it: a failed case reports its own failure,
         /// not every later one a poisoned lock (TASK-470).
         fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
@@ -588,7 +589,7 @@ mod tests {
 
     const BRANCH: u64 = 7;
 
-    impl Store for FakeStore {
+    impl Backend for FakeBackend {
         fn branch(&self) -> u64 {
             BRANCH
         }
@@ -750,7 +751,7 @@ mod tests {
             Err(Errno::EINVAL)
         }
 
-        async fn let_go(&self, _epoch: u64) -> Result<(), Errno> {
+        async fn let_go(&self, _commit: u64) -> Result<(), Errno> {
             Err(Errno::EINVAL)
         }
 
@@ -784,7 +785,7 @@ mod tests {
     /// as `cache` says; returns what the device wrote, the response apart, and the response's
     /// status.
     fn request_as(
-        store: &FakeStore,
+        store: &FakeBackend,
         notices: &Notices,
         cache: CacheType,
         readable: &[u8],
@@ -810,7 +811,7 @@ mod tests {
         (written, u32::from_le(response.status))
     }
 
-    fn request(store: &FakeStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
+    fn request(store: &FakeBackend, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
         request_as(store, &Notices::default(), CacheType::Writeback, readable, writable, usize::MAX)
     }
 
@@ -835,7 +836,7 @@ mod tests {
     /// seals what was written; a FREE frees.
     #[test]
     fn writes_and_reads_go_through_the_store() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let data: Vec<u8> = (0..3 * BLOCK).map(|i| i as u8).collect();
         let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(1, 0, data.len())), &data);
         let notices = Notices::default();
@@ -859,24 +860,24 @@ mod tests {
         assert_eq!(request(&store, &read, writable).1, errno(Errno::ENOENT));
     }
 
-    /// A WRITE's flags order it: a barrier before; a commit after, durable or ordered, setting the
+    /// A WRITE's flags order it: a barrier before; a commit after, uploaded or ordered, setting the
     /// root after the data; none but a WRITE's.
     #[test]
     fn writes_carry_their_barriers() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let rooted = IoArgs { root_len: 6u32.to_le(), ..io(1, 0, 4096) };
         let flags = VIRTIO_EXTENT_WRITE_BARRIER
             | VIRTIO_EXTENT_WRITE_COMMIT
-            | VIRTIO_EXTENT_WRITE_DURABLE
+            | VIRTIO_EXTENT_WRITE_UPLOADED
             | VIRTIO_EXTENT_WRITE_ROOT;
         let data_and_root = [&[7; 4096][..], b"second"].concat();
         let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(rooted), &data_and_root);
         assert_eq!(request(&store, &write, RESPONSE), (vec![], 0));
-        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Durable]);
+        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Uploaded]);
         assert_eq!(store.state().root, b"second");
         assert_eq!(store.state().extents[&id(1)].0, vec![7; 4096]);
-        // A root, or durability, without a commit; an unknown flag; a root past the most.
-        for flags in [VIRTIO_EXTENT_WRITE_ROOT, VIRTIO_EXTENT_WRITE_DURABLE, 1 << 4] {
+        // A root, or an upload, without a commit; an unknown flag; a root past the most.
+        for flags in [VIRTIO_EXTENT_WRITE_ROOT, VIRTIO_EXTENT_WRITE_UPLOADED, 1 << 4] {
             let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(rooted), &data_and_root);
             assert_eq!(request(&store, &write, RESPONSE).1, errno(Errno::EINVAL), "{flags:#x}");
         }
@@ -896,31 +897,31 @@ mod tests {
     /// driver asked.
     #[test]
     fn unsafe_devices_commit_ordered() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let notices = Notices::default();
-        let durable = bytes(
+        let uploaded = bytes(
             VIRTIO_EXTENT_T_COMMIT,
-            VIRTIO_EXTENT_COMMIT_DURABLE,
+            VIRTIO_EXTENT_COMMIT_UPLOADED,
             Some(CommitArgs::default()),
             &[],
         );
-        let flags = VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE;
+        let flags = VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED;
         let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(io(1, 0, 4096)), &[7; 4096]);
-        for request in [&durable, &write] {
+        for request in [&uploaded, &write] {
             let served = request_as(&store, &notices, CacheType::Unsafe, request, RESPONSE, 64);
             assert_eq!(served, (vec![], 0));
         }
         let served =
-            request_as(&store, &notices, CacheType::Writeback, &durable, RESPONSE, usize::MAX);
+            request_as(&store, &notices, CacheType::Writeback, &uploaded, RESPONSE, usize::MAX);
         assert_eq!(served, (vec![], 0));
-        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Ordered, Commit::Durable]);
+        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Ordered, Commit::Uploaded]);
     }
 
     /// ROOT writes the root, zeros to its most, and its length; COMMIT with COMMIT_ROOT sets it;
     /// INFO writes the store's whole, the branch too, refusing room for less (TASK-141.3).
     #[test]
     fn roots_and_info_are_written_whole() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let commit = bytes(
             VIRTIO_EXTENT_T_COMMIT,
             VIRTIO_EXTENT_COMMIT_ROOT,
@@ -954,10 +955,10 @@ mod tests {
     }
 
     /// The pieces a MAP_MANY carries are mapped each with its own flags, zeros only in a window
-    /// that copies on write, and those MAP_AHEAD says mapped ahead; flags of neither, refused.
+    /// that copies on write, and those MAP_PREFAULT says mapped ahead; flags of neither, refused.
     #[test]
     fn maps_carry_their_pieces() {
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let map = |sequence: u64, offset: u64, len: u64, window_offset: u64| MapArgs {
             id: ExtentIdLe { branch: BRANCH.to_le(), sequence: sequence.to_le() },
             offset: offset.to_le(),
@@ -967,12 +968,12 @@ mod tests {
         let entry = |map: MapArgs, flags: u32| MapEntry { map, flags: flags.to_le(), reserved: 0 };
         let pieces: Vec<u8> = [
             entry(map(2, 4096, 4096, 8192), 0),
-            entry(map(0, 0, 4096, 16384), VIRTIO_EXTENT_MAP_ZEROS | VIRTIO_EXTENT_MAP_AHEAD),
+            entry(map(0, 0, 4096, 16384), VIRTIO_EXTENT_MAP_ZEROS | VIRTIO_EXTENT_MAP_PREFAULT),
         ]
         .iter()
         .flat_map(|entry| entry.as_bytes().to_vec())
         .collect();
-        let flags = VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_AHEAD;
+        let flags = VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT;
         let request_ = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(map(1, 0, 4096, 0)), &pieces);
         assert_eq!(request(&store, &request_, RESPONSE), (vec![], 0));
         let mut maps = store.state().maps.clone();
@@ -991,7 +992,7 @@ mod tests {
 
         // Without a window that copies on write, zeros are refused; and a flag unknown, writable
         // DAX's MAP_WRITE among them (backlog doc-13).
-        let follower = FakeStore::default();
+        let follower = FakeBackend::default();
         let zeros = bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_ZEROS, Some(map(0, 0, 1, 0)), &[]);
         assert_eq!(request(&follower, &zeros, RESPONSE).1, errno(Errno::EINVAL));
         for unknown in [1 << 0, 1 << 4] {
@@ -1013,7 +1014,7 @@ mod tests {
     /// again and again names as much as it likes. Up to it, the request is served.
     #[test]
     fn many_past_their_most_are_refused() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(1, 0, 4096)), &[7; 4096]);
         assert_eq!(request(&store, &write, RESPONSE), (vec![], 0));
         let extent = io(1, 0, 0).id;
@@ -1049,7 +1050,7 @@ mod tests {
     /// copies on write alone.
     #[test]
     fn notices_and_window_requests_reach_their_ends() {
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let notices = Notices::default();
         let serve = |request: &[u8]| {
             request_as(&store, &notices, CacheType::Writeback, request, RESPONSE, usize::MAX)
@@ -1085,7 +1086,7 @@ mod tests {
         );
         assert_eq!(store.state().unmapped, vec![(4096, 8192)]);
         assert_eq!(store.state().private, vec![(4096, 8192)]);
-        let follower = FakeStore::default();
+        let follower = FakeBackend::default();
         let private = bytes(VIRTIO_EXTENT_T_PRIVATE, 0, Some(range), &[]);
         assert_eq!(request(&follower, &private, RESPONSE).1, errno(Errno::EINVAL));
     }
@@ -1094,7 +1095,7 @@ mod tests {
     /// unknown type, or whose header is short, is refused.
     #[test]
     fn bad_requests_are_refused() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let mut header = bytes::<Info>(VIRTIO_EXTENT_T_INFO, 0, None, &[]);
         let mut buffers = Buffers::new();
         // SAFETY: The test's memory, which outlives the request.
@@ -1116,7 +1117,7 @@ mod tests {
     /// `whatever_a_driver_asks_is_answered`, whose WRITE near u64::MAX overflowed the fake store.
     #[test]
     fn ranges_past_their_ends_are_refused() {
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         // Aligned, its end wrapping to 0: what the Linux run's WRITE was, nearly.
         let wrapping = u64::MAX - (BLOCK - 1);
         let blocks = vec![7; 2 * BLOCK as usize];
@@ -1198,7 +1199,7 @@ mod tests {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};
 
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         // cladefs TASK-470: and blocks' multiples, which reads, writes and maps take.
         let near_or_far = || {
             prop_oneof![
@@ -1262,7 +1263,7 @@ mod tests {
             offset % alignment == 0 && len % alignment == 0 && end <= u128::from(most)
         }
 
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         // At, below and past `most`; small; unaligned; anywhere; aligned near u64::MAX.
         let edge = |most: u64| {
             prop_oneof![

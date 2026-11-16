@@ -190,7 +190,7 @@ fn say_to(console: &mut File, (start, end): (u8, u8), line: &str) {
 
 /// cladefs: [`say`]s `line`, which has left the guest once this returns: the agent's standard output
 /// waits in its pipe and the console, which a VM stopping loses, though what follows the line
-/// reached the store (a crash soak's round 21 of 50, 2026-10-31).
+/// reached the store (a crash soak's repeat 21 of 50, 2026-10-31).
 pub fn say_out(line: &str) {
     say_drained((STDOUT_START, STDOUT_END), line);
 }

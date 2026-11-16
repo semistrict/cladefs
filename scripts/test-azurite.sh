@@ -54,4 +54,4 @@ curl -fsS -X PUT -H "x-ms-date: $date" -H "x-ms-version: $version" -H 'Content-L
     -H "Authorization: SharedKey $account:$signature" "$endpoint/$container?restype=container"
 
 CLADEFS_AZURE_URL="az://$container/test" cargo nextest run --manifest-path "$root/Cargo.toml" \
-    -p extent_remote --run-ignored only -E 'test(/azurite/)' "$@"
+    -p extent_bucket --run-ignored only -E 'test(/azurite/)' "$@"

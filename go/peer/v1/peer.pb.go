@@ -37,7 +37,7 @@ const (
 // A part asked for.
 type GetPartRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The URL of the bucket, as the asker names it (CLADEFSD_REMOTE): this host's.
+	// The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
 	Bucket string `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
 	// The object's key.
 	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`

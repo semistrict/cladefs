@@ -3,33 +3,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The sandbox team's performance gate, and copy-on-write DAX's, on a Linux host of one's own
-# (TASK-131.5, TASK-164.5), each run of scripts/test-host.sh a measurement there, alone and on CPUs
-# of its own (CLADEFS_HOST_BENCH=1). One VM a case (RESULTS/single): pgbench, five runs of a VM, on
-# the guest's Fxfs without a DAX window, and with one, whose stores copy on write, each VM making
-# its database; the same two on a database a base holds, which the VM forks; on ext4 with DAX on
+# The sandbox team's performance gate, and copy-on-write DAX's, on the test host (TASK-131.5,
+# TASK-164.5), each run of scripts/test-host.sh a measurement there, alone and on CPUs of its own
+# (CLADEFS_TEST_HOST_BENCH=1). One VM a case (RESULTS/single): pgbench, five runs of a VM, on the
+# guest's Fxfs without a DAX window, and with one, whose stores copy on write, each VM making its
+# database; the same two on a database a base holds, which the VM forks; on ext4 with DAX on
 # virtio-pmem, a static DAX device; on ext4 on virtio-blk, its flushes dropped, the sandbox team's
-# runtime, and each a host fsync (TASK-91.8); and bigmap, a file four times the guest's memory, in
-# a base, mapped shared, read all over and 5% of it written, the same two ways. Then the density
-# run (RESULTS/density): CLADEFS_PERF_GATE_VMS VMs (default 3) on forks of a base holding the
-# database, without DAX and with it, all served by one daemon, each making
-# CLADEFS_PERF_GATE_DENSITY_RUNS runs (default 2) and kept running until the last's are done, the
-# host's memory measured as each is added. Then scripts/pgbench-gate.py over both, which writes
-# RESULTS/gate.json, and scripts/pgbench-steps.py, each case's runs step by step in RESULTS/steps.md
-# (and steps.json). It fails if a run or a gate does. docs/measurements/dax-cow-gate.md says what
-# each case measures.
+# runtime, and each a host fsync (TASK-91.8); and bigmap, a file four times the guest's memory, in a
+# base, mapped shared, read all over and 5% of it written, the same two ways. Then the density run
+# (RESULTS/density): CLADEFS_PERF_GATE_VMS VMs (default 3) on forks of a base holding the database,
+# without DAX and with it, all served by one daemon, each making CLADEFS_PERF_GATE_DENSITY_RUNS runs
+# (default 2) and kept running until the last's are done, the host's memory measured as each is
+# added. Then scripts/pgbench-gate.py over both, which writes RESULTS/gate.json, and
+# scripts/pgbench-steps.py, each case's runs step by step in RESULTS/steps.md (and steps.json). It
+# fails if a run or a gate does. docs/measurements/dax-cow-gate.md says what each case measures.
 #
 # Usage: perf-gate-host.sh [--nested] RESULTS [PHASE...]
 #
-# The host (CLADEFS_HOST, scripts/lib/host.sh) is of the kind the numbers are reported as: bare
-# metal, as ubu1 is, by default; with --nested, a VM whose guests are nested. Numbers of the two
-# kinds are not compared. The PHASEs, in order, of `single`, `density` and `gate`, all three by
+# The test host (CLADEFS_TEST_HOST, scripts/lib/host.sh) is of the kind the numbers are reported as:
+# bare metal, as ubu1 is, by default; with --nested, a VM whose guests are nested. Numbers of the
+# two kinds are not compared. The PHASEs, in order, of `single`, `density` and `gate`, all three by
 # default: each a run of its own, `gate` reading both runs' results in RESULTS. A release guest
 # kernel unless CLADEFS_GUEST_KERNEL_BUILD says otherwise; each Firecracker in its jailer's jail, as
 # production runs it, unless CLADEFS_FIRECRACKER_JAIL is set empty (TASK-172: a jailed VM process's
 # DAX window budgets its mappings as the host allows, as an unjailed one's does); CLADEFS_GATE_* are
-# the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* and CLADEFSD_* reaches the host
-# (test-host.sh), CLADEFS_GUEST_CMDLINE among them.
+# the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* and CLADEFSD_* reaches the test
+# host (test-host.sh), CLADEFS_GUEST_CMDLINE among them.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 usage() { echo "Usage: $0 [--nested] RESULTS [single|density|gate]..." >&2; exit 2; }
@@ -49,7 +48,7 @@ done
 # The suites (`runner list --tag perf-single`, `--tag perf-density`).
 single="--tag perf-single"
 density="--tag perf-density"
-export CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_ROUNDS=1 CLADEFS_HOST_BENCH=1
+export CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_REPEATS=1 CLADEFS_TEST_HOST_BENCH=1
 export CLADEFS_GUEST_KERNEL_BUILD=${CLADEFS_GUEST_KERNEL_BUILD:-release}
 export CLADEFS_FIRECRACKER_JAIL=${CLADEFS_FIRECRACKER_JAIL-1}
 status=0

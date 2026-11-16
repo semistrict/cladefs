@@ -5,15 +5,14 @@
 //! TASK-50.3: the daemon's memory, limited at runtime through the control API, a tenant's and
 //! every tenant's together. Past a limit the daemon evicts the clean pages read longest ago; with
 //! none left to evict, what would take more fails with ENOMEM, and the daemon goes on. Its metrics
-//! show each tenant's memory by a hash of its name.
+//! show each tenant's memory by its ID.
 
 #![cfg(target_os = "linux")]
 
 mod common;
 
-use cladefs::extentd::memory::label;
 use cladefs::extentd::metrics::render;
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::{memory, pattern, read_window};
 use tonic::Code;
@@ -33,7 +32,7 @@ fn contents(sequence: u64) -> Vec<u8> {
 /// Writes [`EXTENTS`] extents to `store`, commits, and reads each through a window mapping them
 /// all, read-only, twice over: [`EXTENTS`] MiB of pages cached in the daemon's memory, as it
 /// holds them. Returns the window.
-fn read_through(store: &RemoteExtentStore) -> std::ptr::NonNull<u8> {
+fn read_through(store: &DaemonExtentStore) -> std::ptr::NonNull<u8> {
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
     for sequence in 1..=EXTENTS {
         store.write(extent(sequence), 0, &[VolatileSlice::from(&contents(sequence)[..])]).unwrap();
@@ -101,7 +100,8 @@ fn assert_within(name: &str, limit: u64) {
 }
 
 /// A tenant whose VM reads through its window twice what its limit holds keeps within it, its
-/// pages read longest ago evicted, read again as they are touched; its metrics name it by a hash.
+/// pages read longest ago evicted, read again as they are touched; its metrics name it by its ID,
+/// in hexadecimal.
 /// ShrinkMemory frees its pages, and returns once they are, its VM's window having unmapped them.
 #[test]
 fn tenants_past_their_limits_evict_then_refuse() {
@@ -110,20 +110,21 @@ fn tenants_past_their_limits_evict_then_refuse() {
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
     // Limited before it is granted, as it is made.
-    daemon.set_memory_limit(Some("acme"), Some(2 * CHUNK)).unwrap();
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
-    let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    daemon.set_memory_limit(Some(0xac), Some(2 * CHUNK)).unwrap();
+    let socket = daemon.grant(0xac, &acme, None).unwrap();
+    let vm = DaemonExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     read_through(&vm);
 
-    let tenant = format!("{{tenant=\"{}\"}}", label("acme"));
-    assert_eq!(label("acme"), "822b33ad87c148a0");
-    assert!(!render().contains("acme"), "the metrics name the tenant");
+    let tenant = "{tenant=\"ac\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_memory_limit_bytes{tenant}")), 2 * CHUNK);
     assert_within(&format!("cladefsd_tenant_memory_bytes{tenant}"), 2 * CHUNK);
 
-    assert_eq!(daemon.shrink_memory(Some("acme"), 0).unwrap(), 0);
+    assert_eq!(daemon.shrink_memory(Some(0xac), 0).unwrap(), 0);
     assert_eq!(metric(&format!("cladefsd_tenant_memory_bytes{tenant}")), 0);
-    assert_eq!(failure(daemon.shrink_memory(Some("globex"), 0)), (Code::NotFound, Errno::ENOENT));
+    assert_eq!(failure(daemon.shrink_memory(Some(0xb), 0)), (Code::NotFound, Errno::ENOENT));
+    // The default tenant has no limit of its own: every tenant's is its.
+    let refused = daemon.set_memory_limit(Some(0), Some(2 * CHUNK));
+    assert_eq!(failure(refused), (Code::InvalidArgument, Errno::EINVAL));
     assert_eq!(daemon.stat(&acme.join("vm")).unwrap().open, true);
 }
 
@@ -137,8 +138,8 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     assert_eq!(metric("cladefsd_memory_limit_bytes"), 4 * CHUNK);
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
-    let theirs = RemoteExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    let socket = daemon.grant(1, &acme, None).unwrap();
+    let theirs = DaemonExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     read_through(&theirs);
     let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
     read_through(&ours);

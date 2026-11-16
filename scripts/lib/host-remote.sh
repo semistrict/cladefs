@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The host's half of scripts/lib/host.sh: what a run does on the Linux host it runs on, sent there
-# over ssh on bash's standard input (host_side) and run as the user ssh logs in as, who may sudo
-# without a password:
+# The test host's half of scripts/lib/host.sh: what a run does on the test host it runs on, sent
+# there over ssh on bash's standard input (host_side) and run as the user ssh logs in as, who may
+# sudo without a password:
 #
 #   bash -s -- prepare DIR REPO COMMIT [LABEL=COMMIT...]
 #   bash -s -- launch DIR NAME BENCH MEMORY
@@ -20,11 +20,11 @@
 #   bash -s -- size DIR
 #
 # A run's directory DIR, named for the run (run-..., host_run_name), holds tree, a worktree of
-# COMMIT of the host's clone REPO (a path in the home, or absolute), and trees/LABEL, one of each
-# other COMMIT, which the host script builds in, each its target directories its own; results, the
-# host script's results, and work, its work directory (CLADEFS_HOST_WORK); what the driver copied there (patch,
-# guest-kernel); and job, the job's command, which the driver copied there too, its log, its pid,
-# its exit status and its lock, which the job holds as long as it runs.
+# COMMIT of the test host's clone REPO (a path in the home, or absolute), and trees/LABEL, one of
+# each other COMMIT, which the host script builds in, each its target directories its own; results,
+# the host script's results, and work, its work directory (CLADEFS_TEST_HOST_WORK); what the driver
+# copied there (patch, guest-kernel); and job, the job's command, which the driver copied there
+# too, its log, its pid, its exit status and its lock, which the job holds as long as it runs.
 #
 # prepare makes the worktrees, fetching REPO's origin if a commit is not there yet, with
 # vendor/firecracker checked out in each and the patch, if any, applied to tree; the commit each
@@ -37,7 +37,7 @@
 # machine sleeping ends nothing, under fxjob (system-setup.d/146-fxdax_cgroups.sh), with --bench if
 # BENCH is 1, with --mem MEMORY if one is given; it returns once the job holds its lock. wait waits
 # for the lock, saying `waiting` once it has a connection, then `status N`, or `lost` if the job
-# ended without its status, as with the host's restart, or `lost unreadable` if its status file
+# ended without its status, as with the test host's restart, or `lost unreadable` if its status file
 # holds no number, as a full disk leaves it (made, nothing written in it: TASK-489), or `none` if
 # no job was launched. fetch
 # writes a gzipped tar of the results to its standard output: but for the guests' root filesystems
@@ -60,7 +60,7 @@
 # fxjob kills what is left of its scope itself since TASK-353; reap stays for what it can't reach:
 # cancel's TERM ends the job's shell, freeing its lock, while fxjob still reaps, and a job whose
 # fxjob was killed outright, or is older than that, leaves its scope to reap here.
-# CLADEFS_HOST_PROC names the processes' directory (default /proc), for the tests.
+# CLADEFS_TEST_HOST_PROC names the processes' directory (default /proc), for the tests.
 set -euo pipefail
 
 # The job's command runs as root, sudo's, with the user's Rust (scripts/lib/host.sh's
@@ -78,7 +78,7 @@ give_back() {
 # reap NAME kills the processes left in the scope of the job NAME, each process's cgroup naming it
 # (fxjob-NAME-PID.scope), and succeeds once none is left.
 reap() {
-    local name=$1 proc=${CLADEFS_HOST_PROC:-/proc} pids tries
+    local name=$1 proc=${CLADEFS_TEST_HOST_PROC:-/proc} pids tries
     for (( tries = 0; tries < 30; tries++ )); do
         pids=$(grep -l -- "/fxjob-$name-[0-9]*\.scope\$" "$proc"/[0-9]*/cgroup 2> /dev/null |
             sed 's|.*/\([0-9]*\)/cgroup$|\1|') || true
@@ -118,7 +118,7 @@ prepare() {
     done < <(find "$(dirname "$dir")" -mindepth 1 -maxdepth 1 -name 'run-*' -mtime +3)
     git -C "$repo" worktree prune
     # One run at a time fetches, and adds worktrees, which share the clone's objects and modules.
-    exec 8> "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/fxdax-host.lock"
+    exec 8> "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/cladefs-host.lock"
     flock 8
     for pair in "${pairs[@]}"; do
         label=${pair%%=*} commit=${pair#*=}

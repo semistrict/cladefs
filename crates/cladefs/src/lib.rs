@@ -10,7 +10,7 @@
 //!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's daemon,
 //!   `cladefsd`, one a host (`extentd`), serves the stores of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
-//!   device is a `RemoteExtentStore`, a connection to it.
+//!   device is a `DaemonExtentStore`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
 //!   as the stores a guest's Fxfs mounts. It is the guest's filesystem too: Fxfs's POSIX layer
 //!   (crates/fxfs-posix), which the guest kernel's VFS calls, and the host's filesystem calls as a
@@ -86,7 +86,7 @@
 //! [mounted](Filesystem::mount) straight from storage is the `default` volume of an image of its
 //! own, which closing it closes.
 //!
-//! [`Image::snapshot_volume`] clones a whole volume, mounted or not, into a new one, in time and
+//! [`Image::snapshot_volume`] snapshots a whole volume, mounted or not, into a new one, in time and
 //! space independent of its size: the snapshot shares the source's metadata and data until
 //! either changes them, as Fxfs writes changes to new blocks, and what they share is freed once
 //! neither references it.
@@ -105,13 +105,14 @@
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
 //!
-//! An image can be cloned: [`Storage::clone_to`] clones closed storage, and
-//! [`Image::clone_storage_to`] a mounted image's, after writing back its volumes' dirty data.
-//! A clone is a fork of the image's extent store, which shares the image's data rather than
-//! copies it, whatever it holds, and of its branch in its bucket, which the clone shares.
+//! An image can be forked: [`Storage::fork_to`] forks closed storage, and
+//! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
+//! Forking forks the image's extent store, which shares the image's data rather than copies it,
+//! whatever it holds, and its branch in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
 
+pub mod bucket;
 mod cache;
 mod dax;
 mod error;
@@ -120,9 +121,9 @@ mod executor;
 pub mod extentd;
 mod extents;
 pub mod faults;
-mod fence;
 mod filesystem;
 pub mod fuse;
+mod halt;
 #[cfg(test)]
 mod heap;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -132,11 +133,10 @@ mod image;
 pub mod import;
 mod memory;
 #[cfg(target_os = "linux")]
-pub mod memory_volume;
+pub mod memory_vdisk;
 mod node;
 pub mod pages;
 mod profile;
-pub mod remote;
 pub mod renamed;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod request;
@@ -178,12 +178,12 @@ pub use dax::uffd::{
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
-pub use extent_remote::layout::{Branch, Cell};
+pub use extent_bucket::layout::{Branch, Cell};
 #[cfg(target_os = "linux")]
-pub use extentd::{DaemonConnection, RemoteDevice, RemoteExtentStore};
+pub use extentd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
 pub use extents::{
-    Commit, ExtentId, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
-    StoreHolding, StoreRole, Whose, WindowMapping, WriteBarriers,
+    Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
+    StoreRole, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::{BranchOf, new_cell};
@@ -193,6 +193,7 @@ pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
 pub use storage::Storage;
+pub use storage_device::ExtentId;
 
 /// cladefs: the commit this build is of, as scripts/build-commit.sh said at build time (build.rs):
 /// a commit, with `-dirty` if a tracked file differed from it, or `unknown`. What extentd's

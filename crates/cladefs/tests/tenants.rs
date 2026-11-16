@@ -14,18 +14,18 @@
 mod common;
 
 use cladefs::extentd::{Tenant, serve, serve_tenant};
-use cladefs::{Errno, ExtentId, ExtentStore, RemoteExtentStore};
+use cladefs::{DaemonExtentStore, Errno, ExtentId, ExtentStore};
 use common::{cache, copies, holds, memory, pattern};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A tenant named `name`, of the ID `id` in the bucket (TASK-364), whose stores are in the
-/// directory `name` in `dir`.
+/// A tenant of the ID `id` in the bucket (TASK-364), whose stores are in the directory `name` in
+/// `dir`.
 fn tenant(dir: &Path, name: &str, id: u64) -> Arc<Tenant> {
     std::fs::create_dir(dir.join(name)).unwrap();
-    Tenant::new(name, id, dir.join(name)).unwrap()
+    Tenant::new(id, dir.join(name)).unwrap()
 }
 
 /// A daemon's listener at `name` in `dir`, serving `tenant`'s VM processes, or those of none.
@@ -46,8 +46,8 @@ fn tenants_hold_their_own_pages() {
     let dir = tempfile::tempdir().unwrap();
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
     let two = listen(dir.path(), "two", Some(tenant(dir.path(), "two", 2)));
-    let ours = RemoteExtentStore::connect(&one, dir.path().join("one/ours"), 1 << 24).unwrap();
-    let theirs = RemoteExtentStore::connect(&two, dir.path().join("two/theirs"), 1 << 24).unwrap();
+    let ours = DaemonExtentStore::connect(&one, dir.path().join("one/ours"), 1 << 24).unwrap();
+    let theirs = DaemonExtentStore::connect(&two, dir.path().join("two/theirs"), 1 << 24).unwrap();
     let (our_bytes, their_bytes) = (pattern(1), pattern(2));
     cache(&ours, &our_bytes);
     cache(&theirs, &their_bytes);
@@ -80,13 +80,13 @@ fn public_bases_are_shared_read_only() {
     // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the branch with.
     let base = ExtentStore::open(&base_path).unwrap();
     for (fork, tenant) in forks.iter().zip(1..) {
-        // Each the one volume of a cell of its tenant's (TASK-364).
+        // Each the one vdisk of a cell of its tenant's (TASK-364).
         base.fork(fork, cladefs::new_cell(tenant)).unwrap();
     }
     drop(base);
 
     // Not in its directory, nor a tenant's to open were it there.
-    let refused = RemoteExtentStore::connect(&one, &base_path, 1 << 24);
+    let refused = DaemonExtentStore::connect(&one, &base_path, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let base_in_one = dir.path().join("one/base");
     // Of a cell of its own (TASK-364), refused as public.
@@ -94,12 +94,12 @@ fn public_bases_are_shared_read_only() {
         .unwrap()
         .make_public()
         .unwrap();
-    let refused = RemoteExtentStore::connect(&one, &base_in_one, 1 << 24);
+    let refused = DaemonExtentStore::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 
     let mut stores = Vec::new();
     for (socket, fork) in [(&one, &forks[0]), (&two, &forks[1])] {
-        let store = RemoteExtentStore::connect(socket, fork, 1 << 24).unwrap();
+        let store = DaemonExtentStore::connect(socket, fork, 1 << 24).unwrap();
         let pages = base_bytes.len() / cladefs::pages::page_size() as usize;
         let window = memory(pages);
         // SAFETY: The memory is this test's, which it leaks: the window maps it while the process
@@ -133,17 +133,17 @@ fn public_bases_are_shared_read_only() {
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EACCES));
 }
 
-/// TASK-79.17: the VM processes of no tenant, the default tenant's, hold an arena of their own, as
-/// a tenant's do, not the default arena, whose pages are public bases', which every tenant's VM
-/// processes hold: no tenant's reaches the default tenant's pages; and they hold the default arena
-/// read-only, as a tenant's do.
+/// TASK-79.17: the default tenant's VM processes hold an arena of their own, as a tenant's do, not
+/// the default arena, whose pages are public bases', which every tenant's VM processes hold: no
+/// granted tenant's reaches the default tenant's pages; and they hold the default arena read-only,
+/// as a tenant's do.
 #[test]
 fn the_default_tenants_pages_are_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let default = listen(dir.path(), "default", None);
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
-    let ours = RemoteExtentStore::connect(&default, dir.path().join("ours"), 1 << 24).unwrap();
-    let theirs = RemoteExtentStore::connect(&one, dir.path().join("one/theirs"), 1 << 24).unwrap();
+    let ours = DaemonExtentStore::connect(&default, dir.path().join("ours"), 1 << 24).unwrap();
+    let theirs = DaemonExtentStore::connect(&one, dir.path().join("one/theirs"), 1 << 24).unwrap();
     let our_bytes = pattern(4);
     cache(&ours, &our_bytes);
 

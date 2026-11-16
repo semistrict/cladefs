@@ -4,14 +4,14 @@
 
 //! The collector of the file buckets images keep their branches in, each its own, beside its
 //! directory (backlog doc-14, TASK-165.6): what reclaims what their branches no longer need, and
-//! compacts what is mostly freed, there, the only cleaner of what images free (TASK-165.8). No
-//! `cladefs-gc` collects an image's own bucket, as one does a host's: the processes that have images
-//! of it open do, a pass after an image's commit, on a thread of its own, at most one every
-//! [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
-//! image and its clones, which reads again only the branches' records that changed (`Collector`).
+//! compacts what is mostly freed, there, the only thing that deletes what images free
+//! (TASK-165.8). No `cladefs-gc` collects an image's own bucket, as one does a host's: the
+//! processes that have images of it open do, a pass after an image's commit, on a thread of its
+//! own, at most one every [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
+//! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
-use extent_remote::collector::{Collector, Options, Report};
-use extent_remote::store::Store as Bucket;
+use extent_bucket::collector::{Collector, Options, Report};
+use extent_bucket::object_bucket::ObjectBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -57,7 +57,7 @@ fn pace() -> Pace {
 static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
 
 /// The collector of `bucket`, at `url`, an image's own, which this process's images of it share.
-pub(crate) fn of(url: &str, bucket: &Arc<Bucket>) -> Arc<Collecting> {
+pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
     let mut collecting = COLLECTING.lock().unwrap();
     collecting.retain(|_, collector| collector.strong_count() > 0);
     if let Some(collector) = collecting.get(url).and_then(Weak::upgrade) {
@@ -75,7 +75,7 @@ pub(crate) fn of(url: &str, bucket: &Arc<Bucket>) -> Arc<Collecting> {
 
 /// An image's own bucket's collector in this process. Dropped, it waits for the pass it runs, if any.
 pub(crate) struct Collecting {
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     pace: Pace,
     state: Mutex<State>,
 }
@@ -170,7 +170,7 @@ impl Collecting {
 
     /// Runs passes as [`Collecting::pass_now`] does until two in a row delete and compact nothing,
     /// every image of the bucket closed, and says what they left that they should have collected
-    /// ([`extent_remote::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
+    /// ([`extent_bucket::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
     /// pass over a dead cell retires the references that kept what its parents' cells reclaim at
     /// their next (TASK-395.4); and a pass retiring them again deletes nothing.
     #[cfg(test)]
@@ -186,7 +186,7 @@ impl Collecting {
         }
         assert_eq!(quiet, 2, "{PASSES} passes alone, which kept doing something");
         let left =
-            extent_remote::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
+            extent_bucket::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
         extent_store::upload::block_on(left).unwrap()
     }
 }
@@ -203,7 +203,7 @@ impl Drop for Collecting {
 /// A pass of `collector` over `bucket`, as a holder no other pass is: what it did, logged and
 /// returned, or why it failed, logged. Nothing it could not read it deleted: the next pass tries
 /// again.
-fn pass(collector: &mut Collector, bucket: &Bucket) -> Report {
+fn pass(collector: &mut Collector, bucket: &ObjectBucket) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
     let failed = match extent_store::upload::block_on(collector.collect(bucket, rand::random())) {
@@ -219,12 +219,13 @@ fn pass(collector: &mut Collector, bucket: &Bucket) -> Report {
                 uncompacted,
                 removed,
             } = report;
-            // Sealed objects it leaves uncompacted, its collector having no KMS (TASK-411.6); dead
-            // cells removed whole (TASK-455).
+            // Encrypted objects it leaves uncompacted, its collector having no KMS (TASK-411.6);
+            // dead cells removed whole (TASK-455).
             log::info!(
                 "cladefs: an image's bucket collected: deleted {deleted} ({deleted_bytes} bytes), \
                  compacted {compacted} ({compacted_bytes} bytes), retired {retired} references, \
-                 {skipped} cells unchanged, {uncompacted} sealed left uncompacted in {locked} cells, \
+                 {skipped} cells unchanged, {uncompacted} encrypted left uncompacted in {locked} \
+                 cells, \
                  {removed} dead cells removed"
             );
             return report;

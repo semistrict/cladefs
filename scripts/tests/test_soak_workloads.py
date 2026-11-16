@@ -39,7 +39,7 @@ class SoakWorkloads(unittest.TestCase):
         shutil.copy2(SOAK, root / "scripts" / SOAK.name)
         fake = root / "scripts" / "test-host.sh"
         fake.write_text('#!/bin/bash\nmkdir -p "$1"\necho "$(basename "$1") $CLADEFS_E2E_TEST '
-                        'rounds=$CLADEFS_E2E_ROUNDS kernel=$CLADEFS_GUEST_KERNEL_BUILD '
+                        'repeats=$CLADEFS_E2E_REPEATS kernel=$CLADEFS_GUEST_KERNEL_BUILD '
                         'follow=$CLADEFS_FOLLOW_SECONDS failpoints=${CLADEFSD_FAILPOINTS:-}" '
                         '>> "$(dirname "$1")/../ran.txt"\n')
         fake.chmod(0o755)
@@ -52,15 +52,15 @@ class SoakWorkloads(unittest.TestCase):
         return (root / "ran.txt").read_text().splitlines()
 
     def test_each_group_one_run_after_another(self):
-        self.assertEqual(self.soaked("crash", "mixed", CLADEFS_SOAK_ROUNDS="2"), [
-            "crash --tag soak-crash rounds=100 kernel=release follow=20 failpoints=",
-            "mixed --tag soak-mixed rounds=80 kernel=release follow=0 failpoints=1",
+        self.assertEqual(self.soaked("crash", "mixed", CLADEFS_SOAK_REPEATS="2"), [
+            "crash --tag soak-crash repeats=100 kernel=release follow=20 failpoints=",
+            "mixed --tag soak-mixed repeats=80 kernel=release follow=0 failpoints=1",
         ])
 
-    def test_a_cap_bounds_each_groups_rounds(self):
+    def test_a_cap_bounds_each_groups_repeats(self):
         self.assertEqual(self.soaked("sanitized", "replicas", CLADEFS_SOAK_CAP="1"), [
-            "sanitized --tag soak-sanitized rounds=1 kernel=debug follow=20 failpoints=",
-            "replicas --tag soak-replicas rounds=1 kernel=release follow=600 failpoints=",
+            "sanitized --tag soak-sanitized repeats=1 kernel=debug follow=20 failpoints=",
+            "replicas --tag soak-replicas repeats=1 kernel=release follow=600 failpoints=",
         ])
 
 

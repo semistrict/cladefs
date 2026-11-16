@@ -549,10 +549,10 @@ dependencies = [
  "bitflags",
  "cladefs",
  "event-listener",
+ "extent_bucket",
  "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "fail",
  "flate2",
@@ -604,9 +604,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cladefs",
+ "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "fidl-fuchsia-io",
  "fuchsia-async",
@@ -950,6 +950,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "extent_bucket"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "chrono",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "hyper-util",
+ "imbl",
+ "libc",
+ "log",
+ "object_store",
+ "opentelemetry",
+ "rand 0.10.3",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage_device",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "extent_files"
 version = "0.1.0"
 dependencies = [
@@ -993,49 +1027,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_remote"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode",
- "bytes",
- "chrono",
- "extent_frame",
- "extent_keys",
- "fail",
- "futures",
- "http-body-util",
- "humantime",
- "hyper",
- "hyper-util",
- "imbl",
- "libc",
- "log",
- "object_store",
- "opentelemetry",
- "rand 0.10.3",
- "reqwest",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "storage_device",
- "tempfile",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "extent_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "event-listener",
+ "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "fail",
  "futures",
@@ -3779,9 +3779,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cladefs",
+ "extent_bucket",
  "extent_files",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "futures",
  "libc",

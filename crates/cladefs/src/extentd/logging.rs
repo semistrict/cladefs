@@ -21,7 +21,7 @@
 //! - `CLADEFS_LOG_LEVEL`: the gravest records logged, `info` by default: `off`, `error`, `warn`,
 //!   `info`, `debug` or `trace`, then, after commas, `TARGET=LEVEL`s for the targets (module paths)
 //!   at or under TARGET, the longest such that names one deciding: as
-//!   `info,extent_remote::store=debug`, which logs each request of object storage too.
+//!   `info,extent_bucket::object_bucket=debug`, which logs each request of object storage too.
 
 use std::fmt::{self, Write as _};
 use std::io::Write as _;
@@ -335,13 +335,13 @@ mod tests {
         let pairs: [(&str, log::kv::Value<'_>); 1] = [("kind", log::kv::Value::from("get"))];
         let record = log::Record::builder()
             .level(log::Level::Debug)
-            .target("extent_remote::store")
+            .target("extent_bucket::object_bucket")
             .args(format_args!("object storage: get b/1"))
             .key_values(&pairs)
             .build();
         assert_eq!(
             line(Format::Text, &record, request(42, Some("/stores/vm1")), at()),
-            "DEBUG extent_remote::store: object storage: get b/1 kind=get request_id=42 \
+            "DEBUG extent_bucket::object_bucket: object storage: get b/1 kind=get request_id=42 \
              store=/stores/vm1"
         );
     }
@@ -409,13 +409,13 @@ mod tests {
         );
         let levels = Settings::from_vars(vars(
             None,
-            Some("warn, extent_remote=debug,extent_remote::cache=error"),
+            Some("warn, extent_bucket=debug,extent_bucket::cache=error"),
         ))
         .unwrap();
         assert_eq!(levels.level_of("cladefs::extentd::server"), log::LevelFilter::Warn);
-        assert_eq!(levels.level_of("extent_remote::store"), log::LevelFilter::Debug);
-        assert_eq!(levels.level_of("extent_remote::cache"), log::LevelFilter::Error);
-        assert_eq!(levels.level_of("extent_remote_other"), log::LevelFilter::Warn);
+        assert_eq!(levels.level_of("extent_bucket::object_bucket"), log::LevelFilter::Debug);
+        assert_eq!(levels.level_of("extent_bucket::cache"), log::LevelFilter::Error);
+        assert_eq!(levels.level_of("extent_bucket_other"), log::LevelFilter::Warn);
         assert_eq!(levels.max_level(), log::LevelFilter::Debug);
         assert_eq!(
             Settings::from_vars(vars(None, Some("loud"))),

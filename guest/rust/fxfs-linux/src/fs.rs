@@ -7,10 +7,10 @@
 //! inode number within the volume, through Fxfs's POSIX layer (crates/fxfs-posix), whose VFS is the
 //! kernel's (`Guest`).
 //!
-//! cladefs: what only the guest has is here: its device's DAX, durability, resizes and freezes,
-//! and, on a follower's device, what follows the store's writer (`follow`, backlog doc-8).
+//! cladefs: what only the guest has is here: its device's DAX, uploaded commits, resizes and
+//! freezes, and, on a follower's device, what follows the store's writer (`follow`, backlog doc-8).
 
-use crate::device::{Dax, DeviceStats, Durability, DurableGuard, ExtentDevice, Freezer, Resizer};
+use crate::device::{Dax, DeviceStats, ExtentDevice, Freezer, Resizer, Uploading, UploadingGuard};
 use crate::follow::{Following, GuestFollow};
 use anyhow::{Error, anyhow, ensure};
 use follower::{Failed, Kernel as _};
@@ -70,12 +70,12 @@ const SHRINK_HEADROOM: u64 = 16 << 20;
 pub struct Filesystem {
     /// The filesystem, which `close` closes, after the last unmount.
     filesystem: OpenFxFilesystem,
-    /// cladefs: on a follower's device, the epoch of the commit it last advanced to, as it
+    /// cladefs: on a follower's device, the number of the commit it last advanced to, as it
     /// advances, and the commit its state is as of at the latest.
     follower: Option<(Arc<AtomicU64>, u64)>,
     dax: Dax,
-    /// What makes the device's commits durable, for `sync`.
-    durability: Durability,
+    /// What makes the device's commits uploaded, for `sync`.
+    uploading: Uploading,
     /// cladefs: what the device's requests took, and what waited on its seals (`stats`).
     device_stats: Arc<DeviceStats>,
     /// cladefs: fsyncs, and those another's sync covered, of all its volumes (`stats`).
@@ -130,10 +130,10 @@ pub struct Guest {
 impl Platform for Guest {
     const KEEPS_DIRECTORY_TIMES: bool = true;
 
-    type Durable = DurableGuard;
+    type Durable = UploadingGuard;
 
-    fn durable(&self) -> DurableGuard {
-        self.filesystem.durability.begin()
+    fn durable(&self) -> UploadingGuard {
+        self.filesystem.uploading.begin()
     }
 
     fn spawn_urgent(&self, future: impl Future<Output = ()> + Send + 'static) {
@@ -174,7 +174,7 @@ impl Filesystem {
         let format = !read_only && device.is_empty().await?;
         let device = if read_only { device.writing_nothing() } else { device };
         let dax = device.dax();
-        let durability = device.durability();
+        let uploading = device.uploading();
         let device_stats = device.stats();
         let resizer = device.resizer();
         let freezer = device.freezer();
@@ -209,7 +209,7 @@ impl Filesystem {
             filesystem,
             follower,
             dax,
-            durability,
+            uploading,
             device_stats,
             sync_counts: Arc::default(),
             resizer,
@@ -263,7 +263,7 @@ impl Filesystem {
     }
 
     /// cladefs: seals what is open, as the host asks: syncs the journal, which commits the device,
-    /// ordered, not durable, sealing every extent open. Another guest's writable MAP was refused
+    /// ordered, not uploaded, sealing every extent open. Another guest's writable MAP was refused
     /// for want of the memory they hold, which only their seal lets go of (TASK-153.15).
     pub async fn seal(&self) -> Result<(), Error> {
         self.filesystem.sync(SyncOptions { flush_device: true, ..Default::default() }).await
@@ -299,10 +299,10 @@ impl Filesystem {
                 ..Default::default()
             };
             self.filesystem.sync(options).await?;
-            // Then durable, once: the syncs' flushes ordered, each durable commit waiting for
-            // object storage (TASK-371).
+            // Then uploaded, once: the syncs' flushes ordered, each uploaded commit waiting for
+            // the bucket (TASK-371).
             {
-                let _durable = self.durability.begin();
+                let _uploading = self.uploading.begin();
                 self.filesystem.device().flush().await?;
             }
             self.freezer.freeze().await?;
@@ -450,7 +450,7 @@ impl Filesystem {
         let counts = [
             ("device_read_bytes", &device.read_bytes),
             ("device_write_bytes", &device.write_bytes),
-            ("device_durable_commits", &device.durable_commits),
+            ("device_uploaded_commits", &device.uploaded_commits),
             ("journal_space_waits", &journal.space_waits),
             ("journal_space_wait_ns", &journal.space_wait_ns),
             ("journal_compactions", &journal.compactions),

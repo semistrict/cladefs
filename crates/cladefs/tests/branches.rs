@@ -9,7 +9,7 @@
 //! refused (`ESTALE`): nothing ran them.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_remote::store::Store as Bucket;
+use extent_bucket::object_bucket::ObjectBucket;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -18,12 +18,12 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| seed ^ (i % 251) as u8).collect()
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores' remote, as a host whose placement's
+/// Runs cladefsctl with `args`, the bucket at `url` the stores', as a host whose placement's
 /// token is 1: what it prints.
 fn branch(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_BUCKET", url)
         .env("CLADEFSD_TOKEN", "1")
         .env_remove("CLADEFSD_GRPC")
         .output()
@@ -72,7 +72,7 @@ fn rustfs_forks_and_takes_branches() {
 /// fork goes, and then its parent.
 fn forks_and_takes_branches_in(url: &str) {
     let url = url.to_owned();
-    let bucket = Arc::new(Bucket::from_url(&url).unwrap());
+    let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name);
 
@@ -90,7 +90,7 @@ fn forks_and_takes_branches_in(url: &str) {
         branch(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
     let child_branch: cladefs::Branch = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let record = runtime.block_on(extent_remote::branch::record(&*bucket, child_branch));
+    let record = runtime.block_on(extent_bucket::branch::record(&*bucket, child_branch));
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_branch));
     let forked = attached(&path("child"));
     assert_eq!(forked.branch(), child_branch);
@@ -112,12 +112,12 @@ fn forks_and_takes_branches_in(url: &str) {
     assert!(!path("parent").exists());
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores' remote, expecting it to fail: what it
+/// Runs cladefsctl with `args`, the bucket at `url` the stores', expecting it to fail: what it
 /// says.
 fn branch_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_BUCKET", url)
         .env("CLADEFSD_TOKEN", "1")
         .env_remove("CLADEFSD_GRPC")
         .output()
@@ -143,7 +143,7 @@ fn rustfs_places_and_syncs_stores() {
 /// later, does.
 fn places_and_syncs_stores_in(url: &str) {
     let url = url.to_owned();
-    let bucket = Arc::new(Bucket::from_url(&url).unwrap());
+    let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
 
@@ -159,14 +159,14 @@ fn places_and_syncs_stores_in(url: &str) {
     branch(&url, &["place", &path("first"), "5"]);
     branch(&url, &["sync", &path("first")]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let state = runtime.block_on(extent_remote::recover(&*bucket, branch_id, None)).unwrap().state;
+    let state = runtime.block_on(extent_bucket::recover(&*bucket, branch_id, None)).unwrap().state;
     assert_eq!(state.root, Some(b"synced".to_vec()));
 
     let capacity = (1u64 << 30).to_string();
     let hex = branch_id.to_string();
-    // Refused as it takes the branch's lease, which a later placement holds, leaving nothing
+    // Refused as it takes the branch's head, which a later placement holds, leaving nothing
     // (TASK-165.9: before, it took the branch and its sync was refused); taken placed later, its
-    // lease taken with that placement's token as it is made (TASK-149.20).
+    // head taken with that placement's token as it is made (TASK-149.20).
     let stale = branch_fails(&url, &["take", &path("earlier"), &capacity, &hex, "3"]);
     assert!(stale.contains("a later placement holds the branch"), "{stale}");
     assert!(!Path::new(&path("earlier")).exists());

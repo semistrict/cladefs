@@ -33,7 +33,7 @@
 # daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
 # fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
 # refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on
-# tmpfs, whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for, unless CLADEFSD_REMOTE names
+# tmpfs, whose distance CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFSD_BUCKET names
 # one: it counts against the run's memory, and a case whose working set of gigabytes overruns
 # that (TASK-350) takes more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
 #
@@ -46,8 +46,8 @@
 # comparison's timings. The environment's CLADEFS_* and CLADEFSD_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
 # and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
-# artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_HOST_PROC and
-# CLADEFS_HOST_SYS name the host's /proc and /sys, for the tests.
+# artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_TEST_HOST_PROC
+# and CLADEFS_TEST_HOST_SYS name the host's /proc and /sys, for the tests.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 (( $# >= 3 )) || { sed -n '/^#   scripts/p' "$0" >&2; exit 2; }
@@ -59,7 +59,7 @@ mkdir -p "$results"
 results=$(cd "$results" && pwd)
 command -v fxjob > /dev/null || { echo "fxjob not found: this runs on a host with fxjob (ubu1)" >&2; exit 2; }
 
-proc=${CLADEFS_HOST_PROC:-/proc} sys=${CLADEFS_HOST_SYS:-/sys}
+proc=${CLADEFS_TEST_HOST_PROC:-/proc} sys=${CLADEFS_TEST_HOST_SYS:-/sys}
 load() { cut -d' ' -f1 "$proc/loadavg"; }
 arc_bytes() {
     awk '$1 == "size" { print $3 }' "$proc/spl/kstat/zfs/arcstats" 2> /dev/null || echo -

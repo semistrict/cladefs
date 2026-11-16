@@ -4,13 +4,13 @@
 
 //! cladefs: a store the daemon serves as a device (`storage_device::Device`), the interface a
 //! filesystem keeps itself on: for what keeps itself on the host's daemon from outside a VM, as a
-//! SQLite volume does (crates/sqlite_extents, TASK-300). Its reads of sealed extents are the
+//! SQLite vdisk does (crates/sqlite_extents, TASK-300). Its reads of sealed extents are the
 //! daemon's, from its cache, which every store and VM it serves shares; its writes, frees and
-//! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are
-//! durable on the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
-//! waiting for object storage (the user, 2026-11-09, TASK-301); closing it waits for that.
+//! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are local,
+//! synced to the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
+//! waiting for the bucket (the user, 2026-11-09, TASK-301); closing it waits for that.
 
-use super::RemoteExtentStore;
+use super::DaemonExtentStore;
 use crate::{Commit, VolatileSlice, VolatileSliceMut, WriteBarriers};
 use anyhow::{Context as _, Error, ensure};
 use async_trait::async_trait;
@@ -23,15 +23,15 @@ use storage_device::{Device, ExtentId, ReadOptions, WriteFlags, WriteOptions};
 const TRANSFER_HEAP_SIZE: usize = 32 << 20;
 
 /// A store the daemon serves, as a device. See the module docs.
-pub struct RemoteDevice {
-    store: Arc<RemoteExtentStore>,
+pub struct DaemonDevice {
+    store: Arc<DaemonExtentStore>,
     allocator: BufferAllocator,
     block_count: u64,
 }
 
-impl RemoteDevice {
+impl DaemonDevice {
     /// `store` as a device.
-    pub fn new(store: Arc<RemoteExtentStore>) -> Result<Self, Error> {
+    pub fn new(store: Arc<DaemonExtentStore>) -> Result<Self, Error> {
         let block_size = crate::host_store::BLOCK_SIZE;
         let capacity = store.info().map_err(Error::new).context("the store's capacity")?.capacity;
         let allocator =
@@ -40,17 +40,13 @@ impl RemoteDevice {
     }
 
     /// The store.
-    pub fn store(&self) -> &Arc<RemoteExtentStore> {
+    pub fn store(&self) -> &Arc<DaemonExtentStore> {
         &self.store
     }
 }
 
-fn id(extent: ExtentId) -> crate::ExtentId {
-    crate::ExtentId { branch: extent.branch, sequence: extent.sequence }
-}
-
 #[async_trait]
-impl Device for RemoteDevice {
+impl Device for DaemonDevice {
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
         self.allocator.allocate_buffer(size)
     }
@@ -72,7 +68,7 @@ impl Device for RemoteDevice {
     ) -> Result<(), Error> {
         let bytes = buffer.try_as_mut_slice().expect("a buffer of the heap's");
         let mut slices = [VolatileSliceMut::from(bytes)];
-        let read = self.store.read_async(id(extent), offset, &mut slices).await;
+        let read = self.store.read_async(extent, offset, &mut slices).await;
         read.map_err(Error::new).with_context(|| format!("reading {extent:?} at {offset}"))
     }
 
@@ -95,7 +91,7 @@ impl Device for RemoteDevice {
         };
         let bytes = buffer.try_as_slice().expect("a buffer of the heap's");
         let slices = [VolatileSlice::from(bytes)];
-        let written = self.store.write_with_barriers_async(id(extent), offset, &slices, barriers);
+        let written = self.store.write_with_barriers_async(extent, offset, &slices, barriers);
         written.await.map_err(Error::new).with_context(|| format!("writing {extent:?} at {offset}"))
     }
 
@@ -112,14 +108,13 @@ impl Device for RemoteDevice {
     }
 
     async fn free(&self, extent: ExtentId) -> Result<(), Error> {
-        self.store.free_async(id(extent)).await.map_err(Error::new)
+        self.store.free_async(extent).await.map_err(Error::new)
     }
 
     /// In as few requests as the daemon takes (`FREE_MANY`): if one fails, each is said to have,
     /// those freed before it too, which freeing again does nothing to.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
-        let ids: Vec<_> = extents.iter().map(|extent| id(*extent)).collect();
-        match self.store.free_many_async(&ids).await {
+        match self.store.free_many_async(extents).await {
             Ok(()) => extents.iter().map(|_| Ok(())).collect(),
             Err(errno) => extents.iter().map(|_| Err(Error::new(errno))).collect(),
         }
@@ -136,7 +131,7 @@ impl Device for RemoteDevice {
     /// Waits for what it committed to be in object storage, as a closed image's branch is whole
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
-        self.store.commit_async(None, Commit::Durable).await.map_err(Error::new)
+        self.store.commit_async(None, Commit::Uploaded).await.map_err(Error::new)
     }
 
     async fn flush(&self) -> Result<(), Error> {

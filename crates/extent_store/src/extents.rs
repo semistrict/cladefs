@@ -4,9 +4,9 @@
 
 //! cladefs: a branch's extents, as its store holds them, in two layers (TASK-453). Under, the
 //! bucket's: where its recovered state, as the store opened, places what the bucket held of the
-//! branch, a persistent map (`extent_remote::recovery::Extents`) shared, never changed here, with the
+//! branch, a persistent map (`extent_bucket::recovery::Extents`) shared, never changed here, with the
 //! branch's writer and with every other store open on the host that started from the same decoded
-//! state, as a base's forks do (`extent_remote::recovery::Decoded`). Over it, the store's own:
+//! state, as a base's forks do (`extent_bucket::recovery::Decoded`). Over it, the store's own:
 //! what it wrote, sealed, acknowledged or followed where the collector moved it since, and the
 //! extents of the bucket's layer it holds no more there, freed or overlaid. A lookup reads its own
 //! layer, then the bucket's. So a store's memory grows with what it does, not with what it
@@ -19,11 +19,11 @@
 //! layer's shared, copies of it as it changes it, is counted for the process ([`own_held`]), which
 //! the extent daemon's budget of its anonymous memory counts, as it counts the decoded states the
 //! bucket's layers share once each, however many stores share them
-//! (`extent_remote::recovery::Decoded::held`).
+//! (`extent_bucket::recovery::Decoded::held`).
 
 use crate::layout::{Data, Extent};
+use extent_bucket::recovery::{ENTRY_BYTES, RUN_BYTES};
 use extent_frame::segment::Location;
-use extent_remote::recovery::{ENTRY_BYTES, RUN_BYTES};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -33,10 +33,10 @@ use storage_device::ExtentId;
 /// A branch's extents, in layers. See the module's docs.
 pub(crate) struct Extents {
     /// The bucket's layer: where the branch's state as the store opened placed its extents.
-    bucket: extent_remote::recovery::Extents,
+    bucket: extent_bucket::recovery::Extents,
     /// The decoded state the bucket's layer shares, if it started from one: held, so that the
     /// stores opened after this one find it decoded, and share it too, while this one is open.
-    layer: Option<Arc<extent_remote::State>>,
+    layer: Option<Arc<extent_bucket::State>>,
     /// The store's own layer: every extent it holds but those the bucket's holds still.
     own: HashMap<ExtentId, Extent>,
     /// Those of the bucket's layer it holds no more there: freed, or in its own layer.
@@ -88,7 +88,7 @@ pub const OWN_ENTRY_BYTES: u64 = 1024;
 
 impl Default for Extents {
     fn default() -> Self {
-        Self::over(extent_remote::recovery::Extents::new(), None)
+        Self::over(extent_bucket::recovery::Extents::new(), None)
     }
 }
 
@@ -116,8 +116,8 @@ impl Extents {
     /// The extents `bucket` places, the bucket's layer, sharing `layer`, the decoded state it
     /// started from, if it did; none of the store's own.
     pub fn over(
-        bucket: extent_remote::recovery::Extents,
-        layer: Option<Arc<extent_remote::State>>,
+        bucket: extent_bucket::recovery::Extents,
+        layer: Option<Arc<extent_bucket::State>>,
     ) -> Self {
         let hidden = HashSet::new();
         let extents = Self { bucket, layer, own: HashMap::new(), hidden, hidden_runs: 0 };
@@ -225,9 +225,9 @@ impl Extents {
             return;
         }
         let Some(at) = self.in_bucket(extent) else { return };
-        if extent_remote::layout::further(&at.key, &to.key) {
+        if extent_bucket::layout::further(&at.key, &to.key) {
             let len = at.len;
-            self.insert(*extent, Extent { len, data: Data::Remote(to.clone()) });
+            self.insert(*extent, Extent { len, data: Data::Bucket(to.clone()) });
         }
     }
 
@@ -263,7 +263,7 @@ impl Extents {
 
     /// cladefs: the decoded state its bucket's layer shares, if any.
     #[cfg(any(test, feature = "testing"))]
-    pub fn layer(&self) -> Option<&Arc<extent_remote::State>> {
+    pub fn layer(&self) -> Option<&Arc<extent_bucket::State>> {
         self.layer.as_ref()
     }
 }
@@ -291,7 +291,7 @@ impl<'a> Entry<'a> {
     }
 
     /// The store's own entry, if it is the store's own: those of the bucket's layer are in the
-    /// bucket, their data [`Data::Remote`].
+    /// bucket, their data [`Data::Bucket`].
     pub fn own(self) -> Option<&'a Extent> {
         match self {
             Entry::Own(entry) => Some(entry),
@@ -316,7 +316,7 @@ impl<'a> Entry<'a> {
 
 /// The entry of an extent the bucket holds at `location`.
 fn remote(location: &Location) -> Extent {
-    Extent { len: location.len, data: Data::Remote(location.clone()) }
+    Extent { len: location.len, data: Data::Bucket(location.clone()) }
 }
 
 #[cfg(test)]
@@ -326,7 +326,7 @@ mod tests {
 
     /// Where the bucket holds an extent: in a segment of the base's, at `offset`.
     fn at(offset: u64) -> Location {
-        let key = extent_remote::layout::segment(extent_remote::layout::test_branch(1), 1, 1);
+        let key = extent_bucket::layout::segment(extent_bucket::layout::test_branch(1), 1, 1);
         Location { key, offset, len: 4096 }
     }
 
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// The bucket's layer, as the store opened: extents 0 to 9, in the bucket.
-    fn bucket() -> extent_remote::recovery::Extents {
+    fn bucket() -> extent_bucket::recovery::Extents {
         (0..10).map(|sequence| (extent(sequence), at(sequence * 10))).collect()
     }
 
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn stores_layer_their_own_over_the_buckets() {
         let base = bucket();
-        let decoded = extent_remote::State::of(extent_remote::layout::test_branch(1), base.clone());
+        let decoded = extent_bucket::State::of(extent_bucket::layout::test_branch(1), base.clone());
         let layer = Some(Arc::new(decoded));
         let counted = own_held();
         let (mut one, other) =
@@ -381,10 +381,10 @@ mod tests {
         assert_eq!(one.remove(&extent(4)), Some(remote(&at(40))));
         assert_eq!(one.remove(&extent(4)), None);
         one.insert(extent(5), pieces(2));
-        let key = extent_remote::layout::moves(&at(60).key, 1).unwrap();
+        let key = extent_bucket::layout::moves(&at(60).key, 1).unwrap();
         let moved = Location { key, offset: 0, len: 4096 };
         one.follow(&extent(6), &moved);
-        let elsewhere = extent_remote::layout::segment(extent_remote::layout::test_branch(1), 2, 1);
+        let elsewhere = extent_bucket::layout::segment(extent_bucket::layout::test_branch(1), 2, 1);
         let unrelated = Location { key: elsewhere, offset: 0, len: 4096 };
         one.follow(&extent(7), &unrelated);
         one.follow(&extent(4), &moved);
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(one.len(), 9);
         assert!(one.get(&extent(4)).is_none() && one.get(&extent(20)).is_none());
         assert_eq!(one.get(&extent(5)).map(Entry::to_extent), Some(pieces(2)));
-        assert_eq!(one.get(&extent(6)).unwrap().to_extent().data, Data::Remote(moved.clone()));
+        assert_eq!(one.get(&extent(6)).unwrap().to_extent().data, Data::Bucket(moved.clone()));
         assert!(
             matches!(one.get(&extent(7)), Some(Entry::Bucket(location)) if *location == at(70))
         );
@@ -401,7 +401,7 @@ mod tests {
             base.iter().map(|(extent, location)| (*extent, remote(location))).collect();
         expected.retain(|(held, _)| *held != extent(4));
         expected[4].1 = pieces(2);
-        expected[5].1 = Extent { len: 4096, data: Data::Remote(moved) };
+        expected[5].1 = Extent { len: 4096, data: Data::Bucket(moved) };
         assert_eq!(held(&one), expected);
         let lens: Vec<_> = {
             let mut lens: Vec<_> = one.lens().collect();
@@ -433,9 +433,9 @@ mod tests {
     /// the map whole at most: 1,000 entries, of 512 bytes, 125 runs of 4 KiB.
     #[test]
     fn stores_count_the_runs_their_writers_change() {
-        let base: extent_remote::recovery::Extents =
+        let base: extent_bucket::recovery::Extents =
             (0..1000).map(|sequence| (extent(sequence), at(sequence * 10))).collect();
-        let layer = extent_remote::State::of(extent_remote::layout::test_branch(1), base.clone());
+        let layer = extent_bucket::State::of(extent_bucket::layout::test_branch(1), base.clone());
         let counted = own_held();
         let mut extents = Extents::over(base, Some(Arc::new(layer)));
         let runs = |extents: &Extents| extents.weight().runs;

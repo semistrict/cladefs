@@ -91,14 +91,14 @@ def bigmap_log(read, cached, written_mib=200):
 
 
 class PgbenchGate(unittest.TestCase):
-    def results(self, cases, rounds=False):
+    def results(self, cases, repeats=False):
         """A results directory of `cases`, each case's log by its name: in e2e/CASE/CASE, or, if
-        `rounds`, each of a list of logs in e2e/CASE/round-K/CASE."""
+        `repeats`, each of a list of logs in e2e/CASE/repeat-K/CASE."""
         root = Path(tempfile.mkdtemp())
         for case, logged in cases.items():
-            for at, (console, stdout) in enumerate(logged if rounds else [logged], 1):
-                place = root / "e2e" / case / (f"round-{at}" if rounds else case)
-                if rounds:
+            for at, (console, stdout) in enumerate(logged if repeats else [logged], 1):
+                place = root / "e2e" / case / (f"repeat-{at}" if repeats else case)
+                if repeats:
                     place = place / case
                 place.mkdir(parents=True)
                 (place / "log.txt").write_text(console)
@@ -118,9 +118,9 @@ class PgbenchGate(unittest.TestCase):
         log_txt.with_name("stdout.txt").unlink()
         self.assertEqual(gate.runs(gate.said(log_txt)), [[1.0, 2.0, 3.0, 4.0]])
 
-    def test_each_rounds_runs_are_measured_in_order(self):
+    def test_each_repeats_runs_are_measured_in_order(self):
         results = self.results({"fxfs-guest-pgbench-dax": [log([1, 2]), log([3, 4])] * 5},
-                               rounds=True)
+                               repeats=True)
         self.assertEqual(gate.measure(results)["dax"][::5], [[[1.0, 2.0]], [[3.0, 4.0]]])
         self.assertEqual(len(gate.measure(results)["dax"]), 10)
 
@@ -188,7 +188,7 @@ class PgbenchGate(unittest.TestCase):
             least("writeback-dax", "dax", 1.5, 0.0, True),
         ])
 
-    def test_density_is_of_the_first_round_of_many_vms_in_any_results(self):
+    def test_density_is_of_the_first_repeat_of_many_vms_in_any_results(self):
         single = self.results({
             "fxfs-guest-pgbench": log([1000, 1000]),
             "fxfs-guest-pgbench-dax": log([900, 900]),
@@ -231,13 +231,13 @@ class PgbenchGate(unittest.TestCase):
                          (1, "failed: decay of dax: 0.8 under 0.9\n"))
         self.assertEqual(json.loads(failed.stdout)["host"], "bare-metal")
 
-    def test_rounds_that_passed_are_read_from_their_whole_logs(self):
+    def test_repeats_that_passed_are_read_from_their_whole_logs(self):
         root = Path(tempfile.mkdtemp())
         case = root / "e2e" / "fxfs-guest-pgbench-dax"
         case.mkdir(parents=True)
         for at, runs in [(1, [10, 9]), (2, [8, 7])]:
             console, stdout = log(runs)
-            (case / f"round-{at}.log").write_text(console + stdout)
+            (case / f"repeat-{at}.log").write_text(console + stdout)
         self.assertEqual(gate.measure(root)["dax"], [[[10.0, 9.0]], [[8.0, 7.0]]])
 
     def test_a_run_without_pgbench_fails(self):

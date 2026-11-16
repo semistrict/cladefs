@@ -12,7 +12,7 @@
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
 //!   restore names a point and a store it doesn't have here, so it takes the point's branch from
-//!   the bucket, and forks the store from it. The bucket is CLADEFSD_REMOTE's, if set, or one
+//!   the bucket, and forks the store from it. The bucket is CLADEFSD_BUCKET's, if set, or one
 //!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
 //!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
 //!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
@@ -198,8 +198,8 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Image, Storage};
+    use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
@@ -240,15 +240,14 @@ mod host {
     /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
     /// point isn't (TASK-154): the tenant granted `dir`, and the point's branch, as the daemon says
     /// it, not as the snapshot does, made a store at `point` in it. Returns the tenant's socket,
-    /// given to the jail's user, if Firecracker runs in one. The tenant is named and of an ID in
-    /// the bucket (TASK-364); the point stays the snapshot's tenant's, and the restores are the
-    /// tenant's.
+    /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
+    /// (TASK-364); the point stays the snapshot's tenant's, and the restores are the tenant's.
     fn take_for_tenant(
         extentd: &Path,
         snapshot: &Path,
         point: &Path,
         dir: &Path,
-        tenant: (&str, u64),
+        tenant: u64,
     ) -> anyhow::Result<PathBuf> {
         let control = crate::common::control(extentd)?;
         let mut taken = snapshot.as_os_str().to_owned();
@@ -256,7 +255,8 @@ mod host {
         // In the bucket once taken: no sync.
         let branch = control.branch(Path::new(&taken))?;
         let id = |name: &str| std::env::var(name).ok().map(|id| id.parse()).transpose();
-        let socket = control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?;
+        let socket =
+            control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?;
         control.create_store(point, CAPACITY, branch, None)?;
         Ok(socket)
     }
@@ -276,7 +276,9 @@ mod host {
 
     /// The bundle a migration between hosts leaves the VM in, and restores it from.
     fn bundle() -> anyhow::Result<PathBuf> {
-        Ok(std::env::var_os("CLADEFS_MIGRATE_BUNDLE").context("CLADEFS_MIGRATE_BUNDLE not set")?.into())
+        Ok(std::env::var_os("CLADEFS_MIGRATE_BUNDLE")
+            .context("CLADEFS_MIGRATE_BUNDLE not set")?
+            .into())
     }
 
     impl TestFxfsGuestSnapshot {
@@ -298,18 +300,18 @@ mod host {
             let extentd = match self.mode {
                 Mode::Migrate | Mode::TenantMigrate => {
                     // In the temporary directory, as a socket's path is short (SUN_LEN), and a
-                    // test's directory, a round's of a soak, may not be.
+                    // test's directory, a repeat's of a soak, may not be.
                     let socket = std::env::temp_dir()
                         .join(format!("cladefs-{}-extentd.sock", std::process::id()));
-                    let named = std::env::var_os("CLADEFSD_REMOTE")
-                        .is_some_and(|remote| !remote.is_empty());
+                    let named = std::env::var_os("CLADEFSD_BUCKET")
+                        .is_some_and(|url| !url.is_empty());
                     let bucket = std::ffi::OsStr::new("memory:///migrate");
                     // Beside it, for its tenant's socket, in the jail if there is one.
-                    let tenants =
-                        std::env::temp_dir().join(format!("cladefs-{}-tenants", std::process::id()));
+                    let tenants = std::env::temp_dir()
+                        .join(format!("cladefs-{}-tenants", std::process::id()));
                     let mut env = vec![("CLADEFSD_TENANTS", tenants.as_os_str())];
                     if !named {
-                        env.push(("CLADEFSD_REMOTE", bucket));
+                        env.push(("CLADEFSD_BUCKET", bucket));
                     }
                     let daemon =
                         crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, None)?;
@@ -409,14 +411,8 @@ mod host {
                     Mode::TenantMigrate => {
                         std::fs::create_dir_all(&elsewhere)?;
                         let point = elsewhere.join("point");
-                        let tenant = format!("restored-{name}");
-                        let socket = take_for_tenant(
-                            &extentd,
-                            &snapshot,
-                            &point,
-                            &elsewhere,
-                            (&tenant, id),
-                        )?;
+                        let socket =
+                            take_for_tenant(&extentd, &snapshot, &point, &elsewhere, id)?;
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),
@@ -880,7 +876,10 @@ mod guest {
             mount();
             assert_eq!(fs::read(format!("{MNT}/who")).unwrap(), name.as_bytes());
             assert_eq!(fs::read(format!("{MNT}/after")).unwrap(), after);
-            assert!(fs::read(format!("{MNT}/pieces")).unwrap() == pieces_stored(), "{name}: pieces");
+            assert!(
+                fs::read(format!("{MNT}/pieces")).unwrap() == pieces_stored(),
+                "{name}: pieces"
+            );
             mount_volumes(volumes);
             for volume in 0..volumes {
                 assert_eq!(fs::read(format!("{}/who", at(volume))).unwrap(), name.as_bytes());

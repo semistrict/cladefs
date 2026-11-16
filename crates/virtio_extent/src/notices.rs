@@ -42,7 +42,7 @@ fn raise(interrupt: &Mutex<Option<Arc<dyn ConfigInterrupt>>>) -> bool {
 }
 
 /// cladefs: what the device knows of its store's capacity, which the daemon changes
-/// (`RemoteExtentStore::on_capacity`): the capacity, the shrink the guest is asked to take, if any
+/// (`DaemonExtentStore::on_capacity`): the capacity, the shrink the guest is asked to take, if any
 /// (0 if none), and how the guest is told, once the driver activates the device. The daemon's
 /// changes and the guest's answers are made one at a time (`changing`), so that an answer to a
 /// shrink no longer asked changes nothing (TASK-79.41); the driver reads the fields as they are.
@@ -126,7 +126,7 @@ impl Resizing {
 }
 
 /// cladefs: what a follower's device knows of its writer's commits (`VIRTIO_EXTENT_F_READ_ONLY`,
-/// `RemoteExtentStore::on_committed`): the latest commit's epoch, and how the guest is told, once
+/// `DaemonExtentStore::on_committed`): the latest commit's number, and how the guest is told, once
 /// the driver activates the device.
 #[derive(Default)]
 pub struct Following {
@@ -141,7 +141,7 @@ impl std::fmt::Debug for Following {
 }
 
 impl Following {
-    /// The epoch of the writer's latest commit the guest is told of.
+    /// The number of the writer's latest commit the guest is told of.
     pub fn latest(&self) -> u64 {
         self.committed.load(Ordering::Acquire)
     }
@@ -152,10 +152,10 @@ impl Following {
         *self.interrupt.lock().expect("Poisoned lock") = interrupt;
     }
 
-    /// The writer made commit `epoch`: the guest is told, with a configuration change, if it is
+    /// The writer made commit `commit`: the guest is told, with a configuration change, if it is
     /// after what it was told before.
-    pub fn committed(&self, epoch: u64) {
-        if self.committed.fetch_max(epoch, Ordering::AcqRel) >= epoch {
+    pub fn committed(&self, commit: u64) {
+        if self.committed.fetch_max(commit, Ordering::AcqRel) >= commit {
             return;
         }
         raise(&self.interrupt);

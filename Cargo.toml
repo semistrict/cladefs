@@ -144,7 +144,7 @@ follower = { path = "crates/follower" }
 follower_history = { path = "crates/follower_history" }
 extent_frame = { path = "crates/extent_frame" }
 extent_keys = { path = "crates/extent_keys" }
-extent_remote = { path = "crates/extent_remote" }
+extent_bucket = { path = "crates/extent_bucket" }
 bssl-crypto = { path = "crates/bssl-crypto" }
 mundane = { path = "crates/mundane" }
 fidl-fuchsia-io = { path = "crates/fidl-fuchsia-io" }
@@ -158,7 +158,7 @@ fuchsia-macro = { path = "crates/fuchsia-macro" }
 fidl-fuchsia-diagnostics-types = { path = "crates/fidl-fuchsia-diagnostics-types" }
 diagnostics-log = { path = "crates/diagnostics-log" }
 
-# extent_remote's simulation (scripts/test.sh's part sim): optimized, as its seed searches, seconds
+# extent_bucket's simulation (scripts/test.sh's part sim): optimized, as its seed searches, seconds
 # to minutes each so, took past 20 minutes each unoptimized and ran CI's workspace job out of time;
 # with a debug build's checks kept, its debug_asserts and overflows, among which are the protocol's
 # invariants (TASK-188).

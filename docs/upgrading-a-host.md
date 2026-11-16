@@ -24,7 +24,7 @@ Read the release's notes for which of these changed. Each one changed means what
 | VM process and daemon wire (`wire::VERSION`) | A VMM and a daemon of different versions meet: the daemon refuses its `OPEN` | The VMM fails to make its extent device: "the extent daemon refused this VM process's wire version N". The daemon's log says "refusing a VM process of wire version N: this daemon's is M". |
 | Device protocol (`VIRTIO_EXTENT_VERSION`) | A guest's driver meets a device of another version, or a snapshot of another version is restored | The guest's kernel log says "the device is of protocol version N, this driver of M: refused", and its extent filesystem doesn't mount. The VMM refuses the snapshot's load: "The snapshot's extent device is of protocol version N, this VMM's M". |
 | Store files (`extent_store` `FORMAT`) | The new daemon opens a store of the old format | `ENOTSUP`. The store is made again, from its branch in the bucket if that format didn't change too. |
-| Branches in the bucket (`extent_remote` `layout::FORMAT`) | A daemon reads a branch of another format | The branch is refused, and the collector's pass stops, deleting nothing. |
+| Branches in the bucket (`extent_bucket` `layout::FORMAT`) | A daemon reads a branch of another format | The branch is refused, and the collector's pass stops, deleting nothing. |
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
 
@@ -43,15 +43,15 @@ otherwise. A store or bucket format change means its stores are made again, not 
 3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::extentd::drain`, TASK-141.4):
    - its health service reports NOT_SERVING;
    - its VM sockets refuse connections, and its control API refuses calls with `UNAVAILABLE`;
-   - any VM still connected is cut off and exits 158, its last commits made durable and its store
+   - any VM still connected is cut off and exits 158, its last commits made local and its store
      closed;
    - the points it kept open for forks are closed;
-   - every store's uploader uploads what its store made durable, and stops.
+   - every store's uploader uploads what its store made local, and stops.
 
    It does all of that within `CLADEFSD_DRAIN` seconds (60 by default). If it finishes, it logs
    "drained in ...: every store closed" and exits 0. If not, it logs "not drained within Ns: ...
    left", naming how many connections, control calls and uploaders were left, and exits 1. Then the
-   stores' durable commits are still on the host's disk, and the next daemon to open each store
+   stores' local commits are still on the host's disk, and the next daemon to open each store
    uploads the rest.
 4. **Install the new daemon and Firecracker together.** They are one build. A guest kernel is
    upgraded as its VM next boots, with the Firecracker it boots on. It isn't part of this.

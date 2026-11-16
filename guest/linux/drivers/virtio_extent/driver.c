@@ -249,11 +249,11 @@ bool virtio_extent_map_many(struct virtio_extent *vext)
 }
 EXPORT_SYMBOL_GPL(virtio_extent_map_many);
 
-bool virtio_extent_map_ahead(struct virtio_extent *vext)
+bool virtio_extent_map_prefault(struct virtio_extent *vext)
 {
-	return virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_MAP_AHEAD);
+	return virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_MAP_PREFAULT);
 }
-EXPORT_SYMBOL_GPL(virtio_extent_map_ahead);
+EXPORT_SYMBOL_GPL(virtio_extent_map_prefault);
 
 bool virtio_extent_read_only(struct virtio_extent *vext)
 {
@@ -365,10 +365,11 @@ static u32 vext_args_resized(struct vext_request *req, u32 data_len, u32 root_le
 	return sizeof(req->args.resized);
 }
 
-static u32 vext_args_epoch(struct vext_request *req, u32 data_len, u32 root_len)
+static u32 vext_args_commit_number(struct vext_request *req, u32 data_len, u32 root_len)
 {
-	req->args.epoch = (struct virtio_extent_epoch) { .epoch = cpu_to_le64(req->offset) };
-	return sizeof(req->args.epoch);
+	req->args.commit_number =
+		(struct virtio_extent_commit_number) { .commit = cpu_to_le64(req->offset) };
+	return sizeof(req->args.commit_number);
 }
 
 /* cladefs: a STATS names the ask it answers (TASK-111.4). */
@@ -411,7 +412,7 @@ static const struct vext_type {
 	[VIRTIO_EXTENT_T_RESIZED] = { "resized", vext_args_resized, .writes = true },
 	[VIRTIO_EXTENT_T_FREEZE] = { "freeze" },
 	[VIRTIO_EXTENT_T_ADVANCE] = { "advance", NULL, VEXT_IN },
-	[VIRTIO_EXTENT_T_LET_GO] = { "let_go", vext_args_epoch },
+	[VIRTIO_EXTENT_T_LET_GO] = { "let_go", vext_args_commit_number },
 	[VIRTIO_EXTENT_T_PIN] = { "pin", vext_args_id },
 	[VIRTIO_EXTENT_T_UNPIN] = { "unpin", vext_args_id },
 	/* 15 was writable DAX's SEALED: no type. */
@@ -1476,7 +1477,7 @@ static const unsigned int vext_features[] = {
 	VIRTIO_EXTENT_F_READ_ONLY,
 	VIRTIO_EXTENT_F_FREE_MANY,
 	VIRTIO_EXTENT_F_MAP_MANY,
-	VIRTIO_EXTENT_F_MAP_AHEAD,
+	VIRTIO_EXTENT_F_MAP_PREFAULT,
 	VIRTIO_EXTENT_F_STATS,
 };
 

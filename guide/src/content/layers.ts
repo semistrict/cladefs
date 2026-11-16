@@ -45,7 +45,7 @@ export const layers: Layer[] = [
       "KVM follows for the window, and reports the guest's faults there to the daemon through " +
       "userfaultfd.",
     dirs: ["crates/virtio_extent", "vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/cladefs/src/dax/uffd.rs"],
-    anchors: ["vmm_handle", "vmm_window", "remote_store", "uffd_serve", "vmm_private_max"],
+    anchors: ["vmm_handle", "vmm_window", "daemon_store", "uffd_serve", "vmm_private_max"],
     docs: ["doc-4"],
     provenance: "Firecracker is upstream's, at v1.16.1; the extent device is cladefs's: crates/virtio_extent, which libmachine shares, and its adapter in the fork semistrict/firecracker.",
   },
@@ -56,7 +56,7 @@ export const layers: Layer[] = [
     role:
       "One process serves the extent stores of a host's hundreds of VMs, so each sealed extent is " +
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
-      "tables, mappings and private pages) and makes commits durable behind the guest.",
+      "tables, mappings and private pages) and makes commits local behind the guest.",
     dirs: ["crates/cladefs/src/extentd", "crates/cladefs/src/extents.rs", "crates/cladefs/src/dax.rs"],
     anchors: ["server_serve", "extent_store", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
     docs: ["doc-2", "doc-13"],
@@ -83,9 +83,9 @@ export const layers: Layer[] = [
     role:
       "Each branch's extents on the host's disk: open extents written raw, sealed ones framed into " +
       "zstd-compressed segments at commits. Since doc-14 it is the bucket's WAL and cache, one " +
-      "storage engine: what is durable here and not yet uploaded is the only state the bucket lacks.",
+      "storage engine: what is local here and not yet uploaded is the only state the bucket lacks.",
     dirs: ["crates/extent_store", "crates/extent_frame"],
-    anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_durable"],
+    anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_uploaded"],
     docs: ["doc-14", "doc-7"],
     provenance: "cladefs's own.",
   },
@@ -98,7 +98,7 @@ export const layers: Layer[] = [
       "with checkpoints of its index. One writer holds a branch's head, which names its segments " +
       "and newest checkpoint, every key written once; forks record where they were made and " +
       "inherit without copying; the collector alone deletes.",
-    dirs: ["crates/extent_remote"],
+    dirs: ["crates/extent_bucket"],
     anchors: ["upload", "acknowledge", "head_swap", "bucket", "fork_point", "fetcher", "es_fork"],
     docs: ["doc-7", "doc-14"],
     provenance: "cladefs's own.",

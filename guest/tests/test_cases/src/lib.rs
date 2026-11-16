@@ -206,7 +206,7 @@ tags! {
     /// The nightly's (.github/workflows/nightly.yml), as production runs them: e2e's and
     /// kernel's, every other case cheap enough on a release kernel, and xfstests.
     Nightly = "nightly",
-    /// scripts/dax-gate.sh's suites, rounds of each, in its first run.
+    /// scripts/dax-gate.sh's suites, repeats of each, in its first run.
     DaxGate = "dax-gate",
     /// scripts/soak-workloads-host.sh's crash group: the VM stopped mid-workload.
     SoakCrash = "soak-crash",
@@ -547,20 +547,17 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new(
             "fxfs-guest-follow-torture-mutant",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-faults-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture {
-                dax: true,
-                mutant: Some(Mutant::InvalidationFaults),
-            }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::DropFaults) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-barrier-dax",

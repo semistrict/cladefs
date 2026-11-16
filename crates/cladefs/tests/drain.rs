@@ -9,7 +9,7 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::{ExtentId, ExtentStore, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{DaemonExtentStore, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ impl Drop for KillOnDrop {
 fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(socket)
-        .env("CLADEFSD_REMOTE", format!("file://{}", bucket.display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", token.to_string())
         .spawn()
         .unwrap();
@@ -43,7 +43,7 @@ fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     daemon
 }
 
-fn read(store: &RemoteExtentStore, extent: ExtentId) -> Vec<u8> {
+fn read(store: &DaemonExtentStore, extent: ExtentId) -> Vec<u8> {
     let mut data = vec![0; BLOCK];
     store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     data
@@ -59,7 +59,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
 
     // A VM's store, its last commit only ordered, which its uploader, uploading within a second of
     // a durable commit, has not uploaded as the daemon is told to stop.
-    let store = RemoteExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     store.on_daemon_lost(move || told.send(()).unwrap());
     let branch = store.branch();
@@ -90,11 +90,11 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     // and ID name, as a snapshot names it by its ID alone; taken from the bucket.
     let full = extent_store::host_branch(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
-    unsafe { std::env::set_var("CLADEFSD_REMOTE", format!("file://{}", bucket.display())) };
+    unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
     ExtentStore::take(&point, 1 << 28, full, Some(2)).unwrap();
     let restored = other.join("restored");
     let restored =
-        RemoteExtentStore::connect_forked(&second_socket, &restored, &point, branch, 1 << 28);
+        DaemonExtentStore::connect_forked(&second_socket, &restored, &point, branch, 1 << 28);
     let restored = restored.unwrap();
     assert_eq!(restored.root().unwrap(), b"drained");
     assert_eq!(read(&restored, extent), [7; BLOCK]);

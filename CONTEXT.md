@@ -89,7 +89,7 @@ The first touch of a named page, which puts it into the VM process's memory.
 
 **Prefault**:
 Having KVM map installed pages ahead of the guest's accesses.
-_Avoid_: map ahead (`MAP_AHEAD` becomes `MAP_PREFAULT`), pre-fault, pre-faulting
+_Avoid_: map ahead, pre-fault, pre-faulting
 
 **Private page**:
 A window page the VM owns, copied on the guest's store or by `PRIVATE`, at the same address, named by no extent.
@@ -132,7 +132,7 @@ A file created in this mount, served from the guest's page cache until it is nex
 
 **Extent daemon**:
 The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
-_Avoid_: server, remote; `extentd` in code today, `cladefsd` once TASK-475 merges the host's daemons
+_Avoid_: server, remote; `cladefsd` is its name on the command line, `extentd` its module and protocol
 
 **Daemon client**:
 A VM process's connection to the extent daemon, through which its extent device has a store.
@@ -148,7 +148,7 @@ _Avoid_: tenant name
 
 **Default tenant**:
 The tenant whose ID is 0: the daemon's own socket's, and public bases'.
-_Avoid_: tenant 0, common tenant, no tenant (`NO_TENANT` becomes `DEFAULT_TENANT`)
+_Avoid_: tenant 0, common tenant, no tenant
 
 **Grant**:
 Giving a tenant its own VM socket, for the VM manager to put in the tenant's jails.
@@ -208,6 +208,10 @@ _Avoid_: volume, virtual disk, disk
 **Volume**:
 One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
 _Avoid_: volume for a vdisk
+
+**File set**:
+Named files kept straight on an extent device, with no filesystem between, each committed alone: what a SQLite or memory vdisk holds (`extent_files`).
+_Avoid_: volume
 
 **Fork**:
 A new branch made from a parent's commit or a point, sharing its extents, in O(1).
@@ -399,7 +403,7 @@ A vdisk's data key, under whose subkeys its objects are encrypted.
 
 **Encrypted**:
 Of a cell, store or object: held under its tenant's keys.
-_Avoid_: sealed (sealing is extents'), in the clear for its opposite (say **unencrypted**)
+_Avoid_: sealed (sealing is extents'); its opposite is **unencrypted**, or in the clear
 
 **Shred**:
 Making data unreadable by destroying the key that wraps it: a tenant's KEK, or a cell's wrapped KEKs.
@@ -410,7 +414,7 @@ A host's dropping the keys of a shredded tenant or cell, fencing its stores.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST`.
+A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
 _Avoid_: host alone
 
 **Driver**:
@@ -489,28 +493,34 @@ A dead end that was a diagnosis, not an approach.
 
 ## Ambiguities
 
-Words that mean several things today. Say the qualified form. These choices bind code
-identifiers too (types, protos, env vars, binaries), not prose alone.
+Words that meant several things. Say the qualified form. These choices bind code
+identifiers too (types, protos, env vars, binaries), not prose alone; the names below that the
+code does not have yet are said so.
 
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
-- **remote**: retired, in code too; say **bucket** or **daemon client**.
+- **remote**: retired, in code too; say **bucket** or **daemon client** (`CLADEFSD_BUCKET`).
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
-- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**, in code too (`cell::Vdisk`, `CreateVdisk`).
+- **volume**: Fxfs's alone; a cell's named branch is a **vdisk** (`cell::Vdisk`, `CreateVdisk`,
+  `VdiskKind`, `MemoryVdisk`). Named files on an extent device, with no filesystem, are a
+  **file set** (`extent_files::FileSet`).
 - **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
-- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol too.
+- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
+  StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; branches have none since TASK-407.
-- **durable**: names no stage; say **local** or **uploaded**, in code too.
-- **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it.
+- **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
+  `COMMIT_UPLOADED`, the `local_lag` stats, the trace's `cladefs.level`).
+- **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it,
+  env vars too (`CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`).
 - **region**: the guest's; virtio's is a **shared memory region**.
-- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag becomes `attach_only`).
+- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
-- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version**.
-- **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too.
+- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).
+- **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too
+  (`CLADEFS_E2E_REPEATS`, `repeat-K.json`).
 - **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.
-- **cache**: env vars name theirs: `CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`.

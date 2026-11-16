@@ -6,7 +6,7 @@
 # Measure ranged GETs from object storage (cladefs-gets) on an x86-64
 # Linux host, as root, into RESULTS/gets.md (scripts/gets-host.sh).
 #
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs:
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs:
 # `build` builds cladefs-gets, as work; `measure` runs it, building nothing;
 # unset, both (scripts/gets-host.sh runs the two as jobs of their own, TASK-368).
 #
@@ -26,6 +26,6 @@ if [[ $host_phase != measure ]]; then
     host_cargo build --release --manifest-path "$repo/Cargo.toml" -p cladefs --bin cladefs-gets
     if [[ $host_phase == build ]]; then exit 0; fi
 fi
-[[ -x $gets ]] || { echo "$gets: not built: CLADEFS_HOST_PHASE=build builds it" >&2; exit 2; }
+[[ -x $gets ]] || { echo "$gets: not built: CLADEFS_TEST_HOST_PHASE=build builds it" >&2; exit 2; }
 host_record > "$results/host.txt"
 "$gets" "$url" "$mib" "$secs" > "$results/gets.md"

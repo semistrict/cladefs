@@ -18,11 +18,11 @@ testing = []
 # shuttle_tests::`.
 shuttle = ["dep:shuttle", "physmem/shuttle"]
 # cladefs: the failpoints (the fail crate's) of the extent daemon's requests, and of the steps of a
-# fork's protocol here and in extent_store and extent_remote (`faults`), which the FAILPOINTS
+# fork's protocol here and in extent_store and extent_bucket (`faults`), which the FAILPOINTS
 # environment variable sets, or CLADEFS_FAULT_SEED from a seed: a request of a kind failing or
 # waiting, or a step failing, as configured (TASK-44.10). Without the feature they are nothing:
 # scripts/test-e2e.sh builds the daemon with it for CLADEFS_FAILPOINTS, in the sim profile, as a
-# release build refuses it (extent_remote, TASK-320). This crate's tests have it, and so its
+# release build refuses it (extent_bucket, TASK-320). This crate's tests have it, and so its
 # examples would: they are cladefs-examples'.
 failpoints = ["fail/failpoints"]
 # The protocols of atomics in `sync`'s terms (`hearing`) on loom's atomics, whose model then runs
@@ -49,7 +49,7 @@ extent_files.workspace = true
 zerocopy.workspace = true
 async-trait.workspace = true
 event-listener.workspace = true
-extent_remote.workspace = true
+extent_bucket.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
@@ -75,7 +75,7 @@ cladefs = { path = ".", features = ["failpoints", "testing"] }
 # Panics holding a lock shared beyond one store, in tests that ask (TASK-149.24).
 extent_store = { workspace = true, features = ["testing"] }
 # Tests' branches, of a cell of their own (`layout::test_branch`, TASK-364).
-extent_remote = { workspace = true, features = ["testing"] }
+extent_bucket = { workspace = true, features = ["testing"] }
 # A KMS counting its calls (TASK-411.3).
 extent_keys = { workspace = true, features = ["testing"] }
 # What the hostile VM process test looks for in the memory it is given (TASK-149.17).

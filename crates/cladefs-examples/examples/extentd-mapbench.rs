@@ -40,7 +40,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod bench {
-    use cladefs::{Commit, ExtentId, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+    use cladefs::{Commit, DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
     use cladefs::{WriteBarriers, extentd};
     use std::os::unix::net::UnixListener;
     use std::ptr::NonNull;
@@ -129,7 +129,7 @@ mod bench {
         let connections = number(4, 0);
         // A host of the multi-node system, as the daemon is (TASK-45): a bucket in its memory,
         // and placement 1, unless the environment names others.
-        for (var, default) in [("CLADEFSD_REMOTE", "memory:///mapbench"), ("CLADEFSD_TOKEN", "1")] {
+        for (var, default) in [("CLADEFSD_BUCKET", "memory:///mapbench"), ("CLADEFSD_TOKEN", "1")] {
             if std::env::var_os(var).is_none() {
                 // SAFETY: Before this process starts any other thread.
                 unsafe { std::env::set_var(var, default) };
@@ -144,13 +144,13 @@ mod bench {
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || extentd::serve(listener));
         let store =
-            RemoteExtentStore::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
+            DaemonExtentStore::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
         // The other VM processes' connections, idle.
         extentd::raise_open_files_limit().unwrap();
         let _others: Vec<_> = (0..connections)
             .map(|n| {
                 let path = dir.path().join(format!("other-{n}"));
-                RemoteExtentStore::connect(&socket, path, 1 << 30).unwrap()
+                DaemonExtentStore::connect(&socket, path, 1 << 30).unwrap()
             })
             .collect();
 
@@ -243,7 +243,7 @@ mod bench {
     /// timed, take FAULTs, which the daemon resolves, paging the extent in from the store
     /// (TASK-92.20).
     fn faults(
-        store: &RemoteExtentStore,
+        store: &DaemonExtentStore,
         memory: NonNull<u8>,
         count: u64,
         pages: u64,
@@ -284,7 +284,7 @@ mod bench {
     /// which copies it into a private page, and a journal block written with an ordered commit;
     /// then the range unmapped, its private pages with it, as writeback and rebinding end them.
     fn fsyncs(
-        store: &RemoteExtentStore,
+        store: &DaemonExtentStore,
         memory: NonNull<u8>,
         count: u64,
         pages: u64,

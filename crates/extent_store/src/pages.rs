@@ -37,7 +37,7 @@
 //!   were used, when they were dirtied, which other threads change as the cache goes through them,
 //!   so that no comparison sees another's file changed since (TASK-493).
 //! - **The flusher's work is the process's** ([`FLUSHER`]): every store's files wait on it, so a
-//!   panic on it, which no store's fence contains, aborts the extent daemon as one holding a lock
+//!   panic on it, which no store's halt contains, aborts the extent daemon as one holding a lock
 //!   shared beyond one store does ([`crate::shared`], TASK-149.24). Elsewhere, as in tests, its
 //!   death is said ([`PageCache::flusher_died`]), and a writer it would have let go panics rather
 //!   than wait for good.
@@ -648,7 +648,7 @@ impl<F: File> Shared<F> {
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
             // Assembled in memory aligned to blocks, which direct I/O writes as it is: whole
             // pages, but at the file's end (TASK-433.8).
-            let mut buffer = extent_remote::direct::Buffer::new(run.len() * PAGE as usize);
+            let mut buffer = extent_bucket::direct::Buffer::new(run.len() * PAGE as usize);
             let mut written = Vec::with_capacity(run.len());
             for (&index, into) in run.iter().zip(buffer.bytes_mut().chunks_exact_mut(PAGE as usize))
             {
@@ -1274,7 +1274,7 @@ mod tests {
 
     /// A panic on the flusher aborts the extent daemon, which a panic holding a lock shared beyond
     /// one store does (TASK-149.24), its log naming the flusher: every store's files wait on it, and
-    /// no store's fence contains its death, which left the daemon going on with nothing writing back
+    /// no store's halt contains its death, which left the daemon going on with nothing writing back
     /// what was dirty but writers held at the bound (TASK-493).
     #[test]
     fn a_panic_on_the_flusher_aborts_the_daemon() {

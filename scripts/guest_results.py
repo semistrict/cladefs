@@ -9,18 +9,18 @@ the scripts that drive them read in place of grepping logs.
 A run's results directory (test-e2e.sh's CLADEFS_E2E_RESULTS) holds:
 
 - run.json: the run's commit (scripts/build-commit.sh), its knobs, every CLADEFS_*, CLADEFSD_* and PJDFSTEST_*
-  variable it was given but those that say where it writes (WHERE), its rounds and its cases;
-- CASE/round-K.json: each round's outcome, as the runner writes it (`runner test --outcome`): pass,
-  fail, timeout, skip or report, why, the checks failed, what it took of its limit, the commit, the
+  variable it was given but those that say where it writes (WHERE), its repeats and its cases;
+- CASE/repeat-K.json: each repeat's outcome, as the runner writes it (`runner test --outcome`):
+  pass, fail, timeout, skip or report, why, the checks failed, what it took of its limit, the commit, the
   knobs, its own among them (CLADEFS_SEED), and the command that replays it;
-- summary.json: each case's outcome, its last round's (`unrun` before it starts, `running` between
-  rounds), the cases that failed, and the run's exit status once it ended (null before), rewritten
-  as each round ends; and what each extent daemon downloaded against what it read (`daemons`, a
+- summary.json: each case's outcome, its last repeat's (`unrun` before it starts, `running` between
+  repeats), the cases that failed, and the run's exit status once it ended (null before), rewritten
+  as each repeat ends; and what each extent daemon downloaded against what it read (`daemons`, a
   case's; `daemon`, the run's), from its stats file (CLADEFSD_STATS: the run's
   extentd-stats.txt, a case's daemon's NAME-stats.txt in its directory).
 
-    guest_results.py start RESULTS ROUNDS CASE...   (test-e2e.sh, before its first case)
-    guest_results.py ended RESULTS CASE             (after each round of a case)
+    guest_results.py start RESULTS REPEATS CASE...  (test-e2e.sh, before its first case)
+    guest_results.py ended RESULTS CASE             (after each repeat of a case)
     guest_results.py finish RESULTS STATUS          (as it exits)
     guest_results.py report RESULTS                 how each case went; exits 1 unless the run passed
 """
@@ -54,10 +54,10 @@ def write(path, value):
     staged.replace(path)
 
 
-def rounds_of(results, case):
-    """The outcomes of `case`'s rounds, in their order."""
-    files = (results / case).glob("round-*.json")
-    numbered = sorted((int(re.fullmatch(r"round-(\d+)\.json", f.name).group(1)), f) for f in files)
+def repeats_of(results, case):
+    """The outcomes of `case`'s repeats, in their order."""
+    files = (results / case).glob("repeat-*.json")
+    numbered = sorted((int(re.fullmatch(r"repeat-(\d+)\.json", f.name).group(1)), f) for f in files)
     return [json.loads(f.read_text()) for _, f in numbered]
 
 
@@ -87,21 +87,21 @@ def daemons_of(directory):
     return [each for each in found if each]
 
 
-def case_summary(results, case, rounds):
-    """How `case` went, from its rounds' outcomes, and what its extent daemons downloaded and
+def case_summary(results, case, repeats):
+    """How `case` went, from its repeats' outcomes, and what its extent daemons downloaded and
     read."""
-    ran = rounds_of(results, case)
+    ran = repeats_of(results, case)
     if not ran:
-        return {"case": case, "outcome": "unrun", "round": 0, "rounds_passed": 0}
+        return {"case": case, "outcome": "unrun", "repeat": 0, "repeats_passed": 0}
     last = ran[-1]
     outcome = last["outcome"]
-    if outcome in ("pass", "report") and last["round"] < rounds:
+    if outcome in ("pass", "report") and last["repeat"] < repeats:
         outcome = "running"
     return {
         "case": case,
         "outcome": outcome,
-        "round": last["round"],
-        "rounds_passed": sum(each["outcome"] in ("pass", "report") for each in ran),
+        "repeat": last["repeat"],
+        "repeats_passed": sum(each["outcome"] in ("pass", "report") for each in ran),
         "failed_checks": last["failed_checks"],
         "reason": last["reason"],
         "replay": last["replay"],
@@ -110,13 +110,13 @@ def case_summary(results, case, rounds):
 
 
 def summarize(results, status=None):
-    """Rewrites `results`' summary.json, of its rounds so far, and the exit status `status`."""
+    """Rewrites `results`' summary.json, of its repeats so far, and the exit status `status`."""
     run = json.loads((results / "run.json").read_text())
-    cases = [case_summary(results, case, run["rounds"]) for case in run["cases"]]
+    cases = [case_summary(results, case, run["repeats"]) for case in run["cases"]]
     stats = results / "extentd-stats.txt"
     summary = {
         "commit": run["commit"],
-        "rounds": run["rounds"],
+        "repeats": run["repeats"],
         "status": status,
         "failed": [each["case"] for each in cases if each["outcome"] in FAILED],
         "cases": cases,
@@ -127,11 +127,11 @@ def summarize(results, status=None):
     return summary
 
 
-def start(results, rounds, cases):
+def start(results, repeats, cases):
     commit = subprocess.run([ROOT / "scripts" / "build-commit.sh", ROOT], check=True,
                             capture_output=True, text=True).stdout.strip()
     results.mkdir(parents=True, exist_ok=True)
-    write(results / "run.json", {"commit": commit, "knobs": knobs(os.environ), "rounds": rounds,
+    write(results / "run.json", {"commit": commit, "knobs": knobs(os.environ), "repeats": repeats,
                                  "cases": cases})
     summarize(results)
 
@@ -168,22 +168,22 @@ def said(daemon):
 def report(summary):
     """How each case of `summary` went, a line each, a replay's under a failure's, and what each of
     its extent daemons downloaded against what it read; then the run's daemon's."""
-    rounds = summary["rounds"]
+    repeats = summary["repeats"]
     lines = []
     for each in summary["cases"]:
-        case, outcome, round_ = each["case"], each["outcome"], each["round"]
+        case, outcome, repeat = each["case"], each["outcome"], each["repeat"]
         if outcome in ("pass", "report"):
-            lines.append(f"{case}: passed" + (f" {rounds} rounds" if rounds > 1 else ""))
+            lines.append(f"{case}: passed" + (f" {repeats} repeats" if repeats > 1 else ""))
         elif outcome in FAILED:
             failed = "timed out" if outcome == "timeout" else "failed"
             checks = each["failed_checks"]
-            lines.append(f"{case}: {failed} in round {round_} of {rounds}"
+            lines.append(f"{case}: {failed} in repeat {repeat} of {repeats}"
                          + (f", checks {', '.join(checks)}" if checks else ""))
             lines.append(f"  replay: {each['replay']}")
         elif outcome == "skip":
             lines.append(f"{case}: skipped: {each['reason']}")
         elif outcome == "running":
-            lines.append(f"{case}: stopped after round {round_} of {rounds}, which passed")
+            lines.append(f"{case}: stopped after repeat {repeat} of {repeats}, which passed")
         else:
             lines.append(f"{case}: not run")
         lines.extend(f"  {said(daemon)}" for daemon in each.get("daemons", []))

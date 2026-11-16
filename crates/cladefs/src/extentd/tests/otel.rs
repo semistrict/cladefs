@@ -20,7 +20,7 @@ fn provider(exporter: &InMemorySpanExporter) -> SdkTracerProvider {
         .build()
 }
 
-/// Writes 2 blocks, reads them back and commits them durably, in a store a daemon serves, as a VM
+/// Writes 2 blocks, reads them back and commits them, uploaded,, in a store a daemon serves, as a VM
 /// process would: returns the store's branch.
 fn write_read_commit() -> crate::Branch {
     let dir = tempfile::tempdir().unwrap();
@@ -98,7 +98,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(read, "cladefs.request_id"), None, "a call for no guest request");
 
     let committed = the(&spans, "extentd.commit");
-    assert_eq!(attribute(committed, "cladefs.durable"), Some(Value::Bool(true)));
+    assert_eq!(attribute(committed, "cladefs.level"), Some(Value::from("uploaded")));
     assert_eq!(children(&spans, committed), BTreeSet::from(["store.commit".to_owned()]));
     let commit = the(&spans, "store.commit");
     assert_eq!(attribute(commit, "cladefs.branch"), Some(hex.clone()));
@@ -136,6 +136,6 @@ fn nothing_is_exported_while_tracing_is_off() {
     opentelemetry::global::set_tracer_provider(provider.clone());
     write_read_commit();
     provider.force_flush().unwrap();
-    assert!(!extent_remote::trace::enabled());
+    assert!(!extent_bucket::trace::enabled());
     assert_eq!(names(exporter.get_finished_spans().unwrap().iter()), Vec::<String>::new());
 }

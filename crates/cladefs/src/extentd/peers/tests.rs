@@ -3,26 +3,26 @@
 // found in the LICENSE file.
 
 //! The daemon's peers over gRPC: parts served, refusals, and a peer out of reach. What
-//! asking peers saves, and how it falls back, `crate::remote::peers`' tests show, and two daemons
+//! asking peers saves, and how it falls back, `crate::bucket::peers`' tests show, and two daemons
 //! `tests/peers.rs`.
 
 use super::*;
-use crate::remote::peers::tests::{gets, holding, noise};
-use extent_remote::cache::Cache;
-use extent_remote::layout::{self, Location};
-use extent_remote::store::Store as Bucket;
+use crate::bucket::peers::tests::{gets, holding, noise};
+use extent_bucket::cache::Cache;
+use extent_bucket::layout::{self, Location};
+use extent_bucket::object_bucket::ObjectBucket;
 use std::time::Instant;
 
 const URL: &str = "memory:///peers";
 
 /// A daemon's peer server on the loopback, serving the parts of `bucket`, named [`URL`], kept in a
 /// cache in `dir`: its address.
-fn serving(bucket: &Arc<Bucket>, dir: &std::path::Path) -> String {
+fn serving(bucket: &Arc<ObjectBucket>, dir: &std::path::Path) -> String {
     let cache = Arc::new(Cache::open(dir, u64::MAX, 0).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let serving = crate::remote::serving_peers(bucket.clone(), cache).unwrap();
+    let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
     let server = Server { bucket: URL.to_owned(), serving };
     std::thread::spawn(move || serve(listener, server));
     address
@@ -30,15 +30,15 @@ fn serving(bucket: &Arc<Bucket>, dir: &std::path::Path) -> String {
 
 /// Asks the peer at `address`, serving the bucket at `url`, for `asked`.
 fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, String> {
-    let runtime = crate::remote::remotes().unwrap();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
     runtime.block_on(link(&runtime, address, url).get(asked))
 }
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
 /// its stored bytes.
-fn asked(bucket: &Bucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
-    let object = crate::remote::remotes().unwrap().block_on(async {
-        use extent_remote::bucket::Bucket as _;
+fn asked(bucket: &ObjectBucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
+    let object = crate::bucket::bucket_runtime().unwrap().block_on(async {
+        use extent_bucket::bucket::Bucket as _;
         bucket.get(&location.key).await.unwrap().bytes
     });
     let parts = extent_frame::Parts::of(&object, &extent_frame::NoKeys).unwrap();

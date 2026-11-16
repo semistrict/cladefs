@@ -9,7 +9,7 @@
 // with how long each of its phases took (jbd2_run_stats: waiting to start, running, locked,
 // flushing the ordered data, logging); the discards ext4 issues, which a mount with `discard`
 // makes as a commit's blocks are freed; and the block layer's requests (below). Run
-// alongside guest tests with CLADEFS_HOST_TRACE=scripts/durability-lag.bt
+// alongside guest tests with CLADEFS_TEST_HOST_TRACE=scripts/durability-lag.bt
 // (scripts/lib/test-linux-host.sh), which keeps what it prints in RESULTS/host-trace.txt.
 
 config = {

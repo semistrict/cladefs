@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use storage_device::{ExtentId, SealedExtent};
 
 pub const BLOCK: usize = 4096;
-pub const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(3);
+pub const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(3);
 /// How many recovering rounds the tests run.
 pub const ROUNDS: u64 = 300;
 const STEPS: usize = 200;
@@ -302,7 +302,7 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
 
     let store = Store::open(crashed.clone(), OPTIONS)
         .unwrap_or_else(|e| panic!("round {round}: the store doesn't open: {e:?}"));
-    let epoch = store.epoch().unwrap() as usize;
+    let epoch = store.last_commit().unwrap() as usize;
     assert!(
         (durable..epochs.len()).contains(&epoch),
         "round {round}: recovered epoch {epoch}, of {durable}..{}",

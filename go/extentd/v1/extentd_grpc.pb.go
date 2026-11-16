@@ -15,19 +15,20 @@
 // VM may as well be of one tenant, or of none, on the daemon's own VM socket. Grants are not kept
 // across restarts of the daemon: the caller grants again.
 //
-// A snapshot's point is immutable (TASK-158): any number of hosts read it, none writes it, it has
-// no lease, and a restore's fork is a new branch's record alone, so that a restore on one host
-// changes nothing another sees, and no host's copy goes stale.
+// A point is immutable (TASK-158): any number of hosts read it, none writes it, no writer takes it,
+// and a restore's fork is a new branch's record alone, so that a restore on one host changes
+// nothing another sees, and no host's copy goes stale.
 //
 // A tenant's restore on a host without the point (TASK-154). A VM process names no branch: what a
 // tenant's says in OPEN is ignored, as anyone's ID would take that branch's data. A tenant's stores
 // are what is in its directory, which only this API puts a branch of the bucket in, so that the
 // caller's CreateStore of a branch in a tenant's directory grants it, and DropStore ends that. A
-// snapshot of a tenant's VM restores so, on any number of hosts at once:
+// VM snapshot of a tenant's VM, which makes a point as it is taken, restores so, on any number of
+// hosts at once:
 //
-// - On the snapshot's host, once it is taken: StatStore's `branch` of its point, kept with the
-//   snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which a
-//   VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
+// - On the snapshot's host, once it is taken: StatStore's `branch` of the point it made, kept with
+//   the snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which
+//   a VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
 //   (ALREADY_EXISTS).
 // - On each host to restore it, once, before the VMM's first `PUT /snapshot/load`: CreateStore at a
 //   path in the tenant's directory, of that branch, which that host's daemon reads as the first
@@ -38,24 +39,25 @@
 //   restore forks the point, on as many hosts at once as there are. Without the CreateStore, it
 //   fails with ENOENT, whatever the VMM names; so does one of a point deleted since.
 // - Once this host restores it no more: DropStore of the point, optional, which ends the grant here
-//   and frees the copy. DeleteStore deletes the point, which is the snapshot, on every host: VMs
-//   restored from it keep what they inherited.
+//   and frees the copy. DeleteStore deletes the point, which the snapshot restores from, on every
+//   host: VMs restored from it keep what they inherited.
 //
 // A branch so granted is the tenant's to read and restore: a VM process opening a point to write
-// it fails with EROFS. Grant one only to the tenant whose snapshot it is.
+// it fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
 //
 // Shared points (TASK-395.7): a point forks only into cells of its own tenant's, unless it is
-// shared (SharePoint, or ForkStore's `shared`): a base image or a snapshot that many tenants clone.
+// shared (SharePoint, or ForkStore's `shared`): a base image or a VM snapshot's point that many
+// tenants fork.
 // A restore, or a ForkStore, of a point of another tenant's that isn't shared fails with
 // PERMISSION_DENIED (EACCES), making nothing; each fork reads whether the point is shared, in the
 // bucket, as it is made, so that unsharing it stops new forks on every host, and those made live
-// on. A store with a writer forks into cells of other tenants' only if it is tenant 0's, as the
-// daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
-// another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
+// on. A store with a writer forks into cells of other tenants' only if it is the default tenant's,
+// as the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's
+// into another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
 //
 // A fork of anything but a point is a commit of its branch, which takes its branch's writer: a
 // store forks on one host at a time. A base, or any store, forked on several hosts is made a point
-// first, by ForkStore's `point`, and forked as a snapshot's is, from a copy on each host.
+// first, by ForkStore's `point`, and forked as a VM snapshot's point is, from a copy on each host.
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -78,11 +80,13 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364): every branch is a volume of a tenant's cell, kept under the cell's prefix in
-// the bucket, and a host takes a cell whole, its volumes' leases with it. A branch is named by its
-// tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another. Tenants and cells
-// are IDs alone, which the caller keeps the meaning of. A granted tenant's ID is its grant's
-// (Grant's `id`); the daemon's own socket's VM processes make stores of tenant 0.
+// Cells (TASK-364): every branch is a vdisk of a tenant's cell, kept under the cell's prefix in
+// the bucket, and a host takes a cell whole, the heads of its vdisks' branches with it. A branch
+// is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
+// Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
+// tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
+// one Grant named; the daemon's own socket's VM processes make stores of the default tenant, whose
+// ID is 0.
 
 // Code generated by protoc-gen-go-grpc. DO NOT EDIT.
 // versions:
@@ -105,32 +109,32 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Extentd_CreateStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/CreateStore"
-	Extentd_ImportImage_FullMethodName      = "/cladefs.extentd.v1.Extentd/ImportImage"
-	Extentd_ForkStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/ForkStore"
-	Extentd_DeleteStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/DeleteStore"
-	Extentd_DropStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/DropStore"
-	Extentd_ResizeStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/ResizeStore"
-	Extentd_PlaceStore_FullMethodName       = "/cladefs.extentd.v1.Extentd/PlaceStore"
-	Extentd_MakePublic_FullMethodName       = "/cladefs.extentd.v1.Extentd/MakePublic"
-	Extentd_SharePoint_FullMethodName       = "/cladefs.extentd.v1.Extentd/SharePoint"
-	Extentd_AttachBase_FullMethodName       = "/cladefs.extentd.v1.Extentd/AttachBase"
-	Extentd_SyncStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/SyncStore"
-	Extentd_StatStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/StatStore"
-	Extentd_ListStores_FullMethodName       = "/cladefs.extentd.v1.Extentd/ListStores"
-	Extentd_GetStats_FullMethodName         = "/cladefs.extentd.v1.Extentd/GetStats"
-	Extentd_GetSnapshot_FullMethodName      = "/cladefs.extentd.v1.Extentd/GetSnapshot"
-	Extentd_Grant_FullMethodName            = "/cladefs.extentd.v1.Extentd/Grant"
-	Extentd_Revoke_FullMethodName           = "/cladefs.extentd.v1.Extentd/Revoke"
-	Extentd_SetMemoryLimit_FullMethodName   = "/cladefs.extentd.v1.Extentd/SetMemoryLimit"
-	Extentd_SetMemoryWeight_FullMethodName  = "/cladefs.extentd.v1.Extentd/SetMemoryWeight"
-	Extentd_SetTenantRoom_FullMethodName    = "/cladefs.extentd.v1.Extentd/SetTenantRoom"
-	Extentd_ShrinkMemory_FullMethodName     = "/cladefs.extentd.v1.Extentd/ShrinkMemory"
-	Extentd_SetDiskLimit_FullMethodName     = "/cladefs.extentd.v1.Extentd/SetDiskLimit"
-	Extentd_GetTenantDisk_FullMethodName    = "/cladefs.extentd.v1.Extentd/GetTenantDisk"
-	Extentd_SetPeers_FullMethodName         = "/cladefs.extentd.v1.Extentd/SetPeers"
-	Extentd_ShredCell_FullMethodName        = "/cladefs.extentd.v1.Extentd/ShredCell"
-	Extentd_ForgetTenantKeys_FullMethodName = "/cladefs.extentd.v1.Extentd/ForgetTenantKeys"
+	Extentd_CreateStore_FullMethodName       = "/cladefs.extentd.v1.Extentd/CreateStore"
+	Extentd_ImportImage_FullMethodName       = "/cladefs.extentd.v1.Extentd/ImportImage"
+	Extentd_ForkStore_FullMethodName         = "/cladefs.extentd.v1.Extentd/ForkStore"
+	Extentd_DeleteStore_FullMethodName       = "/cladefs.extentd.v1.Extentd/DeleteStore"
+	Extentd_DropStore_FullMethodName         = "/cladefs.extentd.v1.Extentd/DropStore"
+	Extentd_ResizeStore_FullMethodName       = "/cladefs.extentd.v1.Extentd/ResizeStore"
+	Extentd_PlaceStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/PlaceStore"
+	Extentd_MakePublic_FullMethodName        = "/cladefs.extentd.v1.Extentd/MakePublic"
+	Extentd_SharePoint_FullMethodName        = "/cladefs.extentd.v1.Extentd/SharePoint"
+	Extentd_AttachBase_FullMethodName        = "/cladefs.extentd.v1.Extentd/AttachBase"
+	Extentd_SyncStore_FullMethodName         = "/cladefs.extentd.v1.Extentd/SyncStore"
+	Extentd_StatStore_FullMethodName         = "/cladefs.extentd.v1.Extentd/StatStore"
+	Extentd_ListStores_FullMethodName        = "/cladefs.extentd.v1.Extentd/ListStores"
+	Extentd_GetCounters_FullMethodName       = "/cladefs.extentd.v1.Extentd/GetCounters"
+	Extentd_GetStats_FullMethodName          = "/cladefs.extentd.v1.Extentd/GetStats"
+	Extentd_Grant_FullMethodName             = "/cladefs.extentd.v1.Extentd/Grant"
+	Extentd_Revoke_FullMethodName            = "/cladefs.extentd.v1.Extentd/Revoke"
+	Extentd_SetMemoryLimit_FullMethodName    = "/cladefs.extentd.v1.Extentd/SetMemoryLimit"
+	Extentd_SetMemoryWeight_FullMethodName   = "/cladefs.extentd.v1.Extentd/SetMemoryWeight"
+	Extentd_SetTenantInFlight_FullMethodName = "/cladefs.extentd.v1.Extentd/SetTenantInFlight"
+	Extentd_ShrinkMemory_FullMethodName      = "/cladefs.extentd.v1.Extentd/ShrinkMemory"
+	Extentd_SetDiskLimit_FullMethodName      = "/cladefs.extentd.v1.Extentd/SetDiskLimit"
+	Extentd_GetTenantDisk_FullMethodName     = "/cladefs.extentd.v1.Extentd/GetTenantDisk"
+	Extentd_SetPeers_FullMethodName          = "/cladefs.extentd.v1.Extentd/SetPeers"
+	Extentd_ShredCell_FullMethodName         = "/cladefs.extentd.v1.Extentd/ShredCell"
+	Extentd_ForgetTenantKeys_FullMethodName  = "/cladefs.extentd.v1.Extentd/ForgetTenantKeys"
 )
 
 // ExtentdClient is the client API for Extentd service.
@@ -141,7 +145,7 @@ const (
 type ExtentdClient interface {
 	// Makes an empty store: of a new branch; or of a branch kept in the daemon's bucket, which the
 	// daemon takes once it opens the store (a VM on another host than the branch's), or reads, if it
-	// is a point, a snapshot's or ForkStore's, which any number of hosts hold at once.
+	// is a point, a VM snapshot's or ForkStore's, which any number of hosts hold at once.
 	CreateStore(ctx context.Context, in *CreateStoreRequest, opts ...grpc.CallOption) (*CreateStoreResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(ctx context.Context, in *ImportImageRequest, opts ...grpc.CallOption) (*ImportImageResponse, error)
@@ -152,12 +156,12 @@ type ExtentdClient interface {
 	// number of hosts at once. So a base forked on many hosts is made a point first (`point`).
 	ForkStore(ctx context.Context, in *ForkStoreRequest, opts ...grpc.CallOption) (*ForkStoreResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
-	// other branches share of it, which stays until the last of them goes. A snapshot's point deleted
-	// restores no more, on any host (NOT_FOUND), and what was restored from it lives on.
+	// other branches share of it, which stays until the last of them goes. A point deleted restores
+	// no more, on any host (NOT_FOUND), and what was restored from it lives on.
 	DeleteStore(ctx context.Context, in *DeleteStoreRequest, opts ...grpc.CallOption) (*DeleteStoreResponse, error)
 	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
 	// daemon's bucket, which stays, with what else holds it: a point this host read for a tenant,
-	// which that tenant's VM processes restore no more here, its snapshot living on. A store whose
+	// which that tenant's VM processes restore no more here, the point living on. A store whose
 	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
 	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
@@ -175,8 +179,8 @@ type ExtentdClient interface {
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(ctx context.Context, in *MakePublicRequest, opts ...grpc.CallOption) (*MakePublicResponse, error)
 	// Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-	// than its own, as a base image or a snapshot many tenants clone; unshared, such forks fail
-	// (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
+	// than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
+	// fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
 	// (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
 	// store on this host changes: the point's record in the daemon's bucket says it, for every host.
 	SharePoint(ctx context.Context, in *SharePointRequest, opts ...grpc.CallOption) (*SharePointResponse, error)
@@ -187,26 +191,26 @@ type ExtentdClient interface {
 	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
 	// (FAILED_PRECONDITION), but a stopped store doesn't. No guest can ask for this.
 	AttachBase(ctx context.Context, in *AttachBaseRequest, opts ...grpc.CallOption) (*AttachBaseResponse, error)
-	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
+	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(ctx context.Context, in *SyncStoreRequest, opts ...grpc.CallOption) (*SyncStoreResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
-	// branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
+	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatStore(ctx context.Context, in *StatStoreRequest, opts ...grpc.CallOption) (*StatStoreResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
 	// with what StatStore says of each (TASK-50.5).
 	ListStores(ctx context.Context, in *ListStoresRequest, opts ...grpc.CallOption) (*ListStoresResponse, error)
 	// What the daemon did since it started: counters, which only grow.
-	GetStats(ctx context.Context, in *GetStatsRequest, opts ...grpc.CallOption) (*GetStatsResponse, error)
+	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
 	// commit it was built of (TASK-111.4): the daemon asks every VM process that opened a store, each
 	// its guest, waits for their answers, a while at most, and reads its own counters then.
-	GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*GetSnapshotResponse, error)
-	// Grants a tenant a VM socket, making the tenant if it is new: the path of a socket for the
-	// caller to bind-mount into the tenant's jails, through which VM processes open stores in the
-	// tenant's directory alone. Granting a tenant again returns its socket, given to the uid and gid
-	// named; with another directory, ALREADY_EXISTS.
+	GetStats(ctx context.Context, in *GetStatsRequest, opts ...grpc.CallOption) (*GetStatsResponse, error)
+	// Grants a tenant, by its ID, a VM socket, making the tenant if it is new: the path of a socket
+	// for the caller to bind-mount into the tenant's jails, through which VM processes open stores in
+	// the tenant's directory alone. Granting a tenant again returns its socket, given to the uid and
+	// gid named; with another directory, ALREADY_EXISTS.
 	Grant(ctx context.Context, in *GrantRequest, opts ...grpc.CallOption) (*GrantResponse, error)
 	// Revokes a tenant's grant: its socket goes, and takes no more connections. Its VM processes
 	// connected keep their stores until they go; then the tenant goes, and its cached pages.
@@ -223,11 +227,12 @@ type ExtentdClient interface {
 	// hold, a tenant within its share kept, then any, least recently used first. Every tenant weighs
 	// 1 until set, such as to the memory its sandboxes are given.
 	SetMemoryWeight(ctx context.Context, in *SetMemoryWeightRequest, opts ...grpc.CallOption) (*SetMemoryWeightResponse, error)
-	// Sets the room a tenant's VM processes' connections share (TASK-149.35): what of their
-	// requests the daemon holds at once, their data in the stream and what it queued for them, which
-	// each connection's own room bounds too. A request past it waits for room. By default 8 GiB a
-	// tenant, which a tenant's VMs reach only writing large extents through the stream, back to back.
-	SetTenantRoom(ctx context.Context, in *SetTenantRoomRequest, opts ...grpc.CallOption) (*SetTenantRoomResponse, error)
+	// Sets the bytes in flight a tenant's VM processes' connections share (TASK-149.35): what of
+	// their requests the daemon holds at once, their data in the stream and what it queued for them,
+	// which each connection's own credit bounds too. A request past it waits until enough leaves. By
+	// default 8 GiB a tenant, which a tenant's VMs reach only writing large extents through the
+	// stream, back to back.
+	SetTenantInFlight(ctx context.Context, in *SetTenantInFlightRequest, opts ...grpc.CallOption) (*SetTenantInFlightResponse, error)
 	// Evicts clean pages, of extents asked for longest ago first, until the memory a tenant, or the
 	// daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
 	ShrinkMemory(ctx context.Context, in *ShrinkMemoryRequest, opts ...grpc.CallOption) (*ShrinkMemoryResponse, error)
@@ -248,20 +253,20 @@ type ExtentdClient interface {
 	// HOST:PORT.
 	SetPeers(ctx context.Context, in *SetPeersRequest, opts ...grpc.CallOption) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
-	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// daemon's bucket, by a conditional update, so that its vdisks' keys unwrap no more and no host
 	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
-	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// tenant. Call it on every host that may hold the cell or serve its vdisks: the first call
 	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
 	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
 	// versions. A cell with no object, NOT_FOUND (ENOENT).
 	ShredCell(ctx context.Context, in *ShredCellRequest, opts ...grpc.CallOption) (*ShredCellResponse, error)
 	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
 	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
-	// here are fenced, each request of their VM processes failing with EACCES, as their openings do;
-	// their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+	// here are halted, each request of their VM processes failing with EACCES, as their openings do;
+	// their extents' pages leave the cache, but those other stores hold too (a shared point's fork,
 	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
 	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
-	// for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
 	// their VM processes close them.
 	ForgetTenantKeys(ctx context.Context, in *ForgetTenantKeysRequest, opts ...grpc.CallOption) (*ForgetTenantKeysResponse, error)
 }
@@ -404,20 +409,20 @@ func (c *extentdClient) ListStores(ctx context.Context, in *ListStoresRequest, o
 	return out, nil
 }
 
-func (c *extentdClient) GetStats(ctx context.Context, in *GetStatsRequest, opts ...grpc.CallOption) (*GetStatsResponse, error) {
+func (c *extentdClient) GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetStatsResponse)
-	err := c.cc.Invoke(ctx, Extentd_GetStats_FullMethodName, in, out, cOpts...)
+	out := new(GetCountersResponse)
+	err := c.cc.Invoke(ctx, Extentd_GetCounters_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *extentdClient) GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*GetSnapshotResponse, error) {
+func (c *extentdClient) GetStats(ctx context.Context, in *GetStatsRequest, opts ...grpc.CallOption) (*GetStatsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetSnapshotResponse)
-	err := c.cc.Invoke(ctx, Extentd_GetSnapshot_FullMethodName, in, out, cOpts...)
+	out := new(GetStatsResponse)
+	err := c.cc.Invoke(ctx, Extentd_GetStats_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -464,10 +469,10 @@ func (c *extentdClient) SetMemoryWeight(ctx context.Context, in *SetMemoryWeight
 	return out, nil
 }
 
-func (c *extentdClient) SetTenantRoom(ctx context.Context, in *SetTenantRoomRequest, opts ...grpc.CallOption) (*SetTenantRoomResponse, error) {
+func (c *extentdClient) SetTenantInFlight(ctx context.Context, in *SetTenantInFlightRequest, opts ...grpc.CallOption) (*SetTenantInFlightResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SetTenantRoomResponse)
-	err := c.cc.Invoke(ctx, Extentd_SetTenantRoom_FullMethodName, in, out, cOpts...)
+	out := new(SetTenantInFlightResponse)
+	err := c.cc.Invoke(ctx, Extentd_SetTenantInFlight_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +547,7 @@ func (c *extentdClient) ForgetTenantKeys(ctx context.Context, in *ForgetTenantKe
 type ExtentdServer interface {
 	// Makes an empty store: of a new branch; or of a branch kept in the daemon's bucket, which the
 	// daemon takes once it opens the store (a VM on another host than the branch's), or reads, if it
-	// is a point, a snapshot's or ForkStore's, which any number of hosts hold at once.
+	// is a point, a VM snapshot's or ForkStore's, which any number of hosts hold at once.
 	CreateStore(context.Context, *CreateStoreRequest) (*CreateStoreResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error)
@@ -553,12 +558,12 @@ type ExtentdServer interface {
 	// number of hosts at once. So a base forked on many hosts is made a point first (`point`).
 	ForkStore(context.Context, *ForkStoreRequest) (*ForkStoreResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
-	// other branches share of it, which stays until the last of them goes. A snapshot's point deleted
-	// restores no more, on any host (NOT_FOUND), and what was restored from it lives on.
+	// other branches share of it, which stays until the last of them goes. A point deleted restores
+	// no more, on any host (NOT_FOUND), and what was restored from it lives on.
 	DeleteStore(context.Context, *DeleteStoreRequest) (*DeleteStoreResponse, error)
 	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
 	// daemon's bucket, which stays, with what else holds it: a point this host read for a tenant,
-	// which that tenant's VM processes restore no more here, its snapshot living on. A store whose
+	// which that tenant's VM processes restore no more here, the point living on. A store whose
 	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
 	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
@@ -576,8 +581,8 @@ type ExtentdServer interface {
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(context.Context, *MakePublicRequest) (*MakePublicResponse, error)
 	// Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-	// than its own, as a base image or a snapshot many tenants clone; unshared, such forks fail
-	// (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
+	// than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
+	// fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
 	// (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
 	// store on this host changes: the point's record in the daemon's bucket says it, for every host.
 	SharePoint(context.Context, *SharePointRequest) (*SharePointResponse, error)
@@ -588,26 +593,26 @@ type ExtentdServer interface {
 	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
 	// (FAILED_PRECONDITION), but a stopped store doesn't. No guest can ask for this.
 	AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error)
-	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
+	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(context.Context, *SyncStoreRequest) (*SyncStoreResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
-	// branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
+	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatStore(context.Context, *StatStoreRequest) (*StatStoreResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
 	// with what StatStore says of each (TASK-50.5).
 	ListStores(context.Context, *ListStoresRequest) (*ListStoresResponse, error)
 	// What the daemon did since it started: counters, which only grow.
-	GetStats(context.Context, *GetStatsRequest) (*GetStatsResponse, error)
+	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
 	// commit it was built of (TASK-111.4): the daemon asks every VM process that opened a store, each
 	// its guest, waits for their answers, a while at most, and reads its own counters then.
-	GetSnapshot(context.Context, *GetSnapshotRequest) (*GetSnapshotResponse, error)
-	// Grants a tenant a VM socket, making the tenant if it is new: the path of a socket for the
-	// caller to bind-mount into the tenant's jails, through which VM processes open stores in the
-	// tenant's directory alone. Granting a tenant again returns its socket, given to the uid and gid
-	// named; with another directory, ALREADY_EXISTS.
+	GetStats(context.Context, *GetStatsRequest) (*GetStatsResponse, error)
+	// Grants a tenant, by its ID, a VM socket, making the tenant if it is new: the path of a socket
+	// for the caller to bind-mount into the tenant's jails, through which VM processes open stores in
+	// the tenant's directory alone. Granting a tenant again returns its socket, given to the uid and
+	// gid named; with another directory, ALREADY_EXISTS.
 	Grant(context.Context, *GrantRequest) (*GrantResponse, error)
 	// Revokes a tenant's grant: its socket goes, and takes no more connections. Its VM processes
 	// connected keep their stores until they go; then the tenant goes, and its cached pages.
@@ -624,11 +629,12 @@ type ExtentdServer interface {
 	// hold, a tenant within its share kept, then any, least recently used first. Every tenant weighs
 	// 1 until set, such as to the memory its sandboxes are given.
 	SetMemoryWeight(context.Context, *SetMemoryWeightRequest) (*SetMemoryWeightResponse, error)
-	// Sets the room a tenant's VM processes' connections share (TASK-149.35): what of their
-	// requests the daemon holds at once, their data in the stream and what it queued for them, which
-	// each connection's own room bounds too. A request past it waits for room. By default 8 GiB a
-	// tenant, which a tenant's VMs reach only writing large extents through the stream, back to back.
-	SetTenantRoom(context.Context, *SetTenantRoomRequest) (*SetTenantRoomResponse, error)
+	// Sets the bytes in flight a tenant's VM processes' connections share (TASK-149.35): what of
+	// their requests the daemon holds at once, their data in the stream and what it queued for them,
+	// which each connection's own credit bounds too. A request past it waits until enough leaves. By
+	// default 8 GiB a tenant, which a tenant's VMs reach only writing large extents through the
+	// stream, back to back.
+	SetTenantInFlight(context.Context, *SetTenantInFlightRequest) (*SetTenantInFlightResponse, error)
 	// Evicts clean pages, of extents asked for longest ago first, until the memory a tenant, or the
 	// daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
 	ShrinkMemory(context.Context, *ShrinkMemoryRequest) (*ShrinkMemoryResponse, error)
@@ -649,20 +655,20 @@ type ExtentdServer interface {
 	// HOST:PORT.
 	SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
-	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// daemon's bucket, by a conditional update, so that its vdisks' keys unwrap no more and no host
 	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
-	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// tenant. Call it on every host that may hold the cell or serve its vdisks: the first call
 	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
 	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
 	// versions. A cell with no object, NOT_FOUND (ENOENT).
 	ShredCell(context.Context, *ShredCellRequest) (*ShredCellResponse, error)
 	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
 	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
-	// here are fenced, each request of their VM processes failing with EACCES, as their openings do;
-	// their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+	// here are halted, each request of their VM processes failing with EACCES, as their openings do;
+	// their extents' pages leave the cache, but those other stores hold too (a shared point's fork,
 	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
 	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
-	// for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
 	// their VM processes close them.
 	ForgetTenantKeys(context.Context, *ForgetTenantKeysRequest) (*ForgetTenantKeysResponse, error)
 	mustEmbedUnimplementedExtentdServer()
@@ -714,11 +720,11 @@ func (UnimplementedExtentdServer) StatStore(context.Context, *StatStoreRequest) 
 func (UnimplementedExtentdServer) ListStores(context.Context, *ListStoresRequest) (*ListStoresResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListStores not implemented")
 }
+func (UnimplementedExtentdServer) GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCounters not implemented")
+}
 func (UnimplementedExtentdServer) GetStats(context.Context, *GetStatsRequest) (*GetStatsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetStats not implemented")
-}
-func (UnimplementedExtentdServer) GetSnapshot(context.Context, *GetSnapshotRequest) (*GetSnapshotResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetSnapshot not implemented")
 }
 func (UnimplementedExtentdServer) Grant(context.Context, *GrantRequest) (*GrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Grant not implemented")
@@ -732,8 +738,8 @@ func (UnimplementedExtentdServer) SetMemoryLimit(context.Context, *SetMemoryLimi
 func (UnimplementedExtentdServer) SetMemoryWeight(context.Context, *SetMemoryWeightRequest) (*SetMemoryWeightResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetMemoryWeight not implemented")
 }
-func (UnimplementedExtentdServer) SetTenantRoom(context.Context, *SetTenantRoomRequest) (*SetTenantRoomResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetTenantRoom not implemented")
+func (UnimplementedExtentdServer) SetTenantInFlight(context.Context, *SetTenantInFlightRequest) (*SetTenantInFlightResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetTenantInFlight not implemented")
 }
 func (UnimplementedExtentdServer) ShrinkMemory(context.Context, *ShrinkMemoryRequest) (*ShrinkMemoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ShrinkMemory not implemented")
@@ -1008,6 +1014,24 @@ func _Extentd_ListStores_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Extentd_GetCounters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCountersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExtentdServer).GetCounters(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Extentd_GetCounters_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExtentdServer).GetCounters(ctx, req.(*GetCountersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Extentd_GetStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetStatsRequest)
 	if err := dec(in); err != nil {
@@ -1022,24 +1046,6 @@ func _Extentd_GetStats_Handler(srv interface{}, ctx context.Context, dec func(in
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExtentdServer).GetStats(ctx, req.(*GetStatsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Extentd_GetSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetSnapshotRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ExtentdServer).GetSnapshot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Extentd_GetSnapshot_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ExtentdServer).GetSnapshot(ctx, req.(*GetSnapshotRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1116,20 +1122,20 @@ func _Extentd_SetMemoryWeight_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Extentd_SetTenantRoom_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetTenantRoomRequest)
+func _Extentd_SetTenantInFlight_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTenantInFlightRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ExtentdServer).SetTenantRoom(ctx, in)
+		return srv.(ExtentdServer).SetTenantInFlight(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Extentd_SetTenantRoom_FullMethodName,
+		FullMethod: Extentd_SetTenantInFlight_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ExtentdServer).SetTenantRoom(ctx, req.(*SetTenantRoomRequest))
+		return srv.(ExtentdServer).SetTenantInFlight(ctx, req.(*SetTenantInFlightRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1302,12 +1308,12 @@ var Extentd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Extentd_ListStores_Handler,
 		},
 		{
-			MethodName: "GetStats",
-			Handler:    _Extentd_GetStats_Handler,
+			MethodName: "GetCounters",
+			Handler:    _Extentd_GetCounters_Handler,
 		},
 		{
-			MethodName: "GetSnapshot",
-			Handler:    _Extentd_GetSnapshot_Handler,
+			MethodName: "GetStats",
+			Handler:    _Extentd_GetStats_Handler,
 		},
 		{
 			MethodName: "Grant",
@@ -1326,8 +1332,8 @@ var Extentd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Extentd_SetMemoryWeight_Handler,
 		},
 		{
-			MethodName: "SetTenantRoom",
-			Handler:    _Extentd_SetTenantRoom_Handler,
+			MethodName: "SetTenantInFlight",
+			Handler:    _Extentd_SetTenantInFlight_Handler,
 		},
 		{
 			MethodName: "ShrinkMemory",

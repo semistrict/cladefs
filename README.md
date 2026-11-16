@@ -158,7 +158,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
 - `extentd/` holds the daemon (`bin/cladefsd.rs`) and its client,
-  `RemoteExtentStore`, which a VMM's device is; see the extent daemon below.
+  `DaemonExtentStore`, which a VMM's device is; see the extent daemon below.
 - `dax.rs` holds DAX windows, their mappings and the pages they have mapped,
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
   `dax/uffd.rs` is the VM process's own second stage, in the host memory that
@@ -184,11 +184,11 @@ of these stands in with the items the code copied from Fuchsia uses:
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
   number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
-  attach`, `create-volume`, `detach`, `list`), takes a tenant's cell of the
-  bucket (TASK-364), its volumes' leases with it, each Fxfs volume into
-  `DIR/TENANT/CELL/VOLUME` and shown at `MOUNTPOINT/TENANT/CELL/VOLUME`, and
+  attach`, `create-vdisk`, `detach`, `list`), takes a tenant's cell of the
+  bucket (TASK-364), taking its vdisks' heads with it, each Fxfs vdisk into
+  `DIR/TENANT/CELL/VDISK` and shown at `MOUNTPOINT/TENANT/CELL/VDISK`, and
   detaches the cell once the kernel lets go of it, written back; the daemon's
-  drain closes the mount. A cell's volumes are so held by one process, whether
+  drain closes the mount. A cell's vdisks are so held by one process, whether
   VMs or the mount serve them. macOS has no open-source FUSE, so no mounts
   there.
 - `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory cladefs only
@@ -196,15 +196,15 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
-  (fsck), and clones images: a clone is a fork of the image's branch in the
+  (fsck), and forks images: a fork's branch is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFSD_REMOTE`); the clone's directory is a store of its own, which
+  (`CLADEFSD_BUCKET`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
-  deletes clones and images alike: the branch in its bucket, whose collector
-  reclaims what no other branch inherited, and the directory; clones live on.
+  deletes forks and images alike: the branch in its bucket, whose collector
+  reclaims what no other branch inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
-  open (`collect.rs`), the only cleaner of what they free (TASK-165.8).
+  open (`collect.rs`), the only thing that deletes what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
     `FileBackedDevice`: an extent store in a directory, `crates/extent_store`'s.
     Extents' I/O bypasses the host's page cache (`O_DIRECT`, `F_NOCACHE`); on
@@ -215,7 +215,8 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `host_store.rs` makes, opens, forks and deletes both host stacks' extent
   stores in the host's directories, images (`Storage`) and guests' stores
   (`ExtentStore`), with one block size, one set of options and one way of
-  minting branches. Neither stack cleans its stores (TASK-165.8).
+  minting branches. Neither stack collects its stores: the collector alone
+  deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`crates/physmem`): its size, which
   extents' pages come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
@@ -224,10 +225,11 @@ of these stands in with the items the code copied from Fuchsia uses:
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
 store's directory holds one branch; forks, points and deletion are the
-bucket's (`crates/extent_remote`, TASK-165.7). Nothing cleans a store: once a
-segment is acknowledged in the bucket, it and the extents' files it names
-leave the directory, for the host's cache of the bucket's objects, and the
-bucket's collector takes back what no extent is in (TASK-165.8). Its tests run
+bucket's (`crates/extent_bucket`, TASK-165.7). Nothing collects in a store:
+once a segment is acknowledged in the bucket, it and the extents' files it
+names leave the directory, for the host's cache of the bucket's objects, and
+the bucket's collector, the only thing that deletes, takes back what no extent
+is in (TASK-165.8). Its tests run
 it on a file system in memory that crashes at random points.
 
 **DAX on Linux.** KVM maps a guest's memory from the host memory backing its
@@ -299,25 +301,27 @@ through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
 `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
 `github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
-(TASK-43.4). Grant returns a tenant's own VM socket, for the VM manager to
-bind-mount into the tenant's jails; a connection's tenant is the socket it came
-in on, and it names stores in the tenant's directory alone. A grant names the
-tenant's ID in the bucket (TASK-364): the stores in its directory are volumes
-of its own cells, and its VM processes open no store of another tenant's cell,
-but restore from the points of others' its VM manager gives it. Revoked, a
-tenant's socket goes, and once its VM processes do, its arena and cached pages.
-The daemon's own VM socket is the default tenant's: its connections name
+(TASK-43.4). Every call names a tenant by its ID in the bucket (TASK-364), a
+64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
+`<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
+connection's tenant is the socket it came in on, and it names stores in the
+tenant's directory alone. The stores in its directory are vdisks of its own
+cells, and its VM processes open no store of another tenant's cell, but fork
+the points of others' its VM manager gives it. Revoked, a tenant's socket
+goes, and once its VM processes do, its arena and cached pages.
+The daemon's own VM socket is the default tenant's, ID 0, which is granted
+nothing and has no limits of its own, only every tenant's: its connections name
 stores in the daemon's roots alone (`CLADEFSD_ROOTS`), or anywhere without
 any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
 is separated.
 A tenant's VM process names no branch: what it says is ignored, so that another
-tenant's ID gets it nothing. A snapshot restored on another host needs its point
+tenant's ID gets it nothing. A VM snapshot restored on another host needs its point
 there, which the VM manager makes in the tenant's directory first (`CreateStore`
 of the point's branch), and may drop once done (`DropStore`, which leaves the
 branch in the bucket); the proto says how (TASK-154). A point is immutable: any
-number of hosts restore one at once, and none writes it (TASK-158). A base forked
+number of hosts fork one at once, and none writes it (TASK-158). A base forked
 on several hosts is made a point first (`ForkStore`'s `point`).
 The daemon must be able to kill each VM process (it is the daemon's user's, or
 the daemon has `CAP_KILL`), and refuses a connection whose process it could
@@ -337,8 +341,7 @@ ago; past the total, or out of `MEMORY_BYTES`, any tenant's. With none left to
 evict, what would take more fails with `ENOMEM`, which the guest sees as an I/O
 error, and the daemon goes on. `ShrinkMemory` evicts toward a target at once,
 as the host's memory runs low. `/metrics` shows the memory held, every
-tenant's together and each tenant's, by the first 16 hex digits of its name's
-SHA-256 (`printf %s NAME | sha256sum | cut -c1-16`), not its name. Under cgroup
+tenant's together and each tenant's, by its ID in hex (`tenant="a"`). Under cgroup
 v2 the arenas' memfds are shmem, charged to the cgroup of the process that
 first touches each page, and uncharged when the chunk goes back (a hole
 punched): that is the daemon, which faults each chunk in as an arena takes it
@@ -359,7 +362,7 @@ extents, each file's blocks once, as `du -sx` counts them (TASK-94). One rule
 for what is shared: a file is the tenant's whose directory holds it, and one in
 no tenant's directory is no tenant's. A fork's directory holds what the fork
 wrote, its base's data being in the bucket, read through the host's part cache
-(`CLADEFSD_CACHE`), which is no tenant's: copies of objects any tenant
+(`CLADEFSD_PART_CACHE`), which is no tenant's: copies of objects any tenant
 reads, bounded by its own capacity and floor, evicting to keep within them. The
 daemon walks a tenant's directory as it is granted, every 10 s, soon after a
 write of it is refused, and as `GetTenantDisk` asks, and counts each write it
@@ -368,8 +371,8 @@ tenant and of every tenant together (`SetDiskLimit`, none by default): past a
 tenant's limit its VMs' writes, and the stores they make, fail with `ENOSPC`,
 which the guest sees as a full disk; the daemon goes on, and other tenants'
 writes do. Its commits go on, and what leaves its disk, uploaded or freed, or a
-store deleted, lets it write again. `/metrics` shows each tenant's disk, by the
-hash of its name, as memory. A filesystem's directory quota would not do it: it
+store deleted, lets it write again. `/metrics` shows each tenant's disk, by its
+ID, as memory. A filesystem's directory quota would not do it: it
 refuses whichever write of the directory comes past it, a store framing a closed
 segment, which fails the store, or a flush appending a commit's record, rather
 than the guest's next write, which the daemon refuses before the store takes
@@ -382,7 +385,7 @@ and its open segment.
 copies of it, whose placements fence each other with their tokens: a placement
 cut off neither takes a branch back nor deletes it from under a later one
 (TASK-39.7, TASK-45). The daemon runs as a host of that system, with the bucket
-(`CLADEFSD_REMOTE`) and its placement's token from the control plane
+(`CLADEFSD_BUCKET`) and its placement's token from the control plane
 (`CLADEFSD_TOKEN`, not 0), and refuses to start without them: there is no
 single-node mode. Tests and development use an in-memory bucket
 (`memory:///NAME`), or one in a directory of the host's (`file:///DIR`), which
@@ -395,7 +398,7 @@ branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 **Encryption and shredding** (backlog doc-16). With `CLADEFS_KMS` naming the
 host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
-are sealed: the bucket, the stores' directories and the part cache hold their
+are encrypted: the bucket, the stores' directories and the part cache hold their
 data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
 every host (`cladefsctl forget-tenant-keys TENANT`, the control API's
 `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
@@ -409,9 +412,9 @@ non-current versions: on S3, `NoncurrentVersionExpiration` (with
 object versioning off, or a lifecycle rule deleting non-current versions
 (`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
 old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
-versioning off needs nothing. A host told either fences the stores of the
+versioning off needs nothing. A host told either halts the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
-a fenced store's own keys stay in memory until its VM process closes it.
+a halted store's own keys stay in memory until its VM process closes it.
 
 ### `vendor/firecracker`: the VMM
 
@@ -452,7 +455,7 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 
 | Change | Why |
 |---|---|
-| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::RemoteExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
+| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::DaemonExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
 | Virtio shared memory regions on the PCI transport, a BAR with `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities (a general fix), and `KvmMemSlot`, a KVM memory slot any device may map host memory with. | The device's DAX window is a shared memory region, the daemon's memory mapped in; KVM follows it. |
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see DAX on Linux above (TASK-25.4). |
@@ -532,7 +535,7 @@ suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):
   makes) can't be shared: a reflink of them fails with `EOPNOTSUPP`.
 - `MAP_SYNC` mmaps fail with `EOPNOTSUPP`: the DAX window is the host's
   memory, not persistent memory, and what is stored through it is in a private
-  page until writeback writes it to the store, and durable once an fsync
+  page until writeback writes it to the store, and ordered once an fsync
   commits it, never at the fault.
 - chattr's other flags (`FS_IOC_FSSETXATTR`'s project IDs and extent sizes,
   synchronous, compressed, no-COW) fail with `EOPNOTSUPP`.
@@ -554,7 +557,7 @@ The backlog (`backlog/`, managed with Backlog.md) tracks what remains.
 ```sh
 scripts/test.sh          # macOS or Linux
 scripts/test-linux.sh    # Linux, in a Lima VM
-scripts/test-host.sh     # x86-64 Linux with KVM, on a host of one's own over ssh (ubu1)
+scripts/test-host.sh     # x86-64 Linux with KVM, on the test host over ssh (ubu1)
 ```
 
 `scripts/lima-setup.sh` creates the Lima VM the Linux scripts use on macOS, and
@@ -576,7 +579,7 @@ scripts/test-e2e-linux.sh  # Linux, in a Lima VM
 
 Each case is in suites, which the scripts run it by: `scripts/test-e2e.sh --tag kernel`, or cases
 by name, `--tag e2e` if none (the runner's `list --help` names the suites). A run's outcomes are
-data, a round's in `CASE/round-K.json` and the run's in `summary.json` (`scripts/guest_results.py`).
+data, a repeat's in `CASE/repeat-K.json` and the run's in `summary.json` (`scripts/guest_results.py`).
 
 `scripts/test-e2e-rustfs.sh` runs them with their branches in an S3 bucket on the host (RustFS, a
 process of its release's binary), as production keeps them in object storage. The nightly suite (`--tag nightly`)
@@ -597,12 +600,12 @@ sudo scripts/pjdfstest-fuse.py target/debug/cladefs-mount   # Linux
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its
 anonymous memory, sampled as its stats are, against the sum of what its design bounds
 (`cladefs::extentd::process`: its upload memory, a framing for each store written, its fetches,
-its tenants' rooms, its own), which its stats' `process:` line and its metrics say; and what it
+its tenants' bytes in flight, its own), which its stats' `process:` line and its metrics say; and what it
 writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a run whose daemons
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
 a host's store held to what its design writes for a guest's large file and its small files, each
 byte raw once and framed once, a commit's copies a segment's worth at most
-(`remote::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
+(`bucket::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
 then answering again, VM processes writing all the while (`extentd::tests::soak`, five minutes in
 CI, half an hour each night in Hunt; with guests, `fxfs-guest-bucket-soak`, by name). Each has a
 past bug put back that it fails (`crates/cladefs/mutants`).
@@ -617,14 +620,14 @@ put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short m
 minutes, runs on GitHub's runners' nested KVM on every push to main
 (`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
 LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
-hand, in the qualification before each pin (below), as no CI runner has its memory (TASK-330.5).
+hand, in the qualification before each candidate (below), as no CI runner has its memory (TASK-330.5).
 Each run keeps what the host and the run spent every 30 s (`resources.log`):
 
 ```sh
 scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all
 ```
 
-### Before a pin goes to LangSmith
+### Before a candidate goes to LangSmith
 
 LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
 bump it now and then. Before a candidate is offered, it is qualified against their pin on ubu1,
@@ -663,7 +666,7 @@ of the comparison, saying so above the table and in each cell, and keeps its cou
 (bytes written for each guest byte, peak memory), which a load doesn't move. A metric with no
 clean round on a side is NO RESULT, and fails the comparison. Where others' I/O can't be told
 from the round's own (no cgroup v2 cgroup of its own, as in a CI runner's container or on macOS;
-a ZFS dataset as the round's disk), the round is not checked, said as such, never clean
+a ZFS dataset as the round's disk), the round is unchecked, said as such, never clean
 (TASK-375). A round run by hand is recorded the same way, and `scripts/contamination-check.sh`
 checks the record on a host with fxjob, a round alone and one beside a loader of its own:
 
@@ -675,8 +678,8 @@ scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # ubu1, 
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, in Lima on macOS.
 
-`scripts/test-host.sh` runs them too, on a Linux host of one's own over ssh
-(`CLADEFS_HOST`, ubu1 by default): in a worktree there of a commit origin has,
+`scripts/test-host.sh` runs them too, on the test host, a Linux machine of one's own, over ssh
+(`CLADEFS_TEST_HOST`, ubu1 by default): in a worktree there of a commit origin has,
 under `fxjob`, copying the results back and removing the worktree
 (`scripts/lib/host.sh`).
 
@@ -698,20 +701,19 @@ make check-tla             # about two hours, each model in minutes, on Java; fe
 ### The nightly measurement on ubu1
 
 Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from the nightly's own
-clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change since
-the last night that measured (its newest commit that changed more than `docs/measurements` and
+clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
+since the last night that measured (its newest commit that changed more than `docs/measurements` and
 `backlog`), it does nothing. Otherwise it measures main's head against the commit that night
-measured, as an
-A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_HOST=local`): the head built as work, the
-base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three rounds of both
-sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent sandbox stands on:
-the guest's Fxfs with DAX (cold and warm reads, fsynced appends, SQLite's scans, small files'
-create, stat, readdir and read, create with fsync, sync, syncfs and freeze loops), a fork's boot
-cold and warm, and ext4 on virtio-blk, no cladefs in it, as the control. Beside them, counts that
-a load doesn't move: the guest's device requests, the extent daemon's counters, what each daemon
-wrote by kind for each guest byte and its peak memory (`scripts/budgets.py`'s figures), and three
-benchmarks run with each build (`scripts/counts.sh`: a sandbox's bucket requests by phase, an idle
-fork's heap, the collector's requests over dead cells).
+measured, as an A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_TEST_HOST=local`): the
+head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
+then three rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases
+an agent sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends,
+SQLite's scans, small files' create, stat, readdir and read, create with fsync, sync, syncfs and
+freeze loops), a fork's boot cold and warm, and ext4 on virtio-blk, no cladefs in it, as the
+control. Beside them, counts that a load doesn't move: the guest's device requests, the extent
+daemon's counters, what each daemon wrote by kind for each guest byte and its peak memory
+(`scripts/budgets.py`'s figures), and three benchmarks run with each build (`scripts/counts.sh`: a
+sandbox's bucket requests by phase, an idle fork's heap, the collector's requests over dead cells).
 
 `scripts/ab-rounds.py` judges each round apart. A round is left out when others wrote beside it
 (`contamination.py`) or when its control moved (the median of its timings' ratios past 5%), and
@@ -773,12 +775,12 @@ spreads and ratios to ext4. The guests' root filesystem is an Alpine image
 built with podman.
 
 ```sh
-scripts/bench-host.sh      # x86-64 Linux with KVM, on a host of one's own (ubu1)
+scripts/bench-host.sh      # x86-64 Linux with KVM, on the test host (ubu1)
 scripts/bench.sh           # this host, Linux
 scripts/bench-linux.sh     # Linux, in a Lima VM
 ```
 
-`scripts/bench-host.sh` keeps its results in `docs/measurements`, with the host
+`scripts/bench-host.sh` keeps its results in `docs/measurements`, with the test host
 and the source it measured.
 
 For SQLite, set `CLADEFS_BENCH_GROUPS=sqlite`. This compares cold and warm scans

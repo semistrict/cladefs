@@ -11,9 +11,9 @@ anyhow.workspace = true
 bincode.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
-# cladefs: AES-256-XTS, which a sealed store's raw files are encrypted with (TASK-411.5).
+# cladefs: AES-256-XTS, which an encrypted store's raw files are encrypted with (TASK-411.5).
 extent_keys.workspace = true
-extent_remote.workspace = true
+extent_bucket.workspace = true
 fail = "0.5.1"
 futures.workspace = true
 libc.workspace = true
@@ -29,14 +29,14 @@ tokio.workspace = true
 [dev-dependencies]
 # The simulation of doc-7's protocol over its stores (src/sim, TASK-88): a bucket whose requests
 # take effect when it says, and the protocol's rules, which it turns off.
-extent_remote = { workspace = true, features = ["testing"] }
+extent_bucket = { workspace = true, features = ["testing"] }
 # Its own tests audit the store's counts (the `audit` feature).
 extent_store = { path = ".", features = ["audit"] }
 # And set its failpoints (TASK-189).
 fail = { version = "0.5.1", features = ["failpoints"] }
 object_store.workspace = true
 tempfile.workspace = true
-# A KMS counting its calls, for tests of sealed stores (TASK-411.3).
+# A KMS counting its calls, for tests of encrypted stores (TASK-411.3).
 extent_keys = { workspace = true, features = ["testing"] }
 
 [lints]

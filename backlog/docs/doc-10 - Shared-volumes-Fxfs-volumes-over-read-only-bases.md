@@ -3,7 +3,7 @@ id: doc-10
 title: 'Shared volumes: Fxfs volumes over read-only bases'
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-16 04:15'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
@@ -383,7 +383,7 @@ What the numbers ask of the design:
   `LayerObject::as_slice` allows, if layers' block sizes permit.
 - **Pinned generations.** How long they stay while a sandbox store outlives its use of them, and
   who keeps a stopped store's from going.
-- **Attachments across hosts.** The record is local, and a generation's branch has one writer's
-  lease at a time.
+- **Attachments across hosts.** The record is local, and a generation's branch has one writer
+  at a time.
 - **Whether an in-place swap is worth building**, once the writable layers' growth under
   long-lived sandboxes is measured.

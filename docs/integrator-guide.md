@@ -21,7 +21,7 @@ follows from that.
 1. Start `cladefsd` with `CLADEFSD_GRPC` naming its control socket. Keep that socket away
    from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
    (TASK-159): run the VM manager as that user, or as root.
-2. For each tenant, call `Grant` with the tenant's name, the directory of its stores, and its jails'
+2. For each tenant, call `Grant` with the tenant's ID, the directory of its stores, and its jails'
    uid and gid. It returns the path of a socket.
 3. Bind-mount **that socket alone** into the tenant's jails. Never mount the daemon's default VM
    socket into a jail: it can take any branch by its ID.
@@ -37,7 +37,7 @@ socket.
 To show tenants' cells on the host as files, start `cladefsd` with `CLADEFSD_MOUNT` naming a mount
 point and `CLADEFSD_MOUNT_STORES` a directory for their stores: it mounts them with FUSE and serves
 the Mount service (`proto/cladefs/mount/v1/mount.proto`, Go `go/mount/v1`) on the same control
-socket. One daemon then holds every cell of the host, whether VMs or the mount serve its volumes
+socket. One daemon then holds every cell of the host, whether VMs or the mount serve its vdisks
 (TASK-475.2).
 
 ## Upgrading the daemon
@@ -48,7 +48,7 @@ says what a format change refuses.
 
 ## Restoring a snapshot, on any number of hosts at once
 
-A snapshot's point is immutable. Any number of hosts read it, and none writes it: it has no lease, a
+A VM snapshot's point is immutable. Any number of hosts read it, and none writes it: a
 restore on one host changes nothing another host sees, and no copy of it goes stale. Each restore
 is a fork of the point into a new branch of the VM's own.
 
@@ -195,5 +195,5 @@ whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it
 how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
 open, StatStore reads the count kept as it changes, at no cost; of one none has, it opens the store
-as a VM's would (its state read, its branch's lease taken, the map of its extents built: time and,
+as a VM's would (its state read, its branch's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.

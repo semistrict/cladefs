@@ -26,9 +26,9 @@ use crate::pages::Arena;
 use crate::store_requests::{self, Capacity, Close};
 use crate::store_table::{self, StoreTable, Writer as _};
 use crate::{Branch, BranchOf, Cell, Errno, ExtentInfo, ExtentStore};
-use extent_remote::cache::Cache;
-use extent_remote::cell::Kind;
-use extent_remote::store::Stats;
+use extent_bucket::cache::Cache;
+use extent_bucket::cell::Kind;
+use extent_bucket::object_bucket::Stats;
 use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -452,14 +452,14 @@ impl Close for Forked {
     }
 }
 
-/// Returns once every commit of `store` ordered so far is durable and uploaded: its flush on a
+/// Returns once every commit of `store` ordered so far is uploaded: its flush on a
 /// blocking thread, which holds it meanwhile, the wait for its uploads holding none.
 pub(super) async fn uploaded<S>(store: &Arc<S>) -> Result<(), Errno>
 where
     S: Borrow<ExtentStore> + Send + Sync + 'static,
 {
     let flushed = store.clone();
-    let epoch = blocking(move || (*flushed).borrow().durable_epoch()).await?;
+    let epoch = blocking(move || (*flushed).borrow().make_local()).await?;
     (**store).borrow().uploaded(epoch).await
 }
 
@@ -482,7 +482,7 @@ pub(super) struct New {
     pub capacity: u64,
     /// What it holds.
     pub kind: Kind,
-    /// The tenant whose new cell it is the one volume of (TASK-364): the connection's.
+    /// The tenant whose new cell it is the one vdisk of (TASK-364): the connection's.
     pub tenant: u64,
 }
 
@@ -583,13 +583,13 @@ pub(super) async fn attach(
 /// The store at `path`, as `open` opens it with the daemon's uploader's options ([`keeping`]),
 /// keeping its branch in the bucket its description names: the daemon's, for the stores it made,
 /// or another's, as an image's file bucket, for one it serves (TASK-165.6). Its opening takes the
-/// branch's lease (TASK-165.9).
+/// branch's head (TASK-165.9).
 fn attached<T>(
     path: &Path,
     open: impl FnOnce(extent_store::upload::Options) -> Result<T, crate::Error>,
 ) -> Result<T, Errno> {
     // The daemon's own first, which the stores naming it share (`host_store::bucket`).
-    remote_bucket()?;
+    daemon_bucket()?;
     let keeping = keeping()?;
     open(keeping).map_err(|err| errno_of(format_args!("opening {}", path.display()), err))
 }
@@ -600,11 +600,11 @@ fn attached<T>(
 /// they fill, which the daemon's memory governor lets go of first (`memory::held_parts`,
 /// TASK-400).
 fn keeping() -> Result<extent_store::upload::Options, Errno> {
-    let token = crate::remote::host_token().map_err(|err| {
+    let token = crate::bucket::host_token().map_err(|err| {
         log::error!("extentd: {err}");
         Errno::EINVAL
     })?;
-    let (cache, interval) = (remote_cache()?, upload_interval());
+    let (cache, interval) = (part_cache()?, upload_interval());
     let held = Some(super::memory::held_parts().clone());
     Ok(extent_store::upload::Options { cache, held, token, interval, ..Default::default() })
 }
@@ -643,9 +643,9 @@ pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: crate::Error) -> Errn
 /// Makes an empty store at `path`, which must not exist (`EEXIST`), of `capacity` bytes, and
 /// returns its branch: a new one, or `branch`, if given, whose store kept in the daemon's bucket
 /// the daemon takes once it opens it (`cladefsctl take`); placed at `token` if given ([`place`]).
-/// cladefs: made as [`ExtentStore::create_placed`] makes it, its lease taken with `token`, not the
+/// cladefs: made as [`ExtentStore::create_placed`] makes it, its head taken with `token`, not the
 /// daemon's, so that a copy placed later than the one on another host that took the branch last
-/// takes it over (TASK-266: `ESTALE`, its lease taken with the daemon's token before it was
+/// takes it over (TASK-266: `ESTALE`, its head taken with the daemon's token before it was
 /// placed).
 pub(super) async fn create(
     path: PathBuf,
@@ -678,7 +678,7 @@ pub(super) async fn create(
 }
 
 /// Makes a store at `path`, which must not exist (`EEXIST`), of `capacity` bytes, holding a
-/// filesystem of the container image at `image` (`cladefs::import::store`), the one volume of a new
+/// filesystem of the container image at `image` (`cladefs::import::store`), the one vdisk of a new
 /// cell of `tenant`'s (TASK-364), and returns its branch.
 pub(super) async fn import(
     path: PathBuf,
@@ -748,7 +748,7 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
 /// that is no point, kept open since an earlier restore whose fork fails, as once another host, or
 /// this one's cladefsctl, took its branch, which fences it, is let go of, and opened anew for a fork
 /// once more, which takes the branch back, as each restore's did before stores were kept open: a
-/// restore fails only if the store it opened fails it. The fork is the one volume of a new cell of
+/// restore fails only if the store it opened fails it. The fork is the one vdisk of a new cell of
 /// `tenant`'s, if given, the granted tenant's whose VM process restores, or of the point's tenant's
 /// (TASK-364).
 pub(super) async fn fork_from(
@@ -802,7 +802,7 @@ async fn fork_point(
         Ok(point) => point,
         Err(errno) => return (Err(errno), Opened::Now),
     };
-    // cladefs: the one volume of a new cell of `tenant`'s, or the point's tenant's (TASK-364).
+    // cladefs: the one vdisk of a new cell of `tenant`'s, or the point's tenant's (TASK-364).
     let tenant = tenant.unwrap_or(point.store.branch().cell.tenant);
     let forked = point.store.fork(path, crate::host_store::new_cell(tenant));
     let forked = forked.map(drop).map_err(|err| {
@@ -866,11 +866,11 @@ async fn point(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), E
 /// another host took its branch, is opened anew for a fork once more, as a restore's
 /// ([`fork_from`], TASK-79.103). The fork is a point if `point` ([`ExtentStore::point`],
 /// TASK-158), live or not, once nothing is open; and shared, if `shared` too, once made
-/// ([`share`]): if sharing it fails, the point stands, not shared. It is the one volume of a new
+/// ([`share`]): if sharing it fails, the point stands, not shared. It is the one vdisk of a new
 /// cell of `tenant`'s, if given: the granted tenant's whose directory `to` is in; or of `from`'s
 /// tenant's; its ID the bucket's to give (TASK-364). A point not shared forks to no cell of another
 /// tenant's than its own (`EACCES`, TASK-395.7); nor does a store with a writer, unless it is the
-/// common tenant's, as the daemon's own stores and public bases are (`EACCES`, TASK-395.9),
+/// default tenant's, as the daemon's own stores and public bases are (`EACCES`, TASK-395.9),
 /// refused before anything is made. Only a point is shared (`EINVAL`).
 pub(super) async fn fork(
     from: PathBuf,
@@ -897,7 +897,7 @@ async fn fork_from_store(
 ) -> Result<Branch, Errno> {
     let _child = hold_to_fork(to).await?;
     let key = store_key(from);
-    // cladefs: the one volume of a new cell of `tenant`'s, or the store's tenant's (TASK-364).
+    // cladefs: the one vdisk of a new cell of `tenant`'s, or the store's tenant's (TASK-364).
     let from_branch = extent_store::host_branch(from).map_err(|_| Errno::ENOENT)?;
     let cell = || crate::host_store::new_cell(tenant.unwrap_or(from_branch.cell.tenant));
     let was_kept = kept(&key).is_some();
@@ -1002,10 +1002,10 @@ pub(super) async fn delete(path: PathBuf) -> Result<(), Errno> {
 /// The bucket the store at `path`, or the fork whose handle it is, keeps its branch in, as its
 /// description names it (TASK-165.6): or, if its description is not there, as for what a
 /// deletion that stopped partway left, which deletes nothing in a bucket, the daemon's.
-fn bucket_of(path: &Path) -> Result<Arc<extent_remote::store::Store>, Errno> {
+fn bucket_of(path: &Path) -> Result<Arc<extent_bucket::object_bucket::ObjectBucket>, Errno> {
     match crate::host_store::bucket_at(path) {
         Ok(Some(bucket)) => Ok(bucket),
-        Ok(None) => remote_bucket(),
+        Ok(None) => daemon_bucket(),
         Err(err) => {
             log::warn!("extentd: the bucket of {}: {err:#}", path.display());
             Err(Errno::EIO)
@@ -1026,7 +1026,7 @@ pub(super) async fn drop_copy(path: PathBuf) -> Result<(), Errno> {
 /// has it open.
 async fn delete_alone(
     path: PathBuf,
-    bucket: Option<Arc<extent_remote::store::Store>>,
+    bucket: Option<Arc<extent_bucket::object_bucket::ObjectBucket>>,
 ) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
@@ -1081,14 +1081,15 @@ pub(super) async fn place(path: PathBuf, token: u64) -> Result<(), Errno> {
 }
 
 /// Makes the store at `path` a public base, and the branches it inherited from
-/// ([`ExtentStore::make_public`]): `EBUSY` while a connection has it open, whose guest could
-/// write it still.
-pub(super) async fn make_public(path: PathBuf, generation: bool) -> Result<(), Errno> {
+/// ([`ExtentStore::make_public`]); or, if `attach_only`, its branch alone, to attach to stores, not
+/// to fork ([`ExtentStore::make_public_attach_only`]): `EBUSY` while a connection has it open,
+/// whose guest could write it still.
+pub(super) async fn make_public(path: PathBuf, attach_only: bool) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
         let _held = held;
         let store = open_here(&path)?;
-        if generation { store.make_generation_public() } else { store.make_public() }
+        if attach_only { store.make_public_attach_only() } else { store.make_public() }
     })
     .await
 }
@@ -1147,11 +1148,11 @@ pub(super) async fn stat(path: PathBuf) -> Result<StoreState, Errno> {
     .await
 }
 
-/// The bucket [`remote_bucket`] made, once a store needs it.
-static BUCKET: OnceLock<Arc<extent_remote::store::Store>> = OnceLock::new();
+/// The bucket [`daemon_bucket`] made, once a store needs it.
+static BUCKET: OnceLock<Arc<extent_bucket::object_bucket::ObjectBucket>> = OnceLock::new();
 
 /// What the daemon did with its bucket so far, if it made it (`metrics`).
-pub(super) fn bucket_stats() -> Option<extent_remote::store::Stats> {
+pub(super) fn bucket_stats() -> Option<extent_bucket::object_bucket::Stats> {
     BUCKET.get().map(|bucket| bucket.stats())
 }
 
@@ -1179,18 +1180,18 @@ pub(super) fn follower_views() -> usize {
     open_instances().iter().map(|store| store.view_stats().views).sum()
 }
 
-/// cladefs: the bucket `CLADEFSD_REMOTE` names, which the stores opened keep their branches in:
-/// `EIO` if it names none, as the daemon's host must (`crate::remote::Host`, TASK-45).
-pub(crate) fn remote_bucket() -> Result<Arc<extent_remote::store::Store>, Errno> {
+/// cladefs: the bucket `CLADEFSD_BUCKET` names, which the stores opened keep their branches in:
+/// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
+pub(crate) fn daemon_bucket() -> Result<Arc<extent_bucket::object_bucket::ObjectBucket>, Errno> {
     if let Some(bucket) = BUCKET.get() {
         return Ok(bucket.clone());
     }
-    let host = crate::remote::Host::from_env().map_err(|err| {
+    let host = crate::bucket::Host::from_env().map_err(|err| {
         log::error!("extentd: {err}");
         Errno::EIO
     })?;
     let bucket = crate::host_store::bucket(&host.bucket).map_err(|err| {
-        log::error!("extentd: CLADEFSD_REMOTE: {err:#}");
+        log::error!("extentd: CLADEFSD_BUCKET: {err:#}");
         Errno::EIO
     })?;
     Ok(BUCKET
@@ -1208,7 +1209,7 @@ static UPLOADS_WHEN_ASKED: std::sync::atomic::AtomicBool =
 
 /// Has the stores opened from now on upload only when something waits for an upload (a fork, a
 /// sync, a commit stalled at the lag's bound, the store closing), never as their interval runs
-/// out, as `remote::fork_faults`' stores do. For tests that set a failpoint to fail once for one
+/// out, as `bucket::fork_faults`' stores do. For tests that set a failpoint to fail once for one
 /// store's work: failpoints are the process's, and another store's uploader, woken by its
 /// interval, would pass it first (TASK-157).
 #[cfg(test)]
@@ -1217,12 +1218,12 @@ pub(super) fn uploads_when_asked() {
 }
 
 /// Makes `bucket` the daemon's, before any store opens: for tests that put themselves between the
-/// daemon's stores and their objects. The stores naming `CLADEFSD_REMOTE`'s bucket open it
+/// daemon's stores and their objects. The stores naming `CLADEFSD_BUCKET`'s bucket open it
 /// (`host_store::use_bucket`).
 #[cfg(test)]
-pub(super) fn use_bucket(bucket: extent_remote::store::Store) {
+pub(super) fn use_bucket(bucket: extent_bucket::object_bucket::ObjectBucket) {
     let bucket = Arc::new(bucket);
-    let host = crate::remote::Host::from_env().expect("the daemon's host");
+    let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_store::use_bucket(&host.bucket, bucket.clone());
     assert!(BUCKET.set(bucket.clone()).is_ok(), "the daemon has its bucket already");
     watch_stats(Arc::downgrade(&bucket));
@@ -1278,15 +1279,15 @@ impl FollowerStats {
 }
 
 /// cladefs: keeps what `bucket` did, its requests by kind and its bytes up and down
-/// (`extent_remote::store::Stats::line`), what the stores' followers are ([`FollowerStats`]),
-/// what serving the stores cost ([`daemon_line`]), the requests served
+/// (`extent_bucket::object_bucket::Stats::line`), what the stores' followers are
+/// ([`FollowerStats`]), what serving the stores cost ([`daemon_line`]), the requests served
 /// (`super::metrics::requests_line`), what its uploads hold ([`uploads_line`]) and what its process
 /// holds and spent (`super::process::line`, sampled every poll, as the metrics report it, file or
 /// not), while it lives: in the file `CLADEFSD_STATS` names, if it names one, a line each, rewritten whole within [`STATS_POLL`] of each change, which the
 /// bench reports (`scripts/bench-report.py`); and the bucket's in the log every [`STATS_EVERY`]
 /// that it changed. cladefs: what it keeps but the bucket's, it looks at only to keep it in the file
 /// (TASK-92.17).
-fn watch_stats(bucket: std::sync::Weak<extent_remote::store::Store>) {
+fn watch_stats(bucket: std::sync::Weak<extent_bucket::object_bucket::ObjectBucket>) {
     let file = std::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let watching = std::thread::Builder::new().name("extentd stats".into()).spawn(move || {
@@ -1338,13 +1339,13 @@ fn watch_stats(bucket: std::sync::Weak<extent_remote::store::Store>) {
 }
 
 /// cladefs: what the daemon's uploads hold of the objects they upload, in bytes, now and at most,
-/// and the most they may (`crate::remote::upload_memory`, TASK-317).
+/// and the most they may (`crate::bucket::upload_memory`, TASK-317).
 fn uploads_line() -> String {
-    let memory = crate::remote::upload_memory();
+    let memory = crate::bucket::upload_memory();
     format!("uploads: held={} max-held={} budget={}", memory.held, memory.max_held, memory.budget)
 }
 
-/// cladefs: the daemon's part cache, if it opened one ([`remote_cache`]): opening none.
+/// cladefs: the daemon's part cache, if it opened one ([`part_cache`]): opening none.
 pub(super) fn opened_cache() -> Option<Arc<Cache>> {
     CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().flatten()
 }
@@ -1367,8 +1368,8 @@ fn daemon_line() -> String {
     let quantile = |fraction| lags.quantile_ms(fraction).unwrap_or(0);
     let last = extent_store::LAG_BUCKETS - 1;
     let bucket = |(bucket, count): (usize, &u64)| match bucket == last {
-        false => format!("durable_lag_le_{}ms={count}", 1u64 << bucket),
-        true => format!("durable_lag_gt_{}ms={count}", 1u64 << (bucket - 1)),
+        false => format!("local_lag_le_{}ms={count}", 1u64 << bucket),
+        true => format!("local_lag_gt_{}ms={count}", 1u64 << (bucket - 1)),
     };
     let buckets: Vec<String> = lags.buckets.iter().enumerate().map(bucket).collect();
     // And where it went: how long its flushes and framings took, phase by phase.
@@ -1419,8 +1420,8 @@ fn daemon_line() -> String {
     ];
     let io = process_io().map(|(name, bytes)| format!("io_{name}={bytes}"));
     format!(
-        "daemon: {} durable_lag_count={} durable_lag_max_us={} durable_lag_p50_ms={} \
-         durable_lag_p99_ms={} durable_lag_within_50ms={} {} {} {} {} {} {}",
+        "daemon: {} local_lag_count={} local_lag_max_us={} local_lag_p50_ms={} \
+         local_lag_p99_ms={} local_lag_within_50ms={} {} {} {} {} {} {}",
         named.join(" "),
         lags.count,
         lags.max_us,
@@ -1496,24 +1497,24 @@ static STATS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 const CACHE_FLOOR: u64 = 4 << 30;
 
 /// cladefs: where the daemon keeps its part cache, and how much it may keep there, as the environment
-/// says: the directory `CLADEFSD_CACHE` names, if it names one (empty, it names none); the
-/// bytes of objects `CLADEFSD_CACHE_BYTES` gives, a budget, as a host whose cache shares its
+/// says: the directory `CLADEFSD_PART_CACHE` names, if it names one (empty, it names none); the
+/// bytes of objects `CLADEFSD_PART_CACHE_BYTES` gives, a budget, as a host whose cache shares its
 /// disk with its stores needs (TASK-406.1), or, unset, as many as leave [`CACHE_FLOOR`] free. Read
 /// at the daemon's start, to refuse what it can't use, and again by its first store to open.
 pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
     let set = |var| std::env::var_os(var).filter(|value| !value.is_empty());
-    let dir = set("CLADEFSD_CACHE");
-    let capacity = match set("CLADEFSD_CACHE_BYTES") {
+    let dir = set("CLADEFSD_PART_CACHE");
+    let capacity = match set("CLADEFSD_PART_CACHE_BYTES") {
         None => u64::MAX,
         Some(_) if dir.is_none() => {
-            return Err("CLADEFSD_CACHE_BYTES is set, but CLADEFSD_CACHE names no \
+            return Err("CLADEFSD_PART_CACHE_BYTES is set, but CLADEFSD_PART_CACHE names no \
                         directory for the cache"
                 .to_owned());
         }
         Some(bytes) => match bytes.to_str().and_then(|bytes| bytes.parse().ok()) {
             Some(0) | None => {
                 return Err(format!(
-                    "CLADEFSD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
+                    "CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
                 ));
             }
             Some(bytes) => bytes,
@@ -1523,7 +1524,7 @@ pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
 }
 
 /// cladefs: the daemon's part cache, once its first store opened it, if it keeps one
-/// ([`remote_cache`]).
+/// ([`part_cache`]).
 static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::new(None);
 
 /// cladefs: the cache the environment configures ([`cache_config`]), if it does, where what the
@@ -1531,7 +1532,7 @@ static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::n
 /// opening meanwhile waiting for it: a cache holds its directory locked, and two opened at once, as
 /// a daemon's VMs booting at once open their stores, failed the second (TASK-67). A failure is the
 /// caller's, and the next tries again.
-pub(super) fn remote_cache() -> Result<Option<Arc<Cache>>, Errno> {
+pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
     let mut opened = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cache) = &*opened {
         return Ok(cache.clone());
@@ -1544,7 +1545,7 @@ pub(super) fn remote_cache() -> Result<Option<Arc<Cache>>, Errno> {
         Some((dir, capacity)) => match Cache::open(&dir, capacity, CACHE_FLOOR) {
             Ok(cache) => Some(Arc::new(cache)),
             Err(err) => {
-                log::error!("extentd: CLADEFSD_CACHE: {err}");
+                log::error!("extentd: CLADEFSD_PART_CACHE: {err}");
                 return Err(Errno::EIO);
             }
         },
@@ -1566,28 +1567,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("CLADEFSD_CACHE", dir.path()) };
+        unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path()) };
         let at_once = std::sync::Barrier::new(16);
         let caches: Vec<_> = std::thread::scope(|scope| {
             let opening: Vec<_> = (0..16)
                 .map(|_| {
                     scope.spawn(|| {
                         at_once.wait();
-                        remote_cache()
+                        part_cache()
                     })
                 })
                 .collect();
             opening.into_iter().map(|opening| opening.join().unwrap()).collect()
         });
-        let first = caches[0].clone().expect("a cache").expect("CLADEFSD_CACHE's");
+        let first = caches[0].clone().expect("a cache").expect("CLADEFSD_PART_CACHE's");
         for cache in caches {
-            let cache = cache.expect("a cache").expect("CLADEFSD_CACHE's");
+            let cache = cache.expect("a cache").expect("CLADEFSD_PART_CACHE's");
             assert!(Arc::ptr_eq(&cache, &first), "two caches of one directory");
         }
         assert_eq!(first.capacity(), u64::MAX, "a cache with no budget");
     }
 
-    /// TASK-406.1: the daemon's cache keeps no more than `CLADEFSD_CACHE_BYTES`, as a host
+    /// TASK-406.1: the daemon's cache keeps no more than `CLADEFSD_PART_CACHE_BYTES`, as a host
     /// whose cache shares its disk with its stores needs.
     #[test]
     fn the_cache_takes_its_budget() {
@@ -1595,10 +1596,10 @@ mod tests {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
         unsafe {
-            std::env::set_var("CLADEFSD_CACHE", dir.path());
-            std::env::set_var("CLADEFSD_CACHE_BYTES", "268435456");
+            std::env::set_var("CLADEFSD_PART_CACHE", dir.path());
+            std::env::set_var("CLADEFSD_PART_CACHE_BYTES", "268435456");
         }
-        let cache = remote_cache().expect("a cache").expect("CLADEFSD_CACHE's");
+        let cache = part_cache().expect("a cache").expect("CLADEFSD_PART_CACHE's");
         assert_eq!(cache.capacity(), 256 << 20);
     }
 
@@ -1608,22 +1609,24 @@ mod tests {
     fn budgets_the_cache_cant_take_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: as above.
-        unsafe { std::env::remove_var("CLADEFSD_CACHE") };
-        let set = |bytes: &str| unsafe { std::env::set_var("CLADEFSD_CACHE_BYTES", bytes) };
+        unsafe { std::env::remove_var("CLADEFSD_PART_CACHE") };
+        let set = |bytes: &str| unsafe { std::env::set_var("CLADEFSD_PART_CACHE_BYTES", bytes) };
         set("1");
         assert_eq!(
             cache_config(),
-            Err("CLADEFSD_CACHE_BYTES is set, but CLADEFSD_CACHE names no directory \
+            Err("CLADEFSD_PART_CACHE_BYTES is set, but CLADEFSD_PART_CACHE names no directory \
                  for the cache"
                 .to_owned())
         );
         // SAFETY: as above.
-        unsafe { std::env::set_var("CLADEFSD_CACHE", dir.path()) };
+        unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path()) };
         for bytes in ["0", "-1", "1G", "x"] {
             set(bytes);
             assert_eq!(
                 cache_config(),
-                Err(format!("CLADEFSD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"))
+                Err(format!(
+                    "CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
+                ))
             );
         }
         set("");

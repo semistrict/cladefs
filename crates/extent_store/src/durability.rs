@@ -91,8 +91,9 @@ pub fn durability_lags() -> Lags {
     *LAGS.lock().unwrap()
 }
 
-/// The commits a flush takes, oldest first, and the epoch of the last.
-pub(crate) struct Batch<T> {
+/// The commits due to be made durable, which a flush takes, oldest first, and the epoch of the
+/// last.
+pub(crate) struct Due<T> {
     pub last: u64,
     pub commits: Vec<T>,
 }
@@ -112,11 +113,11 @@ impl<T> Durability<T> {
     }
 
     /// Takes the commits ordered that no flush has taken, if any, for a flush to make durable.
-    pub fn take(&mut self) -> Option<Batch<T>> {
+    pub fn take(&mut self) -> Option<Due<T>> {
         if self.queue.is_empty() {
             return None;
         }
-        Some(Batch { last: self.ordered, commits: self.queue.drain(..).collect() })
+        Some(Due { last: self.ordered, commits: self.queue.drain(..).collect() })
     }
 
     /// The commits up to `last`, a flush's, are durable.
@@ -142,8 +143,8 @@ impl<T> Durability<T> {
         self.ordered > self.durable
     }
 
-    /// The epoch of the last commit durable.
-    pub fn durable(&self) -> u64 {
+    /// The number of the last commit local: synced to the host's disk.
+    pub fn local(&self) -> u64 {
         self.durable
     }
 
@@ -440,10 +441,10 @@ mod tests {
         durability.push(2, ());
         let batch = durability.take().unwrap();
         durability.push(3, ());
-        assert_eq!((durability.durable(), durability.taken()), (0, 2));
+        assert_eq!((durability.local(), durability.taken()), (0, 2));
         assert!(durability.queued());
         durability.finish(batch.last);
-        assert_eq!((durability.durable(), durability.taken()), (2, 2));
+        assert_eq!((durability.local(), durability.taken()), (2, 2));
         assert!(durability.queued());
         // Pending, taken or not, until durable.
         let batch = durability.take().unwrap();

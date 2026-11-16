@@ -8,7 +8,7 @@ use cladefs::extentd::control::proto::extentd_client::ExtentdClient;
 use cladefs::extentd::control::proto::*;
 use cladefs::extentd::control::{connect, errno};
 use cladefs::extentd::{serve, serve_control};
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use tonic::Code;
@@ -38,11 +38,11 @@ impl Daemon {
     }
 
     /// A VM process's store at `path`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(&self, path: &Path, capacity: u64) -> RemoteExtentStore {
-        RemoteExtentStore::connect(&self.vms, path, capacity).unwrap()
+    pub fn open(&self, path: &Path, capacity: u64) -> DaemonExtentStore {
+        DaemonExtentStore::connect(&self.vms, path, capacity).unwrap()
     }
 
-    /// Makes a store at `path` of `branch`, an Fxfs volume of its cell: a new cell if its cell's
+    /// Makes a store at `path` of `branch`, an Fxfs vdisk of its cell: a new cell if its cell's
     /// ID is 0, a new branch there if its ID is (TASK-364).
     pub fn create(
         &mut self,
@@ -116,7 +116,7 @@ impl Daemon {
     }
 
     pub fn make_public(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = MakePublicRequest { path: name(path), generation: false };
+        let request = MakePublicRequest { path: name(path), attach_only: false };
         self.runtime.block_on(self.client.make_public(request)).map(drop)
     }
 
@@ -148,22 +148,20 @@ impl Daemon {
         Ok(cladefs::Branch { cell, id: response.branch })
     }
 
-    /// Grants `tenant`, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`, its
-    /// socket, given to `uid`, if named.
+    /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
+    /// its socket, given to `uid`, if named.
     pub fn grant(
         &mut self,
-        tenant: &str,
-        id: u64,
+        tenant: u64,
         dir: &Path,
         uid: Option<u32>,
     ) -> Result<PathBuf, tonic::Status> {
-        let (tenant, dir) = (tenant.to_owned(), name(dir));
-        let request = GrantRequest { tenant, dir, uid, gid: None, id };
+        let request = GrantRequest { tenant, dir: name(dir), uid, gid: None };
         Ok(self.runtime.block_on(self.client.grant(request))?.into_inner().socket.into())
     }
 
-    pub fn revoke(&mut self, tenant: &str) -> Result<(), tonic::Status> {
-        let request = RevokeRequest { tenant: tenant.to_owned() };
+    pub fn revoke(&mut self, tenant: u64) -> Result<(), tonic::Status> {
+        let request = RevokeRequest { tenant };
         self.runtime.block_on(self.client.revoke(request)).map(drop)
     }
 
@@ -180,11 +178,10 @@ impl Daemon {
     /// Limits the memory of `tenant`, or of every tenant, to `bytes`, or lifts the limit.
     pub fn set_memory_limit(
         &mut self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         bytes: Option<u64>,
     ) -> Result<(), tonic::Status> {
-        let request =
-            SetMemoryLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
+        let request = SetMemoryLimitRequest { tenant, bytes };
         self.runtime.block_on(self.client.set_memory_limit(request)).map(drop)
     }
 
@@ -192,42 +189,40 @@ impl Daemon {
     /// is held then.
     pub fn shrink_memory(
         &mut self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         target: u64,
     ) -> Result<u64, tonic::Status> {
-        let request = ShrinkMemoryRequest {
-            tenant: tenant.unwrap_or_default().to_owned(),
-            target_bytes: target,
-        };
+        let request = ShrinkMemoryRequest { tenant, target_bytes: target };
         Ok(self.runtime.block_on(self.client.shrink_memory(request))?.into_inner().bytes)
     }
 
     /// Limits the disk of `tenant`, or of every tenant, to `bytes`, or lifts the limit (TASK-94).
     pub fn set_disk_limit(
         &mut self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
         bytes: Option<u64>,
     ) -> Result<(), tonic::Status> {
-        let request = SetDiskLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
+        let request = SetDiskLimitRequest { tenant, bytes };
         self.runtime.block_on(self.client.set_disk_limit(request)).map(drop)
     }
 
     /// What the disk of `tenant`, or of every tenant, takes, counted now, and its limit.
     pub fn tenant_disk(
         &mut self,
-        tenant: Option<&str>,
+        tenant: Option<u64>,
     ) -> Result<(u64, Option<u64>), tonic::Status> {
-        let request = GetTenantDiskRequest { tenant: tenant.unwrap_or_default().to_owned() };
+        let request = GetTenantDiskRequest { tenant };
         let response = self.runtime.block_on(self.client.get_tenant_disk(request))?.into_inner();
         Ok((response.bytes, response.limit_bytes))
     }
 
-    pub fn stats(&mut self) -> GetStatsResponse {
-        self.runtime.block_on(self.client.get_stats(GetStatsRequest {})).unwrap().into_inner()
+    pub fn counters(&mut self) -> GetCountersResponse {
+        let counters = self.client.get_counters(GetCountersRequest {});
+        self.runtime.block_on(counters).unwrap().into_inner()
     }
 }
 
-/// A branch to make anew: of a new cell of no tenant's, a new ID there (TASK-364).
+/// A branch to make anew: of a new cell of the default tenant's, a new ID there (TASK-364).
 pub const NEW: cladefs::Branch =
     cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
 
@@ -244,7 +239,7 @@ pub fn failure<T: std::fmt::Debug>(result: Result<T, tonic::Status>) -> (Code, E
 }
 
 /// Writes `bytes` as the first extent of `store` and commits, setting its root to `root`.
-pub fn write(store: &RemoteExtentStore, bytes: &[u8], root: &[u8]) {
+pub fn write(store: &DaemonExtentStore, bytes: &[u8], root: &[u8]) {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(Some(root)).unwrap();

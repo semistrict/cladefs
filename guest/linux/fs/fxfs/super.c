@@ -1393,7 +1393,7 @@ static int fxfs_vfs_iterate(struct file *file, struct dir_context *ctx)
 static void fxfs_vfs_assert_filling(struct inode *inode)
 {
 	if (fxfs_vfs_follows(inode->i_sb) && !fxfs_follow_skip_barrier)
-		lockdep_assert_held(&fxfs_vfs_info(inode->i_sb)->follow_barrier);
+		lockdep_assert_held(&fxfs_vfs_info(inode->i_sb)->fill_barrier);
 }
 
 /* Fills `folio` with file `inode`'s data, and zeros past its end. */
@@ -3021,9 +3021,9 @@ unsigned int fxfs_follow_iomap_delay_us;
 module_param_named(follow_iomap_delay_us, fxfs_follow_iomap_delay_us, uint, 0644);
 MODULE_PARM_DESC(follow_iomap_delay_us,
 		 "A follower's delay between an iomap's extents and its mapping (tests)");
-bool fxfs_follow_skip_invalidate;
-module_param_named(follow_skip_invalidate, fxfs_follow_skip_invalidate, bool, 0644);
-MODULE_PARM_DESC(follow_skip_invalidate,
+bool fxfs_follow_skip_drop;
+module_param_named(follow_skip_drop, fxfs_follow_skip_drop, bool, 0644);
+MODULE_PARM_DESC(follow_skip_drop,
 		 "A follower's batch drops and settles nothing: a mutation the tests catch");
 /* Read-only once booted: a reader takes the barrier, and lets go of it, as it was set. */
 bool fxfs_follow_skip_barrier;
@@ -3062,42 +3062,43 @@ static struct fxfs_vfs_info *fxfs_vfs_follow_info(void *vfs)
 	return fxfs_vfs_info(vfs);
 }
 
-void fxfs_vfs_follow_fill_begin(void *vfs)
+/* cladefs: vfs.h's inline fill barrier shims, out of line for the follower's Rust. */
+void fxfs_vfs_fill_begin_extern(void *vfs)
 {
 	fxfs_vfs_fill_begin(vfs);
 }
 
-void fxfs_vfs_follow_fill_end(void *vfs)
+void fxfs_vfs_fill_end_extern(void *vfs)
 {
 	fxfs_vfs_fill_end(vfs);
 }
 
-void fxfs_vfs_follow_assert_filling(void *vfs)
+void fxfs_vfs_fill_barrier_assert_held(void *vfs)
 {
 	if (!fxfs_follow_skip_barrier)
-		lockdep_assert_held(&fxfs_vfs_follow_info(vfs)->follow_barrier);
+		lockdep_assert_held(&fxfs_vfs_follow_info(vfs)->fill_barrier);
 }
 
 /*
  * cladefs: a follower's batch takes its fill barrier, once its readers holding it are done, and
  * keeps new ones waiting until it lets go (vfs.h): how long it waited is counted.
  */
-void fxfs_vfs_follow_barrier_take(void *vfs)
+void fxfs_vfs_fill_barrier_take(void *vfs)
 {
 	struct fxfs_vfs_info *info = fxfs_vfs_follow_info(vfs);
 	u64 start = ktime_get_ns(), waited;
 
-	down_write(&info->follow_barrier);
+	down_write(&info->fill_barrier);
 	waited = ktime_get_ns() - start;
 	WRITE_ONCE(info->follow_batches, info->follow_batches + 1);
-	WRITE_ONCE(info->follow_barrier_wait_ns, info->follow_barrier_wait_ns + waited);
-	if (waited > info->follow_barrier_wait_max_ns)
-		WRITE_ONCE(info->follow_barrier_wait_max_ns, waited);
+	WRITE_ONCE(info->fill_barrier_wait_ns, info->fill_barrier_wait_ns + waited);
+	if (waited > info->fill_barrier_wait_max_ns)
+		WRITE_ONCE(info->fill_barrier_wait_max_ns, waited);
 }
 
-void fxfs_vfs_follow_barrier_release(void *vfs)
+void fxfs_vfs_fill_barrier_release(void *vfs)
 {
-	up_write(&fxfs_vfs_follow_info(vfs)->follow_barrier);
+	up_write(&fxfs_vfs_follow_info(vfs)->fill_barrier);
 }
 
 bool fxfs_vfs_follow_failing(void)
@@ -3105,7 +3106,7 @@ bool fxfs_vfs_follow_failing(void)
 	return READ_ONCE(fxfs_follow_fail_batch);
 }
 
-void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch)
+void fxfs_vfs_follow_commit(void *vfs, u32 which, u64 commit)
 {
 	struct fxfs_vfs_info *info = fxfs_vfs_follow_info(vfs);
 	u64 *at = which == FXFS_FOLLOW_APPLIED ? &info->follow_applied : &info->follow_settled;
@@ -3118,10 +3119,10 @@ void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch)
 	 * Its batches alone write it, and the commits they apply only move on; a batch settles what
 	 * it applied, never past it (doc-8, testing 1).
 	 */
-	WARN_ON_ONCE(epoch < READ_ONCE(*at));
-	WARN_ON_ONCE(which == FXFS_FOLLOW_SETTLED && epoch > READ_ONCE(info->follow_applied));
-	if (epoch > READ_ONCE(*at))
-		smp_store_release(at, epoch);
+	WARN_ON_ONCE(commit < READ_ONCE(*at));
+	WARN_ON_ONCE(which == FXFS_FOLLOW_SETTLED && commit > READ_ONCE(info->follow_applied));
+	if (commit > READ_ONCE(*at))
+		smp_store_release(at, commit);
 }
 
 /* cladefs: FXFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
@@ -3198,7 +3199,7 @@ static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned lon
 {
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct fxfs_vfs_info *info = fxfs_vfs_info(sb);
-	struct fxfs_follow_epochs epochs;
+	struct fxfs_follow_commits commits;
 	struct fxfs_follow_stats stats;
 	u64 cached;
 
@@ -3222,14 +3223,14 @@ static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	if (!fxfs_vfs_follows(sb))
 		return -ENOTTY;
 	switch (cmd) {
-	case FXFS_IOC_FOLLOW_EPOCHS:
-		epochs.settled = smp_load_acquire(&info->follow_settled);
-		epochs.applied = smp_load_acquire(&info->follow_applied);
-		return copy_to_user((void __user *)arg, &epochs, sizeof(epochs)) ? -EFAULT : 0;
+	case FXFS_IOC_FOLLOW_COMMITS:
+		commits.settled = smp_load_acquire(&info->follow_settled);
+		commits.applied = smp_load_acquire(&info->follow_applied);
+		return copy_to_user((void __user *)arg, &commits, sizeof(commits)) ? -EFAULT : 0;
 	case FXFS_IOC_FOLLOW_STATS:
 		stats.batches = READ_ONCE(info->follow_batches);
-		stats.barrier_wait_ns = READ_ONCE(info->follow_barrier_wait_ns);
-		stats.barrier_wait_max_ns = READ_ONCE(info->follow_barrier_wait_max_ns);
+		stats.barrier_wait_ns = READ_ONCE(info->fill_barrier_wait_ns);
+		stats.barrier_wait_max_ns = READ_ONCE(info->fill_barrier_wait_max_ns);
 		return copy_to_user((void __user *)arg, &stats, sizeof(stats)) ? -EFAULT : 0;
 	default:
 		return -ENOTTY;
@@ -3315,9 +3316,9 @@ static void fxfs_vfs_settle_attr(struct super_block *sb, struct inode *inode, u6
  */
 static bool fxfs_vfs_changing(struct super_block *sb)
 {
-	if (WARN_ON_ONCE(!fxfs_vfs_follows(sb)) || fxfs_follow_skip_invalidate)
+	if (WARN_ON_ONCE(!fxfs_vfs_follows(sb)) || fxfs_follow_skip_drop)
 		return false;
-	lockdep_assert_held_write(&fxfs_vfs_info(sb)->follow_barrier);
+	lockdep_assert_held_write(&fxfs_vfs_info(sb)->fill_barrier);
 	return true;
 }
 
@@ -3625,7 +3626,7 @@ static int fxfs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_bdi->ra_pages = FXFS_IO_MAX / PAGE_SIZE;
 	sb->s_bdi->io_pages = FXFS_IO_MAX / PAGE_SIZE;
 	/* cladefs: what a follower's batches and readers keep, readied before it mounts. */
-	init_rwsem(&info->follow_barrier);
+	init_rwsem(&info->fill_barrier);
 	INIT_WORK(&info->follow, fxfs_vfs_follow_work);
 	err = fxfs_vfs_filesystem_join(info, fc);
 	if (err)

@@ -10,16 +10,16 @@
 //! CI, `forks_read_what_they_inherited_compacted_twice`).
 
 use crate::ExtentStore;
-use extent_remote::store::Store as Bucket;
+use extent_bucket::object_bucket::ObjectBucket;
 use std::time::{Duration, Instant};
 
 /// The newest checkpoint of `branch` that `bucket` lists, by its sequence number.
-pub(crate) fn newest(bucket: &Bucket, branch: crate::Branch) -> Option<u64> {
-    let prefix = extent_remote::layout::checkpoints(branch);
-    let listed = futures::executor::block_on(extent_remote::Bucket::list(bucket, &prefix));
+pub(crate) fn newest(bucket: &ObjectBucket, branch: crate::Branch) -> Option<u64> {
+    let prefix = extent_bucket::layout::checkpoints(branch);
+    let listed = futures::executor::block_on(extent_bucket::Bucket::list(bucket, &prefix));
     (listed.unwrap().iter())
-        .filter_map(|meta| match extent_remote::layout::kind(&meta.key) {
-            extent_remote::layout::Kind::Checkpoint { seq, .. } => Some(seq),
+        .filter_map(|meta| match extent_bucket::layout::kind(&meta.key) {
+            extent_bucket::layout::Kind::Checkpoint { segment, .. } => Some(segment),
             _ => None,
         })
         .max()
@@ -27,7 +27,7 @@ pub(crate) fn newest(bucket: &Bucket, branch: crate::Branch) -> Option<u64> {
 
 /// Runs `commits`, which commit `store` into a checkpoint, and waits for its writer's checkpoint
 /// past the newest before them to be in `bucket`, 60 s at most.
-pub(crate) fn after(store: &ExtentStore, bucket: &Bucket, commits: impl FnOnce()) {
+pub(crate) fn after(store: &ExtentStore, bucket: &ObjectBucket, commits: impl FnOnce()) {
     let before = newest(bucket, store.branch());
     commits();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -43,7 +43,7 @@ pub(crate) fn after(store: &ExtentStore, bucket: &Bucket, commits: impl FnOnce()
 
 /// Commits `store` [`extent_store::upload::CHECKPOINT_EVERY`] times, a segment each, and waits for
 /// the checkpoint they make to be in `bucket` ([`after`]).
-pub(crate) fn checkpointed(store: &ExtentStore, bucket: &Bucket) {
+pub(crate) fn checkpointed(store: &ExtentStore, bucket: &ObjectBucket) {
     after(store, bucket, || {
         for _ in 0..extent_store::upload::CHECKPOINT_EVERY {
             store.commit(None).unwrap();

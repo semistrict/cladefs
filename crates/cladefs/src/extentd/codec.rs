@@ -23,7 +23,7 @@ use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
 use crate::{Access, Commit, Errno, ExtentId, ExtentInfo, MappingContents};
 use crate::{WindowMapping, WriteBarriers};
-use extent_remote::cell::Kind;
+use extent_bucket::cell::Kind;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -74,7 +74,7 @@ pub(crate) enum Request<'a> {
     /// [`ADVANCE`].
     Advance,
     /// [`LET_GO`].
-    LetGo { epoch: u64 },
+    LetGo { commit: u64 },
     /// [`PIN`].
     Pin(ExtentId),
     /// [`UNPIN`].
@@ -97,7 +97,7 @@ pub(crate) enum Opening {
     /// To write, if it exists (no flags).
     Existing,
     /// To write, created with this many bytes of capacity if it doesn't exist ([`OPEN_CREATE`]),
-    /// a volume of this kind of its new cell ([`OPEN_SQLITE`], TASK-364).
+    /// a vdisk of this kind of its new cell ([`OPEN_SQLITE`], TASK-364).
     Create(u64, Kind),
     /// To write, forked from the store at `from` if it doesn't exist, of branch `branch` and
     /// `capacity` bytes, which the daemon takes from its bucket if it doesn't exist either
@@ -194,10 +194,15 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         OPEN => OPEN_CREATE | OPEN_FORK_FROM | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
         READ => READ_TRANSFER,
         WRITE => {
-            WRITE_BARRIER | WRITE_COMMIT | WRITE_DURABLE | WRITE_LOCAL | WRITE_TRANSFER | WRITE_ROOT
+            WRITE_BARRIER
+                | WRITE_COMMIT
+                | WRITE_UPLOADED
+                | WRITE_LOCAL
+                | WRITE_TRANSFER
+                | WRITE_ROOT
         }
         MAP => MAP_ZEROS,
-        COMMIT => COMMIT_ROOT | COMMIT_DURABLE | COMMIT_LOCAL,
+        COMMIT => COMMIT_ROOT | COMMIT_UPLOADED | COMMIT_LOCAL,
         FAULT => FAULT_WRITE | FAULT_PAGE | FAULT_PROBE,
         FORK => FORK_QUIESCENT,
         STATS => STATS_GUEST,
@@ -289,7 +294,7 @@ impl<'a> Request<'a> {
                     None => 0,
                     Some(Commit::Ordered) => WRITE_COMMIT,
                     Some(Commit::Local) => WRITE_COMMIT | WRITE_LOCAL,
-                    Some(Commit::Durable) => WRITE_COMMIT | WRITE_DURABLE,
+                    Some(Commit::Uploaded) => WRITE_COMMIT | WRITE_UPLOADED,
                 };
                 // cladefs: the root the commit sets, after the data in the payload (TASK-153.13).
                 flags |= flag(barriers.root.is_some(), WRITE_ROOT);
@@ -324,7 +329,7 @@ impl<'a> Request<'a> {
             Request::Commit { commit, root } => {
                 let flags = flag(root.is_some(), COMMIT_ROOT)
                     | flag(*commit == Commit::Local, COMMIT_LOCAL)
-                    | flag(*commit == Commit::Durable, COMMIT_DURABLE);
+                    | flag(*commit == Commit::Uploaded, COMMIT_UPLOADED);
                 message(flags, [0; 5]).carrying(root.unwrap_or_default())
             }
             Request::Root | Request::Info | Request::Mappings | Request::Advance => {
@@ -346,7 +351,7 @@ impl<'a> Request<'a> {
             Request::Resized { capacity, took } => {
                 message(0, [*capacity, u64::from(*took), 0, 0, 0])
             }
-            Request::LetGo { epoch } => message(0, [*epoch, 0, 0, 0, 0]),
+            Request::LetGo { commit } => message(0, [*commit, 0, 0, 0, 0]),
             Request::Transfer { len, area } => {
                 Encoded { fd: Some(area.0), ..message(0, [*len, 0, 0, 0, 0]) }
             }
@@ -422,11 +427,11 @@ impl<'a> Request<'a> {
             }
             WRITE => {
                 // A commit's flags, without a commit.
-                if !has(WRITE_COMMIT) && has(WRITE_DURABLE | WRITE_LOCAL | WRITE_ROOT) {
+                if !has(WRITE_COMMIT) && has(WRITE_UPLOADED | WRITE_LOCAL | WRITE_ROOT) {
                     return Err(Errno::EINVAL);
                 }
-                // Durable two ways.
-                if has(WRITE_DURABLE) && has(WRITE_LOCAL) {
+                // Local and uploaded at once.
+                if has(WRITE_UPLOADED) && has(WRITE_LOCAL) {
                     return Err(Errno::EINVAL);
                 }
                 // The data, and the root after it in the payload, if any.
@@ -443,8 +448,8 @@ impl<'a> Request<'a> {
                     return Err(Errno::EINVAL);
                 }
                 let after =
-                    has(WRITE_COMMIT).then_some(match (has(WRITE_DURABLE), has(WRITE_LOCAL)) {
-                        (true, _) => Commit::Durable,
+                    has(WRITE_COMMIT).then_some(match (has(WRITE_UPLOADED), has(WRITE_LOCAL)) {
+                        (true, _) => Commit::Uploaded,
                         (false, true) => Commit::Local,
                         (false, false) => Commit::Ordered,
                     });
@@ -486,9 +491,9 @@ impl<'a> Request<'a> {
                 if root.is_some_and(|root| root.len() > MAX_ROOT) {
                     return Err(Errno::EINVAL);
                 }
-                let commit = match (has(COMMIT_DURABLE), has(COMMIT_LOCAL)) {
+                let commit = match (has(COMMIT_UPLOADED), has(COMMIT_LOCAL)) {
                     (true, true) => return Err(Errno::EINVAL),
-                    (true, false) => Commit::Durable,
+                    (true, false) => Commit::Uploaded,
                     (false, true) => Commit::Local,
                     (false, false) => Commit::Ordered,
                 };
@@ -541,7 +546,7 @@ impl<'a> Request<'a> {
             }
             LET_GO => {
                 nothing()?;
-                Request::LetGo { epoch: args[0] }
+                Request::LetGo { commit: args[0] }
             }
             PIN | UNPIN => {
                 nothing()?;
@@ -725,7 +730,7 @@ pub(crate) enum Told {
     /// to shrink to it ([`CAPACITY_ASK`]).
     Capacity { capacity: u64, ask: bool },
     /// cladefs: [`COMMITTED`].
-    Committed { epoch: u64 },
+    Committed { commit: u64 },
     /// cladefs: [`STATS_ASK`].
     Stats { ask: u64 },
 }
@@ -736,7 +741,7 @@ impl Told {
             Told::Stage(stage) => stage.encode(),
             Told::Capacity { capacity, ask } => (Header::new(CAPACITY, 0).with_args(&[capacity]))
                 .with_flags(if ask { CAPACITY_ASK } else { 0 }),
-            Told::Committed { epoch } => Header::new(COMMITTED, 0).with_args(&[epoch]),
+            Told::Committed { commit } => Header::new(COMMITTED, 0).with_args(&[commit]),
             Told::Stats { ask } => Header::new(STATS_ASK, 0).with_args(&[ask]),
         }
     }
@@ -753,7 +758,7 @@ impl Told {
                 known(CAPACITY_ASK)?;
                 Ok(Told::Capacity { capacity: args[0], ask: flags & CAPACITY_ASK != 0 })
             }
-            COMMITTED => known(0).map(|()| Told::Committed { epoch: args[0] }),
+            COMMITTED => known(0).map(|()| Told::Committed { commit: args[0] }),
             STATS_ASK => known(0).map(|()| Told::Stats { ask: args[0] }),
             _ => Stage::decode(header).map(Told::Stage),
         }
@@ -871,8 +876,8 @@ pub(crate) struct Opened {
     pub branch: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
-    /// cladefs: a follower's view's commit's epoch; 0 of a store opened to write.
-    pub epoch: u64,
+    /// cladefs: a follower's view's commit number; 0 of a store opened to write.
+    pub commit: u64,
     /// cladefs: how many mappings the host lets a process make, if it limits them
     /// (`physmem::max_map_count`), which the VM process's window budgets its own by: the daemon
     /// reads it for the VM process, which can't in a jail without /proc (TASK-172). 0 if it
@@ -883,7 +888,7 @@ pub(crate) struct Opened {
 impl Opened {
     /// Its arguments, with this daemon's wire [`VERSION`], last ([`VERSION_ARG`]).
     pub fn args(&self) -> [u64; 5] {
-        [self.branch, self.arena.0.into(), self.epoch, self.max_map_count.unwrap_or(0), VERSION]
+        [self.branch, self.arena.0.into(), self.commit, self.max_map_count.unwrap_or(0), VERSION]
     }
 
     /// What a reply of `args` says: `EINVAL` of an arena that is none; cladefs: `EPROTONOSUPPORT`
@@ -894,7 +899,7 @@ impl Opened {
         }
         let arena = ArenaId(u32::try_from(args[1]).map_err(|_| Errno::EINVAL)?);
         let max_map_count = (args[3] != 0).then_some(args[3]);
-        Ok(Self { branch: args[0], arena, epoch: args[2], max_map_count })
+        Ok(Self { branch: args[0], arena, commit: args[2], max_map_count })
     }
 }
 
@@ -914,10 +919,10 @@ impl Info {
     }
 }
 
-/// cladefs: what a reply to an [`ADVANCE`] says: the epoch of the commit the view moved to.
+/// cladefs: what a reply to an [`ADVANCE`] says: the number of the commit the view moved to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Advanced {
-    pub epoch: u64,
+    pub commit: u64,
 }
 
 /// cladefs: a [`FORK`]'s reply: the fork's branch's ID, the bucket's to give (TASK-364).
@@ -937,11 +942,11 @@ impl Forked {
 
 impl Advanced {
     pub fn args(&self) -> [u64; 5] {
-        [self.epoch, 0, 0, 0, 0]
+        [self.commit, 0, 0, 0, 0]
     }
 
     pub fn from_args(args: [u64; 5]) -> Self {
-        Self { epoch: args[0] }
+        Self { commit: args[0] }
     }
 }
 
@@ -1013,7 +1018,7 @@ mod tests {
             (any::<[u64; 5]>(), any::<[bool; 3]>(), bytes(), bytes()),
             ([path(), path()], proptest::collection::vec(extent, 0..8)),
             ("[a-zA-Z0-9._-]{1,64}", "(\\PC{0,16}\n){0,8}"),
-            prop_oneof![Just(Commit::Ordered), Just(Commit::Local), Just(Commit::Durable)],
+            prop_oneof![Just(Commit::Ordered), Just(Commit::Local), Just(Commit::Uploaded)],
             prop_oneof![Just(Access::Read), Just(Access::Write)],
         )
             .prop_map(
@@ -1087,7 +1092,7 @@ mod tests {
             Request::Resized { capacity: a, took: one },
             Request::Mappings,
             Request::Advance,
-            Request::LetGo { epoch: a },
+            Request::LetGo { commit: a },
             Request::Pin(extent),
             Request::Unpin(other),
             Request::Transfer { len: a, area: Area(area) },
@@ -1194,8 +1199,9 @@ mod tests {
                 READ => 0b1,
                 // cladefs: bit 5, WRITE_LOCAL (TASK-301).
                 WRITE => 0b11_1111,
-                // cladefs: zeros; bit 0, writably, writable DAX's, is gone (backlog doc-13).
-                MAP => 0b10,
+                // cladefs: zeros, at doc-4's bit 3; bit 0, writably, writable DAX's, is gone
+                // (backlog doc-13).
+                MAP => 0b1000,
                 // cladefs: bit 2, COMMIT_LOCAL (TASK-301).
                 COMMIT => 0b111,
                 FAULT => 0b11,
@@ -1240,12 +1246,12 @@ mod tests {
         refused(OPEN, OPEN_CREATE | OPEN_FORK_FROM, b"store\0from");
         refused(OPEN, OPEN_CREATE | OPEN_READ_ONLY, b"store");
         refused(OPEN, OPEN_FORK_FROM | OPEN_READ_ONLY, b"store\0from");
-        refused(WRITE, WRITE_DURABLE, b"data");
+        refused(WRITE, WRITE_UPLOADED, b"data");
         refused(WRITE, WRITE_LOCAL, b"data");
         refused(WRITE, WRITE_ROOT, b"data");
-        // cladefs: durable two ways (TASK-301).
-        refused(WRITE, WRITE_COMMIT | WRITE_DURABLE | WRITE_LOCAL, b"data");
-        refused(COMMIT, COMMIT_DURABLE | COMMIT_LOCAL, b"");
+        // cladefs: local and uploaded at once (TASK-301).
+        refused(WRITE, WRITE_COMMIT | WRITE_UPLOADED | WRITE_LOCAL, b"data");
+        refused(COMMIT, COMMIT_UPLOADED | COMMIT_LOCAL, b"");
         // cladefs: a probe is of a page alone, to read.
         refused(FAULT, FAULT_PROBE, b"");
         refused(FAULT, FAULT_PROBE | FAULT_PAGE | FAULT_WRITE, b"");
@@ -1261,7 +1267,7 @@ mod tests {
         ];
         let told = ops.map(|op| Told::Stage(Stage { id: 1, op })).into_iter().chain([
             Told::Capacity { capacity: 4096, ask: false },
-            Told::Committed { epoch: 1 },
+            Told::Committed { commit: 1 },
             Told::Stats { ask: 1 },
         ]);
         for told in told {
@@ -1334,7 +1340,7 @@ mod tests {
         let extent = ExtentId { branch: 7, sequence: 9 };
         let area = area();
         let root =
-            WriteBarriers { before: true, after: Some(Commit::Durable), root: Some(&b"r"[..]) };
+            WriteBarriers { before: true, after: Some(Commit::Uploaded), root: Some(&b"r"[..]) };
         let header =
             |kind, flags, args: &[u64]| Header::new(kind, 0).with_args(args).with_flags(flags);
         let cases: Vec<(Request<'_>, Header, Vec<u8>)> = vec![
@@ -1373,7 +1379,7 @@ mod tests {
                     data: Data::Inline(&b"dd"[..]),
                     barriers: root,
                 },
-                header(WRITE, 0b1_0111, &[7, 9, 1, 0, 2]),
+                header(WRITE, 0b1111, &[7, 9, 1, 0, 2]),
                 b"ddr".to_vec(),
             ),
             (
@@ -1422,8 +1428,8 @@ mod tests {
                 [5u64, 4, 7, 9, 3, 0, 6, 4, 0, 0, 0, MAPPING_ZEROS].map(u64::to_le_bytes).concat(),
             ),
             (
-                Request::Commit { commit: Commit::Durable, root: Some(&b"r"[..]) },
-                header(COMMIT, COMMIT_ROOT | COMMIT_DURABLE, &[]),
+                Request::Commit { commit: Commit::Uploaded, root: Some(&b"r"[..]) },
+                header(COMMIT, COMMIT_ROOT | COMMIT_UPLOADED, &[]),
                 b"r".to_vec(),
             ),
             (
@@ -1534,7 +1540,7 @@ mod tests {
             ];
             let told = stages.map(|op| Told::Stage(Stage { id, op })).into_iter().chain([
                 Told::Capacity { capacity: a, ask },
-                Told::Committed { epoch: a },
+                Told::Committed { commit: a },
                 Told::Stats { ask: b },
             ]);
             for told in told {
@@ -1561,7 +1567,7 @@ mod tests {
             mappings_of in proptest::collection::vec((any::<[u64; 5]>(), any::<bool>()), 0..16),
         ) {
             let max_map_count = (c != 0).then_some(c);
-            let opened = Opened { branch: a, arena: ArenaId(arena), epoch: b, max_map_count };
+            let opened = Opened { branch: a, arena: ArenaId(arena), commit: b, max_map_count };
             prop_assert_eq!(Opened::from_args(opened.args()), Ok(opened));
             let info = Info(ExtentInfo {
                 capacity: a,
@@ -1571,7 +1577,7 @@ mod tests {
                 sequence_floor: e,
             });
             prop_assert_eq!(Info::from_args(info.args()), info);
-            let advanced = Advanced { epoch: a };
+            let advanced = Advanced { commit: a };
             prop_assert_eq!(Advanced::from_args(advanced.args()), advanced);
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
                 .map(|([window_offset, len, branch, sequence, offset], zeros)| WindowMapping {
@@ -1624,14 +1630,14 @@ mod tests {
                 }
             }
         });
-        let opened = Opened { branch: 1, arena: ArenaId::DEFAULT, epoch: 0, max_map_count: None };
+        let opened = Opened { branch: 1, arena: ArenaId::DEFAULT, commit: 0, max_map_count: None };
         assert_eq!(version(&Header::new(REPLY, 1).with_args(&opened.args())), VERSION);
         for other in [0, VERSION + 1] {
-            let [branch, arena, epoch, max_map_count, _] = opened.args();
-            let args = [branch, arena, epoch, max_map_count, other];
+            let [branch, arena, commit, max_map_count, _] = opened.args();
+            let args = [branch, arena, commit, max_map_count, other];
             assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
             // Before its arena, which another version may say otherwise.
-            let args = [branch, u64::MAX, epoch, max_map_count, other];
+            let args = [branch, u64::MAX, commit, max_map_count, other];
             assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
         }
     }
@@ -1645,7 +1651,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (8, 0x8f98_a397_0017_c8f1);
+        const WIRE: (u64, u64) = (9, 0x6fd8_ca81_93f3_6596);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),
@@ -1683,7 +1689,7 @@ mod tests {
             ],
             build: "build".into(),
             stats: "stats".into(),
-            commit: Commit::Durable,
+            commit: Commit::Uploaded,
             access: Access::Write,
         };
         let area = area();
@@ -1710,7 +1716,7 @@ mod tests {
         .into_iter()
         .chain([
             Told::Capacity { capacity: 1 << 30, ask: true },
-            Told::Committed { epoch: 12 },
+            Told::Committed { commit: 12 },
             Told::Stats { ask: 6 },
         ]);
         for told in told {
@@ -1724,7 +1730,8 @@ mod tests {
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {
             header(&mut hashed, made.encode());
         }
-        let opened = Opened { branch: 3, arena: ArenaId(6), epoch: 12, max_map_count: Some(65530) };
+        let opened =
+            Opened { branch: 3, arena: ArenaId(6), commit: 12, max_map_count: Some(65530) };
         let info = ExtentInfo {
             capacity: 1 << 30,
             used: 4096,
@@ -1732,7 +1739,7 @@ mod tests {
             next_sequence: 12,
             sequence_floor: 1 << 40,
         };
-        let replies = [opened.args(), Info(info).args(), Advanced { epoch: 12 }.args()];
+        let replies = [opened.args(), Info(info).args(), Advanced { commit: 12 }.args()];
         hashed(
             &replies.as_flattened().iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>(),
         );

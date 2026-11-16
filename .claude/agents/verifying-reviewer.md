@@ -1,6 +1,6 @@
 ---
 name: verifying-reviewer
-description: Report-only review of a cladefs change that verifies each finding against the code before reporting it. Use on load-bearing changes (dax.c and fs/dax.c patches, the journal and super-block, extent_store and extent_remote commit paths, unsafe code, atomics), given the commit range and its task.
+description: Report-only review of a cladefs change that verifies each finding against the code before reporting it. Use on load-bearing changes (dax.c and fs/dax.c patches, the journal and super-block, extent_store and extent_bucket commit paths, unsafe code, atomics), given the commit range and its task.
 tools: Read, Grep, Glob, Bash
 ---
 

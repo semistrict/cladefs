@@ -11,7 +11,7 @@
 //!
 //! Its anonymous memory's budget ([`AnonBudget`]) is the sum of what the daemon holds by design,
 //! each part bounded where it is held (doc-7, Memory): its uploads', its framings', its fetches',
-//! its tenants' rooms', the parts its stores pack ahead of their framings, held, its stores' maps
+//! its tenants' bytes in flight, the parts its stores pack ahead of their framings, held, its stores' maps
 //! of their extents, and its own. A sample past it is memory none of those holds: a copy no
 //! budget counts (TASK-317's per-try copy of each upload), what the allocator kept of what was
 //! freed (TASK-317's glibc arenas), a leak. Each sample is weighed against the budget as of then,
@@ -46,17 +46,17 @@ pub struct Sample {
 /// (`physmem`'s memfd), bounded by `MEMORY_BYTES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnonBudget {
-    /// Its uploads': its upload memory, `CLADEFSD_UPLOAD_MEMORY` (`crate::remote::UPLOADS`),
+    /// Its uploads': its upload memory, `CLADEFSD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
     /// every store's PUTs holding their objects within it, once each however often each is tried.
     pub uploads: u64,
     /// Its framings': [`FRAMING`] for each store written at once, the most so far.
     pub framings: u64,
     /// Its fetches': [`FETCHES`].
     pub fetches: u64,
-    /// Its tenants' rooms': the most their requests' stream data and what the daemon queued for
-    /// their VM processes held at once, so far (`super::memory::InFlight`), each tenant's within
-    /// its room, as the protocol bounds it (TASK-149.35).
-    pub rooms: u64,
+    /// Its tenants' bytes in flight: the most their requests' stream data and what the daemon
+    /// queued for their VM processes held at once, so far (`super::memory::InFlight`), each
+    /// tenant's within its own, as the protocol bounds it (TASK-149.35).
+    pub in_flight: u64,
     /// The parts of segments its stores packed as they filled, held until their framings: the most
     /// held at once so far, which the memory governor bounds, letting them go before any tenant's
     /// pages as the host's memory runs short (`super::memory::held_parts`, TASK-400).
@@ -70,9 +70,9 @@ pub struct AnonBudget {
     /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
     /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
     /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
-    /// (`extent_remote::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
+    /// (`extent_bucket::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
     /// changes to a shared map, a path of its nodes copied, at its
-    /// (`extent_remote::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
+    /// (`extent_bucket::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory`
     /// holds them to. Not bounded otherwise: a host's
     /// stores' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
@@ -87,7 +87,7 @@ impl AnonBudget {
         self.uploads
             + self.framings
             + self.fetches
-            + self.rooms
+            + self.in_flight
             + self.held
             + self.pages
             + self.extents
@@ -111,7 +111,7 @@ pub const FRAMING: u64 = {
 };
 
 /// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::remote::BUDGET`, 64 MiB), the objects' tails kept (`extent_remote::fetch`'s `TAILS`,
+/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_bucket::fetch`'s `TAILS`,
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its stores read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);
@@ -139,16 +139,16 @@ static STATE: Mutex<State> = Mutex::new(State {
         max_over_budget: 0,
     },
     writers: 0,
-    rooms: 0,
+    in_flight: 0,
     extents: 0,
 });
 
 struct State {
     sample: Sample,
-    /// The most stores written at once so far, the most the tenants' rooms held at once, and the
-    /// most the stores' maps of their extents held at once.
+    /// The most stores written at once so far, the most the tenants' connections held in flight
+    /// at once, and the most the stores' maps of their extents held at once.
     writers: u64,
-    rooms: u64,
+    in_flight: u64,
     extents: u64,
 }
 
@@ -160,13 +160,13 @@ pub fn anon_budget() -> AnonBudget {
 
 fn budget(state: &mut State) -> AnonBudget {
     state.writers = state.writers.max(super::stores::open_count() as u64);
-    state.rooms = state.rooms.max(super::memory::rooms_held());
+    state.in_flight = state.in_flight.max(super::memory::in_flight_held());
     state.extents = state.extents.max(extents_held());
     AnonBudget {
-        uploads: crate::remote::upload_memory().budget,
+        uploads: crate::bucket::upload_memory().budget,
         framings: state.writers * FRAMING,
         fetches: FETCHES,
-        rooms: state.rooms,
+        in_flight: state.in_flight,
         held: super::memory::held_parts().counts().peak,
         pages: extent_store::pages::shared().usage().peak,
         extents: state.extents,
@@ -284,13 +284,13 @@ mod tests {
         assert_eq!(FRAMING, 2 * (96 << 20) + (64 << 20) + (32 << 20));
         assert_eq!(FETCHES, 192 << 20);
         let (uploads, framings) = (512 << 20, 2 * FRAMING);
-        let (rooms, held) = (0, 40 << 20);
+        let (in_flight, held) = (0, 40 << 20);
         let extents = 3 << 20;
         let budget = AnonBudget {
             uploads,
             framings,
             fetches: FETCHES,
-            rooms,
+            in_flight,
             held,
             pages: 0,
             extents,

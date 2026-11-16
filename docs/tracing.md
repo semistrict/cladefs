@@ -4,7 +4,7 @@
 they cause and each commit's phases, uploads to the bucket and each bucket request, store opens
 and forks, extent-cache page-ins, and memory-relief passes. Tracing is off by default. While it is
 off, a span costs one relaxed atomic load (measured below), and nothing is allocated or exported.
-The code is `crates/extent_remote/src/trace.rs`, which makes the spans, and
+The code is `crates/extent_bucket/src/trace.rs`, which makes the spans, and
 `crates/cladefs/src/extentd/otel.rs`, which starts the exporter (TASK-258).
 
 ## Turning it on
@@ -41,7 +41,7 @@ docker run -d --name jaeger -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one
 CLADEFSD_TRACES=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_TRACES_SAMPLER=always_on \
-CLADEFSD_REMOTE=... CLADEFSD_TOKEN=... \
+CLADEFSD_BUCKET=... CLADEFSD_TOKEN=... \
 cladefsd /run/cladefs/extentd.sock
 ```
 
@@ -61,8 +61,8 @@ request also has `cladefs.errno`.
 | `store.commit` | every commit of a writer's store | the request, or whatever commits | `branch`, `durable` |
 | `commit.seal` | sealing the extents written since the last commit | `store.commit` | `extents`, `bytes` copied |
 | `commit.write` | recording the commit in the open segment and queuing its flush | `store.commit` | `epoch` |
-| `store.flush` | making ordered commits durable: syncs and log appends | `store.commit` if the commit is durable; root for the daemon's 50 ms flushes | `branch`, `commits` |
-| `commit.upload_wait` | a commit waiting for object storage (durable: uploaded; ordered: within its lag) | `store.commit` | `epoch` |
+| `store.flush` | making ordered commits local: syncs and log appends | `store.commit` if the commit waits for local or uploaded; root for the daemon's 50 ms flushes | `branch`, `commits` |
+| `commit.upload_wait` | a commit waiting for the bucket (uploaded: until uploaded; otherwise: within its lag) | `store.commit` | `epoch` |
 | `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `branch` |
 | `store.fork` | a fork or point of a store | the request or control call | `branch`, `child`, `point` |
 | `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `branch`, `extent`, `arena`, `bytes` |
@@ -72,7 +72,7 @@ request also has `cladefs.errno`.
 | `bucket.get`, `bucket.get_range`, `bucket.head`, `bucket.list`, `bucket.list_delimited`, `bucket.create`, `bucket.update`, `bucket.overwrite`, `bucket.delete`, `bucket.delete_batch` | each object-store request (a batch of deletes: one request where the store deletes in batches, as S3's DeleteObjects) | the upload, checkpoint, page-in, open or collector pass that made it | `object_key`, `bytes`, `objects` (listings, batches of deletes), `prefixes` (listings by delimiter) |
 
 Uploads run behind commits, so an upload is a trace of its own rather than a child of the commit
-it carries. A durable commit's `commit.upload_wait` span shows how long the commit waited for
+it carries. An uploaded commit's `commit.upload_wait` span shows how long the commit waited for
 that upload.
 
 ### Request IDs
@@ -86,7 +86,7 @@ pager's, reads it from `cladefs::request::current()`.
 
 ## Cost while off
 
-`spans_off_are_nothing_and_cost_a_load` (`crates/extent_remote/src/trace.rs`) times a bucket
+`spans_off_are_nothing_and_cost_a_load` (`crates/extent_bucket/src/trace.rs`) times a bucket
 request's span with tracing off: started, three attributes set, ended. On Linux (aarch64, OrbStack)
 it costs under 1 ns in a release build (the test's nanosecond clock reads 0 ns) and 19 ns in a
 debug build, the fastest of 5 rounds of a million. With tracing off, no tracer exists and no
@@ -95,7 +95,7 @@ attribute is ever computed. The request path adds one more load per request, in
 
 ## Tests
 
-- `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and a durable commit through
+- `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and an uploaded commit through
   extentd into OpenTelemetry's in-memory exporter. It checks the span tree and its attributes, and
   that nothing is exported while tracing is off.
 - `crates/cladefs/tests/tracing.rs` runs the `cladefsd` binary against an OTLP/HTTP collector

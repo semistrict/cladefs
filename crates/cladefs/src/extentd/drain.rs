@@ -18,11 +18,11 @@
 //!    the open segment's too, which a store closed leaves for the next to open it, and its store
 //!    closed, as a connection whose VM process goes closes it.
 //! 3. It waits for the connections to be gone and the control API's calls in flight to be done
-//!    ([`Work`]); closes its FUSE mount of cells, if it has one, unmounted lazily, its volumes
+//!    ([`Work`]); closes its FUSE mount of cells, if it has one, unmounted lazily, its vdisks
 //!    written back and their stores closed once nothing uses it ([`super::mount::close`],
 //!    TASK-475.2); closes the points it keeps open for forks; and waits for every store's uploader
 //!    to have uploaded what its store made durable, and stopped, as each does as its store closes
-//!    ([`crate::remote::uploaders`]).
+//!    ([`crate::bucket::uploaders`]).
 //!
 //! All of it within a bound, `CLADEFSD_DRAIN` seconds ([`bound`]): past it, what is left is
 //! logged, and the daemon exits anyway, failing; its stores' commits that weren't durable are
@@ -74,7 +74,7 @@ pub struct Left {
     /// Stores whose uploaders have not stopped: open, or closing, uploading still.
     pub uploaders: usize,
     /// Whether the FUSE mount of cells was left: not closed, as a file open in it holds it, or
-    /// closed failing, as a volume's write-back failed (logged).
+    /// closed failing, as a vdisk's write-back failed (logged).
     pub mount: bool,
 }
 
@@ -108,7 +108,7 @@ pub fn drain(within: Duration) -> Result<(), Left> {
                 log::error!("extentd: draining: {err:#}");
             }
             super::stores::close_points().await;
-            let mut uploaders = crate::remote::uploaders();
+            let mut uploaders = crate::bucket::uploaders();
             let uploaded = uploaders.wait_for(|uploading| *uploading == 0).await.is_ok();
             mount.is_ok() && uploaded
         })
@@ -119,7 +119,7 @@ pub fn drain(within: Duration) -> Result<(), Left> {
         Ok(false) | Err(_) => Err(Left {
             connections: super::server::CONNECTIONS.count(),
             calls: super::control::CALLS.count(),
-            uploaders: *crate::remote::uploaders().borrow(),
+            uploaders: *crate::bucket::uploaders().borrow(),
             mount: super::mount::left(),
         }),
     }

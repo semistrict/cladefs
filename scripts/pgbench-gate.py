@@ -6,8 +6,8 @@
 
 The sandbox team's pgbench (TASK-131.5), and copy-on-write DAX's cases (TASK-164.5): DAX copies
 on write, the only DAX since writable DAX was deleted (doc-13, dead-ends/writable-dax.md). Reads the
-cases' logs of scripts/test-host.sh results directories (e2e/CASE/CASE/log.txt, or each round's,
-round-K/CASE/log.txt), each directory's rounds after the last's:
+cases' logs of scripts/test-host.sh results directories (e2e/CASE/CASE/log.txt, or each repeat's,
+repeat-K/CASE/log.txt), each directory's repeats after the last's:
 
 - pgbench's (test_fxfs_guest_pgbench.rs): their runs' tps in order, RUNS a VM as the guest's output
   beside the log says (stdout.txt's `OK runs RUNS`), as many VMs as one daemon served
@@ -48,7 +48,7 @@ acceptable, with room for noise.
 - unsafe-dax, writeback-dax: DAX against ext4 on virtio-blk, its flushes dropped (the sandbox
   team's runtime) or each a host fsync, as `dax`: at least UNSAFE_DAX and WRITEBACK_DAX, by default
   0, reported and not gated (TASK-91.8);
-- density: of one daemon serving many VMs, the first round that had more than one, its last VM's
+- density: of one daemon serving many VMs, the first repeat that had more than one, its last VM's
   median run against its first's, at least DENSITY;
 - density-memory: each DAX density case's host memory per added VM against no DAX's,
   at most DENSITY_MEMORY;
@@ -61,9 +61,9 @@ acceptable, with room for noise.
 - bigmap-written-memory: the DAX bigmap case's host memory grown over the writes,
   per byte written, at most BIGMAP_WRITTEN_MEMORY: only the written pages cost memory (doc-13).
 
-A density case's host memory per added VM is its first round's host_used after each VM's runs, less
-after the VM's before (or, for the first, before any VM): the mean over the VMs after the first,
-which pays for what they share, the base's pages in the daemon.
+A density case's host memory per added VM is its first repeat's host_used after each VM's runs,
+less after the VM's before (or, for the first, before any VM): the mean over the VMs after the
+first, which pays for what they share, the base's pages in the daemon.
 
 Each pgbench run's guest latencies (TASK-111.6), the histograms the guest's Fxfs keeps of its
 faults, seals and window MAPs (`NAME_hist` in /proc/fs/fxfs/extents, which the case's log has before
@@ -233,19 +233,20 @@ def results(lines):
 
 
 def logs(results_dir, case):
-    """The logs of `case` in `results_dir`, a test-host.sh results directory: each round's, in
-    order: its artifacts' (round-K/CASE/log.txt), or, of a round that passed, whose artifacts
-    aren't kept, its whole log (round-K.log), which has its console and its guest's output both."""
+    """The logs of `case` in `results_dir`, a test-host.sh results directory: each repeat's, in
+    order: its artifacts' (repeat-K/CASE/log.txt), or, of a repeat that passed, whose artifacts
+    aren't kept, its whole log (repeat-K.log), which has its console and its guest's output
+    both."""
     root = Path(results_dir) / "e2e" / case
     single = root / case / "log.txt"
     if single.exists():
         return [single]
-    rounds = {}
-    for path in root.glob("round-*.log"):
-        rounds[int(path.stem.split("-")[1])] = path
-    for path in root.glob(f"round-*/{case}/log.txt"):
-        rounds[int(path.parent.parent.name.split("-")[1])] = path
-    return [rounds[at] for at in sorted(rounds)]
+    repeats = {}
+    for path in root.glob("repeat-*.log"):
+        repeats[int(path.stem.split("-")[1])] = path
+    for path in root.glob(f"repeat-*/{case}/log.txt"):
+        repeats[int(path.parent.parent.name.split("-")[1])] = path
+    return [repeats[at] for at in sorted(repeats)]
 
 
 def said(log):
@@ -258,15 +259,15 @@ def said(log):
     return lines
 
 
-def rounds_of(directories, case):
-    """The lines of each round's log of `case` in the results `directories`, each directory's
-    rounds after the last's."""
+def repeats_of(directories, case):
+    """The lines of each repeat's log of `case` in the results `directories`, each directory's
+    repeats after the last's."""
     return [said(log) for directory in directories for log in logs(directory, case)]
 
 
 def measure(*directories):
-    """Each pgbench case's rounds in the results `directories`, by its JSON name: each round's VMs'
-    runs' tps, each directory's rounds after the last's."""
+    """Each pgbench case's repeats in the results `directories`, by its JSON name: each repeat's
+    VMs' runs' tps, each directory's repeats after the last's."""
     return measure_each(directories, lambda found: [tps for tps, _ in found])
 
 
@@ -274,21 +275,22 @@ def measure_latencies(*directories):
     """As `measure`, each run's guest latencies' percentiles (`latencies`): of the cases whose
     guests keep them."""
     measured = measure_each(directories, lambda found: [between for _, between in found])
-    return {name: rounds for name, rounds in measured.items()
-            if any(run for vms in rounds for runs in vms for run in runs)}
+    return {name: repeats for name, repeats in measured.items()
+            if any(run for vms in repeats for runs in vms for run in runs)}
 
 
 def measure_each(directories, values):
-    """Each pgbench case's rounds in the results `directories`, by its JSON name: each round's VMs'
-    runs' `values`, of its runs' records (`records`), each directory's rounds after the last's."""
+    """Each pgbench case's repeats in the results `directories`, by its JSON name: each repeat's
+    VMs' runs' `values`, of its runs' records (`records`), each directory's repeats after the
+    last's."""
     measured = {}
     for case, name in CASES.items():
-        rounds = []
-        for lines in rounds_of(directories, case):
+        repeats = []
+        for lines in repeats_of(directories, case):
             found, per_vm = records(lines)
-            rounds.append(by_vm(values(found), per_vm) if found else [])
-        if any(rounds):
-            measured[name] = [vms for vms in rounds if vms]
+            repeats.append(by_vm(values(found), per_vm) if found else [])
+        if any(repeats):
+            measured[name] = [vms for vms in repeats if vms]
     return measured
 
 
@@ -298,7 +300,7 @@ def mib(value):
 
 
 def density_memory(memory):
-    """What a density case's VMs cost the host, of its first round's `memory` (`samples`): what
+    """What a density case's VMs cost the host, of its first repeat's `memory` (`samples`): what
     the first VM cost (`first_vm_mib`), the mean of what each after it did (`per_added_vm_mib`),
     and the host's, each VM process's, the daemon's and each guest's memory after each VM's runs;
     or None, without the host's memory before the first VM and after one."""
@@ -368,16 +370,16 @@ def bigmap_summary(said_results, memory):
 
 def measure_memory(*directories):
     """Each density case's host memory (`density_memory`), and each bigmap case's results and
-    what its steps cost (`bigmap_summary`), by its JSON name, each of its first round that has
+    what its steps cost (`bigmap_summary`), by its JSON name, each of its first repeat that has
     them."""
     density, bigmap = {}, {}
     for case, name in CASES.items():
-        for lines in rounds_of(directories, case):
+        for lines in repeats_of(directories, case):
             if summary := density_memory(samples(lines)):
                 density[name] = summary
                 break
     for case, name in BIGMAP.items():
-        for lines in rounds_of(directories, case):
+        for lines in repeats_of(directories, case):
             if summary := bigmap_summary(results(lines), samples(lines)):
                 bigmap[name] = summary
                 break
@@ -396,9 +398,9 @@ def judge(name, case, value, thresholds):
 def gates(measured, thresholds, density=None, bigmap=None):
     """The gates of `measured`, as `measure` has it, and of `density` and `bigmap`, as
     `measure_memory` has them, against `thresholds`, by gate (`judge`). Of each pgbench case's
-    first round, but density's, of its first round of more than one VM."""
+    first repeat, but density's, of its first repeat of more than one VM."""
     found = []
-    first = {case: rounds[0] for case, rounds in measured.items()}
+    first = {case: repeats[0] for case, repeats in measured.items()}
     for case in FXFS:
         if case not in measured:
             continue

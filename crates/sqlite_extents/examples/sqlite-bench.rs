@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a volume on an cladefs image, against SQLite on the host's filesystem (TASK-298):
+//! SQLite on a file set on an cladefs image, against SQLite on the host's filesystem (TASK-298):
 //! the same workloads, each on a database of its own, made under the workspace's target
 //! directory, on the disk the host builds on.
 //!
@@ -25,7 +25,7 @@
 
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Options, Volume, register};
+use sqlite_extents::{FileSet, Options, register};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -173,16 +173,16 @@ fn disk_bytes(path: &Path) -> u64 {
     std::fs::read_dir(path).unwrap().map(|entry| disk_bytes(&entry.unwrap().path())).sum()
 }
 
-/// Runs every workload on a database on `volume`, with `pragmas`.
-fn on_volume(config: &str, volume: std::sync::Arc<Volume>, pragmas: &str, scale: usize) {
-    let registration = register(config, volume.clone()).unwrap();
+/// Runs every workload on a database on `file_set`, with `pragmas`.
+fn on_file_set(config: &str, file_set: std::sync::Arc<FileSet>, pragmas: &str, scale: usize) {
+    let registration = register(config, file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("bench.db", OpenFlags::default(), config).unwrap();
     connection.execute_batch(pragmas).unwrap();
     workloads(config, &connection, scale);
     drop(connection);
     drop(registration);
-    volume.close().unwrap();
+    file_set.close().unwrap();
 }
 
 /// An extent daemon serving stores under `root` on a thread of this process, as a host's would
@@ -212,7 +212,7 @@ fn main() {
     // SAFETY: before this process starts any other thread.
     unsafe {
         std::env::set_var(
-            "CLADEFSD_REMOTE",
+            "CLADEFSD_BUCKET",
             format!("file://{}/", root.join("daemon.bucket").display()),
         );
         std::env::set_var("CLADEFSD_TOKEN", "1");
@@ -226,9 +226,9 @@ fn main() {
     {
         let image = root.join("extents");
         let device = Storage::create(&image, 64 << 30).unwrap().into_device();
-        let volume = Volume::open(device, Options::default()).unwrap();
-        on_volume("extents", volume, "", scale);
-        // The image, and what the bucket its branch is kept in holds (CLADEFSD_REMOTE).
+        let file_set = FileSet::open(device, Options::default()).unwrap();
+        on_file_set("extents", file_set, "", scale);
+        // The image, and what the bucket its branch is kept in holds (CLADEFSD_BUCKET).
         sizes.push(("extents", disk_bytes(&image) + bucket_bytes(&root)));
     }
     #[cfg(target_os = "linux")]
@@ -237,7 +237,7 @@ fn main() {
         for (config, pragmas) in [("daemon", ""), ("daemon-mmap", "PRAGMA mmap_size = 1073741824")]
         {
             let (store, before) = (root.join(config), bucket_bytes(&root));
-            let volume = sqlite_extents::daemon::open(
+            let file_set = sqlite_extents::daemon::open(
                 &socket,
                 &store,
                 64 << 30,
@@ -245,8 +245,8 @@ fn main() {
                 Options::default(),
             )
             .unwrap();
-            on_volume(config, volume.clone(), pragmas, scale);
-            println!("| {config} | pages read in place | {} | | | | |", volume.fetched());
+            on_file_set(config, file_set.clone(), pragmas, scale);
+            println!("| {config} | pages read in place | {} | | | | |", file_set.fetched());
             sizes.push((config, disk_bytes(&store) + bucket_bytes(&root) - before));
         }
     }

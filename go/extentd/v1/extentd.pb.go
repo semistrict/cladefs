@@ -15,19 +15,20 @@
 // VM may as well be of one tenant, or of none, on the daemon's own VM socket. Grants are not kept
 // across restarts of the daemon: the caller grants again.
 //
-// A snapshot's point is immutable (TASK-158): any number of hosts read it, none writes it, it has
-// no lease, and a restore's fork is a new branch's record alone, so that a restore on one host
-// changes nothing another sees, and no host's copy goes stale.
+// A point is immutable (TASK-158): any number of hosts read it, none writes it, no writer takes it,
+// and a restore's fork is a new branch's record alone, so that a restore on one host changes
+// nothing another sees, and no host's copy goes stale.
 //
 // A tenant's restore on a host without the point (TASK-154). A VM process names no branch: what a
 // tenant's says in OPEN is ignored, as anyone's ID would take that branch's data. A tenant's stores
 // are what is in its directory, which only this API puts a branch of the bucket in, so that the
 // caller's CreateStore of a branch in a tenant's directory grants it, and DropStore ends that. A
-// snapshot of a tenant's VM restores so, on any number of hosts at once:
+// VM snapshot of a tenant's VM, which makes a point as it is taken, restores so, on any number of
+// hosts at once:
 //
-// - On the snapshot's host, once it is taken: StatStore's `branch` of its point, kept with the
-//   snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which a
-//   VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
+// - On the snapshot's host, once it is taken: StatStore's `branch` of the point it made, kept with
+//   the snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which
+//   a VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
 //   (ALREADY_EXISTS).
 // - On each host to restore it, once, before the VMM's first `PUT /snapshot/load`: CreateStore at a
 //   path in the tenant's directory, of that branch, which that host's daemon reads as the first
@@ -38,24 +39,25 @@
 //   restore forks the point, on as many hosts at once as there are. Without the CreateStore, it
 //   fails with ENOENT, whatever the VMM names; so does one of a point deleted since.
 // - Once this host restores it no more: DropStore of the point, optional, which ends the grant here
-//   and frees the copy. DeleteStore deletes the point, which is the snapshot, on every host: VMs
-//   restored from it keep what they inherited.
+//   and frees the copy. DeleteStore deletes the point, which the snapshot restores from, on every
+//   host: VMs restored from it keep what they inherited.
 //
 // A branch so granted is the tenant's to read and restore: a VM process opening a point to write
-// it fails with EROFS. Grant one only to the tenant whose snapshot it is.
+// it fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
 //
 // Shared points (TASK-395.7): a point forks only into cells of its own tenant's, unless it is
-// shared (SharePoint, or ForkStore's `shared`): a base image or a snapshot that many tenants clone.
+// shared (SharePoint, or ForkStore's `shared`): a base image or a VM snapshot's point that many
+// tenants fork.
 // A restore, or a ForkStore, of a point of another tenant's that isn't shared fails with
 // PERMISSION_DENIED (EACCES), making nothing; each fork reads whether the point is shared, in the
 // bucket, as it is made, so that unsharing it stops new forks on every host, and those made live
-// on. A store with a writer forks into cells of other tenants' only if it is tenant 0's, as the
-// daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
-// another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
+// on. A store with a writer forks into cells of other tenants' only if it is the default tenant's,
+// as the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's
+// into another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
 //
 // A fork of anything but a point is a commit of its branch, which takes its branch's writer: a
 // store forks on one host at a time. A base, or any store, forked on several hosts is made a point
-// first, by ForkStore's `point`, and forked as a snapshot's is, from a copy on each host.
+// first, by ForkStore's `point`, and forked as a VM snapshot's point is, from a copy on each host.
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -78,11 +80,13 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364): every branch is a volume of a tenant's cell, kept under the cell's prefix in
-// the bucket, and a host takes a cell whole, its volumes' leases with it. A branch is named by its
-// tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another. Tenants and cells
-// are IDs alone, which the caller keeps the meaning of. A granted tenant's ID is its grant's
-// (Grant's `id`); the daemon's own socket's VM processes make stores of tenant 0.
+// Cells (TASK-364): every branch is a vdisk of a tenant's cell, kept under the cell's prefix in
+// the bucket, and a host takes a cell whole, the heads of its vdisks' branches with it. A branch
+// is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
+// Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
+// tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
+// one Grant named; the daemon's own socket's VM processes make stores of the default tenant, whose
+// ID is 0.
 
 // Code generated by protoc-gen-go. DO NOT EDIT.
 // versions:
@@ -107,56 +111,56 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// What a volume of a cell holds.
-type VolumeKind int32
+// What a vdisk of a cell holds.
+type VdiskKind int32
 
 const (
 	// An Fxfs filesystem: a VM's disk, or a host's mount's.
-	VolumeKind_VOLUME_KIND_FXFS VolumeKind = 0
+	VdiskKind_VDISK_KIND_FXFS VdiskKind = 0
 	// A database of sqlite_extents, which its VFS alone opens.
-	VolumeKind_VOLUME_KIND_SQLITE VolumeKind = 1
-	// A VM's memory: an extent_files volume of one file, its image (TASK-456).
-	VolumeKind_VOLUME_KIND_MEMORY VolumeKind = 2
+	VdiskKind_VDISK_KIND_SQLITE VdiskKind = 1
+	// A VM's memory: an extent_files file set of one file, its image (TASK-456).
+	VdiskKind_VDISK_KIND_MEMORY VdiskKind = 2
 )
 
-// Enum value maps for VolumeKind.
+// Enum value maps for VdiskKind.
 var (
-	VolumeKind_name = map[int32]string{
-		0: "VOLUME_KIND_FXFS",
-		1: "VOLUME_KIND_SQLITE",
-		2: "VOLUME_KIND_MEMORY",
+	VdiskKind_name = map[int32]string{
+		0: "VDISK_KIND_FXFS",
+		1: "VDISK_KIND_SQLITE",
+		2: "VDISK_KIND_MEMORY",
 	}
-	VolumeKind_value = map[string]int32{
-		"VOLUME_KIND_FXFS":   0,
-		"VOLUME_KIND_SQLITE": 1,
-		"VOLUME_KIND_MEMORY": 2,
+	VdiskKind_value = map[string]int32{
+		"VDISK_KIND_FXFS":   0,
+		"VDISK_KIND_SQLITE": 1,
+		"VDISK_KIND_MEMORY": 2,
 	}
 )
 
-func (x VolumeKind) Enum() *VolumeKind {
-	p := new(VolumeKind)
+func (x VdiskKind) Enum() *VdiskKind {
+	p := new(VdiskKind)
 	*p = x
 	return p
 }
 
-func (x VolumeKind) String() string {
+func (x VdiskKind) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (VolumeKind) Descriptor() protoreflect.EnumDescriptor {
+func (VdiskKind) Descriptor() protoreflect.EnumDescriptor {
 	return file_cladefs_extentd_v1_extentd_proto_enumTypes[0].Descriptor()
 }
 
-func (VolumeKind) Type() protoreflect.EnumType {
+func (VdiskKind) Type() protoreflect.EnumType {
 	return &file_cladefs_extentd_v1_extentd_proto_enumTypes[0]
 }
 
-func (x VolumeKind) Number() protoreflect.EnumNumber {
+func (x VdiskKind) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use VolumeKind.Descriptor instead.
-func (VolumeKind) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use VdiskKind.Descriptor instead.
+func (VdiskKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
 }
 
@@ -175,17 +179,17 @@ type CreateStoreRequest struct {
 	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE). A point
 	// has no writer, and needs none.
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
-	// The tenant whose cell the branch is a volume of. Of a new cell in a granted tenant's
-	// directory, that tenant's ID (Grant's `id`), or 0 for it; another is refused
+	// The tenant whose cell the branch is a vdisk of. Of a new cell in a granted tenant's
+	// directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
 	// (PERMISSION_DENIED, EPERM). A point of another tenant's there is the VM manager's to give: the
 	// tenant's VM processes restore from it, each restore a cell of their tenant's, if the point is
 	// shared (SharePoint); otherwise each restore fails (PERMISSION_DENIED, EACCES).
 	Tenant uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell, or 0 for a new one: the store is a new volume of it, named as `path`'s last name
+	// The cell, or 0 for a new one: the store is a new vdisk of it, named as `path`'s last name
 	// is, unless it takes a branch it has.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
-	// What the volume holds, which says what opens it.
-	Kind          VolumeKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.extentd.v1.VolumeKind" json:"kind,omitempty"`
+	// What the vdisk holds, which says what opens it.
+	Kind          VdiskKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.extentd.v1.VdiskKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -262,11 +266,11 @@ func (x *CreateStoreRequest) GetCell() uint64 {
 	return 0
 }
 
-func (x *CreateStoreRequest) GetKind() VolumeKind {
+func (x *CreateStoreRequest) GetKind() VdiskKind {
 	if x != nil {
 		return x.Kind
 	}
-	return VolumeKind_VOLUME_KIND_FXFS
+	return VdiskKind_VDISK_KIND_FXFS
 }
 
 // The store made.
@@ -346,7 +350,7 @@ type ImportImageRequest struct {
 	Image string `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
 	// The image in the layout to import, by its reference; empty for its only image.
 	Reference string `protobuf:"bytes,4,opt,name=reference,proto3" json:"reference,omitempty"`
-	// The tenant of the new cell the store is the one volume of. In a granted tenant's directory,
+	// The tenant of the new cell the store is the one vdisk of. In a granted tenant's directory,
 	// that tenant's ID, or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
 	Tenant        uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -425,7 +429,7 @@ type ImportImageResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, of which it is the one volume.
+	// Its cell, a new one, of which it is the one vdisk.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -496,10 +500,10 @@ type ForkStoreRequest struct {
 	// `to` deletes, and the fork stands or never was, as the bucket has it.
 	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
 	// Whether the fork is a point (TASK-158): a name of `from`'s state as it is, which any number of
-	// hosts read and fork at once, and none writes, as a snapshot's is. Forks of it on another host:
-	// CreateStore of its branch there, then ForkStore from that copy, as many and on as many hosts
-	// at once as wanted. `from` must have nothing open (FAILED_PRECONDITION, EBUSY), as a fork of a
-	// store a VM has open does, and be no point itself (INVALID_ARGUMENT): fork that instead.
+	// hosts read and fork at once, and none writes, as a VM snapshot's is. Forks of it on another
+	// host: CreateStore of its branch there, then ForkStore from that copy, as many and on as many
+	// hosts at once as wanted. `from` must have nothing open (FAILED_PRECONDITION, EBUSY), as a fork
+	// of a store a VM has open does, and be no point itself (INVALID_ARGUMENT): fork that instead.
 	Point bool `protobuf:"varint,4,opt,name=point,proto3" json:"point,omitempty"`
 	// Whether the point is shared once made, as SharePoint shares it (TASK-395.7): only with
 	// `point` (INVALID_ARGUMENT otherwise). If sharing it fails, the point stands, not shared, and
@@ -574,7 +578,7 @@ type ForkStoreResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant: `from`'s.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, of which it is the one volume.
+	// Its cell, a new one, of which it is the one vdisk.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1078,9 +1082,9 @@ type MakePublicRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store, which no VM may have open.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	// Its branch alone, not those it inherited: a fork pinning a generation of a store that goes on
-	// being written, to attach to stores (AttachBase), not to fork.
-	Generation    bool `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Its branch alone, not those it inherited: a fork pinning a state of a store that goes on being
+	// written, to attach to stores (AttachBase), not to fork.
+	AttachOnly    bool `protobuf:"varint,2,opt,name=attach_only,json=attachOnly,proto3" json:"attach_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1122,9 +1126,9 @@ func (x *MakePublicRequest) GetPath() string {
 	return ""
 }
 
-func (x *MakePublicRequest) GetGeneration() bool {
+func (x *MakePublicRequest) GetAttachOnly() bool {
 	if x != nil {
-		return x.Generation
+		return x.AttachOnly
 	}
 	return false
 }
@@ -1170,7 +1174,7 @@ func (*MakePublicResponse) Descriptor() ([]byte, []int) {
 type AttachBaseRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store to attach it to.
-	Store string `protobuf:"bytes,1,opt,name=store,proto3" json:"store,omitempty"`
+	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// The fork.
 	Base          string `protobuf:"bytes,2,opt,name=base,proto3" json:"base,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1207,9 +1211,9 @@ func (*AttachBaseRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{18}
 }
 
-func (x *AttachBaseRequest) GetStore() string {
+func (x *AttachBaseRequest) GetPath() string {
 	if x != nil {
-		return x.Store
+		return x.Path
 	}
 	return ""
 }
@@ -1408,27 +1412,27 @@ type StatStoreResponse struct {
 	// Those of the extents it inherited from the branches it was forked from, which may still share
 	// them. Views of followers may keep more, freed: used is at least own and inherited.
 	Inherited uint64 `protobuf:"varint,8,opt,name=inherited,proto3" json:"inherited,omitempty"`
-	// The epoch of its latest commit: what a follower of it advances to.
+	// The commit number of its latest commit: what a follower of it advances to.
 	Committed uint64 `protobuf:"varint,9,opt,name=committed,proto3" json:"committed,omitempty"`
 	// Whether its commits upload to the daemon's bucket now: while a VM process has it open, as
 	// writer. If not, the fields below are zero (TASK-50.5).
 	Uploading bool `protobuf:"varint,10,opt,name=uploading,proto3" json:"uploading,omitempty"`
-	// The fencing token of the placement whose writer took its branch's lease: this host's.
-	LeaseToken uint64 `protobuf:"varint,11,opt,name=lease_token,json=leaseToken,proto3" json:"lease_token,omitempty"`
-	// The lease's epoch, one more than its last taking's.
-	LeaseEpoch uint64 `protobuf:"varint,12,opt,name=lease_epoch,json=leaseEpoch,proto3" json:"lease_epoch,omitempty"`
-	// When the writer took the lease, in milliseconds since the Unix epoch.
-	LeaseTakenUnixMs uint64 `protobuf:"varint,13,opt,name=lease_taken_unix_ms,json=leaseTakenUnixMs,proto3" json:"lease_taken_unix_ms,omitempty"`
-	// The epoch of its latest commit in the bucket.
+	// The fencing token of its writer's taking of its branch's head: this host's placement's.
+	TakenToken uint64 `protobuf:"varint,11,opt,name=taken_token,json=takenToken,proto3" json:"taken_token,omitempty"`
+	// The epoch of its writer's taking of its branch's head, one more than the taking before.
+	TakenEpoch uint64 `protobuf:"varint,12,opt,name=taken_epoch,json=takenEpoch,proto3" json:"taken_epoch,omitempty"`
+	// When its writer's taking of its branch's head was, in milliseconds since the Unix epoch.
+	TakenUnixMs uint64 `protobuf:"varint,13,opt,name=taken_unix_ms,json=takenUnixMs,proto3" json:"taken_unix_ms,omitempty"`
+	// The commit number of its latest commit in the bucket.
 	Uploaded uint64 `protobuf:"varint,14,opt,name=uploaded,proto3" json:"uploaded,omitempty"`
 	// The bytes its commits not yet in the bucket wrote.
 	PendingUploadBytes uint64 `protobuf:"varint,15,opt,name=pending_upload_bytes,json=pendingUploadBytes,proto3" json:"pending_upload_bytes,omitempty"`
 	// How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
 	// uploader's interval (a second): 0 if none waits.
 	OldestPendingMs uint64 `protobuf:"varint,16,opt,name=oldest_pending_ms,json=oldestPendingMs,proto3" json:"oldest_pending_ms,omitempty"`
-	// The tenant whose cell its branch is a volume of (TASK-364).
+	// The tenant whose cell its branch is a vdisk of (TASK-364).
 	Tenant uint64 `protobuf:"varint,17,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell its branch is a volume of.
+	// The cell its branch is a vdisk of.
 	Cell uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
 	// How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
 	// the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
@@ -1540,23 +1544,23 @@ func (x *StatStoreResponse) GetUploading() bool {
 	return false
 }
 
-func (x *StatStoreResponse) GetLeaseToken() uint64 {
+func (x *StatStoreResponse) GetTakenToken() uint64 {
 	if x != nil {
-		return x.LeaseToken
+		return x.TakenToken
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetLeaseEpoch() uint64 {
+func (x *StatStoreResponse) GetTakenEpoch() uint64 {
 	if x != nil {
-		return x.LeaseEpoch
+		return x.TakenEpoch
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetLeaseTakenUnixMs() uint64 {
+func (x *StatStoreResponse) GetTakenUnixMs() uint64 {
 	if x != nil {
-		return x.LeaseTakenUnixMs
+		return x.TakenUnixMs
 	}
 	return 0
 }
@@ -1749,26 +1753,26 @@ func (x *ListedStore) GetStat() *StatStoreResponse {
 }
 
 // Asks what the daemon did.
-type GetStatsRequest struct {
+type GetCountersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GetStatsRequest) Reset() {
-	*x = GetStatsRequest{}
+func (x *GetCountersRequest) Reset() {
+	*x = GetCountersRequest{}
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GetStatsRequest) String() string {
+func (x *GetCountersRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GetStatsRequest) ProtoMessage() {}
+func (*GetCountersRequest) ProtoMessage() {}
 
-func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
+func (x *GetCountersRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1780,14 +1784,14 @@ func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GetStatsRequest.ProtoReflect.Descriptor instead.
-func (*GetStatsRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use GetCountersRequest.ProtoReflect.Descriptor instead.
+func (*GetCountersRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{27}
 }
 
 // What the daemon did since it started: counters, which only grow, so that a measurement is the
 // difference of two.
-type GetStatsResponse struct {
+type GetCountersResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// MAP requests of VMs' windows.
 	Maps uint64 `protobuf:"varint,1,opt,name=maps,proto3" json:"maps,omitempty"`
@@ -1822,7 +1826,7 @@ type GetStatsResponse struct {
 	CommitNs uint64 `protobuf:"varint,15,opt,name=commit_ns,json=commitNs,proto3" json:"commit_ns,omitempty"`
 	// Of those nanoseconds, committing the store.
 	CommitStoreNs uint64 `protobuf:"varint,18,opt,name=commit_store_ns,json=commitStoreNs,proto3" json:"commit_store_ns,omitempty"`
-	// Of those, waiting for object storage: for the upload of a durable commit, or for the uploads
+	// Of those, waiting for object storage: for the upload of a commit waiting for it, or for the uploads
 	// to come within the lag an ordered one allows.
 	CommitWaitNs uint64 `protobuf:"varint,20,opt,name=commit_wait_ns,json=commitWaitNs,proto3" json:"commit_wait_ns,omitempty"`
 	// Segments stores closed and framed.
@@ -1833,9 +1837,238 @@ type GetStatsResponse struct {
 	sizeCache      protoimpl.SizeCache
 }
 
+func (x *GetCountersResponse) Reset() {
+	*x = GetCountersResponse{}
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetCountersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetCountersResponse) ProtoMessage() {}
+
+func (x *GetCountersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetCountersResponse.ProtoReflect.Descriptor instead.
+func (*GetCountersResponse) Descriptor() ([]byte, []int) {
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *GetCountersResponse) GetMaps() uint64 {
+	if x != nil {
+		return x.Maps
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetMapNs() uint64 {
+	if x != nil {
+		return x.MapNs
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetFaults() uint64 {
+	if x != nil {
+		return x.Faults
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetFaultNs() uint64 {
+	if x != nil {
+		return x.FaultNs
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetPageIns() uint64 {
+	if x != nil {
+		return x.PageIns
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetPageInBytes() uint64 {
+	if x != nil {
+		return x.PageInBytes
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetFetchedBytes() uint64 {
+	if x != nil {
+		return x.FetchedBytes
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetReads() uint64 {
+	if x != nil {
+		return x.Reads
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetReadBytes() uint64 {
+	if x != nil {
+		return x.ReadBytes
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetReadStoredBytes() uint64 {
+	if x != nil {
+		return x.ReadStoredBytes
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetPrefetches() uint64 {
+	if x != nil {
+		return x.Prefetches
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetUnpacks() uint64 {
+	if x != nil {
+		return x.Unpacks
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetObjectStorage() *ObjectStorageStats {
+	if x != nil {
+		return x.ObjectStorage
+	}
+	return nil
+}
+
+func (x *GetCountersResponse) GetCommits() uint64 {
+	if x != nil {
+		return x.Commits
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetCommitNs() uint64 {
+	if x != nil {
+		return x.CommitNs
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetCommitStoreNs() uint64 {
+	if x != nil {
+		return x.CommitStoreNs
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetCommitWaitNs() uint64 {
+	if x != nil {
+		return x.CommitWaitNs
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetSegmentCloses() uint64 {
+	if x != nil {
+		return x.SegmentCloses
+	}
+	return 0
+}
+
+func (x *GetCountersResponse) GetSegmentCloseNs() uint64 {
+	if x != nil {
+		return x.SegmentCloseNs
+	}
+	return 0
+}
+
+// Asks for the stats of the daemon, its VM processes and their guests.
+type GetStatsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How long to wait for the VM processes' answers, in milliseconds: 0 for 2,000; 60,000 at most.
+	WaitMs        uint32 `protobuf:"varint,1,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetStatsRequest) Reset() {
+	*x = GetStatsRequest{}
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetStatsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetStatsRequest) ProtoMessage() {}
+
+func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetStatsRequest.ProtoReflect.Descriptor instead.
+func (*GetStatsRequest) Descriptor() ([]byte, []int) {
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *GetStatsRequest) GetWaitMs() uint32 {
+	if x != nil {
+		return x.WaitMs
+	}
+	return 0
+}
+
+// What the daemon, its VM processes and their guests counted, by the names its metrics give them.
+// Counters only grow, so that a measurement is the difference of two; gauges are as of their
+// taking.
+type GetStatsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// When the daemon read its own counters, its VM processes having answered or the wait being
+	// over: nanoseconds since the Unix epoch.
+	TakenUnixNs uint64 `protobuf:"varint,1,opt,name=taken_unix_ns,json=takenUnixNs,proto3" json:"taken_unix_ns,omitempty"`
+	// The commit the daemon was built of.
+	Build string `protobuf:"bytes,2,opt,name=build,proto3" json:"build,omitempty"`
+	// Its counters: those its metrics name cladefsd_NAME_total, as `window_open_maps_refused`.
+	Counters map[string]uint64 `protobuf:"bytes,3,rep,name=counters,proto3" json:"counters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// Its gauges: those its metrics name cladefsd_NAME.
+	Gauges map[string]uint64 `protobuf:"bytes,4,rep,name=gauges,proto3" json:"gauges,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// Its VM processes that opened a store, in the order they connected.
+	Vms           []*VmStats `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
 func (x *GetStatsResponse) Reset() {
 	*x = GetStatsResponse{}
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1847,7 +2080,7 @@ func (x *GetStatsResponse) String() string {
 func (*GetStatsResponse) ProtoMessage() {}
 
 func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1860,267 +2093,38 @@ func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsResponse.ProtoReflect.Descriptor instead.
 func (*GetStatsResponse) Descriptor() ([]byte, []int) {
-	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{28}
-}
-
-func (x *GetStatsResponse) GetMaps() uint64 {
-	if x != nil {
-		return x.Maps
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetMapNs() uint64 {
-	if x != nil {
-		return x.MapNs
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetFaults() uint64 {
-	if x != nil {
-		return x.Faults
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetFaultNs() uint64 {
-	if x != nil {
-		return x.FaultNs
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetPageIns() uint64 {
-	if x != nil {
-		return x.PageIns
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetPageInBytes() uint64 {
-	if x != nil {
-		return x.PageInBytes
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetFetchedBytes() uint64 {
-	if x != nil {
-		return x.FetchedBytes
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetReads() uint64 {
-	if x != nil {
-		return x.Reads
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetReadBytes() uint64 {
-	if x != nil {
-		return x.ReadBytes
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetReadStoredBytes() uint64 {
-	if x != nil {
-		return x.ReadStoredBytes
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetPrefetches() uint64 {
-	if x != nil {
-		return x.Prefetches
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetUnpacks() uint64 {
-	if x != nil {
-		return x.Unpacks
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetObjectStorage() *ObjectStorageStats {
-	if x != nil {
-		return x.ObjectStorage
-	}
-	return nil
-}
-
-func (x *GetStatsResponse) GetCommits() uint64 {
-	if x != nil {
-		return x.Commits
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetCommitNs() uint64 {
-	if x != nil {
-		return x.CommitNs
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetCommitStoreNs() uint64 {
-	if x != nil {
-		return x.CommitStoreNs
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetCommitWaitNs() uint64 {
-	if x != nil {
-		return x.CommitWaitNs
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetSegmentCloses() uint64 {
-	if x != nil {
-		return x.SegmentCloses
-	}
-	return 0
-}
-
-func (x *GetStatsResponse) GetSegmentCloseNs() uint64 {
-	if x != nil {
-		return x.SegmentCloseNs
-	}
-	return 0
-}
-
-// Asks for a snapshot.
-type GetSnapshotRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// How long to wait for the VM processes' answers, in milliseconds: 0 for 2,000; 60,000 at most.
-	WaitMs        uint32 `protobuf:"varint,1,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GetSnapshotRequest) Reset() {
-	*x = GetSnapshotRequest{}
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetSnapshotRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetSnapshotRequest) ProtoMessage() {}
-
-func (x *GetSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetSnapshotRequest.ProtoReflect.Descriptor instead.
-func (*GetSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{29}
-}
-
-func (x *GetSnapshotRequest) GetWaitMs() uint32 {
-	if x != nil {
-		return x.WaitMs
-	}
-	return 0
-}
-
-// What the daemon, its VM processes and their guests counted, by the names its metrics give them.
-// Counters only grow, so that a measurement is the difference of two snapshots; gauges are as of
-// the snapshot.
-type GetSnapshotResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// When the daemon read its own counters, its VM processes having answered or the wait being
-	// over: nanoseconds since the Unix epoch.
-	TakenUnixNs uint64 `protobuf:"varint,1,opt,name=taken_unix_ns,json=takenUnixNs,proto3" json:"taken_unix_ns,omitempty"`
-	// The commit the daemon was built of.
-	Build string `protobuf:"bytes,2,opt,name=build,proto3" json:"build,omitempty"`
-	// Its counters: those its metrics name cladefsd_NAME_total, as `window_open_maps_refused`.
-	Counters map[string]uint64 `protobuf:"bytes,3,rep,name=counters,proto3" json:"counters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// Its gauges: those its metrics name cladefsd_NAME.
-	Gauges map[string]uint64 `protobuf:"bytes,4,rep,name=gauges,proto3" json:"gauges,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// Its VM processes that opened a store, in the order they connected.
-	Vms           []*VmSnapshot `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *GetSnapshotResponse) Reset() {
-	*x = GetSnapshotResponse{}
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *GetSnapshotResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*GetSnapshotResponse) ProtoMessage() {}
-
-func (x *GetSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use GetSnapshotResponse.ProtoReflect.Descriptor instead.
-func (*GetSnapshotResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{30}
 }
 
-func (x *GetSnapshotResponse) GetTakenUnixNs() uint64 {
+func (x *GetStatsResponse) GetTakenUnixNs() uint64 {
 	if x != nil {
 		return x.TakenUnixNs
 	}
 	return 0
 }
 
-func (x *GetSnapshotResponse) GetBuild() string {
+func (x *GetStatsResponse) GetBuild() string {
 	if x != nil {
 		return x.Build
 	}
 	return ""
 }
 
-func (x *GetSnapshotResponse) GetCounters() map[string]uint64 {
+func (x *GetStatsResponse) GetCounters() map[string]uint64 {
 	if x != nil {
 		return x.Counters
 	}
 	return nil
 }
 
-func (x *GetSnapshotResponse) GetGauges() map[string]uint64 {
+func (x *GetStatsResponse) GetGauges() map[string]uint64 {
 	if x != nil {
 		return x.Gauges
 	}
 	return nil
 }
 
-func (x *GetSnapshotResponse) GetVms() []*VmSnapshot {
+func (x *GetStatsResponse) GetVms() []*VmStats {
 	if x != nil {
 		return x.Vms
 	}
@@ -2128,7 +2132,7 @@ func (x *GetSnapshotResponse) GetVms() []*VmSnapshot {
 }
 
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
-type VmSnapshot struct {
+type VmStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its connection's number, the daemon's count of connections as it connected: what tells apart
 	// a store's writer and its followers, of one branch.
@@ -2156,25 +2160,25 @@ type VmSnapshot struct {
 	// How long after it was asked it answered, in nanoseconds: 0 if it didn't.
 	AnswerNs uint64 `protobuf:"varint,10,opt,name=answer_ns,json=answerNs,proto3" json:"answer_ns,omitempty"`
 	// Its guest's, if a guest answered.
-	Guest         *GuestSnapshot `protobuf:"bytes,11,opt,name=guest,proto3,oneof" json:"guest,omitempty"`
+	Guest         *GuestStats `protobuf:"bytes,11,opt,name=guest,proto3,oneof" json:"guest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *VmSnapshot) Reset() {
-	*x = VmSnapshot{}
+func (x *VmStats) Reset() {
+	*x = VmStats{}
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *VmSnapshot) String() string {
+func (x *VmStats) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*VmSnapshot) ProtoMessage() {}
+func (*VmStats) ProtoMessage() {}
 
-func (x *VmSnapshot) ProtoReflect() protoreflect.Message {
+func (x *VmStats) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2186,82 +2190,82 @@ func (x *VmSnapshot) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use VmSnapshot.ProtoReflect.Descriptor instead.
-func (*VmSnapshot) Descriptor() ([]byte, []int) {
+// Deprecated: Use VmStats.ProtoReflect.Descriptor instead.
+func (*VmStats) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{31}
 }
 
-func (x *VmSnapshot) GetConnection() uint64 {
+func (x *VmStats) GetConnection() uint64 {
 	if x != nil {
 		return x.Connection
 	}
 	return 0
 }
 
-func (x *VmSnapshot) GetBranch() uint64 {
+func (x *VmStats) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *VmSnapshot) GetPath() string {
+func (x *VmStats) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-func (x *VmSnapshot) GetFollower() bool {
+func (x *VmStats) GetFollower() bool {
 	if x != nil {
 		return x.Follower
 	}
 	return false
 }
 
-func (x *VmSnapshot) GetBuild() string {
+func (x *VmStats) GetBuild() string {
 	if x != nil {
 		return x.Build
 	}
 	return ""
 }
 
-func (x *VmSnapshot) GetCounters() map[string]uint64 {
+func (x *VmStats) GetCounters() map[string]uint64 {
 	if x != nil {
 		return x.Counters
 	}
 	return nil
 }
 
-func (x *VmSnapshot) GetGauges() map[string]uint64 {
+func (x *VmStats) GetGauges() map[string]uint64 {
 	if x != nil {
 		return x.Gauges
 	}
 	return nil
 }
 
-func (x *VmSnapshot) GetWindow() map[string]uint64 {
+func (x *VmStats) GetWindow() map[string]uint64 {
 	if x != nil {
 		return x.Window
 	}
 	return nil
 }
 
-func (x *VmSnapshot) GetAnswered() bool {
+func (x *VmStats) GetAnswered() bool {
 	if x != nil {
 		return x.Answered
 	}
 	return false
 }
 
-func (x *VmSnapshot) GetAnswerNs() uint64 {
+func (x *VmStats) GetAnswerNs() uint64 {
 	if x != nil {
 		return x.AnswerNs
 	}
 	return 0
 }
 
-func (x *VmSnapshot) GetGuest() *GuestSnapshot {
+func (x *VmStats) GetGuest() *GuestStats {
 	if x != nil {
 		return x.Guest
 	}
@@ -2269,7 +2273,7 @@ func (x *VmSnapshot) GetGuest() *GuestSnapshot {
 }
 
 // What a guest's Fxfs counted, as its /proc/fs/fxfs/TAG says.
-type GuestSnapshot struct {
+type GuestStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The commit it was built of, empty if it didn't say.
 	Build string `protobuf:"bytes,1,opt,name=build,proto3" json:"build,omitempty"`
@@ -2281,20 +2285,20 @@ type GuestSnapshot struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *GuestSnapshot) Reset() {
-	*x = GuestSnapshot{}
+func (x *GuestStats) Reset() {
+	*x = GuestStats{}
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *GuestSnapshot) String() string {
+func (x *GuestStats) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*GuestSnapshot) ProtoMessage() {}
+func (*GuestStats) ProtoMessage() {}
 
-func (x *GuestSnapshot) ProtoReflect() protoreflect.Message {
+func (x *GuestStats) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2306,26 +2310,26 @@ func (x *GuestSnapshot) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use GuestSnapshot.ProtoReflect.Descriptor instead.
-func (*GuestSnapshot) Descriptor() ([]byte, []int) {
+// Deprecated: Use GuestStats.ProtoReflect.Descriptor instead.
+func (*GuestStats) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{32}
 }
 
-func (x *GuestSnapshot) GetBuild() string {
+func (x *GuestStats) GetBuild() string {
 	if x != nil {
 		return x.Build
 	}
 	return ""
 }
 
-func (x *GuestSnapshot) GetCounters() map[string]uint64 {
+func (x *GuestStats) GetCounters() map[string]uint64 {
 	if x != nil {
 		return x.Counters
 	}
 	return nil
 }
 
-func (x *GuestSnapshot) GetHistograms() map[string]*Histogram {
+func (x *GuestStats) GetHistograms() map[string]*Histogram {
 	if x != nil {
 		return x.Histograms
 	}
@@ -2457,8 +2461,11 @@ func (x *ObjectStorageStats) GetFailures() map[string]uint64 {
 // Grants a tenant.
 type GrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its name: letters, digits, `-`, `_` and `.`, not first, at most 64.
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
+	// its directory are vdisks of its cells, under its prefix, and its VM processes open no store of
+	// another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in hexadecimal:
+	// `<tenant>.sock`.
+	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The directory its stores are in, which must exist: its VM processes name stores in it
 	// alone.
 	Dir string `protobuf:"bytes,2,opt,name=dir,proto3" json:"dir,omitempty"`
@@ -2466,11 +2473,7 @@ type GrantRequest struct {
 	// daemon's own user, if not given.
 	Uid *uint32 `protobuf:"varint,3,opt,name=uid,proto3,oneof" json:"uid,omitempty"`
 	// The group to give its socket to; the daemon's own, if not given.
-	Gid *uint32 `protobuf:"varint,4,opt,name=gid,proto3,oneof" json:"gid,omitempty"`
-	// Its ID in the bucket, not 0 (TASK-364): the stores in its directory are volumes of its cells,
-	// under its prefix, and its VM processes open no store of another tenant's cells
-	// (PERMISSION_DENIED, EACCES). Granting it again with another ID is refused (ALREADY_EXISTS).
-	Id            uint64 `protobuf:"varint,5,opt,name=id,proto3" json:"id,omitempty"`
+	Gid           *uint32 `protobuf:"varint,4,opt,name=gid,proto3,oneof" json:"gid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2505,11 +2508,11 @@ func (*GrantRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{35}
 }
 
-func (x *GrantRequest) GetTenant() string {
+func (x *GrantRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
-	return ""
+	return 0
 }
 
 func (x *GrantRequest) GetDir() string {
@@ -2529,13 +2532,6 @@ func (x *GrantRequest) GetUid() uint32 {
 func (x *GrantRequest) GetGid() uint32 {
 	if x != nil && x.Gid != nil {
 		return *x.Gid
-	}
-	return 0
-}
-
-func (x *GrantRequest) GetId() uint64 {
-	if x != nil {
-		return x.Id
 	}
 	return 0
 }
@@ -2590,7 +2586,7 @@ func (x *GrantResponse) GetSocket() string {
 type RevokeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The tenant, granted (NOT_FOUND otherwise).
-	Tenant        string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	Tenant        uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2625,11 +2621,11 @@ func (*RevokeRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{37}
 }
 
-func (x *RevokeRequest) GetTenant() string {
+func (x *RevokeRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
-	return ""
+	return 0
 }
 
 // The tenant's grant revoked.
@@ -2672,10 +2668,11 @@ func (*RevokeResponse) Descriptor() ([]byte, []int) {
 // Limits the memory of a tenant, or of every tenant.
 type SetMemoryLimitRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant whose memory to limit, alive now or granted later, until its limit is set again;
-	// empty for every tenant's together, the default tenant's with them. A tenant revoked and
-	// granted again while its earlier VMs run has the limit for each of its grants' VMs.
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The tenant whose memory to limit, alive now or granted later, until its limit is set again
+	// (INVALID_ARGUMENT for the default tenant); absent for every tenant's together, the default
+	// tenant's with them. A tenant revoked and granted again while its earlier VMs run has the limit
+	// for each of its grants' VMs.
+	Tenant *uint64 `protobuf:"varint,1,opt,name=tenant,proto3,oneof" json:"tenant,omitempty"`
 	// The limit, in bytes, rounded down to 2 MiB, and at least that (INVALID_ARGUMENT otherwise);
 	// absent, none.
 	Bytes         *uint64 `protobuf:"varint,2,opt,name=bytes,proto3,oneof" json:"bytes,omitempty"`
@@ -2713,11 +2710,11 @@ func (*SetMemoryLimitRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{39}
 }
 
-func (x *SetMemoryLimitRequest) GetTenant() string {
-	if x != nil {
-		return x.Tenant
+func (x *SetMemoryLimitRequest) GetTenant() uint64 {
+	if x != nil && x.Tenant != nil {
+		return *x.Tenant
 	}
-	return ""
+	return 0
 }
 
 func (x *SetMemoryLimitRequest) GetBytes() uint64 {
@@ -2767,9 +2764,9 @@ func (*SetMemoryLimitResponse) Descriptor() ([]byte, []int) {
 // Weighs a tenant's memory.
 type SetMemoryWeightRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant, alive now or granted later, until its weight is set again (INVALID_ARGUMENT for a
-	// malformed name).
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The tenant, alive now or granted later, until its weight is set again (INVALID_ARGUMENT for the
+	// default tenant).
+	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its weight: 0 for no share kept under pressure.
 	Weight        uint64 `protobuf:"varint,2,opt,name=weight,proto3" json:"weight,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2806,11 +2803,11 @@ func (*SetMemoryWeightRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{41}
 }
 
-func (x *SetMemoryWeightRequest) GetTenant() string {
+func (x *SetMemoryWeightRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
-	return ""
+	return 0
 }
 
 func (x *SetMemoryWeightRequest) GetWeight() uint64 {
@@ -2857,33 +2854,34 @@ func (*SetMemoryWeightResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{42}
 }
 
-// Sets the room of a tenant's connections.
-type SetTenantRoomRequest struct {
+// Sets the bytes in flight of a tenant's connections.
+type SetTenantInFlightRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant whose room to set, alive now or granted later, until it is set again; empty for
-	// every tenant's whose own isn't set, the default tenant's with them.
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The room, in bytes, a payload's most, 64 MiB, at least (INVALID_ARGUMENT otherwise); absent,
-	// every tenant's, or for every tenant the default.
+	// The tenant whose bytes in flight to set, alive now or granted later, until they are set again
+	// (INVALID_ARGUMENT for the default tenant); absent for every tenant's whose own aren't set, the
+	// default tenant's with them.
+	Tenant *uint64 `protobuf:"varint,1,opt,name=tenant,proto3,oneof" json:"tenant,omitempty"`
+	// The bytes, a payload's most, 64 MiB, at least (INVALID_ARGUMENT otherwise); absent, every
+	// tenant's, or for every tenant the default.
 	Bytes         *uint64 `protobuf:"varint,2,opt,name=bytes,proto3,oneof" json:"bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SetTenantRoomRequest) Reset() {
-	*x = SetTenantRoomRequest{}
+func (x *SetTenantInFlightRequest) Reset() {
+	*x = SetTenantInFlightRequest{}
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetTenantRoomRequest) String() string {
+func (x *SetTenantInFlightRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetTenantRoomRequest) ProtoMessage() {}
+func (*SetTenantInFlightRequest) ProtoMessage() {}
 
-func (x *SetTenantRoomRequest) ProtoReflect() protoreflect.Message {
+func (x *SetTenantInFlightRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2895,46 +2893,46 @@ func (x *SetTenantRoomRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetTenantRoomRequest.ProtoReflect.Descriptor instead.
-func (*SetTenantRoomRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use SetTenantInFlightRequest.ProtoReflect.Descriptor instead.
+func (*SetTenantInFlightRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{43}
 }
 
-func (x *SetTenantRoomRequest) GetTenant() string {
-	if x != nil {
-		return x.Tenant
+func (x *SetTenantInFlightRequest) GetTenant() uint64 {
+	if x != nil && x.Tenant != nil {
+		return *x.Tenant
 	}
-	return ""
+	return 0
 }
 
-func (x *SetTenantRoomRequest) GetBytes() uint64 {
+func (x *SetTenantInFlightRequest) GetBytes() uint64 {
 	if x != nil && x.Bytes != nil {
 		return *x.Bytes
 	}
 	return 0
 }
 
-// The room is set.
-type SetTenantRoomResponse struct {
+// The bytes in flight are set.
+type SetTenantInFlightResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SetTenantRoomResponse) Reset() {
-	*x = SetTenantRoomResponse{}
+func (x *SetTenantInFlightResponse) Reset() {
+	*x = SetTenantInFlightResponse{}
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SetTenantRoomResponse) String() string {
+func (x *SetTenantInFlightResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SetTenantRoomResponse) ProtoMessage() {}
+func (*SetTenantInFlightResponse) ProtoMessage() {}
 
-func (x *SetTenantRoomResponse) ProtoReflect() protoreflect.Message {
+func (x *SetTenantInFlightResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2946,16 +2944,16 @@ func (x *SetTenantRoomResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SetTenantRoomResponse.ProtoReflect.Descriptor instead.
-func (*SetTenantRoomResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use SetTenantInFlightResponse.ProtoReflect.Descriptor instead.
+func (*SetTenantInFlightResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{44}
 }
 
 // Evicts pages toward a target.
 type ShrinkMemoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant whose memory to shrink, alive (NOT_FOUND otherwise); empty for every tenant's.
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The tenant whose memory to shrink, alive (NOT_FOUND otherwise); absent for every tenant's.
+	Tenant *uint64 `protobuf:"varint,1,opt,name=tenant,proto3,oneof" json:"tenant,omitempty"`
 	// The most bytes to hold.
 	TargetBytes   uint64 `protobuf:"varint,2,opt,name=target_bytes,json=targetBytes,proto3" json:"target_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2992,11 +2990,11 @@ func (*ShrinkMemoryRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{45}
 }
 
-func (x *ShrinkMemoryRequest) GetTenant() string {
-	if x != nil {
-		return x.Tenant
+func (x *ShrinkMemoryRequest) GetTenant() uint64 {
+	if x != nil && x.Tenant != nil {
+		return *x.Tenant
 	}
-	return ""
+	return 0
 }
 
 func (x *ShrinkMemoryRequest) GetTargetBytes() uint64 {
@@ -3055,10 +3053,10 @@ func (x *ShrinkMemoryResponse) GetBytes() uint64 {
 // Limits the disk of a tenant, or of every tenant.
 type SetDiskLimitRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant whose disk to limit, alive now or granted later, until its limit is set again;
-	// empty for every tenant's together. A tenant revoked and granted again while its earlier VMs
-	// run has the limit for each of its directories.
-	Tenant string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The tenant whose disk to limit, alive now or granted later, until its limit is set again
+	// (INVALID_ARGUMENT for the default tenant); absent for every tenant's together. A tenant revoked
+	// and granted again while its earlier VMs run has the limit for each of its directories.
+	Tenant *uint64 `protobuf:"varint,1,opt,name=tenant,proto3,oneof" json:"tenant,omitempty"`
 	// The limit, in bytes; absent, none.
 	Bytes         *uint64 `protobuf:"varint,2,opt,name=bytes,proto3,oneof" json:"bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3095,11 +3093,11 @@ func (*SetDiskLimitRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{47}
 }
 
-func (x *SetDiskLimitRequest) GetTenant() string {
-	if x != nil {
-		return x.Tenant
+func (x *SetDiskLimitRequest) GetTenant() uint64 {
+	if x != nil && x.Tenant != nil {
+		return *x.Tenant
 	}
-	return ""
+	return 0
 }
 
 func (x *SetDiskLimitRequest) GetBytes() uint64 {
@@ -3233,8 +3231,8 @@ func (*SetPeersResponse) Descriptor() ([]byte, []int) {
 // Asks what a tenant's disk takes.
 type GetTenantDiskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant, alive (NOT_FOUND otherwise); empty for every tenant together.
-	Tenant        string `protobuf:"bytes,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The tenant, alive (NOT_FOUND otherwise); absent for every tenant together.
+	Tenant        *uint64 `protobuf:"varint,1,opt,name=tenant,proto3,oneof" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3269,11 +3267,11 @@ func (*GetTenantDiskRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{51}
 }
 
-func (x *GetTenantDiskRequest) GetTenant() string {
-	if x != nil {
-		return x.Tenant
+func (x *GetTenantDiskRequest) GetTenant() uint64 {
+	if x != nil && x.Tenant != nil {
+		return *x.Tenant
 	}
-	return ""
+	return 0
 }
 
 // What a tenant's disk takes.
@@ -3547,7 +3545,7 @@ func (x *ForgetTenantKeysResponse) GetForgotten() *Forgotten {
 // What a host forgot of a tenant's or a cell's keys.
 type Forgotten struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The stores open of them it fenced.
+	// The stores open of them it halted.
 	Stores uint32 `protobuf:"varint,1,opt,name=stores,proto3" json:"stores,omitempty"`
 	// The stores' keys its fetchers held.
 	Rings uint32 `protobuf:"varint,2,opt,name=rings,proto3" json:"rings,omitempty"`
@@ -3630,15 +3628,15 @@ var File_cladefs_extentd_v1_extentd_proto protoreflect.FileDescriptor
 
 const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\n" +
-	" cladefs/extentd/v1/extentd.proto\x12\x12cladefs.extentd.v1\"\xe1\x01\n" +
+	" cladefs/extentd/v1/extentd.proto\x12\x12cladefs.extentd.v1\"\xe0\x01\n" +
 	"\x12CreateStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x06 \x01(\x04R\x04cell\x122\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1e.cladefs.extentd.v1.VolumeKindR\x04kindB\b\n" +
+	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.extentd.v1.VdiskKindR\x04kindB\b\n" +
 	"\x06_token\"Y\n" +
 	"\x13CreateStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
@@ -3680,22 +3678,21 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x11SharePointRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x16\n" +
 	"\x06shared\x18\x02 \x01(\bR\x06shared\"\x14\n" +
-	"\x12SharePointResponse\"G\n" +
+	"\x12SharePointResponse\"H\n" +
 	"\x11MakePublicRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1e\n" +
-	"\n" +
-	"generation\x18\x02 \x01(\bR\n" +
-	"generation\"\x14\n" +
-	"\x12MakePublicResponse\"=\n" +
-	"\x11AttachBaseRequest\x12\x14\n" +
-	"\x05store\x18\x01 \x01(\tR\x05store\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1f\n" +
+	"\vattach_only\x18\x02 \x01(\bR\n" +
+	"attachOnly\"\x14\n" +
+	"\x12MakePublicResponse\";\n" +
+	"\x11AttachBaseRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04base\x18\x02 \x01(\tR\x04base\"\x14\n" +
 	"\x12AttachBaseResponse\"&\n" +
 	"\x10SyncStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
 	"\x11SyncStoreResponse\"&\n" +
 	"\x10StatStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xf6\x04\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xeb\x04\n" +
 	"\x11StatStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
@@ -3708,11 +3705,11 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\tcommitted\x18\t \x01(\x04R\tcommitted\x12\x1c\n" +
 	"\tuploading\x18\n" +
 	" \x01(\bR\tuploading\x12\x1f\n" +
-	"\vlease_token\x18\v \x01(\x04R\n" +
-	"leaseToken\x12\x1f\n" +
-	"\vlease_epoch\x18\f \x01(\x04R\n" +
-	"leaseEpoch\x12-\n" +
-	"\x13lease_taken_unix_ms\x18\r \x01(\x04R\x10leaseTakenUnixMs\x12\x1a\n" +
+	"\vtaken_token\x18\v \x01(\x04R\n" +
+	"takenToken\x12\x1f\n" +
+	"\vtaken_epoch\x18\f \x01(\x04R\n" +
+	"takenEpoch\x12\"\n" +
+	"\rtaken_unix_ms\x18\r \x01(\x04R\vtakenUnixMs\x12\x1a\n" +
 	"\buploaded\x18\x0e \x01(\x04R\buploaded\x120\n" +
 	"\x14pending_upload_bytes\x18\x0f \x01(\x04R\x12pendingUploadBytes\x12*\n" +
 	"\x11oldest_pending_ms\x18\x10 \x01(\x04R\x0foldestPendingMs\x12\x16\n" +
@@ -3726,9 +3723,9 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.extentd.v1.ListedStoreR\x06stores\"\\\n" +
 	"\vListedStore\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x129\n" +
-	"\x04stat\x18\x02 \x01(\v2%.cladefs.extentd.v1.StatStoreResponseR\x04stat\"\x11\n" +
-	"\x0fGetStatsRequest\"\xf5\x05\n" +
-	"\x10GetStatsResponse\x12\x12\n" +
+	"\x04stat\x18\x02 \x01(\v2%.cladefs.extentd.v1.StatStoreResponseR\x04stat\"\x14\n" +
+	"\x12GetCountersRequest\"\xf8\x05\n" +
+	"\x13GetCountersResponse\x12\x12\n" +
 	"\x04maps\x18\x01 \x01(\x04R\x04maps\x12\x15\n" +
 	"\x06map_ns\x18\x02 \x01(\x04R\x05mapNs\x12\x16\n" +
 	"\x06faults\x18\x03 \x01(\x04R\x06faults\x12\x19\n" +
@@ -3752,37 +3749,36 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x0ecommit_wait_ns\x18\x14 \x01(\x04R\fcommitWaitNs\x12%\n" +
 	"\x0esegment_closes\x18\x15 \x01(\x04R\rsegmentCloses\x12(\n" +
 	"\x10segment_close_ns\x18\x16 \x01(\x04R\x0esegmentCloseNsB\x11\n" +
-	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"-\n" +
-	"\x12GetSnapshotRequest\x12\x17\n" +
-	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\x99\x03\n" +
-	"\x13GetSnapshotResponse\x12\"\n" +
+	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"*\n" +
+	"\x0fGetStatsRequest\x12\x17\n" +
+	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\x8d\x03\n" +
+	"\x10GetStatsResponse\x12\"\n" +
 	"\rtaken_unix_ns\x18\x01 \x01(\x04R\vtakenUnixNs\x12\x14\n" +
-	"\x05build\x18\x02 \x01(\tR\x05build\x12Q\n" +
-	"\bcounters\x18\x03 \x03(\v25.cladefs.extentd.v1.GetSnapshotResponse.CountersEntryR\bcounters\x12K\n" +
-	"\x06gauges\x18\x04 \x03(\v23.cladefs.extentd.v1.GetSnapshotResponse.GaugesEntryR\x06gauges\x120\n" +
-	"\x03vms\x18\x05 \x03(\v2\x1e.cladefs.extentd.v1.VmSnapshotR\x03vms\x1a;\n" +
+	"\x05build\x18\x02 \x01(\tR\x05build\x12N\n" +
+	"\bcounters\x18\x03 \x03(\v22.cladefs.extentd.v1.GetStatsResponse.CountersEntryR\bcounters\x12H\n" +
+	"\x06gauges\x18\x04 \x03(\v20.cladefs.extentd.v1.GetStatsResponse.GaugesEntryR\x06gauges\x12-\n" +
+	"\x03vms\x18\x05 \x03(\v2\x1b.cladefs.extentd.v1.VmStatsR\x03vms\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
 	"\vGaugesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x90\x05\n" +
-	"\n" +
-	"VmSnapshot\x12\x1e\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x81\x05\n" +
+	"\aVmStats\x12\x1e\n" +
 	"\n" +
 	"connection\x18\x01 \x01(\x04R\n" +
 	"connection\x12\x16\n" +
 	"\x06branch\x18\x02 \x01(\x04R\x06branch\x12\x12\n" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1a\n" +
 	"\bfollower\x18\x04 \x01(\bR\bfollower\x12\x14\n" +
-	"\x05build\x18\x05 \x01(\tR\x05build\x12H\n" +
-	"\bcounters\x18\x06 \x03(\v2,.cladefs.extentd.v1.VmSnapshot.CountersEntryR\bcounters\x12B\n" +
-	"\x06gauges\x18\a \x03(\v2*.cladefs.extentd.v1.VmSnapshot.GaugesEntryR\x06gauges\x12B\n" +
-	"\x06window\x18\b \x03(\v2*.cladefs.extentd.v1.VmSnapshot.WindowEntryR\x06window\x12\x1a\n" +
+	"\x05build\x18\x05 \x01(\tR\x05build\x12E\n" +
+	"\bcounters\x18\x06 \x03(\v2).cladefs.extentd.v1.VmStats.CountersEntryR\bcounters\x12?\n" +
+	"\x06gauges\x18\a \x03(\v2'.cladefs.extentd.v1.VmStats.GaugesEntryR\x06gauges\x12?\n" +
+	"\x06window\x18\b \x03(\v2'.cladefs.extentd.v1.VmStats.WindowEntryR\x06window\x12\x1a\n" +
 	"\banswered\x18\t \x01(\bR\banswered\x12\x1b\n" +
 	"\tanswer_ns\x18\n" +
-	" \x01(\x04R\banswerNs\x12<\n" +
-	"\x05guest\x18\v \x01(\v2!.cladefs.extentd.v1.GuestSnapshotH\x00R\x05guest\x88\x01\x01\x1a;\n" +
+	" \x01(\x04R\banswerNs\x129\n" +
+	"\x05guest\x18\v \x01(\v2\x1e.cladefs.extentd.v1.GuestStatsH\x00R\x05guest\x88\x01\x01\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
@@ -3792,12 +3788,13 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\vWindowEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\b\n" +
-	"\x06_guest\"\xe0\x02\n" +
-	"\rGuestSnapshot\x12\x14\n" +
-	"\x05build\x18\x01 \x01(\tR\x05build\x12K\n" +
-	"\bcounters\x18\x02 \x03(\v2/.cladefs.extentd.v1.GuestSnapshot.CountersEntryR\bcounters\x12Q\n" +
+	"\x06_guest\"\xd7\x02\n" +
 	"\n" +
-	"histograms\x18\x03 \x03(\v21.cladefs.extentd.v1.GuestSnapshot.HistogramsEntryR\n" +
+	"GuestStats\x12\x14\n" +
+	"\x05build\x18\x01 \x01(\tR\x05build\x12H\n" +
+	"\bcounters\x18\x02 \x03(\v2,.cladefs.extentd.v1.GuestStats.CountersEntryR\bcounters\x12N\n" +
+	"\n" +
+	"histograms\x18\x03 \x03(\v2..cladefs.extentd.v1.GuestStats.HistogramsEntryR\n" +
 	"histograms\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -3820,49 +3817,53 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a;\n" +
 	"\rFailuresEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x86\x01\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"v\n" +
 	"\fGrantRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x10\n" +
+	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x10\n" +
 	"\x03dir\x18\x02 \x01(\tR\x03dir\x12\x15\n" +
 	"\x03uid\x18\x03 \x01(\rH\x00R\x03uid\x88\x01\x01\x12\x15\n" +
-	"\x03gid\x18\x04 \x01(\rH\x01R\x03gid\x88\x01\x01\x12\x0e\n" +
-	"\x02id\x18\x05 \x01(\x04R\x02idB\x06\n" +
+	"\x03gid\x18\x04 \x01(\rH\x01R\x03gid\x88\x01\x01B\x06\n" +
 	"\x04_uidB\x06\n" +
 	"\x04_gid\"'\n" +
 	"\rGrantResponse\x12\x16\n" +
 	"\x06socket\x18\x01 \x01(\tR\x06socket\"'\n" +
 	"\rRevokeRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\"\x10\n" +
-	"\x0eRevokeResponse\"T\n" +
-	"\x15SetMemoryLimitRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x19\n" +
-	"\x05bytes\x18\x02 \x01(\x04H\x00R\x05bytes\x88\x01\x01B\b\n" +
+	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\"\x10\n" +
+	"\x0eRevokeResponse\"d\n" +
+	"\x15SetMemoryLimitRequest\x12\x1b\n" +
+	"\x06tenant\x18\x01 \x01(\x04H\x00R\x06tenant\x88\x01\x01\x12\x19\n" +
+	"\x05bytes\x18\x02 \x01(\x04H\x01R\x05bytes\x88\x01\x01B\t\n" +
+	"\a_tenantB\b\n" +
 	"\x06_bytes\"\x18\n" +
 	"\x16SetMemoryLimitResponse\"H\n" +
 	"\x16SetMemoryWeightRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x16\n" +
 	"\x06weight\x18\x02 \x01(\x04R\x06weight\"\x19\n" +
-	"\x17SetMemoryWeightResponse\"S\n" +
-	"\x14SetTenantRoomRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x19\n" +
-	"\x05bytes\x18\x02 \x01(\x04H\x00R\x05bytes\x88\x01\x01B\b\n" +
-	"\x06_bytes\"\x17\n" +
-	"\x15SetTenantRoomResponse\"P\n" +
-	"\x13ShrinkMemoryRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12!\n" +
-	"\ftarget_bytes\x18\x02 \x01(\x04R\vtargetBytes\",\n" +
+	"\x17SetMemoryWeightResponse\"g\n" +
+	"\x18SetTenantInFlightRequest\x12\x1b\n" +
+	"\x06tenant\x18\x01 \x01(\x04H\x00R\x06tenant\x88\x01\x01\x12\x19\n" +
+	"\x05bytes\x18\x02 \x01(\x04H\x01R\x05bytes\x88\x01\x01B\t\n" +
+	"\a_tenantB\b\n" +
+	"\x06_bytes\"\x1b\n" +
+	"\x19SetTenantInFlightResponse\"`\n" +
+	"\x13ShrinkMemoryRequest\x12\x1b\n" +
+	"\x06tenant\x18\x01 \x01(\x04H\x00R\x06tenant\x88\x01\x01\x12!\n" +
+	"\ftarget_bytes\x18\x02 \x01(\x04R\vtargetBytesB\t\n" +
+	"\a_tenant\",\n" +
 	"\x14ShrinkMemoryResponse\x12\x14\n" +
-	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\"R\n" +
-	"\x13SetDiskLimitRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\x12\x19\n" +
-	"\x05bytes\x18\x02 \x01(\x04H\x00R\x05bytes\x88\x01\x01B\b\n" +
+	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\"b\n" +
+	"\x13SetDiskLimitRequest\x12\x1b\n" +
+	"\x06tenant\x18\x01 \x01(\x04H\x00R\x06tenant\x88\x01\x01\x12\x19\n" +
+	"\x05bytes\x18\x02 \x01(\x04H\x01R\x05bytes\x88\x01\x01B\t\n" +
+	"\a_tenantB\b\n" +
 	"\x06_bytes\"\x16\n" +
 	"\x14SetDiskLimitResponse\"/\n" +
 	"\x0fSetPeersRequest\x12\x1c\n" +
 	"\taddresses\x18\x01 \x03(\tR\taddresses\"\x12\n" +
-	"\x10SetPeersResponse\".\n" +
-	"\x14GetTenantDiskRequest\x12\x16\n" +
-	"\x06tenant\x18\x01 \x01(\tR\x06tenant\"c\n" +
+	"\x10SetPeersResponse\">\n" +
+	"\x14GetTenantDiskRequest\x12\x1b\n" +
+	"\x06tenant\x18\x01 \x01(\x04H\x00R\x06tenant\x88\x01\x01B\t\n" +
+	"\a_tenant\"c\n" +
 	"\x15GetTenantDiskResponse\x12\x14\n" +
 	"\x05bytes\x18\x01 \x01(\x04R\x05bytes\x12$\n" +
 	"\vlimit_bytes\x18\x02 \x01(\x04H\x00R\n" +
@@ -3884,12 +3885,11 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*R\n" +
-	"\n" +
-	"VolumeKind\x12\x14\n" +
-	"\x10VOLUME_KIND_FXFS\x10\x00\x12\x16\n" +
-	"\x12VOLUME_KIND_SQLITE\x10\x01\x12\x16\n" +
-	"\x12VOLUME_KIND_MEMORY\x10\x022\x9f\x13\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*N\n" +
+	"\tVdiskKind\x12\x13\n" +
+	"\x0fVDISK_KIND_FXFS\x10\x00\x12\x15\n" +
+	"\x11VDISK_KIND_SQLITE\x10\x01\x12\x15\n" +
+	"\x11VDISK_KIND_MEMORY\x10\x022\xab\x13\n" +
 	"\aExtentd\x12^\n" +
 	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
 	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +
@@ -3908,14 +3908,14 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\tSyncStore\x12$.cladefs.extentd.v1.SyncStoreRequest\x1a%.cladefs.extentd.v1.SyncStoreResponse\x12X\n" +
 	"\tStatStore\x12$.cladefs.extentd.v1.StatStoreRequest\x1a%.cladefs.extentd.v1.StatStoreResponse\x12[\n" +
 	"\n" +
-	"ListStores\x12%.cladefs.extentd.v1.ListStoresRequest\x1a&.cladefs.extentd.v1.ListStoresResponse\x12U\n" +
-	"\bGetStats\x12#.cladefs.extentd.v1.GetStatsRequest\x1a$.cladefs.extentd.v1.GetStatsResponse\x12^\n" +
-	"\vGetSnapshot\x12&.cladefs.extentd.v1.GetSnapshotRequest\x1a'.cladefs.extentd.v1.GetSnapshotResponse\x12L\n" +
+	"ListStores\x12%.cladefs.extentd.v1.ListStoresRequest\x1a&.cladefs.extentd.v1.ListStoresResponse\x12^\n" +
+	"\vGetCounters\x12&.cladefs.extentd.v1.GetCountersRequest\x1a'.cladefs.extentd.v1.GetCountersResponse\x12U\n" +
+	"\bGetStats\x12#.cladefs.extentd.v1.GetStatsRequest\x1a$.cladefs.extentd.v1.GetStatsResponse\x12L\n" +
 	"\x05Grant\x12 .cladefs.extentd.v1.GrantRequest\x1a!.cladefs.extentd.v1.GrantResponse\x12O\n" +
 	"\x06Revoke\x12!.cladefs.extentd.v1.RevokeRequest\x1a\".cladefs.extentd.v1.RevokeResponse\x12g\n" +
 	"\x0eSetMemoryLimit\x12).cladefs.extentd.v1.SetMemoryLimitRequest\x1a*.cladefs.extentd.v1.SetMemoryLimitResponse\x12j\n" +
-	"\x0fSetMemoryWeight\x12*.cladefs.extentd.v1.SetMemoryWeightRequest\x1a+.cladefs.extentd.v1.SetMemoryWeightResponse\x12d\n" +
-	"\rSetTenantRoom\x12(.cladefs.extentd.v1.SetTenantRoomRequest\x1a).cladefs.extentd.v1.SetTenantRoomResponse\x12a\n" +
+	"\x0fSetMemoryWeight\x12*.cladefs.extentd.v1.SetMemoryWeightRequest\x1a+.cladefs.extentd.v1.SetMemoryWeightResponse\x12p\n" +
+	"\x11SetTenantInFlight\x12,.cladefs.extentd.v1.SetTenantInFlightRequest\x1a-.cladefs.extentd.v1.SetTenantInFlightResponse\x12a\n" +
 	"\fShrinkMemory\x12'.cladefs.extentd.v1.ShrinkMemoryRequest\x1a(.cladefs.extentd.v1.ShrinkMemoryResponse\x12a\n" +
 	"\fSetDiskLimit\x12'.cladefs.extentd.v1.SetDiskLimitRequest\x1a(.cladefs.extentd.v1.SetDiskLimitResponse\x12d\n" +
 	"\rGetTenantDisk\x12(.cladefs.extentd.v1.GetTenantDiskRequest\x1a).cladefs.extentd.v1.GetTenantDiskResponse\x12U\n" +
@@ -3938,96 +3938,96 @@ func file_cladefs_extentd_v1_extentd_proto_rawDescGZIP() []byte {
 var file_cladefs_extentd_v1_extentd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_cladefs_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
 var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
-	(VolumeKind)(0),                  // 0: cladefs.extentd.v1.VolumeKind
-	(*CreateStoreRequest)(nil),       // 1: cladefs.extentd.v1.CreateStoreRequest
-	(*CreateStoreResponse)(nil),      // 2: cladefs.extentd.v1.CreateStoreResponse
-	(*ImportImageRequest)(nil),       // 3: cladefs.extentd.v1.ImportImageRequest
-	(*ImportImageResponse)(nil),      // 4: cladefs.extentd.v1.ImportImageResponse
-	(*ForkStoreRequest)(nil),         // 5: cladefs.extentd.v1.ForkStoreRequest
-	(*ForkStoreResponse)(nil),        // 6: cladefs.extentd.v1.ForkStoreResponse
-	(*DeleteStoreRequest)(nil),       // 7: cladefs.extentd.v1.DeleteStoreRequest
-	(*DeleteStoreResponse)(nil),      // 8: cladefs.extentd.v1.DeleteStoreResponse
-	(*DropStoreRequest)(nil),         // 9: cladefs.extentd.v1.DropStoreRequest
-	(*DropStoreResponse)(nil),        // 10: cladefs.extentd.v1.DropStoreResponse
-	(*ResizeStoreRequest)(nil),       // 11: cladefs.extentd.v1.ResizeStoreRequest
-	(*ResizeStoreResponse)(nil),      // 12: cladefs.extentd.v1.ResizeStoreResponse
-	(*PlaceStoreRequest)(nil),        // 13: cladefs.extentd.v1.PlaceStoreRequest
-	(*PlaceStoreResponse)(nil),       // 14: cladefs.extentd.v1.PlaceStoreResponse
-	(*SharePointRequest)(nil),        // 15: cladefs.extentd.v1.SharePointRequest
-	(*SharePointResponse)(nil),       // 16: cladefs.extentd.v1.SharePointResponse
-	(*MakePublicRequest)(nil),        // 17: cladefs.extentd.v1.MakePublicRequest
-	(*MakePublicResponse)(nil),       // 18: cladefs.extentd.v1.MakePublicResponse
-	(*AttachBaseRequest)(nil),        // 19: cladefs.extentd.v1.AttachBaseRequest
-	(*AttachBaseResponse)(nil),       // 20: cladefs.extentd.v1.AttachBaseResponse
-	(*SyncStoreRequest)(nil),         // 21: cladefs.extentd.v1.SyncStoreRequest
-	(*SyncStoreResponse)(nil),        // 22: cladefs.extentd.v1.SyncStoreResponse
-	(*StatStoreRequest)(nil),         // 23: cladefs.extentd.v1.StatStoreRequest
-	(*StatStoreResponse)(nil),        // 24: cladefs.extentd.v1.StatStoreResponse
-	(*ListStoresRequest)(nil),        // 25: cladefs.extentd.v1.ListStoresRequest
-	(*ListStoresResponse)(nil),       // 26: cladefs.extentd.v1.ListStoresResponse
-	(*ListedStore)(nil),              // 27: cladefs.extentd.v1.ListedStore
-	(*GetStatsRequest)(nil),          // 28: cladefs.extentd.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),         // 29: cladefs.extentd.v1.GetStatsResponse
-	(*GetSnapshotRequest)(nil),       // 30: cladefs.extentd.v1.GetSnapshotRequest
-	(*GetSnapshotResponse)(nil),      // 31: cladefs.extentd.v1.GetSnapshotResponse
-	(*VmSnapshot)(nil),               // 32: cladefs.extentd.v1.VmSnapshot
-	(*GuestSnapshot)(nil),            // 33: cladefs.extentd.v1.GuestSnapshot
-	(*Histogram)(nil),                // 34: cladefs.extentd.v1.Histogram
-	(*ObjectStorageStats)(nil),       // 35: cladefs.extentd.v1.ObjectStorageStats
-	(*GrantRequest)(nil),             // 36: cladefs.extentd.v1.GrantRequest
-	(*GrantResponse)(nil),            // 37: cladefs.extentd.v1.GrantResponse
-	(*RevokeRequest)(nil),            // 38: cladefs.extentd.v1.RevokeRequest
-	(*RevokeResponse)(nil),           // 39: cladefs.extentd.v1.RevokeResponse
-	(*SetMemoryLimitRequest)(nil),    // 40: cladefs.extentd.v1.SetMemoryLimitRequest
-	(*SetMemoryLimitResponse)(nil),   // 41: cladefs.extentd.v1.SetMemoryLimitResponse
-	(*SetMemoryWeightRequest)(nil),   // 42: cladefs.extentd.v1.SetMemoryWeightRequest
-	(*SetMemoryWeightResponse)(nil),  // 43: cladefs.extentd.v1.SetMemoryWeightResponse
-	(*SetTenantRoomRequest)(nil),     // 44: cladefs.extentd.v1.SetTenantRoomRequest
-	(*SetTenantRoomResponse)(nil),    // 45: cladefs.extentd.v1.SetTenantRoomResponse
-	(*ShrinkMemoryRequest)(nil),      // 46: cladefs.extentd.v1.ShrinkMemoryRequest
-	(*ShrinkMemoryResponse)(nil),     // 47: cladefs.extentd.v1.ShrinkMemoryResponse
-	(*SetDiskLimitRequest)(nil),      // 48: cladefs.extentd.v1.SetDiskLimitRequest
-	(*SetDiskLimitResponse)(nil),     // 49: cladefs.extentd.v1.SetDiskLimitResponse
-	(*SetPeersRequest)(nil),          // 50: cladefs.extentd.v1.SetPeersRequest
-	(*SetPeersResponse)(nil),         // 51: cladefs.extentd.v1.SetPeersResponse
-	(*GetTenantDiskRequest)(nil),     // 52: cladefs.extentd.v1.GetTenantDiskRequest
-	(*GetTenantDiskResponse)(nil),    // 53: cladefs.extentd.v1.GetTenantDiskResponse
-	(*ShredCellRequest)(nil),         // 54: cladefs.extentd.v1.ShredCellRequest
-	(*ShredCellResponse)(nil),        // 55: cladefs.extentd.v1.ShredCellResponse
-	(*ForgetTenantKeysRequest)(nil),  // 56: cladefs.extentd.v1.ForgetTenantKeysRequest
-	(*ForgetTenantKeysResponse)(nil), // 57: cladefs.extentd.v1.ForgetTenantKeysResponse
-	(*Forgotten)(nil),                // 58: cladefs.extentd.v1.Forgotten
-	nil,                              // 59: cladefs.extentd.v1.GetSnapshotResponse.CountersEntry
-	nil,                              // 60: cladefs.extentd.v1.GetSnapshotResponse.GaugesEntry
-	nil,                              // 61: cladefs.extentd.v1.VmSnapshot.CountersEntry
-	nil,                              // 62: cladefs.extentd.v1.VmSnapshot.GaugesEntry
-	nil,                              // 63: cladefs.extentd.v1.VmSnapshot.WindowEntry
-	nil,                              // 64: cladefs.extentd.v1.GuestSnapshot.CountersEntry
-	nil,                              // 65: cladefs.extentd.v1.GuestSnapshot.HistogramsEntry
-	nil,                              // 66: cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
-	nil,                              // 67: cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                              // 68: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
+	(VdiskKind)(0),                    // 0: cladefs.extentd.v1.VdiskKind
+	(*CreateStoreRequest)(nil),        // 1: cladefs.extentd.v1.CreateStoreRequest
+	(*CreateStoreResponse)(nil),       // 2: cladefs.extentd.v1.CreateStoreResponse
+	(*ImportImageRequest)(nil),        // 3: cladefs.extentd.v1.ImportImageRequest
+	(*ImportImageResponse)(nil),       // 4: cladefs.extentd.v1.ImportImageResponse
+	(*ForkStoreRequest)(nil),          // 5: cladefs.extentd.v1.ForkStoreRequest
+	(*ForkStoreResponse)(nil),         // 6: cladefs.extentd.v1.ForkStoreResponse
+	(*DeleteStoreRequest)(nil),        // 7: cladefs.extentd.v1.DeleteStoreRequest
+	(*DeleteStoreResponse)(nil),       // 8: cladefs.extentd.v1.DeleteStoreResponse
+	(*DropStoreRequest)(nil),          // 9: cladefs.extentd.v1.DropStoreRequest
+	(*DropStoreResponse)(nil),         // 10: cladefs.extentd.v1.DropStoreResponse
+	(*ResizeStoreRequest)(nil),        // 11: cladefs.extentd.v1.ResizeStoreRequest
+	(*ResizeStoreResponse)(nil),       // 12: cladefs.extentd.v1.ResizeStoreResponse
+	(*PlaceStoreRequest)(nil),         // 13: cladefs.extentd.v1.PlaceStoreRequest
+	(*PlaceStoreResponse)(nil),        // 14: cladefs.extentd.v1.PlaceStoreResponse
+	(*SharePointRequest)(nil),         // 15: cladefs.extentd.v1.SharePointRequest
+	(*SharePointResponse)(nil),        // 16: cladefs.extentd.v1.SharePointResponse
+	(*MakePublicRequest)(nil),         // 17: cladefs.extentd.v1.MakePublicRequest
+	(*MakePublicResponse)(nil),        // 18: cladefs.extentd.v1.MakePublicResponse
+	(*AttachBaseRequest)(nil),         // 19: cladefs.extentd.v1.AttachBaseRequest
+	(*AttachBaseResponse)(nil),        // 20: cladefs.extentd.v1.AttachBaseResponse
+	(*SyncStoreRequest)(nil),          // 21: cladefs.extentd.v1.SyncStoreRequest
+	(*SyncStoreResponse)(nil),         // 22: cladefs.extentd.v1.SyncStoreResponse
+	(*StatStoreRequest)(nil),          // 23: cladefs.extentd.v1.StatStoreRequest
+	(*StatStoreResponse)(nil),         // 24: cladefs.extentd.v1.StatStoreResponse
+	(*ListStoresRequest)(nil),         // 25: cladefs.extentd.v1.ListStoresRequest
+	(*ListStoresResponse)(nil),        // 26: cladefs.extentd.v1.ListStoresResponse
+	(*ListedStore)(nil),               // 27: cladefs.extentd.v1.ListedStore
+	(*GetCountersRequest)(nil),        // 28: cladefs.extentd.v1.GetCountersRequest
+	(*GetCountersResponse)(nil),       // 29: cladefs.extentd.v1.GetCountersResponse
+	(*GetStatsRequest)(nil),           // 30: cladefs.extentd.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),          // 31: cladefs.extentd.v1.GetStatsResponse
+	(*VmStats)(nil),                   // 32: cladefs.extentd.v1.VmStats
+	(*GuestStats)(nil),                // 33: cladefs.extentd.v1.GuestStats
+	(*Histogram)(nil),                 // 34: cladefs.extentd.v1.Histogram
+	(*ObjectStorageStats)(nil),        // 35: cladefs.extentd.v1.ObjectStorageStats
+	(*GrantRequest)(nil),              // 36: cladefs.extentd.v1.GrantRequest
+	(*GrantResponse)(nil),             // 37: cladefs.extentd.v1.GrantResponse
+	(*RevokeRequest)(nil),             // 38: cladefs.extentd.v1.RevokeRequest
+	(*RevokeResponse)(nil),            // 39: cladefs.extentd.v1.RevokeResponse
+	(*SetMemoryLimitRequest)(nil),     // 40: cladefs.extentd.v1.SetMemoryLimitRequest
+	(*SetMemoryLimitResponse)(nil),    // 41: cladefs.extentd.v1.SetMemoryLimitResponse
+	(*SetMemoryWeightRequest)(nil),    // 42: cladefs.extentd.v1.SetMemoryWeightRequest
+	(*SetMemoryWeightResponse)(nil),   // 43: cladefs.extentd.v1.SetMemoryWeightResponse
+	(*SetTenantInFlightRequest)(nil),  // 44: cladefs.extentd.v1.SetTenantInFlightRequest
+	(*SetTenantInFlightResponse)(nil), // 45: cladefs.extentd.v1.SetTenantInFlightResponse
+	(*ShrinkMemoryRequest)(nil),       // 46: cladefs.extentd.v1.ShrinkMemoryRequest
+	(*ShrinkMemoryResponse)(nil),      // 47: cladefs.extentd.v1.ShrinkMemoryResponse
+	(*SetDiskLimitRequest)(nil),       // 48: cladefs.extentd.v1.SetDiskLimitRequest
+	(*SetDiskLimitResponse)(nil),      // 49: cladefs.extentd.v1.SetDiskLimitResponse
+	(*SetPeersRequest)(nil),           // 50: cladefs.extentd.v1.SetPeersRequest
+	(*SetPeersResponse)(nil),          // 51: cladefs.extentd.v1.SetPeersResponse
+	(*GetTenantDiskRequest)(nil),      // 52: cladefs.extentd.v1.GetTenantDiskRequest
+	(*GetTenantDiskResponse)(nil),     // 53: cladefs.extentd.v1.GetTenantDiskResponse
+	(*ShredCellRequest)(nil),          // 54: cladefs.extentd.v1.ShredCellRequest
+	(*ShredCellResponse)(nil),         // 55: cladefs.extentd.v1.ShredCellResponse
+	(*ForgetTenantKeysRequest)(nil),   // 56: cladefs.extentd.v1.ForgetTenantKeysRequest
+	(*ForgetTenantKeysResponse)(nil),  // 57: cladefs.extentd.v1.ForgetTenantKeysResponse
+	(*Forgotten)(nil),                 // 58: cladefs.extentd.v1.Forgotten
+	nil,                               // 59: cladefs.extentd.v1.GetStatsResponse.CountersEntry
+	nil,                               // 60: cladefs.extentd.v1.GetStatsResponse.GaugesEntry
+	nil,                               // 61: cladefs.extentd.v1.VmStats.CountersEntry
+	nil,                               // 62: cladefs.extentd.v1.VmStats.GaugesEntry
+	nil,                               // 63: cladefs.extentd.v1.VmStats.WindowEntry
+	nil,                               // 64: cladefs.extentd.v1.GuestStats.CountersEntry
+	nil,                               // 65: cladefs.extentd.v1.GuestStats.HistogramsEntry
+	nil,                               // 66: cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
+	nil,                               // 67: cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                               // 68: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
-	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VolumeKind
+	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VdiskKind
 	27, // 1: cladefs.extentd.v1.ListStoresResponse.stores:type_name -> cladefs.extentd.v1.ListedStore
 	24, // 2: cladefs.extentd.v1.ListedStore.stat:type_name -> cladefs.extentd.v1.StatStoreResponse
-	35, // 3: cladefs.extentd.v1.GetStatsResponse.object_storage:type_name -> cladefs.extentd.v1.ObjectStorageStats
-	59, // 4: cladefs.extentd.v1.GetSnapshotResponse.counters:type_name -> cladefs.extentd.v1.GetSnapshotResponse.CountersEntry
-	60, // 5: cladefs.extentd.v1.GetSnapshotResponse.gauges:type_name -> cladefs.extentd.v1.GetSnapshotResponse.GaugesEntry
-	32, // 6: cladefs.extentd.v1.GetSnapshotResponse.vms:type_name -> cladefs.extentd.v1.VmSnapshot
-	61, // 7: cladefs.extentd.v1.VmSnapshot.counters:type_name -> cladefs.extentd.v1.VmSnapshot.CountersEntry
-	62, // 8: cladefs.extentd.v1.VmSnapshot.gauges:type_name -> cladefs.extentd.v1.VmSnapshot.GaugesEntry
-	63, // 9: cladefs.extentd.v1.VmSnapshot.window:type_name -> cladefs.extentd.v1.VmSnapshot.WindowEntry
-	33, // 10: cladefs.extentd.v1.VmSnapshot.guest:type_name -> cladefs.extentd.v1.GuestSnapshot
-	64, // 11: cladefs.extentd.v1.GuestSnapshot.counters:type_name -> cladefs.extentd.v1.GuestSnapshot.CountersEntry
-	65, // 12: cladefs.extentd.v1.GuestSnapshot.histograms:type_name -> cladefs.extentd.v1.GuestSnapshot.HistogramsEntry
+	35, // 3: cladefs.extentd.v1.GetCountersResponse.object_storage:type_name -> cladefs.extentd.v1.ObjectStorageStats
+	59, // 4: cladefs.extentd.v1.GetStatsResponse.counters:type_name -> cladefs.extentd.v1.GetStatsResponse.CountersEntry
+	60, // 5: cladefs.extentd.v1.GetStatsResponse.gauges:type_name -> cladefs.extentd.v1.GetStatsResponse.GaugesEntry
+	32, // 6: cladefs.extentd.v1.GetStatsResponse.vms:type_name -> cladefs.extentd.v1.VmStats
+	61, // 7: cladefs.extentd.v1.VmStats.counters:type_name -> cladefs.extentd.v1.VmStats.CountersEntry
+	62, // 8: cladefs.extentd.v1.VmStats.gauges:type_name -> cladefs.extentd.v1.VmStats.GaugesEntry
+	63, // 9: cladefs.extentd.v1.VmStats.window:type_name -> cladefs.extentd.v1.VmStats.WindowEntry
+	33, // 10: cladefs.extentd.v1.VmStats.guest:type_name -> cladefs.extentd.v1.GuestStats
+	64, // 11: cladefs.extentd.v1.GuestStats.counters:type_name -> cladefs.extentd.v1.GuestStats.CountersEntry
+	65, // 12: cladefs.extentd.v1.GuestStats.histograms:type_name -> cladefs.extentd.v1.GuestStats.HistogramsEntry
 	66, // 13: cladefs.extentd.v1.ObjectStorageStats.requests:type_name -> cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
 	67, // 14: cladefs.extentd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
 	68, // 15: cladefs.extentd.v1.ObjectStorageStats.failures:type_name -> cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
 	58, // 16: cladefs.extentd.v1.ShredCellResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
 	58, // 17: cladefs.extentd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
-	34, // 18: cladefs.extentd.v1.GuestSnapshot.HistogramsEntry.value:type_name -> cladefs.extentd.v1.Histogram
+	34, // 18: cladefs.extentd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.extentd.v1.Histogram
 	1,  // 19: cladefs.extentd.v1.Extentd.CreateStore:input_type -> cladefs.extentd.v1.CreateStoreRequest
 	3,  // 20: cladefs.extentd.v1.Extentd.ImportImage:input_type -> cladefs.extentd.v1.ImportImageRequest
 	5,  // 21: cladefs.extentd.v1.Extentd.ForkStore:input_type -> cladefs.extentd.v1.ForkStoreRequest
@@ -4041,13 +4041,13 @@ var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
 	21, // 29: cladefs.extentd.v1.Extentd.SyncStore:input_type -> cladefs.extentd.v1.SyncStoreRequest
 	23, // 30: cladefs.extentd.v1.Extentd.StatStore:input_type -> cladefs.extentd.v1.StatStoreRequest
 	25, // 31: cladefs.extentd.v1.Extentd.ListStores:input_type -> cladefs.extentd.v1.ListStoresRequest
-	28, // 32: cladefs.extentd.v1.Extentd.GetStats:input_type -> cladefs.extentd.v1.GetStatsRequest
-	30, // 33: cladefs.extentd.v1.Extentd.GetSnapshot:input_type -> cladefs.extentd.v1.GetSnapshotRequest
+	28, // 32: cladefs.extentd.v1.Extentd.GetCounters:input_type -> cladefs.extentd.v1.GetCountersRequest
+	30, // 33: cladefs.extentd.v1.Extentd.GetStats:input_type -> cladefs.extentd.v1.GetStatsRequest
 	36, // 34: cladefs.extentd.v1.Extentd.Grant:input_type -> cladefs.extentd.v1.GrantRequest
 	38, // 35: cladefs.extentd.v1.Extentd.Revoke:input_type -> cladefs.extentd.v1.RevokeRequest
 	40, // 36: cladefs.extentd.v1.Extentd.SetMemoryLimit:input_type -> cladefs.extentd.v1.SetMemoryLimitRequest
 	42, // 37: cladefs.extentd.v1.Extentd.SetMemoryWeight:input_type -> cladefs.extentd.v1.SetMemoryWeightRequest
-	44, // 38: cladefs.extentd.v1.Extentd.SetTenantRoom:input_type -> cladefs.extentd.v1.SetTenantRoomRequest
+	44, // 38: cladefs.extentd.v1.Extentd.SetTenantInFlight:input_type -> cladefs.extentd.v1.SetTenantInFlightRequest
 	46, // 39: cladefs.extentd.v1.Extentd.ShrinkMemory:input_type -> cladefs.extentd.v1.ShrinkMemoryRequest
 	48, // 40: cladefs.extentd.v1.Extentd.SetDiskLimit:input_type -> cladefs.extentd.v1.SetDiskLimitRequest
 	52, // 41: cladefs.extentd.v1.Extentd.GetTenantDisk:input_type -> cladefs.extentd.v1.GetTenantDiskRequest
@@ -4067,13 +4067,13 @@ var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
 	22, // 55: cladefs.extentd.v1.Extentd.SyncStore:output_type -> cladefs.extentd.v1.SyncStoreResponse
 	24, // 56: cladefs.extentd.v1.Extentd.StatStore:output_type -> cladefs.extentd.v1.StatStoreResponse
 	26, // 57: cladefs.extentd.v1.Extentd.ListStores:output_type -> cladefs.extentd.v1.ListStoresResponse
-	29, // 58: cladefs.extentd.v1.Extentd.GetStats:output_type -> cladefs.extentd.v1.GetStatsResponse
-	31, // 59: cladefs.extentd.v1.Extentd.GetSnapshot:output_type -> cladefs.extentd.v1.GetSnapshotResponse
+	29, // 58: cladefs.extentd.v1.Extentd.GetCounters:output_type -> cladefs.extentd.v1.GetCountersResponse
+	31, // 59: cladefs.extentd.v1.Extentd.GetStats:output_type -> cladefs.extentd.v1.GetStatsResponse
 	37, // 60: cladefs.extentd.v1.Extentd.Grant:output_type -> cladefs.extentd.v1.GrantResponse
 	39, // 61: cladefs.extentd.v1.Extentd.Revoke:output_type -> cladefs.extentd.v1.RevokeResponse
 	41, // 62: cladefs.extentd.v1.Extentd.SetMemoryLimit:output_type -> cladefs.extentd.v1.SetMemoryLimitResponse
 	43, // 63: cladefs.extentd.v1.Extentd.SetMemoryWeight:output_type -> cladefs.extentd.v1.SetMemoryWeightResponse
-	45, // 64: cladefs.extentd.v1.Extentd.SetTenantRoom:output_type -> cladefs.extentd.v1.SetTenantRoomResponse
+	45, // 64: cladefs.extentd.v1.Extentd.SetTenantInFlight:output_type -> cladefs.extentd.v1.SetTenantInFlightResponse
 	47, // 65: cladefs.extentd.v1.Extentd.ShrinkMemory:output_type -> cladefs.extentd.v1.ShrinkMemoryResponse
 	49, // 66: cladefs.extentd.v1.Extentd.SetDiskLimit:output_type -> cladefs.extentd.v1.SetDiskLimitResponse
 	53, // 67: cladefs.extentd.v1.Extentd.GetTenantDisk:output_type -> cladefs.extentd.v1.GetTenantDiskResponse
@@ -4098,7 +4098,9 @@ func file_cladefs_extentd_v1_extentd_proto_init() {
 	file_cladefs_extentd_v1_extentd_proto_msgTypes[35].OneofWrappers = []any{}
 	file_cladefs_extentd_v1_extentd_proto_msgTypes[39].OneofWrappers = []any{}
 	file_cladefs_extentd_v1_extentd_proto_msgTypes[43].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[45].OneofWrappers = []any{}
 	file_cladefs_extentd_v1_extentd_proto_msgTypes[47].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[51].OneofWrappers = []any{}
 	file_cladefs_extentd_v1_extentd_proto_msgTypes[52].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

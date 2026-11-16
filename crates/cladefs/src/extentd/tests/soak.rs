@@ -4,7 +4,7 @@
 
 //! TASK-330.3: the daemon against a degraded bucket, for a long while, with VM processes writing
 //! all the while: the bucket slow, then full, then out of service, then answering again as slowly
-//! as before ([`extent_remote::faults`], its file `CLADEFS_REMOTE_FAULTS`), as LangSmith's RustFS
+//! as before ([`extent_bucket::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
 //! beside their hosts' daemons on a shared disk was (TASK-310, TASK-314, TASK-317). The simulation of the
 //! bucket's protocol checks that nothing a failing bucket does is wrong; this checks what it costs
 //! the daemon over time, and what it says of it:
@@ -24,8 +24,8 @@
 //!   up, as slowly as the bucket lets it;
 //! - **a failing bucket is sent no more than probes** (TASK-382): through a failing phase, the
 //!   writes that failed, each its object sent whole, are a wave of the host's uploads at once and
-//!   then a probe of each kind every [`extent_remote::store`]'s backoff at most, not every upload
-//!   tried again and again, most of the daemon's CPU in the qualification's soak;
+//!   then a probe of each kind every [`extent_bucket::object_bucket`]'s backoff at most, not every
+//!   upload tried again and again, most of the daemon's CPU in the qualification's soak;
 //! - **its background threads live** (TASK-493): a panic holding what is shared beyond one store,
 //!   the page cache's flusher's work among it, aborts it, as the daemon's does; and the page
 //!   cache's flusher is alive throughout, where its death once went unseen, the soak passing.
@@ -41,8 +41,8 @@ use super::super::{process, stores};
 use super::{connect, read};
 use crate::test_data::noise;
 use crate::{ExtentId, VolatileSlice};
-use extent_remote::faults::{Failing, Fault};
-use extent_remote::store::Request;
+use extent_bucket::faults::{Failing, Fault};
+use extent_bucket::object_bucket::Request;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -51,7 +51,7 @@ use std::time::{Duration, Instant, SystemTime};
 const VMS: usize = 4;
 
 /// The host's upload memory: as much as its stores upload at once, the host's 64 PUTs
-/// (`crate::remote::UPLOADS`' requests) of segments some 24 MiB each, as these close a second
+/// (`crate::bucket::UPLOADS`' requests) of segments some 24 MiB each, as these close a second
 /// after their first commit (`extent_store::upload::Options::interval`), at the rate they are
 /// written: so that its uploads, holding each object twice, TASK-317's bug, hold more than every
 /// other part of the daemon's budget may (`process::AnonBudget`), 1.5 GiB more against some 1.4
@@ -88,7 +88,7 @@ const PHASES: [(&str, f64, Fault); 5] = [
     ("answering again", 0.3, Fault { latency: Duration::from_millis(300), failing: Failing::Not }),
 ];
 
-/// The PUTs a host's uploads make at once (`crate::remote::UPLOADS`' requests), every one of which
+/// The PUTs a host's uploads make at once (`crate::bucket::UPLOADS`' requests), every one of which
 /// may fail as a bucket fails before a probe's turn holds them back.
 const UPLOADS_AT_ONCE: u64 = 64;
 
@@ -193,7 +193,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     // limit of open files raised.
     super::super::memory::return_large_allocations();
     super::super::raise_open_files_limit().unwrap();
-    // A panic holding what no store's fence contains, the page cache's flusher's work among it,
+    // A panic holding what no store's halt contains, the page cache's flusher's work among it,
     // aborting the process (TASK-149.24, TASK-493).
     extent_store::shared::abort_on_panics();
     let flusher_lives = || {
@@ -203,12 +203,12 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
+        std::env::set_var("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()));
         std::env::set_var("CLADEFSD_TOKEN", "1");
-        std::env::set_var("CLADEFS_REMOTE_FAULTS", &faults);
+        std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults);
         std::env::set_var("CLADEFSD_STATS", &stats);
     }
-    crate::remote::set_upload_memory(UPLOAD_MEMORY).unwrap();
+    crate::bucket::set_upload_memory(UPLOAD_MEMORY).unwrap();
 
     // Each VM process at the rate that writes WRITTEN_WHILE_FAILING while the bucket fails.
     let failing: f64 = (PHASES.iter())
@@ -298,7 +298,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
             pending >> 20,
             sample.max_anon >> 20,
             sample.anon_budget >> 20,
-            crate::remote::upload_memory(),
+            crate::bucket::upload_memory(),
         );
         if name == "out of service" {
             // Its commits waited at the lag bound, every store's.
