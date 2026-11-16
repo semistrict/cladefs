@@ -5,7 +5,7 @@
 //! The host's extent daemon killed under load (TASK-50.2, doc-4 "When the host's daemon goes"):
 //! two VMs, on stores a daemon of the test's own serves, write files and fault their pages in
 //! through the DAX window; each tells the host once it is at it, and the host kills the daemon.
-//! Each VM's Firecracker exits, within `BOUND`, with status 158 (`ExtentdLost`), which its host
+//! Each VM's Firecracker exits, within `BOUND`, with status 158 (`CladefsdLost`), which its host
 //! process sees: no vCPU waits for ever on a DAX fault the daemon would have served. And a third
 //! VM's daemon goes as the VM is created, opening its store: a daemon of the test's own, which
 //! takes the VM process's connection and its `OPEN`, and closes it, answering nothing, as one
@@ -33,8 +33,8 @@ mod host {
     use std::time::{Duration, Instant};
 
     const CAPACITY: u64 = 256 << 20;
-    /// What cladefs's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
-    const EXTENTD_LOST: i32 = 158;
+    /// What cladefs's Firecracker exits with when its daemon's connection ends (`CladefsdLost`).
+    const CLADEFSD_LOST: i32 = 158;
     /// How long a VM takes at most to exit once its daemon is gone.
     const BOUND: Duration = Duration::from_secs(10);
     const VMS: [&str; 2] = ["first", "second"];
@@ -45,13 +45,13 @@ mod host {
         std::env::temp_dir().join(format!("cladefs-lost-{}-{name}", std::process::id()))
     }
 
-    /// A VM, `name`, on its store, which `extentd` serves, with a DAX window, and its vsock at
+    /// A VM, `name`, on its store, which `cladefsd` serves, with a DAX window, and its vsock at
     /// `uds`.
     fn boot(
         test_setup: &TestSetup,
         root: &Path,
         name: &str,
-        extentd: &Path,
+        cladefsd: &Path,
         uds: &Path,
     ) -> anyhow::Result<Firecracker> {
         let mut vm = Vm::new(2, 512)?;
@@ -64,14 +64,14 @@ mod host {
             &store,
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
-            extentd,
+            cladefsd,
         );
         vm.vsock(uds);
         vm.spawn_api(root, &test_setup.test_case, name, &Vm::api_socket(name))
     }
 
     /// Waits for the VM `name`, of `firecracker`, to exit, as it does within `BOUND` of its
-    /// daemon's going, at `gone`: ExtentdLost.
+    /// daemon's going, at `gone`: CladefsdLost.
     fn exits_lost(name: &str, mut firecracker: Firecracker, gone: Instant) -> anyhow::Result<()> {
         while firecracker.running()? {
             if gone.elapsed() > BOUND {
@@ -85,8 +85,8 @@ mod host {
         }
         let (status, console) = firecracker.wait()?;
         anyhow::ensure!(
-            status.code() == Some(EXTENTD_LOST),
-            "{name}'s VM exited {status} (signal {:?}), not {EXTENTD_LOST}: see {}",
+            status.code() == Some(CLADEFSD_LOST),
+            "{name}'s VM exited {status} (signal {:?}), not {CLADEFSD_LOST}: see {}",
             status.signal(),
             console.display()
         );
@@ -97,13 +97,13 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
             self.lost_opening(test_setup, &root)?;
-            let extentd = socket("extentd.sock");
-            let mut daemon = spawn_daemon(test_setup, &extentd, "extentd", &[], None)?;
+            let cladefsd = socket("cladefsd.sock");
+            let mut daemon = spawn_daemon(test_setup, &cladefsd, "cladefsd", &[], None)?;
             let mut vms = Vec::new();
             for name in VMS {
                 let uds = socket(&format!("{name}.vsock"));
                 let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
-                vms.push((name, boot(test_setup, &root, name, &extentd, &uds)?, listener));
+                vms.push((name, boot(test_setup, &root, name, &cladefsd, &uds)?, listener));
             }
             for (name, firecracker, listener) in &mut vms {
                 let stream = firecracker.accept(listener)?;
@@ -123,11 +123,11 @@ mod host {
         /// A VM whose daemon, the test's own, goes as the VM opens its store, as it is created:
         /// it takes the VM process's connection, waits for its `OPEN`, and closes it.
         fn lost_opening(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
-            let extentd = socket("opening.sock");
-            let listener = UnixListener::bind(&extentd)?;
-            give_to_the_jail(&extentd)?;
+            let cladefsd = socket("opening.sock");
+            let listener = UnixListener::bind(&cladefsd)?;
+            give_to_the_jail(&cladefsd)?;
             let mut firecracker =
-                boot(test_setup, root, "opening", &extentd, &socket("opening.vsock"))?;
+                boot(test_setup, root, "opening", &cladefsd, &socket("opening.vsock"))?;
             let mut connection = firecracker.accept(&listener)?;
             let mut open = [0; 1];
             anyhow::ensure!(connection.read(&mut open)? == 1, "the VM process sent no OPEN");

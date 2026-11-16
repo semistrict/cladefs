@@ -23,7 +23,7 @@ pub mod host {
     use crate::vm::{Firecracker, Vm};
     use anyhow::Context;
     use futures::executor::block_on;
-    use cladefs::extentd::control::Client;
+    use cladefs::cladefsd::control::Client;
     use cladefs::{Image, Storage};
     use fxfs_automount::upcall::{Answer, Newest};
     use std::cell::Cell;
@@ -111,7 +111,7 @@ pub mod host {
     /// each repo URL it has, refusing the rest, counting what each name and URL was asked.
     pub struct Manager {
         /// The daemon's control socket's, as [`crate::common::control`] finds it.
-        extentd: PathBuf,
+        cladefsd: PathBuf,
         names: BTreeMap<String, Generation>,
         newest: BTreeMap<String, String>,
         asked: Arc<Mutex<BTreeMap<String, usize>>>,
@@ -153,13 +153,13 @@ pub mod host {
 
     impl Manager {
         /// A manager attaching, by name, the generations `names` has, and naming the newest of
-        /// each URL `newest` has, through the daemon at `extentd`.
+        /// each URL `newest` has, through the daemon at `cladefsd`.
         pub fn new(
-            extentd: PathBuf,
+            cladefsd: PathBuf,
             names: BTreeMap<String, Generation>,
             newest: BTreeMap<String, String>,
         ) -> Self {
-            Self { extentd, names, newest, asked: Default::default() }
+            Self { cladefsd, names, newest, asked: Default::default() }
         }
 
         /// Answers, on a thread of its own, the asks of the VM of `role`, on the store at `store`,
@@ -172,7 +172,7 @@ pub mod host {
         /// Answers, as [`Manager::serve`], the asks that come to `listener`.
         pub fn serve_at(&self, listener: UnixListener, store: &Path) -> anyhow::Result<()> {
             let mut answering = Answering {
-                control: crate::common::control(&self.extentd)?,
+                control: crate::common::control(&self.cladefsd)?,
                 store: store.to_owned(),
                 names: self.names.clone(),
                 newest: self.newest.clone(),
@@ -206,7 +206,7 @@ pub mod host {
         pub capacity: u64,
         pub window: u64,
         /// The socket of the extent daemon that serves their stores.
-        pub extentd: PathBuf,
+        pub cladefsd: PathBuf,
         /// What says the host's memory as their guests ask ([`crate::measure`]), if they do.
         pub memory: Option<HostMemory>,
         /// How many have booted.
@@ -222,18 +222,18 @@ pub mod host {
     }
 
     impl<'a> Vms<'a> {
-        /// VMs of 2 vCPUs and 1 GiB each, on stores of `capacity` that the daemon at `extentd`
+        /// VMs of 2 vCPUs and 1 GiB each, on stores of `capacity` that the daemon at `cladefsd`
         /// serves, with DAX windows of `window`, not measured.
         pub fn new(
             test_setup: &'a TestSetup,
             root: PathBuf,
-            extentd: PathBuf,
+            cladefsd: PathBuf,
             capacity: u64,
             window: u64,
         ) -> Self {
             let booted = Cell::new(0);
             let (cpus, memory_mib, memory) = (2, 1024, None);
-            Self { test_setup, root, cpus, memory_mib, capacity, window, extentd, memory, booted }
+            Self { test_setup, root, cpus, memory_mib, capacity, window, cladefsd, memory, booted }
         }
 
         /// A VM of the guest's `role`, on the store at `store`, and the host's end of the
@@ -245,7 +245,7 @@ pub mod host {
             talks: bool,
         ) -> anyhow::Result<(Running, Option<UnixStream>)> {
             self.boot(role, talks, |vm| {
-                vm.extent_store_served("extents", store, self.capacity, self.window, &self.extentd);
+                vm.extent_store_served("extents", store, self.capacity, self.window, &self.cladefsd);
                 Ok(())
             })
         }
@@ -326,7 +326,7 @@ pub mod host {
                 "mem_backend": { "backend_type": "File", "backend_path": memory },
                 "resume_vm": true,
                 "vsock_override": { "uds_path": requests.uds() },
-                "extent_overrides": [],
+                "cladefs_overrides": [],
             });
             firecracker.request("PUT", "/snapshot/load", &load)?;
             let stream = firecracker.accept(&listener)?;

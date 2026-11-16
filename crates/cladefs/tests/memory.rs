@@ -11,7 +11,7 @@
 
 mod common;
 
-use cladefs::extentd::metrics::render;
+use cladefs::cladefsd::metrics::render;
 use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::{memory, pattern, read_window};

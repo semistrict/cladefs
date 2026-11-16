@@ -13,13 +13,13 @@
 // same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
-// (cladefs/extentd/v1/extentd.proto), the daemon's user's alone, mode 0600 whatever its umask, as
+// (cladefs/cladefsd/v1/cladefsd.proto), the daemon's user's alone, mode 0600 whatever its umask, as
 // every caller may do everything. A daemon mounting no cells has no Mount service: its calls fail
 // UNIMPLEMENTED. As the daemon drains, its calls fail UNAVAILABLE.
 //
 // Errors are gRPC statuses whose code follows the errno the mount failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
-// control API has them (cladefs/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
+// control API has them (cladefs/cladefsd/v1/cladefsd.proto): ENOENT is NOT_FOUND, EEXIST
 // ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.

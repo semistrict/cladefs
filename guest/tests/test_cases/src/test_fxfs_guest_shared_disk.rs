@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: what extentd asks of a disk it shares with many VMs, and with the bucket (TASK-310): a
+//! cladefs: what cladefsd asks of a disk it shares with many VMs, and with the bucket (TASK-310): a
 //! sandbox host's CI, whose daemon wrote some 2.3 times what its guests wrote, its framings stalled
 //! for seconds behind its own write-back. The case's daemon, its own, keeps its stores, its file
 //! bucket and its part cache in the case's directory, one disk, as such a host's daemon keeps its
@@ -16,7 +16,7 @@
 //! The host says, as `shared-disk:` lines on its standard error, the case's log: what the guests
 //! wrote; what the daemon wrote, as its kernel counts it (/proc/PID/io's `write_bytes`, and of
 //! those `cancelled_write_bytes`, gone before written back), and by kind, as its stats say
-//! (`written_*_bytes`); its framings past extentd's turn, which its log warns of, how many, the
+//! (`written_*_bytes`); its framings past cladefsd's turn, which its log warns of, how many, the
 //! longest and their sum, and so of its makings of the segments framed durable, together, apart
 //! from their framings (TASK-310); the time the host's tasks stalled on I/O (/proc/pressure/io's
 //! `some` and `full`); and the case's disk's writes and busy time (its block device's stat). A
@@ -104,7 +104,7 @@ mod host {
         Some((*fields.get(6)?, *fields.get(9)?))
     }
 
-    /// What of the daemon's past extentd's turn its log `log` warns of, each line saying `what`
+    /// What of the daemon's past cladefsd's turn its log `log` warns of, each line saying `what`
     /// then how long it took: how many, the longest's milliseconds, and the milliseconds of all.
     /// Its framings (`extent store: framing `); cladefs: and its makings of segments framed durable
     /// (`segments framed durable`, TASK-310).
@@ -177,13 +177,13 @@ mod host {
             let dir = &test_setup.tmp_dir;
             // Short, as a Unix socket's path is.
             let sockets = tempdir::TempDir::new("cladefs-shared-disk")?;
-            let socket = sockets.path().join("extentd.sock");
+            let socket = sockets.path().join("cladefsd.sock");
             // Its bucket and part cache in the case's directory, on the stores' disk
             // (crate::common::spawn_daemon's defaults), unless this process names others.
             // As much as the windows' private pages take, with a window; the default without.
             let memory = Some(if self.dax { DAX_DAEMON_MEMORY } else { DAEMON_MEMORY });
             let mut daemon =
-                crate::common::spawn_daemon(test_setup, &socket, "extentd", &[], memory)?;
+                crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &[], memory)?;
             // A window the store's size, as its data is: eight at once of the host's memory each
             // were refused (ENOMEM).
             let window = if self.dax { CAPACITY } else { 0 };
@@ -214,8 +214,8 @@ mod host {
             let (some, full) = io_pressure()?;
             // Its stats file, written within a poll of the last change.
             std::thread::sleep(Duration::from_secs(2));
-            let stats = crate::common::daemon_stats(&dir.join("extentd-stats.txt"))?;
-            let log = std::fs::read_to_string(dir.join("extentd.log"))?;
+            let stats = crate::common::daemon_stats(&dir.join("cladefsd-stats.txt"))?;
+            let log = std::fs::read_to_string(dir.join("cladefsd.log"))?;
             let (slow, longest, slow_sum) = self::slow(&log, "extent store: framing ");
             let durable = self::slow(&log, "segments framed durable");
             let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
@@ -226,7 +226,7 @@ mod host {
             let cancelled = delta("cancelled_write_bytes");
             eprintln!(
                 "shared-disk: vms={vms} at_once={at_once} dax={} secs={:.1} guest_gib={:.2} \
-                 extentd_write_gib={:.2} extentd_cancelled_gib={:.2} ratio={:.2} \
+                 cladefsd_write_gib={:.2} cladefsd_cancelled_gib={:.2} ratio={:.2} \
                  net_ratio={:.2}",
                 self.dax,
                 took.as_secs_f64(),
@@ -289,8 +289,8 @@ mod host {
                 ),
                 _ => eprintln!("shared-disk: {} is on no block device with a stat", dir.display()),
             }
-            crate::common::say_daemon_stats(test_setup, "extentd");
-            crate::common::check_durable_median(test_setup, "extentd")?;
+            crate::common::say_daemon_stats(test_setup, "cladefsd");
+            crate::common::check_durable_median(test_setup, "cladefsd")?;
             daemon.kill()?;
             daemon.wait()?;
             Ok(())

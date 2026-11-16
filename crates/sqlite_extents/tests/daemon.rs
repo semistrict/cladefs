@@ -33,9 +33,9 @@ fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();
-    let socket = sockets.path().join("extentd.sock");
+    let socket = sockets.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     (sockets, socket)
 }
 
@@ -215,8 +215,8 @@ fn a_database_is_fenced_with_its_cell() {
     let listener = UnixListener::bind(&control_socket).unwrap();
     let tenants = sockets.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
-    std::thread::spawn(move || cladefs::extentd::control::serve_control(listener, tenants));
-    let control = cladefs::extentd::control::Client::connect(&control_socket).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
+    let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
 
     let store = dir.path().join("store");
     let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();

@@ -57,7 +57,7 @@
 //! and writes what it would delete to its cell's `gc/marks/<epoch>` instead, retiring no
 //! reference, and `gc/marking`, which readers watch the cells' marks only while it is there: an
 //! operator removes it with the marks. Every reader of the cell
-//! (extentd, cladefsctl, writers recovering, this collector) warns of reaching, a bug in the
+//! (cladefsd, cladefsctl, writers recovering, this collector) warns of reaching, a bug in the
 //! collector; and warns, loudly, of what the pass before marked that it finds kept, the same
 //! objects still, another. Nothing marked goes: the bucket grows by what passes would have
 //! reclaimed, the objects compacted and their moves both, until an operator collects it for real or

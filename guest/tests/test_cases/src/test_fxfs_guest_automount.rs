@@ -42,12 +42,12 @@ mod host {
     impl TestFxfsGuestAutomount {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
-            let extentd: PathBuf =
+            let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
-            let control = control(&extentd)?;
+            let control = control(&cladefsd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
-            let vms = Vms::new(test_setup, root, extentd.clone(), CAPACITY, window);
+            let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, window);
             let (publisher, consumer) = (dir.join("publisher"), dir.join("consumer"));
             format(&publisher, CAPACITY)?;
 
@@ -58,7 +58,7 @@ mod host {
             vm.wait()?;
 
             let names = ["repo", "other"].map(|name| (name.to_owned(), generation.clone()));
-            let manager = Manager::new(extentd, BTreeMap::from(names), BTreeMap::new());
+            let manager = Manager::new(cladefsd, BTreeMap::from(names), BTreeMap::new());
             for role in ["consumer", "rebooted"] {
                 manager.serve(role, &consumer)?;
                 vms.run(role, &consumer, false)?.0.wait()?;

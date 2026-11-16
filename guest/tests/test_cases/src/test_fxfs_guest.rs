@@ -431,7 +431,7 @@ mod host {
             let daemon = if self.daemon_killed {
                 let socket =
                     std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
-                let daemon = spawn_daemon(&test_setup, &socket, "extentd", &[], None)?;
+                let daemon = spawn_daemon(&test_setup, &socket, "cladefsd", &[], None)?;
                 vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
             } else {
@@ -504,10 +504,10 @@ mod host {
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
                     let socket = std::env::var_os("CLADEFSD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::extentd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::cladefsd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
-                    crate::common::say_daemon_stats(&test_setup, "extentd");
+                    crate::common::say_daemon_stats(&test_setup, "cladefsd");
                 }
                 // The store as the crash left it, for a failure to be looked into: checking it
                 // recovers it, and mounting it replays its journal.

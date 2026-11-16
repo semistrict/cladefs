@@ -54,7 +54,7 @@ pub struct ConfigState {
     pub dax_window_size: Option<u64>,
     /// cladefs: the window's private pages at most, as configured (doc-13).
     pub dax_private_max: Option<u64>,
-    pub extentd_socket: String,
+    pub cladefsd_socket: String,
     /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
     pub cache_type: CacheType,
 }
@@ -68,7 +68,7 @@ impl From<&Config> for ConfigState {
             capacity: config.capacity,
             dax_window_size: config.dax_window_size,
             dax_private_max: config.dax_private_max,
-            extentd_socket: config.extentd_socket.clone(),
+            cladefsd_socket: config.cladefsd_socket.clone(),
             cache_type: config.cache_type,
         }
     }
@@ -85,7 +85,7 @@ impl From<&ConfigState> for Config {
             capacity: config.capacity,
             dax_window_size: config.dax_window_size,
             dax_private_max: config.dax_private_max,
-            extentd_socket: config.extentd_socket.clone(),
+            cladefsd_socket: config.cladefsd_socket.clone(),
             read_only: false,
             cache_type: config.cache_type,
         }
@@ -223,7 +223,7 @@ mod tests {
             capacity: 1 << 30,
             dax_window_size: Some(64 << 20),
             dax_private_max: Some(16),
-            extentd_socket: "/extentd.sock".into(),
+            cladefsd_socket: "/cladefsd.sock".into(),
             read_only: false,
             cache_type: CacheType::Unsafe,
         };

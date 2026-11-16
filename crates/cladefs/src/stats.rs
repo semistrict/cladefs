@@ -4,7 +4,7 @@
 
 //! What serving extent stores cost this process, counted since it started, and what its VM
 //! processes' changes to their windows cost them, as they told it: the extent daemon's, which it
-//! reports to whoever asks ([`crate::extentd::stats`]), for benchmarks to compare.
+//! reports to whoever asks ([`crate::cladefsd::stats`]), for benchmarks to compare.
 //! Counters only grow; a measurement is the difference of two readings ([`Stats::since`]).
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,8 +40,8 @@ pub struct Stats {
     /// The parts of extents stored compressed decompressed (`extent_store::unpacks`).
     pub unpacks: u64,
     /// The changes to their DAX windows the extent daemon sent its VM processes, which they made
-    /// (`extentd::client`'s stage operations: maps, unmaps, private pages), as they told it
-    /// (`extentd::wire::STAGE_COUNTS`, TASK-91.16). An unmap and the maps a VM process makes with
+    /// (`cladefsd::client`'s stage operations: maps, unmaps, private pages), as they told it
+    /// (`cladefsd::wire::STAGE_COUNTS`, TASK-91.16). An unmap and the maps a VM process makes with
     /// it at once (`dax::SecondStage::remap`), and adjacent unmaps joined, count as one.
     pub stage_ops: u64,
     /// The nanoseconds they took the VM processes.
@@ -60,14 +60,14 @@ pub struct Stats {
     /// The nanoseconds closing them took.
     pub segment_close_ns: u64,
     /// cladefs: the maps of pages the extent daemon sent its VM processes' windows
-    /// (`extentd::wire::STAGE_MAP`): one for each run of consecutive pages of the kernel's physical
+    /// (`cladefsd::wire::STAGE_MAP`): one for each run of consecutive pages of the kernel's physical
     /// memory that a window maps, so that more of them for as many bytes, `stage_map_bytes`, say
     /// that memory is more fragmented (TASK-108.1).
     pub stage_maps: u64,
     /// The bytes they mapped.
     pub stage_map_bytes: u64,
     /// cladefs: the VM processes' changes to their windows that took access away from pages they had
-    /// installed, as they told the daemon (`extentd::wire::STAGE_COUNTS`): each flushes the host's
+    /// installed, as they told the daemon (`cladefsd::wire::STAGE_COUNTS`): each flushes the host's
     /// TLBs and the hypervisor's, interrupting the guest's vCPUs (TASK-91.16). Memory installed
     /// over theirs, as a map over a range mapped makes it.
     pub stage_overwrites: u64,
@@ -78,7 +78,7 @@ pub struct Stats {
     /// The nanoseconds they took, under the cache's lock.
     pub cache_trim_ns: u64,
     /// cladefs: of `faults`, those VM processes asked for as the guest's stores to pages they had
-    /// installed read-only (`extentd::wire::FAULT` without `FAULT_PAGE`); the rest were on pages
+    /// installed read-only (`cladefsd::wire::FAULT` without `FAULT_PAGE`); the rest were on pages
     /// they hadn't installed (TASK-111.1).
     pub fault_stores: u64,
     /// Of `faults`, the stores refused: to a window that doesn't copy on write, or past its private
@@ -93,14 +93,14 @@ pub struct Stats {
     pub stage_segments: u64,
     /// cladefs: of the VM processes' stage operations (`stage_ops`), the runs of private pages they
     /// made, each at once (`dax::SecondStage::make_private`), as they told the daemon
-    /// (`extentd::wire::STAGE_COUNTS`, TASK-164.10).
+    /// (`cladefsd::wire::STAGE_COUNTS`, TASK-164.10).
     pub stage_private_runs: u64,
     /// The private pages those runs made.
     pub stage_private_pages: u64,
     /// The nanoseconds they took the VM processes.
     pub stage_private_ns: u64,
     /// cladefs: the `PRIVATE` requests the VM processes made, as they told the daemon
-    /// (`extentd::wire::STAGE_PRIVATE_COUNTS`), and the nanoseconds they waited for the replies:
+    /// (`cladefsd::wire::STAGE_PRIVATE_COUNTS`), and the nanoseconds they waited for the replies:
     /// what the daemon's part of them and their stage operations leave of the guest's wait is the
     /// VM process's own, and the socket's (TASK-164.10).
     pub vm_private_requests: u64,

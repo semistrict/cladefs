@@ -81,7 +81,7 @@ mod host {
     const MEMORY_MIB: u32 = 1024;
     const VCPUS: u8 = 2;
     /// The memory each daemon's kernel takes at most.
-    const EXTENTD_MEMORY: u64 = 4 << 30;
+    const CLADEFSD_MEMORY: u64 = 4 << 30;
     /// How long past its load a VM may run before it is hung.
     const GRACE: Duration = Duration::from_secs(120);
     /// How long a daemon may take to stop on SIGTERM, and its VMs to exit once it is killed.
@@ -146,8 +146,8 @@ mod host {
         bucket: u64,
         /// The peak resident memory of the repeat's loaded daemons, the most of them, and of the
         /// checking one.
-        extentd_peak: u64,
-        check_extentd_peak: u64,
+        cladefsd_peak: u64,
+        check_cladefsd_peak: u64,
         /// The state's filesystem's free bytes.
         free: u64,
         /// How long the repeat took.
@@ -196,7 +196,7 @@ mod host {
                 state,
                 bucket,
                 bucket_dir,
-                socket: sockets.join("extentd.sock"),
+                socket: sockets.join("cladefsd.sock"),
                 gc: gc.into(),
             })
         }
@@ -274,8 +274,8 @@ mod host {
         Killed,
     }
 
-    /// The exit code of a VM process whose daemon went (Firecracker's `ExtentdLost`).
-    const EXTENTD_LOST: i32 = 158;
+    /// The exit code of a VM process whose daemon went (Firecracker's `CladefsdLost`).
+    const CLADEFSD_LOST: i32 = 158;
 
     /// What a repeat's load came to.
     #[derive(Default)]
@@ -415,9 +415,9 @@ mod host {
                 ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];
-            let name = format!("extentd-{}", self.daemons);
+            let name = format!("cladefsd-{}", self.daemons);
             let child =
-                spawn_daemon(self.setup, &self.paths.socket, &name, &env, Some(EXTENTD_MEMORY))?;
+                spawn_daemon(self.setup, &self.paths.socket, &name, &env, Some(CLADEFSD_MEMORY))?;
             self.say(format_args!("{name} (pid {}) serves, token {token}", child.id()));
             Ok(Daemon { child })
         }
@@ -697,7 +697,7 @@ mod host {
             }
         }
 
-        /// Waits for the VMs running as their daemon died to exit, as they do, ExtentdLost.
+        /// Waits for the VMs running as their daemon died to exit, as they do, CladefsdLost.
         fn daemon_lost(&self, boots: &mut [Boot]) -> anyhow::Result<()> {
             let deadline = Instant::now() + LOST;
             for boot in boots.iter_mut() {
@@ -826,8 +826,8 @@ mod host {
                 stores: du(&self.paths.stores)?,
                 cache: du(&self.paths.cache)?,
                 bucket: self.bucket_bytes()?,
-                extentd_peak: happened.peak,
-                check_extentd_peak: checker.peak()?,
+                cladefsd_peak: happened.peak,
+                check_cladefsd_peak: checker.peak()?,
                 free: free(&self.paths.state)?,
                 secs: self.started.elapsed().as_secs(),
             };
@@ -839,9 +839,9 @@ mod host {
             let grown = [
                 STORES.grown("the stores' bytes", &series(|m| m.stores)),
                 BUCKET.grown("the bucket's bytes", &series(|m| m.bucket)),
-                MEMORY.grown("the loaded daemons' peak memory", &series(|m| m.extentd_peak)),
+                MEMORY.grown("the loaded daemons' peak memory", &series(|m| m.cladefsd_peak)),
                 MEMORY
-                    .grown("the checking daemon's peak memory", &series(|m| m.check_extentd_peak)),
+                    .grown("the checking daemon's peak memory", &series(|m| m.check_cladefsd_peak)),
             ];
             for grown in grown.into_iter().flatten() {
                 failures.add(grown);
@@ -871,7 +871,7 @@ mod host {
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
-                let log = self.setup.tmp_dir.join(format!("extentd-{daemon}.log"));
+                let log = self.setup.tmp_dir.join(format!("cladefsd-{daemon}.log"));
                 stopped.extend(upload_failures(&std::fs::read_to_string(&log)?));
             }
             Ok(stopped)
@@ -996,7 +996,7 @@ mod host {
                 problems.push(format!("its guest died: {said:?}"));
             }
             Some(Ended::Exited(Some(0)) | Ended::Killed) => {}
-            Some(Ended::Exited(Some(EXTENTD_LOST))) if lossy => {}
+            Some(Ended::Exited(Some(CLADEFSD_LOST))) if lossy => {}
             other => problems.push(format!("it ended {other:?}")),
         }
         problems
@@ -1185,7 +1185,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
             let erred = "base ok\nerror syncfs: Input/output error (os error 5)\ndone\n";
             assert_eq!(load_problems(died, erred, false, true), Vec::<String>::new());
             assert_eq!(load_problems(died, erred, false, false).len(), 1);
-            let lost = Some(Ended::Exited(Some(EXTENTD_LOST)));
+            let lost = Some(Ended::Exited(Some(CLADEFSD_LOST)));
             assert_eq!(load_problems(lost, "base ok\n", true, false), Vec::<String>::new());
             assert_eq!(load_problems(lost, "base ok\n", false, false).len(), 1);
             assert_eq!(load_problems(Some(Ended::Killed), "", false, false), Vec::<String>::new());

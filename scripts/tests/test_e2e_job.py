@@ -24,10 +24,10 @@ from script import SCRIPTS
 CASES = """#!/bin/bash
 cd "$CLADEFS_E2E_RESULTS"
 printf '%s\\n' "$CLADEFS_E2E_RESULTS" "${CLADEFSD_BUCKET-no bucket named}" "$@" > given.txt
-mkdir -p case/extents case/rootfs/bin .extentd-cache.x1 case/store-1 case/vm.bucket
+mkdir -p case/extents case/rootfs/bin .cladefsd-cache.x1 case/store-1 case/vm.bucket
 echo log > case/log.txt
 for left in case/extents/segment case/rootfs/bin/sh case/rootfs.ext4 case/disk.img \\
-    .extentd-cache.x1/part case/store-1/head case/vm.bucket/object; do
+    .cladefsd-cache.x1/part case/store-1/head case/vm.bucket/object; do
     echo left > "$left"
 done
 exit "$FAKE_STATUS"

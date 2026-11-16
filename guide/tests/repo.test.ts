@@ -60,7 +60,7 @@ describe("the symbol index", () => {
   });
 
   test("test code is left out", () => {
-    expect(isTestPath("crates/cladefs/src/extentd/tests/open.rs")).toBe(true);
+    expect(isTestPath("crates/cladefs/src/cladefsd/tests/open.rs")).toBe(true);
     expect(isTestPath("crates/cladefs/src/cache_tests.rs")).toBe(true);
     expect(isTestPath("crates/cladefs/src/cache.rs")).toBe(false);
   });

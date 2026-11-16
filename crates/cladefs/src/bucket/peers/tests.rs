@@ -4,7 +4,7 @@
 
 //! Hosts sharing a bucket in this process, each reaching the others by a link that calls their
 //! serving fetchers directly: what asking peers saves, and what it does when they fail. The daemon's
-//! gRPC links are `extentd::peers`'.
+//! gRPC links are `cladefsd::peers`'.
 
 use super::*;
 use extent_bucket::bucket::{Bucket as _, PutMode};

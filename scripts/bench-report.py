@@ -17,7 +17,7 @@ reads them.
 
 When the extent daemon kept stores in a bucket (CLADEFSD_BUCKET), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
-from the stats it kept in logs/extentd-stats.txt (extent_bucket::object_bucket::Stats::line). Another
+from the stats it kept in logs/cladefsd-stats.txt (extent_bucket::object_bucket::Stats::line). Another
 says what the VM processes' requests took the daemon, by kind, and its commits, by phase.
 
 Usage: scripts/bench-report.py RESULTS_DIR
@@ -64,7 +64,7 @@ def daemon_stats(directory, kind):
     for each kind: object-store (what it did with object storage, if it kept stores there),
     followers (what the stores' followers were), daemon (what serving the stores cost it) and
     requests (the VM processes' requests it served, by kind)."""
-    path = Path(directory) / "logs" / "extentd-stats.txt"
+    path = Path(directory) / "logs" / "cladefsd-stats.txt"
     if not path.exists():
         return None
     for line in path.read_text().splitlines():
@@ -108,7 +108,7 @@ def object_storage(stats):
     uploaded = sum(stats.get(f"up-{kind}", 0) for kind in UPLOADS)
     by_kind = ", ".join(f"{kind} {size(stats.get(f'up-{kind}', 0))}" for kind in UPLOADS)
     lines.append(f"Uploaded {size(uploaded)} ({by_kind}); downloaded {size(stats.get('down', 0))}.")
-    # cladefs: the requests that failed, unanswered, each retried, which extentd.log says why of
+    # cladefs: the requests that failed, unanswered, each retried, which cladefsd.log says why of
     # (TASK-314); none from a daemon before it counted them.
     failed = {request: stats.get(f"failed-{request}", 0) for request in CLASSES}
     if any(failed.values()):
@@ -116,7 +116,7 @@ def object_storage(stats):
         lines.append("")
         lines.append(
             f"Failed: {sum(failed.values()):,} requests ({by_request}), each retried until answered; "
-            "extentd.log says why."
+            "cladefsd.log says why."
         )
     return lines
 

@@ -106,7 +106,7 @@ pub struct Profile {
     /// from, each until an object at its key is deleted ([`SimBucket::hold`], TASK-79.18).
     pub hold: f64,
     /// Whether a host that crashes, its disk kept, starts again at once, taking back the branches
-    /// it had, as extentd opens its stores at boot: while the creates its writers had in flight
+    /// it had, as cladefsd opens its stores at boot: while the creates its writers had in flight
     /// land.
     pub restarts: bool,
     /// cladefs: the chance that a collector's pass is over one branch's cell alone, not a sweep over

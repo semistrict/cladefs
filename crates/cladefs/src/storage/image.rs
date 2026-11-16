@@ -224,7 +224,7 @@ impl Device for ImageDevice {
                 // (`File::read_cached`, TASK-91.17): such a read writes back first what it reads
                 // that is dirty yet, which is slower, not other bytes. This device is an
                 // in-process image's, which imports, host tools and tests use; guests' reads are
-                // extentd's, through the store's. cladefs: the sectors they are in, decrypted, if the
+                // cladefsd's, through the store's. cladefs: the sectors they are in, decrypted, if the
                 // store is encrypted (TASK-411.5).
                 Located::Data { file, offset, len, .. } => {
                     let range = file.read_range(offset, len);

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! An extent store for a guest's own filesystem, Fxfs in its kernel: what a VMM's virtio
-//! extent-store device serves (backlog doc-4), through the extent daemon (`crate::extentd`).
+//! extent-store device serves (backlog doc-4), through the extent daemon (`crate::cladefsd`).
 //!
 //! An [`ExtentStore`] is an image (`crates/extent_store`) whose extents the guest writes, reads and
 //! frees by ID. Its I/O copies between the image's files and guest memory, and blocks the calling
@@ -117,7 +117,7 @@ pub enum MappingContents {
 /// cladefs: what a store opened is: who writes it, and whether every tenant reads it. It says what
 /// may be done to it, which each of its methods that changes it checks, rather than each caller
 /// (TASK-160.10). Fixed once it is open, with its uploader, which says whether it is a point, as
-/// the extent daemon has it before anything asks it to do anything (`extentd::stores`).
+/// the extent daemon has it before anything asks it to do anything (`cladefsd::stores`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreAccess {
     /// Who writes it.
@@ -342,7 +342,7 @@ impl WindowChanges {
                     return true;
                 }
                 log::warn!(
-                    "extentd: {} refused at DAX window offset {:#x}, {:?} ago, mapping {}, \
+                    "cladefsd: {} refused at DAX window offset {:#x}, {:?} ago, mapping {}, \
                      met: {}, {len:#x} bytes from {window_offset:#x}",
                     refused.what,
                     refused.window_offset,
@@ -794,7 +794,7 @@ impl ExtentStore {
     }
 
     /// cladefs: what has its uploader, once it stops, stop at once, uploading nothing more, which
-    /// its write-ahead log keeps for its next opening (TASK-216): what extentd has a writer that
+    /// its write-ahead log keeps for its next opening (TASK-216): what cladefsd has a writer that
     /// waits for its going connection's store to close call. None for a store with no uploader.
     pub fn cut_short(&self) -> Option<crate::store_table::Wanted> {
         let uploader = self.uploader.as_ref()?;
@@ -1572,7 +1572,7 @@ impl ExtentStore {
 
     /// Creates the DAX window of `size` bytes that [`map`](Self::map) maps extents into, each
     /// change to whose mappings is made in `second_stage`, if given, rather than in this process's
-    /// memory: the extent daemon's connection to the VM process (`crate::extentd`), which makes it
+    /// memory: the extent daemon's connection to the VM process (`crate::cladefsd`), which makes it
     /// in the VM's memory. The guest's faults on the window must be passed to
     /// [`DaxWindow::fault`], as the daemon passes those its VM process reports. A store has one
     /// window. cladefs: it refuses every store, as a follower's must; a writer's guest takes one
@@ -4499,7 +4499,7 @@ mod tests {
     /// itself, and lists no mappings of its window, which would name the page's source, not its
     /// bytes, as a snapshot of the VM would record them: `EBUSY`, saying how many. Rebound to an
     /// extent of its bytes, as the guest's freeze does, both are made (a VM restored reads them:
-    /// extentd's snapshots_after_private_pages_are_rebound_restore_their_bytes).
+    /// cladefsd's snapshots_after_private_pages_are_rebound_restore_their_bytes).
     #[test]
     fn a_window_holding_private_pages_takes_no_snapshot() {
         let (store, dir) = store(1 << 24);

@@ -73,7 +73,7 @@ pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
         Ok(kept) => kept.lines().for_each(|line| eprintln!("{name} stats: {line}")),
         Err(err) => eprintln!("{name} stats: reading {}: {err}", path.display()),
     }
-    // And its stores' warnings, of flushes and framings past extentd's turn among them, in its
+    // And its stores' warnings, of flushes and framings past cladefsd's turn among them, in its
     // log, as the stats file, gone with a repeat's directory that passed.
     let log = test_setup.tmp_dir.join(format!("{name}.log"));
     let warned = fs::read_to_string(&log).unwrap_or_default();
@@ -264,7 +264,7 @@ impl Measured {
 }
 
 /// cladefs: fails unless the daemon named `name` the test spawned made half its stores' commits
-/// durable within extentd's turn, 50 ms, at least, as its stats file says: doc-12's median
+/// durable within cladefsd's turn, 50 ms, at least, as its stats file says: doc-12's median
 /// (`local_lag_within_50ms`, TASK-221).
 pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Result<()> {
     let path = test_setup.tmp_dir.join(format!("{name}-stats.txt"));
@@ -283,7 +283,7 @@ pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// cladefs: the most bytes a DAX window has, the extent daemon's (`extentd::wire::MAX_WINDOW`): what
+/// cladefs: the most bytes a DAX window has, the extent daemon's (`cladefsd::wire::MAX_WINDOW`): what
 /// it keeps for a window grows with the pages it maps, which it bounds so (TASK-150.3).
 pub const MAX_DAX_WINDOW: u64 = 64 << 30;
 
@@ -434,8 +434,8 @@ pub fn give_to_the_jail(socket: &Path) -> anyhow::Result<()> {
 /// A client of the control API of the extent daemon whose VM socket is at `socket`: at its control
 /// socket, beside it, `<socket>.control` for `<socket>.sock`, as cladefs's scripts/test-e2e.sh and
 /// [`spawn_daemon`] place it.
-pub fn control(socket: &Path) -> Result<cladefs::extentd::control::Client, cladefs::Error> {
-    cladefs::extentd::control::Client::connect(socket.with_extension("control"))
+pub fn control(socket: &Path) -> Result<cladefs::cladefsd::control::Client, cladefs::Error> {
+    cladefs::cladefsd::control::Client::connect(socket.with_extension("control"))
 }
 
 /// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open: its
@@ -489,7 +489,7 @@ mod tests {
                   cancelled_write_bytes: 0\n";
         let status =
             "Name:\tcladefsd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
-        let stat = "42 (cladefs extentd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
+        let stat = "42 (cladefsd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
         let costs = ProcessCosts::parse(io, status, stat, 100.0).unwrap();
         assert_eq!(costs, ProcessCosts { disk_written: 8192, peak_rss: 512 << 10, cpu_secs: 3.0 });
         assert_eq!(
@@ -505,9 +505,9 @@ mod tests {
     fn daemons_keep_a_part_cache_unless_told_otherwise() {
         let dir = Path::new("/tmp/case");
         let cache = |given: Option<&str>, ours: Option<&str>| {
-            part_cache(given.map(OsStr::new), ours.map(OsStr::new), dir, "extentd")
+            part_cache(given.map(OsStr::new), ours.map(OsStr::new), dir, "cladefsd")
         };
-        assert_eq!(cache(None, None), Some(PathBuf::from("/tmp/case/extentd-cache")));
+        assert_eq!(cache(None, None), Some(PathBuf::from("/tmp/case/cladefsd-cache")));
         assert_eq!(cache(Some(""), None), None);
         assert_eq!(cache(Some("/nvme/cache"), None), None);
         assert_eq!(cache(None, Some("")), None);
@@ -538,9 +538,9 @@ mod tests {
     fn daemons_keep_their_stats_beside_their_logs() {
         let dir = Path::new("/tmp/case");
         assert_eq!(
-            stats_file(false, dir, "extentd"),
-            Some(PathBuf::from("/tmp/case/extentd-stats.txt"))
+            stats_file(false, dir, "cladefsd"),
+            Some(PathBuf::from("/tmp/case/cladefsd-stats.txt"))
         );
-        assert_eq!(stats_file(true, dir, "extentd"), None);
+        assert_eq!(stats_file(true, dir, "cladefsd"), None);
     }
 }

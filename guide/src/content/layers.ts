@@ -57,7 +57,7 @@ export const layers: Layer[] = [
       "One process serves the extent stores of a host's hundreds of VMs, so each sealed extent is " +
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
       "tables, mappings and private pages) and makes commits local behind the guest.",
-    dirs: ["crates/cladefs/src/extentd", "crates/cladefs/src/extents.rs", "crates/cladefs/src/dax.rs"],
+    dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/extents.rs", "crates/cladefs/src/dax.rs"],
     anchors: ["server_serve", "extent_store", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
     docs: ["doc-2", "doc-13"],
     provenance: "cladefs's own.",

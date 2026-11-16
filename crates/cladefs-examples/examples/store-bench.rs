@@ -669,7 +669,7 @@ fn cpu_seconds() -> f64 {
 /// stores' page cache sized to what the host's memory, less the daemon's headroom, leaves it.
 #[cfg(target_os = "linux")]
 fn govern() {
-    use cladefs::extentd::{governor, memory};
+    use cladefs::cladefsd::{governor, memory};
     let host = governor::host_memory().expect("reading the host's memory");
     let headroom = governor::headroom(host.total).expect("the daemon's headroom");
     memory::govern(governor::allowance(memory::governed_bytes(), host, headroom));

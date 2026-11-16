@@ -334,14 +334,14 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if backend.forks_image() {
                 return run_images(test_setup);
             }
-            let extentd =
+            let cladefsd =
                 PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
             // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
             let stores = test_setup.tmp_dir.join("extents");
             std::fs::create_dir_all(&stores)?;
             let base = stores.join("base");
-            role(test_setup, "base", &base, &extentd, None)?;
-            let branch = opened(&extentd, &base)?.branch();
+            role(test_setup, "base", &base, &cladefsd, None)?;
+            let branch = opened(&cladefsd, &base)?.branch();
             // The base's boot profile, which a fork records (cladefs's `profile`).
             let profile = base.join("profiles").join(format!("{branch:016x}"));
             let iterations = iterations().unwrap_or(1);
@@ -349,7 +349,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 // A fork, before the iterations, which records the profile: its output is not
                 // the case's.
                 let fork = stores.join("fork-profile");
-                opened(&extentd, &base)?
+                opened(&cladefsd, &base)?
                     .fork(&fork)
                     .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
@@ -368,7 +368,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             for i in 0..iterations {
                 let fork = stores.join(format!("fork-{i}"));
                 {
-                    let store = opened(&extentd, &base)?;
+                    let store = opened(&cladefsd, &base)?;
                     store
                         .fork(&fork)
                         .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
@@ -380,14 +380,14 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                         let (socket, daemon) = daemon(test_setup, sockets.path(), i)?;
                         (socket, Some(daemon))
                     }
-                    _ => (extentd.clone(), None),
+                    _ => (cladefsd.clone(), None),
                 };
                 let daemon_stats = crate::common::control(&socket)?;
                 let before = daemon_stats.counters()?;
                 role(test_setup, "fork", &fork, &socket, None)?;
                 let counted = daemon_stats.counters()?.since(&before);
                 for (name, value) in counted.named() {
-                    println!("OBSERVED extentd-{name} {value}");
+                    println!("OBSERVED cladefsd-{name} {value}");
                 }
                 if let Some(mut daemon) = daemon {
                     daemon.kill()?;
@@ -424,12 +424,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         }
 
         /// Runs this program again, as `role`'s VM, on the store at `store`, which the daemon at
-        /// `extentd` serves, and waits for it: its output is this one's, or goes to `output`.
+        /// `cladefsd` serves, and waits for it: its output is this one's, or goes to `output`.
         fn role(
             test_setup: &TestSetup,
             role: &str,
             store: &Path,
-            extentd: &Path,
+            cladefsd: &Path,
             output: Option<std::fs::File>,
         ) -> anyhow::Result<()> {
             let mut command = Command::new(std::env::current_exe()?);
@@ -437,7 +437,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 .args(std::env::args_os().skip(1))
                 .env(ROLE, role)
                 .env(STORE, store)
-                .env("CLADEFSD", extentd);
+                .env("CLADEFSD", cladefsd);
             if let Some(output) = output {
                 command.stdout(output);
             }
@@ -454,12 +454,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// The store at `store`, which the daemon at `extentd` serves: once the daemon has seen the
+        /// The store at `store`, which the daemon at `cladefsd` serves: once the daemon has seen the
         /// VM that had it open go.
-        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
+        fn opened(cladefsd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::DaemonExtentStore::connect(extentd, store, IMAGE_SIZE) {
+                match cladefs::DaemonExtentStore::connect(cladefsd, store, IMAGE_SIZE) {
                     Ok(store) => return Ok(store),
                     Err(err)
                         if Instant::now() < deadline
@@ -475,11 +475,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         /// A daemon of its own for iteration `i`'s fork, and its socket in `dir`, once it serves
         /// there.
         fn daemon(test_setup: &TestSetup, dir: &Path, i: u32) -> anyhow::Result<(PathBuf, Child)> {
-            let socket = dir.join("extentd.sock");
+            let socket = dir.join("cladefsd.sock");
             let daemon = crate::common::spawn_daemon(
                 test_setup,
                 &socket,
-                &format!("extentd-{i}"),
+                &format!("cladefsd-{i}"),
                 &[],
                 None,
             )?;

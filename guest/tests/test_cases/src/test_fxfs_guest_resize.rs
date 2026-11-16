@@ -43,16 +43,16 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
 
-    /// Resizes the store at `store` through the daemon at `extentd` as the guest asks, at each
+    /// Resizes the store at `store` through the daemon at `cladefsd` as the guest asks, at each
     /// step, on the connection `listener` takes, and answers with the outcome.
-    fn resize_steps(listener: UnixListener, store: &Path, extentd: &Path) -> std::io::Result<()> {
+    fn resize_steps(listener: UnixListener, store: &Path, cladefsd: &Path) -> std::io::Result<()> {
         let (stream, _) = listener.accept()?;
         let mut answers = stream.try_clone()?;
         let mut asked = BufReader::new(stream).lines();
         for (step, capacity) in STEPS {
             let Some(line) = asked.next() else { return Ok(()) };
             assert_eq!(line?, step, "the steps in order");
-            let resized = crate::common::control(extentd)
+            let resized = crate::common::control(cladefsd)
                 .and_then(|daemon| daemon.resize_store(store, capacity));
             let outcome = match resized {
                 Ok(()) => "ok".to_owned(),
@@ -78,7 +78,7 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
-            let extentd = std::path::PathBuf::from(
+            let cladefsd = std::path::PathBuf::from(
                 std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
@@ -91,7 +91,7 @@ mod host {
             vm.vsock(&uds);
             let resizing = store.clone();
             std::thread::spawn(move || {
-                if let Err(err) = resize_steps(listener, &resizing, &extentd) {
+                if let Err(err) = resize_steps(listener, &resizing, &cladefsd) {
                     eprintln!("resizing: {err}");
                 }
             });

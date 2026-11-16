@@ -1,10 +1,10 @@
-# Integrator guide: running tenants' VMs on extentd
+# Integrator guide: running tenants' VMs on cladefsd
 
-For whoever writes the VM manager, the trusted service on each host that talks to the extentd
-daemon and starts Firecracker. `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto` is the reference
+For whoever writes the VM manager, the trusted service on each host that talks to the cladefsd
+daemon and starts Firecracker. `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto` is the reference
 for every call named here.
 
-A VM manager in Go uses the Go package cladefs generates from it, `go/extentd/v1` (TASK-219): its
+A VM manager in Go uses the Go package cladefs generates from it, `go/cladefsd/v1` (TASK-219): its
 messages and stubs, and `NewClient`, which connects to the control socket and has a failed call's
 error carry the daemon's errno (`errors.Is(err, syscall.ENOENT)`). Take it from the commit the
 daemon is built from, so that the two agree:
@@ -52,7 +52,7 @@ A VM snapshot's point is immutable. Any number of hosts read it, and none writes
 restore on one host changes nothing another host sees, and no copy of it goes stale. Each restore
 is a fork of the point into a new branch of the VM's own.
 
-A VM process can't name a branch: extentd ignores what it says, or any stolen ID would take another
+A VM process can't name a branch: cladefsd ignores what it says, or any stolen ID would take another
 tenant's data. The VM manager puts the snapshot's branch in the tenant's directory instead, and that
 is the grant.
 
@@ -87,13 +87,13 @@ They can't write it: opening a point to write fails with `EROFS`.
 
 ### 3. Load the snapshot
 
-In `extent_overrides`:
+In `cladefs_overrides`:
 
 | Field | Value |
 |---|---|
 | `point_on_host` | The path from step 2 |
 | `path_on_host` | The VM's store, in the tenant's directory |
-| `extentd_socket` | The tenant's socket, as the jail sees it |
+| `cladefsd_socket` | The tenant's socket, as the jail sees it |
 
 Do this as often as you like, on any host, at the same time. Each restore makes a new branch for
 the VM.
@@ -106,7 +106,7 @@ of, if its VM wrote nothing after the snapshot, or the fork an earlier restore o
 made there, if that VM wrote nothing. Any other store there, such as the snapshotted VM's own
 store once it resumed and wrote on, fails the restore with `EEXIST` and is left as it is: its
 guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
-`extent_overrides`, `path_on_host` is the snapshotted VM's own store.
+`cladefs_overrides`, `path_on_host` is the snapshotted VM's own store.
 
 ### 4. When this host won't restore that snapshot any more
 

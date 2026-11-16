@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Print the commit a build of the tree at ROOT (default: this script's) is of, which every build
-# reports (TASK-111.7): extentd's /metrics, cladefsctl --version, the VMM's report to extentd
+# reports (TASK-111.7): cladefsd's /metrics, cladefsctl --version, the VMM's report to cladefsd
 # (crates/cladefs/build.rs) and the guest kernel's /proc/fs/fxfs/build
 # (scripts/build-guest-kernel.sh).
 #

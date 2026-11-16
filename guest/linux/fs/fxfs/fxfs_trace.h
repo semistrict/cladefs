@@ -11,7 +11,7 @@
  * device.c defines them (CREATE_TRACE_POINTS).
  *
  * The id is the guest's own, counted as an event that starts a request is on, 0 while it is off:
- * the device's requests carry none (doc-4's wire protocol), and extentd's log names a MAP by its
+ * the device's requests carry none (doc-4's wire protocol), and cladefsd's log names a MAP by its
  * window offset, as fxfs_window_map_start does.
  *
  * The fields are of the UAPI's types (__u64, __u8 for a flag), which the events' formats name: a

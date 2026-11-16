@@ -12,8 +12,8 @@
 
 mod common;
 
-use cladefs::extentd::disk::STORE_MADE;
-use cladefs::extentd::metrics::render;
+use cladefs::cladefsd::disk::STORE_MADE;
+use cladefs::cladefsd::metrics::render;
 use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::pattern;

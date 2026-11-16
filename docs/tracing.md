@@ -1,11 +1,11 @@
-# Tracing extentd with OpenTelemetry
+# Tracing cladefsd with OpenTelemetry
 
 `cladefsd` can export spans of what it does over OTLP: the requests it serves, the commits
 they cause and each commit's phases, uploads to the bucket and each bucket request, store opens
 and forks, extent-cache page-ins, and memory-relief passes. Tracing is off by default. While it is
 off, a span costs one relaxed atomic load (measured below), and nothing is allocated or exported.
 The code is `crates/extent_bucket/src/trace.rs`, which makes the spans, and
-`crates/cladefs/src/extentd/otel.rs`, which starts the exporter (TASK-258).
+`crates/cladefs/src/cladefsd/otel.rs`, which starts the exporter (TASK-258).
 
 ## Turning it on
 
@@ -42,7 +42,7 @@ CLADEFSD_TRACES=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_TRACES_SAMPLER=always_on \
 CLADEFSD_BUCKET=... CLADEFSD_TOKEN=... \
-cladefsd /run/cladefs/extentd.sock
+cladefsd /run/cladefs/cladefsd.sock
 ```
 
 Then open `http://localhost:16686` and choose the service `cladefsd`. To route spans through
@@ -57,7 +57,7 @@ request also has `cladefs.errno`.
 
 | Span | Made by | Parent | Attributes |
 |---|---|---|---|
-| `extentd.<kind>` (`extentd.map`, `extentd.write`, `extentd.commit`, `extentd.read`, `extentd.free`, `extentd.fault`, `extentd.open`, ...) | each request a VM process sends, from its dispatch to its reply | root | `request.kind`, `branch`, `bytes` (read, write, map, unmap, private), `extents` (free, free_many, map, map_many), `durable` (commit), `store` (open, fork), `request_id` (see below), `errno` |
+| `cladefsd.<kind>` (`cladefsd.map`, `cladefsd.write`, `cladefsd.commit`, `cladefsd.read`, `cladefsd.free`, `cladefsd.fault`, `cladefsd.open`, ...) | each request a VM process sends, from its dispatch to its reply | root | `request.kind`, `branch`, `bytes` (read, write, map, unmap, private), `extents` (free, free_many, map, map_many), `durable` (commit), `store` (open, fork), `request_id` (see below), `errno` |
 | `store.commit` | every commit of a writer's store | the request, or whatever commits | `branch`, `durable` |
 | `commit.seal` | sealing the extents written since the last commit | `store.commit` | `extents`, `bytes` copied |
 | `commit.write` | recording the commit in the open segment and queuing its flush | `store.commit` | `epoch` |
@@ -95,8 +95,8 @@ attribute is ever computed. The request path adds one more load per request, in
 
 ## Tests
 
-- `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and an uploaded commit through
-  extentd into OpenTelemetry's in-memory exporter. It checks the span tree and its attributes, and
+- `crates/cladefs/src/cladefsd/tests/otel.rs` serves a write, a read and an uploaded commit through
+  cladefsd into OpenTelemetry's in-memory exporter. It checks the span tree and its attributes, and
   that nothing is exported while tracing is off.
 - `crates/cladefs/tests/tracing.rs` runs the `cladefsd` binary against an OTLP/HTTP collector
   in the test. It checks that the spans arrive at `/v1/traces` and that nothing is sent without

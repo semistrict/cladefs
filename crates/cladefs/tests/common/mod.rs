@@ -14,7 +14,7 @@ pub mod daemon;
 /// branches in a bucket in its memory, as of placement 1, unless the test named others.
 pub fn host() {
     // The daemon's log, and the VM processes', on standard error, which a test that fails shows.
-    let _ = cladefs::extentd::logging::to_stderr();
+    let _ = cladefs::cladefsd::logging::to_stderr();
     for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't

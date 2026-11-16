@@ -57,7 +57,7 @@ CLADEFS_E2E_RESULTS="$work" "$root/scripts/contamination.py" run \
 # What a case leaves of its stores, buckets, caches, images and roots: not results
 # (scripts/qualify.sh's, and a jailed VM's jail).
 find "$work" -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' -o -name '*-cache' \
-    -o -name '.extentd-cache.*' -o -name '*.bucket' -o -name 'store-*' -o -name sandbox-image \
+    -o -name '.cladefsd-cache.*' -o -name '*.bucket' -o -name 'store-*' -o -name sandbox-image \
     -o -name rootfs -o -name extents -o -name jail \) -prune -exec rm -r {} +
 find "$work" -type f \( -name '*.ext4' -o -name '*.img' \) -delete
 cp -R "$work/." "$results/" || status=$(( status ? status : 1 ))

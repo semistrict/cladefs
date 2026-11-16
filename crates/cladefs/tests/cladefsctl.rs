@@ -413,8 +413,8 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     };
 
     let json: serde_json::Value = serde_json::from_str(&run(&["stats", "--json"])).unwrap();
-    assert_eq!(json["extentd"]["build"], cladefs::BUILD_COMMIT);
-    assert_eq!(json["extentd"]["gauges"]["connections"], 1);
+    assert_eq!(json["cladefsd"]["build"], cladefs::BUILD_COMMIT);
+    assert_eq!(json["cladefsd"]["gauges"]["connections"], 1);
     assert!(json["taken_unix_ns"].as_u64() > Some(0), "{json}");
     let vm = &json["vms"][0];
     assert_eq!(vm["path"], path.canonicalize().unwrap().to_str().unwrap());
@@ -432,7 +432,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let line = |at: &str| lines.lines().find_map(|line| line.strip_prefix(&format!("{at} ")));
     assert_eq!(line("vms.0.guest.counters.seals"), Some("3"), "{lines}");
     assert_eq!(line("vms.0.guest.histograms.seals.1"), Some("2"), "{lines}");
-    assert_eq!(line("extentd.build"), Some(cladefs::BUILD_COMMIT), "{lines}");
+    assert_eq!(line("cladefsd.build"), Some(cladefs::BUILD_COMMIT), "{lines}");
 
     drop(store);
     let refused = Cladefsctl::local().run(&[Path::new("stats"), Path::new("--json")]);

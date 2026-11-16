@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Generates the extent daemon's gRPC API (`proto/cladefs/extentd/v1/extentd.proto`), what daemons
+//! Generates the extent daemon's gRPC API (`proto/cladefs/cladefsd/v1/cladefsd.proto`), what daemons
 //! sharing a bucket serve each other (`proto/cladefs/peer/v1/peer.proto`, TASK-406.2), and the API of
 //! FUSE mounts of many stores (`proto/cladefs/mount/v1/mount.proto`), with protox,
 //! which compiles protobuf in Rust: no protoc needed. cladefs: and stamps the build with the commit it
@@ -14,7 +14,7 @@ use std::process::Command;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
-        "proto/cladefs/extentd/v1/extentd.proto",
+        "proto/cladefs/cladefsd/v1/cladefsd.proto",
         "proto/cladefs/peer/v1/peer.proto",
         "proto/cladefs/mount/v1/mount.proto",
     ];

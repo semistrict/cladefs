@@ -3,7 +3,7 @@
 # again and again, each as its own backoff says, most of the daemon's CPU in the qualification's
 # bucket soak (1,200 of its 1,580 s on ubu1), where a probe at a time would do.
 # Kind: failures
-# Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
+# Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/extent_bucket/src/object_bucket.rs
 +++ b/crates/extent_bucket/src/object_bucket.rs
 @@ -820,8 +820,6 @@

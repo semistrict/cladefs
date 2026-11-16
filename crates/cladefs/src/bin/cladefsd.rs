@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! cladefsd, cladefs's daemon, one a host (TASK-475): serves the extent stores of the VMs on this
-//! host, from one memory, to VM processes that connect to its socket (`cladefs::extentd`); and, if
-//! told to, mounts tenants' cells with FUSE (`cladefs::extentd::mount`). A cell's vdisks are held
+//! host, from one memory, to VM processes that connect to its socket (`cladefs::cladefsd`); and, if
+//! told to, mounts tenants' cells with FUSE (`cladefs::cladefsd::mount`). A cell's vdisks are held
 //! by this one process, whichever serves them.
 //!
 //! ```sh
@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Its memory, which the sealed extents it caches are kept in, and VMs' DAX windows map read-only,
-//! is a page cache (`cladefs::extentd::governor`, TASK-358): as much of the host's as is free, less a
+//! is a page cache (`cladefs::cladefsd::governor`, TASK-358): as much of the host's as is free, less a
 //! headroom (`CLADEFSD_HEADROOM` bytes, by default a sixteenth of the host's memory, 1 GiB at
 //! least), given back as the host's free memory falls, each tenant kept its share by weight
 //! (`SetMemoryWeight`). MEMORY_BYTES, if given, fixes it at that instead, ungoverned, as a test's
@@ -21,7 +21,7 @@
 //! (backlog doc-13). Out of it, or past a limit the control API sets, the daemon evicts the cached
 //! extents asked for longest ago, and fails what it cannot make room for with ENOMEM, rather than
 //! stop (TASK-50.3). A VMM's extent device
-//! connects to the socket its configuration names (cladefs's Firecracker's `extentd_socket`).
+//! connects to the socket its configuration names (cladefs's Firecracker's `cladefsd_socket`).
 //!
 //! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its
 //! stores' branches are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
@@ -31,13 +31,13 @@
 //!
 //! One daemon serves every VM on a host. Connections to SOCKET are of the default tenant: with
 //! `CLADEFSD_ROOTS` naming directories, separated by colons, they name stores in them alone
-//! (`cladefs::extentd`, Isolation). SOCKET is the daemon's user's alone, mode 0600: a VM process of
+//! (`cladefs::cladefsd`, Isolation). SOCKET is the daemon's user's alone, mode 0600: a VM process of
 //! another user, as a jail's, connects to a tenant's socket, granted to its user, and never to this
 //! one, mounted or not (TASK-155). The VM manager runs jails as another user than the daemon's, and
 //! hands them SOCKET's path no more than it does the control socket's.
 //!
 //! With `CLADEFSD_GRPC` naming a path, the daemon serves its control API there too, gRPC over a
-//! Unix socket (`cladefs::extentd::control`; `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`),
+//! Unix socket (`cladefs::cladefsd::control`; `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto`),
 //! through which the host's VM manager makes, forks, syncs and deletes stores, and grants tenants
 //! VM sockets of their own: whoever connects may do all of it, so that it is the daemon's user's
 //! alone, mode 0600, as SOCKET is, whatever the umask (TASK-159): the VM manager runs as that
@@ -46,7 +46,7 @@
 //! the standard gRPC health service too (`grpc.health.v1.Health`, TASK-48): SERVING while the
 //! daemon accepts VM processes, NOT_SERVING as it starts and as it stops.
 //!
-//! SIGTERM drains it, and it exits (`cladefs::extentd::drain`, TASK-141.4): once the health service
+//! SIGTERM drains it, and it exits (`cladefs::cladefsd::drain`, TASK-141.4): once the health service
 //! reports NOT_SERVING, it takes no more VM processes nor control calls (`UNAVAILABLE`), closes
 //! every VM process's connection, whose VM goes as at the daemon's exit, and closes their stores,
 //! durable, and the rest it has open, and waits for their uploads: within `CLADEFSD_DRAIN`
@@ -70,7 +70,7 @@
 //! stores closed once nothing uses it, within the drain's bound.
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics
-//! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::extentd::metrics`,
+//! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::cladefsd::metrics`,
 //! TASK-47).
 //!
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
@@ -103,9 +103,9 @@
 //!
 //! With `CLADEFSD_TRACES` set to `otlp`, the daemon exports spans of what it does, over OTLP,
 //! to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names, OpenTelemetry's variables configuring
-//! them (`cladefs::extentd::otel`, TASK-258; `docs/tracing.md`): off otherwise.
+//! them (`cladefs::cladefsd::otel`, TASK-258; `docs/tracing.md`): off otherwise.
 //!
-//! It logs to standard error, a line a record (`cladefs::extentd::logging`): text by default, or,
+//! It logs to standard error, a line a record (`cladefs::cladefsd::logging`): text by default, or,
 //! with `CLADEFS_LOG_FORMAT=json`, a JSON object a line, of the record's `timestamp`, `level`,
 //! `target`, `message` and key-values (TASK-259). `CLADEFS_LOG_LEVEL` says how much, `info` by
 //! default, by target too: `info,extent_bucket::object_bucket=debug` logs each request of object
@@ -116,9 +116,9 @@
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
-    cladefs::extentd::logging::to_stderr()?;
+    cladefs::cladefsd::logging::to_stderr()?;
     // cladefs: its large buffers given back as they are freed, before any thread is made (TASK-317).
-    cladefs::extentd::memory::return_large_allocations();
+    cladefs::cladefsd::memory::return_large_allocations();
     // cladefs: a panic holding a lock shared beyond one store, which no halt contains, stops the
     // daemon, rather than poison the lock for every user after (TASK-149.24).
     extent_store::shared::abort_on_panics();
@@ -127,21 +127,21 @@ fn main() -> anyhow::Result<()> {
     cladefs::faults::from_seed().map_err(anyhow::Error::msg)?;
     // cladefs: before any thread is started, which SIGQUIT would end otherwise (TASK-44.13).
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
-    let drain = cladefs::extentd::drain::bound().map_err(anyhow::Error::msg)?;
+    let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
     drain_on_sigterm(drain).context("handling SIGTERM")?;
     // cladefs: its spans, over OTLP, if CLADEFSD_TRACES says so (TASK-258): its exporter's
     // threads made after SIGTERM is blocked, as every thread but the drain's.
-    if cladefs::extentd::otel::from_env().map_err(anyhow::Error::msg)? {
-        log::info!("extentd: exporting spans over OTLP");
+    if cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
+        log::info!("cladefsd: exporting spans over OTLP");
     }
-    cladefs::extentd::raise_open_files_limit().context("raising the limit of open files")?;
+    cladefs::cladefsd::raise_open_files_limit().context("raising the limit of open files")?;
     // A host of the multi-node system: the bucket and this host's placement token named.
     let host = cladefs::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     // cladefs: its KMS, which every store is encrypted under: none chosen, it refuses to start, naming
     // CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
-    cladefs::extentd::cache_config().map_err(anyhow::Error::msg)?;
+    cladefs::cladefsd::cache_config().map_err(anyhow::Error::msg)?;
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
     let set = |var| std::env::var(var).ok().filter(|value| !value.is_empty());
     let peers = set("CLADEFSD_PEERS");
@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
         let listener = std::net::TcpListener::bind(&address)
             .with_context(|| format!("serving peers at {address}"))?;
         let peers = peers.iter().flat_map(|peers| peers.split(',')).filter(|peer| !peer.is_empty());
-        cladefs::extentd::peers::start(&address, listener, peers).map_err(anyhow::Error::msg)?;
+        cladefs::cladefsd::peers::start(&address, listener, peers).map_err(anyhow::Error::msg)?;
     } else if peers.is_some() {
         anyhow::bail!("CLADEFSD_PEERS is set, but CLADEFSD_PEER_ADDRESS names no address");
     }
@@ -167,20 +167,20 @@ fn main() -> anyhow::Result<()> {
     } else {
         // cladefs: its memory a page cache, as large as the host's, governed by what is free
         // (TASK-358).
-        let memory = cladefs::extentd::governor::memory_bytes().map_err(anyhow::Error::msg)?;
+        let memory = cladefs::cladefsd::governor::memory_bytes().map_err(anyhow::Error::msg)?;
         cladefs::pages::configure(cladefs::pages::Config::with_memory(memory))?;
-        cladefs::extentd::governor::start().map_err(anyhow::Error::msg)?;
+        cladefs::cladefsd::governor::start().map_err(anyhow::Error::msg)?;
     }
-    let listener = cladefs::extentd::bind_owner_only(&socket)
+    let listener = cladefs::cladefsd::bind_owner_only(&socket)
         .with_context(|| format!("listening at {socket}"))?;
     let control = std::env::var_os("CLADEFSD_GRPC").filter(|path| !path.is_empty());
     // cladefs: its FUSE mount of cells, whose Mount service is on the control socket (TASK-475.2).
-    if let Some(mount) = cladefs::extentd::mount::Config::from_env().map_err(anyhow::Error::msg)? {
+    if let Some(mount) = cladefs::cladefsd::mount::Config::from_env().map_err(anyhow::Error::msg)? {
         anyhow::ensure!(
             control.is_some(),
             "CLADEFSD_MOUNT is set, but CLADEFSD_GRPC names no control socket to attach cells through"
         );
-        cladefs::extentd::mount::start(&mount, host.bucket)?;
+        cladefs::cladefsd::mount::start(&mount, host.bucket)?;
     }
     if let Some(control) = control {
         let tenants = match std::env::var_os("CLADEFSD_TENANTS").filter(|dir| !dir.is_empty()) {
@@ -190,11 +190,11 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&tenants)
             .with_context(|| format!("making {}", tenants.display()))?;
         // It can do everything: its user's alone, as the VM socket (TASK-159).
-        let control = cladefs::extentd::bind_owner_only(&control)
+        let control = cladefs::cladefsd::bind_owner_only(&control)
             .with_context(|| format!("listening at {}", control.display()))?;
-        std::thread::Builder::new().name("extentd control".into()).spawn(move || {
-            if let Err(err) = cladefs::extentd::serve_control(control, tenants) {
-                log::error!("extentd: serving the control API: {err}");
+        std::thread::Builder::new().name("cladefsd ctl".into()).spawn(move || {
+            if let Err(err) = cladefs::cladefsd::serve_control(control, tenants) {
+                log::error!("cladefsd: serving the control API: {err}");
                 std::process::exit(1);
             }
         })?;
@@ -205,13 +205,13 @@ fn main() -> anyhow::Result<()> {
         let address = address.to_str().context("CLADEFSD_METRICS must be an address")?;
         let metrics = std::net::TcpListener::bind(address)
             .with_context(|| format!("serving metrics at {address}"))?;
-        std::thread::Builder::new().name("extentd metrics".into()).spawn(move || {
-            if let Err(err) = cladefs::extentd::serve_metrics(metrics) {
-                log::error!("extentd: serving metrics: {err}");
+        std::thread::Builder::new().name("cladefsd metric".into()).spawn(move || {
+            if let Err(err) = cladefs::cladefsd::serve_metrics(metrics) {
+                log::error!("cladefsd: serving metrics: {err}");
             }
         })?;
     }
-    cladefs::extentd::serve(listener);
+    cladefs::cladefsd::serve(listener);
     // Serving stops only as the daemon drains, whose thread exits the process once it has
     // (`drain_on_sigterm`): not here, its stores still closing.
     loop {
@@ -220,27 +220,27 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Drains the daemon on SIGTERM, as an orchestrator stops it, within `bound`, and exits
-/// (`cladefs::extentd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. SIGTERM is blocked
+/// (`cladefs::cladefsd::drain`, TASK-141.4): 0 once it drained, 1 past its bound. SIGTERM is blocked
 /// in every thread but one, made here first, which waits for it (`cladefs::signals`).
 #[cfg(target_os = "linux")]
 fn drain_on_sigterm(bound: std::time::Duration) -> std::io::Result<()> {
     let sigterm = cladefs::signals::Signals::block(&[libc::SIGTERM])?;
-    cladefs::signals::spawn_taking_no_signals("extentd signals", move || {
+    cladefs::signals::spawn_taking_no_signals("cladefsd signal", move || {
         if let Err(error) = sigterm.wait() {
-            log::error!("extentd: waiting for SIGTERM: {error}");
+            log::error!("cladefsd: waiting for SIGTERM: {error}");
             return;
         }
-        log::info!("extentd: draining, on SIGTERM, within {}s", bound.as_secs());
+        log::info!("cladefsd: draining, on SIGTERM, within {}s", bound.as_secs());
         let began = std::time::Instant::now();
-        let drained = cladefs::extentd::drain::drain(bound);
-        cladefs::extentd::otel::shutdown();
+        let drained = cladefs::cladefsd::drain::drain(bound);
+        cladefs::cladefsd::otel::shutdown();
         match drained {
             Ok(()) => {
-                log::info!("extentd: drained in {:.1?}: every store closed", began.elapsed());
+                log::info!("cladefsd: drained in {:.1?}: every store closed", began.elapsed());
                 std::process::exit(0);
             }
             Err(left) => {
-                log::error!("extentd: not drained within {}s: {left}", bound.as_secs());
+                log::error!("cladefsd: not drained within {}s: {left}", bound.as_secs());
                 std::process::exit(1);
             }
         }

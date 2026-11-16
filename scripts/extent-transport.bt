@@ -18,9 +18,9 @@ BEGIN
 }
 
 // The threads that serve a request: Firecracker's (fc_*: vCPUs, the extent device's workers),
-// the VM process's daemon client and DAX fault threads, and the daemon's (extentd *).
+// the VM process's daemon client and DAX fault threads, and the daemon's (cladefsd *).
 tracepoint:sched:sched_wakeup
-/strncmp(args.comm, "fc_", 3) == 0 || strncmp(args.comm, "extentd", 7) == 0 ||
+/strncmp(args.comm, "fc_", 3) == 0 || strncmp(args.comm, "cladefsd", 8) == 0 ||
  strncmp(args.comm, "dax", 3) == 0/
 {
 	@woken[args.pid] = nsecs;
@@ -89,7 +89,7 @@ tracepoint:kvm:kvm_vcpu_wakeup
 // UFFDIO_REGISTER 0xc020aa00, UFFDIO_WAKE 0x8010aa02, UFFDIO_COPY 0xc028aa03, UFFDIO_WRITEPROTECT
 // 0xc018aa06; KVM_PRE_FAULT_MEMORY 0xc040aed5).
 tracepoint:syscalls:sys_enter_ioctl
-/comm == "extentd client"/
+/comm == "cladefsd client"/
 {
 	@ioctl_at[tid] = nsecs;
 	@ioctl_cmd[tid] = args.cmd;
@@ -110,7 +110,7 @@ tracepoint:syscalls:sys_enter_mprotect, tracepoint:syscalls:sys_enter_madvise,
 tracepoint:syscalls:sys_enter_pread64, tracepoint:syscalls:sys_enter_sendmsg,
 tracepoint:syscalls:sys_enter_recvmsg, tracepoint:syscalls:sys_enter_write,
 tracepoint:syscalls:sys_enter_read
-/comm == "extentd client"/
+/comm == "cladefsd client"/
 {
 	@syscall_at[tid] = nsecs;
 }

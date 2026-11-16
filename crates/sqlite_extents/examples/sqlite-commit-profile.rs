@@ -293,9 +293,9 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     {
-        let socket = root.join("extentd.sock");
+        let socket = root.join("cladefsd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::thread::spawn(move || cladefs::extentd::serve(listener));
+        std::thread::spawn(move || cladefs::cladefsd::serve(listener));
         let store =
             cladefs::DaemonExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);

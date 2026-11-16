@@ -132,7 +132,7 @@ A file created in this mount, served from the guest's page cache until it is nex
 
 **Extent daemon**:
 The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
-_Avoid_: server, remote; `cladefsd` is its name on the command line, `extentd` its module and protocol
+_Avoid_: server, remote; `cladefsd`, its name on the command line, in its module, protocol and files
 
 **Daemon client**:
 A VM process's connection to the extent daemon, through which its extent device has a store.

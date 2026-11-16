@@ -2,9 +2,9 @@
 # can't have, is let go of but for its path, which stays held until the daemon restarts
 # (TASK-150.5).
 # Kind: path held
-# Killer: extentd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/extentd/server.rs
-+++ b/crates/cladefs/src/extentd/server.rs
+# Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -1046,10 +1046,16 @@
          let follower = matches!(opened, Phase::Following);
          let key = store_key(path);

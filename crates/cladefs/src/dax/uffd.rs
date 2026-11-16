@@ -1546,7 +1546,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             resolved => resolved,
         };
         // cladefs: failed as what resolves the window's faults went, the daemon: the VM process is
-        // stopping, ExtentdLost, as its device was told, and its faulting thread waits for that,
+        // stopping, CladefsdLost, as its device was told, and its faulting thread waits for that,
         // which aborting would beat, the VM dying of SIGABRT, where a VM whose daemon goes exits
         // 158 (doc-12; fxfs-guest-soak, GCE r830 round 27; TASK-231).
         if resolved.is_err() && window.lost() {
@@ -2449,7 +2449,7 @@ mod tests {
     }
 
     /// cladefs TASK-231: a fault its window fails as its daemon goes waits for the VM process to
-    /// stop, as it does then, ExtentdLost, rather than abort it: aborted, the VM died of SIGABRT,
+    /// stop, as it does then, CladefsdLost, rather than abort it: aborted, the VM died of SIGABRT,
     /// a VM of fxfs-guest-soak's (GCE r830 round 27), where a VM whose daemon goes exits 158.
     #[test]
     fn faults_failed_as_their_daemon_goes_wait() {

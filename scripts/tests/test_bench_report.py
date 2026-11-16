@@ -48,7 +48,7 @@ class ObjectStorage(unittest.TestCase):
         (directory / "bench-fs-fxfs-guest-dax.json").write_text(json.dumps(case))
         (directory / "logs").mkdir()
         if stats is not None:
-            (directory / "logs" / "extentd-stats.txt").write_text(stats)
+            (directory / "logs" / "cladefsd-stats.txt").write_text(stats)
         return directory
 
     def test_the_stats_kept_are_reported_with_their_cost(self):
@@ -86,7 +86,7 @@ Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, moves
             section,
             """
 
-Failed: 26 requests (create 25, update 1), each retried until answered; extentd.log says why.
+Failed: 26 requests (create 25, update 1), each retried until answered; cladefsd.log says why.
 
 """,
         )

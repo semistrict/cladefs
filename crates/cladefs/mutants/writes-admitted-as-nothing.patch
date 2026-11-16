@@ -2,9 +2,9 @@
 # a walk of its directory finds it, every 10 s, so that between walks they write past its limit
 # as fast as the disk takes it (TASK-94).
 # Kind: disk
-# Killer: extentd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
---- a/crates/cladefs/src/extentd/server.rs
-+++ b/crates/cladefs/src/extentd/server.rs
+# Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -1224,7 +1224,7 @@
                      }
                  };

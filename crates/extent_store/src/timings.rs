@@ -161,7 +161,7 @@ impl<const N: usize> Timing<N> {
     }
 }
 
-/// What took [`Phases`]: so many, and so many past extentd's turn, 50 ms; the phases of the
+/// What took [`Phases`]: so many, and so many past cladefsd's turn, 50 ms; the phases of the
 /// longest; the longest of each phase, of any; and each phase's time, summed over all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Timed<const N: usize> {
@@ -238,7 +238,7 @@ pub fn timings() -> Timings {
     *TIMINGS.lock().unwrap()
 }
 
-/// A flush of a store of this process's, `flush`, of branch `branch`, ended: one past extentd's
+/// A flush of a store of this process's, `flush`, of branch `branch`, ended: one past cladefsd's
 /// turn said as it happens, what it synced with it, which a daemon killed leaves in its log.
 pub(crate) fn flushed(branch: u64, flush: &Flush) {
     let Flush { phases, commits, synced } = flush;
@@ -271,7 +271,7 @@ fn named<const N: usize>(names: &[&str; N], phases: Phases<N>) -> String {
     format!("{} ms; runnable {:.1} ms", named.join(", "), ms(phases.runnable_us))
 }
 
-/// A framing of a store of this process's, of `segment`, took `phases`: one past extentd's turn
+/// A framing of a store of this process's, of `segment`, took `phases`: one past cladefsd's turn
 /// said as it happens, as a slow flush is ([`flushed`]); cladefs: with `how` it framed it, in place
 /// or not, and what of it it read (TASK-400).
 pub(crate) fn framed(
@@ -290,7 +290,7 @@ pub(crate) fn framed(
 }
 
 /// cladefs: making `segments` segments of branch `branch` framed durable together took `phases`
-/// (`segments::make_durable`, TASK-310): past extentd's turn, said as it happens, as a slow
+/// (`segments::make_durable`, TASK-310): past cladefsd's turn, said as it happens, as a slow
 /// framing is ([`framed`]).
 pub(crate) fn made_durable(branch: u64, segments: usize, phases: Phases<4>) {
     if phases.total_us() > 50_000 {

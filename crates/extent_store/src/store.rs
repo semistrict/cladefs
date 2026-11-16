@@ -2165,7 +2165,7 @@ impl<D: Dir> Store<D> {
     ) -> Result<Vec<ExtentId>, Error> {
         let sealing = state.uncommitted.open_extents();
         // cladefs: what sealing copied, which the commit's flush syncs: said once past 8 MiB, which
-        // the flush of extentd's turn writes at once (TASK-221).
+        // the flush of cladefsd's turn writes at once (TASK-221).
         let (mut copies, mut copied, mut largest) = (0, 0, 0);
         // cladefs: why it copies what it copies, with CLADEFS_SEAL_STATS set (TASK-92.41).
         let mut why = seals::enabled().then(seals::Sealing::default);

@@ -219,9 +219,9 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
 
     /// Where a VM's filesystem is.
     enum Device<'a> {
-        /// The store at `store`, which the daemon at `extentd` serves, with a DAX window of
+        /// The store at `store`, which the daemon at `cladefsd` serves, with a DAX window of
         /// `window` bytes if not 0.
-        Store { store: &'a Path, extentd: &'a Path, window: u64 },
+        Store { store: &'a Path, cladefsd: &'a Path, window: u64 },
         /// The image at `image`, on writable virtio-pmem, which the guest mounts ext4 on, with DAX.
         Pmem(&'a Path),
         /// cladefs: the image at `image`, on a writable virtio-blk disk whose flushes go as `cache`
@@ -260,8 +260,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         let mut vm = Vm::new(vcpus()?, memory)?;
         vm.guest_kernel()?;
         match device {
-            Device::Store { store, extentd, window } => {
-                vm.extent_store_served("extents", store, CAPACITY, window, extentd);
+            Device::Store { store, cladefsd, window } => {
+                vm.extent_store_served("extents", store, CAPACITY, window, cladefsd);
             }
             Device::Pmem(image) => {
                 let device = vm.pmem("pgbench", image)?;
@@ -308,7 +308,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     /// the store at `store`: its stats file, `stats`, and the store's upload lag, appended to
     /// `samples` with the seconds since it started: to see where a run's time goes (TASK-91.2).
     /// And the CPU time of each thread of the VM's process, `vmm`, so far: what the window's
-    /// changes cost the VMM, its 'extentd client' thread's system time; and KVM's counts of the
+    /// changes cost the VMM, its 'cladefsd client' thread's system time; and KVM's counts of the
     /// VM's exits, faults and flushes, what they cost the guest (TASK-91.16).
     fn sample(
         socket: PathBuf,
@@ -581,11 +581,11 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             // did, or as CLADEFS_BUCKET_LATENCY_MS says; its socket's path short, as Unix sockets'
             // must be.
             let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
-            let socket = sockets.path().join("extentd.sock");
+            let socket = sockets.path().join("cladefsd.sock");
             let given = std::env::var_os("CLADEFS_BUCKET_LATENCY_MS");
             let bucket = std::env::var_os("CLADEFSD_BUCKET");
             let latency = added_latency(given.as_deref(), bucket.as_deref());
-            let stats = dir.join("extentd-stats.txt");
+            let stats = dir.join("cladefsd-stats.txt");
             // cladefs: its metrics, which say what its memory holds (`crate::measure`).
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
@@ -599,12 +599,12 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             // in and unpacked again what was evicted, slower as the database grew.
             let daemon_memory = None;
             let mut daemon =
-                crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, daemon_memory)?;
+                crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, daemon_memory)?;
             let base = dir.join("base");
             let forked = self.database != Database::Made;
             // cladefs: the base's VM, making the database, as much memory as a VM loading it needs.
             let memory = if forked { load_memory()? } else { 512 };
-            let device = Device::Store { store: &base, extentd: &socket, window: 0 };
+            let device = Device::Store { store: &base, cladefsd: &socket, window: 0 };
             let mut machine = machine("base", device, memory)?;
             if forked {
                 machine.env(c"CLADEFS_PGBENCH_BASE_DATABASE=1");
@@ -614,13 +614,13 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 // cladefs: a host that holds none of the base's data, as one forking another host's
                 // base: the base's daemon drains, its uploads done, and stops (SIGTERM, doc-11);
                 // another serves the forks, with a part cache of its own, empty, and nothing in
-                // memory. Its log and stats are the case's `extentd`'s, the base's daemon's log
+                // memory. Its log and stats are the case's `cladefsd`'s, the base's daemon's log
                 // kept beside them.
                 // SAFETY: a signal to the daemon this case started, which it waits for.
                 unsafe { nix::libc::kill(daemon.id() as nix::libc::pid_t, nix::libc::SIGTERM) };
                 let status = daemon.wait()?;
                 anyhow::ensure!(status.success(), "the base's daemon drained: {status}");
-                std::fs::rename(dir.join("extentd.log"), dir.join("extentd-base.log"))?;
+                std::fs::rename(dir.join("cladefsd.log"), dir.join("cladefsd-base.log"))?;
                 // Its sockets stay where it served, which another daemon listens at only once
                 // they're gone.
                 for gone in [socket.clone(), socket.with_extension("control")] {
@@ -631,14 +631,14 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                         _ => {}
                     }
                 }
-                let cache = dir.join("extentd-cold-cache");
+                let cache = dir.join("cladefsd-cold-cache");
                 std::fs::create_dir_all(&cache)?;
                 let mut env = env.to_vec();
                 env.push(("CLADEFSD_PART_CACHE", cache.as_os_str()));
                 daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,
-                    "extentd",
+                    "cladefsd",
                     &env,
                     daemon_memory,
                 )?;
@@ -654,8 +654,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 let running = self.start(&served, role, vm, load_memory()?, None)?;
                 running.finish().with_context(|| format!("VM {} of {}", vm + 1, vms()))?;
             }
-            crate::common::say_daemon_stats(test_setup, "extentd");
-            crate::common::check_durable_median(test_setup, "extentd")
+            crate::common::say_daemon_stats(test_setup, "cladefsd");
+            crate::common::check_durable_median(test_setup, "cladefsd")
         }
 
         /// cladefs: the VMs of a density case (TASK-164.5), each on a fork of the base, booted one
@@ -699,7 +699,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let fork = dir.join(nth("fork", vm));
             crate::common::control(&served.socket)?.fork_store(&served.base, &fork)?;
             let device =
-                Device::Store { store: &fork, extentd: &served.socket, window: served.window };
+                Device::Store { store: &fork, cladefsd: &served.socket, window: served.window };
             let mut machine = machine(role, device, memory)?;
             if let Some(requests) = requests {
                 machine.vsock(requests.uds());

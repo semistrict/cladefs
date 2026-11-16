@@ -4,10 +4,10 @@
 
 //! An extent daemon serving on threads of a test's process, and a client of its control API.
 
-use cladefs::extentd::control::proto::extentd_client::ExtentdClient;
-use cladefs::extentd::control::proto::*;
-use cladefs::extentd::control::{connect, errno};
-use cladefs::extentd::{serve, serve_control};
+use cladefs::cladefsd::control::proto::cladefsd_client::CladefsdClient;
+use cladefs::cladefsd::control::proto::*;
+use cladefs::cladefsd::control::{connect, errno};
+use cladefs::cladefsd::{serve, serve_control};
 use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use tonic::transport::Channel;
 /// `runtime` runs.
 pub struct Daemon {
     pub vms: PathBuf,
-    pub client: ExtentdClient<Channel>,
+    pub client: CladefsdClient<Channel>,
     pub runtime: tokio::runtime::Runtime,
 }
 

@@ -13,7 +13,7 @@
 
 mod common;
 
-use cladefs::extentd::{Tenant, serve, serve_tenant};
+use cladefs::cladefsd::{Tenant, serve, serve_tenant};
 use cladefs::{DaemonExtentStore, Errno, ExtentId, ExtentStore};
 use common::{cache, copies, holds, memory, pattern};
 use std::os::fd::AsRawFd;

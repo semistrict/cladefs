@@ -369,7 +369,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             .collect()
     }
 
-    /// A framing past extentd's turn, as its daemon's log warns of it: its milliseconds, and its
+    /// A framing past cladefsd's turn, as its daemon's log warns of it: its milliseconds, and its
     /// phases', by name, as extent_store's timings say them, its threads' waits to run among them,
     /// `runnable` (TASK-336).
     #[derive(Debug, PartialEq)]
@@ -378,7 +378,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         phases: Vec<(String, f64)>,
     }
 
-    /// The framings of the daemon whose log is `log` past extentd's turn, as it warns of them.
+    /// The framings of the daemon whose log is `log` past cladefsd's turn, as it warns of them.
     fn slow_framings(log: &str) -> Vec<SlowFraming> {
         log.lines()
             .filter_map(|line| {

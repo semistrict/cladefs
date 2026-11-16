@@ -62,7 +62,7 @@ pub enum Mutant {
     /// Their readers' fill barrier (TASK-42.10): the window between a batch dropping what the
     /// kernel keeps of what it changes and applying it, and between its apply and its attributes
     /// set. A reader's fault maps an extent of the state before a batch after the batch let its
-    /// commit go: extentd refuses the window's map of the extent released (doc-8, testing 1), and
+    /// commit go: cladefsd refuses the window's map of the extent released (doc-8, testing 1), and
     /// the follower's VMM, which can't resolve the fault, aborts; or a reader finds a name the
     /// batch half applied; what its readers found is a wrong history.
     Barrier,
@@ -273,8 +273,8 @@ mod host {
         Ok(std::thread::spawn(move || {
             let control = match &store {
                 Some(_) => {
-                    let extentd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
-                    Some(crate::common::control(Path::new(&extentd))?)
+                    let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
+                    Some(crate::common::control(Path::new(&cladefsd))?)
                 }
                 None => None,
             };
@@ -393,7 +393,7 @@ mod host {
                 None => "OK writer\nOK follower1\nOK follower2\nOK history\n",
                 Some(Mutant::Nested) => "OK writer\nHUNG follower1\nHUNG follower2\nOK history\n",
                 // How a mutant's followers fail depends on the schedule: a reader finds a page
-                // stale (STALE), a fault maps an extent a batch let go of, which extentd refuses
+                // stale (STALE), a fault maps an extent a batch let go of, which cladefsd refuses
                 // and the VMM aborts on (ABORTED), or a reader finds what it can't, and stops (no
                 // line). Caught, none passes, and what they read is a wrong history.
                 Some(Mutant::Drop | Mutant::DropFaults | Mutant::Barrier) => {

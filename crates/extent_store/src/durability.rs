@@ -34,12 +34,12 @@ pub(crate) struct Durability<T> {
 /// cladefs: how long commits waited, from being ordered, which a daemon answers a guest's `COMMIT`
 /// on, until a flush made them durable, in this process: so many, the longest, and so many within
 /// each power of two of milliseconds, the first those within one (TASK-165.9: doc-2's requirement
-/// 11 bounds it, at 50 ms of extentd's turns).
+/// 11 bounds it, at 50 ms of cladefsd's turns).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Lags {
     pub count: u64,
     pub max_us: u64,
-    /// cladefs: those within extentd's turn, 50 ms: doc-12's median holds while they are half of
+    /// cladefs: those within cladefsd's turn, 50 ms: doc-12's median holds while they are half of
     /// them at least (TASK-221).
     pub within_turn: u64,
     /// Bucket `i`: within 2^i ms (`i` 0: within 1 ms), the last all beyond.
@@ -73,7 +73,7 @@ impl Lags {
         self.within_turn += u64::from(us <= 50_000);
         if us > self.max_us {
             self.max_us = us;
-            // The longest yet, past extentd's turn: said as it happens, which a daemon killed
+            // The longest yet, past cladefsd's turn: said as it happens, which a daemon killed
             // leaves in its log.
             if us > 50_000 {
                 log::warn!("extent store: a commit durable {lag:?} after it was ordered");
@@ -454,7 +454,7 @@ mod tests {
     }
 
     /// Lags count each commit within the least power of two of milliseconds holding it, the
-    /// longest exactly; their quantiles are those buckets' bounds; and those within extentd's
+    /// longest exactly; their quantiles are those buckets' bounds; and those within cladefsd's
     /// turn, 50 ms, exactly.
     #[test]
     fn lags_are_counted_in_powers_of_two_of_milliseconds() {

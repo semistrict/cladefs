@@ -11,7 +11,7 @@
 //! does. It unmounts, which closes the connection: a new writer opens the store, as of its last
 //! commit, and writes on; and the follower mounts again, on a connection of its own, and follows
 //! that writer. Last, the host kills the daemon: the follower's VM, on that new connection, exits
-//! with status 158 (`ExtentdLost`), as the VM of one that never reopened does.
+//! with status 158 (`CladefsdLost`), as the VM of one that never reopened does.
 
 use macros::{guest, host};
 
@@ -51,8 +51,8 @@ mod host {
     use std::time::{Duration, Instant};
 
     const CAPACITY: u64 = 256 << 20;
-    /// What cladefs's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
-    const EXTENTD_LOST: i32 = 158;
+    /// What cladefs's Firecracker exits with when its daemon's connection ends (`CladefsdLost`).
+    const CLADEFSD_LOST: i32 = 158;
     /// How long a VM takes at most to exit once its daemon is gone.
     const BOUND: Duration = Duration::from_secs(10);
     /// How long the daemon takes at most to let go of a store its last connection closed.
@@ -69,7 +69,7 @@ mod host {
         setup: &'a TestSetup,
         root: &'a Path,
         store: &'a Path,
-        extentd: &'a Path,
+        cladefsd: &'a Path,
     }
 
     impl Place<'_> {
@@ -91,9 +91,9 @@ mod host {
                 0
             };
             if read_only {
-                vm.extent_store_following_served("extents", self.store, window, self.extentd);
+                vm.extent_store_following_served("extents", self.store, window, self.cladefsd);
             } else {
-                vm.extent_store_served("extents", self.store, CAPACITY, window, self.extentd);
+                vm.extent_store_served("extents", self.store, CAPACITY, window, self.cladefsd);
             }
             vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.vsock(&uds);
@@ -126,7 +126,7 @@ mod host {
         }
     }
 
-    /// Waits for `firecracker`'s VM, `name`, to exit `EXTENTD_LOST`, its daemon `killed`.
+    /// Waits for `firecracker`'s VM, `name`, to exit `CLADEFSD_LOST`, its daemon `killed`.
     fn lost(mut firecracker: Firecracker, name: &str, killed: Instant) -> anyhow::Result<()> {
         while firecracker.running()? {
             if killed.elapsed() > BOUND {
@@ -140,8 +140,8 @@ mod host {
         }
         let (status, console) = firecracker.wait()?;
         anyhow::ensure!(
-            status.code() == Some(EXTENTD_LOST),
-            "{name}'s VM exited {status} (signal {:?}), not {EXTENTD_LOST}: see {}",
+            status.code() == Some(CLADEFSD_LOST),
+            "{name}'s VM exited {status} (signal {:?}), not {CLADEFSD_LOST}: see {}",
             status.signal(),
             console.display()
         );
@@ -152,14 +152,14 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let root = setup_rootfs(test_setup)?;
             let store = test_setup.tmp_dir.join("store");
-            let extentd = socket("extentd.sock");
-            let mut daemon = spawn_daemon(test_setup, &extentd, "extentd", &[], None)?;
+            let cladefsd = socket("cladefsd.sock");
+            let mut daemon = spawn_daemon(test_setup, &cladefsd, "cladefsd", &[], None)?;
             let place = Place {
                 test: self,
                 setup: test_setup,
                 root: &root,
                 store: &store,
-                extentd: &extentd,
+                cladefsd: &cladefsd,
             };
 
             let (mut writer, listener) = place.boot("writer", "writer", false)?;

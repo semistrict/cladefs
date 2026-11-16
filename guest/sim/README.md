@@ -112,7 +112,7 @@ It can't find:
 - **Real page tables.** TLB shootdowns, PTE races with hardware, `get_user_pages`' own races
   (its fast walk, a pin taken as a mapping goes), KVM's stage 2, async page faults, userfaultfd:
   all outside it. A pin is a reference a test takes and drops.
-- **The host.** extentd, uffd and the VMM are fakes here.
+- **The host.** cladefsd, uffd and the VMM are fakes here.
 - **Fxfs.** Journal, compaction, crash recovery, and whatever the model gets wrong that
   `crates/fxfs-sim-diff`, which runs the model beside Fxfs, doesn't find ("The model against Fxfs").
 - **Lock order inversions that no seed plays out:** there is no lockdep graph.

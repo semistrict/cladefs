@@ -59,17 +59,17 @@ mod host {
     }
 
     /// A VM, its guest in role `role` (`base` or `map`), on the store at `store`, of `capacity`
-    /// bytes, which the daemon at `extentd` serves, with a DAX window of `window` bytes if not 0.
+    /// bytes, which the daemon at `cladefsd` serves, with a DAX window of `window` bytes if not 0.
     fn machine(
         role: &str,
         store: &Path,
-        extentd: &Path,
+        cladefsd: &Path,
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<Vm> {
         let mut vm = Vm::new(2, memory()?)?;
         vm.guest_kernel()?;
-        vm.extent_store_served("extents", store, capacity, window, extentd);
+        vm.extent_store_served("extents", store, capacity, window, cladefsd);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_ROLE={role}"))?);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_BYTES={}", file_bytes()?))?);
         for var in ["CLADEFS_BIGMAP_READ_SECS", "CLADEFS_BIGMAP_WRITE_PERCENT"] {
@@ -108,13 +108,13 @@ mod host {
             // Its socket's path short, as Unix sockets' must be; its metrics, which say what its
             // memory holds.
             let sockets = tempdir::TempDir::new("cladefs-bigmap")?;
-            let socket = sockets.path().join("extentd.sock");
+            let socket = sockets.path().join("cladefsd.sock");
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
             let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
             // The file whole in its memory, as a host keeps a base's pages for its forks, and room.
             let memory = Some(bytes + (2 << 30));
-            let daemon = crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, memory)?;
+            let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, memory)?;
             // The file, what the fork writes again of it, and room.
             let capacity = 2 * bytes + (4 << 30);
             let base = dir.join("base");

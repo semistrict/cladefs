@@ -37,7 +37,7 @@
 #
 # The guests' extent stores are served by cladefs's extent daemon, which this
 # starts, as CLADEFSD tells the tests; its control API is beside it, at
-# extentd.control, in a directory of their own under /tmp. CLADEFSD_MEMORY
+# cladefsd.control, in a directory of their own under /tmp. CLADEFSD_MEMORY
 # caps its memory, in bytes. cladefs: every store of the run is encrypted, under a local KMS of the
 # run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
 # below). LIBCLANG_PATH names libclang's directory where
@@ -147,15 +147,15 @@ fi
 
 # With frame pointers, as every build here has them (.cargo/config.toml), which the bench's perf
 # call graphs walk (CLADEFS_BENCH_PERF). With CLADEFS_FAILPOINTS, a daemon whose failpoints it sets (FAILPOINTS, the fail crate's): requests
-# failing or waiting as it says, such as extentd::map=1%return(5) (TASK-44.10); with CLADEFS_FAULT_SEED, those of a
+# failing or waiting as it says, such as cladefsd::map=1%return(5) (TASK-44.10); with CLADEFS_FAULT_SEED, those of a
 # fork's steps its seed says (cladefs::faults); with CLADEFSD_FAILPOINTS=1, one built with them,
 # none set, for cases that set their own daemons' (fxfs-guest-soak, TASK-67): in the sim profile
 # (release with debug assertions), a test's build, as a release build, a measurement's, refuses
 # failpoints (extent_bucket, TASK-320).
-extentd_features=() extentd_profile=release
+cladefsd_features=() cladefsd_profile=release
 seccomp=${CLADEFS_FIRECRACKER_SECCOMP:-real}
 if [[ -n $prebuilt ]]; then
-    extentd_bin="$prebuilt/cladefsd"
+    cladefsd_bin="$prebuilt/cladefsd"
     export CLADEFSCTL_BIN="$prebuilt/cladefsctl" CLADEFS_GC_BIN="$prebuilt/cladefs-gc"
     export CLADEFS_FIRECRACKER="$prebuilt/firecracker"
     export CLADEFS_GUEST_AGENT="$harness_artifacts/guest-agent"
@@ -164,20 +164,20 @@ if [[ -n $prebuilt ]]; then
     fi
 fi
 if [[ -z $prebuilt && -n ${CLADEFS_FAILPOINTS:-}${CLADEFS_FAULT_SEED:-}${CLADEFSD_FAILPOINTS:-} ]]; then
-    extentd_features=(--features failpoints) extentd_profile=sim
+    cladefsd_features=(--features failpoints) cladefsd_profile=sim
 fi
 # The run's directory, by which a case that goes on from repeat to repeat keys what it keeps
 # (fxfs-guest-soak).
 export CLADEFS_E2E_RUN="$results"
 if [[ -z $prebuilt ]]; then
-(cd "$root" && cargo build --profile "$extentd_profile" -p cladefs --bin cladefsd \
-    --bin cladefsctl ${extentd_features[@]+"${extentd_features[@]}"})
+(cd "$root" && cargo build --profile "$cladefsd_profile" -p cladefs --bin cladefsd \
+    --bin cladefsctl ${cladefsd_features[@]+"${cladefsd_features[@]}"})
 root_target=$(target_dir "$root")
-extentd_bin="$root_target/$extentd_profile/cladefsd"
+cladefsd_bin="$root_target/$cladefsd_profile/cladefsd"
 # cladefs: cladefsctl, beside it, for cases that run it against the daemon (fxfs-guest-stats,
 # TASK-111.4); and the bucket's collector, cladefs-gc, for those that collect their bucket
 # (fxfs-guest-soak).
-export CLADEFSCTL_BIN="$root_target/$extentd_profile/cladefsctl"
+export CLADEFSCTL_BIN="$root_target/$cladefsd_profile/cladefsctl"
 (cd "$root" && cargo build --release -p extent_bucket --bin cladefs-gc)
 export CLADEFS_GC_BIN="$root_target/release/cladefs-gc"
 # As cladefs builds it, with its cladefs feature (scripts/firecracker-cargo.sh), in the copy of
@@ -339,7 +339,7 @@ fi
 if [[ -n $build_only ]]; then
     mkdir -p "$build_only"
     artifacts=(runner guest-agent cladefsd cladefsctl cladefs-gc firecracker)
-    cp "$runner" "$CLADEFS_GUEST_AGENT" "$extentd_bin" "$CLADEFSCTL_BIN" "$CLADEFS_GC_BIN" \
+    cp "$runner" "$CLADEFS_GUEST_AGENT" "$cladefsd_bin" "$CLADEFSCTL_BIN" "$CLADEFS_GC_BIN" \
         "$CLADEFS_FIRECRACKER" "$build_only/"
     if [[ -n ${CLADEFS_FIRECRACKER_JAILER:-} ]]; then
         cp "$CLADEFS_FIRECRACKER_JAILER" "$build_only/"
@@ -355,12 +355,12 @@ if [[ -n $build_only ]]; then
 fi
 # Its sockets in a directory of their own under /tmp, not the results': a socket's path is
 # 107 bytes at most (SUN_LEN), which a host run's results nested deeper passed, and the daemon
-# exited ("listening at .../results/main-r1/sandboxes/extentd.control: path must be shorter than
+# exited ("listening at .../results/main-r1/sandboxes/cladefsd.control: path must be shorter than
 # SUN_LEN", TASK-330.4's A/B). Reachable by others, as a jailed VM's user must reach the socket.
 sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)
 chmod 755 "$sockets"
-socket="$sockets/extentd.sock"
-control="$sockets/extentd.control"
+socket="$sockets/cladefsd.sock"
+control="$sockets/cladefsd.control"
 # cladefs: the run's stores encrypted, as production's tenants' are (TASK-411.15, doc-16): the guest
 # tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the
 # sockets, gone with them, not in the results, which runs keep, holding a KEK for every tenant the
@@ -376,13 +376,13 @@ control="$sockets/extentd.control"
 # neither reads the other's stores: what each run was is in encryption.txt.
 kms_dir="$sockets/kms"
 old_daemon='' old_runner=''
-grep -qa CLADEFS_KMS "$extentd_bin" || old_daemon=1
+grep -qa CLADEFS_KMS "$cladefsd_bin" || old_daemon=1
 "$runner" kms --help > /dev/null 2>&1 || old_runner=1
 if [[ -n $old_daemon && -n $old_runner ]]; then
-    echo "clear: $extentd_bin and $runner predate encryption (no CLADEFS_KMS, no \`runner kms\`)" \
+    echo "clear: $cladefsd_bin and $runner predate encryption (no CLADEFS_KMS, no \`runner kms\`)" \
         > "$results/encryption.txt"
 elif [[ -n $old_daemon$old_runner ]]; then
-    echo "$extentd_bin and $runner: one predates encryption, the other encrypts every store" \
+    echo "$cladefsd_bin and $runner: one predates encryption, the other encrypts every store" \
         "(TASK-411.28): run a daemon and a harness of one pin" >&2
     exit 1
 else
@@ -411,43 +411,43 @@ if [[ -z ${CLADEFSD_BUCKET:-} ]]; then
 fi
 cache_dir=
 if [[ -z ${CLADEFSD_PART_CACHE+set} ]]; then
-    cache_dir=$(mktemp -d "$results/.extentd-cache.XXXXXX")
+    cache_dir=$(mktemp -d "$results/.cladefsd-cache.XXXXXX")
 fi
 # cladefs: CLADEFSD_MEMORY_MAX runs the daemon in a systemd scope of its own, limited to that
 # many bytes of memory (systemd's MemoryMax, no swap), its cgroup killing it past them, and keeps
-# the most it held, memory.peak, in extentd-memory-peak.txt as the run ends: what the daemon's
+# the most it held, memory.peak, in cladefsd-memory-peak.txt as the run ends: what the daemon's
 # memory budget is measured against (TASK-317). CLADEFSD_WRAP, a command and its arguments,
 # runs the daemon under it, such as a heap profiler (`heaptrack -o DIR/heap`).
-extentd_scope=
-extentd_run=()
+cladefsd_scope=
+cladefsd_run=()
 if [[ -n ${CLADEFSD_MEMORY_MAX:-} ]]; then
-    extentd_scope="cladefs-e2e-extentd-$$.scope"
-    extentd_run=(systemd-run --scope --quiet --collect --unit="$extentd_scope"
+    cladefsd_scope="cladefs-e2e-cladefsd-$$.scope"
+    cladefsd_run=(systemd-run --scope --quiet --collect --unit="$cladefsd_scope"
         -p MemoryMax="$CLADEFSD_MEMORY_MAX" -p MemorySwapMax=0 --)
 fi
-read -r -a extentd_wrap <<< "${CLADEFSD_WRAP:-}"
+read -r -a cladefsd_wrap <<< "${CLADEFSD_WRAP:-}"
 # The most the daemon's scope held, kept before the daemon goes, whose scope goes with it; and the
 # scope stopped, its every process with it, as a wrapper (heaptrack's script) may outlive the kill.
-extentd_peak() {
-    [[ -n $extentd_scope ]] || return 0
-    systemctl show -P MemoryPeak "$extentd_scope" > "$results/extentd-memory-peak.txt" || true
+cladefsd_peak() {
+    [[ -n $cladefsd_scope ]] || return 0
+    systemctl show -P MemoryPeak "$cladefsd_scope" > "$results/cladefsd-memory-peak.txt" || true
 }
-extentd_stop() {
-    [[ -n $extentd_scope ]] || return 0
-    systemctl stop "$extentd_scope" 2> /dev/null || true
+cladefsd_stop() {
+    [[ -n $cladefsd_scope ]] || return 0
+    systemctl stop "$cladefsd_scope" 2> /dev/null || true
 }
-${extentd_run[@]+"${extentd_run[@]}"} \
+${cladefsd_run[@]+"${cladefsd_run[@]}"} \
 env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
-    CLADEFSD_STATS="$results/extentd-stats.txt" CLADEFSD_GRPC="$control" \
-    FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${extentd_wrap[@]+"${extentd_wrap[@]}"} "$extentd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
-    > "$results/extentd.log" 2>&1 &
+    CLADEFSD_STATS="$results/cladefsd-stats.txt" CLADEFSD_GRPC="$control" \
+    FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
+    > "$results/cladefsd.log" 2>&1 &
 daemon=$!
-trap 'extentd_peak; kill "$daemon" 2> /dev/null; extentd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"' EXIT
+trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"' EXIT
 while [[ ! -S $socket || ! -S $control ]]; do
     if ! kill -0 "$daemon" 2> /dev/null; then
-        echo "the extent daemon exited: see $results/extentd.log" >&2
+        echo "the extent daemon exited: see $results/cladefsd.log" >&2
         exit 1
     fi
     sleep 0.1
@@ -458,7 +458,7 @@ if [[ -n ${CLADEFS_FIRECRACKER_JAIL:-} ]]; then
 fi
 export CLADEFSD="$socket"
 # cladefs: the daemon's binary, for cases that start daemons of their own.
-export CLADEFSD_BIN="$extentd_bin"
+export CLADEFSD_BIN="$cladefsd_bin"
 
 status=0
 for test in "${tests[@]}"; do
@@ -517,7 +517,7 @@ fi
 # cladefs: the guest stores the DAX windows refused: the guest and the window disagreeing, which fails
 # the run (TASK-44.12). Not a kernel worker's, the VM processes' logs saying whose (TASK-150.16).
 mapfile -t firecracker_logs < <(find "$results" -name firecracker.log)
-if ! "$root/scripts/dax-refusals.py" "$results/extentd.log" "${firecracker_logs[@]}" \
+if ! "$root/scripts/dax-refusals.py" "$results/cladefsd.log" "${firecracker_logs[@]}" \
     > "$results/unexplained-refusals.txt"; then
     echo "the DAX window refused a guest's stores: see $results/unexplained-refusals.txt" >&2
     status=1
@@ -526,7 +526,7 @@ fi
 # retried until it is answered, holding its guests' commits at the lag bound meanwhile. The run's
 # own file bucket, on tmpfs, fails only once that is full, its cases then hanging until the runner
 # times them out: the run fails, saying so.
-grep -E "object storage: [a-z-]+ requests (failing|still failing)" "$results/extentd.log" \
+grep -E "object storage: [a-z-]+ requests (failing|still failing)" "$results/cladefsd.log" \
     > "$results/bucket-failures.txt" || true
 if [[ -s $results/bucket-failures.txt ]]; then
     echo "the bucket failed requests, each retried: see $results/bucket-failures.txt; the first:" >&2
@@ -543,7 +543,7 @@ fi
 # for each guest byte, by kind. The run's own daemon's bucket, a file bucket on tmpfs, writes no
 # disk.
 budgets=()
-[[ -z $bucket_dir ]] || budgets=(--bucket-in-memory "$results/extentd-stats.txt")
+[[ -z $bucket_dir ]] || budgets=(--bucket-in-memory "$results/cladefsd-stats.txt")
 if ! "$root/scripts/budgets.py" ${budgets[@]+"${budgets[@]}"} "$results"; then
     echo "an extent daemon past its budget: see $results/budgets.json" >&2
     status=1

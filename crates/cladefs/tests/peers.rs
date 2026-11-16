@@ -10,7 +10,7 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::extentd::control::Client;
+use cladefs::cladefsd::control::Client;
 use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -42,7 +42,7 @@ struct Daemon {
 /// part cache in `dir`; serving its peers at `peers`' first address, and asking them all, if given.
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let (vms, control, stats) =
-        (dir.join("extentd.sock"), dir.join("control.sock"), dir.join("stats"));
+        (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("stats"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
@@ -205,7 +205,7 @@ fn peers_are_set_at_runtime() {
 fn a_cache_budget_the_daemon_cant_take_stops_it() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
-        .arg(dir.path().join("extentd.sock"))
+        .arg(dir.path().join("cladefsd.sock"))
         .env("CLADEFSD_BUCKET", format!("file://{}/", dir.path().display()))
         .env("CLADEFSD_TOKEN", "1")
         .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))

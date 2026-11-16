@@ -13,7 +13,7 @@
 # (`# Killer: scripts/sandboxes.sh short`, guests on KVM, TASK-330.1), which builds what it runs:
 # killed if it exits 1, a run that failed, MISSED if 0, BROKEN otherwise, a run it couldn't set
 # up; its fate says the checks it says failed. This fails unless each is killed. Linux alone, as
-# extentd is.
+# cladefsd is.
 #
 #   mutants.sh [--check] [-c CASES] [NAME...]
 #

@@ -333,7 +333,7 @@ fn tenant_sockets_work_bind_mounted_into_jails() {
     let socket = daemon.grant(1, &acme, Some(uid)).unwrap();
     let jail = dir.path().join("jail");
     std::fs::create_dir(&jail).unwrap();
-    let jail_socket = jail.join("extentd.sock");
+    let jail_socket = jail.join("cladefsd.sock");
     std::fs::write(&jail_socket, b"").unwrap();
     let store = acme.join("vm");
 
@@ -791,7 +791,7 @@ fn refuses_other_users(test: &str, jailed: fn(Sockets) -> PathBuf) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     };
     everyone(dir.path(), 0o755);
-    let (vms, control) = (dir.path().join("extentd.sock"), dir.path().join("extentd.control"));
+    let (vms, control) = (dir.path().join("cladefsd.sock"), dir.path().join("cladefsd.control"));
     let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     daemon.arg(&vms).env("CLADEFSD_GRPC", &control);
     daemon.env("CLADEFSD_BUCKET", "memory:///branches").env("CLADEFSD_TOKEN", "1");
@@ -816,7 +816,7 @@ fn refuses_other_users(test: &str, jailed: fn(Sockets) -> PathBuf) {
     let jail = dir.path().join("jail");
     std::fs::create_dir(&jail).unwrap();
     everyone(&jail, 0o755);
-    let jail_socket = jail.join("extentd.sock");
+    let jail_socket = jail.join("cladefsd.sock");
     std::fs::write(&jail_socket, b"").unwrap();
     let script = r#"mount --bind "$1" "$2" && exec env "$3" "$4" "$5" --exact "$6" --nocapture"#;
     let status = std::process::Command::new("sudo")

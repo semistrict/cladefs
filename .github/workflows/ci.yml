@@ -113,7 +113,7 @@ jobs:
       # scripts/lima-setup.sh gives it to the kvm group.
       - name: Let the tests use userfaultfd
         run: sudo setfacl -m "u:$USER:rw" /dev/userfaultfd
-      # The tests' stores on the root disk, which has room: in /tmp, three extentd tests ran out of
+      # The tests' stores on the root disk, which has room: in /tmp, three cladefsd tests ran out of
       # it (ENOSPC).
       - name: Give the tests' files room
         run: |
@@ -256,7 +256,7 @@ jobs:
         run: scripts/test-openbao.sh --no-fail-fast
 
   # TASK-330.3: the extent daemon against a degraded bucket, five minutes of it, its VM processes
-  # writing all the while (extentd::tests::soak): its memory within its budget, the bucket's
+  # writing all the while (cladefsd::tests::soak): its memory within its budget, the bucket's
   # failures said, commits waiting at the lag bound and none failing, everything uploaded once the
   # bucket answers, no VM process let go. The workspace's suite leaves it out, as it would outlast
   # it; Hunt runs it for half an hour each night. On the root disk, which has room for what it
@@ -298,7 +298,7 @@ jobs:
       - name: The daemon against a degraded bucket, five minutes
         run: >-
           cargo nextest run -p cladefs --lib --run-ignored all --no-capture
-          -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
+          -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
   # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
   # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the

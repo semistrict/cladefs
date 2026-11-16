@@ -2,12 +2,12 @@
 
 For whoever operates cladefs hosts: how a host's `cladefsd` and Firecracker are upgraded, and what
 a format change refuses on the way. The design behind it is backlog doc-11 (TASK-141); the VM
-manager's calls named here are `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`'s.
+manager's calls named here are `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto`'s.
 
 ## Why a drain
 
 The daemon holds its VMs' memory, their stores and their connections, and hands none of it to
-another process. When it exits, every VM on the host exits with 158 (`ExtentdLost`). So a daemon
+another process. When it exits, every VM on the host exits with 158 (`CladefsdLost`). So a daemon
 is upgraded by emptying its host first: its VMs move to other hosts or stop, and only then does the
 daemon stop.
 
@@ -28,6 +28,14 @@ Read the release's notes for which of these changed. Each one changed means what
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
 
+Names change too, refused the same way, never read under both. Since TASK-501 the control API is
+`cladefs.cladefsd.v1.Cladefsd` (Go: `go/cladefsd/v1`), not `cladefs.extentd.v1.Extentd`, whose
+calls a new daemon answers `UNIMPLEMENTED`; and Firecracker's API says `cladefs`: `PUT
+/cladefs/{id}`, a configuration file's `cladefs` list, `cladefs_overrides` and `cladefsd_socket`.
+A configuration file still saying `extent` is refused, naming `cladefs`; `PUT /extent/{id}` is an
+unknown path; `extentd_socket` and `extent_overrides` are unknown fields. A VM manager is upgraded
+with the host's build. The VM snapshots and stores are unchanged.
+
 A wire or device protocol change alone leaves stores and branches readable: VMs move by snapshot
 to a host of the new build only if the device protocol is the same, and stop and boot again there
 otherwise. A store or bucket format change means its stores are made again, not upgraded.
@@ -40,7 +48,7 @@ otherwise. A store or bucket format change means its stores are made again, not 
    integrator guide's "Restoring a snapshot" has the calls. Stop a VM whose tenant accepts that.
    Followers go with or after their writer. When the host is empty, its daemon's `/metrics` says
    `cladefsd_connections 0`.
-3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::extentd::drain`, TASK-141.4):
+3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::cladefsd::drain`, TASK-141.4):
    - its health service reports NOT_SERVING;
    - its VM sockets refuse connections, and its control API refuses calls with `UNAVAILABLE`;
    - any VM still connected is cut off and exits 158, its last commits made local and its store

@@ -104,7 +104,7 @@ impl Vm {
             },
             "drives": [],
             "pmem": [],
-            "extent": [],
+            "cladefs": [],
         });
         Ok(Self {
             config,
@@ -140,8 +140,8 @@ impl Vm {
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-        self.extent_store_served(tag, path, capacity, window, Path::new(&extentd));
+        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+        self.extent_store_served(tag, path, capacity, window, Path::new(&cladefsd));
         Ok(())
     }
 
@@ -154,48 +154,48 @@ impl Vm {
         path: &Path,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-        self.extent_store_following_served(tag, path, window, Path::new(&extentd));
+        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+        self.extent_store_following_served(tag, path, window, Path::new(&cladefsd));
         Ok(())
     }
 
     /// Adds a device as [`Vm::extent_store_following`] does, served by the extent daemon at
-    /// `extentd`.
+    /// `cladefsd`.
     pub fn extent_store_following_served(
         &mut self,
         tag: &str,
         path: &Path,
         window: u64,
-        extentd: &Path,
+        cladefsd: &Path,
     ) {
-        self.extent_store_served(tag, path, 0, window, extentd);
-        let devices = self.config["extent"].as_array_mut().expect("an array");
+        self.extent_store_served(tag, path, 0, window, cladefsd);
+        let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("the device added")["read_only"] = true.into();
     }
 
     /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
     pub fn extent_store_unsafe(&mut self) {
-        let devices = self.config["extent"].as_array_mut().expect("an array");
+        let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("a device added")["cache_type"] = "Unsafe".into();
     }
 
     /// Adds an extent-store device as [`Vm::extent_store`] does, served by the extent daemon at
-    /// `extentd`.
+    /// `cladefsd`.
     pub fn extent_store_served(
         &mut self,
         tag: &str,
         path: &Path,
         capacity: u64,
         window: u64,
-        extentd: &Path,
+        cladefsd: &Path,
     ) {
         let mut device = serde_json::json!({
             "id": tag,
             "tag": tag,
             "path_on_host": path,
             "capacity": capacity,
-            "extentd_socket": extentd,
+            "cladefsd_socket": cladefsd,
         });
         if window != 0 {
             device["dax_window_size"] = window.into();
@@ -208,7 +208,7 @@ impl Vm {
                 device["dax_private_max"] = most.into();
             }
         }
-        push(&mut self.config["extent"], device);
+        push(&mut self.config["cladefs"], device);
     }
 
     /// Adds a writable virtio-pmem device on `image`, and returns its device in the guest.
@@ -670,7 +670,7 @@ fn kill_on_line(
             // SAFETY: A plain system call, of a process of this test's.
             anyhow::ensure!(unsafe { nix::libc::kill(daemon as i32, nix::libc::SIGKILL) } == 0);
             let status = child.wait()?;
-            anyhow::ensure!(status.code() == Some(158), "the VM exited {status}, not ExtentdLost");
+            anyhow::ensure!(status.code() == Some(158), "the VM exited {status}, not CladefsdLost");
             return Ok(None);
         }
     }

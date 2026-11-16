@@ -90,7 +90,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `cache.rs` holds the cache of sealed extents' pages, shared by every store
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
-- `extentd/` holds the daemon (`bin/cladefsd.rs`) and its client,
+- `cladefsd/` holds the daemon (`bin/cladefsd.rs`) and its client,
   `DaemonExtentStore`, which a VMM's device is; see `architecture.md`, The extent daemon.
 - `dax.rs` holds DAX windows, their mappings and the pages they have mapped,
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
@@ -184,22 +184,23 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.16.1-r8` of
-[semistrict/firecracker](https://github.com/semistrict/firecracker), Firecracker's
-v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one linear series,
-each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2, TASK-273, the one
-with the extent device over virtio-PCI alone; r8, TASK-437, r7 renamed, the
-releases before it named `fxdax-v1.16.1-rN`). Its first commits are general
-fixes, each standing alone, among them the PCI transport's shared memory
-regions; everything else is behind its `cladefs` feature, so that a build without
-it is upstream's. Every cladefs VM, on x86-64 and aarch64 alike, runs its devices
-on virtio-PCI (`--enable-pci`): the extent device's DAX window is a BAR of its
-own, which upstream's MMIO transport has no way to describe, so a VM with the
-device on MMIO does not start (TASK-267, TASK-273). Every commit builds both
-ways (`scripts/firecracker-series-check.sh`, CI's firecracker-series job). The
-series names no cladefs dependency and holds none of cladefs's in its Cargo.lock,
-so that it builds outside this checkout, as those who take it onto forks of
-their own build it: cladefs's build supplies them, in a copy of the tree,
+The VMM is a submodule: branch `cladefs-v1.16.1-r9` of
+[semistrict/firecracker](https://github.com/semistrict/firecracker),
+Firecracker's v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one
+linear series, each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2,
+TASK-273, the one with the extent device over virtio-PCI alone; r8, TASK-437, r7
+renamed, the releases before it named `fxdax-v1.16.1-rN`; r9, TASK-501, r8 with
+its API saying cladefs). Its first commits are general fixes, each standing
+alone, among them the PCI transport's shared memory regions; everything else is
+behind its `cladefs` feature, so that a build without it is upstream's. Every
+cladefs VM, on x86-64 and aarch64 alike, runs its devices on virtio-PCI
+(`--enable-pci`): the extent device's DAX window is a BAR of its own, which
+upstream's MMIO transport has no way to describe, so a VM with the device on
+MMIO does not start (TASK-267, TASK-273). Every commit builds both ways
+(`scripts/firecracker-series-check.sh`, CI's firecracker-series job). The series
+names no cladefs dependency and holds none of cladefs's in its Cargo.lock, so
+that it builds outside this checkout, as those who take it onto forks of their
+own build it: cladefs's build supplies them, in a copy of the tree,
 `target/firecracker` (`scripts/firecracker-cargo.sh`, which every script that
 builds Firecracker goes through): the vmm crate's dependency on
 `crates/cladefs`, cladefs's lock (`vendor/firecracker.lock`, which
@@ -208,8 +209,8 @@ repo's `.cargo/config.toml`. The series' own `resources/cladefs/README.md` says
 the same for its users. Branch `fxdax-v1.16.1`, the series before, a commit a
 change, `fxdax`, on Firecracker's main branch, where they began, r1's
 `fxdax-v1.16.1-optin` and its PCI stack, `fxdax-pci-r1`, are superseded by it
-(`vendor/firecracker.rewrites`). cladefs ran on libkrun before;
-it left it for Firecracker, which the sandboxes it serves run (TASK-40).
+(`vendor/firecracker.rewrites`). cladefs ran on libkrun before; it left it for
+Firecracker, which the sandboxes it serves run (TASK-40).
 
 The workspace builds with it checked out (`git submodule update --init`): on
 Linux, cladefs's tests compile its production seccomp filters, upstream's
@@ -221,12 +222,12 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 
 | Change | Why |
 |---|---|
-| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::DaemonExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
+| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /cladefs/{id}` before boot, or the configuration file's `cladefs` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`cladefsd_socket`). Its store is served by the daemon (`cladefs::DaemonExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
 | Virtio shared memory regions on the PCI transport, a BAR with `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities (a general fix), and `KvmMemSlot`, a KVM memory slot any device may map host memory with. | The device's DAX window is a shared memory region, the daemon's memory mapped in; KVM follows it. |
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see `architecture.md`, DAX on Linux (TASK-25.4). |
 | `WRITE_COMMIT`, INFO's `sequence_floor`, and the store's capacity in the device's configuration, changed while the guest runs. | doc-4's requests (TASK-36, TASK-37). |
-| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `extent_overrides` naming each restored VM's own store, forks it from that point and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's branch (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
+| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that point and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's branch (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
 
 ## `guest/`: Fxfs in the guest's kernel
 

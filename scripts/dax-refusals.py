@@ -15,7 +15,7 @@ access decides. The logs hold each first thousand refusals and every power of tw
 vCPU's stays refused until its VM stops, so that one past that shows. Given the daemon's log
 alone, which can't say whose a store was, every store it refused fails the run.
 
-Usage: scripts/dax-refusals.py EXTENTD_LOG [FIRECRACKER_LOG...]
+Usage: scripts/dax-refusals.py CLADEFSD_LOG [FIRECRACKER_LOG...]
 
 prints each refused store that fails the run, as logged (its first line), and exits 1 if there are
 any.
@@ -26,7 +26,7 @@ import sys
 
 # The daemon's line for a store a window refused (`ExtentStore::refused`), with what the window
 # maps at the page and the extent's state in the store: not the line of what a refusal met later.
-REFUSED = re.compile(r"extentd: a store at DAX window offset (0x[0-9a-f]+) refused")
+REFUSED = re.compile(r"cladefsd: a store at DAX window offset (0x[0-9a-f]+) refused")
 
 
 # A VM process's line for a store the window refused, which names the thread that made it, and

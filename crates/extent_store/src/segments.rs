@@ -1349,7 +1349,7 @@ impl<F: File> Unframed<F> {
         let mut timing = Timing::since(Instant::now());
         // The extents stored on their own it names, durable before it is, as a flush syncs them,
         // several at once: one at a time, each a journal commit of the host's file system's, they
-        // held up for as long the syncs of the flushes of extentd's turns, which wait on the same
+        // held up for as long the syncs of the flushes of cladefsd's turns, which wait on the same
         // files, up to 0.9 s under pgbench (GCE r730, TASK-165.9).
         let mut own = Syncs::default();
         for (extent, _) in self.footer.own() {
