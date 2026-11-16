@@ -1826,7 +1826,7 @@ type GetCountersResponse struct {
 	CommitNs uint64 `protobuf:"varint,15,opt,name=commit_ns,json=commitNs,proto3" json:"commit_ns,omitempty"`
 	// Of those nanoseconds, committing the store.
 	CommitStoreNs uint64 `protobuf:"varint,18,opt,name=commit_store_ns,json=commitStoreNs,proto3" json:"commit_store_ns,omitempty"`
-	// Of those, waiting for object storage: for the upload of a durable commit, or for the uploads
+	// Of those, waiting for object storage: for the upload of a commit waiting for it, or for the uploads
 	// to come within the lag an ordered one allows.
 	CommitWaitNs uint64 `protobuf:"varint,20,opt,name=commit_wait_ns,json=commitWaitNs,proto3" json:"commit_wait_ns,omitempty"`
 	// Segments stores closed and framed.

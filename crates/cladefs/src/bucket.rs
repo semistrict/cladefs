@@ -184,7 +184,7 @@ pub struct Forgotten {
 /// KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays in
 /// memory: a halted store's own ring, and its open segment's key, until whoever holds it closes it
 /// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
-/// the pages of extents other stores hold too (a shared point's clone, a public base). On disk,
+/// the pages of extents other stores hold too (a shared point's fork, a public base). On disk,
 /// everything of the scope's is as its keys encrypted it: open segments, write-ahead logs, the part
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
@@ -3026,7 +3026,7 @@ mod tests {
     }
 
     /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
-    /// host's KMS: the point's clone into the other tenant's cell keeps the DEK it inherits
+    /// host's KMS: the point's fork into the other tenant's cell keeps the DEK it inherits
     /// rewrapped under its own cell's KEK. The point deleted, the collector run (compacting
     /// nothing: compaction of encrypted objects is TASK-411.6's), and the point's tenant's KEK
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks

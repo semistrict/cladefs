@@ -20,7 +20,7 @@ fn provider(exporter: &InMemorySpanExporter) -> SdkTracerProvider {
         .build()
 }
 
-/// Writes 2 blocks, reads them back and commits them durably, in a store a daemon serves, as a VM
+/// Writes 2 blocks, reads them back and commits them, uploaded,, in a store a daemon serves, as a VM
 /// process would: returns the store's branch.
 fn write_read_commit() -> crate::Branch {
     let dir = tempfile::tempdir().unwrap();

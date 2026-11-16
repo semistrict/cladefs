@@ -145,7 +145,7 @@ service Extentd {
   // otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
   // (FAILED_PRECONDITION), but a stopped store doesn't. No guest can ask for this.
   rpc AttachBase(AttachBaseRequest) returns (AttachBaseResponse);
-  // Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
+  // Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
   // as before a clean stop.
   rpc SyncStore(SyncStoreRequest) returns (SyncStoreResponse);
   // What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
@@ -536,7 +536,7 @@ message GetCountersResponse {
   reserved "commit_write_ns", "commit_written_bytes", "commit_seal_ns";
   // Of those nanoseconds, committing the store.
   uint64 commit_store_ns = 18;
-  // Of those, waiting for object storage: for the upload of a durable commit, or for the uploads
+  // Of those, waiting for object storage: for the upload of a commit waiting for it, or for the uploads
   // to come within the lag an ordered one allows.
   uint64 commit_wait_ns = 20;
   // Segments stores closed and framed.

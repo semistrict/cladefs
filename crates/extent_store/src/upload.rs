@@ -210,7 +210,7 @@ impl From<anyhow::Error> for Failure {
 /// How an uploader uploads.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// How long durable commits wait at most before they are uploaded.
+    /// How long local commits wait at most before they are uploaded.
     pub interval: Duration,
     /// How many commits may wait to be uploaded: the next waits, while object storage is out of
     /// reach, rather than the lag grow without bound (doc-7, decision 3).

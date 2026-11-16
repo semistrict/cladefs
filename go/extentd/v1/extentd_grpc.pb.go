@@ -191,7 +191,7 @@ type ExtentdClient interface {
 	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
 	// (FAILED_PRECONDITION), but a stopped store doesn't. No guest can ask for this.
 	AttachBase(ctx context.Context, in *AttachBaseRequest, opts ...grpc.CallOption) (*AttachBaseResponse, error)
-	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
+	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(ctx context.Context, in *SyncStoreRequest, opts ...grpc.CallOption) (*SyncStoreResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
@@ -593,7 +593,7 @@ type ExtentdServer interface {
 	// otherwise). The fork stays until the caller deletes it: a VM with it open keeps it from going
 	// (FAILED_PRECONDITION), but a stopped store doesn't. No guest can ask for this.
 	AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error)
-	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
+	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(context.Context, *SyncStoreRequest) (*SyncStoreResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
