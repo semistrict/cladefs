@@ -36,11 +36,11 @@ KEPT = [
     "CLADEFS_BUSYBOX",
     "CLADEFS_FIRECRACKER_SECCOMP_FILTER",
     "CLADEFS_FIRECRACKER_JAILER",
-    "CLADEFS_EXTENTD_GRPC",
-    "CLADEFS_EXTENTD_STATS",
-    "CLADEFS_EXTENTD_METRICS",
-    "CLADEFS_EXTENTD_ROOTS",
-    "CLADEFS_EXTENTD_TENANTS",
+    "CLADEFSD_GRPC",
+    "CLADEFSD_STATS",
+    "CLADEFSD_METRICS",
+    "CLADEFSD_ROOTS",
+    "CLADEFSD_TENANTS",
     "CLADEFS_BENCH_RESULTS",
 ]
 # The run host_command's tests name, and its directory on the host.
@@ -148,16 +148,16 @@ class HostCommand(unittest.TestCase):
         # Knobs for the host: where its stores keep their branches, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
-            "CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix",
+            "CLADEFSD_REMOTE": "s3://bucket/prefix",
             "CLADEFS_S3_URL": "s3://bucket/test",
-            "CLADEFS_EXTENTD_CACHE": "/cache",
+            "CLADEFSD_CACHE": "/cache",
             "CLADEFS_FIRECRACKER": "/laptop/firecracker",
         }
         self.assertEqual(
             self.host_command({**here, **host}, "test-linux-host.sh")[1],
             sorted(BASE + [
-                "CLADEFS_EXTENTD_CACHE=/cache",
-                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix",
+                "CLADEFSD_CACHE=/cache",
+                "CLADEFSD_REMOTE=s3://bucket/prefix",
                 "CLADEFS_FIRECRACKER=/laptop/firecracker",
                 "CLADEFS_S3_URL=s3://bucket/test",
             ]),
@@ -179,7 +179,7 @@ class HostCommand(unittest.TestCase):
                 ]
                 for path in (Path(parent, file) for file in files):
                     if path.suffix in [".rs", ".sh", ".py"] and path != HOST:
-                        read.update(re.findall(r"\bCLADEFS_\w+", path.read_text(errors="replace")))
+                        read.update(re.findall(r"\bCLADEFSD?_\w+", path.read_text(errors="replace")))
         self.assertEqual([name for name in KEPT if name not in read], [])
 
     def test_empty_values_are_not_sent(self):
@@ -201,17 +201,17 @@ class HostCommand(unittest.TestCase):
 
     def test_a_path_in_home_is_in_the_hosts(self):
         self.assertEqual(
-            self.host_command({"CLADEFS_EXTENTD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"CLADEFS_EXTENTD_CACHE={HOST_HOME}/cache"]),
+            self.host_command({"CLADEFSD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
+            sorted(BASE + [f"CLADEFSD_CACHE={HOST_HOME}/cache"]),
         )
 
     def test_the_callers_values_replace_this_machines(self):
         self.assertEqual(
             self.host_command(
-                {"CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
+                {"CLADEFSD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
                  # The run's own, which no caller's replaces.
                  "CLADEFS_HOST_WORK": "/laptop/work"},
-                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
                 "CLADEFS_MIGRATE_BUNDLE=~/run-x/bundle",
                 # Empty, unset there.
                 "CLADEFS_ZSTD_LEVEL=",
@@ -220,7 +220,7 @@ class HostCommand(unittest.TestCase):
             )[1:],
             (
                 sorted(BASE + [
-                    "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                    "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
                     f"CLADEFS_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
                 ]),
                 COMMAND + ["CLADEFS_NOT=an argument"],
@@ -276,7 +276,7 @@ if [[ $phase == build ]]; then exit 0; fi
 {{
     echo "$(basename "$0") $*"
     echo "source $source"
-    env | grep -E '^(CLADEFS_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
+    env | grep -E '^(CLADEFSD?_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
 }} > "$results/ran.txt"
 echo "ran $(basename "$0") $*"
 case ${{CLADEFS_FAKE_HOST:-}} in
@@ -978,12 +978,12 @@ class Drivers(unittest.TestCase):
         status, _, errors = fleet.run_driver(
             "test-host.sh", str(results),
             environment={"CLADEFS_E2E_TEST": "fxfs-guest --tag dax-gate",
-                         "CLADEFS_EXTENTD_REMOTE": "s3://bucket/p"})
+                         "CLADEFSD_REMOTE": "s3://bucket/p"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
         self.assertEqual(ran[0], "test-linux-host.sh fxfs-guest --tag dax-gate")
         run = (results / "run.txt").read_text().split()[1]
-        self.assertIn(f"CLADEFS_EXTENTD_REMOTE=s3://bucket/p/{run}", ran)
+        self.assertIn(f"CLADEFSD_REMOTE=s3://bucket/p/{run}", ran)
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
         self.assertEqual(fleet.runs(), [])
 
@@ -1168,8 +1168,8 @@ class Drivers(unittest.TestCase):
         self.assertEqual(a[1], b[1])
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
             self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
-            self.assertIn(f"CLADEFS_EXTENTD_TOKEN={token}", side)
-            self.assertIn(f"CLADEFS_EXTENTD_REMOTE=file://{held}/bucket/branches", side)
+            self.assertIn(f"CLADEFSD_TOKEN={token}", side)
+            self.assertIn(f"CLADEFSD_REMOTE=file://{held}/bucket/branches", side)
             self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"

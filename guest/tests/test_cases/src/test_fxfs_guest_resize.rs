@@ -79,7 +79,7 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let extentd = std::path::PathBuf::from(
-                std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD names the daemon"),
+                std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;

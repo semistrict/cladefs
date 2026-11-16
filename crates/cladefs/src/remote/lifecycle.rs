@@ -436,7 +436,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     // conditional writes probed, a block of object IDs taken.
     let bucket = Arc::new(Bucket::new(objects, ""));
     // The bucket the daemon's stores are made in, as a point taken from it is.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", url_of(&bucket)) };
+    unsafe { std::env::set_var("CLADEFSD_REMOTE", url_of(&bucket)) };
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
     host_store::new_branch(&bucket, new_cell(NO_TENANT)).unwrap();
     let host = dir.path().join("host");

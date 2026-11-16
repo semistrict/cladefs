@@ -132,7 +132,7 @@ impl Vm {
 
     /// Adds an extent-store device tagged `tag`, on the store at `path`, which it makes, holding
     /// at most `capacity` bytes, if it doesn't exist; with a DAX window of `window` bytes if not
-    /// 0. The extent daemon at CLADEFS_EXTENTD serves the store.
+    /// 0. The extent daemon at CLADEFSD serves the store.
     pub fn extent_store(
         &mut self,
         tag: &str,
@@ -140,21 +140,21 @@ impl Vm {
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
+        let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
         self.extent_store_served(tag, path, capacity, window, Path::new(&extentd));
         Ok(())
     }
 
     /// cladefs: adds an extent-store device tagged `tag` that follows the store at `path`, which
     /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
-    /// The extent daemon at CLADEFS_EXTENTD serves the store.
+    /// The extent daemon at CLADEFSD serves the store.
     pub fn extent_store_following(
         &mut self,
         tag: &str,
         path: &Path,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
+        let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
         self.extent_store_following_served(tag, path, window, Path::new(&extentd));
         Ok(())
     }
@@ -776,7 +776,7 @@ impl Jail {
         let name = Path::new(firecracker).file_name().context("Firecracker has no file name")?;
         let root = base.join(name).join(&id).join("root");
         let mut dirs = vec![dir.to_owned(), std::env::temp_dir()];
-        for var in ["CLADEFS_GUEST_KERNEL", "CLADEFS_EXTENTD", "CLADEFS_FIRECRACKER_SECCOMP_FILTER"] {
+        for var in ["CLADEFS_GUEST_KERNEL", "CLADEFSD", "CLADEFS_FIRECRACKER_SECCOMP_FILTER"] {
             if let Some(path) = std::env::var_os(var) {
                 dirs.extend(Path::new(&path).parent().map(Path::to_owned));
             }

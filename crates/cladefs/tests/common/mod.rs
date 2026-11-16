@@ -15,9 +15,7 @@ pub mod daemon;
 pub fn host() {
     // The daemon's log, and the VM processes', on standard error, which a test that fails shows.
     let _ = cladefs::extentd::logging::to_stderr();
-    for (name, value) in
-        [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")]
-    {
+    for (name, value) in [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.

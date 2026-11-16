@@ -8,7 +8,7 @@ budgets a run of guest tests fails on, as scripts/test-e2e.sh runs this over its
 scripts/bench.sh's runs with it, so that a change that trades one cost for another fails here,
 not at a customer (LangSmith's sandboxes found TASK-310's doubled writes and TASK-317's memory).
 
-Of each daemon's stats file (CLADEFS_EXTENTD_STATS: the run's extentd-stats.txt, a case's daemon's
+Of each daemon's stats file (CLADEFSD_STATS: the run's extentd-stats.txt, a case's daemon's
 NAME-stats.txt), its last lines:
 
 - **memory**: no sample of the daemon's anonymous memory past its budget, which the daemon weighs

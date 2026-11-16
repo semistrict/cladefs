@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 /// A daemon of its own, serving at a socket in `dir`, once it does.
 fn daemon(dir: &Path, name: &str) -> (PathBuf, KillOnDrop) {
     let socket = dir.join(format!("{name}.sock"));
-    let child = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"))
+    let child = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
-        .env("CLADEFS_EXTENTD_REMOTE", "memory:///branches")
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
+        .env("CLADEFSD_REMOTE", "memory:///branches")
+        .env("CLADEFSD_TOKEN", "1")
         .spawn()
         .unwrap();
     let child = KillOnDrop(child);

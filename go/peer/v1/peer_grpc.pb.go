@@ -5,7 +5,7 @@
 // What the extent daemons of hosts sharing a bucket serve each other (TASK-406.2): parts of the
 // bucket's objects, each owned by one of them, which a host asks its owner for before the bucket,
 // so that a part many hosts read comes from the bucket about once for them all. Served over TCP at
-// each daemon's CLADEFS_EXTENTD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
+// each daemon's CLADEFSD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
 // every host can read the whole bucket already. A part is asked for by its object's key and its
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from

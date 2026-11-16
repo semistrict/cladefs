@@ -11,7 +11,7 @@
 //!   kernel's requests until it is unmounted. macOS has no FUSE of its own, nor an open-source one.
 //! - [`MountOptions::mount_stores`] mounts a directory of stores instead (TASK-302): one mount,
 //!   into which stores are attached by name, and detached, by [`Server::attach`] and
-//!   [`Server::detach`], or through [`control`], a gRPC API, as `cladefs-mount --control` serves it.
+//!   [`Server::detach`], or through [`control`], a gRPC API, which cladefsd serves (TASK-475.2).
 //!
 //! The mount is its store's only writer, as a store's directory is its process's alone, so the
 //! kernel may cache all it reads: names, their absence, attributes, pages, directories' entries,

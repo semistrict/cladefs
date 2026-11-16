@@ -118,11 +118,11 @@ fn tenants_past_their_limits_evict_then_refuse() {
     let tenant = format!("{{tenant=\"{}\"}}", label("acme"));
     assert_eq!(label("acme"), "822b33ad87c148a0");
     assert!(!render().contains("acme"), "the metrics name the tenant");
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_memory_limit_bytes{tenant}")), 2 * CHUNK);
-    assert_within(&format!("cladefs_extentd_tenant_memory_bytes{tenant}"), 2 * CHUNK);
+    assert_eq!(metric(&format!("cladefsd_tenant_memory_limit_bytes{tenant}")), 2 * CHUNK);
+    assert_within(&format!("cladefsd_tenant_memory_bytes{tenant}"), 2 * CHUNK);
 
     assert_eq!(daemon.shrink_memory(Some("acme"), 0).unwrap(), 0);
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_memory_bytes{tenant}")), 0);
+    assert_eq!(metric(&format!("cladefsd_tenant_memory_bytes{tenant}")), 0);
     assert_eq!(failure(daemon.shrink_memory(Some("globex"), 0)), (Code::NotFound, Errno::ENOENT));
     assert_eq!(daemon.stat(&acme.join("vm")).unwrap().open, true);
 }
@@ -134,7 +134,7 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     daemon.set_memory_limit(None, Some(4 * CHUNK)).unwrap();
-    assert_eq!(metric("cladefs_extentd_memory_limit_bytes"), 4 * CHUNK);
+    assert_eq!(metric("cladefsd_memory_limit_bytes"), 4 * CHUNK);
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
     let socket = daemon.grant("acme", 1, &acme, None).unwrap();
@@ -142,8 +142,8 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     read_through(&theirs);
     let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
     read_through(&ours);
-    assert_within("cladefs_extentd_memory_bytes", 4 * CHUNK);
+    assert_within("cladefsd_memory_bytes", 4 * CHUNK);
 
     assert_eq!(daemon.shrink_memory(None, CHUNK).unwrap(), CHUNK);
-    assert_eq!(metric("cladefs_extentd_memory_bytes"), CHUNK);
+    assert_eq!(metric("cladefsd_memory_bytes"), CHUNK);
 }

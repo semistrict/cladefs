@@ -40,7 +40,7 @@ class SoakWorkloads(unittest.TestCase):
         fake = root / "scripts" / "test-host.sh"
         fake.write_text('#!/bin/bash\nmkdir -p "$1"\necho "$(basename "$1") $CLADEFS_E2E_TEST '
                         'rounds=$CLADEFS_E2E_ROUNDS kernel=$CLADEFS_GUEST_KERNEL_BUILD '
-                        'follow=$CLADEFS_FOLLOW_SECONDS failpoints=${CLADEFS_EXTENTD_FAILPOINTS:-}" '
+                        'follow=$CLADEFS_FOLLOW_SECONDS failpoints=${CLADEFSD_FAILPOINTS:-}" '
                         '>> "$(dirname "$1")/../ran.txt"\n')
         fake.chmod(0o755)
         (root / "scripts" / "guest_results.py").write_text("#!/bin/sh\n")

@@ -41,9 +41,9 @@ fi
 
 status=0 report=0
 # The extent daemon holds as much memory as the sandbox team's does, 8 GiB, unless
-# CLADEFS_EXTENTD_MEMORY says otherwise: with its default, 1 GiB, a DAX guest's working set
+# CLADEFSD_MEMORY says otherwise: with its default, 1 GiB, a DAX guest's working set
 # doesn't fit, and its faults page in again what was evicted, which measures that (TASK-109.3).
-export CLADEFS_EXTENTD_MEMORY=${CLADEFS_EXTENTD_MEMORY:-$((8 << 30))}
+export CLADEFSD_MEMORY=${CLADEFSD_MEMORY:-$((8 << 30))}
 # shellcheck disable=SC2086 # The cases' selectors are words separated by spaces.
 CLADEFS_BENCH_ITERATIONS=$iterations CLADEFS_BENCH_RESULTS=$results \
     CLADEFS_E2E_RESULTS=$results/logs "$root/scripts/test-e2e.sh" $cases >&2 || status=$?

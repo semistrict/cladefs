@@ -167,10 +167,10 @@ mod host {
                 "CLADEFS_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
                  longer than its client retries a request"
             );
-            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
+            let remote = std::env::var("CLADEFSD_REMOTE").unwrap_or_default();
             ensure!(
                 remote.starts_with("s3://"),
-                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: \
+                "CLADEFSD_REMOTE is {remote:?}, not an S3 server's bucket: \
                  scripts/test-e2e-rustfs.sh starts one"
             );
             let server =
@@ -186,7 +186,7 @@ mod host {
             let (upload_memory, endpoint) = (UPLOAD_MEMORY.to_string(), bucket.endpoint());
             let env = [
                 ("AWS_ENDPOINT", endpoint.as_ref()),
-                ("CLADEFS_EXTENTD_UPLOAD_MEMORY", upload_memory.as_ref()),
+                ("CLADEFSD_UPLOAD_MEMORY", upload_memory.as_ref()),
             ];
             let mut daemon = crate::common::spawn_daemon(
                 test_setup,
@@ -325,8 +325,8 @@ mod host {
 
     impl Test for TestFxfsGuestBucketSoak {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFSD_BIN").is_none() {
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");
             }
             cladefs_guest_should_run()
         }

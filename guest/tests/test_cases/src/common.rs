@@ -32,7 +32,7 @@ pub fn setup_rootfs(test_setup: &TestSetup) -> anyhow::Result<PathBuf> {
 }
 
 /// Whether a test of cladefs's guest kernel's Fxfs runs: CLADEFS_FIRECRACKER names the VMM, and
-/// CLADEFS_GUEST_KERNEL the kernel, and CLADEFS_EXTENTD the socket of the extent daemon that serves
+/// CLADEFS_GUEST_KERNEL the kernel, and CLADEFSD the socket of the extent daemon that serves
 /// the device's store (as cladefs's scripts/test-e2e.sh has them).
 pub fn cladefs_guest_should_run() -> ShouldRun {
     if !crate::vm::has_vmm() {
@@ -41,8 +41,8 @@ pub fn cladefs_guest_should_run() -> ShouldRun {
     if std::env::var_os("CLADEFS_GUEST_KERNEL").is_none() {
         return ShouldRun::No("CLADEFS_GUEST_KERNEL does not name a guest kernel");
     }
-    if std::env::var_os("CLADEFS_EXTENTD").is_none() {
-        return ShouldRun::No("CLADEFS_EXTENTD does not name the extent daemon's socket");
+    if std::env::var_os("CLADEFSD").is_none() {
+        return ShouldRun::No("CLADEFSD does not name the extent daemon's socket");
     }
     ShouldRun::Yes
 }
@@ -326,15 +326,15 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
     }
 }
 
-/// An extent daemon of the test's own, CLADEFS_EXTENTD_BIN, serving at `socket`, and its control API
+/// An extent daemon of the test's own, CLADEFSD_BIN, serving at `socket`, and its control API
 /// beside it ([`control`]), once this returns, with `env` in its environment, and `memory` bytes of
 /// memory if given; otherwise, as production's, its memory a page cache of what of the host's is
 /// free (TASK-358). It logs to `<name>.log` in the test's directory.
 /// cladefs: it keeps what its stores read from their bucket in a part cache of its own,
 /// `<name>-cache` in the test's directory, as production's daemon keeps it on the host's disk
-/// (`CLADEFS_EXTENTD_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
+/// (`CLADEFSD_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
 /// daemon at a time has a cache's directory (TASK-164.12). And it keeps what it did in
-/// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFS_EXTENTD_STATS`): what it
+/// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFSD_STATS`): what it
 /// downloaded against what it read, which the run's summary says (scripts/guest_results.py,
 /// TASK-165.12).
 pub fn spawn_daemon(
@@ -346,7 +346,7 @@ pub fn spawn_daemon(
 ) -> anyhow::Result<std::process::Child> {
     use std::time::{Duration, Instant};
 
-    let bin = std::env::var_os("CLADEFS_EXTENTD_BIN").context("CLADEFS_EXTENTD_BIN")?;
+    let bin = std::env::var_os("CLADEFSD_BIN").context("CLADEFSD_BIN")?;
     let log = fs::File::create(test_setup.tmp_dir.join(format!("{name}.log")))?;
     // A host keeps stores in a bucket, `env`'s or this process's, or a file bucket of its own in
     // the test's directory, as of placement 1, unless one is named. Not one in its memory: the
@@ -358,26 +358,26 @@ pub fn spawn_daemon(
             || std::env::var_os(var).is_some_and(|value| !value.is_empty())
     };
     let mut command = std::process::Command::new(bin);
-    command.arg(socket).env("CLADEFS_EXTENTD_GRPC", socket.with_extension("control"));
+    command.arg(socket).env("CLADEFSD_GRPC", socket.with_extension("control"));
     if let Some(memory) = memory {
         command.arg(memory.to_string());
     }
-    if !named("CLADEFS_EXTENTD_REMOTE") {
+    if !named("CLADEFSD_REMOTE") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));
-        command.env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()));
+        command.env("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
     }
-    if !named("CLADEFS_EXTENTD_TOKEN") {
-        command.env("CLADEFS_EXTENTD_TOKEN", "1");
+    if !named("CLADEFSD_TOKEN") {
+        command.env("CLADEFSD_TOKEN", "1");
     }
-    let given = env.iter().find(|(var, _)| *var == "CLADEFS_EXTENTD_CACHE").map(|(_, value)| *value);
-    let ours = std::env::var_os("CLADEFS_EXTENTD_CACHE");
+    let given = env.iter().find(|(var, _)| *var == "CLADEFSD_CACHE").map(|(_, value)| *value);
+    let ours = std::env::var_os("CLADEFSD_CACHE");
     if let Some(cache) = part_cache(given, ours.as_deref(), &test_setup.tmp_dir, name) {
         fs::create_dir_all(&cache)?;
-        command.env("CLADEFS_EXTENTD_CACHE", cache);
+        command.env("CLADEFSD_CACHE", cache);
     }
-    let given = env.iter().any(|(var, _)| *var == "CLADEFS_EXTENTD_STATS");
+    let given = env.iter().any(|(var, _)| *var == "CLADEFSD_STATS");
     if let Some(stats) = stats_file(given, &test_setup.tmp_dir, name) {
-        command.env("CLADEFS_EXTENTD_STATS", stats);
+        command.env("CLADEFSD_STATS", stats);
     }
     let daemon = command.envs(env.iter().copied()).stderr(log).spawn()?;
     test_setup.register_cleanup_pid(daemon.id());
@@ -395,8 +395,8 @@ pub fn spawn_daemon(
 }
 
 /// cladefs: the part cache a test's daemon `name` is given, in `dir`, the test's directory, as
-/// production's daemon keeps one on the host's disk (`CLADEFS_EXTENTD_CACHE`, doc-7), unless
-/// `CLADEFS_EXTENTD_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
+/// production's daemon keeps one on the host's disk (`CLADEFSD_CACHE`, doc-7), unless
+/// `CLADEFSD_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
 /// as it is, empty for none. Without one, a fork paged in what it inherited from the bucket a ranged
 /// GET at a time: forked-dax 0.304 in the perf gate, 0.849 with it (TASK-164.12, GCE r790, r792).
 fn part_cache(
@@ -488,7 +488,7 @@ mod tests {
         let io = "rchar: 10\nwchar: 20\nsyscr: 1\nsyscw: 2\nread_bytes: 4096\nwrite_bytes: 8192\n\
                   cancelled_write_bytes: 0\n";
         let status =
-            "Name:\tcladefs-extentd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
+            "Name:\tcladefsd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
         let stat = "42 (cladefs extentd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
         let costs = ProcessCosts::parse(io, status, stat, 100.0).unwrap();
         assert_eq!(costs, ProcessCosts { disk_written: 8192, peak_rss: 512 << 10, cpu_secs: 3.0 });
@@ -499,7 +499,7 @@ mod tests {
     }
 
     /// TASK-164.12: a test's daemon keeps a part cache of its own in the test's directory, as
-    /// production's does, unless CLADEFS_EXTENTD_CACHE is said, by the daemon's environment or this
+    /// production's does, unless CLADEFSD_CACHE is said, by the daemon's environment or this
     /// process's, which it takes as it is, empty for none.
     #[test]
     fn daemons_keep_a_part_cache_unless_told_otherwise() {

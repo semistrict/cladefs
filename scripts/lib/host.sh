@@ -181,7 +181,7 @@ host_start() {
 # scripts/lib/SCRIPT of the run's worktree, as root, with the user's Rust, for at most $limit (or
 # CLADEFS_HOST_LIMIT), with the worktree, the results and the ARGs.
 #
-# The script runs in this machine's environment: every CLADEFS_* and PJDFSTEST_* variable set here,
+# The script runs in this machine's environment: every CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here,
 # but those that stay here (host_env_local); the run's own, its work directory, the host's cache of
 # guest kernels and, with CLADEFS_GUEST_KERNEL set, the copy host_start made; and each NAME=VALUE in
 # place of the variable NAME. A value starting with ~/ names a path in the host's home. An empty
@@ -195,7 +195,7 @@ host_command() {
     # A measurement at the host's own niceness: it builds nothing, and runs alone.
     if (( host_bench )); then nice=0; fi
     given=("CLADEFS_GUEST_KERNEL_JOBS=$jobs")
-    for name in ${!CLADEFS_@} ${!PJDFSTEST_@}; do
+    for name in ${!CLADEFS_@} ${!CLADEFSD_@} ${!PJDFSTEST_@}; do
         if ! host_env_local "$name"; then
             given+=("$name=${!name}")
         fi
@@ -246,10 +246,10 @@ host_command() {
 # the host scripts, or what they run, would take as they are. Set here, they name what this machine
 # built or fetched, its own daemon's sockets, address and directories, and where its own runs
 # write; sent, every build, test and daemon on the host would use them in place of its own. Those
-# the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFS_EXTENTD
+# the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFSD
 # (scripts/test-e2e.sh), need no place here. The others go: knobs a driver's caller sets for the
 # host, what runs and how, and where its stores keep their branches and its daemons what they read
-# from them (CLADEFS_EXTENTD_REMOTE, CLADEFS_S3_URL, CLADEFS_EXTENTD_CACHE), or a driver's own, which
+# from them (CLADEFSD_REMOTE, CLADEFS_S3_URL, CLADEFSD_CACHE), or a driver's own, which
 # nothing there reads.
 host_env_local() {
     case $1 in
@@ -264,12 +264,12 @@ host_env_local() {
         # every extent daemon there reads them, those the tests start too, and
         # all of them would serve at the one socket and address, and write the
         # one file.
-        CLADEFS_EXTENTD_GRPC | CLADEFS_EXTENTD_STATS | CLADEFS_EXTENTD_METRICS) ;;
+        CLADEFSD_GRPC | CLADEFSD_STATS | CLADEFSD_METRICS) ;;
         # The directories a daemon serves stores in and puts its tenants'
         # sockets in: every extent daemon there would take them, those the
         # tests start too, whose stores are in directories of their own, and
         # with none of these roots there, a daemon refuses every store.
-        CLADEFS_EXTENTD_ROOTS | CLADEFS_EXTENTD_TENANTS) ;;
+        CLADEFSD_ROOTS | CLADEFSD_TENANTS) ;;
         # Where the benchmark's cases write their measurements, wherever they
         # run; bench-linux-host.sh alone sets it.
         CLADEFS_BENCH_RESULTS) ;;

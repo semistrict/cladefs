@@ -29,7 +29,7 @@
 // group skips scans; CLADEFS_BENCH_SQLITE_WORKLOAD selects one transaction workload by its result
 // name (such as sqlite-wal-normal-batch100), keeping the recovery and snapshot checks.
 // cladefs: the working-set group, run only when named, reads 4 KiB at random from files of half,
-// one, two and four times the extent daemon's memory (CLADEFS_EXTENTD_MEMORY, as test-e2e.sh gives
+// one, two and four times the extent daemon's memory (CLADEFSD_MEMORY, as test-e2e.sh gives
 // it), IOPS and latencies once the caches settle (TASK-350.2); the sync group, also only when
 // named, writes 4 KiB and then syncs, syncfs's or freezes and thaws the filesystem,
 // CLADEFS_BENCH_SYNCS times each (50) (TASK-350.5).
@@ -53,7 +53,7 @@
 // and boots a VM on the fork, which mounts it, reads the tree whole, and starts PostgreSQL on the
 // database and runs pgbench's read-only transactions. The fork is served by the daemon that served
 // the base, whose extent cache holds the base's data (warm), or by a daemon of its own, started
-// for it, whose cache holds nothing (cold): CLADEFS_EXTENTD_BIN names the daemon's binary; or by a
+// for it, whose cache holds nothing (cold): CLADEFSD_BIN names the daemon's binary; or by a
 // daemon of its own that reads the base's boot profile, which a fork before the iterations
 // recorded, into its cache as the fork boots (profiled). The host reports the daemon's counters of
 // what serving the fork cost, as observations. cladefs: so too a fork without a DAX window, its
@@ -335,7 +335,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 return run_images(test_setup);
             }
             let extentd =
-                PathBuf::from(std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD")?);
+                PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
             // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
             let stores = test_setup.tmp_dir.join("extents");
             std::fs::create_dir_all(&stores)?;
@@ -437,7 +437,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 .args(std::env::args_os().skip(1))
                 .env(ROLE, role)
                 .env(STORE, store)
-                .env("CLADEFS_EXTENTD", extentd);
+                .env("CLADEFSD", extentd);
             if let Some(output) = output {
                 command.stdout(output);
             }
@@ -517,11 +517,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             }
         }
         // cladefs: what the working-set workloads size their files by (TASK-350.2): the extent
-        // daemon's fixed memory, CLADEFS_EXTENTD_MEMORY, if it has one, or 1 GiB, its old default,
+        // daemon's fixed memory, CLADEFSD_MEMORY, if it has one, or 1 GiB, its old default,
         // a daemon whose memory is a page cache having no size of its own (TASK-358). Every case
         // gets it, the baselines too, so that each reads files of the same sizes.
         let daemon_memory =
-            std::env::var("CLADEFS_EXTENTD_MEMORY").unwrap_or_else(|_| (1u64 << 30).to_string());
+            std::env::var("CLADEFSD_MEMORY").unwrap_or_else(|_| (1u64 << 30).to_string());
         vm.env(&CString::new(format!("CLADEFS_BENCH_DAEMON_MEMORY={daemon_memory}"))?);
         // The compiler finds the assembler and linker through PATH.
         vm.env(c"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
@@ -711,9 +711,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if matches!(
                 self.backend,
                 Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
-            ) && std::env::var_os("CLADEFS_EXTENTD_BIN").is_none()
+            ) && std::env::var_os("CLADEFSD_BIN").is_none()
             {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon's binary");
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon's binary");
             }
             match self.backend {
                 Backend::FxfsGuest

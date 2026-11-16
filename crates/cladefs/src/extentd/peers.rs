@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 //! cladefs: the daemon's part in the hosts sharing its bucket (TASK-406.2, `crate::remote::peers`):
-//! it serves them parts of the bucket's objects over gRPC, at `CLADEFS_EXTENTD_PEER_ADDRESS`
+//! it serves them parts of the bucket's objects over gRPC, at `CLADEFSD_PEER_ADDRESS`
 //! (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask them for the parts they own,
-//! `CLADEFS_EXTENTD_PEERS` naming them at its start and the control API's `SetPeers` at any time.
+//! `CLADEFSD_PEERS` naming them at its start and the control API's `SetPeers` at any time.
 //! What it serves comes from the host's memory and part cache, which it needs, or from the bucket
 //! once, however many hosts ask at once ([`crate::remote::serving_peers`]).
 
@@ -40,9 +40,9 @@ const THREADS: usize = 2;
 static SERVED: AtomicU64 = AtomicU64::new(0);
 static SERVED_MISSING: AtomicU64 = AtomicU64::new(0);
 
-/// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFS_EXTENTD_PEER_ADDRESS`),
+/// Has the daemon serve the hosts sharing its bucket, at `address` (`CLADEFSD_PEER_ADDRESS`),
 /// on `listener`, bound there, and its stores' fetchers ask them, `peers` at first
-/// (`CLADEFS_EXTENTD_PEERS`), for the parts they own: before any store opens. It needs the host's
+/// (`CLADEFSD_PEERS`), for the parts they own: before any store opens. It needs the host's
 /// part cache, which keeps what it serves.
 pub fn start(
     address: &str,
@@ -58,7 +58,7 @@ pub fn start(
     let bucket = super::stores::remote_bucket().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = super::stores::remote_cache().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = cache.ok_or_else(|| {
-        "CLADEFS_EXTENTD_PEER_ADDRESS is set, but CLADEFS_EXTENTD_CACHE names no directory for the \
+        "CLADEFSD_PEER_ADDRESS is set, but CLADEFSD_CACHE names no directory for the \
          part cache, which keeps what the daemon serves its peers"
             .to_owned()
     })?;
@@ -113,7 +113,7 @@ pub(super) fn counts() -> Option<(crate::remote::peers::Counts, u64, u64)> {
     Some((counts, SERVED.load(Ordering::Relaxed), SERVED_MISSING.load(Ordering::Relaxed)))
 }
 
-/// The daemon's line in its stats file (`CLADEFS_EXTENTD_STATS`): its [`counts`].
+/// The daemon's line in its stats file (`CLADEFSD_STATS`): its [`counts`].
 pub(super) fn line() -> Option<String> {
     let (counts, served, served_missing) = counts()?;
     let crate::remote::peers::Counts { asked, given, missing, failed } = counts;

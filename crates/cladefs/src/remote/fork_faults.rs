@@ -145,7 +145,7 @@ pub(super) fn commit(
 pub(super) fn host() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_TOKEN", TOKEN.to_string()) };
+    unsafe { std::env::set_var("CLADEFSD_TOKEN", TOKEN.to_string()) };
 }
 
 impl World {

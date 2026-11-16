@@ -33,7 +33,7 @@
 # daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
 # fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
 # refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on
-# tmpfs, whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for, unless CLADEFS_EXTENTD_REMOTE names
+# tmpfs, whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for, unless CLADEFSD_REMOTE names
 # one: it counts against the run's memory, and a case whose working set of gigabytes overruns
 # that (TASK-350) takes more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
 #
@@ -43,7 +43,7 @@
 # round directories; and what others wrote to the run's disk meanwhile (contamination.json there,
 # scripts/contamination.py, TASK-375), the job's scratch disk, the stores', which only the job
 # can name: test-e2e-job.sh runs the cases under it, a run others wrote beside left out of the
-# comparison's timings. The environment's CLADEFS_* variables pass to every run (sudo drops them
+# comparison's timings. The environment's CLADEFS_* and CLADEFSD_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
 # and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
 # artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_HOST_PROC and
@@ -72,11 +72,11 @@ stalled() {
     sed -n 's/^some .*total=//p' "$bench/$1.pressure"
 }
 
-# The CLADEFS_* variables of this environment, as env's NAME=VALUE words.
+# The CLADEFS_* and CLADEFSD_* variables of this environment, as env's NAME=VALUE words.
 passed=()
 while IFS= read -r name; do
     passed+=("$name=${!name}")
-done < <(compgen -e | grep '^CLADEFS_' || true)
+done < <(compgen -e | grep -E '^CLADEFSD?_' || true)
 
 # as_root COMMAND...: COMMAND as root, inside a job, with the job's TMPDIR, fxjob's, which it
 # removes with the job: sudo, set-user-ID, never passes it on (glibc drops it), so env sets it,

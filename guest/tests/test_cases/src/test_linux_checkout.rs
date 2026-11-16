@@ -162,8 +162,8 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             let (metrics_at, bucket_at) =
                 (metrics.to_string(), format!("file://{}/", bucket.canonicalize()?.display()));
             let env = [
-                ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
-                ("CLADEFS_EXTENTD_REMOTE", OsStr::new(&bucket_at)),
+                ("CLADEFSD_METRICS", OsStr::new(&metrics_at)),
+                ("CLADEFSD_REMOTE", OsStr::new(&bucket_at)),
             ];
             let memory = bytes("CLADEFS_LINUX_CHECKOUT_EXTENTD_MEMORY")?;
             let daemon = spawn_daemon(test_setup, &extentd, "extentd", &env, memory)?;

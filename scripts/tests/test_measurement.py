@@ -76,7 +76,7 @@ class Guard(unittest.TestCase):
         artifacts = self.directory / "artifacts"
         artifacts.mkdir()
         (artifacts / "artifacts.txt").write_text("source x\nseccomp real\n")
-        for name in ["runner", "guest-agent", "cladefs-extentd", "cladefsctl", "firecracker"]:
+        for name in ["runner", "guest-agent", "cladefsd", "cladefsctl", "firecracker"]:
             (artifacts / name).write_text("")
             (artifacts / name).chmod(0o755)
         for cgroup in [BENCH, WORK]:

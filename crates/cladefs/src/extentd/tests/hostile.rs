@@ -2120,7 +2120,7 @@ fn what_requests_hold_is_within_the_room() {
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", bucket) };
+    unsafe { std::env::set_var("CLADEFSD_REMOTE", bucket) };
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));

@@ -13,7 +13,7 @@
 //!   memory past what its design bounds it by, its uploads within their memory however often each
 //!   is tried (TASK-317);
 //! - **the failures show** in the stats line (`failed-NAME`) and the metrics
-//!   (`cladefs_extentd_object_storage_failures_total`), by kind (TASK-314);
+//!   (`cladefsd_object_storage_failures_total`), by kind (TASK-314);
 //! - **commits wait at the lag bound and never fail** (doc-7, decision 3; doc-12): each store's
 //!   commits stall, none returning an error, for as long as the bucket fails;
 //! - **everything uploads once the bucket answers, within doc-12's bound**: every commit made
@@ -150,7 +150,7 @@ fn vm_process(
 }
 
 /// The bucket's failures of each kind, as the daemon's stats file says them (`failed-NAME`), and
-/// as its metrics do (`cladefs_extentd_object_storage_failures_total`), which must agree.
+/// as its metrics do (`cladefsd_object_storage_failures_total`), which must agree.
 fn failures(stats: &std::path::Path) -> Vec<(Request, u64)> {
     let kept = std::fs::read_to_string(stats).unwrap_or_default();
     let line = kept.lines().find(|line| line.starts_with("object-store: ")).unwrap_or_default();
@@ -161,10 +161,8 @@ fn failures(stats: &std::path::Path) -> Vec<(Request, u64)> {
             let field = format!("failed-{}=", request.name());
             let said = (line.split(' ').find_map(|word| word.strip_prefix(&field)))
                 .map_or(0, |count| count.parse().unwrap());
-            let name = format!(
-                "cladefs_extentd_object_storage_failures_total{{request=\"{}\"}}",
-                request.name()
-            );
+            let name =
+                format!("cladefsd_object_storage_failures_total{{request=\"{}\"}}", request.name());
             let metric = (metrics.lines().find_map(|line| line.strip_prefix(&name)))
                 .map_or(0, |count| count.trim().parse().unwrap());
             // The metrics are as of now, the file as of its last poll: never behind it.
@@ -188,17 +186,17 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
         (dir.path().join("bucket"), dir.path().join("faults"), dir.path().join("stats.txt"));
     std::fs::create_dir(&bucket).unwrap();
     let _ = super::super::logging::to_stderr();
-    // As the daemon starts (`cladefs-extentd`): its large buffers given back as they are freed, its
+    // As the daemon starts (`cladefsd`): its large buffers given back as they are freed, its
     // limit of open files raised.
     super::super::memory::return_large_allocations();
     super::super::raise_open_files_limit().unwrap();
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()));
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
+        std::env::set_var("CLADEFSD_TOKEN", "1");
         std::env::set_var("CLADEFS_REMOTE_FAULTS", &faults);
-        std::env::set_var("CLADEFS_EXTENTD_STATS", &stats);
+        std::env::set_var("CLADEFSD_STATS", &stats);
     }
     crate::remote::set_upload_memory(UPLOAD_MEMORY).unwrap();
 

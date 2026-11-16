@@ -29,9 +29,9 @@
 # fxfs.follow_apply_delay_us=200). CLADEFS_HOST_LIMIT caps the run's time on the host (timeout's
 # DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone, CLADEFS_GUEST_TESTS=0
 # the workspace's alone, and CLADEFS_TEST_ARGS are cargo nextest's arguments for the workspace's,
-# such as a filter. CLADEFS_EXTENTD_REMOTE, if set, names a bucket the guest tests' extent daemons
+# such as a filter. CLADEFSD_REMOTE, if set, names a bucket the guest tests' extent daemons
 # keep their stores' branches in (an object store's URL the host reaches), under a prefix of the
-# run's own. Every other CLADEFS_* and PJDFSTEST_* variable set here reaches the host too
+# run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches the host too
 # (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and CLADEFS_PJDFSTEST_TESTS, and the run's
 # CLADEFS_HOST_* settings are scripts/lib/host.sh's.
 set -euo pipefail
@@ -58,9 +58,9 @@ host_start
 echo "Results: $results" >&2
 # The run's own prefix of the bucket, if one is named.
 remote=
-if [[ -n ${CLADEFS_EXTENTD_REMOTE:-} ]]; then remote=${CLADEFS_EXTENTD_REMOTE%/}/$host_run; fi
+if [[ -n ${CLADEFSD_REMOTE:-} ]]; then remote=${CLADEFSD_REMOTE%/}/$host_run; fi
 # shellcheck disable=SC2086 # The tests' selectors are words separated by spaces.
-host_job "CLADEFS_EXTENTD_REMOTE=$remote" test-linux-host.sh ${CLADEFS_E2E_TEST:-} \
+host_job "CLADEFSD_REMOTE=$remote" test-linux-host.sh ${CLADEFS_E2E_TEST:-} \
     > "$results/remote.log" 2>&1 || status=$?
 if [[ $host_state == ended ]]; then
     host_fetch || status=$?

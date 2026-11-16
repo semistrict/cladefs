@@ -4,7 +4,6 @@
 // kernel's std from the pinned toolchain's rust-src, its licenses and COPYRIGHT in guest/rust/std:
 // without its tests and stability attributes. Do not edit it here.
 
-
 use hashbrown::hash_map::{self as base, RustcOccupiedError};
 
 use self::Entry::*;
@@ -243,12 +242,7 @@ use crate::ops::Index;
 /// static RANDOM_MAP: LazyLock<Mutex<HashMap<String, Vec<i32>>>> =
 ///     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// ```
-pub struct HashMap<
-    K,
-    V,
-    S = RandomState,
-    A: Allocator = Global,
-> {
+pub struct HashMap<K, V, S = RandomState, A: Allocator = Global> {
     base: base::HashMap<K, V, S, A>,
 }
 
@@ -1588,11 +1582,7 @@ impl<K, V> Default for IterMut<'_, K, V> {
 /// ]);
 /// let iter = map.into_iter();
 /// ```
-pub struct IntoIter<
-    K,
-    V,
-    A: Allocator = Global,
-> {
+pub struct IntoIter<K, V, A: Allocator = Global> {
     base: base::IntoIter<K, V, A>,
 }
 
@@ -1712,12 +1702,7 @@ impl<K, V: Debug> fmt::Debug for Values<'_, K, V> {
 /// ]);
 /// let iter = map.drain();
 /// ```
-pub struct Drain<
-    'a,
-    K: 'a,
-    V: 'a,
-    A: Allocator = Global,
-> {
+pub struct Drain<'a, K: 'a, V: 'a, A: Allocator = Global> {
     base: base::Drain<'a, K, V, A>,
 }
 
@@ -1747,13 +1732,7 @@ impl<'a, K, V, A: Allocator> Drain<'a, K, V, A> {
 /// ```
 #[must_use = "iterators are lazy and do nothing unless consumed; \
     use `retain` to remove and discard elements"]
-pub struct ExtractIf<
-    'a,
-    K,
-    V,
-    F,
-    A: Allocator = Global,
-> {
+pub struct ExtractIf<'a, K, V, F, A: Allocator = Global> {
     base: base::ExtractIf<'a, K, V, F, A>,
 }
 
@@ -1802,11 +1781,7 @@ impl<K, V> Default for ValuesMut<'_, K, V> {
 /// ]);
 /// let iter_keys = map.into_keys();
 /// ```
-pub struct IntoKeys<
-    K,
-    V,
-    A: Allocator = Global,
-> {
+pub struct IntoKeys<K, V, A: Allocator = Global> {
     inner: IntoIter<K, V, A>,
 }
 
@@ -1834,11 +1809,7 @@ impl<K, V> Default for IntoKeys<K, V> {
 /// ]);
 /// let iter_keys = map.into_values();
 /// ```
-pub struct IntoValues<
-    K,
-    V,
-    A: Allocator = Global,
-> {
+pub struct IntoValues<K, V, A: Allocator = Global> {
     inner: IntoIter<K, V, A>,
 }
 
@@ -1854,12 +1825,7 @@ impl<K, V> Default for IntoValues<K, V> {
 /// This `enum` is constructed from the [`entry`] method on [`HashMap`].
 ///
 /// [`entry`]: HashMap::entry
-pub enum Entry<
-    'a,
-    K: 'a,
-    V: 'a,
-    A: Allocator = Global,
-> {
+pub enum Entry<'a, K: 'a, V: 'a, A: Allocator = Global> {
     /// An occupied entry.
     Occupied(OccupiedEntry<'a, K, V, A>),
 
@@ -1878,12 +1844,7 @@ impl<K: Debug, V: Debug> Debug for Entry<'_, K, V> {
 
 /// A view into an occupied entry in a `HashMap`.
 /// It is part of the [`Entry`] enum.
-pub struct OccupiedEntry<
-    'a,
-    K: 'a,
-    V: 'a,
-    A: Allocator = Global,
-> {
+pub struct OccupiedEntry<'a, K: 'a, V: 'a, A: Allocator = Global> {
     base: base::RustcOccupiedEntry<'a, K, V, A>,
 }
 
@@ -1898,12 +1859,7 @@ impl<K: Debug, V: Debug, A: Allocator> Debug for OccupiedEntry<'_, K, V, A> {
 
 /// A view into a vacant entry in a `HashMap`.
 /// It is part of the [`Entry`] enum.
-pub struct VacantEntry<
-    'a,
-    K: 'a,
-    V: 'a,
-    A: Allocator = Global,
-> {
+pub struct VacantEntry<'a, K: 'a, V: 'a, A: Allocator = Global> {
     base: base::RustcVacantEntry<'a, K, V, A>,
 }
 
@@ -1917,12 +1873,7 @@ impl<K: Debug, V, A: Allocator> Debug for VacantEntry<'_, K, V, A> {
 ///
 /// Contains the occupied entry, key, and the value that was not inserted.
 #[non_exhaustive]
-pub struct OccupiedError<
-    'a,
-    K: 'a,
-    V: 'a,
-    A: Allocator = Global,
-> {
+pub struct OccupiedError<'a, K: 'a, V: 'a, A: Allocator = Global> {
     /// The entry in the map that was already occupied.
     pub entry: OccupiedEntry<'a, K, V, A>,
     /// The key which was not inserted, because the entry was already occupied.

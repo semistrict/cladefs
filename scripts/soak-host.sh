@@ -16,7 +16,7 @@
 #
 # The default matrix: 1024:2:2048 1024:4:2048 2048:4:512 2048:4:8192 4096:2:2048. The host, the
 # guest kernel and every other setting are scripts/test-host.sh's (CLADEFS_HOST, CLADEFS_GUEST_KERNEL
-# or CLADEFS_GUEST_KERNEL_BUILD, and every other CLADEFS_* reaching the host).
+# or CLADEFS_GUEST_KERNEL_BUILD, and every other CLADEFS_* and CLADEFSD_* reaching the host).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 results=${1:?usage: soak-host.sh RESULTS [MEMORY_MIB:VCPUS:WINDOW_MIB...]}
