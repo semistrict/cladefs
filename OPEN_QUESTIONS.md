@@ -27,7 +27,7 @@ TASK-444.6 asked for dylint lints. I wrote `scripts/rust-rules.py` instead, rule
 crates' source with no build, held to the mutants of the bugs they come from as
 `scripts/cocci-guest.py` holds the guest's. Why: checking a rule against its mutant takes seconds
 this way. A dylint lint needs a nightly toolchain, a build of rustc's internals, and a build of the
-crate per mutant, which only a ubu1 run could afford. Of the crates' 84 mutants, those with a shape
+crate per mutant, which only a ubu1 run could afford. Of the crates' 74 mutants, those with a shape
 a rule can see are syntactic: mixed atomic orderings, an unbounded semaphore, a copied buffer.
 Rules that need types stay clippy's (`clippy.toml`'s disallowed-methods, as TASK-98 did).
 Otherwise: dylint for a rule that needs types and that clippy's configuration can't express. Undo:
