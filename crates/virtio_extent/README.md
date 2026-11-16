@@ -19,7 +19,8 @@ adapter) and libmachine.
   creates the DAX window, and takes snapshots of the store and restores from them.
 - **Requests** (`Buffers`, `handle`, `Requests`, `Workers`): a request's buffers, built from its
   descriptors' guest memory in their order, served over any `Store` (cladefs's
-  `RemoteExtentStore` on Linux, a fake in tests); `Requests` serves a queue's on the threads
+  `RemoteExtentStore` on Linux, a fake in tests), what doc-4 calls out of range refused first,
+  `EINVAL`, within the device's `protocol::Bounds` (TASK-470); `Requests` serves a queue's on the threads
   receiving the daemon's replies, counting those in flight and what each type took; `Workers`, a
   thread each queue, take them off the VMM's `RequestQueue`s as the driver notifies them.
 - **Snapshots** (`persist`): the device's state as plain serializable values, and doc-4's
