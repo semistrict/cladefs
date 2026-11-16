@@ -4,6 +4,7 @@ title: Docs and doc comments that name what no longer exists
 status: To Do
 assignee: []
 created_date: '2026-11-16 02:12'
+updated_date: '2026-11-16 02:48'
 labels:
   - docs
 dependencies: []
@@ -36,3 +37,9 @@ Found scanning the repo for its terms (CONTEXT.md, 2026-11-15): docs and doc com
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Also: doc-8 decision 2 "Readers are VMs" says followers (reader = a task in a follower guest).
+<!-- SECTION:NOTES:END -->
