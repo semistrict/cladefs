@@ -1,0 +1,27 @@
+{
+ "date": "2026-11-17T07:00:04.101605Z",
+ "base": "b8b99760f93559c08d1eafc3b717a8c6da42f4b5",
+ "head": "c281092ae319b3684e8ddfa8334bd37a0f9d2b44",
+ "status": 28,
+ "outcome": "could not run",
+ "why": "the scratch disk /mnt/fxdax-scratch had 111.6 GiB free before building, the night needs 120.0 GiB (see room.txt; CLADEFS_NIGHTLY_ROOM_BUILD)",
+ "head_built": false,
+ "room": {
+  "checks": [
+   {
+    "phase": "build",
+    "free": 119808827392,
+    "need": 128849018880,
+    "verdict": "short",
+    "disk": "/mnt/fxdax-scratch"
+   }
+  ],
+  "built": null,
+  "rounds": null
+ },
+ "moved": [],
+ "broken": [],
+ "no_result": [],
+ "tasks": [],
+ "push": []
+}
