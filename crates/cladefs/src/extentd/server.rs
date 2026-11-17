@@ -1426,8 +1426,7 @@ impl Connection {
                 };
                 let window = window.map_err(|err| {
                     log::warn!("extentd: creating a window: {err:#}");
-                    // cladefs: its private pages past what the tenant may hold, or a store that
-                    // takes none, say so.
+                    // cladefs: no memory for it, or a store that takes none, say so.
                     match err.errno() {
                         Some(errno @ (Errno::ENOMEM | Errno::EROFS | Errno::EPERM)) => errno,
                         _ => Errno::EINVAL,

@@ -2,8 +2,8 @@
 id: doc-13
 title: Copy-on-write DAX
 type: specification
-created_date: 2026-11-04 07:55
-updated_date: '2026-11-16T22:21:00Z'
+created_date: '2026-11-04 07:55'
+updated_date: '2026-11-17 01:46'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -506,4 +506,6 @@ batch.*
   `remap` installing, as `prefault` does, and the guest's writes prefaulting.
 - `private_max` reserved against the tenant at open, not charged as pages come, so that a store
   never waits for memory and no VM asks another to seal. Its default (a quarter of the window is
-  the proposal) waits on the density target, the review's open decision 5.
+  the proposal) waits on the density target, the review's open decision 5. Undone by TASK-501:
+  nothing is reserved, the pages charged to the VM process; the default 1 GiB (TASK-227), sized
+  per VM in bytes by the VM manager (TASK-502).

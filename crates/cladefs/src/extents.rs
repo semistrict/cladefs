@@ -1597,7 +1597,7 @@ impl ExtentStore {
         private_max: u64,
     ) -> Result<DaxWindow, Error> {
         self.access().may_write()?;
-        let copying = crate::dax::CopyOnWrite::new(private_max)?;
+        let copying = crate::dax::CopyOnWrite::at_most(private_max);
         self.install_dax(|| Ok(Dax::copying(size, second_stage, Some(copying))?))
     }
 

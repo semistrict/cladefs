@@ -166,9 +166,9 @@ impl ArenaPages {
 ///   no allocation waits for them, but for their going back.
 /// - Relief is `asked` for an arena from an allocation's asking until its next pass begins; and
 ///   the arena is `exhausted` from a pass that freed nothing while it was starved until a page of
-///   it is freed, a cap changes, or a pass frees something. It is `owed` the
-///   pages relief's passes for it quarantined until they come back, and no pass evicts for it
-///   meanwhile ([`Arenas::wants_relief`]).
+///   it is freed, a cap changes, or a pass frees something. It is `owed` the pages relief's
+///   passes for it quarantined until they come back, and no pass evicts for it meanwhile
+///   ([`Arenas::wants_relief`]).
 /// - The host refuses chunks from its refusing to map one, or take one back, until it next does as
 ///   asked (TASK-79.37): meanwhile no arena takes a spare.
 pub(super) struct Arenas {
@@ -444,11 +444,12 @@ impl Arenas {
         entry.relief.owed == 0
     }
 
-    /// Relief's pass for `arena` freed `freed` bytes: something, and it is not exhausted; nothing, and it is, if it is starved still, but
-    /// while pages that would make it room are quarantined, as they make it room once they come
-    /// back (TASK-106): what relief evicted, a window mapped, waits for its VM process to unmap it,
-    /// and a pass after finds nothing left to evict. Its own pages, starved at its own cap; any
-    /// arena's, at the total's, which relief evicts any arena's for (TASK-132).
+    /// Relief's pass for `arena` freed `freed` bytes: something, and it is not exhausted; nothing,
+    /// and it is, if it is starved still, but while pages that would make it room are quarantined,
+    /// as they make it room once they come back (TASK-106): what relief evicted, a window mapped,
+    /// waits for its VM process to unmap it, and a pass after finds nothing left to evict. Its own
+    /// pages, starved at its own cap; any arena's, at the total's, which relief evicts any arena's
+    /// for (TASK-132).
     pub(super) fn relieved(&mut self, arena: ArenaId, freed: u64) {
         let starved = self.starved(arena);
         let coming_back = match starved {

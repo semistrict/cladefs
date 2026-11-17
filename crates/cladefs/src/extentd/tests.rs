@@ -5654,7 +5654,7 @@ enum LastWords {
 /// however it likes, panics nothing, leaves another tenant's store as it was and served, and lets
 /// its own go. TASK-154: and it gets of the bucket what its VM manager put in its directory alone,
 /// a point it restores, and nothing of the branch it names. TASK-164.1: through a window that
-/// copies on write too, its stores' faults copying pages of its tenant's memory, and its `PRIVATE`s.
+/// copies on write too, its stores' faults copying pages into its own memory, and its `PRIVATE`s.
 /// Seeded by proptest, which says the sequence if one fails.
 #[test]
 fn whatever_a_vm_process_says_harms_no_other() {

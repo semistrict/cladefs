@@ -415,12 +415,10 @@ pub(crate) struct CopyOnWrite {
 }
 
 impl CopyOnWrite {
-    /// A window's private pages, `most` of them at most: `EINVAL` for none.
-    pub(crate) fn new(most: u64) -> Result<Self> {
-        if most == 0 {
-            return Err(Errno::EINVAL);
-        }
-        Ok(Self { most })
+    /// A window's private pages, `most` of them at most, which the window refuses unless it has
+    /// that many pages, one at least ([`Window::new`]).
+    pub(crate) fn at_most(most: u64) -> Self {
+        Self { most }
     }
 }
 
@@ -631,8 +629,11 @@ impl Window {
             return Err(Errno::EINVAL);
         }
         let len = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
-        // cladefs: no more private pages than the window has pages.
-        if copy_on_write.as_ref().is_some_and(|copying| copying.most > size / page_size()) {
+        // cladefs: some private pages, no more than the window has pages.
+        if copy_on_write
+            .as_ref()
+            .is_some_and(|copying| copying.most == 0 || copying.most > size / page_size())
+        {
             return Err(Errno::EINVAL);
         }
         let translation = match second_stage {
@@ -2055,8 +2056,7 @@ pub(crate) mod tests {
         most: u64,
         stage: Option<Arc<dyn SecondStage>>,
     ) -> (Dax, DaxWindow) {
-        let copying = CopyOnWrite::new(most).unwrap();
-        Dax::copying(pages * page_size(), stage, Some(copying)).unwrap()
+        Dax::copying(pages * page_size(), stage, Some(CopyOnWrite::at_most(most))).unwrap()
     }
 
     /// The byte at `at` in page `page` of a window with no second stage, as it maps it now, after
@@ -2228,11 +2228,11 @@ pub(crate) mod tests {
     fn windows_reserve_no_memory_for_their_private_pages() {
         let ps = page_size();
         let pages = physmem::memory_bytes() / ps;
-        let windows: Vec<_> = (0..3).map(|_| copying(pages, pages, None)).collect();
-        assert_eq!(windows.len(), 3);
+        let _windows: Vec<_> = (0..3).map(|_| copying(pages, pages, None)).collect();
 
-        let too_many = CopyOnWrite::new(9).unwrap();
-        assert_eq!(Dax::copying(8 * ps, None, Some(too_many)).err(), Some(Errno::EINVAL));
-        assert_eq!(CopyOnWrite::new(0).err(), Some(Errno::EINVAL));
+        for most in [0, 9] {
+            let refused = Dax::copying(8 * ps, None, Some(CopyOnWrite::at_most(most)));
+            assert_eq!(refused.err(), Some(Errno::EINVAL), "{most} of 8 pages");
+        }
     }
 }
