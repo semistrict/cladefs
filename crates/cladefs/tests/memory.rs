@@ -115,7 +115,7 @@ fn tenants_past_their_limits_evict_then_refuse() {
     let vm = DaemonExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     read_through(&vm);
 
-    let tenant = "{tenant=\"ac\"}";
+    let tenant = "{tenant=\"5c\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_memory_limit_bytes{tenant}")), 2 * CHUNK);
     assert_within(&format!("cladefsd_tenant_memory_bytes{tenant}"), 2 * CHUNK);
 

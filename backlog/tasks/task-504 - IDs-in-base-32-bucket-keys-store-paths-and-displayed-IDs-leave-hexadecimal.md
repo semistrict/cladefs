@@ -5,6 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-17 01:49'
+updated_date: '2026-11-17 02:38'
 labels: []
 dependencies: []
 ordinal: 892000
@@ -30,3 +31,19 @@ Every u64 naming something (tenant, cell, branch, extent sequence number, segmen
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. crates/base32_id: Padded (13 digits, sorts as numbers) and Short forms, Crockford lower case; parse refuses anything else.
+2. Bucket keys (extent_frame, extent_bucket layout), store paths and description (extent_store layout), FUSE paths, boot profile, store_dir records: Padded.
+3. Displayed IDs (Branch/Cell Display and FromStr, cladefsctl, cladefs-gc, metrics, KMS key names, sockets, logs): Short.
+4. Formats bumped: bucket 15, store 14, profile 2; docs, protos, Go fake, gc-sweep.sh.
+5. Tests: macOS scripts/test.sh, then ubu1 test-host.sh.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+macOS scripts/test.sh: clippy, workspace (2642 passed), sim, shuttle, loom, scripts, go all pass after fixing 11 stale test expectations. vendor/firecracker.lock and guest/tests/Cargo.lock gained base32_id. Commit 3ad2bd165; ubu1 run r504b32 started.
+<!-- SECTION:NOTES:END -->
