@@ -612,7 +612,7 @@ pub unsafe extern "C" fn cladefs_import(
 ///
 /// `filesystem` is open.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_seal(filesystem: *const Filesystem) -> c_int {
+pub unsafe extern "C" fn cladefs_seal(filesystem: *const Filesystem) -> c_int {
     // SAFETY: As the caller promises.
     let filesystem = unsafe { &*filesystem };
     match block_on(filesystem.seal()) {

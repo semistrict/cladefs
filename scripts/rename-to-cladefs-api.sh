@@ -163,11 +163,12 @@ if [[ $mode == repo || $mode == backlog ]]; then
     export GUEST_PARAMS
 fi
 if [[ $mode == repo ]]; then
-    # The C symbols the guest module and guest/sim's build of it define, as they name them before
-    # this renames them (crates/fxfs-sim-diff calls guest/sim's), but Fuchsia's crate fxfs_trace,
+    # The C symbols the guest module, its Rust and guest/sim's build of it define, as they name them
+    # before this renames them (crates/fxfs-sim-diff calls guest/sim's), but Fuchsia's crate fxfs_trace,
     # whose name the module's trace header's shares.
     GUEST_SYMBOLS=$({ git grep -hoP '(?<![A-Za-z0-9_])(?:fxfs|FXFS)_\w+' -- guest/linux guest/sim ||
-        [[ $? == 1 ]]; } | { grep -vx 'fxfs_trace' || true; } | sort -u | paste -sd'|' -)
+        [[ $? == 1 ]]; git grep -hoP 'extern "C" fn \K(?:fxfs)_\w+' -- guest/rust || [[ $? == 1 ]]; } |
+        { grep -vx 'fxfs_trace' || true; } | sort -u | paste -sd'|' -)
     export GUEST_SYMBOLS
 fi
 

@@ -1168,7 +1168,7 @@ mod tests {
         };
         let kcsan = |functions: &str, change: &str| kcsan_of(functions, &[], change);
         assert_eq!(checked("quiet.console.txt", "[ 0.1] Linux version 6.18\n"), Ok(()));
-        let warned = "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/cladefs/dax.c:120 fxfs_dax_seal+0x1/0x2\n";
+        let warned = "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/cladefs/dax.c:120 cladefs_dax_seal+0x1/0x2\n";
         assert_eq!(
             checked("warned.console.txt", warned),
             Err(format!("a kernel complained: {:#?}", vec![warned.trim_end()]))
@@ -1183,7 +1183,7 @@ mod tests {
                           vulnerable to RETBleed attacks, data leaks possible!\n";
         assert_eq!(checked("advisories.console.txt", advisories), Ok(()));
         let caller =
-            "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/cladefs/super.c:9 fxfs_fill+0x1/0x2\n";
+            "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/cladefs/super.c:9 cladefs_fill+0x1/0x2\n";
         assert_eq!(
             checked("caller.console.txt", caller),
             Err(format!("a kernel complained: {:#?}", vec![caller.trim_end()]))
@@ -1195,7 +1195,7 @@ mod tests {
         );
         let theirs = kcsan("alloc_pid / copy_process", "0x1 -> 0x2");
         assert_eq!(checked("theirs.console.txt", &theirs), Ok(()));
-        let reviewed = kcsan("fxfs_dax_seal+0x10/0x20 / kthread_is_per_cpu", "0x40000 -> 0x0");
+        let reviewed = kcsan("cladefs_dax_seal+0x10/0x20 / kthread_is_per_cpu", "0x40000 -> 0x0");
         assert_eq!(checked("reviewed.console.txt", &reviewed), Ok(()));
         // A folio's flags, which a reviewed peer reads plainly as cladefs's code changes them,
         // marked: its reads finishing (r565, r611), or a page_mkwrite's lock as writeback holds it
@@ -1278,13 +1278,13 @@ mod tests {
             );
         }
         let ours =
-            kcsan("fxfs_dax_region_open+0x10/0x20 / fxfs_dax_map_to+0x30/0x40", "0x0 -> 0x1");
+            kcsan("cladefs_dax_region_open+0x10/0x20 / cladefs_dax_map_to+0x30/0x40", "0x0 -> 0x1");
         assert_eq!(
             checked("ours.console.txt", &ours),
             Err(format!(
                 "a kernel complained: {:#?}",
                 vec![
-                    "[ 1.0] BUG: KCSAN: data-race in fxfs_dax_region_open+0x10/0x20 / fxfs_dax_map_to+0x30/0x40"
+                    "[ 1.0] BUG: KCSAN: data-race in cladefs_dax_region_open+0x10/0x20 / cladefs_dax_map_to+0x30/0x40"
                 ]
             ))
         );
@@ -1358,6 +1358,7 @@ const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
 /// host, writes as virtio has it).
 fn ours(function: &str) -> bool {
     function.contains("cladefs")
+        || function.contains("cladefs")
         || function.starts_with("vext_")
         || function.starts_with("virtio_extent")
 }
