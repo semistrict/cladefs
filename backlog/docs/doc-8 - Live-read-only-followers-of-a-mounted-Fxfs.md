@@ -3,7 +3,7 @@ id: doc-8
 title: Live read-only followers of a mounted Fxfs
 type: specification
 created_date: '2026-10-17 22:17'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-17 01:09'
 ---
 # Live read-only followers of a mounted Fxfs
 
@@ -129,7 +129,7 @@ client}.rs`), doc-4's Followers.
   series, the branch vendor/firecracker tracks; branch cladefs, on Firecracker's main, is
   superseded by it and has none of the changes since TASK-37).
 
-### The follower in Fxfs (crates/fxfs, guest/rust/fxfs-linux)
+### The follower in Fxfs (crates/fxfs, guest/rust/cladefs-linux)
 
 Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`, with
 `Device::{advance, pin, unpin}` (storage_device) and `Journal::read_on`.
@@ -164,7 +164,7 @@ Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`
 - Readers are kept out of a follower's filesystem while it applies a batch, by its caller, until
   the concurrency protocol below (TASK-42.5).
 
-### The follower in the guest (guest/linux, guest/rust/fxfs-linux)
+### The follower in the guest (guest/linux, guest/rust/cladefs-linux)
 
 Built (TASK-42.6):
 
@@ -172,7 +172,7 @@ Built (TASK-42.6):
   (-EROFS), sends ADVANCE, LET_GO (naming the commit number an ADVANCE returned: the device
   serves requests in any order, and a LET_GO of an earlier one lets go of no more), PIN and UNPIN, and
   reads `committed`. Its DAX window maps sealed extents read-only for a follower.
-- fs/fxfs mounts read-only on `-o ro` or a follower's device (SB_RDONLY, which a remount keeps).
+- fs/cladefs mounts read-only on `-o ro` or a follower's device (SB_RDONLY, which a remount keeps).
   On a follower's device, the device's configuration change schedules a batch (`fxfs_follow`):
   `follower::Protocol` over the kernel's primitives (follow.rs; C shims in super.c).
 - Every VFS entry point that reads the trees holds the fill barrier shared until what it read is
@@ -443,8 +443,8 @@ next operation, so that its operations reach the journal in the order it makes t
 history checker's model assumes: written only to the page cache, a write reaches the journal at
 writeback, after the operations since (a size changed after it commits before it; a file deleted
 before its writeback never held it), which an hour's run found without DAX (TASK-42.12). On a
-debug kernel, KCSAN's reports fail the test when they name the followers' code (fs/fxfs,
-virtio_extent, their Rust), but for a race whose change is PF_MEMALLOC_NOFS alone (fs/fxfs's
+debug kernel, KCSAN's reports fail the test when they name the followers' code (fs/cladefs,
+virtio_extent, their Rust), but for a race whose change is PF_MEMALLOC_NOFS alone (fs/cladefs's
 NOFS scopes writing their own task's flags); the kernel's own races, each seen looked into, it
 leaves to the kernel.
 

@@ -132,8 +132,8 @@ pub(crate) const ROOT: u32 = 8;
 pub(crate) const INFO: u32 = 9;
 /// Creates the store's window, of `args[0]` bytes, which the VM process maps in its own memory as
 /// the daemon's [stage operations](STAGE_MAP) say. cladefs: a writer's copies on write (backlog
-/// doc-13), of `args[1]` private pages at most, one at least, which the daemon reserves against
-/// its tenant's memory (`ENOMEM` past it): a store to a page makes the page private. A follower's
+/// doc-13), of `args[1]` private pages at most, one at least, the VM process's memory, for which
+/// the daemon reserves nothing (TASK-501): a store to a page makes the page private. A follower's
 /// copies nothing, refusing every store, its `args[1]` 0 (`EINVAL` otherwise, as a writer's of
 /// 0). `args[2]` is how many runs of pages the VM process keeps installed at most, each a mapping
 /// of its own, by the mappings the host lets it make ([`OPEN`]'s reply): 0 if it doesn't say, which

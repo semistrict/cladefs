@@ -21,7 +21,7 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
-## extentd is cladefsd everywhere; Firecracker's configuration of the device is cladefs (TASK-501, 2026-11-16)
+## extentd is cladefsd everywhere; Firecracker's configuration of the device is cladefs (TASK-503, 2026-11-16)
 
 Decided without you, after "rename names in commands / APIs from extent(d) to cladefs" and your
 choices (the extentd names and Firecracker's API; cladefsd everywhere):
@@ -42,13 +42,13 @@ choices (the extentd names and Firecracker's API; cladefsd everywhere):
   night before is such a side for a night. *Undo:* drop the shims once no base is from before.
 - **Qualification against a pin from before stays broken**, as TASK-437 and TASK-475.1 already
   broke it (this tree's test-e2e.sh builds `-p cladefs --bin cladefsd`, which such a tree lacks);
-  TASK-501 adds the gRPC package and Firecracker's keys, which the one harness both sides share
+  TASK-503 adds the gRPC package and Firecracker's keys, which the one harness both sides share
   speaks. It mends when LangSmith's pin moves past them. *Instead:* a harness speaking both.
 - **The guest kernel's module is cladefs, Fxfs keeps its name** (your choice: the module only): `fs/cladefs`,
   `mount -t cladefs`, `CONFIG_CLADEFS_FS`, `cladefs.*` parameters, the `cladefs` tracepoints, `/proc/fs/cladefs`,
   its C symbols, `guest/rust/cladefs-linux`, guest/sim's build and model. Kept: Fuchsia's crates and format,
   the `fxfs-guest-*` cases (the A/B history's keys), fxfs-posix, fxfs-sim-diff, fxfs-automount and its
-  `git-remote-fxfs` helper. *Undo:* revert TASK-501's guest commits; nothing else depends on them.
+  `git-remote-fxfs` helper. *Undo:* revert TASK-503's guest commits; nothing else depends on them.
 - **Trace span names (`cladefsd.map`, ...), the daemon's log file and the stats file renamed too**,
   which tools reading them (dashboards, log queries) must follow.
 
@@ -517,7 +517,7 @@ Decisions made without you, still yours to confirm or overturn. Each is a line o
 ## DAX
 
 - **The host's copy-on-write protocol:** no flag on `WINDOW` (`args[1]` the private pages); retired numbers not reused; every map read-only. TASK-164.7, 2026-11-04.
-- **Private pages are the VM process's memory** (a memfd laid out as the window), not the tenant's arena: a tenant's limit no longer bounds them, `private_max` does. TASK-164.1 and doc-13, 2026-11-04.
+- **Private pages are the VM process's memory** (a memfd laid out as the window), not the tenant's arena: a tenant's limit no longer bounds them, `private_max` does. TASK-164.1 and doc-13, 2026-11-04. **Nothing is reserved for them against the daemon's memory:** the window's `private_max` was pinned whole against the tenant's arena as it was made, which charged the cache's budget for memory the daemon never holds and capped DAX writers at 7/8 of the daemon's memory a GiB (GCE, daemon fixed at 8 GiB: the 8th VM's window ENOMEM, without DAX all 8 boot). `private_max` bounds each device; the VM process's cgroup bounds them with its guest memory; no tenant-wide bound. *Undoing it:* a count of private pages per tenant as they are made, not a reservation at the window's making. TASK-501, 2026-11-16.
 - **A PRIVATE refused with ENOMEM stays an EIO,** not a wait. TASK-170, 2026-11-05. The host's refusal, that is: one the guest found no memory to ask for fails ENOMEM (`fxfs_device_private` tells them apart). TASK-44.15, 2026-11-06.
 - **A snapshot is refused while the window holds a private page,** by the store itself (`ExtentStore` point, quiescent fork and `window_mappings`: `EBUSY`, how many said), not the daemon's dispatch alone; not by failing the guest's freeze, whose device is told frozen before the rebind. TASK-203, 2026-11-07.
 - **A writeback Fxfs had no memory for keeps its pages dirty,** their room reserved again, failing ENOMEM without setting the file's error; an I/O error's pages are lost as TASK-149.15 has it; an eviction gives them up after a second of tries. doc-13's writeback, step 4. The page cache's writeback likewise keeps such folios dirty (TASK-212, 2026-11-06). *Instead:* the file marked failed, every later fsync failing, which loses data for a transient error. TASK-207, 2026-11-06.
@@ -527,7 +527,7 @@ Decisions made without you, still yours to confirm or overturn. Each is a line o
 - **A `PRIVATE`'s pages are one change of the window, made by the VM process as a run** (one mmap, none where nothing is installed); **a write(2) following on from its file's last makes 16 to 64 pages ahead private**; **a rebind maps a range's runs in one `MAP_MANY`, a range at a time, the files dirtied longest ago first.** TASK-164.10, 2026-11-05.
 - **A write by any thread not the guest's, on a window that copies on write, resolves as a load** and restricts the page for KVM's worker: no worker makes a page private, a guest making its pages private before it stores. TASK-191, 2026-11-06.
 - **The perf gate's thresholds:** doc-13's for `dax`, r632's for the rest (TASK-164.5, 2026-11-05); **`forked-dax` 0.8, the user's decision** that the forked pgbench at ~0.84 of no DAX (r650: 0.836, 0.854) is doc-13's one host round trip a first store worth paying, its further cuts TASK-164.11's (TASK-164.6, 2026-11-06).
-- **A window's `private_max` is 1 GiB by default, whatever the window's size** (or its pages, if fewer), where TASK-164.11 made it half the window: each DAX VM reserves that much against its tenant's arena, and a 64 GiB window would have reserved 32 GiB. 1 GiB is what forked pgbench needs (GCE r804: forked-dax 0.91). *Undoing it:* `PRIVATE_MAX_DEFAULT` in vendor/firecracker's extent device, or `dax_private_max` per VM. TASK-227, 2026-11-07.
+- **A window's `private_max` is 1 GiB by default, whatever the window's size** (or its pages, if fewer), where TASK-164.11 made it half the window: each DAX VM reserved that much against its tenant's arena (none since TASK-501), and a 64 GiB window would have reserved 32 GiB. 1 GiB is what forked pgbench needs (GCE r804: forked-dax 0.91). *Undoing it:* `PRIVATE_MAX_DEFAULT` in vendor/firecracker's extent device, or `dax_private_max_bytes` per VM. TASK-227, 2026-11-07. **The VM manager sizes it per VM, in bytes** (`dax_private_max_bytes`; the page count `dax_private_max` refused, not read as bytes; snapshots keep their page count), the sandbox platform by its VMs' allocations, the user's decision over a default cladefs derives from vCPUs, for which the only measurement is pgbench's at 2. Documented in Firecracker's swagger (`PUT /extent/{id}`, the device absent before) and the integrator guide. TASK-502, 2026-11-16.
 - **Windows are as large as the data in the tests and the perf gate:** the host's memory, at most 64 GiB (`common::dax_window`); `CLADEFS_DAX_WINDOW_MIB` sets them; fxfs-guest-checks-dax-small alone keeps its small window (32 MiB), which its checks fill (window_filled failed in 64 GiB, GCE r886). The VMM keeps `dax_window_size` explicit, the VM manager's to size: it can't know the data. `MAX_WINDOW` stays 64 GiB: the daemon keeps a mapping a page for a window, which a hostile VM process could fill; past it, that state wants a bound of the tenant's memory, not the window's. *Undoing it:* `Window::Large` back to each case's size. TASK-227, 2026-11-07.
 - **The test daemons take 8 GiB at most unless a case says,** the sandbox team's daemon's (`common::DAEMON_MEMORY`, test-e2e.sh's): with the daemon's default, 1 GiB, a Linux tree's warm reread paged in again what it evicted (13.15 s against 600 ms, GCE r880, r881). The daemon's own default stays 1 GiB, the VM manager's to size. *Undoing it:* `DAEMON_MEMORY` and test-e2e.sh's default. TASK-227, 2026-11-07.
 - **2 MiB pages end to end (TASK-131.3) not taken for TASK-227:** with the window large and the daemon's memory holding the tree, Fxfs DAX's warm reread of the Linux tree is 1.05-1.06x ext4's on virtio-pmem, in the same run (GCE r901: 568 against 537 ms), within the user's 1.5x (2026-11-07). Per-page costs aren't what's left: a reader-only profile (r901) finds the copy the same on both (2,285 samples against 2,339) and Fxfs's extra 7.6% in its directory reads, a read's iomap and clock reads, per file; walked apart (r904), the directories +25 ms, the reads +28 ms. TASK-230 takes the directories and the clock reads (r905: 495 against 530 ms); a cold read's first touches stay TASK-131.3's to weigh. 2026-11-07.

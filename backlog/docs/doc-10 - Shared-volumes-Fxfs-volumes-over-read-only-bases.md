@@ -3,7 +3,7 @@ id: doc-10
 title: 'Shared volumes: Fxfs volumes over read-only bases'
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-17 01:09'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
@@ -75,7 +75,7 @@ guest needs this model however the extents are read. The store question is only 
 
 ### Guest VFS (TASK-136.2)
 
-Built: `mount -t fxfs -o volume=NAME tag path`. One Fxfs on the device, one superblock per mounted
+Built: `mount -t cladefs -o volume=NAME tag path`. One Fxfs on the device, one superblock per mounted
 volume, so each repo has a native `st_dev` and `EXDEV`, and attaching needs no new device.
 
 - `struct fxfs_vfs_filesystem` holds what a device's superblocks share, and in Rust `Filesystem`,
@@ -137,7 +137,7 @@ The sandbox's allocator and root store never learn of the base. Limits:
 Built. A sandbox keeps the volume current with ordinary commands, and the host forks its store and
 keeps the manifest, so that no guest replays its journal. The fork is the generation: it holds every
 extent as of the fork (doc-4), so the sandbox moves on with no `snapshot_volume`. The three ioctls
-are in `guest/linux/fs/fxfs/vfs.h`. In order:
+are in `guest/linux/fs/cladefs/vfs.h`. In order:
 
 1. `syncfs`, once the commands are done.
 2. `FIFREEZE` on the volume, which stops its writers.
@@ -233,7 +233,7 @@ volume imported already, by an earlier lookup or before a reboot, mounts with no
 stays attached (TASK-136.5's record).
 
 - **The kernel's side is Linux's autofs**, protocol 5, an indirect map on ROOT, not a
-  `d_automount` of fs/fxfs's own: autofs is `d_automount`'s client already. It holds every lookup
+  `d_automount` of fs/cladefs's own: autofs is `d_automount`'s client already. It holds every lookup
   of a name on one wait while the daemon mounts it, so that concurrent lookups of a repo attach it
   once; it lets the daemon's process group alone through the directory unmounted (the daemon makes
   a group of its own); and it finds the mounts idle for the timeout, which the daemon unmounts as
@@ -255,7 +255,7 @@ stays attached (TASK-136.5's record).
   journal holds of it is flushed into its layers first, which then hold all it has. A volume in use
   stays open, as does one a read-only filesystem can't flush. A replay opens it again while the
   journal still names it, as it opens any volume written to lately. The guest's
-  `/proc/fs/fxfs/TAG` says `volumes_open`.
+  `/proc/fs/cladefs/TAG` says `volumes_open`.
 
 ### Hundreds mounted at once
 

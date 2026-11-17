@@ -28,7 +28,7 @@ Read the release's notes for which of these changed. Each one changed means what
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
 
-Names change too, refused the same way, never read under both. Since TASK-501 the control API is
+Names change too, refused the same way, never read under both. Since TASK-503 the control API is
 `cladefs.cladefsd.v1.Cladefsd` (Go: `go/cladefsd/v1`), not `cladefs.extentd.v1.Extentd`, whose
 calls a new daemon answers `UNIMPLEMENTED`; and Firecracker's API says `cladefs`: `PUT
 /cladefs/{id}`, a configuration file's `cladefs` list, `cladefs_overrides` and `cladefsd_socket`.

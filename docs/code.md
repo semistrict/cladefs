@@ -184,12 +184,12 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.16.1-r9` of
+The VMM is a submodule: branch `cladefs-v1.16.1-r10` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one
 linear series, each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2,
 TASK-273, the one with the extent device over virtio-PCI alone; r8, TASK-437, r7
-renamed, the releases before it named `fxdax-v1.16.1-rN`; r9, TASK-501, r8 with
+renamed, the releases before it named `fxdax-v1.16.1-rN`; r10, TASK-503, r8 with
 its API saying cladefs). Its first commits are general fixes, each standing
 alone, among them the PCI transport's shared memory regions; everything else is
 behind its `cladefs` feature, so that a build without it is upstream's. Every

@@ -29,7 +29,9 @@
 //! kept running once its runs are done, the host's memory measured as each is added
 //! (`crate::measure`): what a VM more costs the host (fxfs-guest-pgbench-density, -dax-density).
 //! CLADEFS_PGBENCH_RUNS and CLADEFS_PGBENCH_RUN_SECS set the runs, CLADEFS_PGBENCH_SCALE its scale, and
-//! CLADEFS_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024). With CLADEFS_PGBENCH_COLD
+//! CLADEFS_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024), and
+//! CLADEFS_PGBENCH_DAEMON_MEMORY the daemon's, in bytes (a page cache of the host's free memory
+//! unless set). With CLADEFS_PGBENCH_COLD
 //! set, the forks' VMs are served by a daemon started once the base's has drained and stopped,
 //! with a part cache of its own, empty, and nothing in memory: a host forking another host's base,
 //! which holds none of its data (TASK-225).
@@ -183,6 +185,17 @@ mod host {
     /// (TASK-99).
     fn load_memory() -> anyhow::Result<u32> {
         Ok(u32::try_from(setting("CLADEFS_PGBENCH_MEMORY_MIB", 4096)?)?)
+    }
+
+    /// cladefs: the daemon's memory, in bytes: CLADEFS_PGBENCH_DAEMON_MEMORY, or none, a page cache
+    /// of the host's free memory (TASK-501).
+    fn daemon_memory() -> anyhow::Result<Option<u64>> {
+        match std::env::var("CLADEFS_PGBENCH_DAEMON_MEMORY") {
+            Ok(bytes) if !bytes.is_empty() => Ok(Some(
+                bytes.parse().context("CLADEFS_PGBENCH_DAEMON_MEMORY is a count of bytes")?,
+            )),
+            _ => Ok(None),
+        }
     }
 
     /// cladefs: the memory of a density case's VMs, in MiB: CLADEFS_PGBENCH_DENSITY_MEMORY_MIB, or
@@ -596,8 +609,10 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             ];
             // Its memory a page cache of the host's free memory, as production's (TASK-358): with a
             // fixed 1 GiB, the guest's working set, a 2 GiB window's, didn't fit, and faults paged
-            // in and unpacked again what was evicted, slower as the database grew.
-            let daemon_memory = None;
+            // in and unpacked again what was evicted, slower as the database grew. Fixed at
+            // CLADEFS_PGBENCH_DAEMON_MEMORY bytes if set, as a VM manager may fix it: DAX VMs a
+            // daemon of 8 GiB serves (TASK-501).
+            let daemon_memory = daemon_memory()?;
             let mut daemon =
                 crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, daemon_memory)?;
             let base = dir.join("base");

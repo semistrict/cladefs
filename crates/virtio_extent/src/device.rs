@@ -219,7 +219,7 @@ impl Device {
                 // nothing.
                 if !config.read_only {
                     config_space.private_max =
-                        private_max(window.len(), config.dax_private_max).to_le();
+                        private_max(window.len(), config.dax_private_max_bytes).to_le();
                 }
                 Some(window)
             }

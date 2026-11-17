@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # The extent service's names, Firecracker's extent API and the guest kernel's filesystem module
-# named for cladefs (TASK-501), as a script, so that a branch begun before it can run it and then rebase onto main with its own
+# named for cladefs (TASK-503), as a script, so that a branch begun before it can run it and then rebase onto main with its own
 # changes renamed too:
 #
 #   scripts/rename-to-cladefs-api.sh            rename this checkout's live files and paths, and
@@ -85,6 +85,7 @@ s/\bExtentOverride\b/CladefsOverride/g;
 s/\bextent_overrides\b/cladefs_overrides/g;
 s/\bUnknownExtentDevice\b/UnknownCladefsDevice/g;
 s/\bputGuestExtentByID\b/putGuestCladefsByID/g;
+s/\bputExtentDeviceByID\b/putCladefsDeviceByID/g; s/\bits Extent(\s+)definition\b/its Cladefs$1definition/g;
 s/\b(vmm_config|request)::extent\b/$1::cladefs/g;
 s{/extent/\{id\}}{/cladefs/{id}}g;
 s/\b((?:vm_)?resources)(\s*)\.extent\b/$1$2.cladefs/g;
@@ -105,7 +106,7 @@ if ($ARGV =~ m{(^|/)src/firecracker/src/api_server/parsed_request\.rs$}) {
 if ($ARGV =~ m{(^|/)(src/firecracker/src/api_server/request|src/vmm/src/vmm_config)/mod\.rs$}) {
     s/^pub mod extent;/pub mod cladefs;/mg;
 }
-if ($ARGV =~ m{(^|/)resources/cladefs/swagger\.yaml$}) {
+if ($ARGV =~ m{(^|/)(resources/cladefs|src/firecracker/swagger)/[a-z]+\.yaml$}) {
     s{#/definitions/Extent"}{#/definitions/Cladefs"}g;
     s/^  Extent:$/  Cladefs:/mg;
 }
@@ -174,7 +175,7 @@ if [[ $mode == repo ]]; then
 fi
 
 if [[ $mode == backlog ]]; then
-    RENAME="$rename" python3 "$(dirname "$0")/lib/rename_backlog.py" --skip TASK-501
+    RENAME="$rename" python3 "$(dirname "$0")/lib/rename_backlog.py" --skip TASK-503
     exit
 fi
 

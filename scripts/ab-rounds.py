@@ -82,7 +82,7 @@ CONTROL = "ext4-guest-kernel"
 # bytes and reads it counted, and the extent daemon's counters but its times.
 COUNTED = re.compile(r"(-requests|-bytes|-reads)$|^cladefsd-(?!.*-(ms|ns|us|secs)$)")
 ROUND = re.compile(r"-r([1-9][0-9]*)$")
-# The extent daemon's name in the metrics and files of a side from before TASK-501, which
+# The extent daemon's name in the metrics and files of a side from before TASK-503, which
 # LangSmith's pin and the nightly's night before may be for a while. Spelt so that
 # scripts/rename-to-cladefs-api.sh, run again, leaves it.
 BEFORE_CLADEFSD = re.compile(r"\bextent[d](?=[-_.])")
@@ -200,7 +200,7 @@ class Round:
 
 
 def named_now(name):
-    """Metric or file `name` as sides since TASK-501 name it, cladefsd for the daemon."""
+    """Metric or file `name` as sides since TASK-503 name it, cladefsd for the daemon."""
     return BEFORE_CLADEFSD.sub("cladefsd", name)
 
 

@@ -3,11 +3,11 @@ id: doc-3
 title: 'TASK-26.1 spike: porting Fxfs into the guest''s Linux kernel'
 type: other
 created_date: '2026-10-13 21:31'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-17 01:09'
 ---
 # TASK-26.1: porting Fxfs into the guest's Linux kernel
 
-**Status: historical.** The port this spike sized landed (TASK-26.6): guest/linux/fs/fxfs and
+**Status: historical.** The port this spike sized landed (TASK-26.6): guest/linux/fs/cladefs and
 guest/rust. libkrun and libkrunfw are gone (TASK-40): guests run on Firecracker, on Amazon Linux's
 6.18 kernel as Firecracker's CI configures it (scripts/build-guest-kernel.sh), and the guest tests
 live in guest/tests. The report below is kept as written.
@@ -25,12 +25,12 @@ device, is about 9-14 engineer-weeks; the estimate is below.
 
 | Piece | Where | Lines |
 |---|---|---:|
-| VFS glue: mount, inodes, lookup, readdir, read | `guest/linux/fs/fxfs/super.c` | 229 |
-| What the kernel gives Rust: kvmalloc, printk, panic, completions, work items, hrtimers, clocks, randomness | `guest/linux/fs/fxfs/rt.c`, `rt.h` | 210 |
+| VFS glue: mount, inodes, lookup, readdir, read | `guest/linux/fs/cladefs/super.c` | 229 |
+| What the kernel gives Rust: kvmalloc, printk, panic, completions, work items, hrtimers, clocks, randomness | `guest/linux/fs/cladefs/rt.c`, `rt.h` | 210 |
 | Rust runtime: global allocator, logger, panic handler, `block_on`, `spawn`, `Timer` | `guest/rust/linux-rt` | 360 |
-| The filesystem, a stand-in: one file whose contents a spawned task returns after a timer | `guest/rust/fxfs-linux` | 187 |
+| The filesystem, a stand-in: one file whose contents a spawned task returns after a timer | `guest/rust/cladefs-linux` | 187 |
 | std for the kernel, for crates written for std | `guest/rust/std` | 2,200 |
-| Kernel build: libkrunfw's, with fs/fxfs and the Rust built in | `scripts/build-guest-kernel.sh` | |
+| Kernel build: libkrunfw's, with fs/cladefs and the Rust built in | `scripts/build-guest-kernel.sh` | |
 | Guest test: boots that kernel, mounts fxfs, lists and reads it | libkrun `fxfs-guest`, `scripts/test-guest-kernel.sh` | |
 | Fxfs's stack use, by operation | `crates/cladefs/examples/fxfs-stack.rs`, docs/measurements/fxfs-stack-2026-10-13 | |
 | Fxfs's third-party crates against the kernel's std | `guest/std-probe`, `scripts/probe-guest-std.sh` | |
@@ -64,10 +64,10 @@ proc macros. So:
 - Release builds are LTO'd into one object of what the exported functions reach. Compiler
   intrinsics are an object apiece, so the kernel links only those used. Their weak `memcpy`,
   `memset` and `memcmp` lose to the kernel's.
-- fs/fxfs's Makefile partially links that object (`ld -r -u fxfs_init`), strips its LLVM bitcode,
-  and builds it into fs/fxfs. The kernel links with no warnings.
+- fs/cladefs's Makefile partially links that object (`ld -r -u fxfs_init`), strips its LLVM bitcode,
+  and builds it into fs/cladefs. The kernel links with no warnings.
 - The VFS glue is C: it calls the kernel's inline functions and macros directly, and keeps the
-  Rust boundary to a FUSE-like set of calls (`fxfs.h`).
+  Rust boundary to a FUSE-like set of calls (`cladefs.h`).
 
 Still to do: localize the Rust symbols (about 380 `_R…` globals land in vmlinux), and keep
 `CONFIG_RUST` off or rename the allocator's `__rust_*` symbols.

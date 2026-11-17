@@ -355,7 +355,7 @@ class Counts(unittest.TestCase):
             ("daemon cladefsd-stats.txt", "written per guest byte, raw"): "same"})
 
     def test_a_side_from_before_cladefsd_is_compared_under_the_new_names(self):
-        """A base from before TASK-501, LangSmith's pin or the nightly's night before, names the
+        """A base from before TASK-503, LangSmith's pin or the nightly's night before, names the
         daemon's metrics and stats file as the head's did then: its rows are the head's."""
         old = "extent" + "d"
         for number in (1, 2, 3):

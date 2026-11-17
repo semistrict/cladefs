@@ -20,8 +20,9 @@
 # message as scripts/rename-to-cladefs.sh renames them, the feature `cladefs` and its rules in
 # resources/cladefs, nothing else changed.
 e27792aef7c3a7084bd014469edf0eedd60cc0a0 e103560286ee3e1255ecc93077de118acfa5726d
-# TASK-501: cladefs-v1.16.1-r9 (branch cladefs-v1.16.1-r9), r8 renamed: each commit's tree and
+# TASK-503: cladefs-v1.16.1-r10 (branch cladefs-v1.16.1-r10), r8 renamed: each commit's tree and
 # message as scripts/rename-to-cladefs-api.sh renames them, extentd cladefsd and the API's
 # configuration of the device cladefs (PUT /cladefs/{id}, the configuration file's cladefs,
-# cladefs_overrides); then a configuration file's old key refused, on top.
-e103560286ee3e1255ecc93077de118acfa5726d 26add4ca1d7dd938e170749e4a27bbf2aec1a7cc
+# cladefs_overrides); then a configuration file's old key refused, on top. (r9, its first cut, was
+# of r8 before TASK-502's commit and never pinned.)
+93ad15103f337a2802ad4aa8404728b3658874af 9bc4a5a8e40996220c4d170552190799dc3cf37f

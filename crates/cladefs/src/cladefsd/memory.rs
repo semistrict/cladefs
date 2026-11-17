@@ -7,9 +7,9 @@
 //! API. Past a limit the daemon evicts the clean pages asked for longest ago, the tenant's own
 //! past the tenant's, any tenant's past the total; with none left to evict, what would take more
 //! fails with `ENOMEM` (physical memory's relief, with `crate::cache`'s evictor), and the daemon
-//! goes on. cladefs: the private pages of a window that copies on write, its VM process's memory,
-//! are reserved against its tenant's as the window is made (`physmem::pin`), so that relief
-//! keeps room for them (backlog doc-13). Its metrics name tenants by their IDs.
+//! goes on. cladefs: the private pages of a window that copies on write are its VM process's
+//! memory, not the daemon's, and count against none of this (backlog doc-13, TASK-501). Its
+//! metrics name tenants by their IDs.
 
 use super::server::{Parking, Tenant};
 use crate::Errno;

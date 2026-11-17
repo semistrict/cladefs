@@ -183,11 +183,23 @@ commit on that store's branch, so its host needs to be the branch's writer. Fork
 at a time, or make a point first (above).
 
 **Memory.** The pages a guest writes through its DAX window are its own, private copies, in its VM
-process's memory (backlog doc-13): at most the device's `dax_private_max` (a quarter of the window's
-pages by default), reserved against the store's tenant as the guest activates the device, so that a
-store never waits for memory. The guest writes them back and lets them go below that bound; a store
-past it stops that VM (exit 159). Everything else the window maps is sealed extents' pages, shared
-and evictable.
+process's memory (backlog doc-13), until the guest writes them back to the store, as a page cache
+writes back dirty pages, and the window shares them again. They are charged to the VM process, as
+its guest memory is, not to the daemon or the store's tenant: the daemon reserves none of it, so its
+memory sizes its cache alone (TASK-501). Bound the VM process's memory, its cgroup, for guest memory
+and private pages together. Everything else the window maps is sealed extents' pages, shared and
+evictable.
+
+**Sizing a VM's private pages.** The extent device's `dax_private_max_bytes` caps how many bytes of
+them a VM holds at once (`PUT /cladefs/{id}`, in Firecracker's swagger spec): a multiple of the page
+size, a page at least, the window's size at most; 1 GiB unless set, or the window's size if less.
+The guest keeps under it, writing back as it nears it, so a smaller cap means earlier writeback.
+The host refuses what would go past it: a `write(2)` fails `EIO`, and a store through a mapping
+stops that VM (exit 159). The VM
+manager sizes it per VM (TASK-502): the cap bounds a burst of writes between writebacks, which grows
+with how fast the guest writes (its vCPUs) and is memory the VM process holds (weigh it against its
+guest memory). Forked pgbench at 2 vCPUs needed 1 GiB (TASK-227); measure your workloads. The cap
+was a page count, `dax_private_max`, before TASK-502: a device naming that field is refused.
 
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,

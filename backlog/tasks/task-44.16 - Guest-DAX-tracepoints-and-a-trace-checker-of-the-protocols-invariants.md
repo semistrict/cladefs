@@ -4,7 +4,7 @@ title: Guest DAX tracepoints and a trace checker of the protocol's invariants
 status: To Do
 assignee: []
 created_date: '2026-10-24 21:31'
-updated_date: '2026-11-16 22:53'
+updated_date: '2026-11-17 01:10'
 labels: []
 dependencies: []
 parent_task_id: TASK-44
@@ -17,7 +17,7 @@ ordinal: 395000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 The guest's beliefs about its pages and the host's mappings are each logged in part; nothing checks them against each other over a run. Tracepoints at the protocol's steps, merged with cladefsd's log of MAP, UNMAP and PRIVATE, let an offline checker replay the protocol's state machine (or the kernel's RV monitors run it live) and name the first step that breaks an invariant.
 
-At dde8d58d3, after writable DAX was deleted (37c331a6c), the protocol is doc-13's copy-on-write: no region is open in the window, nothing is evacuated, and no page is writable through the window except a private one. The steps to trace: MAP of a sealed extent or zeros, read-only (fxfs_dax_map_pages, guest/linux/fs/fxfs/dax.c:820-905); PRIVATE, before a page is dirty (fxfs_dax_dirty, dax.c:2384-2443; fxfs_device_private, device.c:273); writeback's write-protect and its write through fxfs_write_many (fxfs_dax_write_back, dax.c:2066-2130; fxfs_dax_protect, 2034-2050); the seal (fxfs_device_seal_begin/end, device.c:167-194); rebind (fxfs_dax_rebind, dax.c:2142-2175); UNMAP. A range's page state is pages.c's (bda2e53a0), whose named transitions (fill, dirty, swap, rebind, cut, unmap) are where the guest's side changes. The invariants are specs/dax-cow's (DaxCow.tla), among them DirtyImpliesPrivate. dax.c's trace ring (fxfs.dax_trace, dax.c:513-602) records a page's maps and iomaps, not the host's side.
+At dde8d58d3, after writable DAX was deleted (37c331a6c), the protocol is doc-13's copy-on-write: no region is open in the window, nothing is evacuated, and no page is writable through the window except a private one. The steps to trace: MAP of a sealed extent or zeros, read-only (fxfs_dax_map_pages, guest/linux/fs/cladefs/dax.c:820-905); PRIVATE, before a page is dirty (fxfs_dax_dirty, dax.c:2384-2443; fxfs_device_private, device.c:273); writeback's write-protect and its write through fxfs_write_many (fxfs_dax_write_back, dax.c:2066-2130; fxfs_dax_protect, 2034-2050); the seal (fxfs_device_seal_begin/end, device.c:167-194); rebind (fxfs_dax_rebind, dax.c:2142-2175); UNMAP. A range's page state is pages.c's (bda2e53a0), whose named transitions (fill, dirty, swap, rebind, cut, unmap) are where the guest's side changes. The invariants are specs/dax-cow's (DaxCow.tla), among them DirtyImpliesPrivate. dax.c's trace ring (cladefs.dax_trace, dax.c:513-602) records a page's maps and iomaps, not the host's side.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

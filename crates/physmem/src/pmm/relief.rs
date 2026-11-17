@@ -113,11 +113,10 @@ fn relieve(reliever: &Reliever, mut evict: impl FnMut(Option<ArenaId>, u64) -> u
                 Starved::Total => None,
                 Starved::Removed => unreachable!("relief asked for {arena:?}, removed"),
             };
-            let unpins = node.locked().unpins();
             RELIEVING.set(Some(arena));
             let freed = evict(from, RELIEF_BYTES);
             RELIEVING.set(None);
-            node.locked().relieved(arena, freed, unpins);
+            node.locked().relieved(arena, freed);
             node.room.pulse();
         }
     }

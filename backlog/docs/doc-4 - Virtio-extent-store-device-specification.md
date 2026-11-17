@@ -3,7 +3,7 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-17 01:09'
 ---
 # The virtio extent-store device
 
@@ -164,7 +164,7 @@ process and each guest counted: its stats (`cladefsctl stats --json`, the contro
 a configuration change; the guest answers with `STATS`, naming the ask, its data its stats as UTF-8
 text, `VIRTIO_EXTENT_MAX_STATS` (64 KiB) at most: lines of a name and a value, a number or a
 histogram's numbers between commas (`NAME_hist`), and `commit COMMIT`, the commit its filesystem
-was built of. cladefs's guest says what its `/proc/fs/fxfs/TAG` says, and `/proc/fs/fxfs/build`. An
+was built of. cladefs's guest says what its `/proc/fs/cladefs/TAG` says, and `/proc/fs/cladefs/build`. An
 answer answers the asks before it too, as the guest may see only the latest. A guest with nothing
 mounted answers with no text. The host waits for the answer a while (2 s by default), and reports
 the guest as not having answered past it. The device asks only once the driver acked `F_STATS`, and

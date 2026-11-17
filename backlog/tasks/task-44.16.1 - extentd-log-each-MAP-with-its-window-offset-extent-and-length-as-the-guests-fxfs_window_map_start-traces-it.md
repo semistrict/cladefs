@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-08 14:53'
-updated_date: '2026-11-16 22:53'
+updated_date: '2026-11-17 01:10'
 labels: []
 dependencies: []
 parent_task_id: TASK-44.16
@@ -17,7 +17,7 @@ ordinal: 693000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-44.16's AC1 asks that cladefsd log its MAPs with the same offsets the guest traces, so that a run's guest trace (fs/fxfs/fxfs_trace.h's events, docs/guest-tracepoints.md) and cladefsd's log merge into one history for the trace checker (AC2). The guest side landed (commit ad266aff6, held for the boot-cost decision): fxfs_window_map_start gives the window offset, extent (branch:sequence), offset, length and MAP_MANY count. cladefsd logs no MAP, UNMAP or PRIVATE today (no log line in crates/cladefs's cladefsd or the VMM's virtio extent device mentions window_offset). The device's requests carry no id on the wire, so the window offset (and time) is what joins the two.
+TASK-44.16's AC1 asks that cladefsd log its MAPs with the same offsets the guest traces, so that a run's guest trace (fs/cladefs/cladefs_trace.h's events, docs/guest-tracepoints.md) and cladefsd's log merge into one history for the trace checker (AC2). The guest side landed (commit ad266aff6, held for the boot-cost decision): fxfs_window_map_start gives the window offset, extent (branch:sequence), offset, length and MAP_MANY count. cladefsd logs no MAP, UNMAP or PRIVATE today (no log line in crates/cladefs's cladefsd or the VMM's virtio extent device mentions window_offset). The device's requests carry no id on the wire, so the window offset (and time) is what joins the two.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

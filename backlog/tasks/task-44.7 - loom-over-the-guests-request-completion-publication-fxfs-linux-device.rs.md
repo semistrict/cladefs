@@ -1,9 +1,10 @@
 ---
 id: TASK-44.7
-title: loom over the guest's request completion publication (fxfs-linux device.rs)
+title: loom over the guest's request completion publication (cladefs-linux device.rs)
 status: To Do
 assignee: []
 created_date: '2026-10-18 04:06'
+updated_date: '2026-11-17 01:10'
 labels: []
 dependencies: []
 parent_task_id: TASK-44
@@ -14,7 +15,7 @@ ordinal: 136000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-guest/rust/fxfs-linux/src/device.rs publishes a request's completion with hand-written orderings (status stored Relaxed, done stored Release, both loaded after an Acquire of done) and the capacity with Acquire/Release: the one kind of code where loom, which models C11's weak orderings, finds what Shuttle (all atomics SeqCst) can't (doc-8, Why Shuttle, not loom). Small, so a loom test is cheap, if device.rs's completion can be built for the host.
+guest/rust/cladefs-linux/src/device.rs publishes a request's completion with hand-written orderings (status stored Relaxed, done stored Release, both loaded after an Acquire of done) and the capacity with Acquire/Release: the one kind of code where loom, which models C11's weak orderings, finds what Shuttle (all atomics SeqCst) can't (doc-8, Why Shuttle, not loom). Small, so a loom test is cheap, if device.rs's completion can be built for the host.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

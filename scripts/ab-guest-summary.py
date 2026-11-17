@@ -27,7 +27,7 @@ def deepest(run, name):
 
 
 def daemon_stats(run):
-    # A side from before TASK-501 names it as extent[d] does.
+    # A side from before TASK-503 names it as extent[d] does.
     path = deepest(run, "cladefsd-stats.txt") or deepest(run, "extent[d]-stats.txt")
     if path is None:
         return {}

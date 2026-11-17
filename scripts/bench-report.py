@@ -65,7 +65,7 @@ def daemon_stats(directory, kind):
     followers (what the stores' followers were), daemon (what serving the stores cost it) and
     requests (the VM processes' requests it served, by kind)."""
     logs = Path(directory) / "logs"
-    # A run of a tree from before TASK-501 names it for the daemon's old name, extent[d].
+    # A run of a tree from before TASK-503 names it for the daemon's old name, extent[d].
     path = next(logs.glob("cladefsd-stats.txt"), None) or next(logs.glob("extent[d]-stats.txt"),
                                                                 None)
     if path is None:

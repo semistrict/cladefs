@@ -1,5 +1,5 @@
 ---
-id: TASK-501
+id: TASK-503
 title: >-
   The extent service and Firecracker's extent API named for cladefs: extentd →
   cladefsd, PUT /extent → PUT /cladefs
@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 22:23'
-updated_date: '2026-11-16 23:33'
+updated_date: '2026-11-17 01:11'
 labels:
   - naming
   - host
@@ -62,4 +62,6 @@ macOS: clippy, scripts 523 tests, guide 42/42, upstream-changes --check pass.
 Correction to the note above: what already breaks the qualification A/B against a pin from before is TASK-437 and TASK-475.1, not TASK-474 (proto field renames keep their numbers): this tree's test-e2e.sh builds a side with `cargo build -p cladefs --bin cladefsd`, which a tree from before them has neither of. TASK-501 adds the gRPC package and Firecracker's keys to that; the pin moving past them is what mends it.
 
 Scope added by the user (2026-11-16): fxfs renamed cladefs inside Linux, the kernel module only (Fuchsia's crates and format, and the fxfs-guest-* cases, keep Fxfs), folded into this task. The script collects the C symbols guest/linux and guest/sim define (GUEST_SYMBOLS) and the module's parameters (GUEST_PARAMS) before renaming, renames the kernel C scope (guest/linux, guest/sim, guest/mutants, crates/fxfs-sim-diff/shim, cocci, bpftrace) whole, and elsewhere only the module's interface. First run missed guest/sim's own fxfs_sim_* symbols and the sim-diff shim's `struct fxfs`, which crates/fxfs-sim-diff failed to build on; fixed in the script and the tree. macOS cargo check of fxfs-sim-diff passes.
+
+Renumbered TASK-501 -> TASK-503 at the merge of main (backlog doctor --fix): another session's TASK-501 (CoW DAX windows reserve no daemon memory) and TASK-502 landed on main meanwhile; this branch's commits before the merge say TASK-501. Main's fork commit for TASK-502 (93ad15103, on r8) taken into the renamed series: cladefs-v1.16.1-r10 (bac96b047) is r8 through it renamed (93ad15103 -> 9bc4a5a8e, its upstream swagger's device named Cladefs/putCladefsDeviceByID too), then the refusal citing TASK-503. r9 (8506cccc1), the first cut, was never pinned on main. Merge conflicts were all in files this rename only renamed: main's side taken, the script run again over it (idempotent after), --backlog again.
 <!-- SECTION:NOTES:END -->

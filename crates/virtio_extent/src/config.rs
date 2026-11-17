@@ -34,10 +34,10 @@ pub enum ConfigError {
     #[error("The DAX window's size, {0:#x} bytes, is not a nonzero multiple of 2 MiB")]
     InvalidDaxWindowSize(u64),
     #[error(
-        "The DAX window's private pages, {0}, are none, or more than it has pages, or it has no \
-         window"
+        "The DAX window's private pages' bytes, {0:#x}, are none, not a multiple of the page size, \
+         or more than the window's, or it has no window"
     )]
-    InvalidDaxPrivateMax(u64),
+    InvalidDaxPrivateMaxBytes(u64),
 }
 
 /// An extent-store device: the store of extents that a guest running cladefs's Fxfs itself keeps
@@ -57,12 +57,15 @@ pub struct Config {
     /// files' data from: none without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_window_size: Option<u64>,
-    /// cladefs: the most private pages a writer's window holds, as it copies on write (doc-4's
-    /// `DAX`, cladefs's backlog doc-13), which cladefs's extent daemon reserves against the store's
-    /// tenant's memory as the guest activates the device: 1 GiB's pages without it, or the
-    /// window's if fewer, whatever its size (TASK-227). A follower's window copies nothing.
+    /// cladefs: the most bytes of private pages a writer's window holds, as it copies on write
+    /// (doc-4's `DAX`, cladefs's backlog doc-13): pages the guest wrote and has not written back
+    /// yet, the VM process's memory, for which cladefs's extent daemon reserves nothing
+    /// (TASK-501). A multiple of the page size, a page at least, the window's size at most;
+    /// [`PRIVATE_MAX_DEFAULT`] without it, or the window's if less, whatever its size (TASK-227).
+    /// The VM manager sizes it per VM (TASK-502); a page count was `dax_private_max`, which is
+    /// refused now, not read as bytes. A follower's window copies nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dax_private_max: Option<u64>,
+    pub dax_private_max_bytes: Option<u64>,
     /// The socket of cladefs's extent daemon, which serves the store.
     pub cladefsd_socket: String,
     /// cladefs: whether the device follows the store, read-only, as another VM writes it (cladefs's
@@ -100,11 +103,11 @@ impl Config {
         {
             return Err(ConfigError::InvalidDaxWindowSize(size));
         }
-        // cladefs: some of the window's pages, of a window (doc-13).
-        if let Some(most) = self.dax_private_max {
-            let pages = self.dax_window_size.unwrap_or(0) / cladefs::pages::page_size();
-            if most == 0 || most > pages {
-                return Err(ConfigError::InvalidDaxPrivateMax(most));
+        // cladefs: some of the window's pages, whole, of a window (doc-13, TASK-502).
+        if let Some(most) = self.dax_private_max_bytes {
+            let window = self.dax_window_size.unwrap_or(0);
+            if most == 0 || !most.is_multiple_of(cladefs::pages::page_size()) || most > window {
+                return Err(ConfigError::InvalidDaxPrivateMaxBytes(most));
             }
         }
         Ok(())
@@ -137,18 +140,17 @@ impl Config {
 }
 
 /// cladefs: the most private pages a writer's window of `len` bytes holds as it copies on write
-/// (backlog doc-13): `configured`, if given; otherwise [`PRIVATE_MAX_DEFAULT`]'s pages, or the
-/// window's if fewer, one at least (TASK-227; half its pages before, TASK-164.11).
+/// (backlog doc-13), as `WINDOW` names them: `configured` bytes' pages, if given; otherwise
+/// [`PRIVATE_MAX_DEFAULT`]'s, or the window's if fewer, one at least (TASK-227; half its pages
+/// before, TASK-164.11).
 pub fn private_max(len: u64, configured: Option<u64>) -> u64 {
-    let pages = len / cladefs::pages::page_size();
-    configured
-        .unwrap_or_else(|| (PRIVATE_MAX_DEFAULT / cladefs::pages::page_size()).min(pages))
-        .max(1)
+    let bytes = configured.unwrap_or(PRIVATE_MAX_DEFAULT.min(len));
+    (bytes / cladefs::pages::page_size()).max(1)
 }
 
 /// cladefs: the bytes of private pages a writer's window holds at most unless configured
-/// (`dax_private_max`), whatever its size (TASK-227): enough for a forked pgbench's working set
-/// (GCE r804, forked-dax 0.91), which the daemon reserves against the tenant's memory.
+/// (`dax_private_max_bytes`), whatever its size (TASK-227): enough for a forked pgbench's working
+/// set at 2 vCPUs (GCE r804, forked-dax 0.91). The VM manager sizes it per VM (TASK-502).
 pub const PRIVATE_MAX_DEFAULT: u64 = 1 << 30;
 
 #[cfg(test)]
@@ -162,7 +164,7 @@ mod tests {
             path_on_host: "/store".into(),
             capacity: 1 << 30,
             dax_window_size: Some(64 << 20),
-            dax_private_max: None,
+            dax_private_max_bytes: None,
             cladefsd_socket: "/cladefsd.sock".into(),
             read_only: false,
             cache_type: CacheType::Writeback,
@@ -200,6 +202,13 @@ mod tests {
         assert_eq!(parsed, Config { read_only: true, ..config("extents") });
         let unknown = json.replace('}', r#", "dax": true }"#);
         assert!(serde_json::from_str::<Config>(&unknown).is_err());
+        // cladefs TASK-502: the cap in bytes; its page count, as it was, refused, not read as
+        // bytes.
+        let bytes = json.replace('}', r#", "dax_private_max_bytes": 1048576 }"#);
+        let parsed: Config = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(parsed.dax_private_max_bytes, Some(1 << 20));
+        let pages = json.replace('}', r#", "dax_private_max": 256 }"#);
+        assert!(serde_json::from_str::<Config>(&pages).is_err());
     }
 
     #[test]
@@ -215,17 +224,20 @@ mod tests {
             Config { dax_window_size: Some(0), ..config("a") }.validate(),
             Err(ConfigError::InvalidDaxWindowSize(0))
         );
-        // cladefs: some of the window's pages private at most, of a window.
-        let pages = (64 << 20) / cladefs::pages::page_size();
-        for most in [0, pages + 1] {
-            let private = Config { dax_private_max: Some(most), ..config("a") };
-            assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMax(most)));
+        // cladefs TASK-502: some of the window's pages' bytes private at most, whole pages, of a
+        // window.
+        let (page, window) = (cladefs::pages::page_size(), 64 << 20);
+        for most in [0, page - 1, page + 1, window + page] {
+            let private = Config { dax_private_max_bytes: Some(most), ..config("a") };
+            assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMaxBytes(most)));
         }
-        Config { dax_private_max: Some(pages), ..config("a") }.validate().unwrap();
+        for most in [page, window] {
+            Config { dax_private_max_bytes: Some(most), ..config("a") }.validate().unwrap();
+        }
         let none = Config { dax_window_size: None, ..config("a") };
         none.validate().unwrap();
-        let private = Config { dax_private_max: Some(1), ..none };
-        assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMax(1)));
+        let private = Config { dax_private_max_bytes: Some(page), ..none };
+        assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMaxBytes(page)));
     }
 
     /// A writer's features and a follower's, with a window and without.
@@ -241,9 +253,10 @@ mod tests {
 
     /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
     /// otherwise, whatever its size: the window is address space, as large as the data, and its
-    /// private pages are memory, which the daemon reserves against the tenant's. Half a 64 GiB
-    /// window's pages, as TASK-164.11's default had it, would have reserved 32 GiB a VM. A window
-    /// smaller than the default holds as many as it has pages; one of a page, one.
+    /// private pages are memory, the VM process's. Half a 64 GiB window's pages, as TASK-164.11's
+    /// default had it, would have let a VM hold 32 GiB of them. A window
+    /// smaller than the default holds as many as it has pages; one of a page, one. Configured, its
+    /// bytes are as many pages (TASK-502).
     #[test]
     fn a_windows_private_pages_are_not_its_size() {
         let page = cladefs::pages::page_size();
@@ -251,7 +264,8 @@ mod tests {
         assert_eq!(private_max(64 << 30, None), gib);
         assert_eq!(private_max(2 << 30, None), gib);
         assert_eq!(private_max(512 << 20, None), (512 << 20) / page);
-        assert_eq!(private_max(64 << 30, Some(16)), 16);
+        assert_eq!(private_max(64 << 30, Some(16 * page)), 16);
+        assert_eq!(private_max(64 << 30, Some(4 << 30)), 4 * gib);
         assert_eq!(private_max(page, None), 1);
     }
 }

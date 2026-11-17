@@ -3,7 +3,7 @@ id: doc-9
 title: 'Why every guest fsync seals, and what of a DAX seal is on the commit path'
 type: other
 created_date: '2026-10-28 03:23'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-17 01:09'
 ---
 # Why every guest fsync seals, and what of a DAX seal is on the commit path
 
@@ -89,7 +89,7 @@ So the levers, cheapest first:
      1513 tps against 1364, above ext4 dax=always on virtio-pmem's 1496), but 667 -> 210 tps at
      2 GiB once it fills: a staging region holds pages of many files, so letting go of ranges
      frees few regions;
-   - evacuations batched (16 seals / 20 ms): +3-6%, but data lost under fxfs.dax_delay_us
+   - evacuations batched (16 seals / 20 ms): +3-6%, but data lost under cladefs.dax_delay_us
      (TASK-112.6);
    - the semaphore held for reading through the MAP: writers, the WAL's, still wait;
    - evacuating by dropping the pages instead of mapping them: a range's `mapped` bit means the

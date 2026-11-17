@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/rename-to-cladefs-api.sh (TASK-501): what it renames and what it keeps, by its --filter,
+"""Tests of scripts/rename-to-cladefs-api.sh (TASK-503): what it renames and what it keeps, by its --filter,
 which renames text as it renames the checkout's files; and by its --tree, of a tree like the
 Firecracker fork's, whose configuration layer's files move and whose Rust rustfmt left as it was
 is formatted again."""

@@ -587,8 +587,8 @@ impl DaemonExtentStore {
     /// a hypervisor such as KVM maps as guest memory: the daemon maps its pages there, read-only,
     /// and the guest's faults there go to it. `prefault`, if any, is told of the pages mapped
     /// for the guest ahead of its accesses. cladefs: a writer's copies on write (backlog doc-13), of
-    /// `private_max` private pages at most, one at least, which the daemon reserves against its
-    /// tenant's memory (`ENOMEM` past it): a store to a page, by the guest's own threads
+    /// `private_max` private pages at most, one at least, this process's memory, for which the
+    /// daemon reserves nothing (TASK-501): a store to a page, by the guest's own threads
     /// ([`crate::guest_thread_started`]), or one of a page mapped here, makes the page private. A
     /// follower's copies nothing, refusing every store, its `private_max` 0 (`EINVAL` otherwise, as
     /// a writer's of 0).

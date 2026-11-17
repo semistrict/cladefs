@@ -77,7 +77,7 @@ Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, moves
         )
 
     def test_a_run_of_a_tree_from_before_cladefsd_is_reported_the_same(self):
-        """Its stats file named for the daemon's name before TASK-501."""
+        """Its stats file named for the daemon's name before TASK-503."""
         self.assertEqual(report(self.results(STATS, name="extent" + "d-stats.txt")),
                          report(self.results(STATS)))
 

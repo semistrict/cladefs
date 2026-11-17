@@ -407,7 +407,7 @@ echo "encryption: $(cat "$results/encryption.txt")" >&2
 # the cache by renames, which a store on another filesystem than the cache's refuses (TASK-359).
 # What the run's daemon's stats file and log are called, NAME-stats.txt and NAME.log: as the
 # tree's own helpers read them (scripts/guest_results.py), cladefsd, or the daemon's name before
-# TASK-501 in a tree from before it (CLADEFS_E2E_ROOT, an A/B's base).
+# TASK-503 in a tree from before it (CLADEFS_E2E_ROOT, an A/B's base).
 daemon_file=$(grep -om1 '[a-z]*d-stats\.txt' "$root/scripts/guest_results.py" || true)
 daemon_file=${daemon_file:-cladefsd-stats.txt}
 daemon_file=${daemon_file%-stats.txt}

@@ -66,7 +66,7 @@ run() {
         echo "ab: round $round, $spec, $name failed: $results/run.log" >&2
     fi
     if [[ -z ${CLADEFS_AB_KEEP_DATA:-} ]]; then
-        # A side from before TASK-501 names the daemon's directories as extent[d] does.
+        # A side from before TASK-503 names the daemon's directories as extent[d] does.
         find "$results" -type d \( -name 'store-*' -o -name '*.bucket' -o -name 'cladefsd-cache' \
             -o -name 'extent[d]-cache' -o -name rootfs \) -prune -exec rm -r {} +
         find "$results" -name '*.rootfs.ext4' -delete
