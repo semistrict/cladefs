@@ -3,7 +3,7 @@ id: doc-18
 title: 'Versions: fast, cheap named states of vdisks and cells'
 type: specification
 created_date: '2026-11-16 13:05'
-updated_date: '2026-11-16 14:44'
+updated_date: '2026-11-17 01:52'
 ---
 # Versions: fast, cheap named states of vdisks and cells
 
@@ -176,10 +176,17 @@ objects and moves holding them, and what recovering it reads (the newest checkpo
 the segments from it to `at`). The pass's listing of the cell gives the checkpoints, and the head
 gives the segments' keys: no request beyond those a pass makes now, but the footers it reads.
 
-- **Cost.** One recovery per version per pass, each from the newest checkpoint up to it, as a fork
-  point's is (`collector::keep_points`). A branch's versions are states of one history, so they
-  could be recovered in one walk, the footers read once a pass however many versions: not done
-  yet, a follow-up once measured.
+- **Cost.** A branch's versions are states of one history, recovered in one walk
+  (`recovery::recover_ats`, as `collector::keep_points` recovers a branch's fork points): those
+  sharing their newest checkpoint up to them from it at once, each footer read once a pass however
+  many versions. The walk keeps the first state whole and, of each after it, the extents the
+  footers since named, where it names them: the places a pass keeps of them all, in what changed
+  of them, not in a copy of every extent a version. Plus one GET a version, its checkpoint at its
+  key, which a restore into another cell writes. Measured by `versions-pass-bench`
+  (cladefs-examples), a dry run over a vdisk of 4,096 extents, checkpointed every 64 segments,
+  each version after a commit of 16 extents: at 256 versions (513 segments), 8,232 ranged GETs of
+  footers, 547 GETs and 84.7 ms when each version was recovered alone; 515, 262 and 9.9 ms in one
+  walk. Pinned: `collector::tests::passes_read_a_vdisks_footers_once_for_all_its_versions`.
 - **Prompt reclaim.** A version dropped from the head is kept by no pass after the swap. Its data
   goes in that pass, unless a fork made of it holds it by its reference, or a later version of the
   vdisk still names it.
