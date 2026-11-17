@@ -7,7 +7,7 @@ of it written in this fork.
 
 Fxfs in each guest finds page 0's block in a sealed extent of the base, `base·7`, and sends `MAP`:
 map that extent's page into the window, at the file's offset there. The process's load faults; the
-VM process's userfaultfd hands the fault to extentd, which maps the page.
+VM process's userfaultfd hands the fault to cladefsd, which maps the page.
 
 <Scenes scenes={[sharedScene]} />
 

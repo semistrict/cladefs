@@ -17,7 +17,7 @@ A run's results directory (test-e2e.sh's CLADEFS_E2E_RESULTS) holds:
   repeats), the cases that failed, and the run's exit status once it ended (null before), rewritten
   as each repeat ends; and what each extent daemon downloaded against what it read (`daemons`, a
   case's; `daemon`, the run's), from its stats file (CLADEFSD_STATS: the run's
-  extentd-stats.txt, a case's daemon's NAME-stats.txt in its directory).
+  cladefsd-stats.txt, a case's daemon's NAME-stats.txt in its directory).
 
     guest_results.py start RESULTS REPEATS CASE...  (test-e2e.sh, before its first case)
     guest_results.py ended RESULTS CASE             (after each repeat of a case)
@@ -113,7 +113,7 @@ def summarize(results, status=None):
     """Rewrites `results`' summary.json, of its repeats so far, and the exit status `status`."""
     run = json.loads((results / "run.json").read_text())
     cases = [case_summary(results, case, run["repeats"]) for case in run["cases"]]
-    stats = results / "extentd-stats.txt"
+    stats = results / "cladefsd-stats.txt"
     summary = {
         "commit": run["commit"],
         "repeats": run["repeats"],

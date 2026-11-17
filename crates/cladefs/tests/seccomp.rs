@@ -347,9 +347,9 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     // The daemon, a process of its own in production, unconfined.
-    let socket = dir.path().join("extentd.sock");
+    let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     cladefs::thread::set_spawner(Confining::new(filter("vmm")));
     // As Firecracker makes its device, before its VMM thread is confined, the client's thread
     // confined as it starts.

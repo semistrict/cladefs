@@ -72,7 +72,8 @@ pub const RESTORE_STEPS: [&str; 9] = [
 
 /// The steps of the daemon's around a fork: a guest's request, and a fork the control API asked
 /// for once its store's commits are uploaded; and the fork made, the answer to its guest lost.
-pub const DAEMON_STEPS: [&str; 3] = ["extentd::fork", "extentd::fork_uploaded", "extentd::forked"];
+pub const DAEMON_STEPS: [&str; 3] =
+    ["cladefsd::fork", "cladefsd::fork_uploaded", "cladefsd::forked"];
 
 /// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone, in
 /// order: the first two, or the next two, by whether the child has a record.

@@ -8,13 +8,13 @@
 # grow from a partial page drops the chunk there, which writes it back, and the model's Fxfs zeroes
 # nothing a later writeback doesn't write over; cow_truncate_dirty would see one that did.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -3852,7 +3852,7 @@
  	 * An ordinary grow zeroes from Fxfs's end, which is as writeback leaves it: what is dirty is
  	 * written first, so that it is the inode's (doc-13).
  	 */
--	err = fxfs_dax_write_back(inode);
+-	err = cladefs_dax_write_back(inode);
 +	err = 0;
  	if (err) {
  		filemap_invalidate_unlock(inode->i_mapping);

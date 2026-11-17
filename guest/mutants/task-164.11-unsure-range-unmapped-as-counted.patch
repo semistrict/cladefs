@@ -9,14 +9,14 @@
 # (guest/sim failures, seed 972 at 200 operations). range_map_failed_part_way: window page 0 maps an
 # extent, unmounted.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1203,7 +1203,7 @@
- static void fxfs_dax_unmap_range(struct fxfs_dax *dax, struct fxfs_dax_range *range)
+ static void cladefs_dax_unmap_range(struct cladefs_dax *dax, struct cladefs_dax_range *range)
  {
  	bool mapped = !range->region &&
--		      (range->unsure || fxfs_dax_pages_any_mapped(range->state, 0, range->pages));
-+		      (fxfs_dax_pages_any_mapped(range->state, 0, range->pages));
+-		      (range->unsure || cladefs_dax_pages_any_mapped(range->state, 0, range->pages));
++		      (cladefs_dax_pages_any_mapped(range->state, 0, range->pages));
  	int err = 0;
  
  	lockdep_assert_held_write(&range->file->sem);

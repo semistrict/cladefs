@@ -28,13 +28,23 @@ u64 sim_allocs_failed(void)
 char *strstr(const char *haystack, const char *needle);
 
 /*
+ * Whether the source `file` is the kernel's fs/cladefs's: by its path from the kernel's tree,
+ * linux/fs/cladefs/, as a checkout's own path may say fs/cladefs/ (CI's, .../cladefs/cladefs/),
+ * whose model's allocations, guest/sim/cladefs's, must not fail.
+ */
+static bool under_cladefs(const char *file)
+{
+	return strstr(file, "linux/fs/cladefs/");
+}
+
+/*
  * Whether an allocation by the source `file` is the code under test's, which a sweep fails:
- * fs/fxfs's own, which tests have fail too (sim_alloc_fail, sim_alloc_fail_odds), fs/dax.c's, or
+ * fs/cladefs's own, which tests have fail too (sim_alloc_fail, sim_alloc_fail_odds), fs/dax.c's, or
  * of the XArrays and the pool they use, whose callers see it fail.
  */
 static bool under_test(const char *file)
 {
-	return strstr(file, "fs/fxfs/") || strstr(file, "fs/dax.c") || strstr(file, "lib/xarray.c") ||
+	return under_cladefs(file) || strstr(file, "fs/dax.c") || strstr(file, "lib/xarray.c") ||
 	       strstr(file, "lib/genalloc.c");
 }
 
@@ -47,7 +57,7 @@ static bool alloc_fails(gfp_t gfp, const char *file, int line)
 		return false;
 	if (sim_sweep_fails("an allocation", file, line))
 		fail = true;
-	else if (!strstr(file, "fs/fxfs/"))
+	else if (!under_cladefs(file))
 		fail = false;
 	else if (alloc_odds && !(sim_random() % alloc_odds))
 		fail = true;

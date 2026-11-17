@@ -40,7 +40,7 @@ fn bounds() -> Bounds {
 /// error, which a failed test shows: its EIO opening a store with no bucket named said nothing of
 /// why (cladefs TASK-220).
 fn host() {
-    let _ = cladefs::extentd::logging::to_stderr();
+    let _ = cladefs::cladefsd::logging::to_stderr();
     for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
@@ -66,7 +66,7 @@ impl TestDir {
     }
 
     fn socket(&self) -> PathBuf {
-        self.0.join("extentd.sock")
+        self.0.join("cladefsd.sock")
     }
 }
 
@@ -81,7 +81,7 @@ fn daemon() -> TestDir {
     host();
     let dir = TestDir::new();
     let listener = std::os::unix::net::UnixListener::bind(dir.socket()).unwrap();
-    std::thread::spawn(move || cladefs::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     dir
 }
 
@@ -98,7 +98,7 @@ fn store() -> (DaemonExtentStore, TestDir) {
 
 /// The requests of `kind` the daemons of this process have served (their metrics).
 fn served(kind: &str) -> u64 {
-    let metrics = cladefs::extentd::metrics::render();
+    let metrics = cladefs::cladefsd::metrics::render();
     let name = format!("cladefsd_requests_total{{kind=\"{kind}\"}} ");
     let line = (metrics.lines()).find_map(|line| line.strip_prefix(&name));
     let line = line.unwrap_or_else(|| panic!("no {kind} requests counted in {metrics}"));
@@ -610,7 +610,7 @@ fn config(dir: &TestDir, path: &str) -> Config {
         capacity: 1 << 20,
         dax_window_size: None,
         dax_private_max_bytes: None,
-        extentd_socket: dir.socket().display().to_string(),
+        cladefsd_socket: dir.socket().display().to_string(),
         read_only: false,
         cache_type: CacheType::Writeback,
     }

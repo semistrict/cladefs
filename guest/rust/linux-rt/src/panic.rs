@@ -14,5 +14,5 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     let mut message = Message::new();
     let _ = write!(message, "{info}");
     // SAFETY: Panics with the message's bytes.
-    unsafe { ffi::fxfs_rt_panic(message.bytes().as_ptr().cast(), message.bytes().len()) }
+    unsafe { ffi::cladefs_rt_panic(message.bytes().as_ptr().cast(), message.bytes().len()) }
 }

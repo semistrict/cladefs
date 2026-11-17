@@ -1211,7 +1211,7 @@ fn framings_write_back_as_they_go() {
 /// cladefs: what a guest writes to the open segment is written back as it writes it, its writing
 /// back begun a MiB at a time and waited for 8 MiB behind, before any commit, so that the sync of
 /// the flush after has little left for the host's disk to write at once: a guest's burst, up to
-/// 300 MB a second under pgbench, waited in the host's page cache for the flush of extentd's next
+/// 300 MB a second under pgbench, waited in the host's page cache for the flush of cladefsd's next
 /// turn, which synced 100 MB at once in 250-420 ms (GCE r954); its writing back begun but not
 /// waited for filled the disk's queue as well, syncs waiting behind it up to 0.6 s (r956,
 /// TASK-221). Red with nothing written back until the flush. cladefs: what the sync has left is

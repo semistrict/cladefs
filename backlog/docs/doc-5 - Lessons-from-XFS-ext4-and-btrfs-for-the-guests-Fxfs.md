@@ -3,7 +3,7 @@ id: doc-5
 title: 'Lessons from XFS, ext4 and btrfs for the guest''s Fxfs'
 type: other
 created_date: '2026-10-15 08:29'
-updated_date: '2026-11-06 06:43'
+updated_date: '2026-11-17 01:09'
 ---
 # Lessons from XFS, ext4 and btrfs for the guest's Fxfs
 
@@ -70,4 +70,4 @@ XFS does nothing special about the directory's i_rwsem: `xfs_vn_unlink` (xfs_iop
 
 O_TMPFILE, fallocate, fiemap, fileattr, POSIX ACLs, remap_file_range, freeze/unfreeze, show_options, shutdown, `fs_flags` (FS_MGTIME, FS_ALLOW_IDMAP) and SB_I_VERSION, export_operations, shrinker hooks for cached objects, large folios, O_DIRECT, and MAP_SYNC.
 
-*As of 2026-11-06:* TASK-26.19 added all of these but shutdown and MAP_SYNC (guest/linux/fs/fxfs/super.c, data.c, dax.c).
+*As of 2026-11-06:* TASK-26.19 added all of these but shutdown and MAP_SYNC (guest/linux/fs/cladefs/super.c, data.c, dax.c).

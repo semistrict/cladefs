@@ -17,7 +17,7 @@
 //! The list is this host's address and the others', each as `HOST:PORT`, spelled as every host
 //! spells it: by the environment at the daemon's start, and replaced at any time by the control
 //! API, as hosts come and go. How a peer is reached is a [`Link`]'s: gRPC over TCP, in the daemon
-//! (`extentd::peers`).
+//! (`cladefsd::peers`).
 
 use extent_bucket::peer::{self, Peer};
 use futures::FutureExt as _;
@@ -178,7 +178,7 @@ impl Health {
 
     /// It failed, as `why` says: asked nothing for [`DOWN`].
     fn down(&self, why: &str) {
-        log::warn!("extentd: peer {}: {why}: asked nothing for {DOWN:?}", self.address);
+        log::warn!("cladefsd: peer {}: {why}: asked nothing for {DOWN:?}", self.address);
         self.counters.failed.fetch_add(1, Ordering::Relaxed);
         *self.down_until.lock().unwrap() = Some(Instant::now() + DOWN);
     }

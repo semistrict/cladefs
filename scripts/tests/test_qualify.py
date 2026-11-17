@@ -80,7 +80,7 @@ class Budgets(unittest.TestCase):
                                   "io_write_bytes": 1000 * MIB}))
         past = (qualify_budgets.CPU_BUDGETS["soak"] + 1) * 1000 * ms
         self.part("soak",
-                  daemon("extentd-stats.txt", checks=[("memory", True, "ok")],
+                  daemon("cladefsd-stats.txt", checks=[("memory", True, "ok")],
                          figures={"max_anon": MIB, "cpu_ns": past, "written": written,
                                   "io_write_bytes": 1000 * MIB}))
         status, said, report = self.summary("sandboxes", "soak")
@@ -105,14 +105,14 @@ class Budgets(unittest.TestCase):
         """LangSmith's pin's daemon from before TASK-330.2 says nothing its budgets weigh: no check
         passes it, and the summary says so rather than nothing."""
         self.part("sandboxes", daemon("fxfs-guest-sandboxes/host-a-stats.txt"),
-                  daemon("extentd-stats.txt", checks=[("memory", False, "anonymous memory 4 GiB")]))
+                  daemon("cladefsd-stats.txt", checks=[("memory", False, "anonymous memory 4 GiB")]))
         status, said, report = self.summary("sandboxes", "soak")
         self.assertEqual(status, 1)
         self.assertEqual(report["failures"], {"budgets.unreported": 1, "budgets.memory": 1,
                                               "budgets.not-run": 1})
         self.assertEqual(said, "budgets: sandboxes/fxfs-guest-sandboxes/host-a-stats.txt: says "
                                "nothing its budgets weigh\n"
-                               "budgets: sandboxes/extentd-stats.txt: memory: anonymous memory "
+                               "budgets: sandboxes/cladefsd-stats.txt: memory: anonymous memory "
                                "4 GiB\n"
                                "budgets: soak: not run: no budgets.json, its run ended before "
                                "its budgets\n")
@@ -245,10 +245,10 @@ class Refusals(unittest.TestCase):
         Its sockets are in a directory of their own under /tmp: their paths' length is fixed."""
         text = (SCRIPTS / "test-e2e.sh").read_text()
         self.assertIn('sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)', text)
-        self.assertIn('socket="$sockets/extentd.sock"\ncontrol="$sockets/extentd.control"', text)
-        longest = len("/tmp/cladefs-e2e-sockets.XXXXXX/extentd.control")
+        self.assertIn('socket="$sockets/cladefsd.sock"\ncontrol="$sockets/cladefsd.control"', text)
+        longest = len("/tmp/cladefs-e2e-sockets.XXXXXX/cladefsd.control")
         self.assertLess(longest, 107)
-        self.assertNotIn('"$results/extentd.sock"', text)
+        self.assertNotIn('"$results/cladefsd.sock"', text)
 
     def test_qualify_takes_a_sandboxes_mode_and_a_soaks_seconds(self):
         results = tempfile.mkdtemp()

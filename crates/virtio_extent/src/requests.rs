@@ -7,7 +7,7 @@
 //! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
-//! them, completing each request (`cladefs::extentd::spawn_on_replies`): no thread is woken between
+//! them, completing each request (`cladefs::cladefsd::spawn_on_replies`): no thread is woken between
 //! the reply and the guest's interrupt, nor waits for the store's I/O (TASK-41).
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -464,7 +464,7 @@ mod linux {
                     requests.idle.notify_all();
                 }
             };
-            cladefs::extentd::spawn_on_replies(cladefs::request::guest_request(unique, served));
+            cladefs::cladefsd::spawn_on_replies(cladefs::request::guest_request(unique, served));
         }
 
         /// Waits until the requests taken are returned to the driver.

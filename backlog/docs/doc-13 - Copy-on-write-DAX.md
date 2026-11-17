@@ -2,8 +2,8 @@
 id: doc-13
 title: Copy-on-write DAX
 type: specification
-created_date: 2026-11-04 07:55
-updated_date: '2026-11-16T22:21:00Z'
+created_date: '2026-11-04 07:55'
+updated_date: '2026-11-17 02:11'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -191,9 +191,9 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   punches, not allocation.
 - **What went** (stage 4): open extents' sources in windows (`Source::is_open`, the open extent's
   memory in `crate::cache`), the commit's sealing of windows' mappings (`commit_seal_ns`, `make_read_only`),
-  the open-page pin budget and its `ENOMEM` (`extentd/memory.rs`, `physmem::pin` for open extents;
+  the open-page pin budget and its `ENOMEM` (`cladefsd/memory.rs`, `physmem::pin` for open extents;
   the tenants' limits stay; the reservation of `private_max`, the last pin, went with TASK-501),
-  asking guests to seal (`extentd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
+  asking guests to seal (`cladefsd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
   half (an extent open in memory, a VMO the window maps).
 - **What stays:** the window, its second stage (the VM process's, userfaultfd), `MAP_MANY`,
   `MAP_PREFAULT`, sealed extents' shared pages, the pool, relief of clean pages, 159 for stores the
@@ -304,7 +304,7 @@ Nothing new: the page cache's path already allocates at writeback (TASK-80).
   `ExtentAccess` (and `fxfs_dax_access`: every mapped piece is sealed), `Allocator::restage` and the
   staging extent's restaging (packing small files' blocks into shared extents at writeback is
   unchanged), `set_check_kept`, fxfs-posix's `dax_map_write`, `dax_begin_write`/`DaxWrite`,
-  `retrying_sealed`, fxfs-linux's `restage`. `extents_in` returns extents only. *As built:*
+  `retrying_sealed`, cladefs-linux's `restage`. `extents_in` returns extents only. *As built:*
   `ExtentAccess` and `enum fxfs_dax_access` stay, `Sealed` and `Open` alone: `extents_in` returns
   each extent with whether it is still open, which the window may not map yet
   (crates/fxfs/src/object_store/data_object_handle/dax.rs).
@@ -313,7 +313,7 @@ Nothing new: the page cache's path already allocates at writeback (TASK-80).
 
 Unchanged in substance: an fsync that returned is *ordered*: its pages' bytes `WRITE`n, then the
 transaction, then its barrier. What changes: dirty data lives in private host pages, as the page
-cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or extentd:
+cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or cladefsd:
 the private pages go with the device). The window plays no part in recovery. doc-12's "a store
 through a mapping ... may reach the store before that, whole page by whole page" becomes: reaches
 the store only by writeback (fsync, msync, sync, the flusher at ~30 s, the budget), each page as
@@ -408,7 +408,7 @@ private.
 - **Writes:** created files are exactly the no-DAX path: pgbench on a database made in the run
   should match `fxfs-guest-pgbench` (1,736 tps against DAX's 1,012). Files read in pay a host fault
   for each page's first store (~54-110 µs nested) and nothing after; fsync is the no-DAX path's,
-  with no write-protect at the seal (58 µs of extentd's 126 a commit today) and no evacuation.
+  with no write-protect at the seal (58 µs of cladefsd's 126 a commit today) and no evacuation.
 - **Measured, and accepted (the user, 2026-11-06):** pgbench on a fork of a base's database runs at
   0.836 and 0.854 of no DAX (GCE r650, TASK-164.10), not the 0.9-1.0 expected here: each page's first
   store in the fork is a `PRIVATE`, ~486 µs nested a request (the daemon 83 µs, the VM process's run
@@ -448,7 +448,7 @@ batch.*
    slices read-only, truncate/punch/clone/freeze. Tests: the DAX suites and the crash suites
    (`-crash-dax`, `-killed`, `-daemon-killed`) with it on; new guest checks: stores through a
    mapping during fsyncs (data and journal replay), a rebind forced each second under stores
-   (`fxfs.dax_rebind_every`), truncate/punch/clone of dirty pages, the budget reached (throttling,
+   (`cladefs.dax_rebind_every`), truncate/punch/clone of dirty pages, the budget reached (throttling,
    no 159), `MAP_PRIVATE` stores, a freeze with private pages; guest/sim with the host's copy on
    write, new scenarios and the mutants above; `specs/dax-cow`. The perf gate with the new cases,
    judged by TASK-164's AC #2.
@@ -506,4 +506,6 @@ batch.*
   `remap` installing, as `prefault` does, and the guest's writes prefaulting.
 - `private_max` reserved against the tenant at open, not charged as pages come, so that a store
   never waits for memory and no VM asks another to seal. Its default (a quarter of the window is
-  the proposal) waits on the density target, the review's open decision 5.
+  the proposal) waits on the density target, the review's open decision 5. Undone by TASK-501:
+  nothing is reserved, the pages charged to the VM process; the default 1 GiB (TASK-227), sized
+  per VM in bytes by the VM manager (TASK-502).

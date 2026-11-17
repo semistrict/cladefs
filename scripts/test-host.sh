@@ -27,7 +27,7 @@
 # debug, kasan, coverage or rust-checks) has the test host build one from the source, or take the
 # one built before from the same sources (host_kernel, scripts/lib/linux-host-setup.sh), a release
 # one if neither is set; CLADEFS_GUEST_CMDLINE adds to its arguments (such as
-# fxfs.follow_apply_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
+# cladefs.follow_apply_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
 # (timeout's DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone,
 # CLADEFS_GUEST_TESTS=0 the workspace's alone, and CLADEFS_TEST_ARGS are cargo nextest's arguments
 # for the workspace's, such as a filter. CLADEFSD_BUCKET, if set, names a bucket the guest tests'

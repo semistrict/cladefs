@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's host tool for VMs' disks, the extent stores extentd serves: makes them, of branches kept
+//! cladefs's host tool for VMs' disks, the extent stores cladefsd serves: makes them, of branches kept
 //! in object storage (backlog doc-7) or of container images, places, forks, deletes and resizes
 //! them, makes them public bases, and waits for their uploads:
 //!
@@ -35,7 +35,7 @@
 //! ```
 //!
 //! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
-//! command goes through its control API (`cladefs::extentd::control`), and acts on stores as the
+//! command goes through its control API (`cladefs::cladefsd::control`), and acts on stores as the
 //! daemon serves them: on a store a VM has open, live, or not at all (`EBUSY`). Without, cladefsctl
 //! acts on stores itself, on stores nothing has open, as their lock says, which an extent daemon
 //! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
@@ -48,7 +48,7 @@
 //! new cell of the default tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in base 32,
 //! a vdisk of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
-//! extentd opens it,
+//! cladefsd opens it,
 //! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
 //! point, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
@@ -97,7 +97,7 @@
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
-//! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `extentd`
+//! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `cladefsd`
 //! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `branch` (base 32),
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
@@ -175,8 +175,8 @@ fn usage() -> anyhow::Error {
 
 /// cladefs: what a daemon forgot of a tenant's or a cell's keys, one `name value` a line (TASK-411.7).
 #[cfg(target_os = "linux")]
-fn forgotten_lines(forgotten: &cladefs::extentd::control::proto::Forgotten) -> String {
-    let cladefs::extentd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
+fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> String {
+    let cladefs::cladefsd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
         forgotten;
     format!(
         "stores_halted {stores}\nrings_forgotten {rings}\nkept_dropped {kept}\n\
@@ -436,7 +436,7 @@ impl Command {
         if let Self::Mount(mount) = self {
             return mount.through(socket);
         }
-        let daemon = cladefs::extentd::control::Client::connect(socket)?;
+        let daemon = cladefs::cladefsd::control::Client::connect(socket)?;
         match self {
             Self::Create { dir, capacity } => {
                 let new = cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
@@ -662,7 +662,7 @@ impl std::fmt::Display for Stat {
 /// cladefs: `stats` as `stats --json` prints it (TASK-111.4): see the module docs. Maps' keys in
 /// order.
 #[cfg(target_os = "linux")]
-fn stats_json(stats: &cladefs::extentd::control::proto::GetStatsResponse) -> serde_json::Value {
+fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> serde_json::Value {
     use serde_json::{Value, json};
     let named = |map: &std::collections::HashMap<String, u64>| -> Value {
         map.iter().map(|(name, value)| (name.clone(), Value::from(*value))).collect()
@@ -697,7 +697,7 @@ fn stats_json(stats: &cladefs::extentd::control::proto::GetStatsResponse) -> ser
     });
     json!({
         "taken_unix_ns": stats.taken_unix_ns,
-        "extentd": {
+        "cladefsd": {
             "build": stats.build,
             "counters": named(&stats.counters),
             "gauges": named(&stats.gauges),
@@ -737,7 +737,7 @@ fn main() -> anyhow::Result<()> {
     // cladefs: warnings, as of reading what the collector marked (TASK-264).
     #[cfg(target_os = "linux")]
     {
-        use cladefs::extentd::logging;
+        use cladefs::cladefsd::logging;
         let warnings = logging::Settings { level: log::LevelFilter::Warn, ..Default::default() };
         logging::install(warnings)?;
     }

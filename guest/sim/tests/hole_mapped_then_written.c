@@ -11,7 +11,7 @@
  * its two iomaps only the first said its pages were new: page 1's mapping stayed on the zero page.
  *
  * Then the one way a page in the file has no window page: a truncate's MAP of zeros past the new
- * end fails, which leaves the pages there unmapped (fxfs_dax_resize_end), and a write past them
+ * end fails, which leaves the pages there unmapped (cladefs_dax_resize_end), and a write past them
  * grows the file over them. A load of one then is to map the window's page, as a write maps it,
  * not the kernel's zero page, which no write would take away (failures, seed 1669: a write from
  * the mapping copied its zeros over what read(2) read).

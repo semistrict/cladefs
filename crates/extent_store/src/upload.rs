@@ -338,7 +338,7 @@ pub fn open<D: Dir>(
         }
         // The store let go of before the uploader says it stopped: so that dropping this returns
         // with nothing of the uploader's holding the store open, which the process may open again
-        // at once (`Dir::claim` refusing a second opening), as extentd does a store an image it
+        // at once (`Dir::claim` refusing a second opening), as cladefsd does a store an image it
         // imported made (TASK-165.6).
         drop(uploader);
         UPLOADERS.send_modify(|running| *running -= 1);

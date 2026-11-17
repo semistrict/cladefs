@@ -8,37 +8,37 @@
 # as it ends: the budget gives their room to another's store, which the host, holding them still,
 # refuses past private_max. cow_truncate_held; interleave's seed 90, a range's UNMAP.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1227,11 +1227,10 @@
  	     range->file->ino, range->chunk, range->window_offset, atomic_read(&range->users));
  
  	xa_erase(&range->file->ranges, range->chunk);
-+	fxfs_dax_dropped(dax, range, fxfs_dax_pages_unmap(range->state, 0, range->pages), true);
++	cladefs_dax_dropped(dax, range, cladefs_dax_pages_unmap(range->state, 0, range->pages), true);
  	if (mapped)
- 		err = fxfs_device_unmap(dax->dev, range->window_offset,
+ 		err = cladefs_device_unmap(dax->dev, range->window_offset,
  					(u64)range->pages << PAGE_SHIFT);
 -	/* cladefs: the UNMAP freed its private pages, unless it failed. */
--	fxfs_dax_dropped(dax, range, fxfs_dax_pages_unmap(range->state, 0, range->pages), !err);
- 	fxfs_dax_free_range(dax, range, err);
+-	cladefs_dax_dropped(dax, range, cladefs_dax_pages_unmap(range->state, 0, range->pages), !err);
+ 	cladefs_dax_free_range(dax, range, err);
  }
  
 @@ -4445,14 +4444,13 @@
- 			trace_fxfs_dax_map(FXFS_TRACE_MAP_ZEROS, inode->i_ino,
- 					   fxfs_dax_page_offset(range, page),
+ 			trace_cladefs_dax_map(CLADEFS_TRACE_MAP_ZEROS, inode->i_ino,
+ 					   cladefs_dax_page_offset(range, page),
  					   (u64)(range->pages - page) << PAGE_SHIFT, 1);
-+			fxfs_dax_dropped(dax, range,
-+					 fxfs_dax_pages_cut(range->state, page, range->pages - page),
++			cladefs_dax_dropped(dax, range,
++					 cladefs_dax_pages_cut(range->state, page, range->pages - page),
 +					 true);
- 			err = fxfs_device_map_zeros(dax->dev, fxfs_dax_page_offset(range, page),
+ 			err = cladefs_device_map_zeros(dax->dev, cladefs_dax_page_offset(range, page),
  						    (u64)(range->pages - page) << PAGE_SHIFT);
 -			if (!err) {
--				fxfs_dax_dropped(dax, range,
--						 fxfs_dax_pages_cut(range->state, page,
+-				cladefs_dax_dropped(dax, range,
+-						 cladefs_dax_pages_cut(range->state, page,
 -								    range->pages - page), true);
 +			if (!err)
  				continue;
 -			}
- 			pr_warn("fxfs: mapping zeros past ino %lu's end at %llx of the DAX window failed: %d\n",
- 				inode->i_ino, fxfs_dax_page_offset(range, page), err);
+ 			pr_warn("cladefs: mapping zeros past ino %lu's end at %llx of the DAX window failed: %d\n",
+ 				inode->i_ino, cladefs_dax_page_offset(range, page), err);
  		}

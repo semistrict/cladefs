@@ -1,9 +1,9 @@
 # A connection's faults and PRIVATEs page in as many at once as it keeps in flight, each part's
 # frames of its tenant's memory held until its fetch answers: 258 MiB of 256 faults (TASK-149.34).
 # Kind: memory
-# Killer: extentd::tests::hostile::page_ins_in_flight_are_bounded
---- a/crates/cladefs/src/extentd/server.rs
-+++ b/crates/cladefs/src/extentd/server.rs
+# Killer: cladefsd::tests::hostile::page_ins_in_flight_are_bounded
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -454,7 +454,7 @@
          requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
          drained: Arc::new(event_listener::Event::new()),

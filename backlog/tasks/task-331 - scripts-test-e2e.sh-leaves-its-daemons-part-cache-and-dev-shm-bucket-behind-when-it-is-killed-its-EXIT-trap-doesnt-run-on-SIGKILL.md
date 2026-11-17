@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 14:55'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-16 22:53'
 labels:
   - testing
 dependencies: []
@@ -24,7 +24,7 @@ Seen on ubu1 2026-11-10 (reported by the TASK-310 session): /tmp, a 14 GB tmpfs,
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A run killed with SIGKILL leaves no part cache or bucket of its own in /tmp or /dev/shm, or the next run removes those of runs whose processes are gone
-- [ ] #2 The default cache goes where the results are (CLADEFS_E2E_RESULTS), not a tmpfs, unless CLADEFS_EXTENTD_CACHE says otherwise
+- [ ] #2 The default cache goes where the results are (CLADEFS_E2E_RESULTS), not a tmpfs, unless CLADEFSD_CACHE says otherwise
 <!-- AC:END -->
 
 ## Definition of Done

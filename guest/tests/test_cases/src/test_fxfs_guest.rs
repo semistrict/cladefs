@@ -431,7 +431,7 @@ mod host {
             let daemon = if self.daemon_killed {
                 let socket =
                     std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
-                let daemon = spawn_daemon(&test_setup, &socket, "extentd", &[], None)?;
+                let daemon = spawn_daemon(&test_setup, &socket, "cladefsd", &[], None)?;
                 vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
             } else {
@@ -504,10 +504,10 @@ mod host {
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
                     let socket = std::env::var_os("CLADEFSD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::extentd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::cladefsd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
-                    crate::common::say_daemon_stats(&test_setup, "extentd");
+                    crate::common::say_daemon_stats(&test_setup, "cladefsd");
                 }
                 // The store as the crash left it, for a failure to be looked into: checking it
                 // recovers it, and mounting it replays its journal.
@@ -738,7 +738,7 @@ mod guest {
     fn mount_at(source: &str, target: &str) -> std::io::Result<()> {
         let source = CString::new(source).unwrap();
         let target = CString::new(target).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };
@@ -1118,7 +1118,7 @@ mod guest {
         }
         // No window space lost to an UNMAP that failed: its request's allocation can't
         // (TASK-44.22).
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap();
         assert!(stats.lines().any(|line| line == "window_lost_bytes 0"), "{stats}");
         // The DAX window's latency histograms, each 24 buckets' counts (TASK-111.6).
         for name in ["window_map_requests", "window_unmaps", "dax_faults"] {
@@ -1402,7 +1402,7 @@ mod guest {
                 if let Some(access) = access {
                     // As long as the console's drained, the line reaches the host before the VM stops.
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                    fs::write("/sys/module/fxfs/parameters/dax_stray", access).unwrap();
+                    fs::write("/sys/module/cladefs/parameters/dax_stray", access).unwrap();
                     println!("the stray access returned");
                 }
                 loop {
@@ -1412,7 +1412,7 @@ mod guest {
         }
     }
 
-    /// cladefs: a load or store (fxfs.dax_stray) of the window where nothing is mapped, past what the
+    /// cladefs: a load or store (cladefs.dax_stray) of the window where nothing is mapped, past what the
     /// writers reach, within a page or across two, as `crash_ms` picks.
     fn stray_access(crash_ms: u64) -> String {
         let op = if crash_ms & 1 == 0 { "load" } else { "store" };
@@ -1648,15 +1648,15 @@ mod guest {
         }
     }
 
-    /// TASK-111.7: the filesystem says the commit it was built of, in /proc/fs/fxfs/build, as
+    /// TASK-111.7: the filesystem says the commit it was built of, in /proc/fs/cladefs/build, as
     /// scripts/build-commit.sh said for the tree the kernel was built from: a commit, `-dirty` if
     /// a tracked file differed from it.
     fn build_commit_shown() {
-        let build = fs::read_to_string("/proc/fs/fxfs/build").unwrap();
+        let build = fs::read_to_string("/proc/fs/cladefs/build").unwrap();
         let commit = (build.strip_prefix("commit ").and_then(|line| line.strip_suffix('\n')))
-            .unwrap_or_else(|| panic!("/proc/fs/fxfs/build: {build:?}"));
+            .unwrap_or_else(|| panic!("/proc/fs/cladefs/build: {build:?}"));
         let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
-        assert_eq!(commit.len(), 40, "/proc/fs/fxfs/build: {build:?}");
+        assert_eq!(commit.len(), 40, "/proc/fs/cladefs/build: {build:?}");
         assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()), "{build:?}");
     }
 

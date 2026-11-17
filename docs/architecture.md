@@ -14,7 +14,7 @@ guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX loads and stores
 Firecracker (one VM     vendor/firecracker: the extent device, a client of the
   process)               daemon
   │  Unix socket; the daemon's memory (a memfd), mapped into the DAX window
-cladefsd            crates/cladefs: extentd, the stores, the extent cache,
+cladefsd            crates/cladefs: cladefsd, the stores, the extent cache,
   │                      the DAX windows
 physical memory          crates/physmem: arenas of shared memory (memfds),
   │                      their caps, relief and quarantine
@@ -99,11 +99,11 @@ MINOR`, its minor as the host's `/dev/userfaultfd` has it).
 ## The extent daemon
 
 The VMM runs one VM per process, so extents cached in a
-VM process would be shared by that VM alone. `cladefsd` (the `extentd`
-module) is one process on a host that owns the physical memory, the extent
+VM process would be shared by that VM alone. `cladefsd` (`cladefs::cladefsd`)
+is one process on a host that owns the physical memory, the extent
 cache and the stores, and serves them to VM processes over a Unix socket: the
 only way the VMM's extent device has a store, at the socket its configuration
-names (`extentd_socket`). Physical memory is memfds, which each VM process
+names (`cladefsd_socket`). Physical memory is memfds, which each VM process
 receives once: its
 window's pages are pages of it, which the VM process maps into its own memory
 at the offsets the daemon names, so two VMs mapping one extent map the same
@@ -124,8 +124,8 @@ laid out as its window is, at most `private_max` of them, charged to the VM
 process (its cgroup), not to the daemon's memory or the tenant's (TASK-501).
 The host's VM manager drives the daemon
 through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
-`crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
-`github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
+`crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto`, TASK-43.3; in Go,
+`github.com/semistrict/cladefs/go/cladefsd/v1`, TASK-219): it makes,
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 (TASK-43.4). Every call names a tenant by its ID in the bucket (TASK-364), a
 64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,

@@ -124,11 +124,11 @@ if part go; then
     "$root/go/generate.sh" --check
     unformatted=$(gofmt -l "$root/go")
     [[ -z $unformatted ]] || { echo "not gofmt'd: $unformatted" >&2; exit 1; }
-    go -C "$root/go" vet -tags extentd ./...
+    go -C "$root/go" vet -tags cladefsd ./...
     if [[ $(uname) == Linux ]]; then
         cargo build --manifest-path "$root/Cargo.toml" -p cladefs --bin cladefsd
         CLADEFSD="${CARGO_TARGET_DIR:-$root/target}/debug/cladefsd" \
-            go -C "$root/go" test -tags extentd ./...
+            go -C "$root/go" test -tags cladefsd ./...
     else
         go -C "$root/go" test ./...
     fi
@@ -165,8 +165,13 @@ if part firecracker; then
     tests+=' | test(/device::tests::test_features_/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
+    # A configuration file's old key for the device refused (TASK-503).
+    tests+=' | test(/resources::tests::test_from_json_refuses_the_extent_devices_old_key$/)'
     CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"
+    # The API's parsing of the device's configuration, PUT /cladefs/{id} (TASK-503).
+    "$root/scripts/firecracker-cargo.sh" nextest run -p firecracker --bin firecracker \
+        --features cladefs -E 'test(/request::cladefs::/)'
     # Where KVM is, as on ubu1: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
     # (TASK-267); with CLADEFS_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration

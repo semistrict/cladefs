@@ -71,9 +71,9 @@ describe("Page Pilot", () => {
     const symbols = await indexRepo();
     const accepted = transferTasks.map((task) => [task.id, [...new Set(symbols.filter(task.accepts).map((s) => `${s.path} ${s.name}`))].sort()]);
     expect(accepted).toEqual([
-      ["private-before-dirty", ["guest/linux/fs/fxfs/dax.c fxfs_dax_dirty", "guest/linux/fs/fxfs/device.c fxfs_device_private"]],
+      ["private-before-dirty", ["guest/linux/fs/cladefs/dax.c cladefs_dax_dirty", "guest/linux/fs/cladefs/device.c cladefs_device_private"]],
       ["host-copy", ["crates/cladefs/src/dax.rs make_private", "crates/cladefs/src/dax/uffd.rs make_private"]],
-      ["rebind", ["guest/linux/fs/fxfs/dax.c fxfs_dax_rebind", "guest/linux/fs/fxfs/dax.c fxfs_dax_rebind_range"]],
+      ["rebind", ["guest/linux/fs/cladefs/dax.c cladefs_dax_rebind", "guest/linux/fs/cladefs/dax.c cladefs_dax_rebind_range"]],
     ]);
     for (const task of transferTasks) {
       expect(symbols.some((s) => task.accepts(s) && s.path === task.answer.path)).toBe(true);

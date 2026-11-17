@@ -369,7 +369,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             .collect()
     }
 
-    /// A framing past extentd's turn, as its daemon's log warns of it: its milliseconds, and its
+    /// A framing past cladefsd's turn, as its daemon's log warns of it: its milliseconds, and its
     /// phases', by name, as extent_store's timings say them, its threads' waits to run among them,
     /// `runnable` (TASK-336).
     #[derive(Debug, PartialEq)]
@@ -378,7 +378,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         phases: Vec<(String, f64)>,
     }
 
-    /// The framings of the daemon whose log is `log` past extentd's turn, as it warns of them.
+    /// The framings of the daemon whose log is `log` past cladefsd's turn, as it warns of them.
     fn slow_framings(log: &str) -> Vec<SlowFraming> {
         log.lines()
             .filter_map(|line| {
@@ -993,7 +993,7 @@ mod guest {
     /// Mounts the VM's own store's Fxfs at [`MNT`], made as it mounts.
     fn mount_data() {
         fs::create_dir_all(MNT).unwrap();
-        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"fxfs");
+        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"cladefs");
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

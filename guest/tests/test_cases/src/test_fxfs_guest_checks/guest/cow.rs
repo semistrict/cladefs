@@ -63,11 +63,11 @@ impl Drop for CowMapping {
 }
 
 /// cladefs: has the budget's worker write back, seal and rebind every private page it can
-/// (fxfs.dax_rebind_now), and waits for it: until the rounds it served (dax_rebinds_done)
+/// (cladefs.dax_rebind_now), and waits for it: until the rounds it served (dax_rebinds_done)
 /// reach the asks, as read after this one (dax_rebinds_asked). The write doesn't wait: a
 /// setter that did held the module parameters' lock through a rebind a pause point held.
 fn cow_rebind_now() {
-    fs::write("/sys/module/fxfs/parameters/dax_rebind_now", b"1").unwrap();
+    fs::write("/sys/module/cladefs/parameters/dax_rebind_now", b"1").unwrap();
     let asked = stats()["dax_rebinds_asked"];
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while stats()["dax_rebinds_done"] < asked {
@@ -330,7 +330,7 @@ pub(super) fn test_cow_dirty_truncate_punch_clone() {
 }
 
 /// cladefs: copying on write, a writeback whose transaction fails once its bytes are written,
-/// before it commits, as a crash between the two (fxfs.dax_fail_commits, Fxfs's FAIL_COMMITS):
+/// before it commits, as a crash between the two (cladefs.dax_fail_commits, Fxfs's FAIL_COMMITS):
 /// fsync says so (EIO), and the file holds its old data, all of it, never a mix of old and new
 /// pages, after a remount, which maps it again from what Fxfs committed; written again, it
 /// holds the new. Fails if the writeback committed before its bytes, or in pieces with
@@ -342,9 +342,9 @@ pub(super) fn test_cow_commit_after_bytes() {
     let old = cow_base_file(&name, 4 * PAGE, 0x44);
     let file = fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
     file.write_all_at(&[0x55; 4 * PAGE], 0).unwrap();
-    fs::write("/sys/module/fxfs/parameters/dax_fail_commits", b"1").unwrap();
+    fs::write("/sys/module/cladefs/parameters/dax_fail_commits", b"1").unwrap();
     let synced = file.sync_all();
-    fs::write("/sys/module/fxfs/parameters/dax_fail_commits", b"0").unwrap();
+    fs::write("/sys/module/cladefs/parameters/dax_fail_commits", b"0").unwrap();
     let err = synced.expect_err("fsync of a writeback whose commit failed");
     assert_eq!(err.raw_os_error(), Some(libc::EIO), "{err}");
     drop(file);
@@ -515,7 +515,7 @@ pub(super) fn test_rebind_against_loads_and_stores() {
 
 /// cladefs: copying on write (doc-13), stores through a mapping and write(2)s to a file's pages,
 /// one after another for two seconds, while the budget's worker writes back, seals and rebinds
-/// every private page it can every 10 ms (fxfs.dax_rebind_every, doc-13's stage 2): each reads
+/// every private page it can every 10 ms (cladefs.dax_rebind_every, doc-13's stage 2): each reads
 /// back as stored, then and at the end, and the file evicted holds them all. Fails if a rebind
 /// lost a store (a page mapped back to its extent before the writeback of a store to it was
 /// sealed, or with a store to it under way), or if a writeback lost one made after its

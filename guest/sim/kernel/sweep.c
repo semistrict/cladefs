@@ -2,7 +2,7 @@
 // Copyright 2026 The cladefs Authors.
 /*
  * The sweep (sweep.sh, TASK-149.15): every call the code under test makes that may fail on a real
- * kernel asks here first, a site each (sim_sweep_fails): allocations by fs/fxfs, fs/dax.c and the
+ * kernel asks here first, a site each (sim_sweep_fails): allocations by fs/cladefs, fs/dax.c and the
  * XArrays and pool they use; the device's MAPs, UNMAPs and PRIVATEs; and Fxfs's room for dirty
  * pages, growths, writeback's commits, clones, seals and lookups. With SIM_SWEEP=N in the
  * environment, the Nth of them fails, once, as the run would have it fail at random; and the run
@@ -28,7 +28,7 @@ static unsigned int voided;
 
 /*
  * How long a run may go on once the sweep's call has failed, in virtual time: past the longest
- * dax.c waits for room before it gives up (FXFS_DAX_NO_ROOM_WAITS of 10 ms), many times over.
+ * dax.c waits for room before it gives up (CLADEFS_DAX_NO_ROOM_WAITS of 10 ms), many times over.
  */
 #define SWEEP_AFTER_NS (300ULL * NSEC_PER_SEC)
 
@@ -61,7 +61,7 @@ void sim_sweep_pause(bool pause)
 
 /*
  * A run still going SWEEP_AFTER_NS after the sweep's call failed, every task asleep, one of them
- * at a pause point (fxfs.dax_pause), or a hold (a commit's, a seal's, a MAP's), its test can't let
+ * at a pause point (cladefs.dax_pause), or a hold (a commit's, a seal's, a MAP's), its test can't let
  * go of, kept from it by what failed, as a write's room made by syncing waits for the writeback
  * held: it ends there, void. One with none goes on, a deadlock's or a livelock's to stop, as
  * dax.c's waits for room give up after 30 s each, a write at a time.
@@ -70,7 +70,7 @@ void sim_sweep_watch(u64 now)
 {
 	if (!sweep_failed || now - failed_ns < SWEEP_AFTER_NS)
 		return;
-	if (!sim_param_read("dax_paused") && !fxfs_sim_commit_held() && !fxfs_sim_seal_held() &&
+	if (!sim_param_read("dax_paused") && !cladefs_sim_commit_held() && !cladefs_sim_seal_held() &&
 	    !sim_device_held())
 		return;
 	sim_log("sim: sweep: a task waits at a pause point, or a hold, its test can't let go of, %llu s after call %llu failed: void, the run ends\n",

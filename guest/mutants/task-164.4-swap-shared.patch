@@ -8,15 +8,15 @@
 # had it: a write(2) between the iomap that dirtied its page and its copy straddles it, its bytes in
 # neither set. cow_swap_during_write: the next fsync writes nothing of them.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2129,11 +2129,11 @@
  		}
  		/* Between the count and the swap, where iomaps may dirty more (pause points). */
- 		fxfs_dax_pause_file(FXFS_DAX_STEP_COUNTED, inode->i_ino);
+ 		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
 -		down_write(&file->sem);
 +		down_read(&file->sem);
- 		now = fxfs_dax_dirty_ranges(file);
+ 		now = cladefs_dax_dirty_ranges(file);
  		if (now && now <= most)
  			break;
 -		up_write(&file->sem);
@@ -27,9 +27,9 @@
 @@ -2148,7 +2148,7 @@
  		nr++;
  	}
- 	fxfs_dax_count(dax, file, 0, -pages);
+ 	cladefs_dax_count(dax, file, 0, -pages);
 -	up_write(&file->sem);
 +	up_read(&file->sem);
- 	fxfs_dax_protect(inode->i_mapping, batch, nr);
+ 	cladefs_dax_protect(inode->i_mapping, batch, nr);
  	/* Before it reads its ranges' window pages, which nothing may free (pause points). */
- 	fxfs_dax_pause_file(FXFS_DAX_STEP_WRITEBACK, inode->i_ino);
+ 	cladefs_dax_pause_file(CLADEFS_DAX_STEP_WRITEBACK, inode->i_ino);

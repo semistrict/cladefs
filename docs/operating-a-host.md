@@ -194,6 +194,6 @@ What a host can tell from a VM process's status (TASK-70):
 | 149-151, 154-156 | `SIGBUS`, `SIGSEGV`, `SIGXFSZ`, `SIGXCPU`, `SIGPIPE`, `SIGHUP` | The VMM's handler caught the signal: a bug, or the host's limits, by the signal. |
 | 152, 153 | `BadConfiguration`, `ArgParsing` | How it was started. |
 | 157 | `SIGILL` | A VMM bug, or a host of another CPU. |
-| 158 | `ExtentdLost` | Storage: its extent daemon went, and the VM can't go on. What it was told stays as doc-12 says. |
+| 158 | `CladefsdLost` | Storage: its extent daemon went, and the VM can't go on. What it was told stays as doc-12 says. |
 | 159 | `AccessRefused` | The guest: an access stayed refused, of a part of its DAX window nothing maps, or a store past its private pages' bound (`private_max`, backlog doc-13). That VM alone stops (TASK-77). |
 | Killed by SIGABRT | A panic | A VMM bug: Firecracker panics abort, and an unresolved DAX window fault does. |

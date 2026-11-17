@@ -111,7 +111,7 @@ mod guest {
             nix::libc::mount(
                 c"extents".as_ptr(),
                 c"/mnt/fxfs".as_ptr(),
-                c"fxfs".as_ptr(),
+                c"cladefs".as_ptr(),
                 0,
                 std::ptr::null(),
             )

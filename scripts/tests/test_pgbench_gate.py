@@ -54,14 +54,14 @@ def density_log(per_vm_mib, tps=(100, 80, 80)):
     """A density case's log of a VM a run of each of `tps`: its console (log.txt), where the host
     says its memory before the first VM and after each VM's runs, each VM costing it `per_vm_mib`,
     and its guest's output (stdout.txt)."""
-    console = [f"memory: vm=0 phase=base host_used={1000 * MIB} extentd_pss={10 * MIB}"]
+    console = [f"memory: vm=0 phase=base host_used={1000 * MIB} cladefsd_pss={10 * MIB}"]
     stdout = ["OK load 5000000", "OK base"]
     for vm, each in enumerate(tps, 1):
         console += [
             f"tps = {each} (without initial connection time)",
             f"memory: vm={vm} phase=ran host_used={(1000 + vm * per_vm_mib) * MIB} "
             f"vmm_pss={per_vm_mib * MIB} vmm_anon={(per_vm_mib - 50) * MIB} vmm_shmem={50 * MIB} "
-            f"extentd_memory_bytes={vm * 100 * MIB} extentd_private_pages={vm * 10} "
+            f"cladefsd_memory_bytes={vm * 100 * MIB} cladefsd_private_pages={vm * 10} "
             f"guest_total={1024 * MIB} guest_available={512 * MIB} guest_cached={256 * MIB}",
         ]
         stdout += ["OK runs 1", "OK checked"]
@@ -86,7 +86,7 @@ def bigmap_log(read, cached, written_mib=200):
         vm = ("vm=0" if phase == "base"
               else f"vm=1 vmm_pss={50 * MIB} guest_fxfs_window_privates={privates}")
         console.append(f"memory: {vm} phase={phase} host_used={used * MIB} "
-                       f"extentd_memory_bytes={used * MIB // 2} guest_cached={guest * MIB}")
+                       f"cladefsd_memory_bytes={used * MIB // 2} guest_cached={guest * MIB}")
     return "\n".join(console) + "\n", "OK base\nOK checked\n"
 
 
@@ -265,11 +265,11 @@ class PgbenchGate(unittest.TestCase):
 
     def test_the_host_s_memory_is_read_as_said(self):
         self.assertEqual(gate.samples([
-            "memory: vm=0 phase=base host_used=100 extentd_pss=7",
+            "memory: vm=0 phase=base host_used=100 cladefsd_pss=7",
             "tps = 1.0 (without initial connection time)",
             "  memory: vm=1 phase=ran host_used=300 vmm_pss=150 guest_cached=20  ",
         ]), [
-            {"vm": 0, "phase": "base", "host_used": 100, "extentd_pss": 7},
+            {"vm": 0, "phase": "base", "host_used": 100, "cladefsd_pss": 7},
             {"vm": 1, "phase": "ran", "host_used": 300, "vmm_pss": 150, "guest_cached": 20},
         ])
 
@@ -283,10 +283,10 @@ class PgbenchGate(unittest.TestCase):
             "vmm_pss_mib": [300.0, 300.0, 300.0],
             "vmm_anon_mib": [250.0, 250.0, 250.0],
             "vmm_shmem_mib": [50.0, 50.0, 50.0],
-            "extentd_memory_mib": [100.0, 200.0, 300.0],
+            "cladefsd_memory_mib": [100.0, 200.0, 300.0],
             "guest_used_mib": [512.0, 512.0, 512.0],
             "guest_cached_mib": [256.0, 256.0, 256.0],
-            "extentd_private_pages": [10, 20, 30],
+            "cladefsd_private_pages": [10, 20, 30],
         })
         one_vm = [f"memory: vm=0 phase=base host_used={MIB}",
                   f"memory: vm=1 phase=ran host_used={3 * MIB}"]
@@ -333,7 +333,7 @@ class PgbenchGate(unittest.TestCase):
                               "written": 300.0, "synced": 300.0, "end": 300.0},
             "vmm_pss_mib": {"mounted": 50.0, "read-cold": 50.0, "read-warm": 50.0,
                             "written": 50.0, "synced": 50.0, "end": 50.0},
-            "extentd_memory_mib": {"base": 500.0, "mounted": 500.0, "read-cold": 550.0,
+            "cladefsd_memory_mib": {"base": 500.0, "mounted": 500.0, "read-cold": 550.0,
                                    "read-warm": 550.0, "written": 650.0, "synced": 650.0,
                                    "end": 650.0},
             "guest_fxfs_window_privates": {"base": None, "mounted": 0, "read-cold": 0,

@@ -11,8 +11,8 @@
 //! a cell is attached or detached whole, or not at all.
 
 use super::server::Server;
+use crate::cladefsd::control::{channel, errno, saying};
 use crate::error::{Errno, Error};
-use crate::extentd::control::{channel, errno, saying};
 use crate::{Branch, BranchOf, Cell, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use extent_bucket::cell::{self, Kind};
@@ -42,7 +42,7 @@ pub struct Stores {
 
 /// The Mount service of `server`, a server of many stores, which attaches cells as `stores` says:
 /// what the daemon serves on its control socket, beside its other services, if it mounts cells
-/// (`crate::extentd::mount`, TASK-475.2).
+/// (`crate::cladefsd::mount`, TASK-475.2).
 pub(crate) fn service(
     server: &Arc<Server>,
     stores: Stores,
@@ -93,7 +93,7 @@ struct Control {
 /// (TASK-475.3): while the mount has a store, a VM process opening it, or the daemon's control API
 /// working on it, fails with `EBUSY` at once. Taken before a store opens, let go once it is
 /// detached, written back and closed, or failed to attach.
-type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::extentd::stores::MountHold>>>;
+type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::stores::MountHold>>>;
 
 /// Opens the store at `path` as [`mount_vdisk`] does, held for the mount first ([`Holds`]): `open`
 /// opens it, given the hold, and keeps the hold in `holds` if it opens.
@@ -102,7 +102,7 @@ fn held_open(
     path: &Path,
     open: impl FnOnce() -> Result<Filesystem, Error>,
 ) -> Result<Filesystem, Error> {
-    let hold = crate::extentd::stores::hold_mounted(path).map_err(|errno| {
+    let hold = crate::cladefsd::stores::hold_mounted(path).map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )

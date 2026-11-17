@@ -22,7 +22,7 @@
 //! the host's Fxfs reads and compares.
 //!
 //! fxfs-guest-fsx-dax with a DAX window, -delay-dax with delays injected at the DAX protocol's
-//! racing steps (fxfs.dax_delay_us), and -faults-dax, on the debug kernel, with the Fxfs half's
+//! racing steps (cladefs.dax_delay_us), and -faults-dax, on the debug kernel, with the Fxfs half's
 //! calls failing their allocations (`script_run::Faults`): ENOMEM a refusal, its operation's
 //! effects within what it could have reached, and ext4's file then made Fxfs's. Which call fails
 //! which allocation is the script's seed's, by operation, so that a replay, and a shrink's tries,
@@ -33,7 +33,7 @@ use macros::{guest, host};
 pub struct TestFxfsGuestFsx {
     /// Whether the device has a DAX window, and the guest maps files into it.
     pub dax: bool,
-    /// Whether the guest's DAX code sleeps at its protocol's racing steps (fxfs.dax_delay_us).
+    /// Whether the guest's DAX code sleeps at its protocol's racing steps (cladefs.dax_delay_us).
     #[cfg_attr(feature = "guest", allow(dead_code))]
     pub delay: bool,
     /// Whether Fxfs's calls fail their allocations at random (a debug kernel's fault injection).
@@ -271,8 +271,8 @@ mod host {
             std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
             script_vm::pass_script(&mut vm, seed)?;
             if self.delay {
-                vm.module_param(c"fxfs.dax_delay_us=200");
-                vm.module_param(&CString::new(format!("fxfs.dax_delay_seed={seed}"))?);
+                vm.module_param(c"cladefs.dax_delay_us=200");
+                vm.module_param(&CString::new(format!("cladefs.dax_delay_seed={seed}"))?);
             }
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }

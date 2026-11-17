@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A device's configuration, as a VMM's user gives it: in Firecracker's API, `PUT /extent/{id}`
-//! and a VM's configuration file's `extent`, as this serializes.
+//! A device's configuration, as a VMM's user gives it: in Firecracker's API, `PUT /cladefs/{id}`
+//! and a VM's configuration file's `cladefs`, as this serializes.
 
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +67,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_private_max_bytes: Option<u64>,
     /// The socket of cladefs's extent daemon, which serves the store.
-    pub extentd_socket: String,
+    pub cladefsd_socket: String,
     /// cladefs: whether the device follows the store, read-only, as another VM writes it (cladefs's
     /// backlog doc-8): the store must exist, and the guest mounts it read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -165,7 +165,7 @@ mod tests {
             capacity: 1 << 30,
             dax_window_size: Some(64 << 20),
             dax_private_max_bytes: None,
-            extentd_socket: "/extentd.sock".into(),
+            cladefsd_socket: "/cladefsd.sock".into(),
             read_only: false,
             cache_type: CacheType::Writeback,
         }
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn caches_are_writeback_unless_unsafe() {
         let json =
-            r#"{"id":"a","tag":"fxfs","path_on_host":"/s","capacity":1,"extentd_socket":"/e"}"#;
+            r#"{"id":"a","tag":"fxfs","path_on_host":"/s","capacity":1,"cladefsd_socket":"/e"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.cache_type, CacheType::Writeback);
         assert_eq!(serde_json::to_string(&config).unwrap(), json);
@@ -193,7 +193,7 @@ mod tests {
             "path_on_host": "/store",
             "capacity": 1073741824,
             "dax_window_size": 67108864,
-            "extentd_socket": "/extentd.sock"
+            "cladefsd_socket": "/cladefsd.sock"
         }"#;
         let parsed: Config = serde_json::from_str(json).unwrap();
         assert_eq!(parsed, config("extents"));
@@ -254,9 +254,9 @@ mod tests {
     /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
     /// otherwise, whatever its size: the window is address space, as large as the data, and its
     /// private pages are memory, the VM process's. Half a 64 GiB window's pages, as TASK-164.11's
-    /// default had it, would have let a VM hold 32 GiB of them. A window
-    /// smaller than the default holds as many as it has pages; one of a page, one. Configured, its
-    /// bytes are as many pages (TASK-502).
+    /// default had it, would have let a VM hold 32 GiB of them. A window smaller than the default
+    /// holds as many as it has pages; one of a page, one. Configured, its bytes are as many pages
+    /// (TASK-502).
     #[test]
     fn a_windows_private_pages_are_not_its_size() {
         let page = cladefs::pages::page_size();

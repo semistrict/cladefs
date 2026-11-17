@@ -13,7 +13,7 @@
 //! maps it first.
 //!
 //! The window maps its pages in its [`SecondStage`], if it has one: its translation outside the
-//! daemon. A VM's window is the extent daemon's (`crate::extentd`), whose second stage is its
+//! daemon. A VM's window is the extent daemon's (`crate::cladefsd`), whose second stage is its
 //! connection to the VM process, which makes each change in the VM's memory. KVM maps guest memory
 //! from the host memory backing it, and follows changes to it: the VM process's own stage
 //! (`dax::uffd`) takes that memory over, maps the window's pages into it, and reports the faults
@@ -88,7 +88,7 @@ pub trait SecondStage: Send + Sync {
     /// cladefs: the window begins a change of its mappings, which may unmap what it maps, then map
     /// ranges anew ([`window_mapped`](Self::window_mapped)) and their pages in memory: what it
     /// makes here until [`end_change`](Self::end_change) is one change, which a stage in another
-    /// process, sent it whole (`crate::extentd`), may make at once ([`remap`](Self::remap),
+    /// process, sent it whole (`crate::cladefsd`), may make at once ([`remap`](Self::remap),
     /// TASK-91.16). The window makes a change under its lock, as it makes every call here, so
     /// that nothing else of its comes between: changes don't nest, and a stage may hold back
     /// what a change makes until it ends, which no wait comes before.
@@ -163,7 +163,7 @@ pub trait Prefault: Send + Sync {
 }
 
 /// What resolves the faults on a window's second stage in host memory: the VM process's connection
-/// to the extent daemon, which holds the window (`crate::extentd`), or the window itself, in tests
+/// to the extent daemon, which holds the window (`crate::cladefsd`), or the window itself, in tests
 /// whose window is in this process's host memory (`Dax::in_host_memory`).
 #[cfg(target_os = "linux")]
 pub(crate) trait Faults: Send + Sync {
@@ -184,7 +184,7 @@ pub(crate) trait Faults: Send + Sync {
     fn probe(&self, offset: u64) -> BoxFuture<'_, Result<()>>;
 
     /// cladefs: whether what resolves the faults went, as a VM process's daemon may: its faults fail
-    /// then, and the process is stopping, ExtentdLost, as its device tells it (TASK-231).
+    /// then, and the process is stopping, CladefsdLost, as its device tells it (TASK-231).
     fn lost(&self) -> bool {
         false
     }
@@ -415,17 +415,15 @@ pub(crate) struct CopyOnWrite {
 }
 
 impl CopyOnWrite {
-    /// A window's private pages, `most` of them at most: `EINVAL` for none.
-    pub(crate) fn new(most: u64) -> Result<Self> {
-        if most == 0 {
-            return Err(Errno::EINVAL);
-        }
-        Ok(Self { most })
+    /// A window's private pages, `most` of them at most, which the window refuses unless it has
+    /// that many pages, one at least ([`Window::new`]).
+    pub(crate) fn at_most(most: u64) -> Self {
+        Self { most }
     }
 }
 
 /// A window's mappings, their bytes, and the pages it has mapped, as its state changes: the extent
-/// daemon's gauges (`crate::extentd::metrics`, TASK-131.6), read without the window's lock. cladefs:
+/// daemon's gauges (`crate::cladefsd::metrics`, TASK-131.6), read without the window's lock. cladefs:
 /// and its private pages, of those (backlog doc-13); one window's, which the daemon reports of each
 /// VM's (TASK-111.5), and which add up to all windows' ([`live`]). Nothing once the window goes.
 #[derive(Default)]
@@ -631,8 +629,11 @@ impl Window {
             return Err(Errno::EINVAL);
         }
         let len = usize::try_from(size).map_err(|_| Errno::EINVAL)?;
-        // cladefs: no more private pages than the window has pages.
-        if copy_on_write.as_ref().is_some_and(|copying| copying.most > size / page_size()) {
+        // cladefs: some private pages, no more than the window has pages.
+        if copy_on_write
+            .as_ref()
+            .is_some_and(|copying| copying.most == 0 || copying.most > size / page_size())
+        {
             return Err(Errno::EINVAL);
         }
         let translation = match second_stage {
@@ -1432,7 +1433,7 @@ impl Dax {
 
     /// A window whose second stage is the host memory `stage` takes over, and a handle to it. A
     /// thread of its own serves the faults on the memory, in this process, as tests have it: a
-    /// VM's window is the extent daemon's, whose VM process serves them (`crate::extentd`).
+    /// VM's window is the extent daemon's, whose VM process serves them (`crate::cladefsd`).
     #[cfg(all(test, target_os = "linux"))]
     pub fn in_host_memory(
         stage: Arc<uffd::UffdSecondStage>,
@@ -2055,8 +2056,7 @@ pub(crate) mod tests {
         most: u64,
         stage: Option<Arc<dyn SecondStage>>,
     ) -> (Dax, DaxWindow) {
-        let copying = CopyOnWrite::new(most).unwrap();
-        Dax::copying(pages * page_size(), stage, Some(copying)).unwrap()
+        Dax::copying(pages * page_size(), stage, Some(CopyOnWrite::at_most(most))).unwrap()
     }
 
     /// The byte at `at` in page `page` of a window with no second stage, as it maps it now, after
@@ -2228,11 +2228,11 @@ pub(crate) mod tests {
     fn windows_reserve_no_memory_for_their_private_pages() {
         let ps = page_size();
         let pages = physmem::memory_bytes() / ps;
-        let windows: Vec<_> = (0..3).map(|_| copying(pages, pages, None)).collect();
-        assert_eq!(windows.len(), 3);
+        let _windows: Vec<_> = (0..3).map(|_| copying(pages, pages, None)).collect();
 
-        let too_many = CopyOnWrite::new(9).unwrap();
-        assert_eq!(Dax::copying(8 * ps, None, Some(too_many)).err(), Some(Errno::EINVAL));
-        assert_eq!(CopyOnWrite::new(0).err(), Some(Errno::EINVAL));
+        for most in [0, 9] {
+            let refused = Dax::copying(8 * ps, None, Some(CopyOnWrite::at_most(most)));
+            assert_eq!(refused.err(), Some(Errno::EINVAL), "{most} of 8 pages");
+        }
     }
 }

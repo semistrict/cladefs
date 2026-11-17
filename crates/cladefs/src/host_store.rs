@@ -741,7 +741,7 @@ mod tests {
 
     /// TASK-79.20: a store whose description was never put in place, its host crashing as its
     /// making, or a fork's, wrote what goes before it, is no store, and is removed by deleting it,
-    /// as extentd and cladefsctl delete it.
+    /// as cladefsd and cladefsctl delete it.
     #[test]
     fn deleting_a_store_never_described_removes_it() {
         let dir = tempfile::tempdir().unwrap();

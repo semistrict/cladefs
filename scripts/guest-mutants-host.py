@@ -19,7 +19,7 @@ ubu1 by default): in a worktree there of HEAD, which origin has, with the mutant
 (CLADEFS_TEST_HOST_PATCH, scripts/lib/host.sh), its killer's case alone, of its checks the
 killer's alone (CLADEFS_CHECKS), CLADEFS_E2E_REPEATS times, on a guest kernel of its kind built
 from the worktree; the test host keeps its kernels' builds (host_kernel,
-scripts/lib/linux-host-setup.sh), so each mutant recompiles fs/fxfs alone. It writes each run's
+scripts/lib/linux-host-setup.sh), so each mutant recompiles fs/cladefs alone. It writes each run's
 results under RESULTS, prints each mutant's fate, and exits 1 unless each was killed. A mutant is
 killed only if its killer failed, as the run's summary says (scripts/guest_results.py); MISSED if
 not; BROKEN if the run failed otherwise, as a build that doesn't compile or a test host lost,

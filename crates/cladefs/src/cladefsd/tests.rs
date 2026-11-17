@@ -1,0 +1,6495 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+use super::client::{DaemonExtentStore, Opening};
+use super::server::{default_tenant, serve, serve_connection};
+use crate::pages::page_size;
+use crate::{Commit, Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut, WriteBarriers};
+use extent_bucket::cell::Kind;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
+use std::ptr::NonNull;
+use std::thread::JoinHandle;
+
+const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+
+/// Makes this process a host of the multi-node system, as the daemon's must be: its stores'
+/// branches in a bucket in its memory, as of placement 1; its log on standard error.
+/// The branch of the store at `path`, in its cell, as its description names it (TASK-364): what a
+/// VM process's store, which names its branch's ID alone, is in the bucket.
+fn branch_at(path: &std::path::Path) -> crate::Branch {
+    extent_store::host_branch(path).unwrap()
+}
+
+fn host() {
+    let _ = super::logging::to_stderr();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+}
+
+/// A daemon serving one connection, on a thread, and its client, of the store at `path`.
+fn connect(path: &Path, capacity: u64) -> (DaemonExtentStore, JoinHandle<()>) {
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
+    (DaemonExtentStore::over(client, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
+}
+
+/// cladefs: a daemon serving one connection, on a thread, and its client, a follower of the store
+/// at `path` (backlog doc-8).
+fn follow(path: &Path) -> Result<(DaemonExtentStore, JoinHandle<()>), Option<Errno>> {
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
+    match DaemonExtentStore::over(client, path, Opening::ReadOnly) {
+        Ok(store) => Ok((store, served)),
+        Err(error) => {
+            served.join().unwrap();
+            Err(error.errno())
+        }
+    }
+}
+
+/// cladefs: the commits a follower hears of ([`DaemonExtentStore::on_committed`]).
+fn commits_heard(follower: &DaemonExtentStore) -> std::sync::mpsc::Receiver<u64> {
+    let (heard, commits) = std::sync::mpsc::channel();
+    follower.on_committed(move |commit| {
+        // Unheard once the test stops listening.
+        let _ = heard.send(commit);
+    });
+    commits
+}
+
+/// `len` bytes of `byte` plus their offset modulo 251.
+fn pattern(byte: u8, len: usize) -> Vec<u8> {
+    (0..len).map(|i| byte ^ (i % 251) as u8).collect()
+}
+
+fn write(
+    store: &DaemonExtentStore,
+    extent: ExtentId,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), Errno> {
+    // In two buffers, as a request's descriptors may hold it.
+    let (first, second) = data.split_at(data.len() / 2);
+    store.write(extent, offset, &[VolatileSlice::from(first), VolatileSlice::from(second)])
+}
+
+fn read(
+    store: &DaemonExtentStore,
+    extent: ExtentId,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, Errno> {
+    let mut data = vec![0; len];
+    let (first, second) = data.split_at_mut(len / 2);
+    store.read(
+        extent,
+        offset,
+        &mut [VolatileSliceMut::from(first), VolatileSliceMut::from(second)],
+    )?;
+    Ok(data)
+}
+
+/// `pages` pages of anonymous memory, for a window.
+fn memory(pages: usize) -> NonNull<u8> {
+    // SAFETY: Maps anonymous memory, which the test owns.
+    let memory = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            pages * page_size() as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    NonNull::new(memory.cast()).unwrap()
+}
+
+/// The file and offset this process maps the page at `addr` from, as /proc/self/maps has them:
+/// the device and inode, and the offset.
+fn mapped_from(addr: usize) -> (String, u64) {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    for line in maps.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (start, end) = fields[0].split_once('-').unwrap();
+        let (start, end) =
+            (usize::from_str_radix(start, 16).unwrap(), usize::from_str_radix(end, 16).unwrap());
+        if (start..end).contains(&addr) {
+            let offset = u64::from_str_radix(fields[2], 16).unwrap();
+            return (format!("{} {}", fields[3], fields[4]), offset + (addr - start) as u64);
+        }
+    }
+    panic!("{addr:#x} isn't mapped");
+}
+
+/// How /proc/self/maps names anonymous memory's file: none.
+const ANONYMOUS: &str = "00:00 0";
+
+/// The protection this process maps the page at `addr` with, as /proc/self/maps has it: "r-xp".
+fn protection_of(addr: usize) -> String {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+    for line in maps.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (start, end) = fields[0].split_once('-').unwrap();
+        let (start, end) =
+            (usize::from_str_radix(start, 16).unwrap(), usize::from_str_radix(end, 16).unwrap());
+        if (start..end).contains(&addr) {
+            return fields[1].to_owned();
+        }
+    }
+    panic!("{addr:#x} isn't mapped");
+}
+
+/// cladefs TASK-79.8: a window whose connection goes maps none of the daemon's pages from then on,
+/// which the daemon frees for other VMs' extents, nor anything the guest can reach, until another
+/// connection's window takes its memory over: a follower's device, reset and activated again,
+/// failing before its new window was made, left its guest the pages of other VMs.
+#[test]
+fn windows_let_go_of_the_daemons_pages_as_their_connection_goes() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    let base = memory.as_ptr() as usize;
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(4, ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
+    assert!(*page == pattern(4, ps)[..], "the window maps other data");
+    assert_ne!(mapped_from(base).0, ANONYMOUS, "the window maps no file");
+
+    drop(store);
+    served.join().unwrap();
+    for addr in [base, base + ps] {
+        assert_eq!(
+            (mapped_from(addr).0, protection_of(addr)),
+            (ANONYMOUS.to_owned(), "---p".to_owned()),
+            "{:#x} of the window",
+            addr - base
+        );
+    }
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+}
+
+/// cladefs TASK-172: a VM process's window keeps as many runs of pages installed as the mappings the
+/// daemon says the host lets a process make allow, not as what it reads of /proc itself: in its
+/// jail, without /proc, it budgeted by Linux's default, 30,717 runs where the GCE hosts' limit,
+/// 1,048,576, allows 522,240. The daemon here says 300,000, which neither /proc nor the default
+/// is: 4,096 of them kept for the process's others, half the rest.
+#[test]
+fn windows_budget_by_the_mappings_the_daemon_says_the_host_allows() {
+    host();
+    super::server::MAX_MAP_COUNT_GIVEN.set(300_000).unwrap();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    assert_eq!(store.window_budget(), Some(147_952));
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+}
+
+/// cladefs: with `CLADEFSD_BUCKET` naming a bucket, the stores the daemon opens keep their
+/// branches there: a durable commit is an uploaded one.
+#[test]
+fn keeps_branches_in_object_storage() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 20);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let bucket = super::stores::daemon_bucket().unwrap();
+    futures::executor::block_on(async {
+        let branch = branch_at(&dir.path().join("store"));
+        let state = extent_bucket::recover(&*bucket, branch, None).await.unwrap().state;
+        assert_eq!(state.root, Some(b"root".to_vec()));
+        let data =
+            extent_bucket::testing::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
+        assert_eq!(data, pattern(1, 2 * BLOCK));
+    });
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: a store whose description names a bucket other than the daemon's, as an image's names
+/// its own file bucket, keeps its branch there as the daemon serves it, not in the daemon's
+/// (TASK-165.6): the image's other openers, the cladefs CLI's, find it there.
+#[test]
+fn keeps_branches_in_the_buckets_their_stores_name() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image");
+    let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
+    let branch = crate::host_store::new_alone();
+    let (of, keeping) = (crate::BranchOf::Named(branch), crate::host_store::keeping().unwrap());
+    let made =
+        crate::host_store::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
+            .unwrap();
+    made.made().unwrap();
+    drop(made);
+    let (store, served) = connect(&path, 1 << 20);
+    let extent = ExtentId { branch: branch.id, sequence: 1 };
+    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let image = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let daemons = super::stores::daemon_bucket().unwrap();
+    futures::executor::block_on(async {
+        let state = extent_bucket::recover(&image, branch, None).await.unwrap().state;
+        assert_eq!(state.root, Some(b"root".to_vec()));
+        let record = extent_bucket::branch::record(&*daemons, branch).await.unwrap();
+        assert_eq!(record, None, "the daemon's bucket has the image's branch");
+    });
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: the daemon keeps what its bucket did, its requests and bytes, what the stores'
+/// followers are, how many and how far behind, what serving the stores cost, and the requests it
+/// served, in the file `CLADEFSD_STATS` names, soon after each change: the bench reports it
+/// (`scripts/bench-report.py`).
+#[test]
+fn keeps_object_storage_and_follower_stats() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("stats.txt");
+    // SAFETY: as in host.
+    unsafe { std::env::set_var("CLADEFSD_STATS", &file) };
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let branch = store.branch();
+    let extent = move |sequence| ExtentId { branch, sequence };
+    write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let bucket = super::stores::daemon_bucket().unwrap();
+    assert!(bucket.stats().uploaded(extent_bucket::object_bucket::Upload::Segments) > 0);
+    // A follower two commits behind, keeping what the writer freed.
+    let (follower, followed) = follow(&path).unwrap();
+    store.free(extent(1)).unwrap();
+    store.commit(None).unwrap();
+    store.commit(None).unwrap();
+    // Within a few polls of the last change.
+    let fields = |kept: &str, at: usize, kind: &str| -> Option<Vec<(String, u64)>> {
+        let line = kept.lines().nth(at)?.strip_prefix(kind)?.strip_prefix(": ")?;
+        let field =
+            |field: &str| field.split_once('=').map(|(k, v)| (k.to_owned(), v.parse().unwrap()));
+        line.split(' ').map(field).collect()
+    };
+    let count = |fields: &[(String, u64)], name: &str| {
+        fields.iter().find(|(named, _)| named == name).map(|(_, count)| *count)
+    };
+    let start = std::time::Instant::now();
+    let kept = loop {
+        let kept = std::fs::read_to_string(&file).unwrap_or_default();
+        let behind = fields(&kept, 1, "followers").and_then(|f| count(&f, "max-behind"));
+        let commits = fields(&kept, 2, "daemon").and_then(|f| count(&f, "commits"));
+        if kept.lines().next() == Some(&bucket.stats().line())
+            && behind == Some(2)
+            && commits == Some(3)
+        {
+            break kept;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "kept {kept:?}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let followers = fields(&kept, 1, "followers").unwrap();
+    let names: Vec<_> = followers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["views", "max-views", "max-behind", "max-stale-ms", "max-kept"]);
+    let counts = (followers[0].1, followers[1].1, followers[4].1);
+    assert_eq!(counts, (1, 1, 2 * BLOCK as u64), "{kept}");
+    let daemon = fields(&kept, 2, "daemon").unwrap();
+    let names: Vec<_> = daemon.iter().map(|(name, _)| name.to_owned()).collect();
+    // Its counters, then how long its stores' commits waited to be made durable (TASK-165.9).
+    let mut expected: Vec<String> =
+        crate::stats::stats().named().map(|(name, _)| name.to_owned()).into();
+    let lags = [
+        "local_lag_count",
+        "local_lag_max_us",
+        "local_lag_p50_ms",
+        "local_lag_p99_ms",
+        "local_lag_within_50ms",
+    ];
+    expected.extend(lags.map(str::to_owned));
+    expected.extend((0..15).map(|bucket| format!("local_lag_le_{}ms", 1 << bucket)));
+    expected.push("local_lag_gt_16384ms".to_owned());
+    // And how long its flushes and framings took, phase by phase; and making the segments framed
+    // durable, how many (TASK-310); the slowest's, each phase's longest and each phase summed,
+    // with their threads' waits to run (TASK-336).
+    let phases: [(&str, &[&str]); 3] = [
+        ("flush", &["wait", "data", "dirs", "logs", "gone", "raw"]),
+        ("framing", &["own", "read", "compress", "write"]),
+        ("durable", &["wait", "entries", "files", "dirs"]),
+    ];
+    for (kind, phases) in phases {
+        expected.extend(["count", "slow"].map(|field| format!("{kind}_{field}")));
+        for which in ["slowest", "max", "sum"] {
+            let named = phases.iter().chain(&["runnable"]);
+            expected.extend(named.map(|phase| format!("{kind}_{which}_{phase}_us")));
+        }
+    }
+    expected.extend(["durable_segments", "own_sync_max_us", "raw_sync_max_us"].map(str::to_owned));
+    // And the bytes its stores wrote, by kind, and the process, as its kernel counts them
+    // (TASK-310).
+    let kinds = ["raw", "copied", "framed", "own", "log"];
+    expected.extend(kinds.map(|kind| format!("written_{kind}_bytes")));
+    // And the writes they took, and the stats file's own (TASK-330.2).
+    expected.extend(["written_writes", "stats_written_bytes"].map(str::to_owned));
+    // cladefs: segments framed in place, commits spanning segments (TASK-310, TASK-92.41); the
+    // bytes framings read, and looks ahead (TASK-400).
+    let once = [
+        "segments_framed_in_place",
+        "commits_spanning_segments",
+        "framing_read_bytes",
+        "seen_ahead_bytes",
+    ];
+    expected.extend(once.map(str::to_owned));
+    // And the parts held, packed ahead of their framings (TASK-400).
+    let held = [
+        "bytes",
+        "peak_bytes",
+        "held_bytes",
+        "taken_bytes",
+        "evicted_bytes",
+        "evicted",
+        "late",
+        "skipped",
+    ];
+    expected.extend(held.map(|name| format!("held_parts_{name}")));
+    expected.extend(["io_write_bytes", "io_cancelled_write_bytes"].map(str::to_owned));
+    assert_eq!(names, expected, "{kept}");
+    assert_eq!(count(&daemon, "local_lag_count"), Some(3), "{kept}");
+    // The guest's write, to the open segment, once; its commit's records, in the segment's log.
+    assert_eq!(count(&daemon, "written_raw_bytes"), Some(2 * BLOCK as u64), "{kept}");
+    assert_eq!(count(&daemon, "written_copied_bytes"), Some(0), "{kept}");
+    assert!(count(&daemon, "written_log_bytes") > Some(0), "{kept}");
+    // The three commits, each a COMMIT request: a request's time holds its commit's, which
+    // holds its phases'.
+    let requests = fields(&kept, 3, "requests").unwrap();
+    assert_eq!(count(&requests, "commit"), Some(3), "{kept}");
+    let ns = |fields: &[(String, u64)], name: &str| count(fields, name).unwrap();
+    assert!(ns(&requests, "commit-ns") >= ns(&daemon, "commit-ns"), "{kept}");
+    let phases = ["commit-store-ns", "commit-wait-ns"];
+    assert!(
+        ns(&daemon, "commit-ns") >= phases.map(|phase| ns(&daemon, phase)).iter().sum::<u64>(),
+        "{kept}"
+    );
+    for (store, served) in [(follower, followed), (store, served)] {
+        drop(store);
+        served.join().unwrap();
+    }
+}
+
+/// Runs `call`, a store operation of the control API's, on a runtime of its own, as the API does.
+fn control<T>(call: impl std::future::Future<Output = T>) -> T {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(call)
+}
+
+/// Resizes the store at `path`, as the control API does (`ResizeStore`).
+fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
+    control(super::stores::resize(path.to_owned(), capacity))
+}
+
+/// Forks the store at `from` to a new branch at `to`, as the control API does (`ForkStore`), and
+/// returns the branch.
+fn fork_store(from: &Path, to: &Path) -> Result<crate::Branch, crate::Error> {
+    let forked = control(super::stores::fork(from.to_owned(), to.to_owned(), None, (false, false)));
+    forked.map_err(crate::Error::from)
+}
+
+/// Deletes the store at `path`, as the control API does (`DeleteStore`).
+fn delete_store(path: &Path) -> Result<(), crate::Error> {
+    Ok(control(super::stores::delete(path.to_owned()))?)
+}
+
+/// Waits for the store at `path` to be uploaded, as the control API does (`SyncStore`).
+fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
+    Ok(control(super::stores::sync(path.to_owned()))?)
+}
+
+/// A store a VM has open grows at once, and its VM process is told the new capacity; it shrinks
+/// once its guest, asked, agrees, never below what it holds, and keeps its size if the guest
+/// refuses. Durably: the store reopened has the capacity it was given.
+#[test]
+fn resizes_open_stores() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let (changes, changed) = std::sync::mpsc::channel();
+    store.on_capacity(move |capacity, ask| changes.send((capacity, ask)).unwrap());
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, 64 * BLOCK)).unwrap();
+    store.commit(None).unwrap();
+
+    resize(&path, 4 << 20).unwrap();
+    assert_eq!(changed.recv().unwrap(), (4 << 20, false));
+    assert_eq!(store.info().unwrap().capacity, 4 << 20);
+
+    // Asked, the guest agrees, then refuses.
+    for (capacity, took) in [(2 << 20, true), (1 << 20, false)] {
+        let resizing = {
+            let path = path.clone();
+            std::thread::spawn(move || resize(&path, capacity))
+        };
+        assert_eq!(changed.recv().unwrap(), (capacity, true));
+        store.resized(capacity, took).unwrap();
+        let expected = if took { Ok(()) } else { Err(Errno::ENOSPC) };
+        assert_eq!(resizing.join().unwrap(), expected);
+    }
+    assert_eq!(store.info().unwrap().capacity, 2 << 20);
+    // Below what the store holds, the guest isn't asked.
+    assert_eq!(resize(&path, 32 * BLOCK as u64), Err(Errno::ENOSPC));
+    assert!(changed.try_recv().is_err());
+
+    drop(store);
+    served.join().unwrap();
+    let reopened = ExtentStore::open(&path).unwrap();
+    assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
+}
+
+/// A shrink whose caller drops its `ResizeStore` stops waiting for the guest (TASK-43.6): the
+/// guest's answer, coming after, shrinks nothing.
+#[test]
+fn shrinks_dropped_by_their_callers_stop_waiting() {
+    use super::control::proto::ResizeStoreRequest;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 2 << 20);
+    let (asks, asked) = std::sync::mpsc::channel();
+    store.on_capacity(move |capacity, ask| asks.send((capacity, ask)).unwrap());
+    let socket = dir.path().join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let tenants = dir.path().join("tenants");
+    std::fs::create_dir(&tenants).unwrap();
+    std::thread::spawn(move || super::control::serve_control(listener, tenants));
+    let connection = super::stores::table().writer(&super::stores::store_key(&path)).unwrap();
+
+    control(async {
+        let mut client = super::control::connect(&socket).await.unwrap();
+        let request =
+            ResizeStoreRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
+        let asking = tokio::task::spawn_blocking(move || (asked.recv().unwrap(), asked));
+        let asked = tokio::select! {
+            shrunk = client.resize_store(request) => panic!("{shrunk:?}"),
+            asked = asking => asked.unwrap(),
+        };
+        assert_eq!(asked.0, (1 << 20, true));
+        // Dropped, the call is reset, and the daemon drops its wait.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while connection.shrink_awaited() {
+            assert!(tokio::time::Instant::now() < deadline, "the shrink still waits");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // TASK-79.41: and tells the guest the capacity the store keeps.
+        let told = tokio::task::spawn_blocking(move || asked.1.recv().unwrap()).await.unwrap();
+        assert_eq!(told, (2 << 20, false));
+    });
+    store.resized(1 << 20, true).unwrap();
+    assert_eq!(store.info().unwrap().capacity, 2 << 20);
+
+    drop((store, connection));
+    served.join().unwrap();
+}
+
+/// A store no VM has open grows, through the daemon, which no VM opens it from meanwhile; it does
+/// not shrink, as its guest is not there to agree.
+#[test]
+fn resizes_closed_stores() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    drop(ExtentStore::create(&path, 1 << 20).unwrap());
+    resize(&path, 3 << 20).unwrap();
+    assert_eq!(resize(&path, 2 << 20), Err(Errno::EBUSY));
+    assert_eq!(resize(&dir.path().join("none"), 2 << 20), Err(Errno::ENOENT));
+    let (store, served) = connect(&path, 1 << 20);
+    assert_eq!(store.info().unwrap().capacity, 3 << 20);
+    drop(store);
+    served.join().unwrap();
+}
+
+/// A store served by the daemon is the store: what it writes it reads, commits, and keeps once
+/// the VM process is gone; it fails as the store does; and no other VM process opens it meanwhile.
+#[test]
+fn serves_a_store() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
+    assert_eq!(read(&store, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
+    store.commit(Some(b"root")).unwrap();
+    assert_eq!(store.root(), Ok(b"root".to_vec()));
+    let info = store.info().unwrap();
+    assert_eq!((info.capacity, info.used, info.next_sequence), (1 << 20, 2 * BLOCK as u64, 2));
+    assert_eq!(write(&store, extent, 2 * BLOCK as u64, &[0; BLOCK]), Err(Errno::EPERM));
+    let (other, other_server) = UnixStream::pair().unwrap();
+    let other_served =
+        std::thread::spawn(move || serve_connection(other_server, default_tenant().unwrap()));
+    let error = DaemonExtentStore::over(other, &path, Opening::Create(1 << 20, Kind::Fxfs))
+        .err()
+        .expect("opened it twice");
+    assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
+    other_served.join().unwrap();
+
+    drop(store);
+    served.join().unwrap();
+    let mut data = vec![0; 2 * BLOCK];
+    let local = ExtentStore::open(&path).unwrap();
+    local.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    assert_eq!(data, pattern(1, 2 * BLOCK));
+}
+
+/// Reads and writes move their data through the connection's transfer area, not the socket
+/// (TASK-26.18.6): those that fit a slot, while one is free; others go through the socket.
+#[test]
+fn reads_and_writes_go_through_the_transfer_area() {
+    use super::client::TRANSFER_SLOT;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    let extent = |sequence| ExtentId { branch: store.branch(), sequence };
+    write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
+    assert_eq!(
+        read(&store, extent(1), BLOCK as u64, BLOCK),
+        Ok(pattern(1, 2 * BLOCK)[BLOCK..].to_vec())
+    );
+    assert_eq!(store.transfers(), 2);
+
+    // A slot's worth, and more than a slot's.
+    write(&store, extent(2), 0, &pattern(2, TRANSFER_SLOT)).unwrap();
+    write(&store, extent(3), 0, &pattern(3, 2 * TRANSFER_SLOT)).unwrap();
+    assert_eq!(store.transfers(), 3);
+    assert_eq!(read(&store, extent(3), 0, 2 * TRANSFER_SLOT), Ok(pattern(3, 2 * TRANSFER_SLOT)));
+    assert_eq!(read(&store, extent(2), 0, TRANSFER_SLOT), Ok(pattern(2, TRANSFER_SLOT)));
+    assert_eq!(store.transfers(), 4);
+
+    // No slot free: through the socket.
+    let taken = store.take_transfer_slots();
+    let used = store.transfers();
+    write(&store, extent(4), 0, &pattern(4, BLOCK)).unwrap();
+    assert_eq!(read(&store, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert_eq!(store.transfers(), used);
+    drop(taken);
+    assert_eq!(read(&store, extent(4), 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert_eq!(store.transfers(), used + 1);
+    drop(store);
+    served.join().unwrap();
+}
+
+/// The daemon refuses a transfer area it could fault on, one not sealed against shrinking, and
+/// ranges past the end of the one it has.
+#[test]
+fn transfer_areas_are_checked() {
+    use super::wire::{Header, READ, READ_TRANSFER, TRANSFER, WRITE, WRITE_TRANSFER};
+    use std::os::fd::AsFd;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    // SAFETY: The name is a C string.
+    let fd = unsafe { libc::memfd_create(c"unsealed".as_ptr(), libc::MFD_CLOEXEC) };
+    assert!(fd >= 0);
+    // SAFETY: Just created, and owned here.
+    let file = std::fs::File::from(unsafe {
+        <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    });
+    file.set_len(1 << 20).unwrap();
+    let unsealed = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
+    assert_eq!(store.call(unsealed, &[], &[file.as_fd()]).err(), Some(Errno::EINVAL));
+
+    // The store's own area, given at its opening: once.
+    // SAFETY: As above.
+    let fd = unsafe {
+        libc::memfd_create(c"sealed".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+    };
+    assert!(fd >= 0);
+    // SAFETY: As above.
+    let sealed = std::fs::File::from(unsafe {
+        <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    });
+    sealed.set_len(1 << 20).unwrap();
+    // SAFETY: Seals memory this test made.
+    let seal = unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(&sealed),
+            libc::F_ADD_SEALS,
+            libc::F_SEAL_SHRINK,
+        )
+    };
+    assert_eq!(seal, 0);
+    let again = Header::new(TRANSFER, 0).with_args(&[1 << 20]);
+    assert_eq!(store.call(again, &[], &[sealed.as_fd()]).err(), Some(Errno::EEXIST));
+    let extent = [store.branch(), 1];
+    let area = 8 * super::client::TRANSFER_SLOT as u64;
+    let past = Header::new(READ, 0)
+        .with_args(&[extent[0], extent[1], 0, BLOCK as u64, area - BLOCK as u64 + 1])
+        .with_flags(READ_TRANSFER);
+    assert_eq!(store.call(past, &[], &[]).err(), Some(Errno::EINVAL));
+    let wrapping = Header::new(WRITE, 0)
+        .with_args(&[extent[0], extent[1], 0, u64::MAX, 2])
+        .with_flags(WRITE_TRANSFER);
+    assert_eq!(store.call(wrapping, &[], &[]).err(), Some(Errno::EINVAL));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-160.9: a request with a flag its kind doesn't know is refused (`EINVAL`), rather than
+/// served as though it had none, as the daemon did: a `WRITE` of any flag a write doesn't know
+/// writes nothing, a `COMMIT` of one commits nothing, and the store is served on.
+#[test]
+fn requests_with_flags_the_daemon_doesnt_know_are_refused() {
+    use super::wire::{COMMIT, COMMIT_ROOT, Header, WRITE};
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let args = [extent.branch, extent.sequence, 0, 0, BLOCK as u64];
+    // Bit 31 is any request's: REQUEST (TASK-260).
+    for bit in 5..31 {
+        let unknown = Header::new(WRITE, 0).with_args(&args).with_flags(1 << bit);
+        let written = store.call(unknown, &pattern(1, BLOCK), &[]).map(drop);
+        assert_eq!(written, Err(Errno::EINVAL), "flag {bit}");
+    }
+    assert_eq!(read(&store, extent, 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(write(&store, extent, 0, &pattern(2, BLOCK)), Ok(()));
+    assert_eq!(store.commit(Some(b"before")), Ok(()));
+    // Bit 2 is COMMIT_LOCAL (TASK-301).
+    let unknown = Header::new(COMMIT, 0).with_flags(COMMIT_ROOT | 1 << 3);
+    assert_eq!(store.call(unknown, b"after", &[]).map(drop), Err(Errno::EINVAL));
+    assert_eq!(store.root(), Ok(b"before".to_vec()));
+    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// A write a commit follows is sealed by it, and a write a barrier precedes seals what came
+/// before: each one round trip, as the store has them (`WriteBarriers`).
+#[test]
+fn writes_with_barriers() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let (first, second) = (
+        ExtentId { branch: store.branch(), sequence: 1 },
+        ExtentId { branch: store.branch(), sequence: 2 },
+    );
+    let data = pattern(1, BLOCK);
+    let committed = WriteBarriers { after: Some(Commit::Uploaded), ..Default::default() };
+    store.write_with_barriers(first, 0, &[VolatileSlice::from(&data[..])], committed).unwrap();
+    assert_eq!(write(&store, first, BLOCK as u64, &data), Err(Errno::EPERM), "first is open");
+    write(&store, second, 0, &data).unwrap();
+    let barrier = WriteBarriers { before: true, ..Default::default() };
+    let third = ExtentId { branch: store.branch(), sequence: 3 };
+    store.write_with_barriers(third, 0, &[VolatileSlice::from(&data[..])], barrier).unwrap();
+    assert_eq!(write(&store, second, BLOCK as u64, &data), Err(Errno::EPERM), "second is open");
+    write(&store, third, BLOCK as u64, &data).unwrap();
+    assert_eq!(read(&store, first, 0, BLOCK), Ok(data));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: a write's commit sets the root it carries (`WRITE_ROOT`), its data through the transfer
+/// area or the socket alike, the root not part of the data; and a root with no commit to set it is
+/// refused, unwritten (TASK-153.13).
+#[test]
+fn a_writes_commit_sets_its_root() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let extent = |sequence| ExtentId { branch: store.branch(), sequence };
+    let data = pattern(1, BLOCK);
+    let write = |sequence, root: Option<&[u8]>, after| {
+        let barriers = WriteBarriers { after, root, ..Default::default() };
+        store.write_with_barriers(extent(sequence), 0, &[VolatileSlice::from(&data[..])], barriers)
+    };
+    let committed = Some(Commit::Ordered);
+    write(1, Some(&b"one"[..]), committed).unwrap();
+    assert_eq!(store.transfers(), 1);
+    assert_eq!(store.root(), Ok(b"one".to_vec()));
+    assert_eq!(read(&store, extent(1), 0, BLOCK), Ok(data.clone()));
+
+    let taken = store.take_transfer_slots();
+    let used = store.transfers();
+    write(2, Some(&b"two"[..]), committed).unwrap();
+    assert_eq!(store.transfers(), used);
+    drop(taken);
+    assert_eq!(store.root(), Ok(b"two".to_vec()));
+    assert_eq!(read(&store, extent(2), 0, BLOCK), Ok(data.clone()));
+
+    assert_eq!(write(3, Some(&b"three"[..]), None), Err(Errno::EINVAL));
+    assert_eq!(read(&store, extent(3), 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(store.root(), Ok(b"two".to_vec()));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: a future spawned on replies sends its request on the thread spawning it, and goes on,
+/// as the reply comes, on the thread receiving it, which no other thread then waits for (TASK-41);
+/// its next request too. The thread receiving replies is held, in the store's capacity callback,
+/// until the future waits for its reply: otherwise the reply may come while the spawning thread
+/// still runs it, which then goes on with it.
+#[test]
+fn futures_go_on_where_their_replies_arrive() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let (holding, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = std::sync::Mutex::new(released);
+    store.on_capacity(move |_, _| {
+        holding.send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+    });
+    resize(&path, 4 << 20).unwrap();
+    held.recv().unwrap();
+
+    let store = std::sync::Arc::new(store);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let (done, finished) = std::sync::mpsc::channel();
+    let serving = store.clone();
+    super::spawn_on_replies(async move {
+        let data = pattern(7, BLOCK);
+        let committed = WriteBarriers { after: Some(Commit::Ordered), ..Default::default() };
+        let wrote = serving
+            .write_with_barriers_async(extent, 0, &[VolatileSlice::from(&data[..])], committed)
+            .await;
+        let after_write = std::thread::current();
+        let mut read = vec![0; BLOCK];
+        let mut into = [VolatileSliceMut::from(&mut read[..])];
+        let read_result = serving.read_async(extent, 0, &mut into).await;
+        let after_read = std::thread::current();
+        done.send((wrote, read_result, read == data, after_write, after_read)).unwrap();
+    });
+    release.send(()).unwrap();
+    let (wrote, read, same, after_write, after_read) = finished.recv().unwrap();
+    assert_eq!((wrote, read, same), (Ok(()), Ok(()), true));
+    assert_eq!(after_write.name(), Some("cladefsd client"));
+    assert_eq!(after_read.id(), after_write.id());
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: a store's blocking call on the thread receiving its replies would wait for itself: it
+/// fails, as from a callback of the store's there, rather than panic the VM process (TASK-56),
+/// and the store goes on.
+#[test]
+fn blocking_calls_where_replies_arrive_fail() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let store = std::sync::Arc::new(store);
+    let (answer, answered) = std::sync::mpsc::channel();
+    let calling = std::sync::Arc::downgrade(&store);
+    store.on_capacity(move |_, _| {
+        answer.send(calling.upgrade().unwrap().info().map(drop)).unwrap();
+    });
+    resize(&path, 4 << 20).unwrap();
+    assert_eq!(answered.recv().unwrap(), Err(Errno::EIO));
+    assert_eq!(store.info().map(drop), Ok(()));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// The window is the daemon's, in this process's memory: a load of a sealed extent's page faults,
+/// which the daemon resolves, mapping the extent's page, which another mapping of it maps too;
+/// unmapped, the page is the window's private memory again, as one it never mapped.
+#[test]
+fn maps_a_window_in_the_vm_process() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    let base = memory.as_ptr() as usize;
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(3, ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+    store.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 3 * ps) };
+    assert!(window[..ps] == pattern(3, ps)[..], "the sealed extent holds other data");
+    assert!(window[2 * ps..] == pattern(3, ps)[..], "its other mapping maps other data");
+    assert_eq!(mapped_from(base + 2 * ps), mapped_from(base));
+    assert_ne!(mapped_from(base).0, ANONYMOUS, "the window maps no file");
+    // A page the window never mapped is its private memory, laid out as the window is (backlog
+    // doc-13): not anonymous memory, nor the extent's.
+    let (private, at) = mapped_from(base + 3 * ps);
+    assert_eq!(at, 3 * ps as u64, "the private memory is laid out otherwise");
+    assert_ne!(private, mapped_from(base).0, "the window maps the extent where it maps nothing");
+    // Unmapped, the extent's page is gone from this process's memory once the daemon replies: the
+    // private memory is there in its place, as where the window never mapped anything.
+    store.unmap(2 * ps as u64, ps as u64).unwrap();
+    assert_eq!(mapped_from(base + 2 * ps), (private, 2 * ps as u64));
+
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// A byte of a pipe's read into the page at `addr`, as the kernel writes it, faulting for writing
+/// as KVM does for a vCPU: `Err` with the errno it failed with.
+fn kernel_store(addr: usize) -> Result<(), i32> {
+    let mut pipe = [0; 2];
+    // SAFETY: Makes a pipe, writes a byte to it, and reads one into `addr`, closing it after.
+    unsafe {
+        assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+        assert_eq!(libc::write(pipe[1], [0x77u8].as_ptr().cast(), 1), 1);
+        let read = libc::read(pipe[0], addr as *mut libc::c_void, 1);
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap();
+        libc::close(pipe[0]);
+        libc::close(pipe[1]);
+        if read == 1 { Ok(()) } else { Err(errno) }
+    }
+}
+
+/// cladefs TASK-164.1 (backlog doc-13): a window that copies on write, in the VM process, maps
+/// sealed extents and zeros alone (a `MAP` of an open extent `EPERM`). The
+/// guest's store to a sealed extent's page makes the page private, the tenant's memory mapped in
+/// its place, the extent as the store's reads have it and another mapping of it; to zeros, a page
+/// of zeros. Past the window's private pages a store is refused (`EFAULT`, as `KVM_RUN` fails,
+/// which stops the VM); an `UNMAP` frees a private page, and `PRIVATE` makes pages private at once,
+/// within the bound (`ENOMEM` past it, `EINVAL` where nothing is mapped). A snapshot's fork is
+/// refused while the window has private pages (`EBUSY`).
+#[test]
+fn windows_copy_on_write_in_the_vm_process() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
+    assert!(store.copies_on_write());
+    crate::guest_thread_started();
+    let base = memory.as_ptr() as usize;
+    let (sealed, open) = (
+        ExtentId { branch: store.branch(), sequence: 1 },
+        ExtentId { branch: store.branch(), sequence: 2 },
+    );
+    write(&store, sealed, 0, &pattern(3, ps)).unwrap();
+    store.commit(None).unwrap();
+    write(&store, open, 0, &pattern(4, ps)).unwrap();
+    assert_eq!(store.map(open, 0, ps as u64, 0), Err(Errno::EPERM));
+    store.commit(None).unwrap();
+    store.map(sealed, 0, ps as u64, 0).unwrap();
+    store.map(sealed, 0, ps as u64, ps as u64).unwrap();
+    futures::executor::block_on(store.map_zeros_async(2 * ps as u64, ps as u64)).unwrap();
+    // The window's bytes from `at` to `end`, as the guest reads them.
+    let window = |at: usize, end: usize| -> Vec<u8> {
+        // SAFETY: The window's memory, whose faults the store serves.
+        (at..end).map(|at| unsafe { memory.as_ptr().add(at).read_volatile() }).collect()
+    };
+    assert_eq!(window(0, ps), pattern(3, ps), "the sealed extent holds other data");
+    // Both read, so that both are mapped, from the one page the extent has in memory.
+    assert_eq!(window(ps, 2 * ps), pattern(3, ps), "the sealed extent holds other data");
+    assert_eq!(mapped_from(base), mapped_from(base + ps), "the extent's page isn't shared");
+
+    // SAFETY: As above, a store of the guest's.
+    unsafe { memory.as_ptr().write_volatile(0xee) };
+    assert_ne!(mapped_from(base), mapped_from(base + ps), "the store reached the shared page");
+    assert_eq!(window(0, 1), [0xee]);
+    assert_eq!(window(1, ps), pattern(3, ps)[1..], "the private page holds other data");
+    assert_eq!(window(ps, 2 * ps), pattern(3, ps), "the other mapping changed");
+    assert_eq!(read(&store, sealed, 0, ps), Ok(pattern(3, ps)));
+    assert_eq!(kernel_store(base + 2 * ps), Ok(()));
+    assert_eq!(window(2 * ps, 2 * ps + 1), [0x77]);
+    assert_eq!(window(2 * ps + 1, 3 * ps), vec![0; ps - 1], "zeros copied otherwise");
+
+    // Past the window's two private pages.
+    assert_eq!(kernel_store(base + ps), Err(libc::EFAULT));
+    assert_eq!(window(ps, 2 * ps), pattern(3, ps), "a store refused was made");
+    let point = dir.path().join("point");
+    assert_eq!(store.fork_quiescent(&point), Err(Errno::EBUSY));
+    store.unmap(0, ps as u64).unwrap();
+    assert_eq!(store.make_private(ps as u64, ps as u64), Ok(()));
+    assert_eq!(kernel_store(base + ps), Ok(()));
+    assert_eq!(store.make_private(3 * ps as u64, ps as u64), Err(Errno::EINVAL));
+    store.map(sealed, 0, ps as u64, 3 * ps as u64).unwrap();
+    assert_eq!(store.make_private(3 * ps as u64, ps as u64), Err(Errno::ENOMEM));
+    store.unmap(0, 4 * ps as u64).unwrap();
+    assert_eq!(store.fork_quiescent(&point).map(drop), Ok(()));
+
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// A byte at `addr` written to a pipe, the kernel reading it, faulting for reading as KVM does for
+/// a vCPU's load: `Err` with the errno it failed with.
+fn kernel_load(addr: usize) -> Result<(), i32> {
+    let mut pipe = [0; 2];
+    // SAFETY: Makes a pipe, writes the byte at `addr` to it, and closes it.
+    unsafe {
+        assert_eq!(libc::pipe(pipe.as_mut_ptr()), 0);
+        let written = libc::write(pipe[1], addr as *const libc::c_void, 1);
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap();
+        libc::close(pipe[0]);
+        libc::close(pipe[1]);
+        if written == 1 { Ok(()) } else { Err(errno) }
+    }
+}
+
+/// cladefs TASK-187: a guest's stray access, a load or a store at a window offset nothing maps
+/// (cladefs.dax_stray, fxfs-guest-crash-stray-dax), its page faulted first by KVM's asynchronous page
+/// fault's worker, writing, then by the vCPU, stays refused, withheld, however often the vCPU
+/// retries it as the VMM does ([`AccessFailures`](crate::AccessFailures)), each retry lifting what
+/// the stage restricted for workers' writes; and is given up on, its VM stopped (Firecracker's
+/// 159), after a second of failures 25 µs apart, the clock the test's, though the vCPU exits
+/// thirteen times between each two, as one taking the guest's interrupts does: vCPU 0 in GCE r621
+/// and r622 failed a dozen times, exited, failed again, for as long as the case ran, as an exit
+/// ended its run of failures.
+#[test]
+fn a_stray_access_stays_refused_and_is_given_up_on() {
+    use crate::{AccessFailures, FailingRun, Failure};
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 2) }.unwrap();
+    assert!(store.copies_on_write());
+    let base = memory.as_ptr() as usize;
+    // KVM's worker, a thread not the guest's, faulting the page in for writing for a vCPU's load.
+    let worker = std::thread::spawn(move || kernel_store(base + 2 * ps));
+    assert_eq!(worker.join().unwrap(), Err(libc::EFAULT), "the worker's write went through");
+    crate::guest_thread_started();
+    let step = std::time::Duration::from_micros(25);
+    let accesses: [(&str, fn(usize) -> Result<(), i32>, usize); 2] =
+        [("load", kernel_load, base + 2 * ps), ("store", kernel_store, base + 3 * ps + ps / 2)];
+    for (what, access, addr) in accesses {
+        let mut failures = AccessFailures::default();
+        let start = std::time::Instant::now();
+        let mut now = start;
+        let answer = loop {
+            assert_eq!(access(addr), Err(libc::EFAULT), "the stray {what} went through");
+            match failures.failed(now) {
+                Failure::Retry { ended: None } if now - start < 2 * AccessFailures::PATIENCE => {}
+                answer => break answer,
+            }
+            for _ in 0..13 {
+                assert_eq!(failures.ran(|| now), None, "a run ended {:?} in", now - start);
+            }
+            now += step;
+        };
+        let (last, failures) = (start + 40_000 * step, 40_001);
+        let run = FailingRun { first: start, last, failures, exits: 13 * (failures - 1) };
+        assert_eq!(answer, Failure::GiveUp(run), "the stray {what}");
+    }
+    let told = crate::describe_windows(Some(base));
+    let pages = "0 pages installed, 0 left out, 0 private, 2 withheld, 0 restricted";
+    assert!(told.contains(pages), "{told}");
+
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// cladefs TASK-187: what a forked VM's guest pays for each store to a page not yet here, of a large
+/// window that copies on write (GCE r632, pgbench forked at 0.57 of no DAX, its VMMs restricting
+/// pages for KVM's workers' writes 2^18 times and more): KVM's worker writes the page in for the
+/// vCPU's store, which the stage resolves as a load and restricts to reads, so that the worker's
+/// write fails; the vCPU's store then fails, `KVM_RUN` with `EFAULT`, and the VMM retries it once
+/// the stage's fault thread has lifted the restriction (`guest_access_failed`); the store, retried,
+/// makes the page private. A store failed once, then, or twice where the fault thread was slow to
+/// lift: 357 times while the VMM retried at once and a lift walked every page of the window, 140
+/// once a lift walked the pages restricted alone (printed, with the time the stores took).
+///
+/// The pages are a sealed extent's, not in memory, which the window maps without installing them
+/// here, as a forked VM's are: a page here, write-protected, takes a write as a store, whoever's
+/// (`dax::uffd`'s `writes_to_pages_here_are_stores_whoever_makes_them`). They were zeros once,
+/// which the window installs as it maps them: here only past the stage's budget of runs, which
+/// the host's `vm.max_map_count` sets. 262,144 on OrbStack left them out; GCE's 1,048,576 kept
+/// them, and the first worker's write made its page private (GCE r691). A run of failures is by
+/// the test's clock, a microsecond a failure: a loaded host may take a run's 10 ms between two.
+#[test]
+fn a_store_after_a_workers_write_waits_for_one_lift() {
+    use crate::{AccessFailures, Failure};
+    host();
+    let ps = page_size() as usize;
+    // A 1 GiB window, of which the guest stores to `STORES` pages.
+    const PAGES: usize = 1 << 18;
+    const STORES: usize = 1000;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(PAGES);
+    let size = (PAGES * ps) as u64;
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, size, None, STORES as u64) }.unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(5, ps)).unwrap();
+    store.commit(None).unwrap();
+    // Whatever of it the write left in memory evicted, so that mapping it installs nothing.
+    crate::cache::evict_least_used(None, |_| false);
+    // Every 64th page, as a forked guest's stores are spread over its window.
+    let offset = |page: usize| page * 64 * ps;
+    for page in 0..STORES {
+        store.map(extent, 0, ps as u64, offset(page) as u64).unwrap();
+    }
+    let base = memory.as_ptr() as usize;
+    let told = crate::describe_windows(Some(base));
+    let pages = "0 pages installed, 0 left out, 0 private, 0 withheld, 0 restricted";
+    assert!(told.contains(pages), "the pages stored to are here: {told}");
+    crate::guest_thread_started();
+    let (mut failed, start) = (0u64, std::time::Instant::now());
+    let mut now = start;
+    for page in 0..STORES {
+        let addr = base + offset(page);
+        let worker = std::thread::spawn(move || kernel_store(addr));
+        assert_eq!(worker.join().unwrap(), Err(libc::EFAULT), "the worker's write went through");
+        let mut failures = AccessFailures::default();
+        while let Err(errno) = kernel_store(addr) {
+            assert_eq!(errno, libc::EFAULT);
+            failed += 1;
+            now += std::time::Duration::from_micros(1);
+            let retry = failures.failed(now);
+            assert!(matches!(retry, Failure::Retry { ended: None }), "{retry:?}");
+        }
+    }
+    let took = start.elapsed();
+    eprintln!(
+        "{STORES} stores after workers' writes, of a window of {PAGES} pages: {failed} retries \
+         failed, {:.1} a store, in {took:?}, {:?} a store",
+        failed as f64 / STORES as f64,
+        took / STORES as u32
+    );
+    let told = crate::describe_windows(Some(base));
+    let pages = format!("{STORES} private, 0 withheld, 0 restricted (0 for workers' writes)");
+    assert!(told.contains(&pages), "{told}");
+    assert!(failed <= 2 * STORES as u64, "{failed} retries failed");
+    // SAFETY: The window's last page stored to, private now, which nothing else accesses.
+    let last = unsafe { std::slice::from_raw_parts((base + offset(STORES - 1)) as *const u8, ps) };
+    let mut stored = pattern(5, ps);
+    stored[0] = 0x77;
+    assert!(last == &stored[..], "the private page holds other data");
+
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), PAGES * ps) }, 0);
+}
+
+/// TASK-131.6: the daemon's gauges of its extent cache and its windows' mappings follow a window's
+/// mappings: a sealed extent's, the cached extent its mappings hold (pinned), its page faulted in,
+/// then mapped at once again; and unmapped, the cached extent nothing holds (idle).
+#[test]
+fn metrics_gauge_the_extent_cache_and_the_windows_mappings() {
+    host();
+    let ps = page_size() as usize;
+    let gauges = || {
+        let metrics = super::metrics::render();
+        [
+            "extent_cache_pinned_entries",
+            "extent_cache_idle_entries",
+            "window_mappings",
+            "window_mapped_bytes",
+            "window_pages",
+        ]
+        .map(|name| {
+            let name = format!("cladefsd_{name} ");
+            let line = metrics.lines().find_map(|line| line.strip_prefix(&name));
+            line.unwrap_or_else(|| panic!("no {name}in {metrics}")).parse::<u64>().unwrap()
+        })
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    assert_eq!(gauges(), [0, 0, 0, 0, 0]);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(3, ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 3 * ps) };
+    assert!(window[..ps] == pattern(3, ps)[..], "its mapping maps other data");
+    assert_eq!(gauges(), [1, 0, 1, ps as u64, 1]);
+
+    store.map(extent, 0, ps as u64, 2 * ps as u64).unwrap();
+    assert!(window[2 * ps..] == pattern(3, ps)[..], "its other mapping maps other data");
+    assert_eq!(gauges(), [1, 0, 2, 2 * ps as u64, 2]);
+
+    store.unmap(0, 4 * ps as u64).unwrap();
+    assert_eq!(gauges(), [0, 1, 0, 0, 0]);
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// TASK-111.7: the metrics show the daemon's build, and each VM process's, as it said it opening
+/// its store, by the store's branch, a writer and its follower together, while they are connected.
+/// A build said again, or not a label's characters, is refused.
+#[test]
+fn metrics_show_the_daemons_and_its_vm_processes_builds() {
+    use super::wire::{BUILD, Header, MAX_BUILD};
+    host();
+    let builds = || {
+        let metrics = super::metrics::render();
+        let series = ["cladefsd_build_info{", "cladefsd_vm_build_info{"];
+        (metrics.lines())
+            .filter(|line| series.iter().any(|name| line.starts_with(name)))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let commit = crate::BUILD_COMMIT;
+    let daemon = format!("cladefsd_build_info{{commit=\"{commit}\"}} 1");
+    let vms = |branch: u64, count: usize| {
+        format!(
+            "cladefsd_vm_build_info{{branch=\"{branch}\",commit=\"{commit}\"}} {count}",
+            branch = base32_id::Short(branch)
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let branch = store.branch();
+    assert_eq!(builds(), [daemon.clone(), vms(branch, 1)]);
+    let (follower, followed) = follow(&dir.path().join("store")).unwrap();
+    assert_eq!(builds(), [daemon.clone(), vms(branch, 2)]);
+
+    let said = |payload: &[u8]| store.call(Header::new(BUILD, 0), payload, &[]).map(drop);
+    assert_eq!(said(b"again"), Err(Errno::EEXIST));
+    let (other, other_served) = connect(&dir.path().join("other"), 1 << 24);
+    let said = |payload: &[u8]| other.call(Header::new(BUILD, 0), payload, &[]).map(drop);
+    assert_eq!(said(b"a\"b"), Err(Errno::EINVAL));
+    assert_eq!(said(&[b'a'; MAX_BUILD + 1]), Err(Errno::EINVAL));
+    assert_eq!(said(b""), Err(Errno::EINVAL));
+
+    drop((follower, other));
+    followed.join().unwrap();
+    other_served.join().unwrap();
+    assert_eq!(builds(), [daemon.clone(), vms(branch, 1)]);
+    drop(store);
+    served.join().unwrap();
+    assert_eq!(builds(), [daemon]);
+}
+
+/// cladefs TASK-111.5: the metrics show each VM process's window, its mappings and pages, by its
+/// store's branch and its connection's number, a writer's and its follower's apart, and the runs of
+/// pages its second stage has installed, as it last said, against the most it keeps, as it said
+/// making its window.
+#[test]
+fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
+    host();
+    let ps = page_size() as usize;
+    let series = |name: &str, vm: &super::stats::Vm| -> Option<u64> {
+        let metrics = super::metrics::render();
+        let labels = format!(
+            "{{branch=\"{}\",connection=\"{}\"}} ",
+            base32_id::Short(vm.branch),
+            vm.connection
+        );
+        let name = format!("cladefsd_{name}{labels}");
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&name))
+            .map(|value| value.parse().unwrap())
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (follower, followed) = follow(&dir.path().join("store")).unwrap();
+    let vms = super::stats::vms();
+    assert_eq!(vms.iter().map(|vm| vm.follower).collect::<Vec<_>>(), [false, true]);
+    let (writer, following) = (&vms[0], &vms[1]);
+    assert!(writer.connection < following.connection);
+    // No window yet.
+    assert_eq!(series("vm_window_mappings", writer), None);
+    assert_eq!(series("vm_host_mapping_budget", writer), None);
+
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }.unwrap();
+    let budget = store.window_budget().unwrap() as u64;
+    assert_eq!(series("vm_host_mapping_budget", writer), Some(budget));
+    assert_eq!(series("vm_window_mappings", writer), Some(0));
+    assert_eq!(series("vm_host_mappings", writer), Some(0));
+    assert_eq!(series("vm_window_mappings", following), None);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(3, 2 * ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(extent, 0, 2 * ps as u64, 0).unwrap();
+    store.map(extent, 0, ps as u64, 3 * ps as u64).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    let window = unsafe { std::slice::from_raw_parts(memory.as_ptr(), 4 * ps) };
+    assert!(window[3 * ps..] == pattern(3, ps)[..], "its mapping maps other data");
+    assert_eq!(series("vm_window_mappings", writer), Some(2));
+    assert_eq!(series("vm_window_mapped_bytes", writer), Some(3 * ps as u64));
+    assert_eq!(series("vm_window_private_pages", writer), Some(0));
+    let pages = series("vm_window_pages", writer).unwrap();
+    assert!((1..=3).contains(&pages), "{pages} pages");
+
+    // Its runs installed as it said, unmapping all but the page at 3: as of a taking of stats,
+    // which it answers with them.
+    store.unmap(0, 2 * ps as u64).unwrap();
+    take_stats(WAIT).join().unwrap();
+    assert_eq!(series("vm_window_mappings", writer), Some(1));
+    assert_eq!(series("vm_window_pages", writer), Some(1));
+    assert_eq!(series("vm_host_mappings", writer), Some(1));
+
+    drop((store, follower));
+    served.join().unwrap();
+    followed.join().unwrap();
+    assert_eq!(super::stats::vms(), []);
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+}
+
+/// cladefs TASK-111.4: the stats hold the daemon's counters and gauges and its build, and each VM
+/// process's, as it answered: one whose guest answers, its guest's stats and build among it, its
+/// counts as of its answer; one with no guest to ask, at once, without; and one whose guest never
+/// answers, as the daemon has it once the wait is over. An answer to an ask answers those before
+/// it.
+#[test]
+fn stats_hold_the_daemons_vm_processes_and_guests() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    // Whose guest answers, as the test does.
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let (asked, asks) = std::sync::mpsc::channel();
+    store.on_stats_asked(move |ask| asked.send(ask).is_ok());
+    // With no guest.
+    let (guestless, guestless_served) = connect(&dir.path().join("other"), 1 << 24);
+    // Whose guest never answers.
+    let (silent, silent_served) = connect(&dir.path().join("silent"), 1 << 24);
+    silent.on_stats_asked(|_| true);
+
+    let memory = memory(2);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 2 * ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(5, ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+
+    // The silent one's wait is the test's.
+    let taking = take_stats(std::time::Duration::from_secs(2));
+    let ask = asks.recv().unwrap();
+    let guest = "seals 3\nseals_hist 0,2,1\ncommit abc\n";
+    store.answer_stats(ask, Some(guest)).unwrap();
+    let taken = taking.join().unwrap();
+
+    assert_eq!(taken.build, crate::BUILD_COMMIT);
+    let named = |pairs: &[(String, u64)], name: &str| {
+        pairs.iter().find(|(named, _)| named == name).map(|(_, value)| *value)
+    };
+    assert_eq!(named(&taken.counters, "maps"), Some(1));
+    let gauges: Vec<(String, u64)> =
+        taken.gauges.iter().map(|(name, value)| ((*name).to_owned(), *value)).collect();
+    assert_eq!(named(&gauges, "connections"), Some(3));
+    let paths: Vec<_> = taken.vms.iter().map(|vm| vm.path.clone()).collect();
+    let canonical = dir.path().canonicalize().unwrap();
+    assert_eq!(paths, ["store", "other", "silent"].map(|name| canonical.join(name)));
+
+    let (answered, without, unanswered) = (&taken.vms[0], &taken.vms[1], &taken.vms[2]);
+    assert_eq!(answered.branch, store.branch());
+    assert_eq!(answered.build.as_deref(), Some(crate::BUILD_COMMIT));
+    assert!(answered.answered.is_some(), "{answered:?}");
+    let window = answered.window.expect("its window's gauges");
+    assert_eq!((window.mappings, window.mapped_bytes), (1, ps as u64));
+    assert_eq!(answered.stage.installed, window.pages, "its runs installed as of its answer");
+    assert_eq!(answered.budget, Some(store.window_budget().unwrap() as u64));
+    let guest = answered.guest.as_ref().expect("its guest's stats");
+    assert_eq!(guest.build.as_deref(), Some("abc"));
+    assert_eq!(guest.counters.get("seals"), Some(&3));
+    assert_eq!(guest.histograms.get("seals"), Some(&vec![0, 2, 1]));
+
+    assert!(without.answered.is_some() && without.guest.is_none(), "{without:?}");
+    assert_eq!((without.window, without.budget), (None, None));
+    assert!(unanswered.answered.is_none() && unanswered.guest.is_none(), "{unanswered:?}");
+    assert_eq!(unanswered.build.as_deref(), Some(crate::BUILD_COMMIT));
+
+    // Two asks the guest is slow to answer, one answer, to the later, answering both.
+    drop(silent);
+    silent_served.join().unwrap();
+    let (first, second) = (take_stats(WAIT), take_stats(WAIT));
+    let asked = [asks.recv().unwrap(), asks.recv().unwrap()];
+    store.answer_stats(asked[0].max(asked[1]), None).unwrap();
+    for taking in [first, second] {
+        let taken = taking.join().unwrap();
+        assert!(taken.vms[0].answered.is_some(), "{:?}", taken.vms[0]);
+    }
+
+    drop((store, guestless));
+    for served in [served, guestless_served] {
+        served.join().unwrap();
+    }
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
+}
+
+/// cladefs TASK-198: a taking of stats that gives up on a VM process's answer forgets its ask, so
+/// that a VM process whose guest never answers, as one paused (its device asking it all the same),
+/// holds none of them: it held each, one more a taking, for as long as it lived, which a scraper
+/// polling GetStats grew without end.
+#[test]
+fn asks_given_up_on_are_forgotten() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (silent, served) = connect(&dir.path().join("silent"), 1 << 24);
+    silent.on_stats_asked(|_| true);
+    for _ in 0..3 {
+        let taken = take_stats(std::time::Duration::from_millis(10)).join().unwrap();
+        assert!(taken.vms[0].answered.is_none(), "{:?}", taken.vms[0]);
+    }
+    assert_eq!(super::stats::asks_waiting(), [0]);
+    drop(silent);
+    served.join().unwrap();
+}
+
+/// How long a test's taking of stats waits for answers that come, none of its VM processes silent.
+const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// cladefs: the stats the daemon takes, waiting `wait` at most for its VM processes, on a thread of
+/// its own, which they answer meanwhile (TASK-111.4).
+fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    std::thread::spawn(move || runtime.block_on(super::stats::take(wait)))
+}
+
+/// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
+/// and, if set, that it runs on once it has, until its input closes.
+const CHILD_SOCKET: &str = "CLADEFSD_TEST_SOCKET";
+const CHILD_STORE: &str = "CLADEFSD_TEST_STORE";
+const CHILD_EXTENT: &str = "CLADEFSD_TEST_EXTENT";
+const CHILD_RUNS_ON: &str = "CLADEFSD_TEST_RUNS_ON";
+const CHILD_CLOSES: &str = "CLADEFSD_TEST_CLOSES";
+
+/// Opens the store at `store` through the daemon at `socket`, once the daemon has seen a connection
+/// that had it open go.
+fn connect_once_free(socket: &Path, store: &Path) -> DaemonExtentStore {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match DaemonExtentStore::connect(socket, store, 1 << 24) {
+            Ok(store) => return store,
+            Err(error)
+                if error.errno() == Some(Errno::EBUSY) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("opening {}: {error:#}", store.display()),
+        }
+    }
+}
+
+/// Maps `extent`'s first page into a new window of the store at `store` the daemon at `socket`
+/// serves, checks it holds the pattern written, and returns the store, mapping it still, and the
+/// page's address.
+fn map_first_page(socket: &Path, store: &Path, extent: ExtentId) -> (DaemonExtentStore, usize) {
+    let ps = page_size() as usize;
+    let store = connect_once_free(socket, store);
+    let memory = memory(1);
+    // SAFETY: The memory is this function's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
+    assert!(*page == pattern(9, ps)[..], "the window maps other data");
+    // The memory is leaked: the store's window maps it until the process exits.
+    (store, memory.as_ptr() as usize)
+}
+
+/// A VM process, for [`two_processes_map_the_same_pages`] and
+/// [`frozen_vm_processes_hold_nothing_up`]: prints where it maps the extent from; then, told to,
+/// closes its connection, leaving its window mapped; then exits, or, told to run on, runs on until
+/// its input closes.
+#[test]
+#[ignore = "run by two_processes_map_the_same_pages"]
+fn child_maps_an_extent() {
+    let (Ok(socket), Ok(store), Ok(extent)) =
+        (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE), std::env::var(CHILD_EXTENT))
+    else {
+        return;
+    };
+    let (branch, sequence) = extent.split_once(':').unwrap();
+    let extent = ExtentId { branch: branch.parse().unwrap(), sequence: sequence.parse().unwrap() };
+    let (store, page) = map_first_page(Path::new(&socket), Path::new(&store), extent);
+    let (file, offset) = mapped_from(page);
+    println!("MAPPED {file} {offset}");
+    let mut store = Some(store);
+    if std::env::var_os(CHILD_CLOSES).is_some() {
+        store.take();
+        println!("CLOSED");
+    }
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    if std::env::var_os(CHILD_RUNS_ON).is_some() {
+        std::io::copy(&mut std::io::stdin(), &mut std::io::sink()).unwrap();
+    }
+    // As a VMM that dies does: with its store and window still open.
+    std::process::exit(0);
+}
+
+/// Two VM processes, each of a store forked from one, mapping one extent of it at once map the
+/// same pages: the daemon's, which cache it once.
+#[test]
+fn two_processes_map_the_same_pages() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
+    let extent = {
+        let store = ExtentStore::create(&parent, 1 << 24).unwrap();
+        let extent = ExtentId { branch: store.branch().id, sequence: 1 };
+        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
+        store.commit(None).unwrap();
+        store.fork_to(&child, crate::host_store::fork_child(store.branch())).unwrap();
+        extent
+    };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let (_store, page) = map_first_page(&socket, &parent, extent);
+    let ours = mapped_from(page);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
+        .env(CHILD_SOCKET, &socket)
+        .env(CHILD_STORE, &child)
+        .env(CHILD_EXTENT, format!("{}:{}", extent.branch, extent.sequence))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    let theirs = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("MAPPED "))
+        .unwrap_or_else(|| panic!("the child mapped nothing: {stdout}"));
+    let (file, offset) = theirs.rsplit_once(' ').unwrap();
+    assert_eq!((file.to_string(), offset.parse::<u64>().unwrap()), ours);
+
+    // The child's store goes with it, for another VM process to open, once the daemon has seen it
+    // go.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match DaemonExtentStore::connect(&socket, &child, 1 << 24) {
+            Ok(_) => break,
+            Err(error) if std::time::Instant::now() < deadline => {
+                assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("the child's store is still open: {error:#}"),
+        }
+    }
+}
+/// The connection a VM process of [`vm_processes_tell_the_daemon_what_their_windows_cost`] is
+/// given: its descriptor's number.
+const CHILD_CONNECTION: &str = "CLADEFSD_TEST_CONNECTION";
+
+/// A VM process, for [`vm_processes_tell_the_daemon_what_their_windows_cost`]: changes its window
+/// six times, each a stage operation, a page made private the last, and closes its store; then
+/// prints what they cost it.
+#[test]
+#[ignore = "run by vm_processes_tell_the_daemon_what_their_windows_cost"]
+fn child_changes_its_window() {
+    let (Ok(connection), Ok(store)) = (std::env::var(CHILD_CONNECTION), std::env::var(CHILD_STORE))
+    else {
+        return;
+    };
+    let ps = page_size();
+    // SAFETY: The connection the parent left this process, which nothing else here owns.
+    let stream =
+        unsafe { <UnixStream as std::os::fd::FromRawFd>::from_raw_fd(connection.parse().unwrap()) };
+    let store =
+        DaemonExtentStore::over(stream, Path::new(&store), Opening::Create(1 << 24, Kind::Fxfs));
+    let store = store.unwrap();
+    let memory = memory(1);
+    // SAFETY: The memory is this function's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, ps, None, 1) }.unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(3, ps as usize)).unwrap();
+    store.commit(None).unwrap();
+    // The window maps the extent anew, with none of its pages in memory yet.
+    store.map(extent, 0, ps, 0).unwrap();
+    // A load faults its page in, which the window maps.
+    // SAFETY: The window's memory, whose faults the store serves.
+    assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, 1)[0]);
+    // Unmapped, which the daemon waits for.
+    store.unmap(0, ps).unwrap();
+    // Mapped anew, with its page in memory, which the window maps at once, and the VM process
+    // installs as a load first touches it (TASK-276.6).
+    store.map(extent, 0, ps, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves.
+    assert_eq!(unsafe { memory.as_ptr().read_volatile() }, pattern(3, 1)[0]);
+    // cladefs: made private, a run of a page, over the page installed (TASK-164.10).
+    store.make_private(0, ps).unwrap();
+    let [ops, ns, overwritten, left_out] = store.stage_counts().costs;
+    let [runs, pages, private_ns, requests, waited] = store.private_counts();
+    drop(store);
+    println!(
+        "STAGE {ops} {ns} {overwritten} {left_out} {runs} {pages} {private_ns} {requests} {waited}"
+    );
+}
+
+/// TASK-91.16: what its VM processes' changes to their windows cost them, which they make, the
+/// daemon counts as its own (`Stats::stage_ops`): as they tell it, all of it once they close
+/// their stores. A VM process is another process, whose own counters the daemon never sees.
+#[test]
+fn vm_processes_tell_the_daemon_what_their_windows_cost() {
+    use std::os::fd::AsRawFd;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    // The child's end, which it inherits.
+    // SAFETY: Clears the close-on-exec flag of a descriptor this test owns.
+    assert_eq!(unsafe { libc::fcntl(theirs.as_raw_fd(), libc::F_SETFD, 0) }, 0);
+    let before = crate::stats::stats();
+    let served = std::thread::spawn(move || serve_connection(ours, default_tenant().unwrap()));
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cladefsd::tests::child_changes_its_window", "--ignored", "--nocapture"])
+        .env(CHILD_CONNECTION, theirs.as_raw_fd().to_string())
+        .env(CHILD_STORE, dir.path().join("store"))
+        .output()
+        .unwrap();
+    drop(theirs);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+    let stage = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("STAGE "))
+        .unwrap_or_else(|| panic!("the child changed nothing: {stdout}"));
+    let said: Vec<u64> = stage.split(' ').map(|count| count.parse().unwrap()).collect();
+    let [ops, ns, overwritten, left_out, runs, pages, private_ns, requests, waited] = said[..]
+    else {
+        panic!("not nine counts: {stage}");
+    };
+    // cladefs: one PRIVATE, waited for longer than its stage operation took (TASK-164.10).
+    assert_eq!(requests, 1, "{stdout}");
+    assert!(waited > private_ns, "{stdout}");
+    assert_eq!(ops, 6, "{stdout}");
+    // cladefs: the unmap took access away, from the page the load faulted in (TASK-91.16); the
+    // private page from the page mapped anew.
+    assert_eq!((overwritten, left_out), (1, 1), "{stdout}");
+    assert_eq!((runs, pages), (1, 1), "{stdout}");
+    // Once the daemon is done with the connection, which the child closed.
+    served.join().unwrap();
+    let counted = crate::stats::stats().since(&before);
+    assert_eq!((counted.stage_ops, counted.stage_ns), (ops, ns));
+    let taken = (counted.stage_overwrites, counted.stage_leave_outs);
+    assert_eq!(taken, (overwritten, left_out));
+    // cladefs: and the runs of private pages, as the VM process told them (TASK-164.10).
+    let private = (counted.stage_private_runs, counted.stage_private_pages);
+    assert_eq!((private, counted.stage_private_ns), ((runs, pages), private_ns));
+    let waits = (counted.vm_private_requests, counted.vm_private_request_ns);
+    assert_eq!(waits, (requests, waited));
+    // cladefs: the daemon's maps of pages, one a page: the fault's, and the map's anew, of the page
+    // in memory by then (TASK-108.1).
+    let ps = page_size();
+    assert_eq!((counted.stage_maps, counted.stage_map_bytes), (2, 2 * ps));
+}
+
+/// What `work` returns, run on a thread of its own, unless it takes longer than `wait`: what a
+/// test that would otherwise hang for good waits for.
+fn within<T: Send + 'static>(
+    wait: std::time::Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        // Unheard if the test stopped waiting.
+        let _ = done.send(work());
+    });
+    finished.recv_timeout(wait)
+}
+
+/// A child process, killed and reaped once dropped, as a test that fails leaves it.
+struct Reaped(std::process::Child);
+
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Has this process's threads, those it makes and the processes it starts find the system call
+/// `call` failing with `errno` where its arguments are as `args` say, each the index of one and
+/// the low word it is: as a kernel without what the call asks for, or a daemon without the right
+/// to it, answers, for tests of the daemon on such hosts. For as long as the process lives, which
+/// nextest gives each test of its own.
+fn refuse_system_call(call: libc::c_long, args: &[(usize, u32)], errno: u16) {
+    use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, sock_filter};
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: u32 = 0xc000_00b7;
+    let load = |offset: usize| sock_filter {
+        code: (BPF_LD | BPF_W | BPF_ABS) as u16,
+        jt: 0,
+        jf: 0,
+        k: offset as u32,
+    };
+    // Each test, unless it holds, jumps to the last instruction, which allows the call.
+    let tests = 2 + args.len();
+    let mut program = Vec::new();
+    let test = |program: &mut Vec<sock_filter>, offset: usize, value: u32| {
+        program.push(load(offset));
+        let left = 2 * tests - program.len();
+        let skip = u8::try_from(left).expect("a short filter");
+        program.push(sock_filter {
+            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
+            jt: 0,
+            jf: skip,
+            k: value,
+        });
+    };
+    test(&mut program, std::mem::offset_of!(libc::seccomp_data, arch), ARCH);
+    test(&mut program, std::mem::offset_of!(libc::seccomp_data, nr), call as u32);
+    for (arg, value) in args {
+        // The argument's low word, which comes first, little-endian.
+        test(&mut program, std::mem::offset_of!(libc::seccomp_data, args) + 8 * arg, *value);
+    }
+    let ret = |k: u32| sock_filter { code: (BPF_RET | BPF_K) as u16, jt: 0, jf: 0, k };
+    program.push(ret(libc::SECCOMP_RET_ERRNO | u32::from(errno)));
+    program.push(ret(libc::SECCOMP_RET_ALLOW));
+    let filter = libc::sock_fprog { len: program.len() as u16, filter: program.as_mut_ptr() };
+    // SAFETY: Plain system calls: the filter, which they copy, outlives them.
+    unsafe {
+        assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        let set = libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_TSYNC,
+            &filter,
+        );
+        assert_eq!(set, 0, "{}", std::io::Error::last_os_error());
+    }
+}
+
+/// Stops `child` as SIGSTOP does, and waits until it has: the signal is sent before its threads
+/// stop, and one still running answers what its caller takes to go unanswered (TASK-134).
+fn freeze(child: &std::process::Child) {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: Signals the child this test made.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    let mut status = 0;
+    // SAFETY: Waits for that child to stop, writing `status`.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) }, pid);
+    assert!(libc::WIFSTOPPED(status), "wait status {status:#x}");
+}
+
+/// Whether the page of the daemon's physical memory at `offset` in the memory of `arena`, as a VM
+/// process maps it from its tenant's arena, is free.
+fn page_is_free(arena: crate::pages::ArenaId, offset: u64) -> bool {
+    let location = crate::pages::PhysLocation { arena, offset };
+    physmem::is_free(location).unwrap_or_else(|| panic!("no chunk of {arena:?} holds {offset:#x}"))
+}
+
+/// Whether the page of the daemon's physical memory at `offset` in the memory of `arena` is held:
+/// neither free, nor of memory that went back, every page of it free.
+fn page_is_held(arena: crate::pages::ArenaId, offset: u64) -> bool {
+    physmem::is_free(crate::pages::PhysLocation { arena, offset }) == Some(false)
+}
+
+/// TASK-79.9: a VM process that stops answering, frozen as SIGSTOP or a cgroup's freezer freezes
+/// it, holds nothing up: the daemon takes its access to the pages it maps away without waiting for
+/// it, as it evicts them, as the kernel's relief does, while another VM process's requests and
+/// faults on them are served; and once it has acknowledged nothing it was sent for a while, the
+/// daemon kills it, and lets its store go. The page it maps, evicted, is no other's until then: not
+/// free, but the quarantine's, until it has exited; free once it has.
+#[test]
+fn frozen_vm_processes_hold_nothing_up() {
+    frozen_vm_processes_are_killed();
+}
+
+/// TASK-79.9: as [`frozen_vm_processes_hold_nothing_up`], on a kernel without `SO_PEERPIDFD`
+/// (Linux 6.1 to 6.4), as the system call is refused here: the daemon kills the frozen VM process,
+/// which it knows by the process that connected, and keeps the page it maps until it has exited.
+#[test]
+fn frozen_vm_processes_are_killed_without_peer_pidfds() {
+    let (level, option) = (libc::SOL_SOCKET as u32, libc::SO_PEERPIDFD as u32);
+    refuse_system_call(libc::SYS_getsockopt, &[(1, level), (2, option)], libc::ENOPROTOOPT as u16);
+    frozen_vm_processes_are_killed();
+}
+
+/// A store of a tenant's, whose extent's page a VM process, a child, and this one map, and what
+/// the child printed.
+struct TwoVmProcesses {
+    dir: tempfile::TempDir,
+    tenant: std::sync::Arc<super::server::Tenant>,
+    socket: std::path::PathBuf,
+    extent: ExtentId,
+    ours: DaemonExtentStore,
+    page: usize,
+    theirs: Reaped,
+    stdout: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
+    /// Where the page they map is in the memory of the tenant's arena.
+    offset: u64,
+}
+
+/// [`TwoVmProcesses`], of a tenant, its child with `env` set too.
+fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
+    use std::io::BufRead as _;
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    // A tenant's VM processes, whose pages are of its arena alone.
+    let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
+    let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
+    let extent = {
+        // A vdisk of a cell of the tenant's (TASK-364).
+        let cell = crate::host_store::new_cell(tenant.id());
+        let store = ExtentStore::create_in(&parent, 1 << 24, cell).unwrap();
+        let extent = ExtentId { branch: store.branch().id, sequence: 1 };
+        store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
+        store.commit(None).unwrap();
+        store.fork_to(&child, crate::host_store::fork_child(store.branch())).unwrap();
+        extent
+    };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let serving = tenant.clone();
+    std::thread::spawn(move || super::server::serve_tenant(listener, serving));
+    let (ours, page) = map_first_page(&socket, &parent, extent);
+
+    let mut theirs = std::process::Command::new(std::env::current_exe().unwrap());
+    theirs
+        .args(["--exact", "cladefsd::tests::child_maps_an_extent", "--ignored", "--nocapture"])
+        .env(CHILD_SOCKET, &socket)
+        .env(CHILD_STORE, &child)
+        .env(CHILD_EXTENT, format!("{}:{}", extent.branch, extent.sequence))
+        .env(CHILD_RUNS_ON, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    for name in env {
+        theirs.env(name, "1");
+    }
+    let mut theirs = Reaped(theirs.spawn().unwrap());
+    let mut stdout = std::io::BufReader::new(theirs.0.stdout.take().unwrap()).lines();
+    let mapped = stdout.by_ref().map(Result::unwrap).find(|line| line.starts_with("MAPPED "));
+    let (file, offset) = mapped_from(page);
+    assert_eq!(mapped, Some(format!("MAPPED {file} {offset}")));
+    TwoVmProcesses { dir, tenant, socket, extent, ours, page, theirs, stdout, offset }
+}
+
+/// What [`frozen_vm_processes_hold_nothing_up`] shows.
+fn frozen_vm_processes_are_killed() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let ps = page_size() as usize;
+    let TwoVmProcesses { dir, tenant, socket, extent, ours, page, theirs, stdout, offset } =
+        two_vm_processes(&[]);
+    drop(stdout);
+    freeze(&theirs.0);
+
+    // The extent's page evicted: its mappings taken away, ours and the frozen child's.
+    let arena = tenant.arena();
+    let wait = std::time::Duration::from_secs(10);
+    let evicted = within(wait, || crate::cache::evict_least_used(None, |_| false));
+    assert_eq!(evicted, Ok(ps as u64), "the eviction waited for the frozen VM process");
+    assert!(!page_is_free(arena, offset), "the page the frozen VM process maps is free");
+    let ours = std::sync::Arc::new(ours);
+    let reading = ours.clone();
+    let served = within(wait, move || read(&reading, extent, 0, BLOCK));
+    assert_eq!(served, Ok(Ok(pattern(9, BLOCK))), "our read waited for the frozen VM process");
+    // SAFETY: The window's memory, whose faults our store serves.
+    let loaded =
+        within(wait, move || unsafe { std::slice::from_raw_parts(page as *const u8, ps) }.to_vec());
+    assert_eq!(loaded, Ok(pattern(9, ps)), "our fault waited for the frozen VM process");
+
+    // Killed, once it has acknowledged nothing for a while.
+    let killed = within(std::time::Duration::from_secs(30), move || {
+        let mut theirs = theirs;
+        theirs.0.wait().unwrap()
+    });
+    let status = killed.expect("the frozen VM process lives on");
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status}");
+    // Its store goes with it, for another VM process to open once the daemon lets it go, which
+    // the opening waits for (`CLOSING_WAIT`); and its page, free by then.
+    let child = dir.path().join("child");
+    let reopened = DaemonExtentStore::connect(&socket, &child, 1 << 24).map(|store| store.branch());
+    assert_eq!(reopened.map_err(|error| error.errno()), Ok(branch_at(&child).id));
+    assert!(
+        page_is_free(arena, offset),
+        "the page the frozen VM process mapped isn't free once it's gone"
+    );
+}
+
+/// TASK-79.100: a VM process that closes its connection and lives on maps what its window mapped
+/// still, as nothing took it away: the page, evicted, is no other's until it is gone, which the
+/// daemon sees to, killing it, and lets its store go once it has exited.
+#[test]
+fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
+    use std::os::unix::process::ExitStatusExt as _;
+    let ps = page_size() as usize;
+    let two = two_vm_processes(&[CHILD_CLOSES]);
+    let TwoVmProcesses { dir, tenant, socket, mut theirs, mut stdout, offset, .. } = two;
+    // Open as it runs on, for waiting for it not to close it.
+    let _running = theirs.0.stdin.take();
+    let closed = stdout.next().unwrap().unwrap();
+    assert_eq!(closed, "CLOSED");
+
+    let arena = tenant.arena();
+    let wait = std::time::Duration::from_secs(10);
+    let evicted = within(wait, || crate::cache::evict_least_used(None, |_| false));
+    assert_eq!(evicted, Ok(ps as u64), "the eviction waited for the VM process");
+    // As long as the daemon gives it to exit, the daemon having seen its connection go: well
+    // before that ends.
+    let since = std::time::Instant::now();
+    while since.elapsed() < std::time::Duration::from_secs(1) {
+        assert!(page_is_held(arena, offset), "the page the living VM process maps is free");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let killed = within(std::time::Duration::from_secs(30), move || {
+        let mut theirs = theirs;
+        theirs.0.wait().unwrap()
+    });
+    let status = killed.expect("the VM process lives on");
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{status}");
+    let reopened = connect_once_free(&socket, &dir.path().join("child"));
+    assert_eq!(reopened.branch(), branch_at(&dir.path().join("child")).id);
+    assert!(!page_is_held(arena, offset), "the page isn't free once the VM process is gone");
+}
+
+/// A VM process, for [`vm_processes_that_leave_their_sockets_to_children_are_gone`]: opens the store
+/// [`CHILD_STORE`] names through the daemon at [`CHILD_SOCKET`], forks a child, which holds the
+/// socket and runs on until killed, says its pid, and exits.
+#[test]
+#[ignore = "run by vm_processes_that_leave_their_sockets_to_children_are_gone"]
+fn child_leaves_its_socket_to_a_child() {
+    let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
+        return;
+    };
+    let _store = DaemonExtentStore::connect(socket, store, 1 << 24).unwrap();
+    // SAFETY: The child calls only what is safe in a child of a process with threads.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "{}", std::io::Error::last_os_error());
+    if child == 0 {
+        loop {
+            // SAFETY: Waits for a signal, as the test kills it.
+            unsafe { libc::pause() };
+        }
+    }
+    println!("CHILD {child}");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+    // SAFETY: As a VMM that dies does: with its store open.
+    unsafe { libc::_exit(0) };
+}
+
+/// A process this test has no child's handle of, killed once dropped.
+struct KilledOnDrop(libc::pid_t);
+
+impl Drop for KilledOnDrop {
+    fn drop(&mut self) {
+        // SAFETY: Signals the process this test's child left.
+        unsafe { libc::kill(self.0, libc::SIGKILL) };
+    }
+}
+
+/// TASK-79.101: a VM process that exits leaving its socket to a child of its own is gone, though
+/// the socket's other end lives on: its store is another's to open.
+#[test]
+fn vm_processes_that_leave_their_sockets_to_children_are_gone() {
+    use std::io::BufRead as _;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = dir.path().join("store");
+    let mut process = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cladefsd::tests::child_leaves_its_socket_to_a_child"])
+        .args(["--ignored", "--nocapture"])
+        .env(CHILD_SOCKET, &socket)
+        .env(CHILD_STORE, &store)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = std::io::BufReader::new(process.stdout.take().unwrap());
+    let child = stdout
+        .lines()
+        .map(Result::unwrap)
+        .find_map(|line| line.strip_prefix("CHILD ").map(|pid| KilledOnDrop(pid.parse().unwrap())));
+    let _child = child.expect("the VM process left no child");
+    assert!(process.wait().unwrap().success());
+    drop(connect_once_free(&socket, &store));
+}
+
+/// A VM process, for [`vm_processes_the_daemon_may_not_kill_are_refused`]: opens the store
+/// [`CHILD_STORE`] names through the daemon at [`CHILD_SOCKET`], and says whether it did.
+#[test]
+#[ignore = "run by vm_processes_the_daemon_may_not_kill_are_refused"]
+fn child_opens_a_store() {
+    let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
+        return;
+    };
+    match DaemonExtentStore::connect(socket, store, 1 << 24) {
+        Ok(_) => println!("OPENED"),
+        Err(error) => println!("REFUSED {:?}", error.errno()),
+    }
+}
+
+/// TASK-79.9: a VM process the daemon may not kill, as it may not signal it (`EPERM`, as a daemon
+/// of another user without `CAP_KILL` may not, which the system call refused here stands for), it
+/// refuses as it connects: one that stopped answering it could not let go of, and the pages it may
+/// reach, freed, would wait for it for good.
+#[test]
+fn vm_processes_the_daemon_may_not_kill_are_refused() {
+    refuse_system_call(libc::SYS_pidfd_send_signal, &[], libc::EPERM as u16);
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cladefsd::tests::child_opens_a_store", "--ignored", "--nocapture"])
+        .env(CHILD_SOCKET, &socket)
+        .env(CHILD_STORE, dir.path().join("store"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let said =
+        stdout.lines().find(|line| line.starts_with("OPENED") || line.starts_with("REFUSED"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(said, Some("REFUSED Some(Errno(EIO))"), "{stdout}{stderr}");
+}
+
+/// A store the daemon serves forks to a new branch the daemon serves too, whose window maps the
+/// pages the parent's maps: the daemon's counters count the maps, the faults and the reads. The
+/// extent is paged in once, for both windows and the fork's READ, which reads nothing from the
+/// store (TASK-32).
+#[test]
+fn the_daemon_forks_stores_it_serves() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let before = crate::stats::stats();
+    let store = DaemonExtentStore::connect(&socket, &parent, 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(9, ps)).unwrap();
+    store.commit(None).unwrap();
+    let branch = store.fork(&child).unwrap();
+    // A fork to a path that is there already fails, as making a store there does (TASK-79.83).
+    assert_eq!(store.fork(&child), Err(Errno::EEXIST));
+    drop(store);
+    let (ours, page) = map_first_page(&socket, &parent, extent);
+    let ours_from = mapped_from(page);
+    drop(ours);
+
+    let (theirs, page) = map_first_page(&socket, &child, extent);
+    assert_eq!(theirs.branch(), branch);
+    assert_eq!(mapped_from(page), ours_from);
+    assert_eq!(read(&theirs, extent, 0, ps).unwrap(), pattern(9, ps));
+    let counted = crate::stats::stats().since(&before);
+    assert_eq!((counted.maps, counted.reads, counted.read_bytes), (2, 1, ps as u64));
+    assert_eq!((counted.read_stored_bytes, counted.page_ins), (0, 1));
+}
+
+/// TASK-39.1: a VM's store forks, for a snapshot, only once nothing is open; the VMs restored from
+/// the snapshot each open a fork of their own of that point, holding what it held, whose windows
+/// map what the snapshot's recorded, mapped again; and a point a connection has open is busy.
+#[test]
+fn snapshots_restore_into_forks_of_their_point() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let ours = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(ours, 4 * ps as u64, None, 1) }.unwrap();
+    let (sealed, open) = (
+        ExtentId { branch: store.branch(), sequence: 1 },
+        ExtentId { branch: store.branch(), sequence: 2 },
+    );
+    write(&store, sealed, 0, &pattern(1, ps)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    store.map(sealed, 0, ps as u64, 0).unwrap();
+    let zeros = crate::WindowMapping {
+        window_offset: 2 * ps as u64,
+        len: ps as u64,
+        contents: crate::MappingContents::Zeros,
+    };
+    store.map_many(&[zeros]).unwrap();
+    write(&store, open, 0, &pattern(2, ps)).unwrap();
+    let point = dir.path().join("point");
+    assert_eq!(store.fork_quiescent(&point), Err(Errno::EBUSY));
+    store.commit(None).unwrap();
+    store.map(open, 0, ps as u64, 3 * ps as u64).unwrap();
+    store.fork_quiescent(&point).unwrap();
+    let mappings = store.window_mappings().unwrap();
+    let extent = |extent, offset| crate::MappingContents::Extent { extent, offset };
+    assert_eq!(
+        mappings,
+        [
+            crate::WindowMapping { window_offset: 0, len: ps as u64, contents: extent(sealed, 0) },
+            zeros,
+            crate::WindowMapping {
+                window_offset: 3 * ps as u64,
+                len: ps as u64,
+                contents: extent(open, 0),
+            },
+        ]
+    );
+    // SAFETY: As above.
+    let window =
+        |memory: NonNull<u8>| unsafe { std::slice::from_raw_parts(memory.as_ptr(), 4 * ps) };
+    let snapshotted = [0, 2, 3].map(|page| window(ours)[page * ps..][..ps].to_vec());
+
+    let restored: Vec<DaemonExtentStore> = ["a", "b"]
+        .into_iter()
+        .map(|name| {
+            let restored =
+                DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &point, 0, 0)
+                    .unwrap();
+            assert_eq!(restored.root().unwrap(), b"root");
+            let memory = memory(4);
+            // SAFETY: As above.
+            unsafe { restored.create_dax_window_in_host_memory(memory, 4 * ps as u64, None, 1) }
+                .unwrap();
+            restored.map_many(&mappings).unwrap();
+            assert_eq!(restored.window_mappings().unwrap(), mappings);
+            for (page, bytes) in [0, 2, 3].into_iter().zip(&snapshotted) {
+                assert!(window(memory)[page * ps..][..ps] == bytes[..], "page {page} differs");
+            }
+            restored
+        })
+        .collect();
+    let branches: Vec<u64> = restored.iter().map(DaemonExtentStore::branch).collect();
+    assert!(!branches.contains(&store.branch()) && branches[0] != branches[1], "{branches:x?}");
+    // Each writes on its own.
+    let theirs = ExtentId { branch: branches[0], sequence: 1 };
+    write(&restored[0], theirs, 0, &pattern(3, BLOCK)).unwrap();
+    restored[0].commit(None).unwrap();
+    assert!(read(&restored[1], theirs, 0, BLOCK).is_err());
+    assert_eq!(read(&restored[1], open, 0, BLOCK), Ok(pattern(2, BLOCK)));
+
+    // TASK-158: no connection opens a point to write it, and it restores on. (Till then, one
+    // could, and a restore then was busy.)
+    let opened = DaemonExtentStore::connect(&socket, &point, 1 << 24);
+    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EROFS));
+    let forked = DaemonExtentStore::connect_forked(&socket, dir.path().join("c"), &point, 0, 0);
+    let root = forked.map(|store| store.root()).map_err(|error| error.errno());
+    assert_eq!(root, Ok(Ok(b"root".to_vec())));
+}
+
+/// TASK-92.14: a restored VM's window maps its snapshot's mappings again in one request, one
+/// change of the window, where a MAP each took a round trip and a change apiece: `PAGES` mappings,
+/// each a page of an extent of its own, and runs of zeros between, as a zygote's chunks have them.
+/// Restored both ways, each window reads what the snapshot's did; the MAPs' restore and the
+/// `MAP_MANY`'s are timed, for the task's notes.
+#[test]
+fn snapshots_map_their_windows_again_in_one_request() {
+    const PAGES: usize = 1024;
+    host();
+    let ps = page_size() as usize;
+    let window_pages = 2 * PAGES;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 26).unwrap();
+    let memory = memory(window_pages);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1) }
+        .unwrap();
+    let extent = |page: usize| ExtentId { branch: store.branch(), sequence: 1 + page as u64 };
+    for page in 0..PAGES {
+        write(&store, extent(page), 0, &pattern(page as u8, ps)).unwrap();
+    }
+    store.commit(None).unwrap();
+    // Each extent's page at an even page of the window, last first; zeros at every fourth odd one.
+    let mut mapped = Vec::new();
+    for page in (0..PAGES).rev() {
+        let at = (2 * page * ps) as u64;
+        mapped.push(crate::WindowMapping {
+            window_offset: at,
+            len: ps as u64,
+            contents: crate::MappingContents::Extent { extent: extent(page), offset: 0 },
+        });
+        if page % 4 == 0 {
+            let zeros = crate::MappingContents::Zeros;
+            mapped.push(crate::WindowMapping {
+                window_offset: at + ps as u64,
+                len: ps as u64,
+                contents: zeros,
+            });
+        }
+    }
+    store.map_many(&mapped).unwrap();
+    let point = dir.path().join("point");
+    store.fork_quiescent(&point).unwrap();
+    let mappings = store.window_mappings().unwrap();
+    assert_eq!(mappings.len(), PAGES + PAGES / 4);
+    // The bytes the window's mappings map, in order: the pages between them map nothing, which
+    // the window refuses an access to.
+    let window = |memory: NonNull<u8>| -> Vec<u8> {
+        (mappings.iter())
+            .flat_map(|mapping| {
+                let (at, len) = (mapping.window_offset as usize, mapping.len as usize);
+                // SAFETY: As above.
+                unsafe { std::slice::from_raw_parts(memory.as_ptr().add(at), len) }.to_vec()
+            })
+            .collect()
+    };
+    let snapshotted = window(memory);
+    assert_eq!(&snapshotted[..ps], &pattern(0, ps)[..]);
+    assert_eq!(&snapshotted[ps..2 * ps], &vec![0; ps][..]);
+    assert_eq!(&snapshotted[2 * ps..3 * ps], &pattern(1, ps)[..]);
+
+    let restore = |name: &str, each: bool| {
+        let restored =
+            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &point, 0, 0)
+                .unwrap();
+        let memory = super::tests::memory(window_pages);
+        // SAFETY: As above.
+        unsafe {
+            restored.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1)
+        }
+        .unwrap();
+        let (maps, map_manys) = (served("map"), served("map_many"));
+        let [ops, ops_ns, ..] = restored.stage_counts().costs;
+        let start = std::time::Instant::now();
+        if each {
+            // As restores did before: a MAP each.
+            for &crate::WindowMapping { window_offset, len, contents } in &mappings {
+                match contents {
+                    crate::MappingContents::Extent { extent, offset } => {
+                        restored.map(extent, offset, len, window_offset).unwrap();
+                    }
+                    crate::MappingContents::Zeros => {
+                        let zeros = restored.map_zeros_async(window_offset, len);
+                        futures::executor::block_on(zeros).unwrap();
+                    }
+                }
+            }
+        } else {
+            restored.map_many(&mappings).unwrap();
+        }
+        let took = start.elapsed();
+        assert_eq!(restored.window_mappings().unwrap(), mappings);
+        assert!(window(memory) == snapshotted, "{name}: the restored window differs");
+        let [ops_then, ops_ns_then, ..] = restored.stage_counts().costs;
+        let counted = (served("map") - maps, served("map_many") - map_manys, ops_then - ops);
+        eprintln!(
+            "{name}: {} mappings in {took:?}, {counted:?} (MAPs, MAP_MANYs, stage operations), \
+             the VM process's stage operations {:?} of it",
+            mappings.len(),
+            std::time::Duration::from_nanos(ops_ns_then - ops_ns),
+        );
+        (restored, counted)
+    };
+    let (_each, each) = restore("each", true);
+    let (_at_once, at_once) = restore("at-once", false);
+    assert_eq!((each.0, each.1), (mappings.len() as u64, 0));
+    assert_eq!((at_once.0, at_once.1), (0, 1));
+    // The ranges mapped anew told the VM process in runs, not one each, and the pages' maps
+    // in runs across mappings, where their pages follow one another.
+    assert!(at_once.2 < each.2, "{at_once:?} against {each:?}");
+}
+
+/// TASK-92.14: a VM whose guest stored to its window, its pages private, is snapshotted once its
+/// freeze has written them back and rebound them (backlog doc-13): refused before, as no extent
+/// holds their bytes; and restored, its window reads what the guest stored, mapped again in one
+/// request.
+#[test]
+fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
+    const PAGES: usize = 8;
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let memory = memory(PAGES);
+    let size = (PAGES * ps) as u64;
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, size, None, PAGES as u64) }.unwrap();
+    assert!(store.copies_on_write());
+    crate::guest_thread_started();
+    let extent = |sequence: u64| ExtentId { branch: store.branch(), sequence };
+    let file = extent(1);
+    write(&store, file, 0, &pattern(1, PAGES * ps)).unwrap();
+    store.commit(None).unwrap();
+    store.map(file, 0, size, 0).unwrap();
+    // The guest's stores, to every other page, and its file's page past them zeros.
+    let stored = |page: usize| pattern(0x80 | page as u8, ps);
+    for page in (0..PAGES).step_by(2) {
+        // SAFETY: The window's page, which the store makes private.
+        unsafe {
+            std::ptr::copy_nonoverlapping(stored(page).as_ptr(), memory.as_ptr().add(page * ps), ps)
+        };
+    }
+    // SAFETY: As above.
+    let window = || unsafe { std::slice::from_raw_parts(memory.as_ptr(), PAGES * ps).to_vec() };
+    let expected: Vec<u8> = (0..PAGES)
+        .flat_map(|page| match page % 2 {
+            0 => stored(page),
+            _ => pattern(1, PAGES * ps)[page * ps..][..ps].to_vec(),
+        })
+        .collect();
+    assert!(window() == expected, "the stores didn't reach the window");
+    let point = dir.path().join("point");
+    assert_eq!(store.fork_quiescent(&point), Err(Errno::EBUSY));
+
+    // The freeze: each page stored to written back, to an extent of its own, sealed, and mapped
+    // over the private page, which goes.
+    let mut rebound = Vec::new();
+    for page in (0..PAGES).step_by(2) {
+        let written = extent(2 + page as u64);
+        let bytes = window()[page * ps..][..ps].to_vec();
+        write(&store, written, 0, &bytes).unwrap();
+        rebound.push(crate::WindowMapping {
+            window_offset: (page * ps) as u64,
+            len: ps as u64,
+            contents: crate::MappingContents::Extent { extent: written, offset: 0 },
+        });
+    }
+    store.commit(None).unwrap();
+    store.map_many(&rebound).unwrap();
+    assert!(window() == expected, "rebinding changed the window");
+    store.fork_quiescent(&point).unwrap();
+    let mappings = store.window_mappings().unwrap();
+    assert_eq!(mappings.len(), PAGES);
+
+    let restored =
+        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), &point, 0, 0)
+            .unwrap();
+    let restored_memory = super::tests::memory(PAGES);
+    // SAFETY: As above.
+    unsafe { restored.create_dax_window_in_host_memory(restored_memory, size, None, PAGES as u64) }
+        .unwrap();
+    let map_manys = served("map_many");
+    restored.map_many(&mappings).unwrap();
+    assert_eq!(served("map_many") - map_manys, 1);
+    // SAFETY: As above.
+    let restored_window =
+        unsafe { std::slice::from_raw_parts(restored_memory.as_ptr(), PAGES * ps).to_vec() };
+    assert!(restored_window == expected, "the restored window lost the guest's stores");
+}
+
+/// TASK-39.1: a VM restored on another host than its snapshot's, whose point it doesn't have, forks
+/// its store from the point's branch, taken from the daemon's bucket into a store there. cladefs:
+/// which its VM manager makes first, as the snapshot names the point's branch by its ID alone
+/// (TASK-364).
+#[test]
+fn snapshot_points_are_taken_from_the_bucket() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let point_branch = store.fork_quiescent(&dir.path().join("point")).unwrap();
+    drop(store);
+
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let (moved, point) = (elsewhere.join("store"), elsewhere.join("point"));
+    // TASK-364: a snapshot names its point's branch by its ID alone, which locates no branch: the
+    // restore is refused until the VM manager makes the point's store there, of the branch its
+    // tenant, cell and ID name, which is taken from the bucket.
+    let refused = DaemonExtentStore::connect_forked(&socket, &moved, &point, point_branch, 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
+    let made = (None, Kind::Fxfs);
+    let taken = branch_at(&dir.path().join("point"));
+    control(super::stores::create(point.clone(), 1 << 24, taken, made)).unwrap();
+    let restored =
+        DaemonExtentStore::connect_forked(&socket, &moved, &point, point_branch, 1 << 24).unwrap();
+    assert_eq!(restored.root().unwrap(), b"root");
+    assert_eq!(read(&restored, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
+    assert_ne!(restored.branch(), point_branch);
+    assert!(point.exists(), "the point taken is a store here");
+}
+
+/// TASK-39.1: a store whose VM process just went opens at once for another, as a VM restored from
+/// a snapshot of it does: its connection lets it go once its commits are durable.
+#[test]
+fn stores_open_once_their_vm_process_goes() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    for round in 0..20 {
+        let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+        let extent = ExtentId { branch: store.branch(), sequence: round + 1 };
+        write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
+        store.commit_ordered(None).unwrap();
+        drop(store);
+    }
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!(store.info().unwrap().next_sequence, 21);
+}
+
+/// TASK-39.2: a daemon with roots refuses to open, create or fork stores outside them.
+#[test]
+fn daemons_with_roots_serve_no_stores_outside_them() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
+    std::fs::create_dir(&ours).unwrap();
+    std::fs::create_dir(&theirs).unwrap();
+    // SAFETY: as in host.
+    unsafe { std::env::set_var("CLADEFSD_ROOTS", &ours) };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let refused = DaemonExtentStore::connect(&socket, theirs.join("store"), 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
+    let store = DaemonExtentStore::connect(&socket, ours.join("store"), 1 << 24).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(store.fork(&theirs.join("fork")), Err(Errno::EACCES));
+    store.fork(&ours.join("fork")).unwrap();
+}
+
+/// TASK-39.3: a store a VM process has open forks live through the daemon, from a connection of
+/// its own: refused while an extent is open, as unless its guest's filesystem is frozen; once
+/// committed, the fork holds the store as of then, and the store goes on as it was.
+#[test]
+fn stores_fork_live_once_nothing_is_open() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = |sequence| ExtentId { branch: store.branch(), sequence };
+    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(Some(b"before")).unwrap();
+    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+
+    let busy = fork_store(&path, &fork);
+    assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    store.commit(Some(b"at the fork")).unwrap();
+    let branch = fork_store(&path, &fork).unwrap();
+    // The store goes on, its writes its own.
+    write(&store, extent(3), 0, &pattern(3, BLOCK)).unwrap();
+    store.commit(Some(b"after")).unwrap();
+    assert_eq!(read(&store, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
+
+    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    assert_eq!(forked.branch(), branch.id);
+    assert_eq!(forked.root().unwrap(), b"at the fork");
+    assert_eq!(read(&forked, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
+    assert!(read(&forked, extent(3), 0, BLOCK).is_err());
+}
+
+/// TASK-39.4: a store is deleted through the daemon while its fork is open, though not while its
+/// own VM process has it open: its directory goes, while the fork reads what it inherited and
+/// writes as before, until it is deleted too. Before TASK-165.7, the store's directory stayed,
+/// holding what the fork shared of it.
+#[test]
+fn stores_are_deleted_while_their_forks_are_open() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let base = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, base, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(Some(b"base")).unwrap();
+    fork_store(&path, &fork).unwrap();
+    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+
+    let busy = delete_store(&path);
+    assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    drop(store);
+    delete_store(&path).unwrap();
+    assert!(!path.exists(), "the store's directory stayed");
+    assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    let own = ExtentId { branch: forked.branch(), sequence: 1 };
+    write(&forked, own, 0, &pattern(2, BLOCK)).unwrap();
+    forked.commit(Some(b"fork")).unwrap();
+
+    let busy = delete_store(&fork);
+    assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    drop(forked);
+    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    assert_eq!(forked.root().unwrap(), b"fork");
+    assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    drop(forked);
+    delete_store(&fork).unwrap();
+    assert!(!fork.exists());
+    let missing = delete_store(&fork);
+    assert_eq!(missing.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
+}
+
+/// TASK-364: a store a connection makes is the one vdisk of a new cell, named as its directory
+/// is: an Fxfs one, or, made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite
+/// one, which a host's FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory
+/// (TASK-456.2). The cell's object, under its tenant's prefix in the bucket, says so; and the
+/// store's branch's head was taken with the cell's epoch.
+#[test]
+fn stores_made_are_vdisks_of_their_cells_of_their_kinds() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (disk, db) = (dir.path().join("disk"), dir.path().join("db.sqlite"));
+    let fxfs = DaemonExtentStore::connect(&socket, &disk, 1 << 24).unwrap();
+    let daemon = crate::DaemonConnection::connect(&socket).unwrap();
+    let sqlite = daemon.open_sqlite(&db, 1 << 24).unwrap();
+    let memory = dir.path().join("memory");
+    let memory_store = crate::DaemonConnection::connect(&socket).unwrap();
+    let memory_store = memory_store.open_memory(&memory, 1 << 24).unwrap();
+    let (disk_branch, db_branch) = (branch_at(&disk), branch_at(&db));
+    let memory_branch = branch_at(&memory);
+    assert_eq!((fxfs.branch(), sqlite.branch()), (disk_branch.id, db_branch.id));
+    assert_eq!(memory_store.branch(), memory_branch.id);
+    assert_ne!(disk_branch.cell, db_branch.cell, "each made alone, in a cell of its own");
+    let bucket = super::stores::daemon_bucket().unwrap();
+    futures::executor::block_on(async {
+        for (branch, name, kind) in [
+            (disk_branch, "disk", Kind::Fxfs),
+            (db_branch, "db.sqlite", Kind::Sqlite),
+            (memory_branch, "memory", Kind::Memory),
+        ] {
+            let cell = extent_bucket::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
+            let vdisk = extent_bucket::cell::Vdisk { branch: branch.id, kind };
+            let vdisks = std::collections::BTreeMap::from([(name.to_owned(), vdisk)]);
+            assert_eq!((cell.vdisks, cell.deleted), (vdisks, false), "{name}");
+            let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
+        }
+    });
+}
+
+/// TASK-456.2: a memory vdisk's pages and holes, committed at once, read back once it is opened
+/// again; a fork of it reads its pages and stores only those it writes, each page of the parent
+/// it leaves as it was, and its holes nothing.
+#[test]
+fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
+    use crate::memory_vdisk::MemoryVdisk;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    const PAGES: u64 = 256;
+    let path = dir.path().join("memory");
+    let memory = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
+    let page = memory.page_size();
+    assert_eq!(page, 4096);
+    let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
+    memory.write(0, &filled(1, PAGES)).unwrap();
+    memory.punch(100 * page, 20 * page).unwrap();
+    memory.commit().unwrap();
+    let parent_extents = memory.extents().unwrap();
+    let fork = dir.path().join("fork");
+    let forked = memory.fork(&fork).unwrap();
+    memory.close().unwrap();
+
+    let mut expected = filled(1, PAGES);
+    expected[(100 * page) as usize..(120 * page) as usize].fill(0);
+    let reopened = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
+    let mut image = filled(0xee, PAGES);
+    reopened.read(0, &mut image).unwrap();
+    assert!(image == expected, "the image committed");
+    reopened.close().unwrap();
+
+    let child = MemoryVdisk::open(&socket, &fork, PAGES * 4096).unwrap();
+    assert_eq!(child.branch(), forked);
+    let mut image = filled(0xee, PAGES);
+    child.read(0, &mut image).unwrap();
+    assert!(image == expected, "the fork reads its parent's pages");
+    child.write(3 * page, &filled(2, 4)).unwrap();
+    child.punch(10 * page, page).unwrap();
+    child.commit().unwrap();
+    expected[(3 * page) as usize..(7 * page) as usize].fill(2);
+    expected[(10 * page) as usize..(11 * page) as usize].fill(0);
+    child.read(0, &mut image).unwrap();
+    assert!(image == expected, "the fork's image");
+    // Its own extents: the pages it wrote, with the nodes naming them, a few blocks, one
+    // extent; the rest are the parent's.
+    let own: Vec<_> =
+        (child.extents().unwrap().into_iter()).filter(|extent| extent.branch == forked).collect();
+    assert_eq!(own.len(), 1, "the fork's own extents: {own:?}");
+    let inherited = child.extents().unwrap().into_iter().filter(|extent| extent.branch != forked);
+    assert!(inherited.into_iter().all(|extent| parent_extents.contains(&extent)));
+    child.close().unwrap();
+}
+
+/// TASK-39.4: with a bucket, deleting a store through the daemon deletes its branch there too,
+/// and the collector keeps what its fork needs of it.
+#[test]
+fn deleted_stores_branches_keep_what_their_forks_need() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let base_branch = store.branch();
+    let base = ExtentId { branch: base_branch, sequence: 1 };
+    write(&store, base, 0, &pattern(3, 2 * BLOCK)).unwrap();
+    store.commit(Some(b"base")).unwrap();
+    let fork_branch = fork_store(&path, &fork).unwrap();
+    let base_branch = branch_at(&path);
+    drop(store);
+    delete_store(&path).unwrap();
+
+    let bucket = super::stores::daemon_bucket().unwrap();
+    futures::executor::block_on(async {
+        use extent_bucket::branch;
+        let deleted = branch::record(&*bucket, base_branch).await.unwrap().unwrap();
+        assert!(deleted.deleted);
+        let record = branch::record(&*bucket, fork_branch).await.unwrap().unwrap();
+        assert!(!record.deleted);
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        extent_bucket::collector::collect(&*bucket, 1, &options).await.unwrap();
+        let state = extent_bucket::recover(&*bucket, fork_branch, record.origin()).await.unwrap();
+        let data =
+            extent_bucket::testing::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
+        assert_eq!(data, pattern(3, 2 * BLOCK));
+    });
+    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    assert_eq!(forked.root().unwrap(), b"base");
+    assert_eq!(read(&forked, base, 0, 2 * BLOCK), Ok(pattern(3, 2 * BLOCK)));
+}
+
+/// TASK-39.7: a store's copy placed at an earlier placement than the one that last took its branch
+/// does not open (`ESTALE`): a placement cut off takes no branch back from the one after it.
+#[test]
+fn earlier_placements_open_no_stores() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
+    let branch = ExtentStore::create(&path, 1 << 24).unwrap().branch();
+    ExtentStore::place(&path, 5).unwrap();
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    write(&store, ExtentId { branch: branch.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(Some(b"placed at 5")).unwrap();
+    drop(store);
+
+    // A copy of the branch's made here, not opened, which would take its head: placed before.
+    std::fs::create_dir(&earlier).unwrap();
+    let description =
+        extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
+    let vdisk = extent_store::Vdisk { name: "earlier".into(), kind: Kind::Fxfs };
+    extent_store::create_host(&earlier, description, "memory:///branches", vdisk).unwrap();
+    extent_store::made_host(&earlier).unwrap();
+    ExtentStore::place(&earlier, 3).unwrap();
+    let refused = DaemonExtentStore::connect(&socket, &earlier, 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::ESTALE));
+    ExtentStore::place(&earlier, 6).unwrap();
+    let later = DaemonExtentStore::connect(&socket, &earlier, 1 << 24).unwrap();
+    assert_eq!(later.root().unwrap(), b"placed at 5");
+}
+
+/// TASK-266: a store the control API makes of a branch, at a placement (`CreateStore`, as
+/// `cladefsctl take` through the daemon's), takes the branch's cell, and so its head, with that
+/// placement's token as it is made, not the daemon's: a copy placed later than the one that took
+/// the branch last, on another host, takes it over, in a file bucket as in any.
+#[test]
+fn control_takes_branches_at_the_placements_given() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
+    // SAFETY: as in host.
+    unsafe { std::env::set_var("CLADEFSD_BUCKET", &url) };
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = |name: &str| dir.path().join(name);
+    // Host 1's copy, of a new branch the bucket names, placed at 5, its commit synced.
+    let new = crate::Branch { cell: crate::Cell { tenant: 0, id: 0 }, id: 0 };
+    let made = super::stores::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs));
+    let branch = control(made).unwrap();
+    let extent = ExtentId { branch: branch.id, sequence: 1 };
+    let first = DaemonExtentStore::connect(&socket, path("first"), 1 << 24).unwrap();
+    write(&first, extent, 0, &pattern(7, BLOCK)).unwrap();
+    first.commit(Some(b"placed at 5")).unwrap();
+    drop(first);
+    assert_eq!(control(super::stores::sync(path("first"))), Ok(()));
+    // A copy beside the daemon, as cladefsctl's without it, placed at 6.
+    ExtentStore::take(path("second"), 1 << 24, branch, Some(6)).unwrap();
+    // One through the daemon, placed at 7.
+    let taken = super::stores::create(path("third"), 1 << 24, branch, (Some(7), Kind::Fxfs));
+    assert_eq!(control(taken), Ok(branch));
+    let third = DaemonExtentStore::connect(&socket, path("third"), 1 << 24).unwrap();
+    assert_eq!(third.root().unwrap(), b"placed at 5");
+    assert_eq!(read(&third, extent, 0, BLOCK), Ok(pattern(7, BLOCK)));
+}
+
+/// TASK-39.7: the daemon returns once a store's commits so far are in its bucket: a store a VM
+/// process has open, and one none has.
+#[test]
+fn the_daemon_waits_for_uploads() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
+    store.commit_ordered(Some(b"ordered")).unwrap();
+    wait_uploaded(&path).unwrap();
+    let bucket = super::stores::daemon_bucket().unwrap();
+    let uploaded = || {
+        futures::executor::block_on(extent_bucket::recover(&*bucket, branch_at(&path), None))
+            .unwrap()
+            .state
+            .root
+    };
+    assert_eq!(uploaded(), Some(b"ordered".to_vec()));
+    store.commit_ordered(Some(b"closed")).unwrap();
+    drop(store);
+    wait_uploaded(&path).unwrap();
+    assert_eq!(uploaded(), Some(b"closed".to_vec()));
+}
+
+/// The extents `what_guests_free_the_collector_compacts` writes: 16 of them a store's capacity.
+const EXTENT: usize = 64 * BLOCK;
+
+/// Writes `store`'s extents `sequences`, of `EXTENT` bytes each, their own data, which does not
+/// compress: what of it no extent is in takes as much of the host's disk as it is (TASK-79.2).
+fn write_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<u64>) {
+    for sequence in sequences {
+        let extent = ExtentId { branch: store.branch(), sequence };
+        write(store, extent, 0, &crate::test_data::noise(sequence, EXTENT)).unwrap();
+    }
+}
+
+/// Frees `store`'s extents `sequences`.
+fn free_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<u64>) {
+    for sequence in sequences {
+        store.free(ExtentId { branch: store.branch(), sequence }).unwrap();
+    }
+}
+
+/// Waits for the uploader of the store at `path`, which a connection has open, to have uploaded
+/// its latest commit as its interval ran out, and let go of what the commits up to it freed: as
+/// the daemon's control API says (`StatStore`), which makes nothing durable, as waiting for the
+/// uploads would (`SyncStore`).
+fn wait_for_uploader(path: &Path) {
+    control(async {
+        loop {
+            let state = super::stores::stat(path.to_owned()).await.unwrap();
+            if state.upload.unwrap().uploaded == state.committed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+}
+
+/// TASK-165.8: what a guest frees of what it committed leaves the host's disk with the segments
+/// its uploader has acknowledged in the bucket, whose collector compacts it there: the daemon
+/// collects no store behind its guest's commits, as it did (TASK-79.2). The store keeps what the
+/// guest frees for its uploader until the uploader has uploaded the commit that freed it, and it
+/// takes none of the guest's room. Once the store closes, its uploader checkpointing its branch,
+/// the collector deletes the segments no live extent is in, and compacts those the guest's live
+/// extents hold little of; the guest,
+/// connected again, reads them as written, where they moved, and writes on.
+#[test]
+fn what_guests_free_the_collector_compacts() {
+    let extent_bytes = EXTENT as u64;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 16 * extent_bytes);
+    let branch = store.branch();
+    // A segment of the capacity's worth, freed but its first extent; another of all but one of
+    // what that left room for, freed but its first too, the last frees ordered.
+    write_extents(&store, 1..=16);
+    store.commit(None).unwrap();
+    free_extents(&store, 2..=16);
+    write_extents(&store, 17..=31);
+    store.commit(None).unwrap();
+    free_extents(&store, 18..=31);
+    store.commit_ordered(None).unwrap();
+    // 29 extents' worth no extent holds: the guest's room is what its two extents leave.
+    wait_for_uploader(&path);
+    let segments = path.join("segments").join(base32_id::Padded(branch).to_string());
+    assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
+    assert_eq!(store.info().unwrap().available, 14 * extent_bytes);
+    drop(store);
+    served.join().unwrap();
+
+    let bucket = super::stores::daemon_bucket().unwrap();
+    let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+    let collected = extent_bucket::collector::collect(&*bucket, 1, &options);
+    let report = futures::executor::block_on(collected).unwrap();
+    // The writer's fence, which no extent is in, is kept (TASK-371).
+    let counted =
+        extent_bucket::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
+    assert_eq!(report, counted);
+    let (store, served) = connect(&path, 16 * extent_bytes);
+    for sequence in [1, 17] {
+        let extent = ExtentId { branch, sequence };
+        assert_eq!(read(&store, extent, 0, EXTENT), Ok(crate::test_data::noise(sequence, EXTENT)));
+    }
+    write(&store, ExtentId { branch, sequence: 32 }, 0, &pattern(32, 2 * EXTENT)).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(store.info().unwrap().available, 12 * extent_bytes);
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-45: the daemon keeps every store's branch in its bucket, and opens none without one.
+#[test]
+fn stores_open_only_with_a_bucket() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let refused = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EIO));
+}
+
+/// cladefs: a tenant's arena, and the extents cached in it, go with the tenant, once its grant and
+/// its VM processes have (TASK-43.4).
+#[test]
+fn tenants_arenas_go_with_them() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = super::Tenant::new(1, dir.path()).unwrap();
+    let arena = tenant.arena();
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || serve_connection(server, tenant));
+    let store = DaemonExtentStore::over(
+        client,
+        &dir.path().join("store"),
+        Opening::Create(1 << 24, Kind::Fxfs),
+    )
+    .unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    store.write(extent, 0, &[VolatileSlice::from(&pattern(4, ps)[..])]).unwrap();
+    store.commit(None).unwrap();
+    let memory = memory(1);
+    // SAFETY: The memory is this test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    store.map(extent, 0, ps as u64, 0).unwrap();
+    // SAFETY: The window's memory, whose faults the store serves: the extent cached, in the arena.
+    let page = unsafe { std::slice::from_raw_parts(memory.as_ptr(), ps) };
+    assert!(*page == pattern(4, ps)[..], "the window maps other data");
+    assert!(crate::pages::arena_memory(arena).is_some());
+
+    drop(store);
+    served.join().unwrap();
+    // Gone with the tenant, once the page-in that served the fault, which holds the extent a while
+    // after the fault returns, lets it go: the arena retires until then.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while crate::pages::arena_memory(arena).is_some() {
+        assert!(std::time::Instant::now() < deadline, "the tenant's arena stayed");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// cladefs: followers read a store as of their view's commit beside its writer's connection, which
+/// never waits for them: they hear of its commits, advance to them, hold what the commits between
+/// held until they let go of them, and pin what their guest holds open; what the writer wrote
+/// since they read as ENOENT, what they let go of as EIO, and what would change the store they
+/// refuse with EROFS (backlog doc-8).
+#[test]
+fn followers_follow_their_writer_side_by_side() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let branch = store.branch();
+    let extent = move |sequence| ExtentId { branch, sequence };
+    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(Some(b"one")).unwrap();
+    let (follower, followed) = follow(&path).unwrap();
+    let (other, other_followed) = follow(&path).unwrap();
+    assert!(follower.is_read_only() && !store.is_read_only());
+    assert_eq!((follower.branch(), follower.root()), (store.branch(), Ok(b"one".to_vec())));
+    let commits = commits_heard(&follower);
+    assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+
+    // The writer goes on, the followers where they are.
+    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    store.free(extent(1)).unwrap();
+    store.commit(Some(b"two")).unwrap();
+    let commit = commits.recv().unwrap();
+    assert_eq!(follower.committed(), commit);
+    assert_eq!(read(&follower, extent(2), 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(read(&other, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(follower.advance(), Ok(commit));
+    assert_eq!(follower.root(), Ok(b"two".to_vec()));
+    assert_eq!(read(&follower, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
+    assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    follower.let_go(commit).unwrap();
+    assert_eq!(read(&follower, extent(1), 0, BLOCK), Err(Errno::EIO));
+    follower.pin(extent(2)).unwrap();
+
+    // The writer commits on, freeing what the followers hold, without waiting for them.
+    store.free(extent(2)).unwrap();
+    for sequence in 3..20 {
+        write(&store, extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        store.commit(None).unwrap();
+    }
+    assert_eq!(read(&other, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    let latest = follower.advance().unwrap();
+    follower.let_go(latest).unwrap();
+    assert_eq!(read(&follower, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
+    assert_eq!(read(&follower, extent(19), 0, BLOCK), Ok(pattern(19, BLOCK)));
+    follower.unpin(extent(2)).unwrap();
+    assert_eq!(read(&follower, extent(2), 0, BLOCK), Err(Errno::EIO));
+    assert_eq!(follower.committed(), latest);
+
+    assert_eq!(write(&follower, extent(20), 0, &pattern(20, BLOCK)), Err(Errno::EROFS));
+    assert_eq!(follower.free(extent(3)), Err(Errno::EROFS));
+    assert_eq!(follower.commit(None), Err(Errno::EROFS));
+    assert_eq!(follower.fork(&dir.path().join("fork")), Err(Errno::EROFS));
+    assert_eq!(store.advance(), Err(Errno::EINVAL));
+    for (store, served) in [(follower, followed), (other, other_followed), (store, served)] {
+        drop(store);
+        served.join().unwrap();
+    }
+}
+
+/// cladefs: followers of a store no writer has open follow it as of its last commit; a writer
+/// opening it then takes it over, and they hear of its commits.
+#[test]
+fn writers_take_over_stores_their_followers_opened() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    assert_eq!(follow(&path).err(), Some(Some(Errno::ENOENT)));
+    let (store, served) = connect(&path, 1 << 20);
+    let branch = store.branch();
+    let extent = move |sequence| ExtentId { branch, sequence };
+    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    drop(store);
+    served.join().unwrap();
+
+    let (follower, followed) = follow(&path).unwrap();
+    let commits = commits_heard(&follower);
+    assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    let (store, served) = connect(&path, 1 << 20);
+    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(follower.advance(), Ok(commits.recv().unwrap()));
+    assert_eq!(read(&follower, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
+
+    // Once its writer goes, nothing open, a writer takes it over again.
+    drop(store);
+    served.join().unwrap();
+    let (store, served) = connect(&path, 1 << 20);
+    write(&store, extent(3), 0, &pattern(3, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(follower.advance(), Ok(commits.recv().unwrap()));
+    assert_eq!(read(&follower, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
+    assert_eq!(store.info().unwrap().next_sequence, 4);
+    for (store, served) in [(follower, followed), (store, served)] {
+        drop(store);
+        served.join().unwrap();
+    }
+}
+
+/// cladefs: a writer that goes with writes uncommitted cuts its followers off (ESTALE), and no
+/// writer or follower opens its store until they are gone: then it opens as of its last commit.
+#[test]
+fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let branch = store.branch();
+    let extent = move |sequence| ExtentId { branch, sequence };
+    write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    let (follower, followed) = follow(&path).unwrap();
+    write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
+    drop(store);
+    served.join().unwrap();
+
+    assert_eq!(read(&follower, extent(1), 0, BLOCK), Err(Errno::ESTALE));
+    assert_eq!(follower.advance(), Err(Errno::ESTALE));
+    assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
+    let (client, server) = UnixStream::pair().unwrap();
+    let busy = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
+    let opened = DaemonExtentStore::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs));
+    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    busy.join().unwrap();
+
+    drop(follower);
+    followed.join().unwrap();
+    let (store, served) = connect(&path, 1 << 20);
+    assert_eq!(read(&store, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(read(&store, extent(2), 0, BLOCK), Err(Errno::ENOENT));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// cladefs: a connection opens no store open in an arena not its own (TASK-79.36), whose pages its
+/// VM process's window could not map, or not as it maps them: neither a follower of the default
+/// tenant's a store a granted tenant's writer has open, nor a granted tenant's writer one that
+/// followers of the default tenant's have open (EBUSY), until the other is gone.
+#[test]
+fn stores_open_in_another_arena_are_busy() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let tenant = super::Tenant::new(1, dir.path()).unwrap();
+    let open_as_tenant = || {
+        let (client, server) = UnixStream::pair().unwrap();
+        let tenant = tenant.clone();
+        let served = std::thread::spawn(move || serve_connection(server, tenant));
+        (DaemonExtentStore::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
+    };
+    let (store, served) = open_as_tenant();
+    let store = store.unwrap();
+    write(&store, ExtentId { branch: store.branch(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
+    drop(store);
+    served.join().unwrap();
+
+    let (follower, followed) = follow(&path).unwrap();
+    let (opened, busy) = open_as_tenant();
+    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    busy.join().unwrap();
+    drop(follower);
+    followed.join().unwrap();
+    let (store, served) = open_as_tenant();
+    drop(store.unwrap());
+    served.join().unwrap();
+}
+
+/// cladefs: the daemon's work on a store followers have open: synced, grown and forked as it is;
+/// deleted, placed or made public, not (EBUSY).
+#[test]
+fn stores_followed_are_worked_on_as_they_are() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 20);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    drop(store);
+    served.join().unwrap();
+    let (follower, followed) = follow(&path).unwrap();
+
+    wait_uploaded(&path).unwrap();
+    resize(&path, 2 << 20).unwrap();
+    assert_eq!(resize(&path, 1 << 20), Err(Errno::EBUSY));
+    assert_eq!(follower.info().unwrap().capacity, 2 << 20);
+    let fork = dir.path().join("fork");
+    fork_store(&path, &fork).unwrap();
+    assert_eq!(delete_store(&path).err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    assert_eq!(control(super::stores::place(path.clone(), 2)), Err(Errno::EBUSY));
+    assert_eq!(control(super::stores::make_public(path.clone(), false)), Err(Errno::EBUSY));
+    drop(follower);
+    followed.join().unwrap();
+    let forked = ExtentStore::open(&fork).unwrap();
+    let mut data = vec![0; BLOCK];
+    forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    assert_eq!(data, pattern(1, BLOCK));
+    delete_store(&path).unwrap();
+}
+
+/// What this process holds, as Linux counts it: the daemon's threads (but for its clients'), its
+/// open files, and its resident memory.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    threads: usize,
+    files: usize,
+    resident: u64,
+}
+
+impl Held {
+    fn now() -> Self {
+        let threads = thread_comms().filter(|comm| comm != "cladefsd client").count();
+        let files = std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let kib = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|kib| kib.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+            .unwrap();
+        Self { threads, files, resident: kib << 10 }
+    }
+}
+
+/// The names of this process's threads alive as they are read: one that ends between the listing of
+/// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
+/// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
+/// (`ESRCH`), as for the threads a store's flush syncs its files on (`extent_store`'s `AT_ONCE`).
+fn thread_comms() -> impl Iterator<Item = String> {
+    std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
+        match std::fs::read_to_string(task.unwrap().path().join("comm")) {
+            Ok(comm) => Some(comm.trim().to_owned()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) if err.raw_os_error() == Some(libc::ESRCH) => None,
+            Err(err) => panic!("reading a thread's name: {err}"),
+        }
+    })
+}
+
+/// This process's threads, by name, and how many of each.
+fn thread_names() -> std::collections::BTreeMap<String, usize> {
+    let mut names = std::collections::BTreeMap::new();
+    for comm in thread_comms() {
+        *names.entry(comm).or_default() += 1;
+    }
+    names
+}
+
+/// TASK-34: the daemon serves 300 stores, forks of one base, open at once, each reading its base,
+/// on threads they share: the daemon's threads do not grow with them, and each holds a few files
+/// open and a little memory, the base's state and its files' handles shared.
+#[test]
+fn serves_hundreds_of_forks_of_a_base() {
+    const FORKS: usize = 300;
+    const EXTENTS: u64 = 64;
+    host();
+    // As the daemon does.
+    super::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base");
+    let (store, served) = connect(&base, 1 << 30);
+    let branch = store.branch();
+    for sequence in 0..EXTENTS {
+        let extent = ExtentId { branch, sequence };
+        write(&store, extent, 0, &pattern(sequence as u8, 16 * BLOCK)).unwrap();
+    }
+    store.commit(None).unwrap();
+    drop(store);
+    served.join().unwrap();
+    let forks: Vec<_> = (0..FORKS)
+        .map(|n| {
+            let fork = dir.path().join(format!("fork-{n}"));
+            fork_store(&base, &fork).unwrap();
+            fork
+        })
+        .collect();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let before = Held::now();
+    let stores: Vec<_> = (forks.iter())
+        .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
+        .collect();
+    for (n, store) in stores.iter().enumerate() {
+        let sequence = n as u64 % EXTENTS;
+        let extent = ExtentId { branch, sequence };
+        assert_eq!(read(store, extent, 0, BLOCK).unwrap(), pattern(sequence as u8, BLOCK));
+    }
+    let after = Held::now();
+    let files = (after.files - before.files) as f64 / FORKS as f64;
+    let resident = after.resident.saturating_sub(before.resident) / FORKS as u64;
+    println!("{FORKS} forks open: before {before:?}, after {after:?}");
+    println!("per fork: {files:.1} files, {} KiB resident", resident >> 10);
+    // The daemon's threads: its runtimes', and the requests' running, not a set per connection.
+    assert!(after.threads < 64, "{} threads: {:?}", after.threads, thread_names());
+    // Each fork's: the connection's two ends here, and the client's, with its kernel's memory, its
+    // arena and the default one, read-only (TASK-79.17); its store's directory, its own since
+    // TASK-165.7, its open segment and its commit log (TASK-165.9). And the base's, which it is
+    // attached to.
+    let opened = after.files - before.files;
+    assert!(opened <= 10 * FORKS + 64, "{opened} files for {FORKS} forks");
+    assert!(resident < 1 << 20, "{resident} bytes a fork");
+    drop(stores);
+}
+
+/// TASK-92.55: opening a fork through the daemon unpacks and reads nothing more of a larger base:
+/// forks of a base of 32,768 extents unpack and read as much as forks of one of 1,024. 100 forks of
+/// the larger had taken about 0.5 s each on a GCE host (debug), in zstd on a bucket runtime thread.
+/// Their times are said, not bounded: what still grows with the base, the parent's checkpoint at
+/// each fork and the child's decoding it, is ~0.3 us an extent in a release build (~11 ms a fork of
+/// the larger against ~3.5 ms, Linux in Docker), under a round trip to a real bucket, and 42 ms
+/// against 5 ms in debug (124.5 ms against 6.0 ms on GCE r1021 before the extents' map was
+/// persistent).
+#[test]
+fn forks_opening_reads_nothing_more_of_a_larger_base() {
+    const FORKS: u64 = 20;
+    host();
+    super::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    // Forks of a base of `extents` extents, opened: how long their opening took, and what it
+    // unpacked and read from the stores.
+    let opened = |extents: u64| {
+        let base =
+            ExtentStore::create(dir.path().join(format!("base-{extents}")), 1 << 30).unwrap();
+        let branch = base.branch();
+        for sequence in 1..=extents {
+            let data = pattern(sequence as u8, BLOCK);
+            base.write(
+                ExtentId { branch: branch.id, sequence },
+                0,
+                &[VolatileSlice::from(&data[..])],
+            )
+            .unwrap();
+            if sequence % 1024 == 0 {
+                base.commit(None).unwrap();
+            }
+        }
+        let forks: Vec<_> = (1..=FORKS)
+            .map(|n| {
+                let fork = dir.path().join(format!("fork-{extents}-{n}"));
+                base.fork_to(&fork, crate::host_store::fork_child(branch)).unwrap();
+                fork
+            })
+            .collect();
+        drop(base);
+        let before = crate::stats::stats();
+        let start = std::time::Instant::now();
+        let stores: Vec<_> = (forks.iter())
+            .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
+            .collect();
+        let took = start.elapsed() / FORKS as u32;
+        let after = crate::stats::stats();
+        drop(stores);
+        (took, after.unpacks - before.unpacks, after.read_stored_bytes - before.read_stored_bytes)
+    };
+    let small = opened(1024);
+    let large = opened(32768);
+    println!("a fork's opening, of a base of 1,024 extents and of 32,768: {small:?} and {large:?}");
+    assert_eq!((large.1, large.2), (small.1, small.2), "(unpacked, read) by opening forks");
+}
+
+/// TASK-92.17: what the daemon says of followers, which its stats poll looks at every 200 ms and
+/// each scrape of its metrics counts, costs nothing of what a fork's base holds: here, of 100
+/// forks open of a base of 32768 extents, none followed, the followers' views are counted within
+/// a few milliseconds, as of forks of an empty base. Counting them walked each fork's whole
+/// extent map, its base's with it, under its state lock: 3.3 million extents a count, 160 ms on a
+/// GCE host. The base is made here, its extents' writes no round trips to the daemon, and
+/// committed a thousand at a time, as a guest's are.
+#[test]
+fn counting_followers_walks_no_extents() {
+    const FORKS: u64 = 100;
+    const EXTENTS: u64 = 32768;
+    host();
+    super::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let base = ExtentStore::create(dir.path().join("base"), 1 << 30).unwrap();
+    let branch = base.branch();
+    for sequence in 1..=EXTENTS {
+        let data = pattern(sequence as u8, BLOCK);
+        base.write(ExtentId { branch: branch.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
+            .unwrap();
+        if sequence % 1024 == 0 {
+            base.commit(None).unwrap();
+        }
+    }
+    let forks: Vec<_> = (1..=FORKS)
+        .map(|n| {
+            let fork = dir.path().join(format!("fork-{n}"));
+            base.fork_to(&fork, crate::host_store::fork_child(branch)).unwrap();
+            fork
+        })
+        .collect();
+    drop(base);
+    let stores: Vec<_> = (forks.iter())
+        .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
+        .collect();
+    // The quickest of a few counts: what counting itself costs.
+    let took = (0..5)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            assert_eq!(super::stores::follower_views(), 0);
+            start.elapsed()
+        })
+        .min()
+        .unwrap();
+    println!("{FORKS} forks of a base of {EXTENTS} extents: their followers counted in {took:?}");
+    assert!(took < std::time::Duration::from_millis(10), "counting them took {took:?}");
+    drop(stores);
+}
+
+/// TASK-92.49: the daemon makes the ordered commits of 300 stores' guests durable on threads they
+/// share, a bounded number, rather than a blocking thread for each store whose flush is due at
+/// its turn, which hundreds of guests committing together kept as many of as their syncs' waits
+/// took, each idle 10 s after: here each guest commits, ordered, again and again for a second.
+/// At once, the stores' flushes run on `FLUSHES` threads at most, and the 15 they share to sync
+/// their files on beside their own (`extent_store`'s `HELPERS`, which count as theirs, named as
+/// they are): the most seen at once, looking every millisecond, is no more. Once their commits are durable, the runtime keeps threads for
+/// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest
+/// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 stores
+/// were open, in a container of 15 processors), more under load, as a thread just done is not yet
+/// idle when the next request comes for one (40 beside the full workspace's tests); a thread for
+/// each store would be 297. One guest's commits are durable within a few of its
+/// store's turns, of 50 ms each and the flushes' time: told in turns, which the daemon counts
+/// ([`ExtentStore::flush_turns`]), as the full workspace's tests beside it stretch each turn's
+/// flushes to hundreds of milliseconds (TASK-110); the most one waited in time, its lag, is
+/// reported. The stores are on
+/// a disk, in `/var/tmp`, as a host's are: `/tmp` may be memory (tmpfs), whose syncs cost nothing.
+#[test]
+fn hundreds_of_writers_flush_on_threads_they_share() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const STORES: usize = 300;
+    const WRITERS: usize = 8;
+    // The runtime's, and those flushing.
+    const NAMES: [&str; 2] = ["cladefsd io", "cladefsd flush"];
+    host();
+    super::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let paths: Vec<_> = (0..STORES).map(|n| dir.path().join(format!("store-{n}"))).collect();
+    let stores: Vec<_> = (paths.iter())
+        .map(|path| Arc::new(DaemonExtentStore::connect(&socket, path, 1 << 30).unwrap()))
+        .collect();
+    // The daemon's side of each store, which says whether its commits wait to be made durable;
+    // and the guest whose commits' lag is measured.
+    let theirs: Vec<_> = (paths.iter())
+        .map(|path| {
+            let key = super::stores::store_key(path);
+            super::stores::table().writer(&key).unwrap().store().unwrap().clone()
+        })
+        .collect();
+    let ((probe, others), probed) = (stores.split_first().unwrap(), theirs[0].clone());
+    // The most of them seen at once, and how many of each kind then.
+    let sampling = Arc::new(AtomicBool::new(true));
+    let sampler = {
+        let sampling = sampling.clone();
+        std::thread::spawn(move || {
+            let mut most = [0; NAMES.len()];
+            while sampling.load(Ordering::Relaxed) {
+                let names = thread_names();
+                let threads = NAMES.map(|name| names.get(name).copied().unwrap_or(0));
+                if threads.iter().sum::<usize>() > most.iter().sum() {
+                    most = threads;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            most
+        })
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let writers: Vec<_> = (others.chunks(others.len().div_ceil(WRITERS)))
+        .map(|stores| {
+            let stores = stores.to_vec();
+            std::thread::spawn(move || {
+                let mut sequence = 0;
+                while std::time::Instant::now() < until {
+                    sequence += 1;
+                    for store in &stores {
+                        let extent = ExtentId { branch: store.branch(), sequence };
+                        write(store, extent, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+                        store.commit_ordered(None).unwrap();
+                    }
+                }
+            })
+        })
+        .collect();
+    let lagging = {
+        let probe = probe.clone();
+        std::thread::spawn(move || {
+            let (mut lags, mut turns, mut sequence) = (Vec::new(), 0, 0);
+            while std::time::Instant::now() < until {
+                sequence += 1;
+                let extent = ExtentId { branch: probe.branch(), sequence };
+                write(&probe, extent, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+                probe.commit_ordered(None).unwrap();
+                let (committed, turned) = (std::time::Instant::now(), probed.flush_turns());
+                while probed.flush_pending() {
+                    std::thread::yield_now();
+                }
+                lags.push(committed.elapsed());
+                turns = turns.max(probed.flush_turns() - turned);
+            }
+            lags.sort();
+            (lags, turns)
+        })
+    };
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    let (lags, turns) = lagging.join().unwrap();
+    // Every guest's commits durable, what the flushes took and kept.
+    while theirs.iter().any(|store| store.flush_pending()) {
+        std::thread::yield_now();
+    }
+    let names = thread_names();
+    sampling.store(false, Ordering::Relaxed);
+    let most = sampler.join().unwrap();
+    let kept = NAMES.map(|name| names.get(name).copied().unwrap_or(0));
+    let threads: usize = kept.iter().sum();
+    let (median, lag) = (lags[lags.len() / 2], lags[lags.len() - 1]);
+    println!(
+        "{STORES} stores' guests committing: {threads} threads kept, {kept:?} named {NAMES:?}, \
+         at most {} at once, {most:?}; a guest's {} ordered commits durable within {median:?}, \
+         the median, and {lag:?}, {turns} of its store's turns",
+        most.iter().sum::<usize>(),
+        lags.len()
+    );
+    let flushing = super::server::FLUSHES + 15;
+    assert!(most[1] <= flushing, "{most:?} named {NAMES:?} at once");
+    assert!(kept[0] < STORES / 4, "{threads} threads kept: {kept:?} named {NAMES:?}, of {names:?}");
+    // Four turns, however long the load made them.
+    assert!(turns <= 4, "ordered commits durable {turns} turns after, {lag:?}");
+    drop(stores);
+}
+
+/// TASK-47: the daemon's metrics, scraped over HTTP as Prometheus scrapes them, count each kind of
+/// request as it is served, and say how many VM processes are connected and stores open.
+#[test]
+fn metrics_count_requests_as_they_are_served() {
+    use std::io::{Read as _, Write as _};
+    host();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || super::serve_metrics(listener));
+    let get = |path: &str| {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let metric = |metrics: &str, name: &str| -> u64 {
+        let line = (metrics.lines())
+            .find(|line| line.split_once(' ').is_some_and(|(found, _)| found == name))
+            .unwrap_or_else(|| panic!("no {name} in {metrics}"));
+        line.rsplit_once(' ').unwrap().1.parse().unwrap()
+    };
+    let before = get("/metrics");
+    assert!(before.starts_with("HTTP/1.1 200 OK\r\n"), "{before}");
+    assert_eq!(metric(&before, "cladefsd_requests_total{kind=\"write\"}"), 0);
+    assert_eq!(metric(&before, "cladefsd_connections"), 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 20);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    for offset in 0..3 {
+        write(&store, extent, offset * BLOCK as u64, &pattern(1, BLOCK)).unwrap();
+    }
+    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    let metrics = get("/metrics");
+    let requests =
+        |kind: &str| metric(&metrics, &format!("cladefsd_requests_total{{kind=\"{kind}\"}}"));
+    assert_eq!(
+        [requests("open"), requests("transfer"), requests("write"), requests("read")],
+        [1, 1, 3, 1]
+    );
+    let histogram = "cladefsd_request_duration_seconds";
+    assert_eq!(metric(&metrics, &format!("{histogram}_count{{kind=\"write\"}}")), 3);
+    assert_eq!(metric(&metrics, &format!("{histogram}_bucket{{kind=\"write\",le=\"+Inf\"}}")), 3);
+    assert_eq!(metric(&metrics, "cladefsd_request_errors_total{kind=\"write\"}"), 0);
+    assert_eq!(metric(&metrics, "cladefsd_connections"), 1);
+    assert_eq!(metric(&metrics, "cladefsd_stores_open"), 1);
+    // TASK-91.3: its uploader's lag, nothing once a durable commit is uploaded.
+    store.commit(None).unwrap();
+    let metrics = get("/metrics");
+    let upload = |name: &str| {
+        format!("cladefsd_upload_{name}{{branch=\"{}\"}}", branch_at(&dir.path().join("store")))
+    };
+    assert_eq!(
+        [
+            metric(&metrics, &upload("pending_bytes")),
+            metric(&metrics, &upload("oldest_pending_seconds")),
+            metric(&metrics, &upload("stalls_total")),
+        ],
+        [0, 0, 0]
+    );
+    // TASK-314: the bucket's requests that failed, by kind: none of a bucket answering all.
+    let failures = |request: &str| {
+        metric(
+            &metrics,
+            &format!("cladefsd_object_storage_failures_total{{request=\"{request}\"}}"),
+        )
+    };
+    assert_eq!([failures("create"), failures("get-range"), failures("update")], [0, 0, 0]);
+    assert!(get("/other").starts_with("HTTP/1.1 404 Not Found\r\n"));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-79.27: the daemon's metrics server answers a request line longer than it reads with `431`,
+/// holding no more of it than it reads (`HEAD_MAX`): what the client sends after that it reads and
+/// drops, until the client is done, as the connection, closed with bytes unread, would be reset,
+/// the answer lost; then it closes the connection.
+#[test]
+fn metrics_refuse_requests_too_long() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || super::serve_metrics(listener));
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    let mut writing = stream.try_clone().unwrap();
+    // A line of a mebibyte, which a server reading lines whole holds whole.
+    std::thread::spawn(move || {
+        writing.write_all(&vec![b'G'; 1 << 20]).unwrap();
+        writing.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let response = within(std::time::Duration::from_secs(10), move || {
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let response = response.unwrap();
+    assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"), "{response}");
+}
+
+/// TASK-79.27: a scrape is answered while another client, slow, has sent but part of its request:
+/// the daemon's metrics server waits for neither on the other. The slow client is answered
+/// nothing, its connection open, once the scrape is done: a server serving one at a time would have
+/// answered the scrape only once the slow client's time was up, and it closed.
+#[test]
+fn metrics_are_served_beside_slow_clients() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || super::serve_metrics(listener));
+    let mut slow = std::net::TcpStream::connect(address).unwrap();
+    write!(slow, "GET /metrics HTTP/1.1\r\n").unwrap();
+    let scraped = within(std::time::Duration::from_secs(30), move || {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(stream, "GET /metrics HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let scraped = scraped.expect("the scrape is answered never");
+    assert!(scraped.starts_with("HTTP/1.1 200 OK\r\n"), "{scraped}");
+    slow.set_nonblocking(true).unwrap();
+    let answered = slow.read(&mut [0; 64]).map_err(|err| err.kind());
+    assert_eq!(answered, Err(std::io::ErrorKind::WouldBlock), "the slow client was let go first");
+}
+
+/// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
+/// one, as with as many files open as it may (EMFILE): it accepts them once files close.
+#[test]
+fn the_daemon_accepts_on_after_failing_to() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    // No file opens: the daemon's accept fails as it begins.
+    let none = libc::rlimit { rlim_cur: 0, ..limit };
+    // SAFETY: Lowers the process's own limit, which this test sets back.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none) }, 0);
+    let (serving, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // Dropped as serving stops.
+        let _serving = serving;
+        serve(listener)
+    });
+    let served = stopped.recv_timeout(std::time::Duration::from_secs(1));
+    // SAFETY: As above.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    assert_eq!(served, Err(std::sync::mpsc::RecvTimeoutError::Timeout), "serving stopped");
+    let path = dir.path().join("store");
+    let opened = within(std::time::Duration::from_secs(10), move || {
+        DaemonExtentStore::connect(&socket, path, 1 << 20).map(|store| store.branch())
+    });
+    assert!(matches!(opened, Ok(Ok(_))), "the daemon accepts no more: {opened:?}");
+}
+
+/// TASK-79.83: a fork of a store, as the control API makes it (`ForkStore`), to a path a store is
+/// at already, fails with `EEXIST`, as making a store there does (`CreateStore`).
+#[test]
+fn forks_to_stores_there_already_fail_with_eexist() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
+    let store = ExtentStore::create(&path, 1 << 20).unwrap();
+    store.commit(None).unwrap();
+    drop(store);
+    fork_store(&path, &fork).unwrap();
+    let again = fork_store(&path, &fork);
+    assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
+}
+
+/// TASK-136.5: nothing a VM process sends attaches a store to the one it has open: whatever request
+/// it makes, naming the store, what that holds stays unreadable to it.
+#[test]
+fn requests_attach_nothing() {
+    use super::wire::{ACK, Header, REPLY, STAGE_COUNTS, STAGE_PRIVATE_COUNTS};
+    use std::os::unix::ffi::OsStrExt;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let base = dir.path().join("base");
+    let store = ExtentStore::create(&base, 1 << 20).unwrap();
+    let extent = ExtentId { branch: store.branch().id, sequence: 1 };
+    store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).unwrap();
+    store.commit(None).unwrap();
+    drop(store);
+    let vm = DaemonExtentStore::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
+    // But those nothing replies to.
+    for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(kind))
+    {
+        for (branch, sequence) in [(extent.branch, 1), (0, 0)] {
+            let header = Header::new(kind, 0).with_args(&[branch, sequence, 0, 4096]);
+            let _ = vm.call(header, base.as_os_str().as_bytes(), &[]);
+        }
+    }
+    let mut data = vec![0; 4096];
+    let read = vm.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]);
+    assert_eq!(read, Err(Errno::ENOENT));
+}
+
+/// TASK-79.17: a store the daemon opens to work on, as no VM process has it open, boots no guest:
+/// the boot profile of the base it is a fork of is not read into the extent cache, as its pages
+/// would be the default arena's, which every VM process holds, a tenant's base's too. Here the
+/// fork is synced.
+#[test]
+fn stores_worked_on_here_read_no_boot_profile() {
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
+    let store = ExtentStore::create(&base, 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch().id, sequence: 1 };
+    store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).unwrap();
+    store.commit(None).unwrap();
+    store.fork_to(&fork, crate::host_store::fork_child(store.branch())).unwrap();
+    drop(store);
+    // The base's profile, as its first fork to boot recorded it.
+    let profile = crate::profile::path(&base.canonicalize().unwrap(), extent.branch);
+    let recorder = crate::profile::Recorder::new(profile, branch_at(&fork).id);
+    recorder.record(extent, 0, ps as u64);
+    recorder.write().unwrap();
+
+    let before = crate::stats::stats();
+    wait_uploaded(&fork).unwrap();
+    // A profile's replay is done once its threads are.
+    while thread_comms().any(|comm| comm == "cladefs replay") {
+        std::thread::yield_now();
+    }
+    let counted = crate::stats::stats().since(&before);
+    assert_eq!((counted.prefetches, counted.page_ins), (0, 0));
+}
+
+/// TASK-79.34: a store the daemon synced, opened here as no connection had it open, is closed
+/// before those waiting to open it may: deleted at once after, it is open no more, each time.
+#[test]
+fn stores_synced_here_are_closed_before_they_are_let_go() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let path = dir.path().join(format!("store-{round}"));
+        let store = ExtentStore::create(&path, 1 << 20).unwrap();
+        store.commit(None).unwrap();
+        drop(store);
+        wait_uploaded(&path).unwrap();
+        let deleted = delete_store(&path).map_err(|error| error.errno());
+        assert_eq!(deleted, Ok(()), "round {round}");
+    }
+}
+
+/// A memory object of `len` bytes, as a daemon hands its VM processes its arenas.
+fn memfd(len: u64) -> std::fs::File {
+    // SAFETY: The name is a C string.
+    let fd = unsafe { libc::memfd_create(c"memory".as_ptr(), libc::MFD_CLOEXEC) };
+    assert!(fd >= 0);
+    // SAFETY: Just created, and owned here.
+    let file = std::fs::File::from(unsafe {
+        <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd)
+    });
+    file.set_len(len).unwrap();
+    file
+}
+
+/// TASK-79.43: a window's mappings, a snapshot's, more of them than one message's most bytes of
+/// payload hold, arrive whole: a daemon's reply holds as many as a window of its size can have,
+/// which its VM process takes. Here a daemon of the test's answers the store's opening, its
+/// window's, and its mappings', a page each, past `MAX_PAYLOAD`.
+#[test]
+fn window_mappings_past_a_messages_payload_arrive() {
+    use super::wire::*;
+    use std::os::fd::AsFd;
+    let ps = page_size();
+    // More than a message's payload, and its header's room past it, hold.
+    let count = (MAX_PAYLOAD + size_of::<Header>() as u64) / 48 + 1;
+    let (client, daemon) = UnixStream::pair().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (sender, mut receiver) =
+            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+        let (own, public) = (memfd(ps), memfd(ps));
+        while let Ok(Some(request)) = receiver.receive(|| 0) {
+            let mut reply = Header::new(REPLY, request.header.id);
+            let (mut payload, mut fds) = (Vec::new(), Vec::new());
+            match request.header.kind {
+                OPEN => {
+                    reply.args = opened_args(7);
+                    fds = vec![own.as_fd(), public.as_fd()];
+                }
+                MAPPINGS => {
+                    payload = (0..count)
+                        .flat_map(|page| [page * ps, ps, 0, 0, 0, MAPPING_ZEROS])
+                        .flat_map(u64::to_le_bytes)
+                        .collect();
+                }
+                BUILD | TRANSFER | WINDOW => {}
+                _ => reply.status = -Errno::EINVAL.raw(),
+            }
+            sender.send(reply, &payload, &fds).unwrap();
+        }
+    });
+    let store =
+        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let store = store.unwrap();
+    let size = count * ps;
+    // SAFETY: Reserves the window's memory, which the test leaks: the window maps it while the
+    // process lives.
+    let memory = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    let memory = NonNull::new(memory.cast()).unwrap();
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, size, None, 1) }.unwrap();
+    let mappings = store.window_mappings().unwrap();
+    assert_eq!(mappings.len() as u64, count);
+    let last = crate::WindowMapping {
+        window_offset: (count - 1) * ps,
+        len: ps,
+        contents: crate::MappingContents::Zeros,
+    };
+    assert_eq!(mappings.last(), Some(&last));
+    drop(store);
+    answering.join().unwrap();
+}
+
+/// cladefs: a request its daemon's going failed finds the daemon gone: the connection is lost before
+/// what waits on it fails, so that what a failure makes of it, as the VM process's faults do, can
+/// tell a daemon gone from a refusal (TASK-231). A VM whose daemon died with a fault in flight
+/// aborted (SIGABRT), the fault's EIO taken for the daemon's refusal, where it exits CladefsdLost
+/// (158): fxfs-guest-soak, GCE r830 round 27.
+#[test]
+fn requests_failed_by_the_daemons_going_find_it_gone() {
+    use super::wire::*;
+    use std::os::fd::AsFd;
+    let ps = page_size();
+    let (client, daemon) = UnixStream::pair().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (sender, mut receiver) =
+            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+        let (own, public) = (memfd(ps), memfd(ps));
+        while let Ok(Some(request)) = receiver.receive(|| 0) {
+            let mut reply = Header::new(REPLY, request.header.id);
+            let mut fds = Vec::new();
+            match request.header.kind {
+                OPEN => {
+                    reply.args = opened_args(7);
+                    fds = vec![own.as_fd(), public.as_fd()];
+                }
+                BUILD | TRANSFER => {}
+                // The daemon goes as it is asked to read, answering nothing.
+                _ => return,
+            }
+            sender.send(reply, &[], &fds).unwrap();
+        }
+    });
+    let store =
+        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let store = store.unwrap();
+    // What the failed request does comes before the rest of the connection's end.
+    let _slow = fail::FailGuard::new("client::requests_failed", "sleep(200)").unwrap();
+    let mut data = vec![0; ps as usize];
+    let extent = ExtentId { branch: 7, sequence: 1 };
+    let read = store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]);
+    assert_eq!(read, Err(crate::Errno::EIO));
+    assert!(store.daemon_lost(), "the read failed, its daemon not yet lost");
+    answering.join().unwrap();
+}
+
+/// cladefs: a daemon going as a store opens over its connection is told of, as what was said of the
+/// connection before the open says ([`DaemonConnection::on_lost`]), before the open fails, which
+/// says why: a VMM stops its VM CladefsdLost (158) then, as for a daemon going later, rather than
+/// for the open's failure. A VM booted again as its daemon was killed exited 1, its store
+/// recovering from a bucket slowed a second a request: fxfs-guest-soak, GCE r831 round 29
+/// (TASK-232). Red with the connection's end told of after the open failed, which the failpoint
+/// holding the end shows.
+#[test]
+fn daemons_going_as_stores_open_are_told_of_first() {
+    use super::client::DaemonConnection;
+    use super::wire::*;
+    let (client, daemon) = UnixStream::pair().unwrap();
+    let going = std::thread::spawn(move || {
+        let open = Receiver::new(daemon).receive(|| 0).unwrap().unwrap();
+        // The daemon goes as it opens the store, answering nothing.
+        assert_eq!(open.header.kind, OPEN);
+    });
+    let connection = DaemonConnection::over(client).unwrap();
+    let happened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let told = happened.clone();
+    connection.on_lost(move || told.lock().unwrap().push("daemon lost"));
+    // What the connection's end does after failing what waits on it comes after the open fails.
+    let _slow = fail::FailGuard::new("client::requests_failed", "sleep(200)").unwrap();
+    let opened = connection.open(Path::new("store"), 1 << 20);
+    happened.lock().unwrap().push("open failed");
+    let err = opened.err().expect("the store opened, its daemon gone");
+    assert_eq!(
+        format!("{err:#}"),
+        "opening the extent store at store: the extent daemon went: EIO (errno 5)"
+    );
+    assert_eq!(*happened.lock().unwrap(), ["daemon lost", "open failed"]);
+    going.join().unwrap();
+}
+
+/// A VM process's connection to the daemon at `socket`, made by hand, as one that keeps to no
+/// protocol makes it: its store at `path` opened, created with `capacity` bytes, and its branch.
+fn raw_connection(
+    socket: &Path,
+    path: &Path,
+    capacity: u64,
+) -> (super::wire::Sender, super::wire::Receiver, UnixStream, u64) {
+    use super::wire::*;
+    let stream = UnixStream::connect(socket).unwrap();
+    let (sender, mut receiver) =
+        (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream.try_clone().unwrap()));
+    let open =
+        Header::new(OPEN, 1).with_args(&[capacity, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let opened = receiver.receive(|| 0).unwrap().unwrap();
+    assert_eq!(opened.header.status, 0);
+    (sender, receiver, stream, opened.header.args[0])
+}
+
+/// Sends `requests`, of no payload, until the daemon lets the VM process go, as it may before the
+/// last is sent: what it leaves unread passes what a connection may hold while the test still
+/// sends (TASK-240). A send failing so ends them; whether the daemon let it go is the test's to
+/// check, with [`assert_let_go`].
+fn send_until_let_go(
+    sender: &super::wire::Sender,
+    requests: impl IntoIterator<Item = super::wire::Header>,
+) {
+    for request in requests {
+        match sender.send(request, &[], &[]) {
+            Ok(()) => {}
+            Err(error) if shut(&error) => return,
+            Err(error) => panic!("sending request {}: {error}", request.id),
+        }
+    }
+}
+
+/// Whether `error`, a send's, says the daemon shut the connection.
+fn shut(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset};
+    matches!(error.kind(), BrokenPipe | ConnectionReset)
+}
+
+/// Asserts the daemon let go of the VM process whose connection `sender` sends on and `stream` is,
+/// within 10 s: it hangs up, and shuts the connection, so that what the VM process sends then
+/// fails, as a send of [`send_until_let_go`]'s may (TASK-240).
+fn assert_let_go(sender: &super::wire::Sender, stream: &UnixStream) {
+    use super::wire::{Header, INFO};
+    use std::os::fd::AsRawFd;
+    let mut hung_up = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLRDHUP, revents: 0 };
+    // SAFETY: Polls the stream, which the caller keeps open, for 10 s at most.
+    let ready = unsafe { libc::poll(&mut hung_up, 1, 10_000) };
+    assert_eq!(ready, 1, "the daemon holds what the VM process leaves unread");
+    assert_ne!(hung_up.revents & libc::POLLRDHUP, 0, "{:#x}", hung_up.revents);
+    let sent = sender.send(Header::new(INFO, u64::MAX), &[], &[]);
+    assert!(sent.as_ref().is_err_and(shut), "sent once let go: {sent:?}");
+}
+
+/// How many bytes `stream` has received that are not read yet.
+fn unread(stream: &UnixStream) -> usize {
+    use std::os::fd::AsRawFd;
+    let mut unread: libc::c_int = 0;
+    // SAFETY: Reads the count into `unread`.
+    assert_eq!(unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut unread) }, 0);
+    unread as usize
+}
+
+/// TASK-79.16: a VM process that stops reading what the daemon sends it holds up no other: as the
+/// daemon's reply to it waits for room in its socket, another VM process opening its store is
+/// refused at once (`EBUSY`), and another's store opens.
+#[test]
+fn vm_processes_that_stop_reading_hold_up_no_other() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let (sender, mut receiver, stream, branch) = raw_connection(&socket, &path, 1 << 24);
+    // An extent, read back whole in one reply, many times what the socket holds, which it never
+    // reads.
+    let len = 4 << 20;
+    let written = Header::new(WRITE, 2).with_args(&[branch, 1, 0]);
+    sender.send(written, &pattern(1, len), &[]).unwrap();
+    assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
+    let read = Header::new(READ, 3).with_args(&[branch, 1, 0, len as u64]);
+    sender.send(read, &[], &[]).unwrap();
+    while unread(&stream) == 0 {
+        std::thread::yield_now();
+    }
+
+    let wait = std::time::Duration::from_secs(10);
+    let opening = path.clone();
+    let (busy_socket, other_socket) = (socket.clone(), socket.clone());
+    let busy = within(wait, move || {
+        DaemonExtentStore::connect(&busy_socket, &opening, 1 << 24).err().and_then(|e| e.errno())
+    });
+    assert_eq!(busy, Ok(Some(Errno::EBUSY)), "opening the store waited for its VM process");
+    let other = dir.path().join("other");
+    let opened = within(wait, move || {
+        DaemonExtentStore::connect(&other_socket, &other, 1 << 24).map(|store| store.branch())
+    });
+    assert!(matches!(opened, Ok(Ok(_))), "another store's opening waited: {opened:?}");
+    drop((sender, receiver, stream));
+}
+
+/// TASK-79.16: a VM process that leaves what the daemon sends it unread, past what a connection
+/// may hold, is let go, rather than held without end in the daemon's memory, or its threads: here
+/// replies to its reads, half a gibibyte of them.
+#[test]
+fn vm_processes_that_leave_replies_unread_are_let_go() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (sender, mut receiver, stream, branch) =
+        raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+    let len = 8 << 20;
+    let written = Header::new(WRITE, 2).with_args(&[branch, 1, 0]);
+    sender.send(written, &pattern(1, len), &[]).unwrap();
+    assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
+    let reads = (3..67).map(|id| Header::new(READ, id).with_args(&[branch, 1, 0, len as u64]));
+    send_until_let_go(&sender, reads);
+    assert_let_go(&sender, &stream);
+    drop((sender, receiver, stream));
+}
+
+/// TASK-150.3: a window of any size a VM process names makes the daemon no more room for it: past
+/// what the protocol bounds, it is let go still, here for half a gibibyte of replies it leaves
+/// unread, behind a window's worth of mappings of all the bits a word has.
+#[test]
+fn vm_processes_naming_vast_windows_are_let_go_all_the_same() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (sender, mut receiver, stream, branch) =
+        raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+    let window = Header::new(WINDOW, 2).with_args(&[1 << 60, 1]);
+    let answered = call(&sender, &mut receiver, window, &[]).header.status;
+    let len = 8 << 20;
+    let written = Header::new(WRITE, 3).with_args(&[branch, 1, 0]);
+    assert_eq!(call(&sender, &mut receiver, written, &pattern(1, len)).header.status, 0);
+    let reads = (4..68).map(|id| Header::new(READ, id).with_args(&[branch, 1, 0, len as u64]));
+    send_until_let_go(&sender, reads);
+    assert_let_go(&sender, &stream);
+    assert_eq!(answered, -Errno::EINVAL.raw());
+    drop((sender, receiver, stream));
+}
+
+/// TASK-150.3: a window as large as the daemon makes room for is one it serves.
+#[test]
+fn windows_go_up_to_the_most_the_daemon_makes_room_for() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    for (name, size, status) in
+        [("past", MAX_WINDOW + page_size(), -Errno::EINVAL.raw()), ("largest", MAX_WINDOW, 0)]
+    {
+        let (sender, mut receiver, _stream, _) =
+            raw_connection(&socket, &dir.path().join(name), 1 << 24);
+        // cladefs: a writer's, copying on write (backlog doc-13).
+        let window = Header::new(WINDOW, 2).with_args(&[size, 1]);
+        assert_eq!(call(&sender, &mut receiver, window, &[]).header.status, status, "{name}");
+    }
+}
+
+/// TASK-150.4: a VM process opening a fork of a point that doesn't exist, in its tenant's directory,
+/// names another tenant's branch: it gets nothing of it, and the branch's writer is left as it was.
+/// Its tenant's stores are its directory's: what the bucket holds has no tenant.
+#[test]
+fn tenants_take_no_branch_by_naming_it() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = |name: &str, id: u64| {
+        let stores = dir.path().join(name);
+        std::fs::create_dir(&stores).unwrap();
+        let tenant = super::server::Tenant::new(id, &stores).unwrap();
+        let socket = dir.path().join(format!("{name}.sock"));
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+        (stores, socket)
+    };
+    let (ours, our_socket) = tenant("ours", 1);
+    let (theirs, their_socket) = tenant("theirs", 2);
+    let store = DaemonExtentStore::connect(&their_socket, theirs.join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
+    store.commit(Some(b"theirs")).unwrap();
+
+    let (restored, point) = (ours.join("restored"), ours.join("point"));
+    let opened =
+        DaemonExtentStore::connect_forked(&our_socket, &restored, &point, store.branch(), 1 << 24);
+    assert_eq!(opened.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOENT)));
+    assert!(!point.exists(), "the point of another tenant's branch was taken");
+    let later = ExtentId { branch: store.branch(), sequence: 2 };
+    assert_eq!(write(&store, later, 0, &pattern(5, BLOCK)), Ok(()));
+    assert_eq!(store.commit(None), Ok(()));
+    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
+}
+
+/// TASK-150.5: a connection has one store, however many `OPEN`s its VM process has in flight: the
+/// second, as the first waits for its store's last holder to let it go, is refused, holding
+/// nothing, and both stores open for others once the connection goes.
+#[test]
+fn connections_open_one_store_at_a_time() {
+    use super::stores::{store_key, table};
+    use super::wire::*;
+    use std::os::unix::ffi::OsStrExt as _;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    let key = store_key(&first);
+    let held = table().hold(&key, None).unwrap();
+
+    let stream = UnixStream::connect(&socket).unwrap();
+    let sender = Sender::new(stream.try_clone().unwrap());
+    let mut receiver = Receiver::new(stream.try_clone().unwrap());
+    let open =
+        |id| Header::new(OPEN, id).with_args(&[1 << 24, 0, 0, 0, VERSION]).with_flags(OPEN_CREATE);
+    sender.send(open(1), first.as_os_str().as_bytes(), &[]).unwrap();
+    while !table().is_waited_for(&key) {
+        std::thread::yield_now();
+    }
+    let second_opened = call(&sender, &mut receiver, open(2), second.as_os_str().as_bytes());
+    drop(held);
+    let first_opened = receiver.receive(|| 0).unwrap().unwrap();
+    let statuses =
+        (first_opened.header.id, first_opened.header.status, second_opened.header.status);
+    stream.shutdown(std::net::Shutdown::Both).unwrap();
+    drop((sender, receiver, stream));
+
+    let (opening, reopened_first, reopened_second) =
+        (socket.clone(), first.clone(), second.clone());
+    let opened = within(std::time::Duration::from_secs(30), move || {
+        reopened(&opening, &reopened_first);
+        reopened(&opening, &reopened_second);
+    });
+    assert_eq!(opened, Ok(()), "a store stayed held once its connection went");
+    assert_eq!(statuses, (1, 0, -Errno::EBUSY.raw()));
+}
+
+/// TASK-79.16: a tenant's VM processes, the default tenant's too, have so many connections at
+/// most: one past them is closed as it comes; once one goes, another is served. The first of them
+/// is served here, as tests' connections are, which says when it is done ([`serve_connection`]).
+#[test]
+fn tenants_connections_are_bounded() {
+    use std::io::Read as _;
+    host();
+    super::raise_open_files_limit().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    // Served once its store is open.
+    let (ours, theirs) = UnixStream::pair().unwrap();
+    let serving = std::thread::spawn(move || serve_connection(theirs, default_tenant().unwrap()));
+    let first = DaemonExtentStore::over(
+        ours,
+        &dir.path().join("first"),
+        Opening::Create(1 << 20, Kind::Fxfs),
+    );
+    let first = first.unwrap();
+    let connected: Vec<UnixStream> = (1..super::server::MAX_CONNECTIONS)
+        .map(|_| UnixStream::connect(&socket).unwrap())
+        .collect();
+    let past = UnixStream::connect(&socket).unwrap();
+    let closed = within(std::time::Duration::from_secs(10), move || {
+        (&past).read(&mut [0]).map_err(|err| err.kind())
+    });
+    assert_eq!(closed, Ok(Ok(0)), "a connection past the tenant's was served");
+
+    drop(first);
+    serving.join().unwrap();
+    let opened = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 20);
+    assert_eq!(opened.map(drop).map_err(|error| error.errno()), Ok(()), "no connection served");
+    drop(connected);
+}
+
+/// TASK-79.84: a VM restored from a snapshot to where a fork of its point was left unmade, its host
+/// crashing as it made the child's store, gets a fork made anew, of a branch of its own, holding
+/// what the point holds: what was left goes (`host_store::unmade`, TASK-165.7).
+#[test]
+fn restores_fork_anew_over_forks_left_unmade() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let point = dir.path().join("point");
+    store.fork_quiescent(&point).unwrap();
+    drop(store);
+
+    // What a fork of the point there leaves, its host crashing before its store's description.
+    let restored = dir.path().join("restored");
+    std::fs::create_dir_all(restored.join("segments")).unwrap();
+    std::fs::write(restored.join("ancestry"), "1 /elsewhere\n").unwrap();
+    let ours = DaemonExtentStore::connect_forked(&socket, &restored, &point, 0, 0).unwrap();
+    assert_eq!(ours.root(), Ok(b"root".to_vec()));
+    assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));
+    assert!(!crate::host_store::unmade(&restored), "the new fork is no store");
+}
+
+/// TASK-194: a restore into a store written since its snapshot's point, as the snapshotted VM's
+/// own store is once it resumed and wrote on, is refused: opened, its guest, of the snapshot's
+/// memory, would read extents freed since, and commit over what was written since.
+#[test]
+fn restores_refuse_a_store_written_since_its_point() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let point = dir.path().join("point");
+    store.fork_quiescent(&point).unwrap();
+    // The VM resumes, and goes on: what its snapshot holds it frees, and it commits anew.
+    store.free(extent).unwrap();
+    store.commit(Some(b"later")).unwrap();
+    drop(store);
+
+    let restored = DaemonExtentStore::connect_forked(&socket, &path, &point, 0, 0);
+    assert_eq!(restored.err().and_then(|err| err.errno()), Some(Errno::EEXIST));
+    // Nothing of it changed: opened, it is as the VM left it.
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    assert_eq!((store.root(), read(&store, extent, 0, BLOCK).ok()), (Ok(b"later".to_vec()), None));
+}
+
+/// TASK-194: what a restore may open, a store there already holding what its point does: the store
+/// its snapshot was taken of, written nothing since, as a VM stopped without resuming leaves it;
+/// and a fork of the point an earlier restore made, its VM having written nothing, retried. Once
+/// that fork is written, a restore into it is refused too.
+#[test]
+fn restores_open_stores_still_at_their_point() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let point = dir.path().join("point");
+    store.fork_quiescent(&point).unwrap();
+    drop(store);
+    let restore = |into: &Path| DaemonExtentStore::connect_forked(&socket, into, &point, 0, 0);
+    let at_point =
+        |store: &DaemonExtentStore| (store.root().ok(), read(store, extent, 0, BLOCK).ok());
+    let state = (Some(b"root".to_vec()), Some(pattern(8, BLOCK)));
+
+    // The snapshotted VM's own store, written nothing since its point.
+    let restored = restore(&path).unwrap();
+    assert_eq!(at_point(&restored), state);
+    drop(restored);
+
+    // A fork an earlier restore made, its VM gone before it wrote anything, restored into again.
+    let fork = dir.path().join("fork");
+    let restored = restore(&fork).unwrap();
+    let branch = restored.branch();
+    drop(restored);
+    let restored = restore(&fork).unwrap();
+    assert_eq!((restored.branch(), at_point(&restored)), (branch, state.clone()));
+    // Its VM writes on, and goes: restored into once more, it is refused.
+    write(&restored, minted(&restored), 0, &pattern(9, BLOCK)).unwrap();
+    restored.commit(Some(b"later")).unwrap();
+    drop(restored);
+    assert_eq!(restore(&fork).err().and_then(|err| err.errno()), Some(Errno::EEXIST));
+}
+
+/// What a store of the daemon's at `path` mints next, as its guest mints: from its writer's floor,
+/// or past what it minted.
+fn minted(store: &DaemonExtentStore) -> ExtentId {
+    let info = store.info().unwrap();
+    assert!(info.sequence_floor >= 1 << extent_bucket::EPOCH_SHIFT, "{info:?}");
+    ExtentId { branch: store.branch(), sequence: info.next_sequence.max(info.sequence_floor) }
+}
+
+/// The store at `path`, once the connection that had it open let it go.
+fn reopened(socket: &Path, path: &Path) -> DaemonExtentStore {
+    loop {
+        match DaemonExtentStore::connect(socket, path, 1 << 24) {
+            Err(error) if error.errno() == Some(Errno::EBUSY) => std::thread::yield_now(),
+            opened => break opened.unwrap(),
+        }
+    }
+}
+
+/// Waits for the daemon to have let go of the store at `path`, whose connection went: closed, its
+/// uploader done with what closing uploads, as another connection may open it then.
+fn let_go(path: &Path) {
+    let (table, key) = (super::stores::table(), super::stores::store_key(path));
+    // `EBUSY` until the daemon sees the connection going; then the wait is for it to let go.
+    let hold = loop {
+        match table.hold(&key, None) {
+            Err(Errno::EBUSY) => std::thread::yield_now(),
+            held => break held.unwrap(),
+        }
+    };
+    // Then for its store, closing, to go: the table has it while anything does.
+    while hold.instance().is_some() {
+        std::thread::yield_now();
+    }
+}
+
+/// TASK-44.10: a guest's fork failing at each of its steps ([`crate::faults::FORK_STEPS`]) fails
+/// with `EIO`, leaving nothing at its path; the store opens again, holds what it held, and forks; and
+/// another's store is served on. `bucket::fork_faults` goes further, on stores alone: this is the
+/// daemon's side, its requests, connections, and errnos.
+///
+/// A step fails once, for whichever uploader passes it first, failpoints being the process's: so
+/// each fails with no other store's uploader at work, theirs uploading only when asked, and the
+/// stores of the step before closed (TASK-157). `other`'s waking on its interval took
+/// `upload::gather`'s failure, under load, its fork's own gather a while after it was set.
+#[test]
+fn guests_forks_failing_at_each_step_harm_nothing() {
+    host();
+    super::stores::uploads_when_asked();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let other = DaemonExtentStore::connect(&socket, &dir.path().join("other"), 1 << 24).unwrap();
+    let kept = minted(&other);
+    write(&other, kept, 0, &pattern(9, BLOCK)).unwrap();
+    other.commit(None).unwrap();
+
+    for (case, step) in crate::faults::FORK_STEPS.into_iter().enumerate() {
+        let path = dir.path().join(format!("store-{case}"));
+        let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+        let extent = minted(&store);
+        write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
+        store.commit(Some(b"root")).unwrap();
+        let child = dir.path().join(format!("child-{case}"));
+        let failing = fail::FailGuard::new(step, "1*return").unwrap();
+        let forked = store.fork(&child);
+        drop(failing);
+        assert_eq!((forked, child.exists()), (Err(Errno::EIO), false), "{step}");
+        drop(store);
+
+        let store = reopened(&socket, &path);
+        assert_eq!(store.root(), Ok(b"root".to_vec()), "{step}");
+        assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
+        let retried = dir.path().join(format!("retried-{case}"));
+        assert_eq!(store.fork(&retried).map(drop), Ok(()), "{step}");
+        let forked = DaemonExtentStore::connect(&socket, &retried, 1 << 24).unwrap();
+        assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
+        forked.commit(Some(b"fork")).unwrap();
+
+        assert_eq!(read(&other, kept, 0, BLOCK), Ok(pattern(9, BLOCK)), "{step}");
+        assert_eq!(other.commit(None), Ok(()), "{step}");
+        drop((forked, store));
+        let_go(&retried);
+        let_go(&path);
+    }
+}
+
+/// TASK-44.10: a fork made whose answer its guest never got, which took it to have failed: the
+/// fork stands, a retry to its path fails with `EEXIST`, and it is deleted as any store is. A guest's request refused before it began makes nothing, and a retry forks.
+#[test]
+fn forks_whose_answers_are_lost_stand() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let extent = minted(&store);
+    write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+
+    let refused = dir.path().join("refused");
+    let failing = fail::FailGuard::new("cladefsd::fork", "1*return").unwrap();
+    assert_eq!(store.fork(&refused), Err(Errno::EIO));
+    drop(failing);
+    assert!(!refused.exists(), "a request refused made a fork");
+    assert_eq!(store.fork(&refused).map(drop), Ok(()));
+
+    let child = dir.path().join("child");
+    let failing = fail::FailGuard::new("cladefsd::forked", "1*return").unwrap();
+    assert_eq!(store.fork(&child), Err(Errno::EIO));
+    drop(failing);
+    assert_eq!(store.fork(&child), Err(Errno::EEXIST));
+    assert_eq!(store.fork(&dir.path().join("again")).map(drop), Ok(()));
+    assert_eq!(store.commit(Some(b"later")), Ok(()));
+    let forked = DaemonExtentStore::connect(&socket, &child, 1 << 24).unwrap();
+    assert_eq!(forked.root(), Ok(b"root".to_vec()));
+    assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
+    drop(forked);
+    let deleted = loop {
+        match delete_store(&child) {
+            Err(error) if error.errno() == Some(Errno::EBUSY) => std::thread::yield_now(),
+            deleted => break deleted,
+        }
+    };
+    assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()));
+    assert!(!child.exists(), "its store is left");
+}
+
+/// TASK-44.10: a fork of the control API's failing once its store's commits were uploaded makes
+/// nothing; a retry forks. One of a new branch, of a point kept open, whose fork fails once it is
+/// made, is made anew, of another branch, what the first left gone.
+#[test]
+fn control_forks_failing_fork_again() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (base, fork, again) =
+        (dir.path().join("base"), dir.path().join("fork"), dir.path().join("again"));
+    let (store, served) = connect(&base, 1 << 24);
+    let extent = minted(&store);
+    write(&store, extent, 0, &pattern(3, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    drop(store);
+    served.join().unwrap();
+
+    let failing = fail::FailGuard::new("cladefsd::fork_uploaded", "1*return").unwrap();
+    let failed = fork_store(&base, &fork).map_err(|err| err.errno());
+    drop(failing);
+    assert_eq!((failed, fork.exists()), (Err(Some(Errno::EIO)), false));
+    fork_store(&base, &fork).unwrap();
+
+    let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
+    let branch =
+        control(super::stores::fork(base.clone(), again.clone(), None, (false, false))).unwrap();
+    drop(failing);
+    assert_eq!(ExtentStore::open(&again).map(|store| store.branch()).map_err(drop), Ok(branch));
+    let (forked, served) = connect(&again, 1 << 24);
+    assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(3, BLOCK)));
+    drop(forked);
+    served.join().unwrap();
+}
+
+/// TASK-44.10: a restore, a fork of a point, which commits nothing, failing once its child's record
+/// is made, its cleanup failing with it, leaves nothing at the restore's path, and in the bucket an
+/// orphan, the child's record live (doc-14): a restore there forks anew. Before, it left a handle
+/// naming no branch, which opened as no store until deleted.
+#[test]
+fn restores_over_what_a_failed_cleanup_left_fork_anew() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (store, point, restored) =
+        (dir.path().join("store"), dir.path().join("point"), dir.path().join("restored"));
+    let made = DaemonExtentStore::connect(&socket, &store, 1 << 24).unwrap();
+    let extent = minted(&made);
+    write(&made, extent, 0, &pattern(4, BLOCK)).unwrap();
+    made.commit(Some(b"root")).unwrap();
+    made.fork_quiescent(&point).unwrap();
+    drop(made);
+
+    let left = ["fork::made", "branch::head_ended"];
+    let failing = left.map(|step| fail::FailGuard::new(step, "1*return").unwrap());
+    let forked = fork_store(&point, &restored).map_err(|err| err.errno());
+    drop(failing);
+    assert_eq!((forked, restored.exists()), (Err(Some(Errno::EIO)), false));
+    let ours = DaemonExtentStore::connect_forked(&socket, &restored, &point, 0, 0).unwrap();
+    assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
+}
+
+/// How many requests of `kind` the daemon has served, as its metrics count them.
+fn served(kind: &str) -> u64 {
+    let metrics = super::metrics::render();
+    let name = format!("cladefsd_requests_total{{kind=\"{kind}\"}} ");
+    let line = metrics.lines().find_map(|line| line.strip_prefix(&name));
+    line.unwrap_or_else(|| panic!("no {kind} requests counted in {metrics}")).parse().unwrap()
+}
+
+/// TASK-92.13: a flush's dead extents, as many as a guest's `FREE` names with `FREE_MANY` (257),
+/// freed together, are freed in one request of the daemon's, not one each, each a round trip.
+#[test]
+fn extents_freed_together_are_freed_in_one_request() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, serving) = connect(&dir.path().join("store"), 1 << 24);
+    let branch = store.branch();
+    let extents: Vec<_> = (1..=257).map(|sequence| ExtentId { branch, sequence }).collect();
+    for extent in &extents {
+        write(&store, *extent, 0, &pattern(extent.sequence as u8, BLOCK)).unwrap();
+    }
+    store.commit(None).unwrap();
+    let before = (served("free"), served("free_many"));
+    store.free_many(&extents).unwrap();
+    assert_eq!((served("free") - before.0, served("free_many") - before.1), (0, 1));
+    for extent in [extents[0], extents[128], extents[256]] {
+        assert_eq!(read(&store, extent, 0, BLOCK), Err(Errno::ENOENT), "{extent:?}");
+    }
+    drop(store);
+    serving.join().unwrap();
+}
+
+/// TASK-92.13, TASK-141.3: a VM process's frees of many extents in one request never reach a daemon
+/// older than that request, which knows `FREE` alone, and would free the first, ignoring the flags
+/// and payload it doesn't know, the rest leaked, success said: a daemon of another wire version,
+/// an older one saying none, the VM process refuses as it opens its store, closing the connection
+/// on it, naming both versions. The daemon here is one by hand, as a daemon before TASK-92.13
+/// served. Before TASK-141.3, the VM process opened its store, and its `FREE_MANY` failed with
+/// the daemon's `EINVAL`.
+#[test]
+fn daemons_of_other_wire_versions_are_refused() {
+    use super::wire::*;
+    use std::os::fd::AsFd;
+    let ps = page_size();
+    let (client, daemon) = UnixStream::pair().unwrap();
+    let answering = std::thread::spawn(move || {
+        let (sender, mut receiver) =
+            (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+        let (own, public) = (memfd(ps), memfd(ps));
+        let mut served = Vec::new();
+        while let Ok(Some(request)) = receiver.receive(|| 0) {
+            let mut reply = Header::new(REPLY, request.header.id);
+            let mut fds = Vec::new();
+            served.push(request.header.kind);
+            match request.header.kind {
+                // As a daemon of no wire version replied: its args[4] 0.
+                OPEN => {
+                    reply.args = [7, 1, 0, 0, 0];
+                    fds = vec![own.as_fd(), public.as_fd()];
+                }
+                _ => reply.status = -Errno::EINVAL.raw(),
+            }
+            sender.send(reply, &[], &fds).unwrap();
+        }
+        served
+    });
+    let refused =
+        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let refused = refused.err().expect("a daemon of another wire version refused");
+    assert_eq!(refused.errno(), Some(Errno::EPROTONOSUPPORT));
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "opening the extent store at store: the extent daemon is of wire version 0, this VM \
+             process of {VERSION}: EPROTONOSUPPORT (errno 93)"
+        )
+    );
+    // Closed on, once it opened: nothing else asked of it.
+    assert_eq!(answering.join().unwrap(), [OPEN]);
+}
+
+/// TASK-141.3: a daemon refuses a VM process of another wire version as it opens its store, with
+/// `EPROTONOSUPPORT` and its own version, whatever else its `OPEN` holds, and opens nothing for it;
+/// a VM process of its own version, after, it serves. Before, nothing said a version: a VM process
+/// of another build was served, its requests read as this one has them.
+#[test]
+fn vm_processes_of_other_wire_versions_are_refused() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
+    let (sender, mut receiver) =
+        (Sender::new(client.try_clone().unwrap()), Receiver::new(client.try_clone().unwrap()));
+    let named = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+    for (id, other) in [(1, 0), (2, VERSION + 1), (3, u64::MAX)] {
+        // Flags this version doesn't know, as another's OPEN may have.
+        for flags in [OPEN_CREATE, u32::MAX] {
+            let open =
+                Header::new(OPEN, id).with_args(&[1 << 24, 0, 0, 0, other]).with_flags(flags);
+            sender.send(open, named, &[]).unwrap();
+            let reply = receiver.receive(|| 0).unwrap().unwrap();
+            let said = (reply.header.id, reply.header.status, super::codec::version(&reply.header));
+            assert_eq!(said, (id, -Errno::EPROTONOSUPPORT.raw(), VERSION), "{other}, {flags:#x}");
+            assert!(reply.fds.is_empty());
+        }
+    }
+    assert!(!path.exists(), "a store was made for a VM process of another version");
+    drop((sender, receiver, client));
+    served.join().unwrap();
+    let (store, served) = connect(&path, 1 << 24);
+    assert_eq!(store.info().map(|info| info.capacity), Ok(1 << 24));
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-141.3: what opening asks of a daemon of the VM process's own version, its build and its
+/// transfer area, is required, not let be as an older daemon's refusal was: refused, opening fails,
+/// and the connection is closed on, which lets the store go for another to open.
+#[test]
+fn openings_fail_on_refusals_of_what_they_ask() {
+    use super::wire::*;
+    use std::os::fd::AsFd;
+    let ps = page_size();
+    for refusing in [BUILD, TRANSFER] {
+        let (client, daemon) = UnixStream::pair().unwrap();
+        let answering = std::thread::spawn(move || {
+            let (sender, mut receiver) =
+                (Sender::new(daemon.try_clone().unwrap()), Receiver::new(daemon));
+            let (own, public) = (memfd(ps), memfd(ps));
+            let mut served = Vec::new();
+            while let Ok(Some(request)) = receiver.receive(|| 0) {
+                let mut reply = Header::new(REPLY, request.header.id);
+                let mut fds = Vec::new();
+                served.push(request.header.kind);
+                match request.header.kind {
+                    OPEN => {
+                        reply.args = opened_args(7);
+                        fds = vec![own.as_fd(), public.as_fd()];
+                    }
+                    kind if kind == refusing => reply.status = -Errno::EINVAL.raw(),
+                    BUILD | TRANSFER => {}
+                    _ => reply.status = -Errno::EINVAL.raw(),
+                }
+                sender.send(reply, &[], &fds).unwrap();
+            }
+            served
+        });
+        let opened = DaemonExtentStore::over(
+            client,
+            Path::new("store"),
+            Opening::Create(1 << 20, Kind::Fxfs),
+        );
+        let refused = opened.err().expect("opening failed");
+        assert_eq!(refused.errno(), Some(Errno::EINVAL), "{refused:#}");
+        let asked = match refusing {
+            BUILD => vec![OPEN, BUILD],
+            _ => vec![OPEN, BUILD, TRANSFER],
+        };
+        assert_eq!(answering.join().unwrap(), asked);
+    }
+}
+
+/// What a daemon by hand replies to an `OPEN`, of its store of `branch`: the default arena's memory
+/// its own, as of the default tenant, and its wire version this one.
+fn opened_args(branch: u64) -> [u64; 5] {
+    let arena = crate::pages::ArenaId(1);
+    super::codec::Opened { branch, arena, commit: 0, max_map_count: None }.args()
+}
+
+/// TASK-79.95: a fork's child opened while the fork is being made, its segment not yet in the
+/// bucket, waits for the fork, and finds its record the fork's. Before, it opened at once: before
+/// the parent's uploader took the fork's segment, it found no record and no sign the fork might
+/// land, took a branch of its own, and the parent's writer, recording the fork, found the child's
+/// record another's, failing the fork, and every writer of the parent's after. Here the fork's
+/// segment is held as it uploads, after it was taken, which no test can come before: what is
+/// asserted is that the child doesn't open while its fork is being made.
+#[test]
+fn childs_opened_during_their_forks_wait_for_them() {
+    use std::sync::Arc;
+    host();
+    let ps = page_size() as usize;
+    let gated = Arc::new(GatedReads::new());
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+        gated.clone(),
+        "branches",
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (path, child) = (dir.path().join("store"), dir.path().join("child"));
+    let parent = {
+        let store = ExtentStore::create(&path, 1 << 24).unwrap();
+        let branch = store.branch();
+        let data = pattern(1, ps);
+        let extent = ExtentId { branch: branch.id, sequence: 1 };
+        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+        store.commit(None).unwrap();
+        branch
+    };
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    wait_uploaded(&path).unwrap();
+    // The parent's segments, the fork's among them, which records the fork, held.
+    let segments = format!("branches/{}", extent_bucket::layout::segments(parent));
+    gated.hold_writes(Some(segments));
+    let forking = {
+        let (path, child) = (path.clone(), child.clone());
+        std::thread::spawn(move || control(super::stores::fork(path, child, None, (false, false))))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gated.writes_waiting() == 0 || !child.exists() {
+        assert!(std::time::Instant::now() < deadline, "the fork's segment was never held");
+        std::thread::yield_now();
+    }
+    // The child opened, and committing a write, as its VM would.
+    let opened = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opening = {
+        let (socket, child, opened) = (socket.clone(), child.clone(), opened.clone());
+        std::thread::spawn(move || {
+            let store = DaemonExtentStore::connect(&socket, &child, 1 << 24)?;
+            opened.store(true, std::sync::atomic::Ordering::Relaxed);
+            let data = pattern(2, ps);
+            let extent = ExtentId { branch: store.branch(), sequence: 1 };
+            store.write(extent, 0, &[VolatileSlice::from(&data[..])])?;
+            store.commit(None)?;
+            Ok::<_, crate::Error>(store)
+        })
+    };
+    let key = super::stores::store_key(&child);
+    let opened_now = || opened.load(std::sync::atomic::Ordering::Relaxed);
+    let waiting = || super::stores::table().is_waited_for(&key);
+    while !waiting() && !opened_now() && !opening.is_finished() {
+        let late = std::time::Instant::now() >= deadline;
+        assert!(!late, "the child's opening neither waited nor ended");
+        std::thread::yield_now();
+    }
+    if opening.is_finished() {
+        let ended = opening.join().unwrap().map(drop);
+        panic!("the child's opening ended while its fork was being made: {ended:?}");
+    }
+    assert!(!opened_now(), "the child opened while its fork was being made");
+    gated.hold_writes(None);
+    let forked = forking.join().unwrap().unwrap();
+    let child_store = opening.join().unwrap();
+    assert!(child_store.is_ok(), "opening the child: {:?}", child_store.err());
+    assert_eq!(child_store.as_ref().map(|store| store.branch()).ok(), Some(forked.id));
+    let records = extent_bucket::object_bucket::ObjectBucket::new(gated.clone(), "branches");
+    let record = control(extent_bucket::branch::record(&records, branch_at(&child))).unwrap();
+    let origin = record.and_then(|record| record.origin()).map(|origin| origin.parent);
+    assert_eq!(origin, Some(parent));
+    drop((child_store, store));
+}
+
+/// TASK-216: a VM booted again on the store its VM crashed out of opens it at once, while what
+/// that store's uploader had in flight waits on the bucket: the uploader of a store whose
+/// connection went stops as the new writer waits for it, without uploading the rest, which the
+/// store's write-ahead log keeps and the new opening uploads. Before, the going connection's store
+/// was closed as any store is, its uploader uploading all it held first, and the new opening,
+/// waiting at most `CLOSING_WAIT` for that, failed `EBUSY` (fxfs-guest-soak on GCS, GCE r758
+/// round 14, every bucket request 1000 ms late).
+#[test]
+fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
+    use std::sync::Arc;
+    host();
+    let ps = page_size() as usize;
+    let gated = Arc::new(GatedReads::new());
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+        gated.clone(),
+        "branches",
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let branch = store.branch();
+    let write = |store: &DaemonExtentStore, sequence: u64| {
+        let extent = ExtentId { branch, sequence };
+        let data = pattern(sequence as u8, ps);
+        store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+    };
+    write(&store, 1);
+    store.commit(None).unwrap();
+    wait_uploaded(&path).unwrap();
+    // The next segment's upload, held: the bucket out of reach for what the store has in flight.
+    let segments = format!("branches/{}", extent_bucket::layout::segments(branch_at(&path)));
+    gated.hold_next_write(&segments);
+    write(&store, 2);
+    store.commit_ordered(None).unwrap();
+    // The VM goes, its connection with it, its store's uploader uploading what it held.
+    drop(store);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while gated.writes_waiting() == 0 {
+        assert!(std::time::Instant::now() < deadline, "the going store's upload was never held");
+        std::thread::yield_now();
+    }
+    // A VM booted again opens it, at once, and reads what the first committed.
+    let asked = std::time::Instant::now();
+    let again = DaemonExtentStore::connect(&socket, &path, 1 << 24);
+    let took = asked.elapsed();
+    let again = again.unwrap_or_else(|err| panic!("opening again, after {took:?}: {err:#}"));
+    assert!(took < super::stores::CLOSING_WAIT / 2, "opening again took {took:?}");
+    let mut data = vec![0; ps];
+    let extent = ExtentId { branch, sequence: 2 };
+    again.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
+    assert!(data == pattern(2, ps), "the store opened again reads other data");
+    // What it opened with lands in the bucket, with the commit the first left in its log.
+    again.commit(None).unwrap();
+    gated.let_held_write_go();
+    drop(again);
+}
+
+/// An object store in memory whose reads wait while they are held ([`GatedReads::hold`]): what
+/// makes a page-in's fetch from object storage wait as long as a test needs. And whose writes
+/// under a prefix wait while it is held ([`GatedReads::hold_writes`]).
+#[derive(Debug)]
+struct GatedReads {
+    store: object_store::memory::InMemory,
+    held: tokio::sync::watch::Sender<bool>,
+    /// The reads waiting.
+    waiting: std::sync::atomic::AtomicUsize,
+    /// The prefix of the keys whose writes wait, if any.
+    held_writes: tokio::sync::watch::Sender<Option<String>>,
+    /// The writes waiting.
+    writes_waiting: std::sync::atomic::AtomicUsize,
+    /// The prefix of the keys whose next write alone waits, until let go, if any
+    /// ([`GatedReads::hold_next_write`]); and whether the one held is let go.
+    next_write: std::sync::Mutex<Option<String>>,
+    next_write_going: tokio::sync::watch::Sender<bool>,
+}
+
+impl std::fmt::Display for GatedReads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gated reads")
+    }
+}
+
+impl GatedReads {
+    fn new() -> Self {
+        Self {
+            store: object_store::memory::InMemory::new(),
+            held: tokio::sync::watch::channel(false).0,
+            waiting: Default::default(),
+            held_writes: tokio::sync::watch::channel(None).0,
+            writes_waiting: Default::default(),
+            next_write: Default::default(),
+            next_write_going: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    /// Holds the next write of a key beginning with `prefix`, and no other after it, until
+    /// [`GatedReads::let_held_write_go`]: what one writer has in flight, which those after it don't
+    /// wait behind.
+    fn hold_next_write(&self, prefix: &str) {
+        self.next_write_going.send_replace(false);
+        *self.next_write.lock().unwrap() = Some(prefix.to_owned());
+    }
+
+    fn let_held_write_go(&self) {
+        self.next_write_going.send_replace(true);
+    }
+
+    /// Holds the writes of keys beginning with `prefix` from now on, if any, or lets them go.
+    fn hold_writes(&self, prefix: Option<String>) {
+        self.held_writes.send_replace(prefix);
+    }
+
+    fn writes_waiting(&self) -> usize {
+        self.writes_waiting.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Holds the reads from now on, if `held`, or lets them go.
+    fn hold(&self, held: bool) {
+        self.held.send_replace(held);
+    }
+
+    fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for GatedReads {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        use std::sync::atomic::Ordering;
+        let holds = |prefix: &Option<String>| {
+            prefix.as_ref().is_some_and(|prefix| location.as_ref().starts_with(prefix.as_str()))
+        };
+        let next = {
+            let mut next = self.next_write.lock().unwrap();
+            let holds_next = holds(&next);
+            holds_next.then(|| next.take())
+        };
+        if next.is_some() {
+            let mut going = self.next_write_going.subscribe();
+            self.writes_waiting.fetch_add(1, Ordering::Relaxed);
+            let _ = going.wait_for(|going| *going).await;
+            self.writes_waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        if holds(&self.held_writes.borrow()) {
+            let mut held = self.held_writes.subscribe();
+            self.writes_waiting.fetch_add(1, Ordering::Relaxed);
+            let _ = held.wait_for(|prefix| !holds(prefix)).await;
+            self.writes_waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.store.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.store.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        use std::sync::atomic::Ordering;
+        if *self.held.borrow() {
+            let mut held = self.held.subscribe();
+            self.waiting.fetch_add(1, Ordering::Relaxed);
+            let _ = held.wait_for(|held| !*held).await;
+            self.waiting.fetch_sub(1, Ordering::Relaxed);
+        }
+        self.store.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>> {
+        self.store.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.store.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.store.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.store.copy_opts(from, to, options).await
+    }
+}
+
+/// TASK-92.20: a VM's faults that wait for the pager, which fetches what they fault on from
+/// object storage, hold up none of its requests: here 12 of them, more than the 8 requests the
+/// daemon serves of a connection at once, wait while the bucket answers no reads, and the VM's
+/// `INFO` is answered meanwhile. Each held a thread of the daemon's and one of those 8 while it
+/// waited, as for a part from GCS, 30-100 ms, and the requests after them waited their turn.
+#[test]
+fn faults_waiting_for_object_storage_hold_up_no_request() {
+    use std::sync::Arc;
+    const FAULTS: usize = 12;
+    host();
+    let ps = page_size() as usize;
+    let gated = Arc::new(GatedReads::new());
+    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+        gated.clone(),
+        "branches",
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    // A store of an extent a page for each fault, written here, whose pages are of an arena no
+    // VM process's connection has, made a snapshot's point through the daemon, which keeps its
+    // branch in the bucket.
+    let (path, point) = (dir.path().join("store"), dir.path().join("point"));
+    let branch = {
+        let store = ExtentStore::create(&path, 1 << 24).unwrap();
+        let branch = store.branch();
+        for sequence in 1..=FAULTS as u64 {
+            let data = pattern(sequence as u8, ps);
+            store
+                .write(
+                    ExtentId { branch: branch.id, sequence },
+                    0,
+                    &[VolatileSlice::from(&data[..])],
+                )
+                .unwrap();
+        }
+        store.commit(None).unwrap();
+        branch
+    };
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    store.fork_quiescent(&point).unwrap();
+    drop(store);
+    // Its VM restored on another host, which has the point's extents in the bucket alone, its VM
+    // manager having made the point's store there first (TASK-364: a snapshot names its point's
+    // branch by its ID alone, which locates no branch).
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let made = (None, Kind::Fxfs);
+    control(super::stores::create(elsewhere.join("point"), 1 << 24, branch_at(&point), made))
+        .unwrap();
+    let restored = elsewhere.join("store");
+    let ours = DaemonExtentStore::connect_forked(
+        &socket,
+        &restored,
+        elsewhere.join("point"),
+        branch.id + 1,
+        1 << 24,
+    )
+    .unwrap();
+    let memory = memory(FAULTS);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { ours.create_dax_window_in_host_memory(memory, (FAULTS * ps) as u64, None, 1) }
+        .unwrap();
+    for n in 0..FAULTS {
+        let extent = ExtentId { branch: branch.id, sequence: n as u64 + 1 };
+        ours.map(extent, 0, ps as u64, (n * ps) as u64).unwrap();
+    }
+    gated.hold(true);
+    let base = memory.as_ptr() as usize;
+    let faulting: Vec<_> = (0..FAULTS)
+        .map(|n| {
+            // SAFETY: The window's memory, whose faults the store serves.
+            std::thread::spawn(move || unsafe {
+                std::slice::from_raw_parts((base + n * ps) as *const u8, ps).to_vec()
+            })
+        })
+        .collect();
+    // Every fault received, each waiting for a fetch.
+    let connection = super::stores::table().writer(&super::stores::store_key(&restored)).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while connection.unanswered() < FAULTS || gated.waiting() == 0 {
+        assert!(std::time::Instant::now() < deadline, "{} faults", connection.unanswered());
+        std::thread::yield_now();
+    }
+    let ours = Arc::new(ours);
+    let asking = ours.clone();
+    let info = within(std::time::Duration::from_secs(10), move || asking.info());
+    let waiting = faulting.iter().filter(|faulting| !faulting.is_finished()).count();
+    gated.hold(false);
+    assert!(matches!(info, Ok(Ok(_))), "the VM's INFO waited for its faults: {info:?}");
+    assert_eq!(waiting, FAULTS, "the faults were answered as the INFO was");
+    for (n, faulting) in faulting.into_iter().enumerate() {
+        let page = faulting.join().unwrap();
+        assert!(page == pattern(n as u8 + 1, ps), "page {n} holds other data");
+    }
+}
+
+/// TASK-92.5: the restores of a zygote's snapshot, all at once, here with object storage as far
+/// away as another region's (50 ms), fork its point as it is, opened once for them and kept open:
+/// none fails, and nothing takes the point's branch, which has no writer (TASK-158), let alone
+/// once each. Each restore opened the point, attached it (taking its branch), forked and closed
+/// it, in turn, the k-th waiting for all those before it, a second or more each, and those that
+/// waited past `CLOSING_WAIT` failed (`EBUSY`). Their forks are made in object storage one at a
+/// time still, each waiting for a checkpoint of the point's branch that reads the record of every
+/// fork before it (TASK-92.4): what each restore took is told.
+#[test]
+fn a_zygotes_restores_open_its_point_once() {
+    const RESTORES: usize = 24;
+    host();
+    // SAFETY: As in host.
+    unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
+    store.commit(Some(b"zygote")).unwrap();
+    let point = dir.path().join("point");
+    store.fork_quiescent(&point).unwrap();
+    drop(store);
+    // How many writers took the point's branch: its head's epoch.
+    let bucket = super::stores::daemon_bucket().unwrap();
+    let branch = branch_at(&point);
+    let takings = || control(extent_bucket::head::epoch(&*bucket, branch)).unwrap();
+    let taken = takings();
+
+    let restoring: Vec<_> = (0..RESTORES)
+        .map(|n| {
+            let (socket, point) = (socket.clone(), point.clone());
+            let to = dir.path().join(format!("restore-{n}"));
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let restored = DaemonExtentStore::connect_forked(&socket, to, point, 0, 0);
+                let root = restored.map_err(|error| error.errno()).and_then(|store| {
+                    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
+                    store.root().map_err(Some)
+                });
+                (root, start.elapsed())
+            })
+        })
+        .collect();
+    let restored: Vec<_> = restoring.into_iter().map(|thread| thread.join().unwrap()).collect();
+    let took: Vec<_> = restored.iter().map(|(_, took)| *took).collect();
+    let taken = takings() - taken;
+    println!("{RESTORES} restores at once took {took:?}; the point's branch taken {taken} times");
+    for (n, (root, _)) in restored.iter().enumerate() {
+        assert_eq!(root, &Ok(b"zygote".to_vec()), "restore {n}");
+    }
+    assert_eq!(taken, 0, "a writer took the point's branch");
+}
+
+/// TASK-79.9: a follower's VM process that stops reading, frozen as SIGSTOP freezes it, holds as
+/// much of the daemon's memory as a message telling it of its writer's commits, whatever the
+/// writer commits meanwhile: told of the latest once it reads again, rather than of each, which the
+/// daemon kept for it without end, as it sends without waiting (TASK-79.9).
+#[test]
+fn followers_that_stop_reading_are_told_of_the_latest_commit() {
+    use super::wire::*;
+    const ROUNDS: u8 = 200;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let writer = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    // The follower's VM process, by hand, which reads its opening's reply, and nothing more until
+    // its writer is done.
+    let stream = UnixStream::connect(&socket).unwrap();
+    let (sender, mut receiver) = (Sender::new(stream.try_clone().unwrap()), Receiver::new(stream));
+    let open = Header::new(OPEN, 1).with_args(&[0, 0, 0, 0, VERSION]).with_flags(OPEN_READ_ONLY);
+    sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
+    let opened = receiver.receive(|| 0).unwrap().unwrap();
+    assert_eq!(opened.header.status, 0);
+    let mut commit = opened.header.args[2];
+
+    // Commits, many times what its socket holds, each told of as the writer makes it, each of an
+    // extent of its own.
+    let mut sequence = 0;
+    for round in 0..ROUNDS {
+        for _ in 0..16 {
+            sequence += 1;
+            let extent = ExtentId { branch: writer.branch(), sequence };
+            write(&writer, extent, 0, &pattern(round, BLOCK)).unwrap();
+            writer.commit_ordered(None).unwrap();
+        }
+        let queued = super::server::most_queued();
+        assert!(queued <= size_of::<Header>() as u64, "{queued} bytes queued for VM processes");
+    }
+    let key = super::stores::store_key(&path);
+    let holder = super::stores::table().writer(&key).unwrap();
+    let latest = holder.store().unwrap().committed().unwrap();
+    // Each commit it is told of after the last, the latest last.
+    let told = within(std::time::Duration::from_secs(10), move || {
+        while commit < latest {
+            let told = receiver.receive(|| 0).unwrap().unwrap();
+            assert_eq!(told.header.kind, COMMITTED);
+            assert!(told.header.args[0] > commit, "told of {} after {commit}", told.header.args[0]);
+            commit = told.header.args[0];
+        }
+        commit
+    });
+    assert_eq!(told, Ok(latest), "the follower wasn't told of its writer's latest commit");
+    drop((sender, writer));
+}
+
+/// TASK-79.16: a `READ` asking for more bytes than a message holds is refused (`EINVAL`), and its
+/// VM process served on, whatever it asks for: here more than what a request's bytes of stream
+/// data count, the payload it carries and what it asks for, may add up to.
+#[test]
+fn reads_past_a_messages_payload_are_refused() {
+    use super::wire::*;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (sender, mut receiver, _stream, branch) =
+        raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+    let read = Header::new(READ, 2).with_args(&[branch, 1, 0, u64::MAX]);
+    sender.send(read, &[0; 8], &[]).unwrap();
+    let refused = receiver.receive(|| 0).unwrap().expect("the daemon let the VM process go");
+    assert_eq!((refused.header.id, refused.header.status), (2, -Errno::EINVAL.raw()));
+    sender.send(Header::new(INFO, 3), &[], &[]).unwrap();
+    let info = receiver.receive(|| 0).unwrap().expect("the daemon let the VM process go");
+    assert_eq!((info.header.id, info.header.status), (3, 0));
+}
+
+/// Sends `header` and `payload`, a request, through `sender`, and returns its reply, which
+/// `receiver` receives, the stage operations before it acknowledged, as a VM process makes them.
+fn call(
+    sender: &super::wire::Sender,
+    receiver: &mut super::wire::Receiver,
+    header: super::wire::Header,
+    payload: &[u8],
+) -> super::wire::Message {
+    use super::wire::*;
+    sender.send(header, payload, &[]).unwrap();
+    loop {
+        let message = receiver.receive(|| 0).unwrap().expect("the daemon let the VM process go");
+        match message.header.kind {
+            REPLY => {
+                assert_eq!(message.header.id, header.id, "a reply out of order");
+                return message;
+            }
+            _ if message.header.flags & STAGE_ACK != 0 => {
+                sender.send(Header::new(ACK, message.header.id), &[], &[]).unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// TASK-79.9: a shrink of a tenant's memory evicts what it must, and returns what the tenant holds,
+/// once the pages it evicted are free: a window's, which wait, freed, for its VM process to
+/// acknowledge their unmapping, or for the daemon to let go of it, as here of one that acknowledges
+/// nothing. Of two extents of a chunk each, read and mapped, it evicts the one asked for longest
+/// ago, which leaves the tenant the other's chunk alone.
+#[test]
+fn shrinks_return_once_the_pages_they_evict_are_free() {
+    use super::wire::*;
+    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    let (sender, mut receiver, _stream, branch) =
+        raw_connection(&socket, &dir.path().join("store"), 1 << 26);
+    let mut served = |header: Header, payload: &[u8]| {
+        let reply = call(&sender, &mut receiver, header, payload);
+        assert_eq!(reply.header.status, 0, "request {}", header.kind);
+        reply
+    };
+    for sequence in 1..=2 {
+        let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
+        served(written, &pattern(sequence as u8, CHUNK as usize));
+    }
+    served(Header::new(COMMIT, 3).with_flags(COMMIT_UPLOADED), &[]);
+    for sequence in 1..=2 {
+        let read = Header::new(READ, 3 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
+        assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
+    }
+    served(Header::new(WINDOW, 6).with_args(&[2 * CHUNK, 1]), &[]);
+    for sequence in 1..=2 {
+        let at = (sequence - 1) * CHUNK;
+        served(Header::new(MAP, 6 + sequence).with_args(&[branch, sequence, 0, CHUNK, at]), &[]);
+    }
+    assert_eq!(super::memory::shrink(Some(1), u64::MAX), Ok(2 * CHUNK));
+
+    let shrinking = std::thread::spawn(|| super::memory::shrink(Some(1), CHUNK));
+    // The unmaps it is sent, which it never acknowledges, until the daemon lets it go.
+    let mut unmapped = Vec::new();
+    while let Ok(Some(message)) = receiver.receive(|| 0) {
+        assert_eq!(message.header.kind, STAGE_UNMAP, "{:?}", message.header);
+        unmapped.push(message.header.args[..2].to_vec());
+    }
+    assert_eq!((shrinking.join().unwrap(), unmapped), (Ok(CHUNK), vec![vec![0, CHUNK]]));
+}
+
+/// TASK-358: the governor, the host's memory running low, evicts each tenant down to its share by
+/// weight of what it allows: of two tenants of 4 chunks each, weighing 3 and 1, allowed 4 chunks
+/// together, the heavier keeps 3, the lighter 1.
+#[test]
+fn the_governor_shares_memory_by_weight() {
+    use super::wire::*;
+    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let mut kept = Vec::new();
+    for (id, (name, weight)) in (1..).zip([("heavy", 3), ("light", 1)]) {
+        super::memory::set_weight(id, weight).unwrap();
+        let tenant_dir = dir.path().join(name);
+        std::fs::create_dir(&tenant_dir).unwrap();
+        let tenant = super::server::Tenant::new(id, &tenant_dir).unwrap();
+        let socket = tenant_dir.join("cladefsd.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+        let (sender, mut receiver, stream, branch) =
+            raw_connection(&socket, &tenant_dir.join("store"), 1 << 26);
+        let mut served = |header: Header, payload: &[u8]| {
+            let reply = call(&sender, &mut receiver, header, payload);
+            assert_eq!(reply.header.status, 0, "request {}", header.kind);
+            reply
+        };
+        for sequence in 1..=4 {
+            let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
+            served(written, &pattern(sequence as u8, CHUNK as usize));
+        }
+        served(Header::new(COMMIT, 5).with_flags(COMMIT_UPLOADED), &[]);
+        for sequence in 1..=4 {
+            let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
+            assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
+        }
+        assert_eq!(super::memory::shrink(Some(id), u64::MAX), Ok(4 * CHUNK), "{name}");
+        kept.push((sender, receiver, stream));
+    }
+    super::memory::govern(4 * CHUNK);
+    let held = |id| super::memory::shrink(Some(id), u64::MAX).unwrap();
+    assert_eq!((held(1), held(2)), (3 * CHUNK, CHUNK));
+}
+
+/// TASK-400: the governor, the host's memory running low, lets go of the parts of segments the
+/// daemon's stores hold packed, newest first, before any tenant's pages: they are derived, their
+/// framings reading them back; then, none left, it evicts tenants' pages as before.
+#[test]
+fn the_governor_lets_parts_held_go_before_tenants_pages() {
+    use super::wire::*;
+    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let tenant_dir = dir.path().join("cached");
+    std::fs::create_dir(&tenant_dir).unwrap();
+    let tenant = super::server::Tenant::new(1, &tenant_dir).unwrap();
+    let socket = tenant_dir.join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    let (sender, mut receiver, _stream, branch) =
+        raw_connection(&socket, &tenant_dir.join("store"), 1 << 26);
+    let mut served = |header: Header, payload: &[u8]| {
+        let reply = call(&sender, &mut receiver, header, payload);
+        assert_eq!(reply.header.status, 0, "request {}", header.kind);
+        reply
+    };
+    // Noise, which its store's looks ahead hold none of, its segment looking framed in place.
+    let noise = |seed: u64| -> Vec<u8> {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
+        let words = (0..CHUNK / 8).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        });
+        words.flat_map(u64::to_le_bytes).collect()
+    };
+    for sequence in 1..=4 {
+        let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
+        served(written, &noise(sequence));
+    }
+    served(Header::new(COMMIT, 5).with_flags(COMMIT_UPLOADED), &[]);
+    for sequence in 1..=4 {
+        let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
+        assert!(served(read, &[]).payload == noise(sequence), "extent {sequence}");
+    }
+    let cached = || super::memory::shrink(Some(1), u64::MAX).unwrap();
+    assert_eq!(cached(), 4 * CHUNK);
+    let parts = super::memory::held_parts();
+    let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
+    assert_eq!(super::memory::governed_bytes(), 4 * CHUNK + 2 * CHUNK);
+    super::memory::govern(4 * CHUNK + CHUNK);
+    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, CHUNK), "the last two let go");
+    super::memory::govern(4 * CHUNK);
+    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, 0), "every part let go, no page");
+    super::memory::govern(3 * CHUNK);
+    assert_eq!((cached(), parts.bytes()), (3 * CHUNK, 0), "then pages");
+}
+
+/// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's
+/// connection, as with as many files open as it may (EMFILE): once files close.
+#[test]
+fn metrics_are_served_on_after_failing_to_accept() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: Reads the process's limit into `limit`.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    // No file opens: the server's accept fails as it begins.
+    let none = libc::rlimit { rlim_cur: 0, ..limit };
+    // SAFETY: Lowers the process's own limit, which this test sets back.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none) }, 0);
+    let (serving, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // Dropped as serving stops.
+        let _serving = serving;
+        super::serve_metrics(listener)
+    });
+    let served = stopped.recv_timeout(std::time::Duration::from_secs(1));
+    // SAFETY: As above.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    assert_eq!(served, Err(std::sync::mpsc::RecvTimeoutError::Timeout), "serving stopped");
+    let scraped = within(std::time::Duration::from_secs(10), move || {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(stream, "GET /metrics HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+    let scraped = scraped.expect("the metrics are served no more");
+    assert!(scraped.starts_with("HTTP/1.1 200 OK\r\n"), "{scraped}");
+}
+
+/// TASK-79.17: a VM process opens no public base to write it, of the default tenant as of any
+/// (`EPERM`): what it wrote would be every VM's that forks it, its pages the default arena's, which
+/// every VM process holds. Its forks it opens.
+#[test]
+fn vm_processes_of_any_tenant_write_no_public_base() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
+    let store = ExtentStore::create(&base, 1 << 24).unwrap();
+    store.commit(None).unwrap();
+    store.make_public().unwrap();
+    let forked = crate::host_store::fork_child(store.branch());
+    drop(store);
+    let opened = ExtentStore::open(&base).unwrap();
+    opened.fork_to(&fork, forked).unwrap();
+    drop(opened);
+    let refused = DaemonExtentStore::connect(&socket, &base, 1 << 24);
+    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
+    let opened = DaemonExtentStore::connect(&socket, &fork, 1 << 24).map(|store| store.branch());
+    assert_eq!(opened.map_err(|error| error.errno()), Ok(forked.id));
+}
+
+/// TASK-92.5: a restore from a store that is no point (TASK-158), which the daemon keeps open, once
+/// another writer of its branch has taken it, of this host's placement, as cladefsctl's `take` of it
+/// is, or a VM's opening of a copy of it, forks the store opened anew, taking the branch back, as
+/// each restore did before stores were kept open: not the one kept open, whose fork fails, its
+/// writer fenced.
+#[test]
+fn restores_fork_their_point_anew_once_another_writer_took_its_branch() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
+    store.commit(Some(b"point")).unwrap();
+    let point = dir.path().join("point");
+    let forked = super::stores::fork(dir.path().join("store"), point.clone(), None, (false, false));
+    let point_branch = control(forked).unwrap();
+    drop(store);
+    let restore = |name: &str| {
+        let restored =
+            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &point, 0, 0);
+        restored.map_err(|error| error.errno()).and_then(|store| store.root().map_err(Some))
+    };
+    assert_eq!(restore("first"), Ok(b"point".to_vec()));
+    // Another copy of the point's branch, which a VM opens, taking the branch.
+    let taken = dir.path().join("taken");
+    let made = (None, Kind::Fxfs);
+    control(super::stores::create(taken.clone(), 1 << 24, point_branch, made)).unwrap();
+    let taking = DaemonExtentStore::connect(&socket, &taken, 1 << 24).unwrap();
+    assert_eq!(read(&taking, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
+    drop(taking);
+    assert_eq!(restore("second"), Ok(b"point".to_vec()));
+}
+
+/// TASK-79.103: as a restore, so a control fork of a store that is no point (TASK-158) kept open:
+/// once another writer took its branch, the fork of the store opened anew takes it back.
+#[test]
+fn control_forks_of_a_point_fork_it_anew_once_another_writer_took_its_branch() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
+    store.commit(Some(b"point")).unwrap();
+    let point = dir.path().join("point");
+    let forked = super::stores::fork(dir.path().join("store"), point.clone(), None, (false, false));
+    let point_branch = control(forked).unwrap();
+    drop(store);
+    // A restore keeps the point open.
+    let restored =
+        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), &point, 0, 0);
+    assert_eq!(restored.map_err(|error| error.errno()).map(drop), Ok(()));
+    let taken = dir.path().join("taken");
+    let made = (None, Kind::Fxfs);
+    control(super::stores::create(taken.clone(), 1 << 24, point_branch, made)).unwrap();
+    let taking = DaemonExtentStore::connect(&socket, &taken, 1 << 24).unwrap();
+    assert_eq!(read(&taking, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
+    drop(taking);
+    let child = dir.path().join("child");
+    let branch = control(super::stores::fork(point, child.clone(), None, (false, false))).unwrap();
+    let child = DaemonExtentStore::connect(&socket, &child, 1 << 24).unwrap();
+    assert_eq!(child.branch(), branch.id);
+    assert_eq!(child.root(), Ok(b"point".to_vec()));
+}
+
+/// TASK-79.34: a store whose VM process goes while the daemon's work through its connection holds
+/// the connection, here a shrink waiting for its guest's answer, is let go once that work is done,
+/// which its VM process's going ends, not before: deleted once its connection is done, it is open
+/// no more.
+#[test]
+fn stores_held_through_their_connections_are_let_go_once_they_are() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 2 << 20);
+    let (asks, asked) = std::sync::mpsc::channel();
+    store.on_capacity(move |capacity, ask| {
+        // Unheard once the test has its answer.
+        let _ = asks.send((capacity, ask));
+    });
+    let resizing = {
+        let path = path.clone();
+        std::thread::spawn(move || resize(&path, 1 << 20))
+    };
+    assert_eq!(asked.recv().unwrap(), (1 << 20, true));
+    // Its VM process goes, answering nothing.
+    drop(store);
+    served.join().unwrap();
+    assert_eq!(delete_store(&path).map_err(|error| error.errno()), Ok(()));
+    assert_eq!(resizing.join().unwrap(), Err(Errno::ETIMEDOUT));
+}
+
+/// TASK-160.8: `OPEN`s of a store, to write it and to follow it, all at once as the VM process
+/// writing it exits, each tried again on `EBUSY` until it opens the store, or, to write it, another
+/// connection writes it: one writes it, as the first lets it go, holding it until all are done, the
+/// others refused (`EBUSY`); each follower follows it, the first's, a follower's or the next
+/// writer's; all read what the first committed. Once all are gone, nothing holds the store, nor
+/// has it open, and it opens again.
+#[test]
+fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier, RwLock, mpsc};
+    const WRITERS: usize = 4;
+    const FOLLOWERS: usize = 4;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (first, served) = connect(&path, 1 << 24);
+    let extent = ExtentId { branch: first.branch(), sequence: 1 };
+    assert_eq!(write(&first, extent, 0, &pattern(1, BLOCK)), Ok(()));
+    assert_eq!(first.commit(None), Ok(()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let tried = move |errno: Option<Errno>| {
+        errno != Some(Errno::EBUSY) || std::time::Instant::now() >= deadline
+    };
+    // All at once; those that open the store keep it until all are done: until the test lets go
+    // of `done`.
+    let start = Arc::new(Barrier::new(WRITERS + FOLLOWERS + 1));
+    let done = Arc::new(RwLock::new(()));
+    let all_done = done.write().unwrap();
+    let won = Arc::new(AtomicBool::new(false));
+    let (wrote, writes) = mpsc::channel();
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            let (path, start, done, won, wrote) =
+                (path.clone(), start.clone(), done.clone(), won.clone(), wrote.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                let opened = loop {
+                    let (client, server) = UnixStream::pair().unwrap();
+                    let tenant = default_tenant().unwrap();
+                    let served = std::thread::spawn(move || serve_connection(server, tenant));
+                    match DaemonExtentStore::over(
+                        client,
+                        &path,
+                        Opening::Create(1 << 24, Kind::Fxfs),
+                    ) {
+                        Ok(store) => {
+                            won.store(true, Ordering::SeqCst);
+                            break Ok((store, served));
+                        }
+                        Err(error) => {
+                            served.join().unwrap();
+                            if tried(error.errno()) || won.load(Ordering::SeqCst) {
+                                break Err(error.errno());
+                            }
+                        }
+                    }
+                };
+                match opened {
+                    Ok((store, served)) => {
+                        wrote.send(Ok(read(&store, extent, 0, BLOCK))).unwrap();
+                        drop(done.read().unwrap());
+                        drop(store);
+                        served.join().unwrap();
+                    }
+                    Err(errno) => wrote.send(Err(errno)).unwrap(),
+                }
+            })
+        })
+        .collect();
+    let (followed, follows) = mpsc::channel();
+    let followers: Vec<_> = (0..FOLLOWERS)
+        .map(|_| {
+            let (path, start, done, followed) =
+                (path.clone(), start.clone(), done.clone(), followed.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                let following = loop {
+                    match follow(&path) {
+                        Err(errno) if !tried(errno) => {}
+                        following => break following,
+                    }
+                };
+                match following {
+                    Ok((follower, served)) => {
+                        followed.send(Ok(read(&follower, extent, 0, BLOCK))).unwrap();
+                        drop(done.read().unwrap());
+                        drop(follower);
+                        served.join().unwrap();
+                    }
+                    Err(errno) => followed.send(Err(errno)).unwrap(),
+                }
+            })
+        })
+        .collect();
+    drop((wrote, followed));
+    // Its VM process exits.
+    start.wait();
+    drop(first);
+    served.join().unwrap();
+    // Each says once, the store open or not.
+    let wait = std::time::Duration::from_secs(60);
+    let writes: Vec<_> =
+        (0..WRITERS).map(|_| writes.recv_timeout(wait).expect("a writer said nothing")).collect();
+    let follows: Vec<_> = (0..FOLLOWERS)
+        .map(|_| follows.recv_timeout(wait).expect("a follower said nothing"))
+        .collect();
+    drop(all_done);
+    for thread in writers.into_iter().chain(followers) {
+        thread.join().unwrap();
+    }
+    let (opened, refused): (Vec<_>, Vec<_>) = writes.into_iter().partition(Result::is_ok);
+    assert_eq!(opened, vec![Ok(Ok(pattern(1, BLOCK)))]);
+    assert_eq!(refused, vec![Err(Some(Errno::EBUSY)); WRITERS - 1]);
+    assert_eq!(follows, vec![Ok(Ok(pattern(1, BLOCK))); FOLLOWERS]);
+    assert!(super::stores::table().is_empty(), "the store is held or open once all are gone");
+    let (again, served) = connect(&path, 1 << 24);
+    assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    drop(again);
+    served.join().unwrap();
+}
+
+/// TASK-79.16: a VM process that keeps as much stream data in flight as the protocol allows,
+/// whole extents' writes of eight threads, four in flight at once, the others waiting for room
+/// until one is answered, is served on: what a request's payload holds is counted in flight until
+/// its reply is queued, and the reply's bytes from then, not both (`server::Answer`), which, for a
+/// while, would have a VM process within the bounds let go.
+#[test]
+fn vm_processes_within_the_bounds_are_served_on() {
+    const WRITERS: u64 = 8;
+    const ROUNDS: u64 = 8;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 30);
+    let store = std::sync::Arc::new(store);
+    let extent = pattern(3, super::wire::MAX_PAYLOAD as usize);
+    let extent = std::sync::Arc::new(extent);
+    let writers: Vec<_> = (1..=WRITERS)
+        .map(|sequence| {
+            let (store, extent) = (store.clone(), extent.clone());
+            std::thread::spawn(move || {
+                let id = ExtentId { branch: store.branch(), sequence };
+                (0..ROUNDS).map(|_| write(&store, id, 0, &extent)).collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let written: Vec<_> = writers.into_iter().map(|writer| writer.join().unwrap()).collect();
+    assert_eq!(written, vec![vec![Ok(()); ROUNDS as usize]; WRITERS as usize]);
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-79.43: a window's mappings are answered beside as much stream data in flight as the
+/// protocol allows, and their VM process served on: what a reply to `MAPPINGS` holds, as many
+/// mappings as a window of its size may have, takes none of the room the daemon keeps for what it
+/// queues otherwise, stage operations and commits. Here a window of pages every other of which is
+/// a mapping of its own, their reply larger than that room, behind whole extents' reads, their
+/// replies unread, and an `INFO` after.
+#[test]
+fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
+    use super::wire::*;
+    let ps = page_size();
+    // A reply of mappings larger than the daemon's room for what it queues but replies.
+    let count = (18 << 20) / MAPPING_BYTES;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let (sender, mut receiver, _stream, branch) = raw_connection(&socket, &path, 1 << 30);
+    let window = Header::new(WINDOW, 2).with_args(&[2 * count * ps, 1]);
+    call(&sender, &mut receiver, window, &[]);
+    // The mappings, as many in flight as a thread taking their replies leaves room for.
+    let sender = std::sync::Arc::new(sender);
+    let (answered, answers) = std::sync::mpsc::channel();
+    let receiving = {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let reply = loop {
+                    let message = receiver.receive(|| 0).unwrap().unwrap();
+                    match message.header.kind {
+                        REPLY => break message,
+                        _ if message.header.flags & STAGE_ACK != 0 => {
+                            sender.send(Header::new(ACK, message.header.id), &[], &[]).unwrap()
+                        }
+                        _ => {}
+                    }
+                };
+                assert_eq!(reply.header.status, 0, "mapping {}", reply.header.id);
+                answered.send(()).unwrap();
+            }
+            receiver
+        })
+    };
+    for n in 0..count {
+        if n >= 1024 {
+            answers.recv().unwrap();
+        }
+        let args = [0, 0, 0, ps, 2 * n * ps];
+        let zeros = Header::new(MAP, 3 + n).with_args(&args).with_flags(MAP_ZEROS);
+        sender.send(zeros, &[], &[]).unwrap();
+    }
+    let mut receiver = receiving.join().unwrap();
+
+    // A whole extent read back as many times as the protocol's stream data holds, and the
+    // window's mappings, their replies unread, which the daemon holds.
+    let id = 3 + count;
+    let extent = pattern(4, MAX_PAYLOAD as usize);
+    let written = Header::new(WRITE, id).with_args(&[branch, 1, 0]);
+    assert_eq!(call(&sender, &mut receiver, written, &extent).header.status, 0);
+    let reads = MAX_STREAM_BYTES / MAX_PAYLOAD;
+    for n in 1..=reads {
+        let read = Header::new(READ, id + n).with_args(&[branch, 1, 0, MAX_PAYLOAD]);
+        sender.send(read, &[], &[]).unwrap();
+    }
+    sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
+    let holder = super::stores::table().writer(&super::stores::store_key(&path)).unwrap();
+    // All of them queued, but what the socket holds, a mebibyte at most.
+    let replies = reads * MAX_PAYLOAD + count * MAPPING_BYTES - (1 << 20);
+    while holder.queued() < replies {
+        std::thread::yield_now();
+    }
+    sender.send(Header::new(INFO, id + reads + 2), &[], &[]).unwrap();
+    // Their replies, in any order, as the daemon serves its requests side by side.
+    let answered = within(std::time::Duration::from_secs(60), move || {
+        let mut answered = Vec::new();
+        while answered.len() < reads as usize + 2 {
+            let message = receiver.receive(|| 0).unwrap().expect("the daemon let it go");
+            if message.header.kind == REPLY {
+                let header = message.header;
+                answered.push((header.id - id, header.status, message.payload.len()));
+            }
+        }
+        answered.sort();
+        answered
+    });
+    let mut expected: Vec<_> = (1..=reads).map(|n| (n, 0, MAX_PAYLOAD as usize)).collect();
+    expected.push((reads + 1, 0, (count * MAPPING_BYTES) as usize));
+    expected.push((reads + 2, 0, 0));
+    assert_eq!(answered, Ok(expected));
+}
+
+/// How a [`whatever_a_vm_process_says_harms_no_other`] sequence ends.
+#[derive(Debug, Clone, Copy)]
+enum LastWords {
+    /// Closes the connection between messages.
+    Nothing,
+    /// A part of a header.
+    PartOfAHeader,
+    /// A header of more payload than comes.
+    MissingPayload(u64),
+    /// A header of more descriptors than come.
+    MissingDescriptors(u32),
+}
+
+/// TASK-77: a VM process is as trustworthy as its guest, once the guest has broken out into it: a
+/// tenant's VM process saying anything, of any kind, with any flags and arguments, IDs and paths
+/// that name another tenant's among them, through its window and transfer area, then breaking off
+/// however it likes, panics nothing, leaves another tenant's store as it was and served, and lets
+/// its own go. TASK-154: and it gets of the bucket what its VM manager put in its directory alone,
+/// a point it restores, and nothing of the branch it names. TASK-164.1: through a window that
+/// copies on write too, its stores' faults copying pages into its own memory, and its `PRIVATE`s.
+/// Seeded by proptest, which says the sequence if one fails.
+#[test]
+fn whatever_a_vm_process_says_harms_no_other() {
+    use super::wire::*;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+    use std::os::fd::{AsFd as _, AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use zerocopy::IntoBytes as _;
+
+    /// A word that says the VM process's store's branch, the other tenant's, and the one its VM
+    /// manager took for it.
+    const OWN_BRANCH: u64 = 0xb0b0_0001;
+    const OTHER_BRANCH: u64 = 0xb0b0_0002;
+    const GIVEN_BRANCH: u64 = 0xb0b0_0003;
+    const WINDOW_BYTES: u64 = 1 << 20;
+    const TRANSFER_BYTES: u64 = 1 << 20;
+    /// The ID of the request that ends a sequence.
+    const LAST: u64 = 0x1a57;
+    /// The ID of a restore's `OPEN`.
+    const RESTORE: u64 = 0x7e57;
+    const KINDS: [u32; 33] = [
+        OPEN,
+        READ,
+        WRITE,
+        FREE,
+        MAP,
+        UNMAP,
+        COMMIT,
+        ROOT,
+        INFO,
+        WINDOW,
+        FAULT,
+        ACK,
+        FORK,
+        RESIZED,
+        // cladefs: and 29 and 107, writable DAX's asks to seal and their answers, retired.
+        MAPPINGS,
+        ADVANCE,
+        LET_GO,
+        PIN,
+        UNPIN,
+        TRANSFER,
+        FREE_MANY,
+        STAGE_COUNTS,
+        BUILD,
+        29,
+        PRIVATE,
+        REPLY,
+        STAGE_MAP,
+        STAGE_UNMAP,
+        CAPACITY,
+        107,
+        14,
+        0xffff_ffff,
+        MAP_MANY,
+    ];
+    let wait = std::time::Duration::from_secs(60);
+
+    // A panic on the daemon's runtime ends its task alone.
+    static PANICS: AtomicU64 = AtomicU64::new(0);
+    let panicked = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        PANICS.fetch_add(1, Ordering::Relaxed);
+        panicked(info);
+    }));
+
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let vms = dir.path().join("vms");
+    std::fs::create_dir(&vms).unwrap();
+    let tenant = super::server::Tenant::new(1, &vms).unwrap();
+    let (socket, other_socket) = (dir.path().join("tenant.sock"), dir.path().join("other.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    let listener = UnixListener::bind(&other_socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+
+    let other_path = dir.path().join("other");
+    let other = DaemonExtentStore::connect(&other_socket, &other_path, 1 << 24).unwrap();
+    let kept = ExtentId { branch: other.branch(), sequence: 1 };
+    write(&other, kept, 0, &pattern(9, BLOCK)).unwrap();
+    other.commit(None).unwrap();
+    let their_bytes = std::sync::Arc::new(pattern(9, BLOCK));
+
+    // A snapshot in the bucket, of a branch its VM manager makes a point of in its directory.
+    let given = DaemonExtentStore::connect(&other_socket, dir.path().join("given"), 1 << 24);
+    let given = given.unwrap();
+    let given_branch = given.branch();
+    write(&given, ExtentId { branch: given_branch, sequence: 1 }, 0, &pattern(8, BLOCK)).unwrap();
+    given.commit(Some(b"given")).unwrap();
+    drop(given);
+    let point = vms.join("point");
+    let given = branch_at(&dir.path().join("given"));
+    control(super::stores::create(point.clone(), 1 << 24, given, (None, Kind::Fxfs))).unwrap();
+
+    let ps = page_size();
+    let word = prop_oneof![
+        Just(0u64),
+        Just(1),
+        Just(ps),
+        Just(WINDOW_BYTES),
+        Just(WINDOW_BYTES - ps),
+        Just(MAX_WINDOW),
+        Just(MAX_WINDOW + ps),
+        Just(1 << 60),
+        Just(OWN_BRANCH),
+        Just(OTHER_BRANCH),
+        Just(GIVEN_BRANCH),
+        1u64..16,
+        (0u64..64).prop_map(move |page| page * ps),
+        (0u64..4096).prop_map(|back| u64::MAX - back),
+        any::<u64>(),
+    ];
+    let paths = [
+        vms.join("fork"),
+        vms.join("../escaped"),
+        other_path.clone(),
+        point.clone(),
+        std::path::PathBuf::from("relative"),
+    ];
+    let payload = prop_oneof![
+        4 => proptest::collection::vec(any::<u8>(), 0..64),
+        1 => (0..paths.len()).prop_map(move |path| {
+            std::os::unix::ffi::OsStrExt::as_bytes(paths[path].as_os_str()).to_vec()
+        }),
+    ];
+    let anything = (
+        proptest::sample::select(&KINDS[..]),
+        prop_oneof![0u32..32, any::<u32>()],
+        any::<u64>(),
+        [word.clone(), word.clone(), word.clone(), word.clone(), word],
+        payload,
+    );
+    // Requests a store would serve, as far as their extents and pages go: of those the VM
+    // process wrote, or wrote and freed, and of the window it has, in any order.
+    let page = move || (0u64..32).prop_map(move |page| page * ps);
+    let length = move || (1u64..8).prop_map(move |pages| pages * ps);
+    let sequence = || 1u64..16;
+    let plausible = prop_oneof![
+        (sequence(), page(), 1usize..8).prop_map(move |(extent, at, pages)| {
+            (WRITE, 0, 0, [OWN_BRANCH, extent, at, 0, 0], vec![0x5a; pages * ps as usize])
+        }),
+        (sequence(), page(), length()).prop_map(|(extent, at, len)| {
+            (READ, 0, 0, [OWN_BRANCH, extent, at, len, 0], Vec::new())
+        }),
+        (sequence(), page(), length(), page(), 0u32..4).prop_map(|(extent, at, len, to, flags)| {
+            (MAP, flags, 0, [OWN_BRANCH, extent, at, len, to], Vec::new())
+        }),
+        // cladefs: of extents or zeros, some (TASK-92.14).
+        proptest::collection::vec((sequence(), page(), length(), page(), any::<bool>()), 1..4)
+            .prop_map(|maps| {
+                let mappings: Vec<crate::WindowMapping> = (maps.into_iter())
+                    .map(|(sequence, at, len, to, zeros)| crate::WindowMapping {
+                        window_offset: to,
+                        len,
+                        contents: match zeros {
+                            true => crate::MappingContents::Zeros,
+                            false => crate::MappingContents::Extent {
+                                extent: ExtentId { branch: OWN_BRANCH, sequence },
+                                offset: at,
+                            },
+                        },
+                    })
+                    .collect();
+                (MAP_MANY, 0, 0, [0; 5], super::codec::mappings_payload(&mappings))
+            }),
+        (page(), length()).prop_map(|(at, len)| (UNMAP, 0, 0, [at, len, 0, 0, 0], Vec::new())),
+        (page(), 0u32..4).prop_map(|(at, flags)| (FAULT, flags, 0, [at, 0, 0, 0, 0], Vec::new())),
+        // cladefs: of a window that copies on write, or not (backlog doc-13).
+        (page(), length()).prop_map(|(at, len)| (PRIVATE, 0, 0, [at, len, 0, 0, 0], Vec::new())),
+        sequence().prop_map(|extent| (FREE, 0, 0, [OWN_BRANCH, extent, 0, 0, 0], Vec::new())),
+        (0u32..4).prop_map(|flags| (COMMIT, flags, 0, [0; 5], Vec::new())),
+        Just((MAPPINGS, 0, 0, [0; 5], Vec::new())),
+        Just((INFO, 0, 0, [0; 5], Vec::new())),
+    ];
+    // What the other tenant wrote, as a store of its branch would read it.
+    let reading_theirs = Just((READ, 0, 0, [OTHER_BRANCH, 1, 0, BLOCK as u64, 0], Vec::new()));
+    // On a connection that opened nothing yet, stores any which way: restores of a point of none,
+    // and of the one taken for it, naming a branch of either, or the other tenant's.
+    let nothing = [&[0], vms.join("nothing").as_os_str().as_bytes()].concat();
+    let taken = [&[0], point.as_os_str().as_bytes()].concat();
+    let opening = prop_oneof![
+        (0u64..4, any::<bool>()).prop_map(|(store, creating)| {
+            let flags = if creating { OPEN_CREATE } else { 0 };
+            (OPEN, flags, 0, [1 << 24, 0, 0, 0, VERSION], format!("open-{store}").into_bytes())
+        }),
+        (0u64..4, any::<bool>(), prop_oneof![Just(OTHER_BRANCH), Just(GIVEN_BRANCH)]).prop_map(
+            move |(store, absent, branch)| {
+                let point = if absent { &nothing } else { &taken };
+                let named = [format!("open-{store}").as_bytes(), point].concat();
+                (OPEN, OPEN_FORK_FROM, RESTORE, [1 << 24, branch, 0, 0, VERSION], named)
+            }
+        ),
+    ];
+    let message = prop_oneof![12 => plausible, 4 => anything, 2 => opening, 1 => reading_theirs];
+    let last_words = prop_oneof![
+        Just(LastWords::Nothing),
+        Just(LastWords::PartOfAHeader),
+        any::<u64>().prop_map(LastWords::MissingPayload),
+        (1u32..4).prop_map(LastWords::MissingDescriptors),
+    ];
+    // A window of any size it asks for first, the sequence's mappings' within most.
+    let window = prop_oneof![
+        4 => Just(WINDOW_BYTES),
+        1 => Just(MAX_WINDOW),
+        1 => Just(MAX_WINDOW + ps),
+        1 => Just(1 << 60),
+    ];
+    // cladefs: copying on write, of some private pages, none, or more than it has (backlog doc-13).
+    let copying = prop_oneof![
+        1 => Just(0u64),
+        6 => 1u64..16,
+        1 => Just(u64::MAX),
+    ];
+    let sequence = (
+        proptest::collection::vec(message, 1..64),
+        any::<bool>(),
+        last_words,
+        any::<bool>(),
+        window,
+        copying,
+    );
+
+    let cases = AtomicU64::new(0);
+    let served = std::sync::Arc::new(AtomicU64::new(0));
+    let restored = std::sync::Arc::new(AtomicU64::new(0));
+    let stolen = std::sync::Arc::new(AtomicU64::new(0));
+    // A failing case shrinks for two minutes at most: each step may wait as long as `wait`, and
+    // shrinking one to the end took 38 minutes.
+    let config = Config {
+        cases: 128,
+        failure_persistence: None,
+        max_shrink_time: 120_000,
+        ..Config::default()
+    };
+    TestRunner::new(config)
+        .run(&sequence, |(messages, transfer, last_words, opened, window, copying)| {
+            let case = cases.fetch_add(1, Ordering::Relaxed);
+            let path = vms.join(format!("store-{case}"));
+            let (sender, mut receiver, stream, branch) = if opened {
+                raw_connection(&socket, &path, 1 << 24)
+            } else {
+                let stream = UnixStream::connect(&socket).unwrap();
+                let sending = Sender::new(stream.try_clone().unwrap());
+                (sending, Receiver::new(stream.try_clone().unwrap()), stream, 0)
+            };
+            // The stores it may hold once done: those it opened, had it none.
+            let held: Vec<_> = (0..4)
+                .filter(|_| !opened)
+                .map(|store| vms.join(format!("{case}-open-{store}")))
+                .chain([path].into_iter().filter(|_| opened))
+                .collect();
+            let sender = std::sync::Arc::new(sender);
+            // Whatever comes back, its stage operations made, as far as saying so goes.
+            let (answered, all_answered) = std::sync::mpsc::channel();
+            let (restore_answered, restores_answered) = std::sync::mpsc::channel();
+            let own = std::sync::Arc::new(AtomicU64::new(branch));
+            let answering = {
+                let (sender, served, restored) = (sender.clone(), served.clone(), restored.clone());
+                let (stolen, their_bytes, own) = (stolen.clone(), their_bytes.clone(), own.clone());
+                std::thread::spawn(move || {
+                    while let Ok(Some(message)) = receiver.receive(|| u64::MAX) {
+                        if message.header.kind == REPLY && message.header.status == 0 {
+                            served.fetch_add(1, Ordering::Relaxed);
+                            if message.header.id == RESTORE {
+                                restored.fetch_add(1, Ordering::Relaxed);
+                                own.store(message.header.args[0], Ordering::Relaxed);
+                            }
+                            // The other tenant's branch, or what it wrote.
+                            if message.header.args[0] == kept.branch
+                                || message.payload == *their_bytes
+                            {
+                                stolen.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        if message.header.kind == REPLY && message.header.id == LAST {
+                            let _ = answered.send(());
+                        }
+                        if message.header.kind == REPLY && message.header.id == RESTORE {
+                            let _ = restore_answered.send(());
+                        }
+                        if message.header.flags & STAGE_ACK != 0 {
+                            let _ = sender.send(Header::new(ACK, message.header.id), &[], &[]);
+                        }
+                    }
+                })
+            };
+            let window = Header::new(WINDOW, 2).with_args(&[window, copying]);
+            sender.send(window, &[], &[]).unwrap();
+            if transfer {
+                // SAFETY: Makes a descriptor, which is owned below.
+                let fd =
+                    unsafe { libc::memfd_create(c"transfer".as_ptr(), libc::MFD_ALLOW_SEALING) };
+                assert!(fd >= 0);
+                // SAFETY: Just made, and owned here.
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                // SAFETY: Sizes and seals it.
+                unsafe {
+                    assert_eq!(libc::ftruncate(fd.as_raw_fd(), TRANSFER_BYTES as i64), 0);
+                    assert_eq!(
+                        libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK),
+                        0
+                    );
+                }
+                let area = Header::new(TRANSFER, 3).with_args(&[TRANSFER_BYTES]);
+                sender.send(area, &[], &[fd.as_fd()]).unwrap();
+            }
+            let named_word = |word: u64| match word {
+                OWN_BRANCH => own.load(Ordering::Relaxed),
+                OTHER_BRANCH => kept.branch,
+                GIVEN_BRANCH => given_branch,
+                word => word,
+            };
+            // A path a sequence opens at, this case's.
+            let in_vms = |payload: Vec<u8>| match payload.strip_prefix(b"open-") {
+                Some(rest) => {
+                    let named = vms.as_os_str().as_bytes();
+                    [named, format!("/{case}-open-").as_bytes(), rest].concat()
+                }
+                None => payload,
+            };
+            for (kind, flags, id, args, payload) in messages {
+                let args = args.map(named_word);
+                let message = Header::new(kind, id).with_args(&args).with_flags(flags);
+                let payload = in_vms(payload);
+                // The daemon may have let it go by now.
+                let _ = sender.send(message, &payload, &[]);
+                // What comes after a restore is said of the store it opened, as the daemon may
+                // take longer over it than over all that comes after: answered, or the daemon
+                // let it go, which ends the answers.
+                if id == RESTORE {
+                    let _ = restores_answered.recv_timeout(wait);
+                }
+            }
+            // Answered, or the daemon has let it go, which ends the answers.
+            let _ = sender.send(Header::new(INFO, LAST), &[], &[]);
+            let _ = all_answered.recv_timeout(wait);
+            let raw = |bytes: &[u8]| {
+                let _ = std::io::Write::write_all(&mut &stream, bytes);
+            };
+            let header = |len, fds| Header { kind: WRITE, len, fds, ..Default::default() };
+            match last_words {
+                LastWords::Nothing => {}
+                LastWords::PartOfAHeader => raw(&header(0, 0).as_bytes()[..16]),
+                LastWords::MissingPayload(len) => raw(header(len, 0).as_bytes()),
+                LastWords::MissingDescriptors(fds) => raw(header(0, fds).as_bytes()),
+            }
+            stream.shutdown(std::net::Shutdown::Both).unwrap();
+            prop_assert!(within(wait, move || answering.join().unwrap()).is_ok());
+
+            // Its store is let go of, and opens.
+            for path in held {
+                let (opening, reopened) = (socket.clone(), path);
+                let opened = within(wait, move || {
+                    loop {
+                        match DaemonExtentStore::connect(&opening, &reopened, 1 << 24) {
+                            Err(error) if error.errno() == Some(Errno::EBUSY) => {
+                                std::thread::yield_now()
+                            }
+                            opened => break opened.map(drop).map_err(|error| error.to_string()),
+                        }
+                    }
+                });
+                prop_assert_eq!(opened, Ok(Ok(())));
+            }
+
+            // Nothing it said took a branch, nor reached the other tenant's, which is served on.
+            prop_assert!(!vms.join("nothing").exists(), "a point of a branch named was taken");
+            prop_assert_eq!(stolen.load(Ordering::Relaxed), 0);
+            prop_assert_eq!(read(&other, kept, 0, BLOCK), Ok(pattern(9, BLOCK)));
+            let served = ExtentId { branch: kept.branch, sequence: 2 + case };
+            prop_assert_eq!(write(&other, served, 0, &pattern(7, BLOCK)), Ok(()));
+            prop_assert_eq!(other.commit(None), Ok(()));
+            prop_assert_eq!(read(&other, served, 0, BLOCK), Ok(pattern(7, BLOCK)));
+            prop_assert_eq!(PANICS.load(Ordering::Relaxed), 0);
+            Ok(())
+        })
+        .unwrap();
+    // What it says reaches past the checks: not every request is refused. Those it heard of
+    // served, once it hung up, are fewer the busier the host: 929 at the least of 1300 or so, with
+    // the machine's other work making everything fifty times slower.
+    let (served, restored) = (served.load(Ordering::Relaxed), restored.load(Ordering::Relaxed));
+    println!("{served} requests served, {restored} of them restores");
+    assert!(served > 500, "{served} requests served");
+    // And it restores what it was given: refusing everything would pass the rest.
+    assert!(restored > 0, "{restored} restores served");
+    drop(other);
+}
+
+/// TASK-153.16: a panic holding a store's lock, serving a VM process's request, halts the store,
+/// alone: the request fails with `EIO`, and so does each after it, which panics no more, as each
+/// did at the lock's poison in TASK-104, TASK-105 and TASK-150.20, those that take no lock of the
+/// store's too. Another VM process's store serves on. Its VM process gone, the store opens anew,
+/// as of its last commit, and serves.
+#[test]
+fn a_panic_holding_a_stores_lock_halts_it_alone() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PANICS: AtomicU64 = AtomicU64::new(0);
+    let panicked = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        PANICS.fetch_add(1, Ordering::Relaxed);
+        panicked(info);
+    }));
+
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    let (other, other_served) = connect(&dir.path().join("other"), 1 << 24);
+    let ours = |sequence| ExtentId { branch: store.branch(), sequence };
+    let (kept, written) = (ours(1), ours(2));
+    write(&store, kept, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+
+    crate::halt::tests::panic_holding("opening");
+    assert_eq!(write(&store, written, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
+    assert_eq!(PANICS.load(Ordering::Relaxed), 1);
+    assert_eq!(read(&store, kept, 0, BLOCK), Err(Errno::EIO));
+    assert_eq!(write(&store, ours(3), 0, &pattern(3, BLOCK)), Err(Errno::EIO));
+    assert_eq!(store.commit(None), Err(Errno::EIO));
+    // Which takes no lock of the store's.
+    assert_eq!(store.info().map(|info| info.capacity), Err(Errno::EIO));
+    assert_eq!(PANICS.load(Ordering::Relaxed), 1);
+
+    let theirs = ExtentId { branch: other.branch(), sequence: 1 };
+    assert_eq!(write(&other, theirs, 0, &pattern(4, BLOCK)), Ok(()));
+    assert_eq!(other.commit(None), Ok(()));
+    assert_eq!(read(&other, theirs, 0, BLOCK), Ok(pattern(4, BLOCK)));
+
+    drop(store);
+    served.join().unwrap();
+    let (store, served) = connect(&path, 1 << 24);
+    assert_eq!(read(&store, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(write(&store, written, 0, &pattern(5, BLOCK)), Ok(()));
+    assert_eq!(store.commit(None), Ok(()));
+    assert_eq!(read(&store, written, 0, BLOCK), Ok(pattern(5, BLOCK)));
+    assert_eq!(PANICS.load(Ordering::Relaxed), 1);
+    for (store, served) in [(store, served), (other, other_served)] {
+        drop(store);
+        served.join().unwrap();
+    }
+}
+
+/// The locks shared beyond one store a VM process's requests take ([`child_panics_holding`]): the
+/// extent cache's and its extents', a window's and its change's, its connection's, and those of
+/// `extent_store`'s store, which its followers share with its writer (TASK-149.24).
+const SHARED_LOCKS: &[&str] = &[
+    "extent cache",
+    "cached extent holders",
+    "cached extent pages",
+    "window",
+    "stage change",
+    "connection phase",
+    "connection window",
+    "connection requests",
+    "store state",
+    "store commit",
+    "store durability",
+    "store flush",
+];
+
+/// What [`child_panics_holding`] panics holding, as its parent says.
+const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
+
+/// Run by [`a_panic_holding_a_shared_lock_stops_the_daemon`], in a process of its own: a daemon,
+/// aborting on panics as `cladefsd` does, serves a VM process's window and store, which
+/// write, commit, map and fault a page in, and close, a panic holding the lock [`PANIC_HOLDING`]
+/// names as it is next taken. It says if it got to the end.
+#[test]
+#[ignore = "run by a_panic_holding_a_shared_lock_stops_the_daemon, in a process of its own"]
+fn child_panics_holding() {
+    let Ok(lock) = std::env::var(PANIC_HOLDING) else { return };
+    extent_store::shared::abort_on_panics();
+    host();
+    let ps = page_size() as usize;
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let memory = memory(1);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    extent_store::shared::testing::panic_holding(lock.leak());
+    let written = write(&store, extent, 0, &pattern(3, ps));
+    let committed = store.commit(None);
+    let mapped = store.map(extent, 0, ps as u64, 0);
+    // SAFETY: The window's memory, whose faults the store serves.
+    let loaded = unsafe { memory.as_ptr().read_volatile() };
+    drop(store);
+    let closed = served.join();
+    println!("THE END: {written:?} {committed:?} {mapped:?} {loaded} {closed:?}");
+}
+
+/// TASK-149.24: a panic holding a lock shared beyond one store stops the daemon at once, saying
+/// which: an abort, from its panic hook, before anything unwinds; not a halt, which contains only
+/// its store, while the lock's poison, or what it guards half changed, reaches every user after,
+/// nor an abort from a drop panicking as it unwinds.
+#[test]
+fn a_panic_holding_a_shared_lock_stops_the_daemon() {
+    use std::os::unix::process::ExitStatusExt;
+    for lock in SHARED_LOCKS {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "cladefsd::tests::child_panics_holding", "--ignored", "--nocapture"])
+            .env(PANIC_HOLDING, lock)
+            .output()
+            .unwrap();
+        let said =
+            String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{lock}: {said}");
+        assert!(extent_store::shared::aborted_holding(&said, lock), "{lock}: {said}");
+        assert!(!said.contains("THE END"), "{lock}: {said}");
+        assert!(!said.contains("panic in a destructor"), "{lock}: {said}");
+    }
+}
+
+/// TASK-153.16: a panic serving a VM process's request past the store's locks, which poisons
+/// none of them, as one in `extent_store` beneath them may (TASK-79.1, TASK-79.80), halts the
+/// store as well: a read after it, which would find nothing amiss, fails with `EIO`. Its VM
+/// process gone, the store opens anew as of its last commit.
+#[test]
+fn a_panic_past_a_stores_locks_halts_it() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PANICS: AtomicU64 = AtomicU64::new(0);
+    let panicked = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        PANICS.fetch_add(1, Ordering::Relaxed);
+        panicked(info);
+    }));
+
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    let ours = |sequence| ExtentId { branch: store.branch(), sequence };
+    let (kept, written) = (ours(1), ours(2));
+    write(&store, kept, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    write(&store, written, 0, &pattern(2, BLOCK)).unwrap();
+
+    fail::cfg("cladefsd::commit", "panic").unwrap();
+    assert_eq!(store.commit(None), Err(Errno::EIO));
+    fail::remove("cladefsd::commit");
+    assert_eq!(read(&store, kept, 0, BLOCK), Err(Errno::EIO));
+    assert_eq!(PANICS.load(Ordering::Relaxed), 1);
+
+    drop(store);
+    served.join().unwrap();
+    let (store, served) = connect(&path, 1 << 24);
+    assert_eq!(read(&store, kept, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    assert_eq!(read(&store, written, 0, BLOCK), Err(Errno::ENOENT));
+    assert_eq!(PANICS.load(Ordering::Relaxed), 1);
+    drop(store);
+    served.join().unwrap();
+}
+
+/// TASK-159: a tenant's socket is of its mode, 0660, from the moment it is at its path, whatever
+/// the daemon's umask, even none: bound where no one else reaches, given its mode there, and only
+/// then put at its path, rather than open there until it is given.
+#[test]
+fn tenants_sockets_are_of_their_mode_from_the_first() {
+    use std::os::unix::fs::PermissionsExt as _;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (stores, sockets) = (dir.path().join("acme"), dir.path().join("tenants"));
+    std::fs::create_dir(&stores).unwrap();
+    std::fs::create_dir(&sockets).unwrap();
+    let socket = sockets.join("1.sock");
+    let (seen, modes) = std::sync::mpsc::channel();
+    let at = socket.clone();
+    fail::cfg_callback("cladefsd::bound", move || {
+        let mode = std::fs::symlink_metadata(&at).unwrap().permissions().mode();
+        seen.send(mode & 0o777).unwrap();
+    })
+    .unwrap();
+    // SAFETY: Plain system calls. Nothing else of this test's process, its own, makes a file
+    // meanwhile.
+    let umask = unsafe { libc::umask(0) };
+    let granted = super::grants::Grants::new(sockets.clone()).grant(1, &stores, (None, None));
+    // SAFETY: As above.
+    unsafe { libc::umask(umask) };
+    fail::remove("cladefsd::bound");
+    assert_eq!(granted, Ok(socket));
+    assert_eq!(modes.try_iter().collect::<Vec<_>>(), [0o660]);
+    // Where it was bound went.
+    assert_eq!(std::fs::read_dir(&sockets).unwrap().count(), 1);
+}
+
+/// TASK-159: a socket bound where one is already, as a running daemon's, fails with `EEXIST`, and
+/// leaves that one there, serving.
+#[test]
+fn sockets_are_not_bound_over_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let _running = super::bind_owner_only(&socket).unwrap();
+    let again = super::bind_owner_only(&socket).unwrap_err();
+    assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+    UnixStream::connect(&socket).unwrap();
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+/// TASK-141.4: a drain closes every VM process's connection, its VM told its daemon went, and its
+/// store, closed, opens elsewhere; the daemon's VM socket and its tenants' take no more
+/// connections, refused, their threads serving them returning; and the control API takes no more
+/// calls. Before, nothing drained: the daemon exited with all of them as they were.
+#[test]
+fn drains_close_every_connection_and_take_no_more() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let vms = dir.path().join("vms");
+    std::fs::create_dir(&vms).unwrap();
+    let (socket, tenant_socket) =
+        (dir.path().join("cladefsd.sock"), dir.path().join("tenant.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    let serving = std::thread::spawn(move || serve(listener));
+    let tenant = super::server::Tenant::new(1, &vms).unwrap();
+    let listener = UnixListener::bind(&tenant_socket).unwrap();
+    let serving_tenant = std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+
+    let (path, tenant_path) = (dir.path().join("store"), vms.join("store"));
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let tenants = DaemonExtentStore::connect(&tenant_socket, &tenant_path, 1 << 24).unwrap();
+    let (told, lost) = std::sync::mpsc::channel();
+    for (name, store) in [("store", &store), ("tenant's", &tenants)] {
+        let told = told.clone();
+        store.on_daemon_lost(move || told.send(name).unwrap());
+    }
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit_ordered(Some(b"drained")).unwrap();
+
+    assert_eq!(super::drain::drain(std::time::Duration::from_secs(60)), Ok(()));
+    let mut told: Vec<_> = lost.try_iter().collect();
+    told.sort();
+    assert_eq!(told, ["store", "tenant's"]);
+    assert_eq!(write(&store, extent, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
+    serving.join().unwrap();
+    serving_tenant.join().unwrap();
+    for socket in [&socket, &tenant_socket] {
+        let refused = UnixStream::connect(socket).err().map(|err| err.kind());
+        assert_eq!(refused, Some(std::io::ErrorKind::ConnectionRefused), "{}", socket.display());
+    }
+    assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
+    drop((store, tenants));
+    // Closed, durable, as of its last commit, though only ordered.
+    let closed = ExtentStore::open(&path).unwrap();
+    assert_eq!(closed.root(), Ok(b"drained".to_vec()));
+}
+
+/// TASK-141.4: a drain gives up past its bound, saying what is left: here, a connection that never
+/// goes.
+#[test]
+fn drains_give_up_past_their_bound() {
+    host();
+    let connection = super::server::CONNECTIONS.begin().unwrap();
+    let left = super::drain::drain(std::time::Duration::from_millis(100));
+    let left = left.err().expect("a drain gave up");
+    assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0, mount: false });
+    assert_eq!(
+        left.to_string(),
+        "1 VM processes' connections, 0 control calls and 0 stores' uploaders left"
+    );
+    drop(connection);
+}
+/// TASK-237: an image imported through the daemon (`ImportImage`) keeps what the bucket
+/// acknowledged of it in the host's part cache, as the daemon's other stores do, and the import's
+/// check of the filesystem it made reads it there: no ranged GET of the bucket's at all, the
+/// recoveries as the import's store is made and as the daemon opens it after reading what the
+/// branch's head names, nothing, then the import's checkpoint, whole (TASK-407). Its
+/// store was an image's, whose uploader and fetcher had no cache: its acknowledged segments were
+/// deleted, and the check read the image back from the bucket, 6,183 ranged GETs here (GCE r970:
+/// 6.8 GB downloaded for 11 GB uploaded).
+#[test]
+fn imports_read_what_they_made_from_the_hosts_cache() {
+    use crate::import::testing::{Entry, Kind, layer};
+    use extent_bucket::object_bucket::Request;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe { std::env::set_var("CLADEFSD_PART_CACHE", &cache) };
+    let bucket = super::stores::daemon_bucket().unwrap();
+    // Files of a few parts each, so that what the check reads is in segments the bucket
+    // acknowledged before it, as the import's close waits for its uploads.
+    let contents: Vec<Vec<u8>> = (0..8u8).map(|file| pattern(file, 3 << 20)).collect();
+    let names: Vec<String> = (0..contents.len()).map(|file| format!("file-{file}")).collect();
+    let entries: Vec<Entry<'_>> = (names.iter().zip(&contents))
+        .map(|(name, contents)| Entry::new(name, Kind::File(contents)))
+        .collect();
+    let image = dir.path().join("image.tar");
+    std::fs::write(&image, layer(&entries).unwrap()).unwrap();
+    let ranged = || bucket.stats().requests(Request::GetRange);
+    let before = ranged();
+    let path = dir.path().join("store");
+    control(super::stores::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
+    // Before TASK-407, three: a footer as the store's writer took its branch, made, its fence's;
+    // two as the daemon opened it after, its recovery's and its writer's, past the checkpoint.
+    assert_eq!(ranged() - before, 0, "ranged GETs of the bucket as the import ran");
+}
+
+/// TASK-149.17: a compromised VM process beside other tenants, checked against invariants.
+mod hostile;
+
+/// TASK-258: the daemon's spans, exported.
+mod otel;
+
+/// TASK-330.3: the daemon against a degraded bucket, for a long while.
+mod soak;
+
+/// TASK-260: the daemon's log records about a VM process's call for a guest request name the
+/// request, by the guest's number of it, and the store the call is of: refused at once, as a
+/// `WRITE` of a flag no write knows, or deferred, as a `PRIVATE` the window refuses; and a call for
+/// none names none.
+#[test]
+fn calls_for_guest_requests_are_logged_with_them() {
+    use super::wire::{Header, WRITE};
+    use crate::request::{RequestId, within_now};
+    use std::num::NonZeroU64;
+    let lines = super::logging::capture();
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    let named = std::fs::canonicalize(&path).unwrap();
+    let named = named.to_str().unwrap();
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let args = [extent.branch, extent.sequence, 0, 0, BLOCK as u64];
+    let unknown = Header::new(WRITE, 0).with_args(&args).with_flags(1 << 20);
+    let guest = |guest| Some(RequestId { guest: NonZeroU64::new(guest).unwrap(), store: None });
+    let refused = || {
+        let logged = std::mem::take(&mut *lines.lock().unwrap());
+        logged.into_iter().filter(|line| line.contains("refused with EINVAL")).collect::<Vec<_>>()
+    };
+    // Its flags as the wire has them, REQUEST among them if it says its guest request.
+    let write_refused = |flags: u32| {
+        format!(
+            "WARN cladefs::cladefsd::server: cladefsd: request 3 refused with EINVAL: flags {flags:#x}, \
+             args [\n    {:#x},\n    0x1,\n    0x0,\n    0x0,\n    0x1000,\n]",
+            extent.branch
+        )
+    };
+    refused();
+    let written = within_now(guest(42), || store.call(unknown, &pattern(1, BLOCK), &[]).map(drop));
+    assert_eq!(written, Err(Errno::EINVAL));
+    let saying = write_refused(1 << 31 | 1 << 20);
+    assert_eq!(refused(), [format!("{saying} request_id=42 store={named}")]);
+    // Deferred: served as a future, polled with its request current; refused where the window
+    // maps nothing. Asked as the VMM does, a future polled with the guest's number current.
+    let ps = page_size() as u64;
+    let memory = memory(4);
+    // SAFETY: The memory is the test's, and outlives the store.
+    unsafe { store.create_dax_window_in_host_memory(memory, 4 * ps, None, 2) }.unwrap();
+    refused();
+    let private = crate::request::guest_request(43, store.make_private_async(0, ps));
+    assert_eq!(futures::executor::block_on(private), Err(Errno::EINVAL));
+    assert_eq!(
+        refused(),
+        [format!(
+            "WARN cladefs::cladefsd::server: cladefsd: request 30 refused with EINVAL: flags 0x80000000, \
+             args [\n    0x0,\n    {ps:#x},\n    0x0,\n    0x0,\n    0x0,\n] request_id=43 \
+             store={named}"
+        )]
+    );
+    // A call for no guest request: none.
+    assert_eq!(store.call(unknown, &pattern(1, BLOCK), &[]).map(drop), Err(Errno::EINVAL));
+    assert_eq!(refused(), [write_refused(1 << 20)]);
+    drop(store);
+    served.join().unwrap();
+    // SAFETY: Unmaps the memory, which nothing uses any more.
+    assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps as usize) }, 0);
+}
+
+/// TASK-371: what a guest's sync costs through the daemon, measured: rounds of a guest's sync
+/// loop's requests, a 4 KiB write and an ordered commit, then another write and a durable commit,
+/// each round's time, to a file bucket whose requests wait `CLADEFS_BUCKET_LATENCY_MS`, at the URL
+/// `CLADEFS_PHASES_BUCKET` names, through a daemon serving on a thread. Against
+/// `crate::bucket`'s `bucket_round_trips_by_phase`, which commits in this process: what the daemon
+/// adds. `CLADEFS_TEST_ARGS='--run-ignored only --no-capture durable_commits_through_the_daemon'`.
+#[test]
+#[ignore = "a measurement against CLADEFS_PHASES_BUCKET's bucket"]
+fn durable_commits_through_the_daemon() {
+    let url = std::env::var("CLADEFS_PHASES_BUCKET").expect("CLADEFS_PHASES_BUCKET names a bucket");
+    let url = format!("{}/daemon-{:016x}/", url.trim_end_matches('/'), rand::random::<u64>());
+    let _ = super::logging::to_stderr();
+    // SAFETY: As in host.
+    unsafe {
+        std::env::set_var("CLADEFSD_BUCKET", &url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _served) = connect(&dir.path().join("store"), 1 << 30);
+    let mut took = Vec::new();
+    for sequence in 1..=40u64 {
+        let started = std::time::Instant::now();
+        let data = ExtentId { branch: store.branch(), sequence: 2 * sequence };
+        write(&store, data, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        store.commit_ordered(None).unwrap();
+        let journal = ExtentId { branch: store.branch(), sequence: 2 * sequence + 1 };
+        write(&store, journal, 0, &pattern(sequence as u8, BLOCK)).unwrap();
+        store.commit(None).unwrap();
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        println!("ROUND {sequence} ms={ms:.1}");
+        took.push(ms);
+    }
+    took.sort_by(f64::total_cmp);
+    println!(
+        "ROUNDS n={} median-ms={:.1} min-ms={:.1} max-ms={:.1}",
+        took.len(),
+        took[took.len() / 2],
+        took[0],
+        took[took.len() - 1]
+    );
+}
+
+/// TASK-433.8: the governor sizes the stores' page cache to what it leaves it, as Linux sizes its
+/// page cache to the memory free: a tenth of it dirty before the flusher writes back, a fifth
+/// before writers wait, all of it held.
+#[test]
+fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
+    let allowance = 8 << 30;
+    super::memory::govern(allowance);
+    let sized = extent_store::pages::shared().options();
+    assert_eq!(
+        (sized.background, sized.hard, sized.most),
+        (allowance / 10, allowance / 5, allowance)
+    );
+}

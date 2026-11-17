@@ -1337,8 +1337,8 @@ impl Model {
     }
 
     /// What `step`, refused for lack of room or memory, left of `file`: `got`, what it reads now.
-    /// An operation of many transactions stands as far as it got (fxfs_vfs_remap_file_range,
-    /// fxfs_dax_punch_begin). Takes `got` for `file`'s if `step` could have reached it: a write
+    /// An operation of many transactions stands as far as it got (cladefs_data_remap_file_range,
+    /// cladefs_dax_punch_begin). Takes `got` for `file`'s if `step` could have reached it: a write
     /// nothing, as one that writes any says how much; a whole file's clone its blocks in order,
     /// a size between; any other, each byte as it was or as the step done whole leaves it, and a
     /// size between those. An O_DIRECT write is the last kind: it may fail having written some of
@@ -1390,7 +1390,7 @@ impl Model {
     }
 
     /// What a clone refused for lack of room left: a clone is many transactions, and what it got
-    /// to stands (fxfs_vfs_remap_file_range), its blocks in order, which `got`, `to` as it reads
+    /// to stands (cladefs_data_remap_file_range), its blocks in order, which `got`, `to` as it reads
     /// now, says the extent of. Fails with the size if that's no size the clone could have reached.
     fn clone_stopped_short(&mut self, from: usize, to: usize, got: &[u8]) -> Result<(), String> {
         let (before, source) = (self.files[to].len(), self.files[from].clone());
@@ -1417,7 +1417,7 @@ impl Model {
 
 /// cladefs: the largest file a filesystem holds, its superblock's `s_maxbytes`: the VFS's own
 /// (MAX_LFS_FILESIZE), as XFS's and Fxfs's without a DAX window are; Fxfs's with one, a chunk short
-/// of the VFS's (fxfs_vfs_fill_super); and ext4's of blocks of `block` bytes, its extents' 32-bit
+/// of the VFS's (cladefs_vfs_fill_super); and ext4's of blocks of `block` bytes, its extents' 32-bit
 /// block numbers' (ext4_max_size).
 pub const LARGEST: u64 = i64::MAX as u64;
 pub const LARGEST_DAX: u64 = LARGEST / CHUNK * CHUNK;

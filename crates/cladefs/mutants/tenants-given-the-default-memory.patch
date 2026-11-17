@@ -1,9 +1,9 @@
 # Every tenant's VM process is given the default tenant's memory as its own, as the default arena
 # was every tenant's once (TASK-79.17).
 # Kind: another tenant's
-# Killer: extentd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
---- a/crates/cladefs/src/extentd/server.rs
-+++ b/crates/cladefs/src/extentd/server.rs
+# Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
 @@ -1353,7 +1353,7 @@
      /// it says ([`Opened`]): its tenant's arena, and the default one, read-only (TASK-43); the
      /// default tenant's as any other's (TASK-79.17).

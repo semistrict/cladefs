@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 13:57'
+updated_date: '2026-11-16 22:53'
 labels: []
 dependencies: []
 parent_task_id: TASK-444.2
@@ -17,7 +18,7 @@ ordinal: 863000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-444.2's audit (docs/memory-ordering.md, 'Orderings stronger than needed') found 14 groups of Acquire/Release sites that publish nothing beyond their own value or are ordered by a lock or a system call: extentd client's closing (socket shutdown), uffd Lift::asked (eventfd), executor Jobs::running (tokio Notify), server's let_go/closing/connections, physmap chunks (the PMM lock), relief's running, and others. Their mutants to Relaxed are equivalent by argument only: no loom model runs them, as each would need a stand-in for the socket, eventfd or Notify that carries the order. AC #3 of TASK-444.2 files this gap rather than leaving it unsaid.
+TASK-444.2's audit (docs/memory-ordering.md, 'Orderings stronger than needed') found 14 groups of Acquire/Release sites that publish nothing beyond their own value or are ordered by a lock or a system call: cladefsd client's closing (socket shutdown), uffd Lift::asked (eventfd), executor Jobs::running (tokio Notify), server's let_go/closing/connections, physmap chunks (the PMM lock), relief's running, and others. Their mutants to Relaxed are equivalent by argument only: no loom model runs them, as each would need a stand-in for the socket, eventfd or Notify that carries the order. AC #3 of TASK-444.2 files this gap rather than leaving it unsaid.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

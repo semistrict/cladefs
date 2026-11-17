@@ -1,11 +1,12 @@
 ---
 id: TASK-444.11
 title: >-
-  One deterministic simulation across extentd, extent_remote and followers, with
-  agents hunting seeds
+  One deterministic simulation across cladefsd, extent_remote and followers,
+  with agents hunting seeds
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:43'
+updated_date: '2026-11-16 22:54'
 labels: []
 dependencies: []
 references:
@@ -25,7 +26,7 @@ Each subsystem has its own simulation (TASK-28.1 for object storage, TASK-42.1 f
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 extentd store logic, extent_remote and a follower run in one seeded process with time, randomness, bucket faults and fsync faults under the seed
+- [ ] #1 cladefsd store logic, extent_remote and a follower run in one seeded process with time, randomness, bucket faults and fsync faults under the seed
 - [ ] #2 Follower reads are checked for linearizability against the writer history
 - [ ] #3 A failing seed replays exactly and is shrunk
 - [ ] #4 Seeds run nightly on ubu1 under fxjob; the notes record what they found

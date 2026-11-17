@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! What Fxfs's metadata operations cost, without a kernel or a device: each as the guest kernel's
-//! Fxfs does it (guest/rust/fxfs-linux), on a device in memory, with the guest's options, timed
+//! Fxfs does it (guest/rust/cladefs-linux), on a device in memory, with the guest's options, timed
 //! over many files. For profiling Fxfs itself, with perf on Linux, say:
 //!
 //! ```sh
@@ -37,7 +37,7 @@ use storage_device::fake_device::FakeDevice;
 const BLOCK_SIZE: u32 = 4096;
 /// The benchmark's extent store's capacity (test_fs_bench.rs's IMAGE_SIZE).
 const CAPACITY: u64 = 8 << 30;
-/// The guest's options (guest/rust/fxfs-linux/src/fs.rs), for a guest of 4 GiB.
+/// The guest's options (guest/rust/cladefs-linux/src/fs.rs), for a guest of 4 GiB.
 const MEMORY: u64 = 4 << 30;
 const LAZY_FLUSH: LazyFlush = LazyFlush { bytes: 128 << 10, delay: Duration::from_secs(5) };
 

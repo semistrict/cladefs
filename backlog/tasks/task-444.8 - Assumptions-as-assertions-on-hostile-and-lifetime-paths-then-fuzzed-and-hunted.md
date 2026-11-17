@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:34'
+updated_date: '2026-11-16 22:54'
 labels: []
 dependencies: []
 references:
@@ -24,7 +25,7 @@ Code-Augur (arXiv 2606.18619): for each site an agent judges safe, write the rea
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 virtio request decoding, the extentd codec, the window and uffd paths and dax.c have their safety assumptions as assertions
+- [ ] #1 virtio request decoding, the cladefsd codec, the window and uffd paths and dax.c have their safety assumptions as assertions
 - [ ] #2 The fuzz targets, hostile tests, guest/sim and the hunt run with them on; each trip is fixed or the assumption corrected
 - [ ] #3 Coverage plateaus in the cargo-fuzz targets get structure-aware generators, with coverage before and after recorded
 <!-- AC:END -->

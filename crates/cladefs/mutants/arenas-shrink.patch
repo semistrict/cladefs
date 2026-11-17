@@ -2,7 +2,7 @@
 # write, and the daemon's next access to a page past its new end faults (SIGBUS), the daemon gone,
 # every tenant's VMs with it (TASK-149.17).
 # Kind: daemon crashed
-# Killer: extentd::tests::hostile::vm_processes_shrinking_their_memory_crash_nothing
+# Killer: cladefsd::tests::hostile::vm_processes_shrinking_their_memory_crash_nothing
 --- a/crates/physmem/src/physmap.rs
 +++ b/crates/physmem/src/physmap.rs
 @@ -136,7 +136,7 @@

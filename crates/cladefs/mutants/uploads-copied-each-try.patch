@@ -3,7 +3,7 @@
 # memory held twice what it counts, 5-6 GB of anonymous memory under a backlog, and the host's OOM
 # killer took the daemon (TASK-317, TASK-330.3).
 # Kind: memory
-# Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
+# Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/extent_bucket/src/bucket.rs
 +++ b/crates/extent_bucket/src/bucket.rs
 @@ -439,7 +439,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C

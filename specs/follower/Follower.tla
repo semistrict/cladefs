@@ -5,7 +5,7 @@
 (* found in the LICENSE file.                                              *)
 (*                                                                         *)
 (* Live read-only followers of a mounted Fxfs (backlog doc-8, TASK-42.8):  *)
-(* the protocol between a writer VM, the store extentd serves it from, a   *)
+(* the protocol between a writer VM, the store cladefsd serves it from, a   *)
 (* follower VM's Fxfs and the readers in that VM, at the level of the      *)
 (* protocol: what each step reads and writes, and in what order.           *)
 (*                                                                         *)
@@ -154,7 +154,7 @@ WriterNext ==
        \/ \E f \in Files : Write(f) \/ Delete(f)
 
 -----------------------------------------------------------------------------
-(* The store (extentd). *)
+(* The store (cladefsd). *)
 
 \* A kept free goes once the follower's view is past it, unless the graveyard pins it.
 ReleaseOf(kf) ==
@@ -168,7 +168,7 @@ ReleaseOf(kf) ==
 Release == \E kf \in kept : ReleaseOf(kf)
 
 \* A follower holding too much kept is cut off: its view goes, and what it kept; its reads
-\* fail from here on (extentd refuses them), so nothing it does matters any more.
+\* fail from here on (cladefsd refuses them), so nothing it does matters any more.
 CutOff ==
     /\ "cutOff" \in Rules
     /\ ~cutOff

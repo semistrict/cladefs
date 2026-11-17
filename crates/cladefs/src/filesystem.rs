@@ -903,7 +903,7 @@ impl Node {
     }
 
     /// Sets the node's extended attribute `name` to `value`, as `mode` says, changing its status
-    /// change time, as Linux's filesystems do (the guest's `fxfs_vfs_xattr_set`).
+    /// change time, as Linux's filesystems do (the guest's `cladefs_vfs_xattr_set`).
     pub async fn setxattr(&self, name: &[u8], value: &[u8], mode: XattrMode) -> Result<()> {
         let volume = self.volume()?;
         let (ino, name, value, now) = (self.ino(), name.to_vec(), value.to_vec(), now()?);

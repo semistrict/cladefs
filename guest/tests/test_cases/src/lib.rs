@@ -43,7 +43,7 @@ use test_fxfs_guest_pgbench::{
     Database as PgbenchDatabase, Probe, Storage as PgbenchStorage, TestFxfsGuestPgbench,
 };
 mod test_fxfs_guest_bigmap;
-// cladefs: what extentd asks of a disk it shares with many VMs and the bucket (TASK-310).
+// cladefs: what cladefsd asks of a disk it shares with many VMs and the bucket (TASK-310).
 mod test_fxfs_guest_shared_disk;
 use test_fxfs_guest_shared_disk::TestFxfsGuestSharedDisk;
 mod test_fxfs_guest_bucket_soak;

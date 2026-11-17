@@ -882,7 +882,7 @@ async fn syncs_make_one_commit_durable() {
 async fn a_removed_fill_gives_back_all_its_data() {
     use fxfs::object_store::allocator::STAGING_SIZE;
     use fxfs::object_store::journal::{JournalOptions, LazyFlush};
-    // As the guest has it on 256 MiB (fxfs-linux's fs.rs, JOURNAL_SHARE and LAZY_FLUSH).
+    // As the guest has it on 256 MiB (cladefs-linux's fs.rs, JOURNAL_SHARE and LAZY_FLUSH).
     let journal = JournalOptions {
         reclaim_size: 8 << 20,
         lazy_flush: Some(LazyFlush { bytes: 1 << 20, delay: Duration::from_secs(5) }),

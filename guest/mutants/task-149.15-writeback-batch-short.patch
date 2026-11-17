@@ -11,13 +11,13 @@
 # durability check (TASK-149.18), failures seed 62; cow_writeback_counts_again: Fxfs's extents lack
 # the second chunk's write after the fsync.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2130,16 +2130,10 @@
  		/* Between the count and the swap, where iomaps may dirty more (pause points). */
- 		fxfs_dax_pause_file(FXFS_DAX_STEP_COUNTED, inode->i_ino);
+ 		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
  		down_write(&file->sem);
--		now = fxfs_dax_dirty_ranges(file);
+-		now = cladefs_dax_dirty_ranges(file);
 -		if (now && now <= most)
 -			break;
 -		up_write(&file->sem);
@@ -27,8 +27,8 @@
 +		break;
  	}
  	xa_for_each(&file->ranges, chunk, range) {
--		if (!fxfs_dax_range_dirty(range))
-+		if (nr == most || !fxfs_dax_range_dirty(range))
+-		if (!cladefs_dax_range_dirty(range))
++		if (nr == most || !cladefs_dax_range_dirty(range))
  			continue;
  		batch[nr].range = range;
  		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */

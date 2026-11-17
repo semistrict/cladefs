@@ -4,7 +4,7 @@
 
 //! cladefs: the store's page cache (TASK-433): what holds the bytes its data files are written with
 //! until they are on the host's disk, and for as long after as memory allows, in memory of the
-//! process's own, which the extent daemon governs with the rest (`cladefs::extentd::memory`). Its
+//! process's own, which the extent daemon governs with the rest (`cladefs::cladefsd::memory`). Its
 //! files bypass the host's page cache (`O_DIRECT`), so that no byte a store holds is held twice,
 //! in two memories each budgeted as if the other weren't there. It does what the host's did for
 //! them, as Linux's does (mm/filemap.c, mm/page-writeback.c, fs/fs-writeback.c):

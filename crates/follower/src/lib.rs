@@ -30,7 +30,7 @@
 //! ([`Failed`]), until the follower is remounted, on a new view of its store. (TASK-79.23)
 //!
 //! The protocol is generic over [`Kernel`], the kernel's operations: thin C shims in the guest
-//! (guest/linux/fs/fxfs), Shuttle's primitives in tests, so that Shuttle runs the protocol itself
+//! (guest/linux/fs/cladefs), Shuttle's primitives in tests, so that Shuttle runs the protocol itself
 //! (tests/shuttle.rs). It has no lock-free code of its own, whose relaxed orderings Shuttle, which
 //! makes every atomic SeqCst, couldn't check.
 //!

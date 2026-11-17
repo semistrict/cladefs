@@ -7,7 +7,7 @@
 //!
 //! The host boots the guest kernel with an extent-store device with a DAX window, on a new store,
 //! which the guest formats as it mounts it. The guest writes a file, durably, and reads it through
-//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/fxfs/extents), asks the host
+//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/cladefs/extents), asks the host
 //! over vsock for the stats, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against
 //! the daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks
 //! it:
@@ -50,12 +50,12 @@ mod host {
     use std::path::{Path, PathBuf};
 
     /// The daemon's stats, as `cladefsctl stats --json` prints them through the control socket of
-    /// the daemon at `extentd`.
-    fn stats(extentd: &Path) -> anyhow::Result<(String, Value)> {
+    /// the daemon at `cladefsd`.
+    fn stats(cladefsd: &Path) -> anyhow::Result<(String, Value)> {
         let cladefsctl = std::env::var_os("CLADEFSCTL_BIN").context("CLADEFSCTL_BIN")?;
         let output = std::process::Command::new(cladefsctl)
             .args(["stats", "--json"])
-            .env("CLADEFSD_GRPC", extentd.with_extension("control"))
+            .env("CLADEFSD_GRPC", cladefsd.with_extension("control"))
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
         ensure!(
@@ -78,9 +78,9 @@ mod host {
     /// the VM's store, at `store`, its process's and its guest's counters; and returns those of its
     /// guest's `asked` names, and when it was taken.
     fn check(json: &Value, store: &Path, asked: &[&str]) -> anyhow::Result<(Vec<u64>, u64)> {
-        let build = json["extentd"]["build"].as_str().context("the daemon's build")?;
+        let build = json["cladefsd"]["build"].as_str().context("the daemon's build")?;
         ensure!(is_commit(build), "the daemon's build: {build:?}");
-        ensure!(json["extentd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
+        ensure!(json["cladefsd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
         let vms = json["vms"].as_array().context("vms")?;
         let vm = (vms.iter())
             .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(store))
@@ -110,7 +110,7 @@ mod host {
     /// JSON in `dir`, and answers with what they say of the guest's counters, or why it failed.
     fn takings(
         listener: UnixListener,
-        extentd: &Path,
+        cladefsd: &Path,
         store: &Path,
         dir: &Path,
     ) -> anyhow::Result<()> {
@@ -127,7 +127,7 @@ mod host {
                     Ok((name, value.parse()?))
                 })
                 .collect::<anyhow::Result<_>>()?;
-            let checked = stats(extentd).and_then(|(text, json)| {
+            let checked = stats(cladefsd).and_then(|(text, json)| {
                 std::fs::write(dir.join(format!("stats-{}.json", round + 1)), &text)?;
                 eprintln!("cladefsctl stats --json, taking {}:\n{text}", round + 1);
                 let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
@@ -170,7 +170,7 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
-            let extentd = PathBuf::from(
+            let cladefsd = PathBuf::from(
                 std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
@@ -184,7 +184,7 @@ mod host {
             let dir = test_setup.tmp_dir.clone();
             std::thread::spawn(move || {
                 // Created as the guest mounts it, before it asks.
-                if let Err(err) = takings(listener, &extentd, &store, &dir) {
+                if let Err(err) = takings(listener, &cladefsd, &store, &dir) {
                     eprintln!("stats: {err:#}");
                 }
             });
@@ -216,7 +216,7 @@ mod guest {
     fn mount() {
         let source = CString::new("extents").unwrap();
         let target = CString::new(MNT).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

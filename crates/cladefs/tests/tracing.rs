@@ -100,7 +100,7 @@ fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
 /// exports the spans it has not yet: what it was sent, in order, once it exited.
 fn serve_and_drain(dir: &Path, traces: Option<&str>) -> Vec<(String, Vec<u8>)> {
     let (endpoint, exports) = collector();
-    let socket = dir.join("extentd.sock");
+    let socket = dir.join("cladefsd.sock");
     let mut daemon = daemon(&socket, traces, &endpoint);
     let store = DaemonExtentStore::connect(&socket, dir.join("store"), 1 << 28).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
@@ -127,9 +127,9 @@ fn the_daemon_exports_its_spans_over_otlp() {
     let body: Vec<u8> = exports.into_iter().flat_map(|(_, body)| body).collect();
     let missing: Vec<&str> = [
         "cladefsd",
-        "extentd.open",
-        "extentd.write",
-        "extentd.commit",
+        "cladefsd.open",
+        "cladefsd.write",
+        "cladefsd.commit",
         "store.create",
         "store.commit",
         "commit.seal",

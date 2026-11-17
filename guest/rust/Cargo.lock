@@ -653,7 +653,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxfs-linux"
+name = "cladefs-linux"
 version = "0.1.0"
 dependencies = [
  "anyhow",

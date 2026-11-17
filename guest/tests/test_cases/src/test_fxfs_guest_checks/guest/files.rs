@@ -460,17 +460,17 @@ pub(super) fn test_direct_io() {
 }
 
 /// TASK-26.19.10: Fxfs's cached records go under memory pressure: the superblock's shrinker
-/// counts them (FXFS_IOC_CACHED_OBJECTS) and frees them, as drop_caches (2) has it do.
+/// counts them (CLADEFS_IOC_CACHED_OBJECTS) and frees them, as drop_caches (2) has it do.
 pub(super) fn test_cache_shrinks() {
     /// `_IOR('x', 0x44, __u64)`.
-    const FXFS_IOC_CACHED_OBJECTS: libc::c_ulong = 0x8008_7844;
+    const CLADEFS_IOC_CACHED_OBJECTS: libc::c_ulong = 0x8008_7844;
     const FILES: u64 = 2000;
     let cached = || {
         let dir = fs::File::open(MNT).unwrap();
         let mut cached = 0u64;
         let ret =
-            unsafe { libc::ioctl(dir.as_raw_fd(), FXFS_IOC_CACHED_OBJECTS as _, &mut cached) };
-        assert_eq!(ret, 0, "FXFS_IOC_CACHED_OBJECTS: {}", std::io::Error::last_os_error());
+            unsafe { libc::ioctl(dir.as_raw_fd(), CLADEFS_IOC_CACHED_OBJECTS as _, &mut cached) };
+        assert_eq!(ret, 0, "CLADEFS_IOC_CACHED_OBJECTS: {}", std::io::Error::last_os_error());
         cached
     };
     let dir = path("cached");

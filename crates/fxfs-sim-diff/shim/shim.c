@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright 2026 The cladefs Authors.
 /*
- * guest/sim's kernel, as much of it as its model of Fxfs (guest/sim/fxfs/fxfs.c) calls, for a
+ * guest/sim's kernel, as much of it as its model of Fxfs (guest/sim/cladefs/cladefs.c) calls, for a
  * process of one thread (sim/sim.h): memory, locks that never wait, and the extent store under the
  * model as guest/sim's kernel/device.c has it: each extent as long as its furthest write, sealed by
  * a seal if a write reached it, written never after, and gone once freed. A write to a sealed
@@ -17,7 +17,7 @@
 
 #include <sim/host.h>
 
-#include "../../../guest/linux/fs/fxfs/device.h"
+#include "../../../guest/linux/fs/cladefs/device.h"
 
 /* The harness's (src/model.rs). */
 __attribute__((noreturn)) void fxfs_sim_diff_panic(const char *message);
@@ -165,7 +165,7 @@ static struct extent *extents;
 static size_t nr_extents;
 static u64 store_used;
 static u64 device_seals;
-static struct fxfs_device {
+static struct cladefs_device {
 	int unused;
 } device;
 
@@ -285,31 +285,31 @@ void host_store_write(u64 offset, const void *buf, size_t len)
 	memcpy(extent->data + (offset - extent->store_offset), buf, len);
 }
 
-struct fxfs_device *fxfs_device_find(const char *tag, size_t len, struct fxfs_device_info *info)
+struct cladefs_device *cladefs_device_find(const char *tag, size_t len, struct cladefs_device_info *info)
 {
-	*info = (struct fxfs_device_info) {
+	*info = (struct cladefs_device_info) {
 		.block_size = PAGE_SIZE, .max_io = 1 << 20, .max_root = 4096, .branch = 1,
 		.max_extent = 64 << 20,
 	};
 	return &device;
 }
 
-void fxfs_device_put(struct fxfs_device *dev)
+void cladefs_device_put(struct cladefs_device *dev)
 {
 }
 
 /* The device counts a seal's beginning and its end. */
-u64 fxfs_device_seals(struct fxfs_device *dev)
+u64 cladefs_device_seals(struct cladefs_device *dev)
 {
 	return device_seals;
 }
 
-void fxfs_device_seal_begin(struct fxfs_device *dev)
+void cladefs_device_seal_begin(struct cladefs_device *dev)
 {
 	device_seals++;
 }
 
-void fxfs_device_seal_end(struct fxfs_device *dev)
+void cladefs_device_seal_end(struct cladefs_device *dev)
 {
 	device_seals++;
 }

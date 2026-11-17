@@ -424,7 +424,7 @@ pub(crate) fn freed(
 /// The extents cached: how many something but the cache holds (`pinned`), as a window's mapping, a
 /// read or a page-in does, which it keeps however many it holds, and how many nothing else does
 /// (`idle`), which it lets go of past its bound (TASK-104), the extent daemon's gauges
-/// (`crate::extentd::metrics`, TASK-131.6).
+/// (`crate::cladefsd::metrics`, TASK-131.6).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Entries {

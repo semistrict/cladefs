@@ -42,12 +42,12 @@ mod host {
     impl TestFxfsGuestAutomount {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
-            let extentd: PathBuf =
+            let cladefsd: PathBuf =
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
-            let control = control(&extentd)?;
+            let control = control(&cladefsd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
-            let vms = Vms::new(test_setup, root, extentd.clone(), CAPACITY, window);
+            let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, window);
             let (publisher, consumer) = (dir.join("publisher"), dir.join("consumer"));
             format(&publisher, CAPACITY)?;
 
@@ -58,7 +58,7 @@ mod host {
             vm.wait()?;
 
             let names = ["repo", "other"].map(|name| (name.to_owned(), generation.clone()));
-            let manager = Manager::new(extentd, BTreeMap::from(names), BTreeMap::new());
+            let manager = Manager::new(cladefsd, BTreeMap::from(names), BTreeMap::new());
             for role in ["consumer", "rebooted"] {
                 manager.serve(role, &consumer)?;
                 vms.run(role, &consumer, false)?.0.wait()?;
@@ -161,7 +161,7 @@ mod guest {
 
     /// The volumes the filesystem has open, as it says (TASK-136.6).
     fn volumes_open() -> usize {
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap();
         let line = stats.lines().find_map(|line| line.strip_prefix("volumes_open "));
         line.expect("no volumes_open").parse().unwrap()
     }
@@ -190,7 +190,7 @@ mod guest {
         // A lookup returns once mounted.
         let repo = format!("{ROOT}/repo");
         check_published(&repo);
-        assert_eq!(mounted(&repo).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&repo).as_deref(), Some("cladefs"));
         let dev = |path: &str| fs::metadata(path).unwrap().dev();
         assert_ne!(dev(&repo), dev(MNT));
         fs::write(format!("{repo}/written"), b"the consumer's\n").unwrap();
@@ -207,7 +207,7 @@ mod guest {
                 });
             }
         });
-        assert_eq!(mounted(&other).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&other).as_deref(), Some("cladefs"));
         assert_eq!(volumes_open(), before + 2);
 
         // A name refused: no mount, no volume.
@@ -226,7 +226,7 @@ mod guest {
         assert_eq!(volumes_open(), before);
         assert_eq!(fs::read(format!("{repo}/written")).unwrap(), b"the consumer's\n");
         check_published(&repo);
-        assert_eq!(mounted(&repo).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&repo).as_deref(), Some("cladefs"));
     }
 
     fn rebooted() {

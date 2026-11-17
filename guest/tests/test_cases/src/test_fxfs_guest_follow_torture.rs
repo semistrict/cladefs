@@ -27,13 +27,13 @@
 //! The VMs send the host their histories, which it checks once they are done with TASK-42.1's
 //! checker (`follower_history`): the writer's operations, each with the files it changed, and the
 //! store's latest commit as each of its syncs returned; and its followers' reads, each with the
-//! commits its follower may have been as of (fs/fxfs's FXFS_IOC_FOLLOW_COMMITS). Each reader must
+//! commits its follower may have been as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS). Each reader must
 //! find what a prefix of the writer's operations those commits may hold left, a prefix no shorter
 //! than its last read's. A reader records each read that found what it last found of the file
 //! otherwise, and the others every RECORD_EVERY.
 //!
 //! The kernel's command line may widen
-//! the protocol's windows (fs/fxfs's `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's
+//! the protocol's windows (fs/cladefs's `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's
 //! kernel may complain (a debug kernel's lockdep, KCSAN and DEBUG_ATOMIC_SLEEP, or the follower's
 //! own WARN_ONs). A mutant, with one window widened and the rule that closes it switched off, must
 //! be caught: its followers report what is stale, and its history is wrong.
@@ -62,7 +62,7 @@ pub enum Mutant {
     /// Their readers' fill barrier (TASK-42.10): the window between a batch dropping what the
     /// kernel keeps of what it changes and applying it, and between its apply and its attributes
     /// set. A reader's fault maps an extent of the state before a batch after the batch let its
-    /// commit go: extentd refuses the window's map of the extent released (doc-8, testing 1), and
+    /// commit go: cladefsd refuses the window's map of the extent released (doc-8, testing 1), and
     /// the follower's VMM, which can't resolve the fault, aborts; or a reader finds a name the
     /// batch half applied; what its readers found is a wrong history.
     Barrier,
@@ -144,24 +144,24 @@ mod host {
             // The windows the protocol closes, widened; or a mutant's, the rule closing it off.
             match self.mutant {
                 None => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_iomap_delay_us=50");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_iomap_delay_us=50");
                 }
                 Some(Mutant::Drop) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_skip_drop=1");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_skip_drop=1");
                 }
                 Some(Mutant::DropFaults) => {
-                    vm.env(c"fxfs.follow_iomap_delay_us=50");
-                    vm.env(c"fxfs.follow_skip_drop=1");
+                    vm.env(c"cladefs.follow_iomap_delay_us=50");
+                    vm.env(c"cladefs.follow_skip_drop=1");
                 }
                 Some(Mutant::Barrier) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_skip_barrier=1");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_skip_barrier=1");
                 }
                 Some(Mutant::Nested) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_read_faults=1");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_read_faults=1");
                 }
             }
             vm.vsock(uds);
@@ -273,8 +273,8 @@ mod host {
         Ok(std::thread::spawn(move || {
             let control = match &store {
                 Some(_) => {
-                    let extentd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
-                    Some(crate::common::control(Path::new(&extentd))?)
+                    let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
+                    Some(crate::common::control(Path::new(&cladefsd))?)
                 }
                 None => None,
             };
@@ -393,7 +393,7 @@ mod host {
                 None => "OK writer\nOK follower1\nOK follower2\nOK history\n",
                 Some(Mutant::Nested) => "OK writer\nHUNG follower1\nHUNG follower2\nOK history\n",
                 // How a mutant's followers fail depends on the schedule: a reader finds a page
-                // stale (STALE), a fault maps an extent a batch let go of, which extentd refuses
+                // stale (STALE), a fault maps an extent a batch let go of, which cladefsd refuses
                 // and the VMM aborts on (ABORTED), or a reader finds what it can't, and stops (no
                 // line). Caught, none passes, and what they read is a wrong history.
                 Some(Mutant::Drop | Mutant::DropFaults | Mutant::Barrier) => {
@@ -453,7 +453,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
@@ -587,7 +587,7 @@ mod guest {
     const BLOCK_OBJECTS: u64 = 1 << 62;
     const SHAPE_OBJECTS: u64 = 1 << 61;
 
-    /// The commits a follower's state is as of (fs/fxfs's FXFS_IOC_FOLLOW_COMMITS): every batch up
+    /// The commits a follower's state is as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS): every batch up
     /// to `settled`'s settled, none past `applied`'s applied.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -598,8 +598,8 @@ mod guest {
 
     nix::ioctl_read!(follow_commits, b'x', 0x42, FollowCommits);
 
-    /// A follower's batches, and how long they waited for its fill barrier (fs/fxfs's
-    /// FXFS_IOC_FOLLOW_STATS).
+    /// A follower's batches, and how long they waited for its fill barrier (fs/cladefs's
+    /// CLADEFS_IOC_FOLLOW_STATS).
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct Stats {
@@ -613,7 +613,7 @@ mod guest {
     fn stats(dir: &fs::File) -> Stats {
         let mut stats = Stats::default();
         // SAFETY: The ioctl writes a `Stats`.
-        unsafe { follow_stats(dir.as_raw_fd(), &mut stats) }.expect("FXFS_IOC_FOLLOW_STATS");
+        unsafe { follow_stats(dir.as_raw_fd(), &mut stats) }.expect("CLADEFS_IOC_FOLLOW_STATS");
         stats
     }
 
@@ -621,7 +621,7 @@ mod guest {
     fn commits(dir: &fs::File) -> FollowCommits {
         let mut commits = FollowCommits::default();
         // SAFETY: The ioctl writes a `FollowCommits`.
-        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }.expect("FXFS_IOC_FOLLOW_COMMITS");
+        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }.expect("CLADEFS_IOC_FOLLOW_COMMITS");
         commits
     }
 
@@ -869,7 +869,7 @@ mod guest {
         /// read(2), into a private, writable mapping of the blocks' file at this address, its
         /// pages dropped each pass (MADV_DONTNEED): each copy to a page the reader no longer has
         /// faults it in from the follower, a fill inside the read(2)'s, which must wait for no
-        /// batch waiting for the read(2) (fs/fxfs's fxfs_vfs_follower_read).
+        /// batch waiting for the read(2) (fs/cladefs's cladefs_vfs_follower_read).
         ReadIntoMapping(usize),
     }
 

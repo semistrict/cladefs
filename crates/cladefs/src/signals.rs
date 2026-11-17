@@ -53,7 +53,7 @@ impl Signals {
 
 /// Starts a thread that takes no signal: blocked from before it starts, as a thread blocking them
 /// itself would take one until it first ran, however late that is, and a process that leaves the
-/// signal to another thread, as extentd does SIGTERM, would die of it.
+/// signal to another thread, as cladefsd does SIGTERM, would die of it.
 pub fn spawn_taking_no_signals(name: &str, work: impl FnOnce() + Send + 'static) -> io::Result<()> {
     // SAFETY: Signal sets, filled by the calls below.
     let (mut all, mut mask): (libc::sigset_t, libc::sigset_t) =

@@ -32,7 +32,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 /// Lets a thread wait until it is woken, spinning briefly before it sleeps (the kernel's side,
-/// `fxfs_rt_park`): a wake lets a `park` return, and wakes meanwhile are taken with it.
+/// `cladefs_rt_park`): a wake lets a `park` return, and wakes meanwhile are taken with it.
 struct Parker(NonNull<ffi::Parker>);
 
 // SAFETY: A parker may be parked on by one thread and unparked from any context.
@@ -43,13 +43,13 @@ unsafe impl Sync for Parker {}
 impl Parker {
     fn new() -> Self {
         // SAFETY: Allocates a parker, which `drop` frees.
-        let parker = unsafe { ffi::fxfs_rt_parker_new() };
+        let parker = unsafe { ffi::cladefs_rt_parker_new() };
         Self(NonNull::new(parker).expect("no memory for a parker"))
     }
 
     fn park(&self) {
         // SAFETY: The parker is live.
-        unsafe { ffi::fxfs_rt_park(self.0.as_ptr()) }
+        unsafe { ffi::cladefs_rt_park(self.0.as_ptr()) }
     }
 }
 
@@ -60,14 +60,14 @@ impl Wake for Parker {
 
     fn wake_by_ref(self: &Arc<Self>) {
         // SAFETY: The parker is live; unparking does not sleep.
-        unsafe { ffi::fxfs_rt_unpark(self.0.as_ptr()) }
+        unsafe { ffi::cladefs_rt_unpark(self.0.as_ptr()) }
     }
 }
 
 impl Drop for Parker {
     fn drop(&mut self) {
         // SAFETY: Nothing else holds the parker.
-        unsafe { ffi::fxfs_rt_parker_free(self.0.as_ptr()) }
+        unsafe { ffi::cladefs_rt_parker_free(self.0.as_ptr()) }
     }
 }
 
@@ -133,7 +133,7 @@ where
     Task(task)
 }
 
-/// A task's work item (`fxfs_rt_work`), which its polls are queued on, one at a time, as a task is
+/// A task's work item (`cladefs_rt_work`), which its polls are queued on, one at a time, as a task is
 /// scheduled again only once its poll has begun: made with the task, where the kernel may sleep,
 /// so that a waker, in any context, queues a poll without allocating, and can't fail to, which
 /// would leave the task waiting for ever (TASK-60.1). Freed with the task, in its last poll, or
@@ -148,7 +148,7 @@ unsafe impl Sync for Work {}
 impl Work {
     fn new(urgent: bool) -> Self {
         // SAFETY: Makes a work item, without failing, which `drop` frees.
-        let work = unsafe { ffi::fxfs_rt_work_new(run, urgent) };
+        let work = unsafe { ffi::cladefs_rt_work_new(run, urgent) };
         Self(NonNull::new(work).expect("a work item"))
     }
 }
@@ -156,7 +156,7 @@ impl Work {
 impl Drop for Work {
     fn drop(&mut self) {
         // SAFETY: Its task, gone, holds no runnable, so it is queued no more.
-        unsafe { ffi::fxfs_rt_work_free(self.0.as_ptr()) }
+        unsafe { ffi::cladefs_rt_work_free(self.0.as_ptr()) }
     }
 }
 
@@ -167,7 +167,7 @@ fn schedule(runnable: Runnable<Work>) {
     let runnable = runnable.into_raw();
     // SAFETY: `run` takes back the runnable, once; the task, alive while it is held, holds the
     // work item.
-    unsafe { ffi::fxfs_rt_work_queue(work.as_ptr(), runnable.as_ptr().cast()) };
+    unsafe { ffi::cladefs_rt_work_queue(work.as_ptr(), runnable.as_ptr().cast()) };
 }
 
 extern "C" fn run(runnable: *mut c_void) {

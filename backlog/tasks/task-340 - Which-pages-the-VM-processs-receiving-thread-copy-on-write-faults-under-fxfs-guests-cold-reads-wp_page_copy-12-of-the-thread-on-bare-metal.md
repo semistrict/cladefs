@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-11 01:11'
+updated_date: '2026-11-16 22:54'
 labels:
   - perf
 dependencies: []
@@ -16,7 +17,7 @@ ordinal: 736000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by TASK-276.7 (ubu1, bare metal, 4 vCPUs, 8 jobs, fxfs-guest's scaling group, perf of the VM process): the 'extentd client' thread spends 12.5% of its samples in wp_page_copy (do_wp_page, then ptep_clear_flush's TLB shootdown), under memcpy and recvmsg's copies. TASK-276's GCE profile had taken them for guest pages the guest read before the host wrote (the zero page), but a guest booted with init_on_alloc=1, which writes every page it allocates, left them at 11.7% (and an interleaved A/B of the two, 3 rounds x 2, found every cold-read IOPS and latency within drift). So which mappings they are is open: guest memory a read mapped read-only otherwise, the transfer area, or the receiver's heap.
+Found by TASK-276.7 (ubu1, bare metal, 4 vCPUs, 8 jobs, fxfs-guest's scaling group, perf of the VM process): the 'cladefsd client' thread spends 12.5% of its samples in wp_page_copy (do_wp_page, then ptep_clear_flush's TLB shootdown), under memcpy and recvmsg's copies. TASK-276's GCE profile had taken them for guest pages the guest read before the host wrote (the zero page), but a guest booted with init_on_alloc=1, which writes every page it allocates, left them at 11.7% (and an interleaved A/B of the two, 3 rounds x 2, found every cold-read IOPS and latency within drift). So which mappings they are is open: guest memory a read mapped read-only otherwise, the transfer area, or the receiver's heap.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

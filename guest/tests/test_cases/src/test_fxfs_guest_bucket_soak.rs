@@ -14,7 +14,7 @@
 //! CLADEFS_BUCKET_SOAK_VMS VMs (4), each on a store of its own, write files of 16 MiB that don't
 //! compress and fsync each, deleting each once 16 newer are written, at the rate that writes past
 //! every store's lag bound while the bucket fails, until the run's end; then sync, every commit
-//! uploaded, and exit. As `cladefs::extentd::tests::soak` does with VM processes of its own in CI,
+//! uploaded, and exit. As `cladefs::cladefsd::tests::soak` does with VM processes of its own in CI,
 //! in seconds a phase, this does with guests' kernels and their Fxfs, the daemon a process of its
 //! own. It fails, saying each check that failed, unless:
 //!
@@ -64,7 +64,7 @@ mod host {
     const DAEMON_MEMORY: u64 = 2 << 30;
     /// Its upload memory: as much as its stores upload at once, so that its uploads holding each
     /// object twice, TASK-317's bug, hold more than every other part of its budget may, as
-    /// `cladefs::extentd::tests::soak`'s.
+    /// `cladefs::cladefsd::tests::soak`'s.
     const UPLOAD_MEMORY: u64 = 1536 << 20;
     /// What the guests write while the bucket fails: past every store's lag bound, 1 GiB, so that
     /// their commits stall there, and past the host's upload memory.
@@ -179,10 +179,10 @@ mod host {
             let run = Duration::from_secs(secs);
             let root = setup_rootfs(test_setup)?;
             let dir = &test_setup.tmp_dir;
-            let stats = dir.join("extentd-stats.txt");
+            let stats = dir.join("cladefsd-stats.txt");
             // Short, as a Unix socket's path is.
             let sockets = tempdir::TempDir::new("cladefs-bucket-soak")?;
-            let socket = sockets.path().join("extentd.sock");
+            let socket = sockets.path().join("cladefsd.sock");
             let (upload_memory, endpoint) = (UPLOAD_MEMORY.to_string(), bucket.endpoint());
             let env = [
                 ("AWS_ENDPOINT", endpoint.as_ref()),
@@ -191,7 +191,7 @@ mod host {
             let mut daemon = crate::common::spawn_daemon(
                 test_setup,
                 &socket,
-                "extentd",
+                "cladefsd",
                 &env,
                 Some(DAEMON_MEMORY),
             )?;
@@ -298,7 +298,7 @@ mod host {
             }
             // Its stats file, written within a second of the last change.
             std::thread::sleep(Duration::from_secs(2));
-            let log = std::fs::read_to_string(dir.join("extentd.log"))?;
+            let log = std::fs::read_to_string(dir.join("cladefsd.log"))?;
             let let_go = |line: &&str| line.contains("letting a VM process go");
             let let_go: Vec<&str> = log.lines().filter(let_go).collect();
             if !let_go.is_empty() {
@@ -310,7 +310,7 @@ mod host {
             if let Some(anon) = process.get("max-anon") {
                 measured.lower("soak.daemon.max_anon", "MiB", (anon >> 20) as f64);
             }
-            crate::common::say_daemon_stats(test_setup, "extentd");
+            crate::common::say_daemon_stats(test_setup, "cladefsd");
             // What its kernel counted of it, as either side's daemon is counted (TASK-330.4).
             measured.costs("soak.daemon", ProcessCosts::of(daemon.id())?);
             daemon.kill()?;
@@ -413,7 +413,7 @@ mod guest {
             let (source, target, fstype) = (
                 CString::new("extents").unwrap(),
                 CString::new(MNT).unwrap(),
-                CString::new("fxfs").unwrap(),
+                CString::new("cladefs").unwrap(),
             );
             let ret = unsafe {
                 libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())

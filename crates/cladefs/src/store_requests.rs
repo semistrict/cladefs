@@ -212,7 +212,7 @@ pub(crate) async fn resize_held(
         }
         // No answer in time, or its VM process gone without one.
         Some(Err(_)) | None => {
-            log::warn!("extentd: no answer from the guest to a shrink to {capacity} bytes");
+            log::warn!("cladefsd: no answer from the guest to a shrink to {capacity} bytes");
             Err(Errno::ETIMEDOUT)
         }
     }
@@ -582,7 +582,7 @@ mod shuttle_tests {
     }
 
     /// A store opened here whose closing, its call cancelled, is left to a thread of its own, as
-    /// `extentd::stores::Here`'s is to a blocking thread, with what holds it, which it lets go once
+    /// `cladefsd::stores::Here`'s is to a blocking thread, with what holds it, which it lets go once
     /// the store is closed.
     struct ClosedBehind(Option<(Arc<Model>, Option<ModelHold<'static>>)>);
 

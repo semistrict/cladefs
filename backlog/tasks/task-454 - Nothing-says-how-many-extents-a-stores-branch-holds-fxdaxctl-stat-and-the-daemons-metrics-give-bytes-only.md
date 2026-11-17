@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 00:43'
+updated_date: '2026-11-16 22:53'
 labels:
   - perf
   - review-2026-11-15
@@ -42,7 +42,7 @@ TASK-443.2 found that daemon heap per open fork is ~220-470 B times the base's e
 <!-- SECTION:PLAN:BEGIN -->
 1. extent_store: Space (state.rs), which counts the bytes the branch's extents hold, own and all, counts the extents too: set at opening from the map Recovering already walks, one more as finish_write enters an extent, one less as free removes one; Space::audit (test and audit builds, every state release) recounts them from the map. Info gains own_extents and inherited_extents, read in O(1) as info() is.
 2. cladefs: StoreBytes becomes the split of what a store holds, bytes and extents (one info() call); StoreState carries it.
-3. Control API: StatStoreResponse gains own_extents and inherited_extents (ListedStore carries StatStoreResponse, so ListStores too); go/generate.sh regenerates go/extentd/v1.
+3. Control API: StatStoreResponse gains own_extents and inherited_extents (ListedStore carries StatStoreResponse, so ListStores too); go/generate.sh regenerates go/cladefsd/v1.
 4. cladefsctl stat prints own_extents and inherited_extents lines, locally and through the daemon; module docs, integrator guide and proto comments say what it costs for a store no VM has open (opened whole, as before: the count adds nothing to it).
 5. Tests: extent_store unit test of exact counts across write, grow, free, commit, reopen; cladefs remote.rs randomized sequence (seeded) of writes, frees, commits, reopenings and forks, the counts equal to extents() recounted after each; cladefsctl test (locally on macOS, through the daemon on Linux) of exact own/inherited extents before and after writes, frees, a fork; control.rs (Linux only) exact counts through StatStore and ListStores.
 6. cargo nextest for extent_store and cladefs on macOS, clippy as CI, go generate --check and go tests.

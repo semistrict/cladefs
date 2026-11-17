@@ -1,12 +1,12 @@
 ---
 id: TASK-357
 title: >-
-  extentd hostile on a loaded ubu1: a commit unanswered within 60 s ('mallory's
+  cladefsd hostile on a loaded ubu1: a commit unanswered within 60 s ('mallory's
   store didn't commit') and connections that never end within 240 s
 status: To Do
 assignee: []
 created_date: '2026-11-11 14:39'
-updated_date: '2026-11-15 11:37'
+updated_date: '2026-11-16 22:53'
 labels:
   - extentd
   - testing

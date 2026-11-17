@@ -121,7 +121,7 @@ export function Machine({ scene }: { scene: Scene }) {
 
       <rect x={10} y={HOST_Y} width={W - 20} height={100} rx={8} fill="none" stroke="var(--l-memory)" strokeDasharray="5 4" />
       <text x={24} y={HOST_Y + 90} fontFamily="var(--display)" fontWeight={700} fontSize={13} fill="var(--l-memory)">
-        extentd’s physical memory (memfds the VM processes map)
+        cladefsd’s physical memory (memfds the VM processes map)
       </text>
       <g opacity={dim("cache") ? 0.42 : 1}>
         {cached.map((e, i) => (

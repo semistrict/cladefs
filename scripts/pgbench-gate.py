@@ -66,7 +66,7 @@ less after the VM's before (or, for the first, before any VM): the mean over the
 first, which pays for what they share, the base's pages in the daemon.
 
 Each pgbench run's guest latencies (TASK-111.6), the histograms the guest's Fxfs keeps of its
-faults, seals and window MAPs (`NAME_hist` in /proc/fs/fxfs/extents, which the case's log has before
+faults, seals and window MAPs (`NAME_hist` in /proc/fs/cladefs/extents, which the case's log has before
 and after each run on its `fxfs stats:` lines), are reported as their percentiles, in us: the upper
 bound of the bucket each falls in, bucket k's 1.024 us times 2 to the k, the last's none.
 
@@ -322,7 +322,7 @@ def density_memory(memory):
         "vmm_pss_mib": column("vmm_pss"),
         "vmm_anon_mib": column("vmm_anon"),
         "vmm_shmem_mib": column("vmm_shmem"),
-        "extentd_memory_mib": column("extentd_memory_bytes"),
+        "cladefsd_memory_mib": column("cladefsd_memory_bytes"),
         "guest_used_mib": [mib(sample["guest_total"] - sample["guest_available"])
                            if "guest_total" in sample else None for sample in ran],
         "guest_cached_mib": column("guest_cached"),
@@ -359,7 +359,7 @@ def bigmap_summary(said_results, memory):
         "host_used_mib": {phase: mib(grown("host_used", "base", phase))
                           for phase in BIGMAP_PHASES[1:]},
         "vmm_pss_mib": {phase: mib(at[phase].get("vmm_pss")) for phase in BIGMAP_PHASES[1:]},
-        "extentd_memory_mib": {phase: mib(at[phase].get("extentd_memory_bytes"))
+        "cladefsd_memory_mib": {phase: mib(at[phase].get("cladefsd_memory_bytes"))
                                for phase in BIGMAP_PHASES},
     })
     # Copy-on-write DAX's private pages, as the daemon or the guest counts them, if they do.

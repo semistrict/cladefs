@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: '2026-10-31 22:17'
-updated_date: '2026-11-16 04:06'
+updated_date: '2026-11-16 22:52'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -21,23 +21,23 @@ recovery.
 
 | Level | What it means | When |
 |---|---|---|
-| Ordered | `COMMIT` returned: extentd has it, in order: its data in the store's files, its commit record in extentd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
+| Ordered | `COMMIT` returned: cladefsd has it, in order: its data in the store's files, its commit record in cladefsd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
 | Local | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
 | Uploaded | in the bucket, a contiguous prefix, acknowledged by the head's swap while the writer holds it | the lag (below) |
 
 *Revised 2026-11-08 (TASK-221, the user's decision: the window is what main achieves):* "within
-50 ms" is the **median**: extentd makes the commits ordered local every 50 ms, a flush behind the
+50 ms" is the **median**: cladefsd makes the commits ordered local every 50 ms, a flush behind the
 host's disk at worst. Measured on main (08d444ef7, GCE n2-standard-16, jailed, 3 rounds each of
-fxfs-guest-pgbench and -pgbench-dax, ~365,000 commits a round, extentd's `durable_lag_*` stats): the
+fxfs-guest-pgbench and -pgbench-dax, ~365,000 commits a round, cladefsd's `durable_lag_*` stats): the
 median 32 ms or less, p99 64 ms or less, 85% within 50 ms, and the longest under 1,024 ms (about
 0.7% of commits over 64 ms). What a daemon or host crash may lose is bounded by that longest lag:
-**the crash bound, 1 s**. The daemon-killed test holds extentd to it (`CRASH_LOSS_BOUND_MS`), and the
+**the crash bound, 1 s**. The daemon-killed test holds cladefsd to it (`CRASH_LOSS_BOUND_MS`), and the
 pgbench cases to the median (`durable_lag_within_50ms`). Shortening the tail is performance work
 (TASK-221's notes: commits whose sealing copies whole extents into the open segment).
 
 A guest's **fsync, fdatasync, msync and O_SYNC** wait for *ordered*. **sync, syncfs, unmount and
 freeze** ask for `COMMIT_UPLOADED`, and wait for *local*, and with a bucket, for *uploaded*.
-So an acknowledged fsync is not yet local: it is ordered, and survives what leaves extentd alive.
+So an acknowledged fsync is not yet local: it is ordered, and survives what leaves cladefsd alive.
 
 *Added 2026-11-12 (TASK-384):* *uploaded* needs *local* of the commits, not of the
 segment's framed file. A segment's upload waits for its commits' records synced in its log (the
@@ -75,11 +75,11 @@ it stays within the bound.
 |---|---|---|---|
 | Guest crash or panic, VM reset | kept | kept | fxfs-guest-crash, -crash-dax; guest/sim's `cow_crash_between_bytes_and_commit` (a commit held after its bytes) |
 | VMM killed (SIGKILL) | kept | kept | fxfs-guest-crash-dax-killed |
-| extentd killed | what was ordered within the crash bound (1 s) may go, its records unwritten; a prefix stays, a file whose fsync returned in that time found short or empty at worst. The VM exits 158 | kept | fxfs-guest-crash-dax-daemon-killed (1 of 296 files told of went, GCE r342), fxfs-guest-daemon-lost |
+| cladefsd killed | what was ordered within the crash bound (1 s) may go, its records unwritten; a prefix stays, a file whose fsync returned in that time found short or empty at worst. The VM exits 158 | kept | fxfs-guest-crash-dax-daemon-killed (1 of 296 files told of went, GCE r342), fxfs-guest-daemon-lost |
 | Host reboot or kernel crash, disk kept | what was ordered within the crash bound may go; a prefix stays | kept | **nothing: no test loses a host's page cache (TASK-67)** |
 | Host lost, disk with it, with a bucket | the unuploaded lag goes; a prefix stays | kept | the simulation (doc-7, `crashes_anywhere`); **no guest test (TASK-67)** |
-| Host lost, without a bucket | everything goes | everything goes | not a recovery case: a store with no bucket, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; extentd refuses to start without a bucket (`CLADEFS_EXTENTD_REMOTE`, TASK-45) |
-| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_bucket's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `extentd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
+| Host lost, without a bucket | everything goes | everything goes | not a recovery case: a store with no bucket, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; cladefsd refuses to start without a bucket (`CLADEFSD_REMOTE`, TASK-45) |
+| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_bucket's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `cladefsd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
 
 Every row keeps ordering: what survives is a prefix of the commits, never a later commit without an
 earlier one. Filesystems recover by replaying their journal to that prefix. Open-but-unnamed files
@@ -91,7 +91,7 @@ are freed as the store is next mounted.
   the VM's on DAX, a folio of the guest's page cache without. It is covered by the next `msync` or
   `fsync` of the file, and may reach the store before that only by writeback (`sync`, the flusher
   at ~30 s, the guest keeping its private pages under `private_max`), each page as writeback copied
-  it. Every crash, of the guest, the VMM or extentd, loses what wasn't written back: private pages
+  it. Every crash, of the guest, the VMM or cladefsd, loses what wasn't written back: private pages
   go with the device.
 - **A `write(2)` cut short** leaves the bytes it copied, as on ext4: nothing it writes moves.
 - **The device's store failing** fails the store: a commit that failed part way leaves it refusing
@@ -109,16 +109,16 @@ are freed as the store is next mounted.
   give the guest errors for data that is safe on the host's disk, and a guest filesystem that
   errors on fsync shuts down, or retries what Linux has already dropped from its page cache: a
   failure that frees the bucket's disk, or renews its credentials, cures, made one that loses
-  data. It is loud instead: extentd logs each kind of request failing as the run of failures
+  data. It is loud instead: cladefsd logs each kind of request failing as the run of failures
   starts, a warning naming the bucket's own error (a file bucket's `No space left on device`,
   S3's `AccessDenied`), then every 30 s with how many failed, and as it answers again
   (`extent_bucket::object_bucket`, `FAILING_EVERY`); counts them by kind (the stats line's `failed-NAME`,
-  GetCounters' `ObjectStorageStats.failures`, the metric `cladefs_extentd_object_storage_failures_total`),
+  GetCounters' `ObjectStorageStats.failures`, the metric `cladefsd_object_storage_failures_total`),
   beside how long each store's oldest commit has waited for its upload
-  (`cladefs_extentd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
-  commit first waits at the bound. *Added 2026-11-10 (TASK-317):* meanwhile extentd's memory does
+  (`cladefsd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
+  commit first waits at the bound. *Added 2026-11-10 (TASK-317):* meanwhile cladefsd's memory does
   not grow with what waits, which is on the host's disk: what it holds of it is what it uploads at
-  once, its upload memory (`CLADEFS_EXTENTD_UPLOAD_MEMORY`, 512 MiB), and it gives back what it
+  once, its upload memory (`CLADEFSD_UPLOAD_MEMORY`, 512 MiB), and it gives back what it
   frees (doc-7, Uploads, Memory). Before, a backlog held its uploads twice and the allocator kept
   what it freed, 4-6 GB of anonymous memory, and the host's OOM killer took the daemon, every VM
   it served with it.
@@ -130,11 +130,11 @@ are freed as the store is next mounted.
 
 ## How a host tells them apart
 
-A VM whose daemon goes exits with status 158 (`ExtentdLost`), within the bound its test holds it
+A VM whose daemon goes exits with status 158 (`CladefsdLost`), within the bound its test holds it
 to. The README lists the rest ("How a VM process exits").
 
 ## Not promised
 
-- That an fsync survives extentd or the host going within the crash bound (1 s) of returning. An application that
+- That an fsync survives cladefsd or the host going within the crash bound (1 s) of returning. An application that
   needs that must `syncfs`, which costs a round trip to the disk, and to the bucket with one.
 - Anything of what the lag holds, across the loss of a host.

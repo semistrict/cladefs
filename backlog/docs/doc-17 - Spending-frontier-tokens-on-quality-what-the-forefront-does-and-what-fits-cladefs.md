@@ -5,7 +5,7 @@ title: >-
   cladefs
 type: guide
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-16 04:14'
+updated_date: '2026-11-17 01:09'
 ---
 Web research of 2026-11-15 (four parallel research agents, ~200 searches and fetches), checked
 against main (36f194bbc). The ranked list in §2 is what to do; §1 is the evidence; §3 what not to
@@ -121,7 +121,7 @@ item 10 is TASK-149.4, filed before.
    Ordering mutants (Release/Acquire to Relaxed, a fence deleted) must turn a loom model red, or
    that's a missing test. dax.c's barriers would want LKMM litmus tests (herd7), licence pending
    (§4).
-3. **Kernel review agents on guest/linux/fs/fxfs and the fs/dax.c patches.** review-prompts (orc)
+3. **Kernel review agents on guest/linux/fs/cladefs and the fs/dax.c patches.** review-prompts (orc)
    and Sashiko, both on Claude, with an fxfs/DAX context file of cladefs's invariants (doc-4, doc-9,
    doc-13, the dax-cow spec, dead-ends) and a known-issues file. First a whole-tree sweep for
    pre-existing bugs, 3-5 runs, findings kept only when they recur or a verifier confirms them;
@@ -145,7 +145,7 @@ item 10 is TASK-149.4, filed before.
    Agents write mutants from a list of concerns drawn from the backlog's bug classes, an
    equivalence filter drops no-ops, survivors become tasks under TASK-149 with a killing test.
 8. **Assumptions as assertions on hostile and lifetime paths.** An agent walks virtio request
-   decoding, extentd's codec, the window and uffd paths and dax.c, and writes each "this is safe
+   decoding, cladefsd's codec, the window and uffd paths and dax.c, and writes each "this is safe
    because" as an assertion; fuzzers, the hostile tests, guest/sim and the hunt run with them on.
    Includes structure-aware generators for coverage plateaus in the cargo-fuzz targets.
 9. **Guardrails for agent work, as hooks.** Implementer agents can't edit tests, specs or mutation

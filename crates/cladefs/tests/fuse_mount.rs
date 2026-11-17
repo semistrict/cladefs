@@ -616,7 +616,7 @@ fn a_vdisk_mounted_is_the_mounts_alone() {
     let started = std::time::Instant::now();
     let vm = cladefs::DaemonExtentStore::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
-    let control = cladefs::extentd::control::Client::connect(socket).unwrap();
+    let control = cladefs::cladefsd::control::Client::connect(socket).unwrap();
     let forked = control.fork_store(&store, &dir.path().join("fork"));
     assert_eq!(forked.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let waited = started.elapsed();

@@ -55,7 +55,7 @@ pub struct ConfigState {
     /// cladefs: the window's private pages at most, as configured (doc-13): a count of pages, as
     /// snapshots before TASK-502 hold it, which configurations now give in bytes.
     pub dax_private_max: Option<u64>,
-    pub extentd_socket: String,
+    pub cladefsd_socket: String,
     /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
     pub cache_type: CacheType,
 }
@@ -71,7 +71,7 @@ impl From<&Config> for ConfigState {
             dax_private_max: config
                 .dax_private_max_bytes
                 .map(|bytes| bytes / cladefs::pages::page_size()),
-            extentd_socket: config.extentd_socket.clone(),
+            cladefsd_socket: config.cladefsd_socket.clone(),
             cache_type: config.cache_type,
         }
     }
@@ -90,7 +90,7 @@ impl From<&ConfigState> for Config {
             dax_private_max_bytes: config
                 .dax_private_max
                 .map(|pages| pages * cladefs::pages::page_size()),
-            extentd_socket: config.extentd_socket.clone(),
+            cladefsd_socket: config.cladefsd_socket.clone(),
             read_only: false,
             cache_type: config.cache_type,
         }
@@ -229,7 +229,7 @@ mod tests {
             capacity: 1 << 30,
             dax_window_size: Some(64 << 20),
             dax_private_max_bytes: Some(16 * cladefs::pages::page_size()),
-            extentd_socket: "/extentd.sock".into(),
+            cladefsd_socket: "/cladefsd.sock".into(),
             read_only: false,
             cache_type: CacheType::Unsafe,
         };

@@ -11,7 +11,7 @@
 # script of SOURCE's traces the host as the guest tests run, its maps in RESULTS/host-trace.txt
 # (scripts/extent-transport.bt, TASK-164.11.1). With CLADEFS_GUEST_KERNEL_BUILD set
 # (release; debug: lockdep, KCSAN, DEBUG_ATOMIC_SLEEP; kasan: KASAN, KFENCE, lockdep; or coverage:
-# gcov of fs/fxfs, which leaves coverage/ in the results, scripts/guest-coverage.py), the guest
+# gcov of fs/cladefs, which leaves coverage/ in the results, scripts/guest-coverage.py), the guest
 # tests run on a guest kernel it builds from the source (scripts/build-guest-kernel.sh), not
 # CLADEFS_GUEST_KERNEL's; with neither set, on a release one it builds (TASK-130: without one, every
 # guest case skipped). It builds in trees that persist between runs, so that a run builds only
@@ -134,7 +134,7 @@ for core in "$cores"/core.*; do
 done
 if [[ -n ${CLADEFS_COVERAGE:-} ]]; then
     "$repo/scripts/guest-coverage.py" "$CLADEFS_COVERAGE" "$(dirname "$(find "$host_kernel_work" \
-        -path '*/fs/fxfs/dax.gcno' -print -quit)")" "$results/coverage" ||
+        -path '*/fs/cladefs/dax.gcno' -print -quit)")" "$results/coverage" ||
         echo "guest coverage: failed" >&2
 fi
 if (( status == 0 )); then status=$e2e_status; fi

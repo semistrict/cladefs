@@ -1,4 +1,4 @@
-# guest/sim's model of Fxfs (guest/sim/fxfs/fxfs.c), which guest/sim tests dax.c against, run beside
+# guest/sim's model of Fxfs (guest/sim/cladefs/cladefs.c), which guest/sim tests dax.c against, run beside
 # Fxfs (fxfs-posix) on the same operations, each file compared after each (TASK-149.29). The model is
 # C, built here over a shim of guest/sim's kernel, so this runs wherever the workspace's tests do.
 [package]

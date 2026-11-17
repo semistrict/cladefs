@@ -8,7 +8,7 @@ guest/sim's seeds (zloop.sh, 3,000 of them) and its sweep (sweep.sh, every call 
 one failing in turn) took half an hour each, CI's wall time twice its other jobs'; since 2026-10-31
 the seeds failed eight times in 430 runs, each beside the workspace's failures of the same rewrite,
 and the sweep never (the user's decision, 2026-11-08). So CI runs them whole only when the code
-they test changed, dax.c and its kernel (guest/linux/fs/fxfs, the kernel's patches and how it is
+they test changed, dax.c and its kernel (guest/linux/fs/cladefs, the kernel's patches and how it is
 built) or the simulator; otherwise a smoke run, and the nightly workflow runs them whole.
 
 The base is what CI compares with: a pull request's base, a push's commit before it, or, if
@@ -25,7 +25,7 @@ import sys
 
 # What guest/sim tests, directories and files: a change of one runs it whole.
 TESTED = (
-    "guest/linux/fs/fxfs/",
+    "guest/linux/fs/cladefs/",
     "guest/linux/patches/",
     "guest/sim/",
     "scripts/build-guest-kernel.sh",

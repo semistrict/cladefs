@@ -13,7 +13,7 @@
 mod common;
 
 use cladefs::Errno;
-use cladefs::extentd::control::proto::*;
+use cladefs::cladefsd::control::proto::*;
 use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
 use common::pattern;
 use std::path::Path;
@@ -313,7 +313,7 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
     let mut daemon = Daemon::new(dir.path());
     let idle = dir.path().join("idle");
     daemon.create(&idle, NEW, None).unwrap();
-    let count = cladefs::extentd::control::BLOCKING_THREADS + 16;
+    let count = cladefs::cladefsd::control::BLOCKING_THREADS + 16;
     let asked = Arc::new(AtomicUsize::new(0));
     let (vms, paths): (Vec<_>, Vec<_>) = (0..count)
         .map(|vm| {
@@ -372,10 +372,10 @@ fn health_follows_whether_the_daemon_serves() {
     let control = dir.path().join("control.sock");
     let listener = std::os::unix::net::UnixListener::bind(&control).unwrap();
     let tenants = dir.path().join("tenants");
-    std::thread::spawn(move || cladefs::extentd::serve_control(listener, tenants));
+    std::thread::spawn(move || cladefs::cladefsd::serve_control(listener, tenants));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let channel = cladefs::extentd::control::channel(&control).await.unwrap();
+        let channel = cladefs::cladefsd::control::channel(&control).await.unwrap();
         let health = HealthClient::new(channel);
         let mut watcher = health.clone();
         let status = |service: &str| {
@@ -383,7 +383,7 @@ fn health_follows_whether_the_daemon_serves() {
             let request = HealthCheckRequest { service: service.to_owned() };
             async move { health.check(request).await.unwrap().into_inner().status() }
         };
-        let api = "cladefs.extentd.v1.Extentd";
+        let api = "cladefs.cladefsd.v1.Cladefsd";
         assert_eq!(status("").await, ServingStatus::NotServing);
         assert_eq!(status(api).await, ServingStatus::NotServing);
         let request = HealthCheckRequest { service: String::new() };
@@ -392,17 +392,17 @@ fn health_follows_whether_the_daemon_serves() {
         assert_eq!(next().await, ServingStatus::NotServing);
 
         let vms = std::os::unix::net::UnixListener::bind(dir.path().join("vms.sock")).unwrap();
-        std::thread::spawn(move || cladefs::extentd::serve(vms));
+        std::thread::spawn(move || cladefs::cladefsd::serve(vms));
         assert_eq!(next().await, ServingStatus::Serving);
         assert_eq!(status(api).await, ServingStatus::Serving);
 
-        tokio::task::spawn_blocking(cladefs::extentd::stop_serving).await.unwrap();
+        tokio::task::spawn_blocking(cladefs::cladefsd::stop_serving).await.unwrap();
         assert_eq!(next().await, ServingStatus::NotServing);
         assert_eq!(status(api).await, ServingStatus::NotServing);
     });
 }
 
-/// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of an encrypted cell through its
+/// TASK-411.7, and TASK-411's AC #3 (cladefsd serving a VM's store of an encrypted cell through its
 /// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
 /// written by its VM, read back, no file of their directories holding what they wrote in the
 /// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and halts its store,

@@ -5,7 +5,7 @@
 # Killer: scenarios cow_reclaim_after_writeback_met_a_fault
 #
 # TASK-164.4, doc-13: a range with no dirty page is released with its DAX entries as they are,
-# fxfs_dax_clean_entries taken out: one tagged dirty, a writeback having left it so, a fault holding
+# cladefs_dax_clean_entries taken out: one tagged dirty, a writeback having left it so, a fault holding
 # it (or, since TASK-164.9, any a write fault tagged, which only writepages and the release clean),
 # fails the invalidation for ever, so that the range is never reclaimed;
 # cow_reclaim_after_writeback_met_a_fault, interleave's seed 3390 at 1,000 operations. Until
@@ -13,13 +13,13 @@
 # them, which since the release holds the file's semaphore deadlocks on it in writepages, every run
 # failing at once and its scenario never reached.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1172,8 +1172,6 @@
  	 * and a fault waiting for room reclaimed the range again and again (guest/sim, seed 3390 at
  	 * 1,000 operations).
  	 */
--	if (fxfs_dax_clean_entries(inode, start, end))
+-	if (cladefs_dax_clean_entries(inode, start, end))
 -		return false;
  	return !invalidate_inode_pages2_range(mapping, start >> PAGE_SHIFT, end >> PAGE_SHIFT);
  }

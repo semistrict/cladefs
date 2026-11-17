@@ -3,18 +3,18 @@ id: doc-8
 title: Live read-only followers of a mounted Fxfs
 type: specification
 created_date: '2026-10-17 22:17'
-updated_date: '2026-11-16 04:15'
+updated_date: '2026-11-17 01:09'
 ---
 # Live read-only followers of a mounted Fxfs
 
 Status: planned, 2026-10-17; the protocol's TLA+ spec written and checked (TASK-42.8, testing 0);
 store views built (TASK-42.2, 2026-10-18); the simulation (TASK-42.1), the follower in Fxfs
-(TASK-42.4), its protocol under Shuttle (TASK-42.5, the host's side) and extentd's followers
+(TASK-42.4), its protocol under Shuttle (TASK-42.5, the host's side) and cladefsd's followers
 (TASK-42.3, but Firecracker) built, 2026-10-18; the fill barrier in place of the seqcount, its
 mutex fallback and SRCU (TASK-42.10), 2026-10-19. Tasks: TASK-42, in order: the protocol in TLA+
 (42.8), store views (42.2), the test foundation (42.1: simulation on Shuttle, history checker,
 per-batch comparison, trace validation), the follower in Fxfs (42.4), the concurrency protocol
-under Shuttle (42.5, once 42.8 is done), extentd, doc-4 and Firecracker (42.3), the guest kernel
+under Shuttle (42.5, once 42.8 is done), cladefsd, doc-4 and Firecracker (42.3), the guest kernel
 (42.6), the guest torture test and measurements (42.7).
 
 *Frozen 2026-11-04* (docs/reviews/2026-11-04-first-principles.md, decision 4: no customer now):
@@ -33,14 +33,14 @@ built around testing techniques that make them loud and reproducible.
 1. **Live follow, only.** No point-in-time-only stage ships. A follower mounts the store as of a
    commit, then applies each commit after it. (Point-in-time mounts fall out of it: a follower
    that never advances.)
-2. **Followers are VMs on the writer's host**, served by the same extentd, so a follower reads
+2. **Followers are VMs on the writer's host**, served by the same cladefsd, so a follower reads
    the writer's sealed extents, and its open extents' sealed parts, from the same memory and
    cache, with no copy.
 3. **The writer never waits** for a follower: no commit is forced, no free blocks on one. A
    follower takes the latest commit the writer made, ordered, local or uploaded.
 4. **A follower sees a prefix of the writer's history**: at every moment, the state as of some
-   commit, moving forward. It may see an ordered commit a crash of extentd would lose; followers
-   are ephemeral, and die with that extentd anyway.
+   commit, moving forward. It may see an ordered commit a crash of cladefsd would lose; followers
+   are ephemeral, and die with that cladefsd anyway.
 5. **DAX from the start**: it is the primary path. Without DAX (the page cache) comes along, as
    it shares everything but the dropping of mappings.
 6. **A file the writer deletes while a follower has it open stays readable until the follower
@@ -93,10 +93,10 @@ Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view,
   `view_kept_bytes` of frees as the oldest, is cut off (decision 7): it keeps nothing, and its
   reads, advances and pins fail with `CutOff`. The limits are to be chosen with measurements.
 
-### extentd and the device protocol (doc-4)
+### cladefsd and the device protocol (doc-4)
 
 Built (TASK-42.3): `ExtentStore::{follow, advance, let_go, pin, unpin, newer, take_over}`
-(crates/cladefs/src/extents.rs), extentd's read-only connections (`extentd/{server, stores,
+(crates/cladefs/src/extents.rs), cladefsd's read-only connections (`cladefsd/{server, stores,
 client}.rs`), doc-4's Followers.
 
 - A follower is an `ExtentStore` of its own (`ExtentStore::follow`), sharing its writer's store
@@ -104,7 +104,7 @@ client}.rs`), doc-4's Followers.
   refusing what is outside it and its pins with EIO, logged, and what would change the store with
   EROFS. `advance` keeps the commits between until `let_go` (`View::advance_keeping`), as the
   guest's follower reads them while it applies them, and its readers may still read them.
-- extentd keeps one instance of a store for its connections: its writer's, whose connection holds
+- cladefsd keeps one instance of a store for its connections: its writer's, whose connection holds
   the path, and its followers' (`stores::followed`). Followers that find no writer open the store
   as a writer would; a writer opening it then takes that instance over
   (`ExtentStore::take_over`), as it does a writer's that went, if nothing is open in it (its last
@@ -129,7 +129,7 @@ client}.rs`), doc-4's Followers.
   series, the branch vendor/firecracker tracks; branch cladefs, on Firecracker's main, is
   superseded by it and has none of the changes since TASK-37).
 
-### The follower in Fxfs (crates/fxfs, guest/rust/fxfs-linux)
+### The follower in Fxfs (crates/fxfs, guest/rust/cladefs-linux)
 
 Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`, with
 `Device::{advance, pin, unpin}` (storage_device) and `Journal::read_on`.
@@ -164,7 +164,7 @@ Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`
 - Readers are kept out of a follower's filesystem while it applies a batch, by its caller, until
   the concurrency protocol below (TASK-42.5).
 
-### The follower in the guest (guest/linux, guest/rust/fxfs-linux)
+### The follower in the guest (guest/linux, guest/rust/cladefs-linux)
 
 Built (TASK-42.6):
 
@@ -172,7 +172,7 @@ Built (TASK-42.6):
   (-EROFS), sends ADVANCE, LET_GO (naming the commit number an ADVANCE returned: the device
   serves requests in any order, and a LET_GO of an earlier one lets go of no more), PIN and UNPIN, and
   reads `committed`. Its DAX window maps sealed extents read-only for a follower.
-- fs/fxfs mounts read-only on `-o ro` or a follower's device (SB_RDONLY, which a remount keeps).
+- fs/cladefs mounts read-only on `-o ro` or a follower's device (SB_RDONLY, which a remount keeps).
   On a follower's device, the device's configuration change schedules a batch (`fxfs_follow`):
   `follower::Protocol` over the kernel's primitives (follow.rs; C shims in super.c).
 - Every VFS entry point that reads the trees holds the fill barrier shared until what it read is
@@ -325,7 +325,7 @@ TLC trace validation, so the spec stays the implementation's, not a separate sto
 
 ### 1. Loud failures (first, as it multiplies everything else)
 
-- extentd checks each READ and MAP of a read-only connection against its view and pins: anything
+- cladefsd checks each READ and MAP of a read-only connection against its view and pins: anything
   else is EIO and an error logged, never a silent stale read.
 - The follower asserts it never advances past a commit an operation in flight still uses.
 - Code shape: reads return values; only validated values reach caches.
@@ -333,7 +333,7 @@ TLC trace validation, so the spec stays the implementation's, not a separate sto
   refuses it, -EROFS), a write fault through a follower's DAX window, a follower's commit numbers going
   back or settling past what it applied, a batch's drop off the follower's mounts; lockdep
   asserts the fill barrier held where the trees are read and batches change the kernel's caches.
-  extentd's checks always on.
+  cladefsd's checks always on.
 
 ### 2. Shuttle: controlled schedules of the real code
 
@@ -430,7 +430,7 @@ Delay injection points (debug builds) widen the windows: between a batch's apply
 settling, between iomap_begin and the PTE insert in a fault (as seal_race widened the one that
 found TASK-39.6's DAX bug). Mutants switch each rule off and must be caught: the batches' drops
 (stale reads, a wrong history), the readers' barrier (a fault maps an extent a batch let go of,
-which extentd refuses, and the follower's VMM aborts on the fault), the read(2)s' copies without
+which cladefsd refuses, and the follower's VMM aborts on the fault), the read(2)s' copies without
 page faults (a reader reading into a private mapping of a follower's file hangs). Hours on GCE, several followers; the follower's lag and pinned bytes
 recorded.
 
@@ -443,8 +443,8 @@ next operation, so that its operations reach the journal in the order it makes t
 history checker's model assumes: written only to the page cache, a write reaches the journal at
 writeback, after the operations since (a size changed after it commits before it; a file deleted
 before its writeback never held it), which an hour's run found without DAX (TASK-42.12). On a
-debug kernel, KCSAN's reports fail the test when they name the followers' code (fs/fxfs,
-virtio_extent, their Rust), but for a race whose change is PF_MEMALLOC_NOFS alone (fs/fxfs's
+debug kernel, KCSAN's reports fail the test when they name the followers' code (fs/cladefs,
+virtio_extent, their Rust), but for a race whose change is PF_MEMALLOC_NOFS alone (fs/cladefs's
 NOFS scopes writing their own task's flags); the kernel's own races, each seen looked into, it
 leaves to the kernel.
 

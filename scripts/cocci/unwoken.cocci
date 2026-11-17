@@ -2,7 +2,7 @@
 // wait's queue: as a range freed counted in `released`, and a round of the budget's worker in
 // `rounds`, without waking their waiters, which waited out their timeouts instead, only slower,
 // which nothing saw (TASK-149.18). The change and its wake belong in one function, as
-// fxfs_dax_released keeps them.
+// cladefs_dax_released keeps them.
 // Mutants: task-149.18-release-unwoken task-149.18-round-unwoken
 
 @waited@

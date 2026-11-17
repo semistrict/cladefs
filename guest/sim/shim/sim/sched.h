@@ -44,7 +44,7 @@ struct task_struct {
 	struct address_space *fault_mapping;
 	pgoff_t fault_pgoff;
 	bool fault_write;
-	/* Kernel copies don't fault (fxfs_dax_write_iter's, and read's). */
+	/* Kernel copies don't fault (cladefs_dax_write_iter's, and read's). */
 	int pagefault_disabled;
 	/* Spinlocks held, and RCU readers entered: a sleep under either fails the run. */
 	int atomic;

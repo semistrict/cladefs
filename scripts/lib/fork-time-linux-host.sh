@@ -85,16 +85,16 @@ for pair in "$@"; do
     : > "$out"
     echo "== $label: timing" >&2
     CLADEFSD_BUCKET="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
-        CLADEFSD_PART_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/extentd.control" \
+        CLADEFSD_PART_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/cladefsd.control" \
         CLADEFSD_STATS="$results/$label-stats.txt" \
-        "$bin/cladefsd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
+        "$bin/cladefsd" "$dir/cladefsd.sock" $(( 8 << 30 )) > "$results/$label-cladefsd.log" 2>&1 &
     daemon=$!
     for _ in {1..600}; do
-        [[ -S $dir/extentd.control ]] && break
+        [[ -S $dir/cladefsd.control ]] && break
         kill -0 "$daemon" || { echo "$label: the daemon exited" >&2; exit 1; }
         sleep 0.1
     done
-    export CLADEFSD_GRPC=$dir/extentd.control
+    export CLADEFSD_GRPC=$dir/cladefsd.control
     # timed STEP ITERATION COMMAND... runs COMMAND and records how long it took.
     timed() {
         local step=$1 iteration=$2 start end

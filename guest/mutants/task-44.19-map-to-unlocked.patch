@@ -17,8 +17,8 @@
 # the region the guest gave back (sim_device_check_unmapped). The check at the unmount alone missed
 # it: the end reads the files in again, whose region took the same space and UNMAPped it whole.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1397,7 +1397,6 @@
  	unsigned long from, to;
  	int err = 0;

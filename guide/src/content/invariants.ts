@@ -133,7 +133,7 @@ export const invariants: Invariant[] = [
     id: "fsync-ordered",
     layer: "daemon",
     claim:
-      "An fsync returns once its commit is ordered: in extentd, its data in the store's files. It " +
+      "An fsync returns once its commit is ordered: in cladefsd, its data in the store's files. It " +
       "is local, on the host's disk, within 50 ms at the median, 1 s at most; sync, syncfs, " +
       "unmount and freeze wait for local, and with a bucket, for uploaded.",
     why:

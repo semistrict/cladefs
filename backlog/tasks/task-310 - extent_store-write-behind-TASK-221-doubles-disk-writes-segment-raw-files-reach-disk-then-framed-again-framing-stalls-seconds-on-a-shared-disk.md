@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09 23:57'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 22:52'
 labels:
   - perf
   - extentd
@@ -20,15 +20,15 @@ ordinal: 718000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Reported by LangSmith (sandbox CI, 8-vCPU runner, two sandbox hosts each with its own extentd, one local RustFS bucket on the same disk), after the bump 6a513509a -> 96c7808b8. Their cladefs E2E job became flaky; the non-cladefs job did not.
+Reported by LangSmith (sandbox CI, 8-vCPU runner, two sandbox hosts each with its own cladefsd, one local RustFS bucket on the same disk), after the bump 6a513509a -> 96c7808b8. Their cladefs E2E job became flaky; the non-cladefs job did not.
 
-Per CI run, from extentd's 'extent store: framing ... took' warnings (logged above 50 ms):
+Per CI run, from cladefsd's 'extent store: framing ... took' warnings (logged above 50 ms):
 - Old pin: 33-51 slow framings, slowest 0.2 s, 3-4 s total, about a third in the write phase.
 - New pin: 940-1,065 slow framings, slowest 3.3-9.6 s, 245-314 s total, about 85% in the write phase. 'commits wait for object storage' also hit the 1 GiB lag bound.
 - Sandboxes: /bin/echo took 1.9 s, uname 6.3 s, cat 11.9 s; creates took up to 43 s; tests timed out.
 
 Their controlled workload: 16-vCPU GCE VM with a persistent disk, new pin. 16 sandboxes, 8 at a time, each writing 768 MiB with fsync, then 3,000 files of 8 KiB, reading back and deleting. That is about 12.4 GiB of guest writes in about 130 s.
-- extentd wrote 28.8-29.0 GiB, about 2.3x the guest data, with cancelled_write_bytes = 0.
+- cladefsd wrote 28.8-29.0 GiB, about 2.3x the guest data, with cancelled_write_bytes = 0.
 - The disk wrote 42.7-45.0 GiB in all, including RustFS's copy.
 - 104-135 slow framings per run, up to 17.5 s.
 - I/O stalls for 35-38 s of the 130 s.
@@ -47,17 +47,17 @@ Fix direction, theirs:
 - Skip or defer raw write-back for segments that will be framed soon.
 - Drop the raw file's pages once framed.
 - Make write-behind adaptive.
-- Count extentd's bytes written per kind (raw, framed, log) in the stats.
+- Count cladefsd's bytes written per kind (raw, framed, log) in the stats.
 
 Whatever the fix, it must keep doc-12's durability window (TASK-221's ACs).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Reproduced on ubu1 (non-ZFS disk, many VMs, one shared disk): extentd's bytes written vs guest bytes, slow framings, measured on main
+- [x] #1 Reproduced on ubu1 (non-ZFS disk, many VMs, one shared disk): cladefsd's bytes written vs guest bytes, slow framings, measured on main
 - [x] #2 Root cause shown by A/B (write-behind off / 3cb88647e reverted vs main) on the same workload
-- [x] #3 extentd's stats count bytes written per kind (raw, framed, log)
-- [ ] #4 Fixed: extentd writes about 1x guest data plus framing overhead on that workload, slow framings back to old-pin levels, and pgbench durable_lag still meets doc-12's window
+- [x] #3 cladefsd's stats count bytes written per kind (raw, framed, log)
+- [ ] #4 Fixed: cladefsd writes about 1x guest data plus framing overhead on that workload, slow framings back to old-pin levels, and pgbench durable_lag still meets doc-12's window
 <!-- AC:END -->
 
 ## Definition of Done
@@ -70,8 +70,8 @@ Whatever the fix, it must keep doc-12's durability window (TASK-221's ACs).
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. extent_store counts the bytes it writes per kind (raw: guest writes to segments' raw files; copied: sealing's copies into the open segment; framed; own: extents' own files; log: logs and WAL base); extentd's daemon stats line says them, with its /proc/self/io write_bytes and cancelled_write_bytes.
-2. A guest case, fxfs-guest-shared-disk (manual): its own daemon, stores, file bucket and part cache under the case's directory, on one disk; VMs N at a time, each writing a large file with fsync and many small files, reading back, deleting; the host says extentd's bytes written (proc io, per kind) against the guests', slow framings, and the disk's stall time (PSI io, device stat).
+1. extent_store counts the bytes it writes per kind (raw: guest writes to segments' raw files; copied: sealing's copies into the open segment; framed; own: extents' own files; log: logs and WAL base); cladefsd's daemon stats line says them, with its /proc/self/io write_bytes and cancelled_write_bytes.
+2. A guest case, fxfs-guest-shared-disk (manual): its own daemon, stores, file bucket and part cache under the case's directory, on one disk; VMs N at a time, each writing a large file with fsync and many small files, reading back, deleting; the host says cladefsd's bytes written (proc io, per kind) against the guests', slow framings, and the disk's stall time (PSI io, device stat).
 3. ubu1: a system-setup.d step making an ext4 scratch filesystem on a ZFS zvol, the case's directory on it.
 4. Measure main vs write-behind off + 3cb88647e reverted (A/B).
 5. Fix from what the A/B shows; measure again; pgbench and pgbench-dax durable_lag within doc-12's window.

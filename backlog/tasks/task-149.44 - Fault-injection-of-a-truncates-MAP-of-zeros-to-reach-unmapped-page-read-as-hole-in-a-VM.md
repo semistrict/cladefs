@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-08 05:38'
+updated_date: '2026-11-17 01:10'
 labels:
   - testing
 dependencies: []
@@ -17,7 +18,7 @@ ordinal: 677000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by TASK-149.2: guest/mutants/unmapped-page-read-as-hole.patch needs a truncate's failed MAP of zeros (pages past the new end left without window pages, which a write past them grows the file over, then a load reads the kernel's zero page), which guest/sim's device fails on request. In a VM nothing makes that MAP fail: fxfs.dax_fail_maps fails ranges' maps of more than one piece, dax_fail_map_many and dax_fail_fallbacks a chunk's MAP_MANY. A parameter failing the next N MAPs of zeros (fxfs_device_map with zeros) would let a guest case reach the path, and the fsx scripts on a DAX mount with it kill the mutant.
+Found by TASK-149.2: guest/mutants/unmapped-page-read-as-hole.patch needs a truncate's failed MAP of zeros (pages past the new end left without window pages, which a write past them grows the file over, then a load reads the kernel's zero page), which guest/sim's device fails on request. In a VM nothing makes that MAP fail: cladefs.dax_fail_maps fails ranges' maps of more than one piece, dax_fail_map_many and dax_fail_fallbacks a chunk's MAP_MANY. A parameter failing the next N MAPs of zeros (fxfs_device_map with zeros) would let a guest case reach the path, and the fsx scripts on a DAX mount with it kill the mutant.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

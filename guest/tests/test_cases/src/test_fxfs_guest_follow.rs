@@ -141,8 +141,8 @@ mod host {
             f.expect("seen")?;
             w.tell("done")?;
             w.expect("unmounted")?;
-            let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD unset")?;
-            let control = crate::common::control(Path::new(&extentd))?;
+            let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD unset")?;
+            let control = crate::common::control(Path::new(&cladefsd))?;
             let before = control.committed(&store)?;
             w.tell("mount read-only")?;
             w.expect("unmounted read-only")?;
@@ -197,7 +197,7 @@ mod guest {
     use std::time::{Duration, Instant};
 
     const MNT: &str = "/mnt/fxfs";
-    const FAIL_ATTACH: &str = "/sys/module/fxfs/parameters/dax_fail_attach";
+    const FAIL_ATTACH: &str = "/sys/module/cladefs/parameters/dax_fail_attach";
     /// How long a follower takes at most to see its writer's sync.
     const FOLLOWS_WITHIN: Duration = Duration::from_secs(30);
 
@@ -213,7 +213,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), flags, std::ptr::null())

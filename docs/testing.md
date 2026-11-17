@@ -45,14 +45,14 @@ sudo scripts/pjdfstest-fuse.py target/debug/cladefs-mount   # Linux
 
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its
 anonymous memory, sampled as its stats are, against the sum of what its design bounds
-(`cladefs::extentd::process`: its upload memory, a framing for each store written, its fetches,
+(`cladefs::cladefsd::process`: its upload memory, a framing for each store written, its fetches,
 its tenants' bytes in flight, its own), which its stats' `process:` line and its metrics say; and what it
 writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a run whose daemons
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
 a host's store held to what its design writes for a guest's large file and its small files, each
 byte raw once and framed once, a commit's copies a segment's worth at most
 (`bucket::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
-then answering again, VM processes writing all the while (`extentd::tests::soak`, five minutes in
+then answering again, VM processes writing all the while (`cladefsd::tests::soak`, five minutes in
 CI, half an hour each night in Hunt; with guests, `fxfs-guest-bucket-soak`, by name). Each has a
 past bug put back that it fails (`crates/cladefs/mutants`).
 
@@ -132,7 +132,7 @@ under `fxjob`, copying the results back and removing the worktree
 The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
 model-checks exhaustively over small bounds (`specs/`): live read-only
 followers (`specs/follower`, backlog doc-8), the guest Fxfs's copy-on-write
-DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/fxfs/dax.c`),
+DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/cladefs/dax.c`),
 branches in the bucket with the host's write-ahead log (`specs/bucket`,
 backlog doc-7 and doc-14), and Fxfs's super-block claiming only what its
 journal flushed (`specs/journal`). Each rule

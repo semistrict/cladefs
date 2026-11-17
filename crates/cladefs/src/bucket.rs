@@ -398,7 +398,7 @@ static UPLOADS: std::sync::LazyLock<Arc<Budget>> = std::sync::LazyLock::new(|| {
 static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
-/// (TASK-317): extentd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
+/// (TASK-317): cladefsd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
 /// fall, what waits for it is on the host's disk, their write-ahead logs, and what of it is in
 /// memory is what this lets upload at once. Before any store opens; no less than the largest
 /// object a store uploads, an extent's of 64 MiB, which goes alone.
@@ -1189,13 +1189,13 @@ mod tests {
     /// base of each of `CLADEFS_BENCH_EXTENTS` extents (64, 1,024, 32,768 and 300,000 unless set, a
     /// list by commas) of a block each, in a memory bucket, forked `CLADEFS_BENCH_FORKS` times (100
     /// unless set; its first count alone), once from the store itself, live, whose writer writes a
-    /// checkpoint for each fork, as `extentd::tests::serves_hundreds_of_forks_of_a_base` makes its
+    /// checkpoint for each fork, as `cladefsd::tests::serves_hundreds_of_forks_of_a_base` makes its
     /// forks, and once from a point of it, whose forks all start from the point's one state
     /// (`CLADEFS_BENCH_PARENTS`, `live,point` unless set). A line for each count of forks open,
     /// then one of what holds it ([`fork_extent_memory`]).
     /// TASK-453: and it fails unless each fork past the first holds [`IDLE_FORK_BYTES`] at most,
     /// whatever its base holds, and the daemon's count of the stores' maps
-    /// (`extentd::process::AnonBudget::extents`) covers what they hold.
+    /// (`cladefsd::process::AnonBudget::extents`) covers what they hold.
     /// In the sim profile, optimized as a release build is, which this crate's tests, with their
     /// failpoints, refuse to be (TASK-320): the bytes are any build's, the times this one's.
     /// `cargo nextest run -p cladefs --cargo-profile sim --run-ignored only
@@ -1230,7 +1230,7 @@ mod tests {
     const IDLE_FORK_BYTES: u64 = 64 << 10;
 
     /// What the stores' maps of their extents hold now, as the extent daemon counts it
-    /// (`extentd::process::extents_held`, Linux's): what the stores hold of their own, and the
+    /// (`cladefsd::process::extents_held`, Linux's): what the stores hold of their own, and the
     /// decoded states they share, each once.
     fn extents_counted() -> (extent_store::Own, extent_bucket::recovery::Held) {
         (extent_store::own_held(), crate::host_store::decoded_held())
@@ -2882,7 +2882,7 @@ mod tests {
     #[test]
     fn reads_of_object_storage_are_logged_with_their_guest_request() {
         use crate::request::{RequestId, within_now};
-        let lines = crate::extentd::logging::capture();
+        let lines = crate::cladefsd::logging::capture();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =

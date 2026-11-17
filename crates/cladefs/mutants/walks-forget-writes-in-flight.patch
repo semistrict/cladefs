@@ -2,9 +2,9 @@
 # in its files yet: each recount, as a refusal asks for, admits the tenant as many more bytes
 # again, past its limit (TASK-94; the hostile proptest found it, mallory 2 MiB past).
 # Kind: disk
-# Killer: extentd::disk::tests::writes_not_done_stay_counted_across_walks
---- a/crates/cladefs/src/extentd/disk.rs
-+++ b/crates/cladefs/src/extentd/disk.rs
+# Killer: cladefsd::disk::tests::writes_not_done_stay_counted_across_walks
+--- a/crates/cladefs/src/cladefsd/disk.rs
++++ b/crates/cladefs/src/cladefsd/disk.rs
 @@ -212,7 +212,7 @@ impl Disk {
          }
          let walked = walk(&self.dir);

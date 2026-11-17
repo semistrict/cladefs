@@ -29,7 +29,7 @@ impl Drop for KillOnDrop {
 /// another process reads what they hold in once it has left their directories, uploaded
 /// (TASK-165.8).
 fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
-    let socket = dir.join("extentd.sock");
+    let socket = dir.join("cladefsd.sock");
     let bucket = format!("file://{}/", dir.canonicalize().unwrap().join("bucket").display());
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)

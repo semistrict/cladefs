@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
-updated_date: '2026-11-15 13:31'
+updated_date: '2026-11-16 22:53'
 labels:
   - perf
   - review-2026-11-15
@@ -21,7 +21,7 @@ ordinal: 840000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-crates/cladefs/src/extentd/stores.rs: the first restore of a point holds its key through take_store, a full open; every other restore waits in hold_to_fork with CLOSING_WAIT (10 s) and returns EBUSY; fork_from retries only Opened::Before. 200 restores of one snapshot on a cold host with a slow bucket or a saturated disk would fail in a burst. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+crates/cladefs/src/cladefsd/stores.rs: the first restore of a point holds its key through take_store, a full open; every other restore waits in hold_to_fork with CLOSING_WAIT (10 s) and returns EBUSY; fork_from retries only Opened::Before. 200 restores of one snapshot on a cold host with a slow bucket or a saturated disk would fail in a burst. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

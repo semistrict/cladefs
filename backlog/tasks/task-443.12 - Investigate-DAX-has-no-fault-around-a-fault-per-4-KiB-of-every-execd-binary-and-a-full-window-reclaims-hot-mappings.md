@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
+updated_date: '2026-11-17 01:10'
 labels:
   - perf
   - review-2026-11-15
@@ -20,7 +21,7 @@ ordinal: 846000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-guest/linux/fs/fxfs/dax.c fxfs_dax_vm_ops has no .map_pages, so each touched page of libc, ld.so and small files goes through fxfs_dax_do_fault, taking the inode's invalidate_lock and file sem and, with more than one hot range, the filesystem-wide dax->lock; fork children refault. Once the window fills, fxfs_dax_reclaim picks by an LRU only iomaps refresh, so a mapped library with live PTEs ages and is unmapped (an rmap walk per entry, a blocking UNMAP, every vCPU flushed), and faults wait in 10 ms steps. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+guest/linux/fs/cladefs/dax.c fxfs_dax_vm_ops has no .map_pages, so each touched page of libc, ld.so and small files goes through fxfs_dax_do_fault, taking the inode's invalidate_lock and file sem and, with more than one hot range, the filesystem-wide dax->lock; fork children refault. Once the window fills, fxfs_dax_reclaim picks by an LRU only iomaps refresh, so a mapped library with live PTEs ages and is unmapped (an rmap walk per entry, a blocking UNMAP, every vCPU flushed), and faults wait in 10 ms steps. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

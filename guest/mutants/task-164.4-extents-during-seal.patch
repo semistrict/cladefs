@@ -8,14 +8,14 @@
 # progress has yet to seal them on the device (OpenExtents::seal, at its beginning): the host
 # refuses the MAP (-EPERM), and the range seals and tries again. cow_map_during_seal's write.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1527,7 +1527,7 @@
  	for (;;) {
- 		seals = fxfs_device_seals(dax->dev);
- 		count = fxfs_nofs(fxfs_dax_extents(fs, ino, offset, len, found, capacity));
--		if (count < 0 || (!(seals & 1) && fxfs_device_seals(dax->dev) == seals))
+ 		seals = cladefs_device_seals(dax->dev);
+ 		count = cladefs_nofs(cladefs_dax_extents(fs, ino, offset, len, found, capacity));
+-		if (count < 0 || (!(seals & 1) && cladefs_device_seals(dax->dev) == seals))
 +		if (count < 0 || true)
  			return count;
- 		fxfs_device_wait_unsealed(dax->dev);
+ 		cladefs_device_wait_unsealed(dax->dev);
  	}

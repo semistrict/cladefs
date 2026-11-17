@@ -3,7 +3,7 @@
 # nothing says why, no failed-NAME in the stats line, no failures in the metrics (TASK-314,
 # TASK-330.3).
 # Kind: failures
-# Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
+# Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
 --- a/crates/extent_bucket/src/object_bucket.rs
 +++ b/crates/extent_bucket/src/object_bucket.rs
 @@ -451,13 +451,7 @@

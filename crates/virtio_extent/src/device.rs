@@ -182,7 +182,7 @@ impl Device {
             cladefs::userfaultfd_accessible()
                 .map_err(|err| Error::Userfaultfd(config.id.clone(), err))?;
         }
-        let store = connect(&config.extentd_socket, &config.id, &on_lost)
+        let store = connect(&config.cladefsd_socket, &config.id, &on_lost)
             .and_then(|daemon| match &making {
                 Making::Boot if config.read_only => daemon.open_read_only(&config.path_on_host),
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
@@ -387,7 +387,7 @@ impl Device {
     /// reset ([`Device::reset`]), with its window's faults, before the new one creates its window
     /// in the same memory, which it left inaccessible meanwhile (TASK-79.8).
     fn reopen(&mut self) -> Result<(), cladefs::Error> {
-        let store = connect(&self.config.extentd_socket, &self.config.id, &self.on_lost)?
+        let store = connect(&self.config.cladefsd_socket, &self.config.id, &self.on_lost)?
             .open_read_only(&self.config.path_on_host)?;
         self.following = Arc::new(Following::default());
         hear_commits(&store, &self.following);

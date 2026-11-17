@@ -61,7 +61,7 @@ static void check_file(const char *what, struct file *file, const char *expected
 		read = sim_read(file, 0, got, len);
 		check(read == len, "%s: read %zd of %zu", what, read, len);
 		check(!memcmp(got, expected, len), "%s: read(2) differs, round %d", what, round);
-		fxfs_sim_read(mount->info->fs, inode->i_ino, 0, got, len);
+		cladefs_sim_read(mount->info->fs, inode->i_ino, 0, got, len);
 		check(!memcmp(got, expected, len), "%s: Fxfs's extents differ, round %d", what, round);
 		for (int seals = 0; seals < 8; seals++)
 			check(!sim_fsync(file), "%s: fsync", what);
@@ -172,9 +172,9 @@ static void append_stopped_short_in_a_page(void)
 	done = sim_write_user(file, 0, stops_after(source, readable), 2 * PAGE_SIZE);
 	check(done == readable, "an append from memory ending part way: %zd", done);
 	check(!sim_fsync(file), "fsync");
-	check(fxfs_sim_size(mount->info->fs, file_inode(file)->i_ino) == readable,
+	check(cladefs_sim_size(mount->info->fs, file_inode(file)->i_ino) == readable,
 	      "Fxfs's size, after an append stopped short: %llu",
-	      fxfs_sim_size(mount->info->fs, file_inode(file)->i_ino));
+	      cladefs_sim_size(mount->info->fs, file_inode(file)->i_ino));
 	memset(expected + readable, 'x', after);
 	done = sim_write(file, readable, expected + readable, after);
 	check(done == after, "the next append: %zd", done);
@@ -217,22 +217,22 @@ static void write_past_end_copies_nothing(void)
 	check(i_size_read(file_inode(file)) == sizeof(bytes), "the file is %lld bytes long",
 	      i_size_read(file_inode(file)));
 	check(!sim_fsync(file), "fsync");
-	check(fxfs_sim_size(mount->info->fs, file_inode(file)->i_ino) == sizeof(bytes),
-	      "in Fxfs: %llu", fxfs_sim_size(mount->info->fs, file_inode(file)->i_ino));
+	check(cladefs_sim_size(mount->info->fs, file_inode(file)->i_ino) == sizeof(bytes),
+	      "in Fxfs: %llu", cladefs_sim_size(mount->info->fs, file_inode(file)->i_ino));
 	done = sim_read(file, 0, got, sizeof(got));
 	check(done == sizeof(got) && !memcmp(got, bytes, sizeof(got)), "the read: %zd", done);
 }
 
 /*
  * That every way the model of Fxfs grows a file reads zeros where a cut that kept its last block
- * (FXFS_SET_KEEP_TAIL), as a DAX file's truncate does, left bytes past the end, as Fxfs does
+ * (CLADEFS_SET_KEEP_TAIL), as a DAX file's truncate does, left bytes past the end, as Fxfs does
  * (fxfs-posix's every_growth_finds_what_a_cut_left_past_the_end_zeroed): a writeback in that block
  * keeps of it what was the file's alone (read_unaligned_ends); one past it, a truncate, and a clone
  * past it, even of that block, zero the tail of a block they don't write (txn_grow_size,
  * zero_tail_before_growth). Where the model kept them, a writeback of a DAX file's last page up to
  * its end, and one past the end after it, read them back (failures 140272 at 1,000).
  */
-static void fxfs_growths_zero_past_a_cut(void)
+static void cladefs_growths_zero_past_a_cut(void)
 {
 	static const struct {
 		const char *what;
@@ -244,58 +244,58 @@ static void fxfs_growths_zero_past_a_cut(void)
 		{ "a clone past it", 65536 + 2 * PAGE_SIZE },
 		{ "a clone of the block past it", 65536 + PAGE_SIZE },
 	};
-	struct fxfs_setattr cut = { .valid = FXFS_SET_SIZE | FXFS_SET_KEEP_TAIL, .size = 1000 };
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs_setattr cut = { .valid = CLADEFS_SET_SIZE | CLADEFS_SET_KEEP_TAIL, .size = 1000 };
+	struct cladefs *fs = mount->info->fs;
 	static char bytes[2 * PAGE_SIZE], expected[PAGE_SIZE], got[PAGE_SIZE];
-	struct fxfs_write_part part = { 0, bytes, sizeof(bytes) };
-	struct fxfs_setattr grown = { .valid = FXFS_SET_SIZE };
-	u64 source = fxfs_sim_new_file(fs), ino;
-	struct fxfs_attr attr;
+	struct cladefs_write_part part = { 0, bytes, sizeof(bytes) };
+	struct cladefs_setattr grown = { .valid = CLADEFS_SET_SIZE };
+	u64 source = cladefs_sim_new_file(fs), ino;
+	struct cladefs_attr attr;
 	size_t i, at;
 
 	memset(bytes, 's', sizeof(bytes));
-	check(!fxfs_write_many(fs, source, &part, 1, 0), "the clones' source's write");
+	check(!cladefs_write_many(fs, source, &part, 1, 0), "the clones' source's write");
 	memset(bytes, 'c', sizeof(bytes));
 	for (i = 0; i < ARRAY_SIZE(growths); i++) {
-		ino = fxfs_sim_new_file(fs);
-		part = (struct fxfs_write_part) { 0, bytes, sizeof(bytes) };
-		check(!fxfs_write_many(fs, ino, &part, 1, 0), "%s: the write", growths[i].what);
-		check(!fxfs_write_inode(fs, ino, &cut), "%s: the cut", growths[i].what);
+		ino = cladefs_sim_new_file(fs);
+		part = (struct cladefs_write_part) { 0, bytes, sizeof(bytes) };
+		check(!cladefs_write_many(fs, ino, &part, 1, 0), "%s: the write", growths[i].what);
+		check(!cladefs_write_inode(fs, ino, &cut), "%s: the cut", growths[i].what);
 		switch (i) {
 		case 0:
-			part = (struct fxfs_write_part) { 1999, "w", 1 };
-			check(!fxfs_write_many(fs, ino, &part, 1, 0), "%s", growths[i].what);
+			part = (struct cladefs_write_part) { 1999, "w", 1 };
+			check(!cladefs_write_many(fs, ino, &part, 1, 0), "%s", growths[i].what);
 			break;
 		case 1:
-			part = (struct fxfs_write_part) { 65536, "w", 1 };
-			check(!fxfs_write_many(fs, ino, &part, 1, 0), "%s", growths[i].what);
+			part = (struct cladefs_write_part) { 65536, "w", 1 };
+			check(!cladefs_write_many(fs, ino, &part, 1, 0), "%s", growths[i].what);
 			break;
 		case 2:
 			grown.size = growths[i].size;
-			check(!fxfs_write_inode(fs, ino, &grown), "%s", growths[i].what);
+			check(!cladefs_write_inode(fs, ino, &grown), "%s", growths[i].what);
 			break;
 		case 3:
-			check(!fxfs_clone_range(fs, source, 0, 2 * PAGE_SIZE, ino, 65536,
+			check(!cladefs_clone_range(fs, source, 0, 2 * PAGE_SIZE, ino, 65536,
 						growths[i].size, &attr), "%s", growths[i].what);
 			break;
 		case 4:
-			check(!fxfs_clone_range(fs, ino, 0, PAGE_SIZE, ino, 65536, growths[i].size,
+			check(!cladefs_clone_range(fs, ino, 0, PAGE_SIZE, ino, 65536, growths[i].size,
 						&attr), "%s", growths[i].what);
 			break;
 		}
-		check(fxfs_sim_size(fs, ino) == growths[i].size, "%s: Fxfs's size is %llu",
-		      growths[i].what, fxfs_sim_size(fs, ino));
+		check(cladefs_sim_size(fs, ino) == growths[i].size, "%s: Fxfs's size is %llu",
+		      growths[i].what, cladefs_sim_size(fs, ino));
 		memset(expected, 0, sizeof(expected));
 		memset(expected, 'c', 1000);
 		if (i == 0)
 			expected[1999] = 'w';
-		fxfs_sim_read(fs, ino, 0, got, sizeof(got));
+		cladefs_sim_read(fs, ino, 0, got, sizeof(got));
 		for (at = 0; at < sizeof(got); at++)
 			check(got[at] == expected[at], "%s: byte %zu is %#x, not %#x", growths[i].what,
 			      at, (u8)got[at], (u8)expected[at]);
 		/* The clone of the block shares it as the growth left it. */
 		if (i == 4) {
-			fxfs_sim_read(fs, ino, 65536, got, sizeof(got));
+			cladefs_sim_read(fs, ino, 65536, got, sizeof(got));
 			for (at = 0; at < sizeof(got); at++)
 				check(got[at] == expected[at], "%s: byte %zu of the clone is %#x, not %#x",
 				      growths[i].what, at, (u8)got[at], (u8)expected[at]);
@@ -310,7 +310,7 @@ static void drop_ranges(struct file *file)
 	int err;
 
 	filemap_invalidate_lock(inode->i_mapping);
-	err = fxfs_dax_changed(mount->info->dax, mount->info->dax_volume, inode, inode->i_ino, 0,
+	err = cladefs_dax_changed(mount->info->dax, mount->info->dax_volume, inode, inode->i_ino, 0,
 			       MAX_LFS_FILESIZE);
 	filemap_invalidate_unlock(inode->i_mapping);
 	check(!err, "dropping its ranges: %d", err);
@@ -586,9 +586,9 @@ static void cow_check_file(const char *what, size_t len)
 
 	check(!sim_fsync(cow_target), "%s: fsync", what);
 	check_file(what, cow_target, cow_expected, len);
-	check(!fxfs_sim_reserved(mount->info->fs, inode->i_ino),
+	check(!cladefs_sim_reserved(mount->info->fs, inode->i_ino),
 	      "%s: %llu bytes of dirty pages' room reserved, with none dirty", what,
-	      fxfs_sim_reserved(mount->info->fs, inode->i_ino));
+	      cladefs_sim_reserved(mount->info->fs, inode->i_ino));
 	/* The model's Fxfs says open of what writeback wrote until its seal: none is mapped. */
 	check(!sim_device_open_maps_refused(), "%s: %llu maps of open extents refused (EPERM)", what,
 	      sim_device_open_maps_refused());
@@ -674,7 +674,7 @@ static void cow_writeback_against_stores(void)
 			floor[page] = READ_ONCE(cow_round[page]);
 		check(!sim_fsync(cow_target), "fsync %d", fsyncs);
 		for (page = 0; page < pages; page++) {
-			fxfs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino,
+			cladefs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino,
 				      page * PAGE_SIZE, &got, sizeof(got));
 			check(got >= floor[page] && got <= READ_ONCE(cow_round[page]) + 1,
 			      "fsync %d returned, and Fxfs's page %llu holds round %llu: the store of round %llu completed before it began",
@@ -720,9 +720,9 @@ static void cow_truncate_dirty(void)
 	check(!memcmp(tail, zeros, sizeof(tail)), "the last page past the end isn't zeros");
 	memset(cow_expected + size, 0, pages * PAGE_SIZE - size);
 	cow_check_file("past the truncate", size);
-	check(fxfs_sim_size(mount->info->fs, file_inode(cow_target)->i_ino) == size,
+	check(cladefs_sim_size(mount->info->fs, file_inode(cow_target)->i_ino) == size,
 	      "Fxfs's size, past the truncate: %llu",
-	      fxfs_sim_size(mount->info->fs, file_inode(cow_target)->i_ino));
+	      cladefs_sim_size(mount->info->fs, file_inode(cow_target)->i_ino));
 
 	check(!sim_truncate(cow_target, pages * PAGE_SIZE), "growing the file");
 	cow_check_file("grown again", pages * PAGE_SIZE);
@@ -782,7 +782,7 @@ static void cow_fsync(void *arg)
  * That a crash between writeback's bytes and its commit shows the file as it was, whole pages, and
  * the commit as writeback copied them: a commit before its bytes would show what its extent held
  * unwritten. A store meanwhile, which takes no lock a writeback holds, goes to the private page,
- * dirty again, which the fsync's writeback of its dirty pages (fxfs_dax_write_back) writes after.
+ * dirty again, which the fsync's writeback of its dirty pages (cladefs_dax_write_back) writes after.
  */
 static void cow_crash_between_bytes_and_commit(void)
 {
@@ -796,20 +796,20 @@ static void cow_crash_between_bytes_and_commit(void)
 	memcpy(old, cow_expected, sizeof(old));
 	cow_addr = sim_mmap(cow_target, 0, pages * PAGE_SIZE);
 	cow_put_pages(0, pages - 1, 1);
-	fxfs_sim_hold_commits(true);
+	cladefs_sim_hold_commits(true);
 	syncer = sim_spawn("syncer", cow_fsync, NULL);
-	sim_await(fxfs_sim_commit_held(), "no writeback's commit held");
-	fxfs_sim_read(mount->info->fs, ino, 0, got, sizeof(got));
+	sim_await(cladefs_sim_commit_held(), "no writeback's commit held");
+	cladefs_sim_read(mount->info->fs, ino, 0, got, sizeof(got));
 	check(!memcmp(got, old, sizeof(got)), "a crash before the commit doesn't show the file as it was");
-	fxfs_sim_read_pending(mount->info->fs, ino, 0, got, sizeof(got));
+	cladefs_sim_read_pending(mount->info->fs, ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)),
 	      "a crash after the commit wouldn't show what writeback copied");
 	storer = sim_spawn("storer", cow_store_during_commit, NULL);
 	msleep(50);
-	fxfs_sim_hold_commits(false);
+	cladefs_sim_hold_commits(false);
 	wait_for(syncer);
 	wait_for(storer);
-	fxfs_sim_read(mount->info->fs, ino, 0, got, sizeof(got));
+	cladefs_sim_read(mount->info->fs, ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)),
 	      "after the held fsync, Fxfs doesn't hold the store made during it: page 3 holds round %llu",
 	      *(u64 *)(got + 3 * PAGE_SIZE));
@@ -823,7 +823,7 @@ static void cow_write_page3(void *arg)
 }
 
 /*
- * fxfs.dax_rebind_now: the budget's worker writes back, seals and rebinds all it can, waited for as
+ * cladefs.dax_rebind_now: the budget's worker writes back, seals and rebinds all it can, waited for as
  * a guest check waits: until the rounds it served reach the asks, as read after this one.
  */
 static void cow_rebind_now(void *arg)
@@ -894,12 +894,12 @@ static void cow_rebind_during_writeback(void)
 
 	cow_mapped_file(8);
 	cow_put_pages(0, 7, 1);
-	fxfs_sim_hold_commits(true);
+	cladefs_sim_hold_commits(true);
 	syncer = sim_spawn("syncer", cow_fsync, NULL);
-	sim_await(fxfs_sim_commit_held(), "no writeback's commit held");
+	sim_await(cladefs_sim_commit_held(), "no writeback's commit held");
 	rebinder = sim_spawn("rebinder", cow_rebind_now, NULL);
 	msleep(50);
-	fxfs_sim_hold_commits(false);
+	cladefs_sim_hold_commits(false);
 	wait_for(syncer);
 	wait_for(rebinder);
 	for (page = 0; page < 8; page++)
@@ -911,7 +911,7 @@ static void cow_rebind_during_writeback(void)
  * That a rebind takes no dirty page, nor one a fault left writable: the worker's own writeback
  * held after its copy, a write(2) dirties page 1 again, which the rebind after must leave, while
  * it rebinds the rest, whose PTEs, made writable by faults, the writeback write-protected
- * (fxfs_dax_protect): through one left writable, a store makes the page
+ * (cladefs_dax_protect): through one left writable, a store makes the page
  * private again on the host, which the guest never learns of, and no fsync writes.
  */
 static void cow_rebind_skips_dirty(void)
@@ -922,11 +922,11 @@ static void cow_rebind_skips_dirty(void)
 	cow_mapped_file(8);
 	cow_put_pages(0, 7, 1);
 	freed = sim_device_private_freed();
-	fxfs_sim_hold_commits(true);
+	cladefs_sim_hold_commits(true);
 	rebinder = sim_spawn("rebinder", cow_rebind_now, NULL);
-	sim_await(fxfs_sim_commit_held(), "no writeback's commit held");
+	sim_await(cladefs_sim_commit_held(), "no writeback's commit held");
 	cow_put(1, 2, false);
-	fxfs_sim_hold_commits(false);
+	cladefs_sim_hold_commits(false);
 	wait_for(rebinder);
 	check(sim_device_private_freed() > freed, "the worker rebound nothing");
 	cow_check(1, false, "the page dirtied as the worker wrote back");
@@ -979,7 +979,7 @@ static void cow_rebind_against_write(void)
 }
 
 /*
- * That a writeback whose commit fails after its bytes (fxfs.dax_fail_commits) says so: the fsync
+ * That a writeback whose commit fails after its bytes (cladefs.dax_fail_commits) says so: the fsync
  * fails EIO, and Fxfs holds the file as it was, as a crash between the two would; the pages clean
  * then, as the page cache's are after a failed writeback, the next fsync succeeds, and what is
  * written again is kept.
@@ -995,7 +995,7 @@ static void cow_commit_failed(void)
 	sim_param_set("dax_fail_commits", "1");
 	err = sim_fsync(cow_target);
 	check(err == -EIO, "an fsync whose writeback's commit failed: %d", err);
-	fxfs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
+	cladefs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
 	check(!memcmp(got, old, sizeof(got)), "a commit that failed changed the file in Fxfs");
 	check(!sim_fsync(cow_target), "the fsync after the failed one");
 	cow_put_pages(0, 7, 2);
@@ -1077,10 +1077,10 @@ static void cow_sync_kept(void *arg)
 	const char *what = arg ? "a sync" : "an fsync";
 
 	if (arg)
-		fxfs_vfs_make_room(file_inode(cow_target)->i_sb);
+		cladefs_vfs_make_room(file_inode(cow_target)->i_sb);
 	else
 		check(!sim_fsync(cow_target), "the second fsync");
-	fxfs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
+	cladefs_sim_read(mount->info->fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)),
 	      "%s returned, another's writeback under way, and Fxfs holds round %llu of page 0, not 1",
 	      what, *(u64 *)got);
@@ -1203,7 +1203,7 @@ static void cow_store_page1(void *arg)
 
 /*
  * That a range maps no extent a seal in progress has yet to seal. An fsync's writeback writes the
- * file to a new extent, and its seal is held once it has begun (fxfs_sim_hold_seals): Fxfs takes the
+ * file to a new extent, and its seal is held once it has begun (cladefs_sim_hold_seals): Fxfs takes the
  * extent for sealed already, as the guest's does (OpenExtents::seal), the device not. The file's
  * ranges dropped, a read maps the chunk again, as a slice of the extent's region, and then a write,
  * as a range of its own; and a load's fault, and a store's, which block on the seal holding their
@@ -1221,13 +1221,13 @@ static void cow_map_during_seal(void)
 	for (way = 0; way < ARRAY_SIZE(ways); way++) {
 		cow_mapped_file(8);
 		cow_put_pages(0, 7, 1);
-		fxfs_sim_hold_seals(true);
+		cladefs_sim_hold_seals(true);
 		syncer = sim_spawn("syncer", cow_fsync, NULL);
-		sim_await(fxfs_sim_seal_held(), "no seal held");
+		sim_await(cladefs_sim_seal_held(), "no seal held");
 		drop_ranges(cow_target);
 		mapper = sim_spawn("mapper", ways[way], NULL);
 		msleep(50);
-		fxfs_sim_hold_seals(false);
+		cladefs_sim_hold_seals(false);
 		wait_for(syncer);
 		wait_for(mapper);
 		cow_check_file("after a map met a seal", 8 * PAGE_SIZE);
@@ -1237,7 +1237,7 @@ static void cow_map_during_seal(void)
 /*
  * That the budget's worker rebinds clean private pages whose extent a writeback outside it left
  * open, with nothing dirty for it to write back: a truncate's writes them back first
- * (fxfs_dax_resize_begin), as a write that stopped short's, the flusher's or a drop's would, and
+ * (cladefs_dax_resize_begin), as a write that stopped short's, the flusher's or a drop's would, and
  * nothing seals after. The worker sealed only what it wrote back itself, and left them private for
  * good: interleave seed 215500, a 4 MiB write stopped short at ENOSPC, its growth's writeback
  * leaving 256 pages private of private_max's 256, no round of the worker rebinding any, and a
@@ -1331,17 +1331,17 @@ static void cow_private_failed(void)
 		loff_t at = pages[i] * PAGE_SIZE;
 		bool mapped = i;
 
-		reserved = fxfs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino);
+		reserved = cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino);
 		sim_device_fail(VIRTIO_EXTENT_T_PRIVATE, 0, 1);
 		err = mapped ? sim_user_store(cow_addr + at, &round, sizeof(round)) :
 			       (int)sim_write(cow_target, at, &round, sizeof(round));
 		check(err == (mapped ? -EFAULT : -EIO), "a %s whose PRIVATE failed: %d",
 		      mapped ? "store" : "write", err);
 		check(sim_device_failed() == i + 1, "no PRIVATE failed");
-		check(fxfs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino) == reserved,
+		check(cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino) == reserved,
 		      "a %s whose PRIVATE failed left %llu bytes of room reserved, of %llu before",
 		      mapped ? "store" : "write",
-		      fxfs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino), reserved);
+		      cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino), reserved);
 		cow_check(pages[i], mapped, "after its PRIVATE failed");
 		cow_put(pages[i], round, mapped);
 	}
@@ -1354,7 +1354,7 @@ static void cow_private_failed(void)
 	for (i = 0; i < 2; i++) {
 		bool guest = !i;
 
-		reserved = fxfs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino);
+		reserved = cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino);
 		if (guest)
 			sim_alloc_fail(0, 1);
 		else
@@ -1362,7 +1362,7 @@ static void cow_private_failed(void)
 		err = (int)sim_write(cow_target, 3 * PAGE_SIZE, &round, sizeof(round));
 		check(err == (guest ? -ENOMEM : -EIO), "a write whose PRIVATE %s: %d",
 		      guest ? "the guest had no memory for" : "the host had no room for", err);
-		check(fxfs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino) == reserved,
+		check(cladefs_sim_reserved(mount->info->fs, file_inode(cow_target)->i_ino) == reserved,
 		      "a write whose PRIVATE found no memory left room reserved");
 		cow_check(3, false, "after its PRIVATE found no memory");
 	}
@@ -1381,7 +1381,7 @@ static void cow_private_failed(void)
 static void cow_writeback_found_no_memory(void)
 {
 	static char old[8 * PAGE_SIZE], got[8 * PAGE_SIZE];
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs *fs = mount->info->fs;
 	struct file *copy;
 	u64 page;
 	int err;
@@ -1389,14 +1389,14 @@ static void cow_writeback_found_no_memory(void)
 	cow_mapped_file(8);
 	memcpy(old, cow_expected, sizeof(old));
 	cow_put_pages(0, 7, 1);
-	fxfs_sim_fail_commits_with(1, -ENOMEM);
+	cladefs_sim_fail_commits_with(1, -ENOMEM);
 	err = sim_fsync(cow_target);
 	check(err == -ENOMEM, "an fsync whose writeback found no memory: %d", err);
-	fxfs_sim_read(fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
+	cladefs_sim_read(fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
 	check(!memcmp(got, old, sizeof(got)), "a writeback that found no memory changed the file in Fxfs");
-	check(fxfs_sim_reserved(fs, file_inode(cow_target)->i_ino) == 8 * PAGE_SIZE,
+	check(cladefs_sim_reserved(fs, file_inode(cow_target)->i_ino) == 8 * PAGE_SIZE,
 	      "a writeback that found no memory left %llu bytes of room reserved for its 8 pages",
-	      fxfs_sim_reserved(fs, file_inode(cow_target)->i_ino));
+	      cladefs_sim_reserved(fs, file_inode(cow_target)->i_ino));
 	/* A clone takes the store's blocks, once the VFS has written the source back. */
 	copy = new_file(old, sizeof(old));
 	check(!sim_clone(cow_target, 0, copy, 0, sizeof(got)), "the clone");
@@ -1406,7 +1406,7 @@ static void cow_writeback_found_no_memory(void)
 	for (page = 0; page < 8; page++)
 		cow_check(page, page % 2, "after a writeback that found no memory, and a rebind");
 	cow_check_file("written back after one found no memory", 8 * PAGE_SIZE);
-	fxfs_sim_read(fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
+	cladefs_sim_read(fs, file_inode(cow_target)->i_ino, 0, got, sizeof(got));
 	check(!memcmp(got, cow_expected, sizeof(got)), "Fxfs doesn't hold what was written");
 }
 
@@ -1484,7 +1484,7 @@ static void cow_writeback_counts_again(void)
 	check(!sim_user_store(addr + 3 * PAGE_SIZE, "first", 5), "the first chunk's store");
 	sim_param_set("dax_pause", "0");
 	wait_for(syncer);
-	fxfs_sim_read(mount->info->fs, file_inode(counted_file)->i_ino, second, got, sizeof(got));
+	cladefs_sim_read(mount->info->fs, file_inode(counted_file)->i_ino, second, got, sizeof(got));
 	check(!memcmp(got, "second", sizeof(got)),
 	      "the fsync returned without the second chunk's write, before it began");
 }
@@ -1796,7 +1796,7 @@ static const struct {
 	SCENARIO(append_stopped_short_in_a_page),
 	SCENARIO(store_past_end_then_written),
 	SCENARIO(write_past_end_copies_nothing),
-	SCENARIO(fxfs_growths_zero_past_a_cut),
+	SCENARIO(cladefs_growths_zero_past_a_cut),
 	SCENARIO(write_killed),
 	SCENARIO(unmap_failed),
 	SCENARIO(unmaps_failed_take_the_window),

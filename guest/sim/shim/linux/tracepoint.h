@@ -2,7 +2,7 @@
 /* Copyright 2026 The cladefs Authors. */
 /*
  * Tracepoints: each an empty function, and off, so that the kernel's own trace headers compile, and
- * fs/fxfs's (fxfs_trace.h).
+ * fs/cladefs's (cladefs_trace.h).
  */
 #ifndef _SIM_TRACEPOINT_H
 #define _SIM_TRACEPOINT_H

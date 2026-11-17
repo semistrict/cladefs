@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 12:05'
-updated_date: '2026-11-15 11:37'
+updated_date: '2026-11-16 22:53'
 labels: []
 dependencies: []
 priority: low
@@ -17,7 +17,7 @@ ordinal: 728000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found in TASK-317: extent_store::framed::read_whole reads a file into an Aligned buffer (O_DIRECT) and returns as_slice().to_vec(), so each object the uploader reads (read_object, Closed::bytes, stored()) is held twice for a moment as it is read, outside what the host's upload budget (CLADEFS_EXTENTD_UPLOAD_MEMORY) counts: up to twice the budget if every grant reads at once. The heap profile under a backlog (heaptrack, ubu1) showed no such coincidence, but the bound documented in doc-7 (Uploads, Memory) is per object held once. Handing the Aligned buffer on as bytes::Bytes (Bytes::from_owner) to extent_remote's Body, whose bucket::create holds Bytes since TASK-317, would read it once.
+Found in TASK-317: extent_store::framed::read_whole reads a file into an Aligned buffer (O_DIRECT) and returns as_slice().to_vec(), so each object the uploader reads (read_object, Closed::bytes, stored()) is held twice for a moment as it is read, outside what the host's upload budget (CLADEFSD_UPLOAD_MEMORY) counts: up to twice the budget if every grant reads at once. The heap profile under a backlog (heaptrack, ubu1) showed no such coincidence, but the bound documented in doc-7 (Uploads, Memory) is per object held once. Handing the Aligned buffer on as bytes::Bytes (Bytes::from_owner) to extent_remote's Body, whose bucket::create holds Bytes since TASK-317, would read it once.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

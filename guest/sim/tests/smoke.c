@@ -28,14 +28,14 @@ static void check_file(const char *what, size_t at, const char *expected, size_t
 {
 	char *got = kmalloc(len, GFP_KERNEL);
 	struct inode *inode = file_inode(file);
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs *fs = mount->info->fs;
 	ssize_t read = sim_read(file, at, got, len);
 
 	check(read == len, "%s: read %zd of %zu", what, read, len);
 	check(!memcmp(got, expected, len), "%s: read(2) differs", what);
 	/* Written back, as the window's private pages are only by writeback. */
 	check(!sim_fsync(file), "%s: fsync", what);
-	fxfs_sim_read(fs, inode->i_ino, at, got, len);
+	cladefs_sim_read(fs, inode->i_ino, at, got, len);
 	check(!memcmp(got, expected, len), "%s: Fxfs's extents differ", what);
 	kfree(got);
 }
@@ -90,7 +90,7 @@ static void scenario(void *arg)
 	err = sim_fsync(file);
 	check(!err, "fsync: %d", err);
 
-	fxfs_dax_show_stats(mount->info->dax, NULL);
+	cladefs_dax_show_stats(mount->info->dax, NULL);
 	sim_file_evict(file);
 	sim_mount_free(mount);
 }
@@ -104,7 +104,7 @@ int main(void)
 	sim_spawn("scenario", scenario, NULL);
 	sim_run();
 	sim_end(SIM_END_READ_FILES);
-	fxfs_sim_stats(&written, &freed, &failed);
+	cladefs_sim_stats(&written, &freed, &failed);
 	sim_log("smoke: passed: %llu points, %llu switches, %llu device maps, %llu blocks written back, %llu extents freed, trace %llx\n",
 		sim_points(), sim_switches(), sim_device_maps(), written, freed, sim_trace_hash());
 	return 0;

@@ -23,8 +23,8 @@ export const transferTasks: TransferTask[] = [
     id: "private-before-dirty",
     question: "Where does the guest have the host make a page private, before the page goes in the dirty set?",
     accepts: (s) =>
-      (s.path === "guest/linux/fs/fxfs/dax.c" && s.name === "fxfs_dax_dirty") ||
-      (s.path === "guest/linux/fs/fxfs/device.c" && s.name === "fxfs_device_private"),
+      (s.path === "guest/linux/fs/cladefs/dax.c" && s.name === "cladefs_dax_dirty") ||
+      (s.path === "guest/linux/fs/cladefs/device.c" && s.name === "cladefs_device_private"),
     hint: "It is in the guest's C, on the path an iomap_begin takes for a write.",
     answer: answer("guest_dirty"),
   },
@@ -38,7 +38,7 @@ export const transferTasks: TransferTask[] = [
   {
     id: "rebind",
     question: "Where does the guest map its clean private pages back to their sealed extents?",
-    accepts: (s) => s.path === "guest/linux/fs/fxfs/dax.c" && (s.name === "fxfs_dax_rebind_range" || s.name === "fxfs_dax_rebind"),
+    accepts: (s) => s.path === "guest/linux/fs/cladefs/dax.c" && (s.name === "cladefs_dax_rebind_range" || s.name === "cladefs_dax_rebind"),
     hint: "The guest's dax.c calls it a rebind.",
     answer: answer("guest_rebind_range"),
   },

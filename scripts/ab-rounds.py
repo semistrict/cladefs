@@ -80,8 +80,12 @@ bench_ab = module("bench_ab", "bench-ab.py")
 CONTROL = "ext4-guest-kernel"
 # The guest's observations that are counts: what a load beside a round doesn't move. Requests,
 # bytes and reads it counted, and the extent daemon's counters but its times.
-COUNTED = re.compile(r"(-requests|-bytes|-reads)$|^extentd-(?!.*-(ms|ns|us|secs)$)")
+COUNTED = re.compile(r"(-requests|-bytes|-reads)$|^cladefsd-(?!.*-(ms|ns|us|secs)$)")
 ROUND = re.compile(r"-r([1-9][0-9]*)$")
+# The extent daemon's name in the metrics and files of a side from before TASK-503, which
+# LangSmith's pin and the nightly's night before may be for a while. Spelt so that
+# scripts/rename-to-cladefs-api.sh, run again, leaves it.
+BEFORE_CLADEFSD = re.compile(r"\bextent[d](?=[-_.])")
 # The bounds of metrics named apart by default, (METRIC, FRACTION): Bounds.of puts the caller's
 # before them.
 NAMED = (("max_anon", 0.10),)
@@ -178,12 +182,13 @@ class Round:
                 into = found.timings if contamination.skewed(result["unit"]) else found.counts
                 into.setdefault(key, []).extend(result["values"])
             for name, values in report.get("observations", {}).items():
+                name = named_now(name)
                 if COUNTED.search(name):
                     found.counts.setdefault((case, name), []).extend(values)
         budgets = Path(directory) / "logs" / "budgets.json"
         if budgets.exists():
             for daemon in json.loads(budgets.read_text()):
-                case, figures = f"daemon {daemon['daemon']}", daemon["figures"]
+                case, figures = f"daemon {named_now(daemon['daemon'])}", daemon["figures"]
                 if "max_anon" in figures:
                     found.counts[(case, "max_anon")] = [figures["max_anon"]]
                     found.kinds[(case, "max_anon")] = ("bytes", False)
@@ -192,6 +197,11 @@ class Round:
                     found.counts[key] = [value]
                     found.kinds[key] = ("x", False)
         return found
+
+
+def named_now(name):
+    """Metric or file `name` as sides since TASK-503 name it, cladefsd for the daemon."""
+    return BEFORE_CLADEFSD.sub("cladefsd", name)
 
 
 def rounds(results, name):

@@ -19,7 +19,7 @@ guest_results = script.load("guest_results")
 # The knobs a run is given, and what says where it writes, which aren't knobs.
 GIVEN = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
     "CLADEFS_GUEST_KERNEL": "/var/lib/fxdax-test/guest-kernel-release/out/x86_64/vmlinux",
@@ -28,7 +28,7 @@ GIVEN = {
 }
 KNOBS = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
 }
@@ -108,7 +108,7 @@ class GuestResults(unittest.TestCase):
         guest_results.start(self.results, 1, ["fxfs-guest-pgbench-dax-forked"])
         logs = self.results / "fxfs-guest-pgbench-dax-forked" / "fxfs-guest-pgbench-dax-forked"
         logs.mkdir(parents=True)
-        (logs / "extentd-stats.txt").write_text(
+        (logs / "cladefsd-stats.txt").write_text(
             "object-store: get=541 get-range=16 head=0 down=1000\n"
             "daemon: maps=1 page-ins=9 page-in-bytes=2000 fetched-bytes=3000 reads=1\n"
             "object-store: get=541 get-range=16 head=0 down=774037\n"
@@ -117,22 +117,22 @@ class GuestResults(unittest.TestCase):
             "reads=5523 read-bytes=226099200\n"
             "requests: open=2\n")
         (logs / "samples.txt").write_text("t=2 pending_upload_bytes=0\n")
-        (self.results / "extentd-stats.txt").write_text(
+        (self.results / "cladefsd-stats.txt").write_text(
             "object-store: get=3 down=2500000000\ndaemon: page-in-bytes=0 fetched-bytes=500000000\n")
         self.ended("fxfs-guest-pgbench-dax-forked",
                    outcome("fxfs-guest-pgbench-dax-forked", 1, "pass"))
         guest_results.finish(self.results, 0)
         summary = guest_results.load(self.results)
         self.assertEqual(summary["cases"][0]["daemons"], [
-            {"daemon": "extentd", "downloaded": 774037, "bucket_read": 4728643584,
+            {"daemon": "cladefsd", "downloaded": 774037, "bucket_read": 4728643584,
              "store_read": 202076160}])
-        self.assertEqual(summary["daemon"], {"daemon": "extentd", "downloaded": 2500000000,
+        self.assertEqual(summary["daemon"], {"daemon": "cladefsd", "downloaded": 2500000000,
                                              "bucket_read": 500000000, "store_read": 0})
         self.assertEqual(guest_results.report(summary), [
             "fxfs-guest-pgbench-dax-forked: passed",
-            "  extentd: downloaded 774.0 kB for 4.7 GB read of its bucket's, 202.1 MB of its "
+            "  cladefsd: downloaded 774.0 kB for 4.7 GB read of its bucket's, 202.1 MB of its "
             "store's",
-            "the run's extentd: downloaded 2.5 GB for 500.0 MB read of its bucket's, 0 B of its "
+            "the run's cladefsd: downloaded 2.5 GB for 500.0 MB read of its bucket's, 0 B of its "
             "store's",
             "the run ended with 0",
         ])

@@ -10,7 +10,7 @@
 
 mod common;
 
-use cladefs::extentd::control::proto::{AttachBaseRequest, MakePublicRequest};
+use cladefs::cladefsd::control::proto::{AttachBaseRequest, MakePublicRequest};
 use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSliceMut};
 use common::daemon::{CAPACITY, Daemon, failure, name, write};
 use common::{copies, pattern};

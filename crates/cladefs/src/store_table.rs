@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The extent daemon's stores (`crate::extentd`), by the keys that name them
-//! (`extentd::stores::store_key`): one table, whose entry for a key says all there is of its store
+//! The extent daemon's stores (`crate::cladefsd`), by the keys that name them
+//! (`cladefsd::stores::store_key`): one table, whose entry for a key says all there is of its store
 //! (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what is
 //! open of it for others: the store its writer's connection, or its followers', have open, or a
 //! point the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
@@ -766,7 +766,7 @@ mod shuttle_tests {
 
     /// A connection: going once its VM process is; and, if it writes the store, the store and its
     /// hold of it, let go as the last of the connection is dropped, the store first, as
-    /// `extentd::server::Connection`'s are: wherever that is, but under the table's lock, which
+    /// `cladefsd::server::Connection`'s are: wherever that is, but under the table's lock, which
     /// letting the hold go takes.
     struct Conn {
         going: AtomicBool,
@@ -843,7 +843,7 @@ mod shuttle_tests {
         }
     }
 
-    /// A point kept open, as `extentd::stores::Point` is: the store opened, which each fork of it
+    /// A point kept open, as `cladefsd::stores::Point` is: the store opened, which each fork of it
     /// holds while it forks it, and what says it is closed, once the last lets it go.
     struct Point {
         store: Arc<Store>,
@@ -858,7 +858,7 @@ mod shuttle_tests {
     }
 
     /// Closes `point`, if given, and returns once it is closed: once the forks forking it are
-    /// done, as `extentd::stores::close_point` does.
+    /// done, as `cladefsd::stores::close_point` does.
     fn close(point: Option<Point>) {
         let Some(Point { store, closed }) = point else { return };
         drop(store);
@@ -933,7 +933,7 @@ mod shuttle_tests {
         hold: Counted<'static>,
     }
 
-    /// Opens the store for `conn` to write, as a connection does (`extentd::server`): holding it,
+    /// Opens the store for `conn` to write, as a connection does (`cladefsd::server`): holding it,
     /// closing the point kept of it, taking over the store followers have open, unless it is
     /// retired, or not quiescent, its writer gone with writes uncommitted (`ExtentStore::take_over`);
     /// or opening it. The connection has it from then on.
@@ -988,7 +988,7 @@ mod shuttle_tests {
         }
     }
 
-    /// Follows the store, as a follower does (`extentd::stores::followed`): the store connections
+    /// Follows the store, as a follower does (`cladefsd::stores::followed`): the store connections
     /// have open, unless retired ([`StoreTable::follow`]); or, held by the daemon, which no writer
     /// retires a store under, its point closed, the store opened.
     fn follow(table: &Table, counts: &Arc<Counts>) -> Result<Follower, Errno> {
@@ -1013,7 +1013,7 @@ mod shuttle_tests {
         Ok(Follower::of(store))
     }
 
-    /// Forks the store, as the daemon does (`extentd::stores::fork`): through its writer, or the
+    /// Forks the store, as the daemon does (`cladefsd::stores::fork`): through its writer, or the
     /// store followers have open, live; or the point kept, or else the store opened, kept open as
     /// a point, which it holds while it forks it, as a restore's fork does, its hold let go.
     fn fork(table: &Table, counts: &Arc<Counts>) -> Result<(), Errno> {
@@ -1253,7 +1253,7 @@ mod shuttle_tests {
     }
 
     /// TASK-160.8: a store's followers cut off before it is marked retired, a follower finding it
-    /// unmarked between the two is followed on, uncut (`extentd::stores::retire` did so).
+    /// unmarked between the two is followed on, uncut (`cladefsd::stores::retire` did so).
     #[test]
     fn needs_retirement_to_mark_before_cutting() {
         let rules = Rules { marks_before_cutting: false, ..Rules::ALL };

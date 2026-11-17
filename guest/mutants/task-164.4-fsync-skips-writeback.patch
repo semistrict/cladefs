@@ -9,8 +9,8 @@
 # writeback returns with the stores before it neither written nor sealed.
 # cow_fsync_during_writeback; interleave's seed 962, 3 of 300 copying on write.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2326,17 +2326,9 @@
  	bool traced = false;
  	int err = 0;
@@ -28,5 +28,5 @@
 -	if (!atomic_long_read(&file->dirty_pages))
 -		goto out;
  	traced = true;
- 	trace_fxfs_dax_writeback_start(file->ino);
- 	parts = kmalloc_array(FXFS_DAX_WRITEBACK_RUN, sizeof(*parts), GFP_NOFS);
+ 	trace_cladefs_dax_writeback_start(file->ino);
+ 	parts = kmalloc_array(CLADEFS_DAX_WRITEBACK_RUN, sizeof(*parts), GFP_NOFS);

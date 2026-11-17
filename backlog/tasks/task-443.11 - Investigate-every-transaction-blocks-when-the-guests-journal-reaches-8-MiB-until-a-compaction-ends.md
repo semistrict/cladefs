@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
+updated_date: '2026-11-17 01:10'
 labels:
   - perf
   - review-2026-11-15
@@ -20,7 +21,7 @@ ordinal: 845000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-crates/fxfs/src/object_store/journal.rs check_journal_space waits on reclaim_event once the journal passes reclaim_size, 8 MiB at most in the guest (guest/rust/fxfs-linux/src/fs.rs JOURNAL_MAX); compaction starts at half; a size-tiered merge rewrites a layer as large as the newer ones together, and the non-Fuchsia CompactionYielder::yield_now is empty. Stalls grow with the filesystem's size and age. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+crates/fxfs/src/object_store/journal.rs check_journal_space waits on reclaim_event once the journal passes reclaim_size, 8 MiB at most in the guest (guest/rust/cladefs-linux/src/fs.rs JOURNAL_MAX); compaction starts at half; a size-tiered merge rewrites a layer as large as the newer ones together, and the non-Fuchsia CompactionYielder::yield_now is empty. Stalls grow with the filesystem's size and age. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

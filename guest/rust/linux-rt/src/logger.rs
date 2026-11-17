@@ -28,7 +28,7 @@ impl Log for Printk {
         let mut message = Message::new();
         let _ = write!(message, "{}", record.args());
         // SAFETY: Prints the message's bytes.
-        unsafe { ffi::fxfs_rt_log(level, message.bytes().as_ptr().cast(), message.bytes().len()) };
+        unsafe { ffi::cladefs_rt_log(level, message.bytes().as_ptr().cast(), message.bytes().len()) };
     }
 
     fn flush(&self) {}

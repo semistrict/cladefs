@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 08:52'
-updated_date: '2026-11-16 11:47'
+updated_date: '2026-11-16 22:52'
 labels:
   - bug
   - testing
@@ -25,7 +25,7 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Both patches re-anchored on the code TASK-449 left, the same mutation each
-- [x] #2 forks-take-branches-claimed is killed by its Killer remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist (macOS) and uploads-copied-each-try by extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound (ubu1, fxjob)
+- [x] #2 forks-take-branches-claimed is killed by its Killer remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist (macOS) and uploads-copied-each-try by cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound (ubu1, fxjob)
 - [x] #3 crates/cladefs/mutants.sh --check reports 0 broken; CLADEFS_TEST_PARTS=scripts scripts/test.sh passes
 <!-- AC:END -->
 
@@ -39,7 +39,7 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Re-anchor each patch by making its mutation by hand on the code TASK-449 left and diffing it, header kept. 2. Run forks-take-branches-claimed with its killer (macOS) and the killer on the clean tree. 3. Compile uploads-copied-each-try (killer is extentd's, Linux-only). 4. mutants.sh --check; CLADEFS_TEST_PARTS=scripts scripts/test.sh.
+1. Re-anchor each patch by making its mutation by hand on the code TASK-449 left and diffing it, header kept. 2. Run forks-take-branches-claimed with its killer (macOS) and the killer on the clean tree. 3. Compile uploads-copied-each-try (killer is cladefsd's, Linux-only). 4. mutants.sh --check; CLADEFS_TEST_PARTS=scripts scripts/test.sh.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

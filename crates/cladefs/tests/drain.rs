@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! TASK-141.4: SIGTERM drains the daemon before it exits (`cladefs::extentd::drain`): a VM process
+//! TASK-141.4: SIGTERM drains the daemon before it exits (`cladefs::cladefsd::drain`): a VM process
 //! still connected is told its daemon went, and its store is closed, its last commits durable and
 //! uploaded, as a host upgrading its daemon needs. Before, the daemon exited at once, its store as
 //! a crash leaves it: an ordered commit made just before not uploaded, nor perhaps durable.
@@ -54,7 +54,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = dir.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
-    let (socket, path) = (dir.path().join("extentd.sock"), dir.path().join("store"));
+    let (socket, path) = (dir.path().join("cladefsd.sock"), dir.path().join("store"));
     let mut first = daemon(&socket, &bucket, 1);
 
     // A VM's store, its last commit only ordered, which its uploader, uploading within a second of
@@ -83,7 +83,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     // VM of the branch from the bucket, its commit there.
     let other = dir.path().join("other");
     std::fs::create_dir(&other).unwrap();
-    let second_socket = other.join("extentd.sock");
+    let second_socket = other.join("cladefsd.sock");
     let _second = daemon(&second_socket, &bucket, 2);
     let point: PathBuf = other.join("point");
     // TASK-364: its VM manager makes the point's store there first, of the branch its tenant, cell

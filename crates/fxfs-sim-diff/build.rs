@@ -11,24 +11,24 @@ use std::path::PathBuf;
 fn main() {
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = crate_dir.join("../..");
-    let in_tree = root.join("guest/sim/fxfs/fxfs.c");
+    let in_tree = root.join("guest/sim/cladefs/cladefs.c");
     println!("cargo:rerun-if-env-changed=CLADEFS_SIM_MODEL");
     let model = std::env::var_os("CLADEFS_SIM_MODEL").map_or(in_tree, PathBuf::from);
     for path in [&model, &crate_dir.join("shim")] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    for header in ["device.h", "fxfs.h"] {
+    for header in ["device.h", "cladefs.h"] {
         println!(
             "cargo:rerun-if-changed={}",
-            root.join("guest/linux/fs/fxfs").join(header).display()
+            root.join("guest/linux/fs/cladefs").join(header).display()
         );
     }
     cc::Build::new()
         .file(&model)
         .file(crate_dir.join("shim/shim.c"))
         .include(crate_dir.join("shim"))
-        // For a copy's `#include "../../linux/fs/fxfs/fxfs.h"`, which its own directory hasn't.
-        .include(root.join("guest/sim/fxfs"))
+        // For a copy's `#include "../../linux/fs/cladefs/cladefs.h"`, which its own directory hasn't.
+        .include(root.join("guest/sim/cladefs"))
         .std("gnu11")
         // A panic unwinds through the model to the case that ran it (shim/shim.c).
         .flag("-fexceptions")

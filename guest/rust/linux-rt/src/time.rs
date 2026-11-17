@@ -17,7 +17,7 @@ use futures_util::task::AtomicWaker;
 /// The time since the kernel booted.
 pub fn monotonic() -> Duration {
     // SAFETY: Reads the clock.
-    Duration::from_nanos(unsafe { ffi::fxfs_rt_monotonic_ns() })
+    Duration::from_nanos(unsafe { ffi::cladefs_rt_monotonic_ns() })
 }
 
 /// A future that is ready once a duration has passed.
@@ -44,11 +44,11 @@ impl Timer {
         let arg = Arc::into_raw(shared.clone()).cast_mut().cast();
         // SAFETY: `fire` may be called with `arg` until `drop` frees the timer, and `drop` then
         // releases the reference `arg` holds.
-        let timer = unsafe { ffi::fxfs_rt_timer_new(fire, arg) };
+        let timer = unsafe { ffi::cladefs_rt_timer_new(fire, arg) };
         let timer = NonNull::new(timer).expect("no memory for a timer");
         let ns = u64::try_from(after.as_nanos()).unwrap_or(u64::MAX);
         // SAFETY: The timer is live.
-        unsafe { ffi::fxfs_rt_timer_start(timer.as_ptr(), ns) };
+        unsafe { ffi::cladefs_rt_timer_start(timer.as_ptr(), ns) };
         Self { timer, shared }
     }
 }
@@ -75,7 +75,7 @@ impl Drop for Timer {
         // SAFETY: Cancels the timer and waits for its callback, after which nothing uses the
         // reference it held, which is released.
         unsafe {
-            ffi::fxfs_rt_timer_free(self.timer.as_ptr());
+            ffi::cladefs_rt_timer_free(self.timer.as_ptr());
             drop(Arc::from_raw(Arc::as_ptr(&self.shared)));
         }
     }

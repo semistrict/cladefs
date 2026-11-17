@@ -21,7 +21,7 @@
 //! A part held is derived from the raw file, which stays the source of truth until the framed file
 //! is durable: one let go is read back and packed by its framing, as before. So what holds parts
 //! may let any go at any time, as the host's memory runs short ([`HeldParts::evict_to`]): a
-//! daemon's governor, before any tenant's cached pages (`cladefs`'s extentd). Newest first: a
+//! daemon's governor, before any tenant's cached pages (`cladefs`'s cladefsd). Newest first: a
 //! segment's framing is near for those held longest, and those held last are those whose raw pages
 //! the host is likeliest to hold still, as it lets the least recently used go first.
 //!

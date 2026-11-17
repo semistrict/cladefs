@@ -8,7 +8,7 @@
 //!
 //! - **Extent stores** ([`ExtentStore`]), which a guest running Fxfs in its own kernel keeps its
 //!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's daemon,
-//!   `cladefsd`, one a host (`extentd`), serves the stores of a host's VMs, and maps their
+//!   `cladefsd`, one a host (`cladefsd`), serves the stores of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
 //!   device is a `DaemonExtentStore`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
@@ -47,7 +47,7 @@
 //! - Errors are [`Errno`]s, Linux's values on every host.
 //!
 //! On Linux, [`fuse`] mounts a filesystem with FUSE, for any process to use; `cladefs-mount` mounts
-//! a store so, and cladefsd tenants' cells (`extentd::mount`, TASK-475.2).
+//! a store so, and cladefsd tenants' cells (`cladefsd::mount`, TASK-475.2).
 //!
 //! # Async
 //!
@@ -125,11 +125,11 @@ compile_error!(
 
 pub mod bucket;
 mod cache;
+#[cfg(target_os = "linux")]
+pub mod cladefsd;
 mod dax;
 mod error;
 mod executor;
-#[cfg(target_os = "linux")]
-pub mod extentd;
 mod extents;
 pub mod faults;
 mod filesystem;
@@ -180,6 +180,8 @@ pub mod thread;
 mod volume;
 
 #[cfg(target_os = "linux")]
+pub use cladefsd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
+#[cfg(target_os = "linux")]
 pub use dax::Prefault;
 pub use dax::failures::{AccessFailures, FailingRun, Failure};
 #[cfg(target_os = "linux")]
@@ -190,8 +192,6 @@ pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_bucket::layout::{Branch, Cell};
-#[cfg(target_os = "linux")]
-pub use extentd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
 pub use extents::{
     Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
     StoreRole, Whose, WindowMapping, WriteBarriers,
@@ -207,8 +207,8 @@ pub use storage::Storage;
 pub use storage_device::ExtentId;
 
 /// cladefs: the commit this build is of, as scripts/build-commit.sh said at build time (build.rs):
-/// a commit, with `-dirty` if a tracked file differed from it, or `unknown`. What extentd's
-/// metrics, cladefsctl --version and a VM process's connection to extentd report (TASK-111.7).
+/// a commit, with `-dirty` if a tracked file differed from it, or `unknown`. What cladefsd's
+/// metrics, cladefsctl --version and a VM process's connection to cladefsd report (TASK-111.7).
 pub const BUILD_COMMIT: &str = env!("CLADEFS_BUILD_COMMIT");
 
 #[cfg(test)]

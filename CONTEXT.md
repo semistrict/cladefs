@@ -132,7 +132,7 @@ A file created in this mount, served from the guest's page cache until it is nex
 
 **Extent daemon**:
 The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
-_Avoid_: server, remote; `cladefsd` is its name on the command line, `extentd` its module and protocol
+_Avoid_: server, remote; `cladefsd`, its name on the command line, in its module, protocol and files
 
 **Daemon client**:
 A VM process's connection to the extent daemon, through which its extent device has a store.
@@ -199,7 +199,7 @@ A line of commits with one writer at a time, named by an ID in the bucket.
 _Avoid_: volume, store (a store holds a branch)
 
 **Cell**:
-A tenant's unit of placement and of collection: the branches one host writes together.
+A tenant's unit of placement, writing and collection: one writer holds it, and with it every vdisk and version in it.
 
 **Vdisk**:
 A named branch of a cell, of a kind (Fxfs, SQLite, memory): not quite a disk, a VM's virtual one.
@@ -237,12 +237,8 @@ A point other tenants' cells may fork.
 _Avoid_: public (public is a base's)
 
 **Version**:
-A named state of a vdisk its head keeps, in its own cell, of no record: cut local, then uploaded, and dropped by its writer.
-_Avoid_: snapshot (VMs' and Fxfs's), point (a point has its record), checkpoint
-
-**Cut**:
-The commit that makes a version, of a quiescent store, closing its segment; a **cell cut** makes a version of each of a cell's vdisks at one moment.
-_Avoid_: freeze (the guest's), barrier (any commit is one)
+A named state of a whole cell, every vdisk in it at one moment, kept inside the cell. Only the cell's writer takes and drops one; taking one makes no new cell. Local at once, uploaded later.
+_Avoid_: cut, snapshot (VMs' and Fxfs's), point (a point is a branch of its own and outlives its source), checkpoint, a vdisk's version (a version is always a whole cell's)
 
 **Base**:
 A store VMs boot forks of, such as an imported container image.
@@ -511,7 +507,8 @@ code does not have yet are said so.
 - **volume**: Fxfs's alone; a cell's named branch is a **vdisk** (`cell::Vdisk`, `CreateVdisk`,
   `VdiskKind`, `MemoryVdisk`). Named files on an extent device, with no filesystem, are a
   **file set** (`extent_files::FileSet`).
-- **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
+- **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**, a cell's a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
+- **version**: a whole cell's named state alone, never a vdisk's; a format's is its **format**, a tool's a **pinned version**. **cut** is retired, in code too: the per-vdisk versions the code has (`Head::versions`, `VersionCut`, `Store::commit_version`, `cell_cut`) give way to the cell's.
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
   StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
@@ -523,6 +520,9 @@ code does not have yet are said so.
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
+- **Fxfs** / **cladefs** in the guest: Fxfs is Fuchsia's filesystem, its crates and its format; the guest
+  kernel's module that runs it is `cladefs` (`fs/cladefs`, `mount -t cladefs`, `cladefs.*` parameters,
+  the `cladefs` tracepoints); cases keep `fxfs-guest-*`, named for what they test.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
 - **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).

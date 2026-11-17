@@ -189,9 +189,9 @@ fn on_file_set(config: &str, file_set: std::sync::Arc<FileSet>, pragmas: &str, s
 /// from its own, keeping their branches in a file bucket there: its socket.
 #[cfg(target_os = "linux")]
 fn daemon(root: &Path) -> PathBuf {
-    let socket = root.join("extentd.sock");
+    let socket = root.join("cladefsd.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     socket
 }
 

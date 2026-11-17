@@ -30,9 +30,9 @@ export interface Symbol {
 
 /** cladefs's code outside crates/, every file of it cladefs's own. */
 export const EXTRA_ROOTS = [
-  "guest/rust/fxfs-linux/src",
+  "guest/rust/cladefs-linux/src",
   "guest/rust/linux-rt/src",
-  "guest/linux/fs/fxfs",
+  "guest/linux/fs/cladefs",
   "guest/linux/drivers/virtio_extent",
   "vendor/firecracker/src/vmm/src/devices/virtio/extent",
 ];

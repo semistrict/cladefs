@@ -84,7 +84,7 @@ fi
 not_run budgets bench-budgets.json
 # What a failed case leaves of its stores, buckets, caches, images and roots: not results.
 find "$results" -mindepth 2 -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' \
-    -o -name '*-cache' -o -name '.extentd-cache.*' -o -name '*.bucket' -o -name 'store-*' \
+    -o -name '*-cache' -o -name '.cladefsd-cache.*' -o -name '*.bucket' -o -name 'store-*' \
     -o -name sandbox-image -o -name rootfs -o -name extents \) -prune -exec rm -rf {} +
 find "$results" -type f \( -name '*.ext4' -o -name '*.img' \) -delete
 if (( not_run )); then status=3; fi

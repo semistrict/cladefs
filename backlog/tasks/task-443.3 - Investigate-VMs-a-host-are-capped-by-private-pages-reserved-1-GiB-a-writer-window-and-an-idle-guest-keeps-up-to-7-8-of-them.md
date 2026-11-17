@@ -5,8 +5,8 @@ title: >-
   window), and an idle guest keeps up to 7/8 of them
 status: To Do
 assignee: []
-created_date: 2026-11-15 12:24
-updated_date: '2026-11-16T21:40:00Z'
+created_date: '2026-11-15 12:24'
+updated_date: '2026-11-17 01:09'
 labels:
   - perf
   - review-2026-11-15
@@ -21,12 +21,12 @@ ordinal: 837000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-PRIVATE_MAX_DEFAULT is 1 GiB (crates/virtio_extent/src/config.rs); CopyOnWrite::reserve (crates/cladefs/src/dax.rs) pins it whole at WINDOW, and Arenas::pin (crates/physmem/src/pmm/arenas.rs) refuses past 7/8 of the allowance or the tenant's cap: ~105 VMs on a 128 GiB host at best, 7 for a tenant limited to 8 GiB, then WINDOW fails ENOMEM. Separately guest/linux/fs/fxfs/dax.c fxfs_dax_work relieves clean private pages only near the bound, so a sandbox that overwrote a few hundred MiB then idles keeps them in host memory. The perf gate's density phase runs 3 VMs and reaches neither. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+PRIVATE_MAX_DEFAULT is 1 GiB (crates/virtio_extent/src/config.rs); CopyOnWrite::reserve (crates/cladefs/src/dax.rs) pins it whole at WINDOW, and Arenas::pin (crates/physmem/src/pmm/arenas.rs) refuses past 7/8 of the allowance or the tenant's cap: ~105 VMs on a 128 GiB host at best, 7 for a tenant limited to 8 GiB, then WINDOW fails ENOMEM. Separately guest/linux/fs/cladefs/dax.c fxfs_dax_work relieves clean private pages only near the bound, so a sandbox that overwrote a few hundred MiB then idles keeps them in host memory. The perf gate's density phase runs 3 VMs and reaches neither. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Idle VMs with the default config are started on one host until WINDOW fails, logging pinned bytes and the allowance; and cladefs_extentd_vm_window_private_pages is read after a write burst and five idle minutes
+- [ ] #1 Idle VMs with the default config are started on one host until WINDOW fails, logging pinned bytes and the allowance; and cladefsd_vm_window_private_pages is read after a write burst and five idle minutes
 - [ ] #2 The notes give the measured cost and the workload size at which a customer would feel it; a fix, if needed, is filed as its own task
 <!-- AC:END -->
 
