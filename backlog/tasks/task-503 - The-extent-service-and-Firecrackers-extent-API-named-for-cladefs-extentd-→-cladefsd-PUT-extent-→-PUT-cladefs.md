@@ -3,11 +3,11 @@ id: TASK-503
 title: >-
   The extent service and Firecracker's extent API named for cladefs: extentd →
   cladefsd, PUT /extent → PUT /cladefs
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16 22:23'
-updated_date: '2026-11-17 01:11'
+updated_date: '2026-11-17 02:32'
 labels:
   - naming
   - host
@@ -24,20 +24,20 @@ TASK-475.1 renamed the binary cladefsd and its variables CLADEFSD_*, but kept ex
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No live file says extentd, Extentd or EXTENTD, but records (docs/measurements, docs/reviews, dead-ends/, DONE.md, the backlog's closed tasks, vendor/firecracker.rewrites), the earlier rename scripts and renamed.rs
-- [ ] #2 Firecracker's API says cladefs: PUT /cladefs/{id}, the configuration file's `cladefs`, LoadSnapshot's `cladefs_overrides`, `cladefsd_socket`, the swagger; a configuration still saying `extent` is refused, naming `cladefs`
-- [ ] #3 The Firecracker series is rewritten, released as cladefs-v1.16.1-r9 on semistrict/firecracker, the submodule pinned to it and listed in vendor/firecracker.rewrites
-- [ ] #4 A/B tooling compares a side from before the rename: its extentd-stats.txt and extentd-* metrics read as the new names
-- [ ] #5 A script renames a branch begun before (repo, --tree, --filter, --backlog modes), tested as rename-to-cladefsd.sh is
-- [ ] #6 CONTEXT.md, the integrator guide and upgrading-a-host say the new names
-- [ ] #7 The guest kernel's filesystem module is cladefs: fs/cladefs, mount -t cladefs, CONFIG_CLADEFS_FS, cladefs.* parameters, cladefs tracepoints, /proc/fs/cladefs, guest/rust/cladefs-linux, guest/sim; Fxfs (Fuchsia's crates and format) and the fxfs-guest-* cases keep their names; guest cases pass on a guest kernel built so
+- [x] #1 No live file says extentd, Extentd or EXTENTD, but records (docs/measurements, docs/reviews, dead-ends/, DONE.md, the backlog's closed tasks, vendor/firecracker.rewrites), the earlier rename scripts and renamed.rs
+- [x] #2 Firecracker's API says cladefs: PUT /cladefs/{id}, the configuration file's `cladefs`, LoadSnapshot's `cladefs_overrides`, `cladefsd_socket`, the swagger; a configuration still saying `extent` is refused, naming `cladefs`
+- [x] #3 A/B tooling compares a side from before the rename: its extentd-stats.txt and extentd-* metrics read as the new names
+- [x] #4 A script renames a branch begun before (repo, --tree, --filter, --backlog modes), tested as rename-to-cladefsd.sh is
+- [x] #5 CONTEXT.md, the integrator guide and upgrading-a-host say the new names
+- [x] #6 The guest kernel's filesystem module is cladefs: fs/cladefs, mount -t cladefs, CONFIG_CLADEFS_FS, cladefs.* parameters, cladefs tracepoints, /proc/fs/cladefs, guest/rust/cladefs-linux, guest/sim; Fxfs (Fuchsia's crates and format) and the fxfs-guest-* cases keep their names; guest cases pass on a guest kernel built so
+- [x] #7 The Firecracker series is rewritten, released as cladefs-v1.16.1-r10 on semistrict/firecracker, the submodule pinned to it and listed in vendor/firecracker.rewrites
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -64,4 +64,12 @@ Correction to the note above: what already breaks the qualification A/B against 
 Scope added by the user (2026-11-16): fxfs renamed cladefs inside Linux, the kernel module only (Fuchsia's crates and format, and the fxfs-guest-* cases, keep Fxfs), folded into this task. The script collects the C symbols guest/linux and guest/sim define (GUEST_SYMBOLS) and the module's parameters (GUEST_PARAMS) before renaming, renames the kernel C scope (guest/linux, guest/sim, guest/mutants, crates/fxfs-sim-diff/shim, cocci, bpftrace) whole, and elsewhere only the module's interface. First run missed guest/sim's own fxfs_sim_* symbols and the sim-diff shim's `struct fxfs`, which crates/fxfs-sim-diff failed to build on; fixed in the script and the tree. macOS cargo check of fxfs-sim-diff passes.
 
 Renumbered TASK-501 -> TASK-503 at the merge of main (backlog doctor --fix): another session's TASK-501 (CoW DAX windows reserve no daemon memory) and TASK-502 landed on main meanwhile; this branch's commits before the merge say TASK-501. Main's fork commit for TASK-502 (93ad15103, on r8) taken into the renamed series: cladefs-v1.16.1-r10 (bac96b047) is r8 through it renamed (93ad15103 -> 9bc4a5a8e, its upstream swagger's device named Cladefs/putCladefsDeviceByID too), then the refusal citing TASK-503. r9 (8506cccc1), the first cut, was never pinned on main. Merge conflicts were all in files this rename only renamed: main's side taken, the script run again over it (idempotent after), --backlog again.
+
+Validation at c0a8b6edd (second merge of main): macOS scripts/test.sh whole (2638 workspace, 527 scripts, sim, shuttle, mutants, Go); ubu1 under fxjob at 08a73ab43: Linux test.sh whole (2948 workspace; scripts 526/527, test_nightly the known TASK-500), the Firecracker part with the refusal test; guest cases on a guest kernel built from the renamed module: fxfs-guest-dax, -snapshot-dax, -daemon-lost, -checks-dax, -follow-dax, -bpftrace-dax, -automount at 08a73ab43, and -dax, -snapshot-dax, -checks-dax, -bpftrace-dax at c0a8b6edd. guide 42/42, upstream-changes --check, firecracker-forward (CI). guest/sim: CI's zloop failed 2997/3000 because sim/kernel/lib.c chose allocations to fail by "fs/cladefs/" in the path, which CI's checkout, /home/runner/work/cladefs/cladefs/, says too; now "linux/fs/cladefs/": reproduced on ubu1 under a cladefs/cladefs/ checkout (old fails, new 30/30). CI failures not this task's, on main too: object-stores, test_nightly (TASK-500), kms_having_no_kek_refuses_new_cells_as_destroyed (TASK-505 filed), firecracker-series's commits before TASK-417 (TASK-422). The repo script run again leaves the tree as it is.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every name in commands and APIs says cladefs: the extent service is cladefsd everywhere (gRPC cladefs.cladefsd.v1.Cladefsd, go/cladefsd/v1, cladefs::cladefsd, cladefsd_socket, cladefsd.sock/.log/-stats.txt, metrics, trace spans, thread names within 15 bytes); Firecracker's configuration of the device is cladefs (PUT /cladefs/{id}, the configuration's cladefs, cladefs_overrides, CladefsDeviceConfig), its old key refused, released as cladefs-v1.16.1-r10 and pinned; the guest kernel's module is cladefs (fs/cladefs, mount -t cladefs, cladefs.* parameters and tracepoints, /proc/fs/cladefs, guest/rust/cladefs-linux, guest/sim), Fxfs keeping its name. scripts/rename-to-cladefs-api.sh does it for branches (repo, --tree, --filter, --backlog; idempotent; tested); A/B readers take a side from before. Verified on macOS and ubu1 (full suites, 7 guest cases on the renamed kernel) and CI; the remaining CI failures are main's too.
+<!-- SECTION:FINAL_SUMMARY:END -->
