@@ -127,6 +127,7 @@ s/\bCONFIG_FXFS_FS\b/CONFIG_CLADEFS_FS/g;
 s/(KBUILD_MODNAME=\S{0,3})fxfs\b/$1cladefs/g;
 s/(-t )fxfs\b/$1cladefs/g;
 s/\brootfstype=fxfs\b/rootfstype=cladefs/g;
+s/\bstruct fxfs\b/struct cladefs/g;
 if ($par) { s/\bfxfs\.($par)\b/cladefs.$1/g; }
 if ($sym) {
     s{(?<![A-Za-z0-9_])($sym)\b}{my $n = $1; $n =~ s/^fxfs/cladefs/; $n =~ s/^FXFS/CLADEFS/; $n}ge;

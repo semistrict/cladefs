@@ -15,7 +15,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// `struct fxfs`, the model's.
+/// `struct cladefs`, the model's.
 #[repr(C)]
 struct Fs {
     _opaque: [u8; 0],
