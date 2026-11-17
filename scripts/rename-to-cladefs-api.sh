@@ -126,6 +126,7 @@ s/\bfxfs:(?=fxfs_|\*)/cladefs:/g;
 s/\bCONFIG_FXFS_FS\b/CONFIG_CLADEFS_FS/g;
 s/(KBUILD_MODNAME=\S{0,3})fxfs\b/$1cladefs/g;
 s/(-t )fxfs\b/$1cladefs/g;
+s/\brootfstype=fxfs\b/rootfstype=cladefs/g;
 if ($par) { s/\bfxfs\.($par)\b/cladefs.$1/g; }
 if ($sym) {
     s{(?<![A-Za-z0-9_])($sym)\b}{my $n = $1; $n =~ s/^fxfs/cladefs/; $n =~ s/^FXFS/CLADEFS/; $n}ge;
@@ -137,8 +138,10 @@ if ($ARGV =~ m{(^|/)(guest/linux|guest/sim|guest/mutants|crates/fxfs-sim-diff/sh
     s/(?:(?<![A-Za-z0-9])|(?<=-D))FXFS/CLADEFS/g;
 }
 if ($ARGV =~ m{(^|/)guest/rust/}) { s/"fxfs: /"cladefs: /g; }
-if ($ARGV =~ m{(^|/)(guest/tests|crates/fxfs-automount)/}) {
+if ($ARGV =~ m{(^|/)(guest/tests|crates/fxfs-automount)/} && $ARGV !~ m{Cargo\.(lock|toml)$}) {
     s/"fxfs"/"cladefs"/g; s/\] fxfs: /] cladefs: /g;
+    s/virtiofs\|fxfs/virtiofs|cladefs/g; s/(FSTYP"? ?=+ ?)fxfs\b/$1cladefs/g;
+    s/\b(Tracing|no) fxfs (seals|events)\b/$1 cladefs $2/g; s/\bfxfs\.\{param\}/cladefs.{param}/g;
 }
 '
 # Perl that renames a path: the files of Firecracker's configuration layer, besides extentd's.

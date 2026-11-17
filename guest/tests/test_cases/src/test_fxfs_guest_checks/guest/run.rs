@@ -135,7 +135,7 @@ impl Guest {
             if left != *booted {
                 fs::write(path, booted).unwrap();
                 let param = path.file_name().unwrap().to_string_lossy();
-                eprintln!("{name}: left fxfs.{param} at {left}, set back to {booted}");
+                eprintln!("{name}: left cladefs.{param} at {left}, set back to {booted}");
             }
         }
         if thaw() {

@@ -863,7 +863,7 @@ dependencies = [
  "flate2",
  "fuchsia-async",
  "futures",
- "cladefs",
+ "fxfs",
  "fxfs-posix",
  "humantime",
  "hyper-util",
@@ -1578,7 +1578,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cladefs"
+name = "fxfs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1665,7 +1665,7 @@ dependencies = [
  "fidl-fuchsia-io",
  "fuchsia-async",
  "futures",
- "cladefs",
+ "fxfs",
  "log",
  "rustc-hash",
 ]

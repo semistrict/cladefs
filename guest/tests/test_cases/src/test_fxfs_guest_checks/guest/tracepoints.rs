@@ -55,7 +55,7 @@ impl Trace {
         }
         assert!(
             std::path::Path::new(&format!("{TRACING}/events/cladefs/cladefs_seal_begin")).exists(),
-            "no fxfs events in {TRACING}/events"
+            "no cladefs events in {TRACING}/events"
         );
         fs::write(format!("{TRACING}/buffer_size_kb"), b"4096").unwrap();
         fs::write(format!("{TRACING}/trace"), b"").unwrap();

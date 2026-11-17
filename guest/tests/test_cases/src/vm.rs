@@ -403,7 +403,7 @@ impl Vm {
         );
         let mut boot_args = match &self.fxfs_root {
             // Not a block device's: the kernel mounts it by its source, the device's tag.
-            Some(tag) => format!("root={tag} rootfstype=fxfs rw {CMDLINE}"),
+            Some(tag) => format!("root={tag} rootfstype=cladefs rw {CMDLINE}"),
             None => {
                 self.add_root_image(root)?;
                 CMDLINE.to_owned()

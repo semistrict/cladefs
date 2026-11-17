@@ -42,7 +42,7 @@ mod host {
         "https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git refs/tags/v2026.10.15 \\\n",
         " && git -C /xfstests checkout FETCH_HEAD\n",
         "WORKDIR /xfstests\n",
-        "RUN sed -E -i '/^[[:space:]]*[^#]*virtiofs[^#]*\\)/ s/virtiofs/virtiofs|fxfs/' ",
+        "RUN sed -E -i '/^[[:space:]]*[^#]*virtiofs[^#]*\\)/ s/virtiofs/virtiofs|cladefs/' ",
         "common/rc common/config\n",
         "RUN make -j8 && useradd -m fsgqa && useradd -m 123456-fsgqa && useradd -m fsgqa2\n",
     );
@@ -58,7 +58,7 @@ eval "_upstream$(declare -f _try_scratch_mkfs_sized)"
 eval "_upstream$(declare -f _scratch_unmount)"
 _try_scratch_mkfs_sized()
 {
-	[ "$FSTYP" = fxfs ] || { _upstream_try_scratch_mkfs_sized "$@"; return; }
+	[ "$FSTYP" = cladefs ] || { _upstream_try_scratch_mkfs_sized "$@"; return; }
 	_scratch_unmount 2>/dev/null
 	export SCRATCH_DEV=scratch-$1
 	_try_scratch_mount || _notrun "no Fxfs scratch device of $1 bytes"
@@ -67,7 +67,7 @@ _try_scratch_mkfs_sized()
 }
 _scratch_unmount()
 {
-	[ "$FSTYP" = fxfs ] || { _upstream_scratch_unmount "$@"; return; }
+	[ "$FSTYP" = cladefs ] || { _upstream_scratch_unmount "$@"; return; }
 	_unmount $SCRATCH_MNT
 }
 "#;
@@ -254,7 +254,7 @@ SCRATCH_DEV=scratch SCRATCH_MNT=/mnt/scratch
             let size = SIZED[2];
             assert_eq!(
                 bash(&format!(
-                    "FSTYP=fxfs\n_try_scratch_mkfs_sized {size}\n_scratch_unmount\necho $SCRATCH_DEV"
+                    "FSTYP=cladefs\n_try_scratch_mkfs_sized {size}\n_scratch_unmount\necho $SCRATCH_DEV"
                 )),
                 format!(
                     "unmount /mnt/scratch\nmount scratch-{size} on /mnt/scratch\nunmount \
@@ -262,7 +262,7 @@ SCRATCH_DEV=scratch SCRATCH_MNT=/mnt/scratch
                 )
             );
             assert_eq!(
-                bash("FSTYP=fxfs\n_try_scratch_mkfs_sized 1\necho ran on"),
+                bash("FSTYP=cladefs\n_try_scratch_mkfs_sized 1\necho ran on"),
                 "unmount /mnt/scratch\nmount scratch-1 on /mnt/scratch\nnotrun: no Fxfs scratch \
                  device of 1 bytes\n"
             );

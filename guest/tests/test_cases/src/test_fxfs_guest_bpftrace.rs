@@ -71,7 +71,7 @@ mod guest {
     const TRACING: &str = "/sys/kernel/tracing";
     const PAGE: usize = 4096;
     /// What the script says once it has attached (its BEGIN).
-    const READY: &str = "Tracing fxfs seals and window MAPs; Ctrl-C to end.";
+    const READY: &str = "Tracing cladefs seals and window MAPs; Ctrl-C to end.";
 
     fn mount(source: &str, target: &str, fstype: &str) {
         fs::create_dir_all(target).unwrap();
