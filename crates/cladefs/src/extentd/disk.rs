@@ -184,9 +184,9 @@ impl Disk {
     fn refuse(&self) -> Errno {
         if !self.full.swap(true, Ordering::Relaxed) {
             log::warn!(
-                "extentd: tenant {:x}'s disk at its limit, its writes refused (ENOSPC): it takes \
+                "extentd: tenant {}'s disk at its limit, its writes refused (ENOSPC): it takes \
                  {} bytes, of {:?}; every tenant's, {} of {:?}",
-                self.tenant,
+                base32_id::Short(self.tenant),
                 self.used(),
                 self.limit(),
                 total(),
@@ -208,8 +208,8 @@ impl Disk {
         let writing = self.writing.load(Ordering::SeqCst);
         if let Err(err) = extent_store::pages::shared().write_back_all() {
             log::warn!(
-                "extentd: writing back the stores' page cache to count tenant {:x}'s disk: {err}",
-                self.tenant
+                "extentd: writing back the stores' page cache to count tenant {}'s disk: {err}",
+                base32_id::Short(self.tenant)
             );
         }
         let walked = walk(&self.dir);

@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-16 11:25'
+updated_date: '2026-11-17 02:06'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs
 
@@ -765,9 +765,9 @@ refuses to start) and removed plaintext (One sealed mode).
 refused, so that a misspelt `endpoint` does not send calls to AWS itself.
 
 - **Naming.** Each tenant's KEK is a symmetric KMS key (`SYMMETRIC_DEFAULT`, `ENCRYPT_DECRYPT`)
-  named as `kms::KeyNames` says: the template `key` with `{tenant}` in hexadecimal, say
+  named as `kms::KeyNames` says: the template `key` with `{tenant}` in base 32 (TASK-504), say
   `alias/cladefs-tenant-{tenant}`, an alias per tenant the operator makes (`aws kms create-key`,
-  `aws kms create-alias`); and the overrides file `keys`, lines `TENANT_HEX NAME`, for tenants that
+  `aws kms create-alias`); and the overrides file `keys`, lines `TENANT NAME` (the tenant in base 32), for tenants that
   bring their own key (BYOK). A name is any form `Encrypt` and `Decrypt` take: a key ID, a key
   ARN, an alias name or an alias ARN; a key in another account needs its key ARN (or alias ARN).
 - **Endpoint.** AWS's own for the region, unless `endpoint` names another: a VPC interface
@@ -878,7 +878,7 @@ start `bao server -dev` themselves.
   sent as `X-Vault-Namespace`), or `openbaos://` over HTTPS, which may add `&ca=FILE`, a PEM file of
   the only CAs trusted (else the system's). `openbao://` sends the token in the clear: loopback or a
   trusted network only. Each tenant's key is named by `kms::KeyNames`: `TEMPLATE` with `{tenant}` in
-  hexadecimal, `FILE`'s overrides for tenants bringing their own; names of letters, digits, `-`, `_`
+  base 32, `FILE`'s overrides for tenants bringing their own; names of letters, digits, `-`, `_`
   and `.`. The token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or that of the file `CLADEFS_KMS_OPENBAO_TOKEN_FILE`
   names (exactly one set), read at start and again whenever OpenBao answers 403, the call made once
   more if it changed: OpenBao Agent's file sink renewing it works. Credentials in the URL are refused.
@@ -953,7 +953,7 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
 
 - **Configuration.** `CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`.
   A tenant's KEK is a `cryptoKey` named as `kms::KeyNames` says: the template, `{tenant}` the tenant
-  in hexadecimal, an id in ring `R` (`cladefs-tenant-{tenant}`); or a line of the overrides file,
+  in base 32, an id in ring `R` (`cladefs-tenant-{tenant}`); or a line of the overrides file,
   `TENANT NAME`, where `NAME` is an id in `R` or a key's whole resource name,
   `projects/P2/locations/L2/keyRings/R2/cryptoKeys/K`, in a project of the tenant's own (BYOK,
   cross-project). Each name is checked as the URL is read (project, location, ids of 1 to 63

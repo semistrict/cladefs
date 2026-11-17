@@ -14,8 +14,8 @@ use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, KINDS, LOGS, OPEN_EXTENTS,
     OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Vdisk, add_piece, branch_dir,
-    create_branch_dirs, extent_path, files_of, list_numbers, log_path, open_extent_path,
-    open_segment_path, segment_path, spare_path,
+    create_branch_dirs, extent_path, files_of, list_numbers, log_path, numbered_path,
+    open_extent_path, open_segment_path, segment_path, spare_path,
 };
 use crate::raw::{RawEncryption, RawFile};
 use crate::seals;
@@ -36,6 +36,7 @@ use crate::wal::{
 };
 use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use base32_id::Short;
 use extent_bucket::cache::Cache;
 use extent_bucket::keys::Ring;
 use extent_bucket::recovery::{Places, Seal};
@@ -2675,7 +2676,7 @@ impl<D: Dir> Store<D> {
         }
         let segment = SegmentId { branch: self.branch.id, number };
         match state.segments.framing_failure(segment) {
-            Some(error) => bail!("framing segment {number:#x}: {error}"),
+            Some(error) => bail!("framing segment {}: {error}", Short(number)),
             None => Ok(()),
         }
     }
@@ -2811,7 +2812,7 @@ impl<D: Dir> Store<D> {
                 Some(queued) if queued.number == number => {
                     queued.footer.contents.commits.last().copied().or(state.wal.start())
                 }
-                _ => bail!("segment {number:#x} is not the first of the write-ahead log"),
+                _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
             }
         };
         if let Err(err) = start.write(&*self.dir, after) {
@@ -3388,7 +3389,7 @@ fn remove_unheld<D: Dir>(
             if own && (held.contains(&FileKey::Own(extent)) || named.contains(&extent)) {
                 continue;
             }
-            let path = format!("{}/{:016x}", branch_dir(kind, branch), number);
+            let path = numbered_path(kind, branch, number);
             dir.remove(&path).with_context(|| format!("removing {path}"))?;
         }
     }
@@ -3529,7 +3530,7 @@ mod tests {
                 crate::sync::refuse_threads(false);
                 committed.unwrap();
                 let framed = dir.list(&branch_dir(crate::layout::SEGMENTS, 1)).unwrap();
-                assert_eq!(framed, ["0000000000000000"]);
+                assert_eq!(framed, ["0000000000000"]);
                 store.write(extent(1), 0, &[2; 4096]).unwrap();
                 store.commit(None).unwrap();
                 drop(store);

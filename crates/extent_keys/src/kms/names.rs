@@ -12,10 +12,10 @@ use std::path::Path;
 const TENANT: &str = "{tenant}";
 
 /// The name a real KMS knows each tenant's KEK by: a template, in which `{tenant}` stands for the
-/// tenant's ID in hexadecimal, as cladefs displays tenants (`TENANT/CELL`); and overrides, for
+/// tenant's ID in base 32, as cladefs displays tenants (`TENANT/CELL`, `base32_id`); and overrides, for
 /// tenants that bring their own key (BYOK) under a name of their choosing, perhaps in an account
 /// of their own (an AWS key ARN, a GCP key's resource name). A KMS URL gives the template as its
-/// `key` and the file of overrides as its `keys`: lines of a tenant in hexadecimal and its key's
+/// `key` and the file of overrides as its `keys`: lines of a tenant in base 32 and its key's
 /// name, separated by white space, `#` beginning a comment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyNames {
@@ -44,7 +44,7 @@ impl KeyNames {
             else {
                 return Err(at("not a tenant and a key's name"));
             };
-            let tenant = u64::from_str_radix(tenant, 16).map_err(|_| at("no tenant in hex"))?;
+            let tenant = base32_id::parse(tenant).ok_or_else(|| at("no tenant in base 32"))?;
             if names.insert(tenant, name.to_owned()).is_some() {
                 return Err(at("a tenant named twice"));
             }
@@ -80,7 +80,7 @@ impl KeyNames {
     pub fn of(&self, tenant: u64) -> String {
         match self.overrides.get(&tenant) {
             Some(name) => name.clone(),
-            None => self.template.replace(TENANT, &format!("{tenant:x}")),
+            None => self.template.replace(TENANT, &base32_id::Short(tenant).to_string()),
         }
     }
 
@@ -97,10 +97,10 @@ mod tests {
 
     #[test]
     fn tenants_are_named_by_the_template_unless_overridden() {
-        let overrides = "# tenants with keys of their own\n2a arn:aws:kms:us-east-1:1:key/abc\n\n";
+        let overrides = "# tenants with keys of their own\n1a arn:aws:kms:us-east-1:1:key/abc\n\n";
         let names = KeyNames::new("cladefs-tenant-{tenant}", Some(overrides)).unwrap();
-        assert_eq!(names.of(0x1f), "cladefs-tenant-1f");
-        assert_eq!(names.of(0x2a), "arn:aws:kms:us-east-1:1:key/abc");
+        assert_eq!(names.of(31), "cladefs-tenant-z");
+        assert_eq!(names.of(42), "arn:aws:kms:us-east-1:1:key/abc");
     }
 
     #[test]
@@ -112,9 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn overrides_are_tenants_in_hex_and_names_once_each() {
+    fn overrides_are_tenants_in_base_32_and_names_once_each() {
         let refused = |overrides| KeyNames::new("k-{tenant}", Some(overrides)).unwrap_err();
-        assert_eq!(refused("zz name"), "the key overrides' line 1: no tenant in hex: \"zz name\"");
+        let hex = "the key overrides' line 1: no tenant in base 32: \"1F name\"";
+        assert_eq!(refused("1F name"), hex);
         assert_eq!(refused("1 a\n1 b"), "the key overrides' line 2: a tenant named twice: \"1 b\"");
         assert_eq!(refused("1"), "the key overrides' line 1: not a tenant and a key's name: \"1\"");
     }

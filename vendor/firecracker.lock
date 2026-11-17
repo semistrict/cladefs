@@ -639,6 +639,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "base32_id"
+version = "0.1.0"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -998,6 +1002,7 @@ dependencies = [
  "anyhow",
  "async-task",
  "async-trait",
+ "base32_id",
  "bitflags 2.13.2",
  "event-listener",
  "extent_bucket",
@@ -1463,6 +1468,7 @@ name = "extent_bucket"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base32_id",
  "bincode",
  "bytes",
  "extent_frame",
@@ -1503,6 +1509,7 @@ dependencies = [
 name = "extent_frame"
 version = "0.1.0"
 dependencies = [
+ "base32_id",
  "bincode",
  "crc-fast",
  "extent_keys",
@@ -1520,6 +1527,7 @@ dependencies = [
  "aws-config",
  "aws-lc-rs",
  "aws-sdk-kms",
+ "base32_id",
  "base64 0.22.1",
  "bytes",
  "crc-fast",
@@ -1541,6 +1549,7 @@ name = "extent_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base32_id",
  "bincode",
  "event-listener",
  "extent_bucket",

@@ -644,8 +644,8 @@ message ObjectStorageStats {
 message GrantRequest {
   // Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
   // its directory are vdisks of its cells, under its prefix, and its VM processes open no store of
-  // another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in hexadecimal:
-  // `<tenant>.sock`.
+  // another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in base 32
+  // (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
   uint64 tenant = 1;
   // The directory its stores are in, which must exist: its VM processes name stores in it
   // alone.

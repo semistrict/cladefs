@@ -11,20 +11,21 @@
 //! than going on as if there were none, as a public base opening private would (TASK-160.10).
 
 use crate::error::{Errno, Result};
+use base32_id::{Padded, Short};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The record of what is attached to a store: a line of each's branches, in hexadecimal,
+/// The record of what is attached to a store: a line of each's branches, in base 32,
 /// comma-separated, and path.
 const ATTACHED: &str = "attached-bases";
 
 /// The record naming the stores a store was forked from, nearest first: a line of each's branch,
-/// in hexadecimal, and directory, as of the fork. A fork's directory is its own, its branch alone
+/// in base 32, and directory, as of the fork. A fork's directory is its own, its branch alone
 /// in it (TASK-165.7): what it inherited of what cladefs keeps beside a store ([`inherit`]).
 const ANCESTRY: &str = "ancestry";
 
-/// The prefix of the empty file marking a branch public, its branch in hexadecimal after it.
+/// The prefix of the empty file marking a branch public, its branch in base 32 after it, padded.
 const PUBLIC: &str = "public-";
 
 /// Writes `text` as the record `name` in `dir`, durably: whole or not at all, by a file written
@@ -87,8 +88,8 @@ fn failed(dir: &Path, what: &str, err: io::Error) -> Errno {
 pub(crate) fn attached(dir: &Path) -> Result<Vec<(Vec<u64>, PathBuf)>> {
     lines(dir, ATTACHED, "what is attached", |line| {
         let (branches, base) = line.split_once(' ')?;
-        let branches = branches.split(',').map(|branch| u64::from_str_radix(branch, 16));
-        Some((branches.collect::<std::result::Result<_, _>>().ok()?, base.into()))
+        let branches = branches.split(',').map(base32_id::parse);
+        Some((branches.collect::<Option<_>>()?, base.into()))
     })
 }
 
@@ -106,7 +107,8 @@ pub(crate) fn attach(dir: &Path, base: &Path, branches: &[u64]) -> Result<()> {
 fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
     let mut text = String::new();
     for (branches, base) in attached {
-        let branches: Vec<String> = branches.iter().map(|branch| format!("{branch:x}")).collect();
+        let branches: Vec<String> =
+            branches.iter().map(|&branch| Short(branch).to_string()).collect();
         text += &format!("{} {}\n", branches.join(","), base.display());
     }
     write(dir, ATTACHED, &text).map_err(|err| failed(dir, "recording what is attached", err))
@@ -116,7 +118,7 @@ fn write_attached(dir: &Path, attached: &[(Vec<u64>, PathBuf)]) -> Result<()> {
 pub(crate) fn ancestry(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     lines(dir, ANCESTRY, "what it was forked from", |line| {
         let (branch, from) = line.split_once(' ')?;
-        Some((u64::from_str_radix(branch, 16).ok()?, from.into()))
+        Some((base32_id::parse(branch)?, from.into()))
     })
 }
 
@@ -132,7 +134,7 @@ pub(crate) fn public_branches(dir: &Path) -> Result<BTreeSet<u64>> {
         for entry in std::fs::read_dir(dir)? {
             let name = entry?.file_name();
             let marked = name.to_str().and_then(|name| name.strip_prefix(PUBLIC));
-            if let Some(branch) = marked.and_then(|branch| u64::from_str_radix(branch, 16).ok()) {
+            if let Some(branch) = marked.and_then(base32_id::parse_padded) {
                 public.insert(branch);
             }
         }
@@ -143,7 +145,7 @@ pub(crate) fn public_branches(dir: &Path) -> Result<BTreeSet<u64>> {
 
 /// Marks `branches` public in the store in `dir`, durably.
 pub(crate) fn mark_public(dir: &Path, branches: &[u64]) -> Result<()> {
-    let markers = branches.iter().map(|branch| format!("{PUBLIC}{branch:016x}"));
+    let markers = branches.iter().map(|&branch| format!("{PUBLIC}{}", Padded(branch)));
     mark(dir, markers).map_err(|err| failed(dir, "marking branches public", err))
 }
 
@@ -167,9 +169,9 @@ pub(crate) fn inherit(
         mark_public(to, &public)?;
     }
     let from = from.canonicalize().map_err(|err| failed(from, "finding the store", err))?;
-    let mut text = format!("{branch:x} {}\n", from.display());
-    for (branch, dir) in forked_from {
-        text += &format!("{branch:x} {}\n", dir.display());
+    let mut text = format!("{} {}\n", Short(branch), from.display());
+    for &(branch, ref dir) in forked_from {
+        text += &format!("{} {}\n", Short(branch), dir.display());
     }
     write(to, ANCESTRY, &text).map_err(|err| failed(to, "recording what it was forked from", err))
 }
@@ -198,10 +200,10 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
-        let expected = ["attached-bases", "public-0000000000000007", "public-0000000000000009"];
+        let expected = ["attached-bases", "public-0000000000007", "public-0000000000009"];
         assert_eq!(names, expected.map(str::to_owned).into());
 
-        std::fs::write(dir.join(ANCESTRY), "not hex /stores/base\n").unwrap();
+        std::fs::write(dir.join(ANCESTRY), "1F /stores/base\n").unwrap();
         assert_eq!(ancestry(dir), Err(Errno::EIO));
         std::fs::create_dir(dir.join("unreadable")).unwrap();
         assert_eq!(read(dir, "unreadable", "a directory"), Err(Errno::EIO));

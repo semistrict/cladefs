@@ -78,18 +78,18 @@ fn spans_trace_requests_commits_and_uploads() {
     let branch = write_read_commit();
     provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
-    // cladefs: as `TENANT/CELL/ID`, in hexadecimal (TASK-364).
-    let hex = Value::from(branch.to_string());
+    // cladefs: as `TENANT/CELL/ID`, in base 32 (TASK-364, TASK-504).
+    let named = Value::from(branch.to_string());
 
     let opened = the(&spans, "extentd.open");
     assert_eq!(children(&spans, opened), BTreeSet::from(["store.create".to_owned()]));
     let created = the(&spans, "store.create");
-    assert_eq!(attribute(created, "cladefs.branch"), Some(hex.clone()));
+    assert_eq!(attribute(created, "cladefs.branch"), Some(named.clone()));
 
     let written = the(&spans, "extentd.write");
     assert_eq!(written.parent_span_id, opentelemetry::trace::SpanId::INVALID);
     assert_eq!(attribute(written, "cladefs.request.kind"), Some(Value::from("write")));
-    assert_eq!(attribute(written, "cladefs.branch"), Some(hex.clone()));
+    assert_eq!(attribute(written, "cladefs.branch"), Some(named.clone()));
     assert_eq!(attribute(written, "cladefs.bytes"), Some(Value::I64(2 * BLOCK as i64)));
     assert_eq!(written.status, opentelemetry::trace::Status::Unset);
     assert_eq!(attribute(written, "cladefs.request_id"), Some(Value::from("42")));
@@ -101,7 +101,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(committed, "cladefs.level"), Some(Value::from("uploaded")));
     assert_eq!(children(&spans, committed), BTreeSet::from(["store.commit".to_owned()]));
     let commit = the(&spans, "store.commit");
-    assert_eq!(attribute(commit, "cladefs.branch"), Some(hex.clone()));
+    assert_eq!(attribute(commit, "cladefs.branch"), Some(named.clone()));
     assert_eq!(
         children(&spans, commit),
         ["commit.seal", "commit.upload_wait", "commit.write", "store.flush"]
@@ -115,11 +115,11 @@ fn spans_trace_requests_commits_and_uploads() {
     // checkpoint, which follows its forks' moves, created, then named by a swap of the branch's
     // head (TASK-407).
     let upload = the(&spans, "upload.segment");
-    assert_eq!(attribute(upload, "cladefs.branch"), Some(hex.clone()));
+    assert_eq!(attribute(upload, "cladefs.branch"), Some(named.clone()));
     assert_eq!(attribute(upload, "cladefs.extents"), Some(Value::I64(0)));
     assert_eq!(children(&spans, upload), BTreeSet::from(["bucket.create".to_owned()]));
     let checkpoint = the(&spans, "upload.checkpoint");
-    assert_eq!(attribute(checkpoint, "cladefs.branch"), Some(hex));
+    assert_eq!(attribute(checkpoint, "cladefs.branch"), Some(named));
     assert_eq!(
         children(&spans, checkpoint),
         ["bucket.create", "bucket.list", "bucket.update"].map(str::to_owned).into()

@@ -14,6 +14,7 @@ use super::server::Server;
 use crate::error::{Errno, Error};
 use crate::extentd::control::{channel, errno, saying};
 use crate::{Branch, BranchOf, Cell, Filesystem, SetAttr, Storage};
+use base32_id::Padded;
 use extent_bucket::cell::{self, Kind};
 use extent_bucket::keys;
 use proto::mount_client::MountClient;
@@ -51,10 +52,16 @@ pub(crate) fn service(
 }
 
 /// The path a vdisk of `cell` named `name` has in the mount, and in its directory of stores:
-/// `TENANT/CELL/NAME`, the tenant and the cell in 16 hexadecimal digits, as the bucket's keys
-/// have them.
+/// `TENANT/CELL/NAME`, the tenant and the cell in base 32, padded, as the bucket's keys have them
+/// (`base32_id::Padded`).
 pub fn vdisk_path(cell: Cell, name: &str) -> String {
-    format!("{:016x}/{:016x}/{name}", cell.tenant, cell.id)
+    format!("{}{name}", cell_dir(cell))
+}
+
+/// The directory of `cell`'s vdisks in the mount, and in its directory of stores, `TENANT/CELL/`
+/// ([`vdisk_path`]).
+fn cell_dir(cell: Cell) -> String {
+    format!("{}/{}/", Padded(cell.tenant), Padded(cell.id))
 }
 
 /// The cells attached, or being attached or detached, and the fencing token each was taken at.
@@ -344,7 +351,7 @@ impl proto::mount_server::Mount for Control {
         .map_err(|errno| failed(errno.into()))?;
         let (server, cells, holds) = (self.server()?, self.cells.clone(), self.holds.clone());
         let dir = self.stores.dir.clone();
-        let prefix = format!("{:016x}/{:016x}/", cell.tenant, cell.id);
+        let prefix = cell_dir(cell);
         let detached = whole(async move {
             let shown: Vec<String> = (server.attached().into_iter())
                 .map(|attached| attached.name)
@@ -380,7 +387,7 @@ impl proto::mount_server::Mount for Control {
         let listed = tokio::task::spawn_blocking(move || {
             (attached.into_iter())
                 .map(|cell| {
-                    let prefix = format!("{:016x}/{:016x}/", cell.tenant, cell.id);
+                    let prefix = cell_dir(cell);
                     let mut vdisks: Vec<proto::Vdisk> = (shown.iter())
                         .filter_map(|attached| {
                             let name = attached.name.strip_prefix(&prefix)?;
@@ -468,10 +475,9 @@ impl Client {
         token: Option<u64>,
     ) -> Result<(Cell, Vec<proto::Vdisk>), Error> {
         let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token };
-        let response = self
-            .call(format!("attaching cell {:x}", cell.id), |mut client| async move {
-                client.attach(request).await
-            })?;
+        let response = self.call(format!("attaching cell {cell}"), |mut client| async move {
+            client.attach(request).await
+        })?;
         Ok((Cell { id: response.cell, ..cell }, response.vdisks))
     }
 
@@ -489,7 +495,7 @@ impl Client {
     /// Detaches `cell`, at once if `force` (`Detach`).
     pub fn detach(&self, cell: Cell, force: bool) -> Result<(), Error> {
         let request = DetachRequest { tenant: cell.tenant, cell: cell.id, force };
-        self.call(format!("detaching cell {:x}", cell.id), |mut client| async move {
+        self.call(format!("detaching cell {cell}"), |mut client| async move {
             client.detach(request).await
         })?;
         Ok(())

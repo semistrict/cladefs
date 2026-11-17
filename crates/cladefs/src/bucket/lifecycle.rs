@@ -23,6 +23,7 @@ use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::extents::Opening;
 use crate::host_store::{self, DEFAULT_TENANT, new_cell};
 use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
+use base32_id::Padded;
 use extent_bucket::faults::{Fault, Faults, Faulty};
 use extent_bucket::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
@@ -318,8 +319,8 @@ struct Names(BTreeMap<String, String>);
 
 impl Names {
     fn name(&mut self, branch: Branch, name: &str) {
-        self.0.insert(format!("{:016x}", branch.id), name.to_owned());
-        self.0.insert(format!("{:016x}", branch.cell.id), format!("{name}'s"));
+        self.0.insert(Padded(branch.id).to_string(), name.to_owned());
+        self.0.insert(Padded(branch.cell.id).to_string(), format!("{name}'s"));
     }
 
     /// `key`, each of its segments that is a named ID as its name.

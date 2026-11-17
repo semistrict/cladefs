@@ -20,7 +20,7 @@ ago; past the total, or out of `MEMORY_BYTES`, any tenant's. With none left to
 evict, what would take more fails with `ENOMEM`, which the guest sees as an I/O
 error, and the daemon goes on. `ShrinkMemory` evicts toward a target at once,
 as the host's memory runs low. `/metrics` shows the memory held, every
-tenant's together and each tenant's, by its ID in hex (`tenant="a"`). Under cgroup
+tenant's together and each tenant's, by its ID in base 32 (`tenant="a"`). Under cgroup
 v2 the arenas' memfds are shmem, charged to the cgroup of the process that
 first touches each page, and uncharged when the chunk goes back (a hole
 punched): that is the daemon, which faults each chunk in as an arena takes it
@@ -93,7 +93,7 @@ OpenBao's Transit engine:
 `openbao://HOST[:PORT]/MOUNT?key=cladefs-tenant-{tenant}` (`openbaos://` over TLS,
 `&ca=FILE` for a private CA; `&namespace=NS`; `&keys=FILE` naming tenants' own
 keys), each tenant's KEK the Transit key the template names, `{tenant}` its ID
-in hex. Its token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or in the file
+in base 32. Its token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or in the file
 `CLADEFS_KMS_OPENBAO_TOKEN_FILE` names (read again when refused, as OpenBao Agent
 renews it), its policy `update` on `MOUNT/encrypt/*` and `MOUNT/decrypt/*` and
 `read` on `MOUNT/keys/*`, and not `create`, which would make a key for every
@@ -134,16 +134,16 @@ the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
 
 **AWS KMS** (doc-16, Real KMSes: AWS KMS). `CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE`,
 say `aws-kms://us-east-1?key=alias/cladefs-tenant-{tenant}`: each tenant's KEK is a
-symmetric KMS key, named by the template with `{tenant}` in hexadecimal (a key
+symmetric KMS key, named by the template with `{tenant}` in base 32 (a key
 ID, key ARN, alias name or alias ARN), and `&keys=FILE` names a file of
-overrides, lines `TENANT_HEX NAME`, for tenants that bring their own key, in
+overrides, lines `TENANT NAME` (the tenant in base 32), for tenants that bring their own key, in
 their own account by its key ARN. `&endpoint=URL` names a VPC endpoint (or an
 emulator). Credentials are the standard AWS chain's: the environment, the
 shared profile (SSO, `credential_process`), web identity, the ECS task's or
 the instance's role. cladefs's role needs `kms:Encrypt` and `kms:Decrypt` on each
 tenant's key, and nothing else; every call carries the encryption context
-`cladefs-tenant` = the tenant in hexadecimal, so a policy can tie each key to its
-tenant with the condition `"StringEquals": {"kms:EncryptionContext:cladefs-tenant": "2a"}`.
+`cladefs-tenant` = the tenant in base 32, so a policy can tie each key to its
+tenant with the condition `"StringEquals": {"kms:EncryptionContext:cladefs-tenant": "1a"}`.
 A tenant bringing a key in another account allows cladefs's role those two
 actions under that condition in its key policy, cladefs's IAM policy allows them
 on the key's ARN, and the overrides file names it. A tenant revokes cladefs's use
@@ -156,7 +156,7 @@ local-kms, an emulator (`scripts/test-local-kms.sh`, Go to install it).
 
 **Google Cloud KMS** (backlog doc-16, Real KMSes). With
 `CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=cladefs-tenant-{tenant}`,
-each tenant's KEK is the key `cladefs-tenant-<tenant in hex>` in that key ring
+each tenant's KEK is the key `cladefs-tenant-<tenant in base 32>` in that key ring
 (symmetric, purpose `ENCRYPT_DECRYPT`), a wrap its `:encrypt`, bound to the
 tenant as associated data. A tenant bringing its own key, in a project of its
 own, is named in a file given as `&keys=FILE`, a line `TENANT

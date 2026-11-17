@@ -51,7 +51,7 @@ receiver with the `http` protocol and point `OTEL_EXPORTER_OTLP_ENDPOINT` at tha
 
 ## Spans
 
-Every attribute is prefixed `cladefs.`. Branches are written in hex, as store paths name them.
+Every attribute is prefixed `cladefs.`. Branches are written in base 32 (`base32_id`), as store paths name them.
 Counts are integers. A failed operation has an error status carrying its message. A failed
 request also has `cladefs.errno`.
 

@@ -178,8 +178,9 @@ impl Sealing {
             .map(|(why, name)| format!("{name} {} {} KiB", self.count[why], self.bytes[why] >> 10))
             .collect();
         log::info!(
-            "extent store: seal stats: branch {branch:#x} commit {epoch}: copied {} KiB; {}; \
+            "extent store: seal stats: branch {} commit {epoch}: copied {} KiB; {}; \
              committed new {} KiB; most pieces {}",
+            base32_id::Short(branch),
             copied >> 10,
             whys.join(", "),
             self.committed_new >> 10,

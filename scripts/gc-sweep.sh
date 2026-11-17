@@ -73,12 +73,19 @@ cell=${CLADEFS_GC_CELL:-}
 for count in "$tenants" "$cells" "$segments" "$largest" "$rounds" "$sweeps" $at_once; do
     [[ $count =~ ^[1-9][0-9]*$ ]] || { echo "$count: not a count" >&2; exit 2; }
 done
-[[ -z $cell || $cell =~ ^[0-9a-f]+/[0-9a-f]+$ ]] ||
-    { echo "CLADEFS_GC_CELL: $cell: TENANT/CELL, in hexadecimal" >&2; exit 2; }
+# An ID as cladefs writes it, in base 32 (crates/base32_id), and padded, as keys hold it: 13 digits.
+id='[0123456789abcdefghjkmnpqrstvwxyz]{1,13}'
+padded() {
+    local id=$1
+    while ((${#id} < 13)); do id=0$id; done
+    printf %s "$id"
+}
+[[ -z $cell || $cell =~ ^$id/$id$ ]] ||
+    { echo "CLADEFS_GC_CELL: $cell: TENANT/CELL, in base 32" >&2; exit 2; }
 # Where a bucket of files keeps the cell's objects, under its directory.
 cell_dir=
 if [[ -n $cell ]]; then
-    printf -v cell_dir 'tenants/%016x/cells/%016x' "0x${cell%/*}" "0x${cell#*/}"
+    cell_dir="tenants/$(padded "${cell%/*}")/cells/$(padded "${cell#*/}")"
 fi
 case $(uname) in
     Linux) copy=(cp -al) ;;

@@ -925,7 +925,7 @@ impl Client {
         gid: Option<u32>,
     ) -> Result<PathBuf, crate::Error> {
         let request = GrantRequest { tenant, dir: name(dir)?, uid, gid };
-        let what = format!("granting tenant {tenant:x}");
+        let what = format!("granting tenant {tenant}", tenant = base32_id::Short(tenant));
         let response = self.call(what, |mut c| async move { c.grant(request).await })?;
         Ok(response.socket.into())
     }
@@ -934,7 +934,7 @@ impl Client {
     /// their stores (`Revoke`).
     pub fn revoke(&self, tenant: u64) -> Result<(), crate::Error> {
         let request = RevokeRequest { tenant };
-        let what = format!("revoking tenant {tenant:x}");
+        let what = format!("revoking tenant {tenant}", tenant = base32_id::Short(tenant));
         self.call(what, |mut c| async move { c.revoke(request).await }).map(drop)
     }
 
@@ -954,7 +954,8 @@ impl Client {
     /// TASK-358).
     pub fn set_memory_weight(&self, tenant: u64, weight: u64) -> Result<(), crate::Error> {
         let request = SetMemoryWeightRequest { tenant, weight };
-        let what = format!("weighing the memory of tenant {tenant:x}");
+        let what =
+            format!("weighing the memory of tenant {tenant}", tenant = base32_id::Short(tenant));
         self.call(what, |mut c| async move { c.set_memory_weight(request).await }).map(drop)
     }
 
@@ -1122,10 +1123,13 @@ impl Client {
     }
 }
 
-/// The tenant `tenant`, as an error says it, in hexadecimal as cells say it; or, without one,
+/// The tenant `tenant`, as an error says it, in base 32 as cells say it; or, without one,
 /// `none`.
 fn whom(tenant: Option<u64>, none: &str) -> String {
-    tenant.map_or_else(|| none.to_owned(), |tenant| format!("tenant {tenant:x}"))
+    tenant.map_or_else(
+        || none.to_owned(),
+        |tenant| format!("tenant {tenant}", tenant = base32_id::Short(tenant)),
+    )
 }
 
 /// `path`, as a request names it: `EINVAL` unless it is UTF-8.

@@ -343,7 +343,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             role(test_setup, "base", &base, &extentd, None)?;
             let branch = opened(&extentd, &base)?.branch();
             // The base's boot profile, which a fork records (cladefs's `profile`).
-            let profile = base.join("profiles").join(format!("{branch:016x}"));
+            let profile = base.join("profiles").join(base32_id::Padded(branch).to_string());
             let iterations = iterations().unwrap_or(1);
             if backend == Backend::FxfsGuestDaxForkProfiled {
                 // A fork, before the iterations, which records the profile: its output is not

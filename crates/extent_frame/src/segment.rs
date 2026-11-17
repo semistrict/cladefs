@@ -8,6 +8,7 @@
 //! store's and a writer's alike, and admits those another closed for it.
 
 use crate::Corrupt;
+use base32_id::{Padded, Short};
 use serde::{Deserialize, Serialize};
 use storage_device::ExtentId;
 
@@ -31,30 +32,29 @@ pub struct Cell {
 impl Cell {
     /// The prefix of the keys of the cell's objects: `tenants/<tenant>/cells/<id>/`.
     pub fn prefix(self) -> String {
-        format!("tenants/{:016x}/cells/{:016x}/", self.tenant, self.id)
+        format!("tenants/{}/cells/{}/", Padded(self.tenant), Padded(self.id))
     }
 }
 
-/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in hexadecimal, as a branch's
+/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in base 32, as a branch's
 /// first two parts (`cladefs-gc --cell`, TASK-395.4).
 impl std::fmt::Display for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}/{:x}", self.tenant, self.id)
+        write!(f, "{}/{}", Short(self.tenant), Short(self.id))
     }
 }
 
 impl std::str::FromStr for Cell {
     type Err = String;
 
-    /// The cell `TENANT/CELL` names, each in hexadecimal, as it is displayed.
+    /// The cell `TENANT/CELL` names, each in base 32, as it is displayed.
     fn from_str(text: &str) -> Result<Self, String> {
-        let hex = |word: &str| u64::from_str_radix(word, 16).ok();
         let parsed = match text.split('/').collect::<Vec<_>>()[..] {
-            [tenant, id] => hex(tenant).zip(hex(id)),
+            [tenant, id] => base32_id::parse(tenant).zip(base32_id::parse(id)),
             _ => None,
         };
         let parsed = parsed.map(|(tenant, id)| Self { tenant, id });
-        parsed.ok_or_else(|| format!("no cell, TENANT/CELL in hexadecimal: {text}"))
+        parsed.ok_or_else(|| format!("no cell, TENANT/CELL in base 32: {text}"))
     }
 }
 
@@ -74,28 +74,28 @@ impl Branch {
     }
 }
 
-/// A branch as operators read and write it: `TENANT/CELL/ID`, each in hexadecimal.
+/// A branch as operators read and write it: `TENANT/CELL/ID`, each in base 32.
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}/{:x}/{:x}", self.cell.tenant, self.cell.id, self.id)
+        write!(f, "{}/{}", self.cell, Short(self.id))
     }
 }
 
 impl std::str::FromStr for Branch {
     type Err = String;
 
-    /// The branch `TENANT/CELL/ID` names, each in hexadecimal, as it is displayed.
+    /// The branch `TENANT/CELL/ID` names, each in base 32, as it is displayed.
     fn from_str(text: &str) -> Result<Self, String> {
-        let hex = |word: &str| u64::from_str_radix(word, 16).ok();
+        let id = base32_id::parse;
         let parsed = match text.split('/').collect::<Vec<_>>()[..] {
-            [tenant, cell, id] => (hex(tenant), hex(cell), hex(id)),
+            [tenant, cell, branch] => (id(tenant), id(cell), id(branch)),
             _ => (None, None, None),
         };
         match parsed {
             (Some(tenant), Some(cell), Some(id)) => {
                 Ok(Self { cell: Cell { tenant, id: cell }, id })
             }
-            _ => Err(format!("no branch, TENANT/CELL/ID in hexadecimal: {text}")),
+            _ => Err(format!("no branch, TENANT/CELL/ID in base 32: {text}")),
         }
     }
 }
@@ -359,10 +359,12 @@ pub fn writer_of(tag: u64) -> u64 {
 /// `cell`, its branch's (TASK-364).
 pub fn extent_key(cell: Cell, epoch: u64, segment: u64, extent: ExtentId) -> String {
     format!(
-        "{}extents/{:016x}/{epoch:016x}.{segment:016x}.{:016x}",
+        "{}extents/{}/{}.{}.{}",
         cell.prefix(),
-        extent.branch,
-        extent.sequence
+        Padded(extent.branch),
+        Padded(epoch),
+        Padded(segment),
+        Padded(extent.sequence)
     )
 }
 
@@ -439,15 +441,16 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in hexadecimal; anything else is no
+    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in base 32; anything else is no
     /// branch.
     #[test]
     fn branches_parse_as_they_display() {
-        let branch = Branch { cell: Cell { tenant: 0xa, id: 0xbc }, id: 0x123 };
-        assert_eq!(branch.to_string(), "a/bc/123");
-        assert_eq!("a/bc/123".parse(), Ok(branch));
-        for wrong in ["123", "a/bc", "a/bc/123/4", "a/bc/xyz", ""] {
-            let refused = format!("no branch, TENANT/CELL/ID in hexadecimal: {wrong}");
+        let branch = Branch { cell: Cell { tenant: 10, id: 32 * 11 + 22 }, id: 33 };
+        assert_eq!(branch.to_string(), "a/bp/11");
+        assert_eq!("a/bp/11".parse(), Ok(branch));
+        assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(branch));
+        for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
+            let refused = format!("no branch, TENANT/CELL/ID in base 32: {wrong}");
             assert_eq!(wrong.parse::<Branch>(), Err(refused));
         }
     }
@@ -549,13 +552,13 @@ mod tests {
 
     /// The keys of extents stored on their own: under their cell's prefix, by tenant and cell; then
     /// by branch, the writer's epoch, the segment that names them, and sequence, in fixed-width
-    /// hex, so that a listing is in that order.
+    /// base 32, so that a listing is in that order.
     #[test]
     fn extent_keys_order_by_cell_branch_epoch_segment_and_sequence() {
-        let cell = Cell { tenant: 0xa, id: 0xc };
-        let key = extent_key(cell, 7, 0x2a, ExtentId { branch: 2, sequence: 0x1f });
-        let expected = "tenants/000000000000000a/cells/000000000000000c/extents/\
-                        0000000000000002/0000000000000007.000000000000002a.000000000000001f";
+        let cell = Cell { tenant: 10, id: 12 };
+        let key = extent_key(cell, 7, 42, ExtentId { branch: 2, sequence: 31 });
+        let expected = "tenants/000000000000a/cells/000000000000c/extents/\
+                        0000000000002/0000000000007.000000000001a.000000000000z";
         assert_eq!(key, expected);
     }
 }

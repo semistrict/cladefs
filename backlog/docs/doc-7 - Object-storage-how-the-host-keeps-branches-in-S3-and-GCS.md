@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-16 14:44'
+updated_date: '2026-11-17 02:06'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -159,7 +159,7 @@ Settled with the user on 2026-10-16:
 
 *Rewritten 2026-11-11 (TASK-364, format 5):* every branch is a vdisk of a tenant's **cell**, and
 its objects are under the cell's prefix, `tenants/<tenant>/cells/<cell>/`, the tenant and the cell
-each an ID in 16 hexadecimal digits, which callers keep the meaning of. The flat layout before it,
+each an ID in base 32, 13 digits (`base32_id::Padded`; 16 hexadecimal digits before TASK-504, format 15), which callers keep the meaning of. The flat layout before it,
 `segments/<branch>/...` at the bucket's root, is refused by format (`layout::FORMAT` 5): nothing
 reads it.
 
@@ -266,10 +266,10 @@ doc-2's separate `index/` deltas and `frees/` objects are gone: a segment's foot
 and its frees, and a branch's history can be rebuilt from its segments alone. A batch with no data
 (frees, a root, forks) is a segment with only a footer.
 
-Numbers are fixed-width hex, so listings sort.
+Numbers are fixed-width base 32, 13 digits of Crockford's alphabet in lower case, whose ASCII order is their values' (`base32_id`, TASK-504), so listings sort. Where operators read and type IDs (`TENANT/CELL/ID`), they are base 32 with no leading zeros.
 
 **Formats** *(added 2026-11-03, TASK-141.2; doc-11, rule 1).* A branch's record says first the
-format of its objects (`layout::FORMAT`, now 11: footers and checkpoints hold the capacity,
+format of its objects (`layout::FORMAT`, 11 then, 15 now, its every key's numbers in base 32 since TASK-504: footers and checkpoints hold the capacity,
 TASK-165.3, a footer the runs of a commit it goes on with, TASK-92.41, a branch's objects are under
 its cell's prefix, TASK-364, keys and moves, its collection's, under it, TASK-395.2, records and
 cells keep keys, TASK-411.3, and a branch's head names what it holds, its keys written once,
@@ -973,14 +973,14 @@ else, and deletes nothing else but the references it retires; it reads other cel
 
 ### The layout (TASK-395.2, a format change)
 
-`<C>` is a cell's prefix, `tenants/<tenant>/cells/<cell>/`; numbers fixed-width hex as elsewhere.
+`<C>` is a cell's prefix, `tenants/<tenant>/cells/<cell>/`; numbers fixed-width base 32 as elsewhere.
 
 | Key | What | Written |
 |---|---|---|
 | `<C>gc/lease` | the cell's collector lease (`passed::CollectorLease`): the format; its epoch and holder; until when its pass holds the cell, and when the last pass over it that went through ended (TASK-395.5); and what the last pass over the cell to end recorded, carried by each taking to the next (Passes that skip, TASK-395.6, TASK-395.8); replaces `gc/lease` | created, then updated with a condition, by passes over the cell |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted | create-only, by the collector |
 | `<C>moves/<rest>/<pass>` | the moves of the object at `<C><rest>` by the cell's pass of epoch `pass`, and `<C>moves/moves/<rest>/<pass>/<pass>` those moves' moves: a reader that finds `<C><rest>` gone lists `<C>moves/<rest>/` and follows the latest pass's moves that name the extent, then those moves' (TASK-407.1: a pass slow to create its moves, after later passes made and deleted theirs, creates its own, never again a key once read; `moves_by_pass`, `NoMovesByPass`) | create-only, by the cell's passes |
-| `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference: the fork of the cell's branch `parent` at its segment `at` to `child` of cell `<cell>` of `<tenant>`, each ID 16 hex digits; its bytes the format and the fork's owner (a writable fork's, from its footer; a point's fork's, its own), unique to the fork, so that every writer of it writes the same | create-only (an object of identical bytes there is success), before the child's record; deleted by the passes of the child's cell |
+| `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference: the fork of the cell's branch `parent` at its segment `at` to `child` of cell `<cell>` of `<tenant>`, each ID 13 base-32 digits; its bytes the format and the fork's owner (a writable fork's, from its footer; a point's fork's, its own), unique to the fork, so that every writer of it writes the same | create-only (an object of identical bytes there is success), before the child's record; deleted by the passes of the child's cell |
 
 A listing of `<C>refs/` with delimiter `/` gives the cell's parents with forks in other cells; of
 `<C>refs/<parent>/` with delimiter `/`, that parent's distinct fork points
@@ -1541,7 +1541,7 @@ whole; a written cell with many fork points is TASK-395.12's.
 **What each cell and tenant takes** (TASK-395.8): `cladefs-gc URL --usage [--tenant TENANT]` reads
 each cell's collector lease (one GET a cell, 32 at once, the tenants and each one's cells found by delimiter
 listings a page at a time, as a sweep finds them) and writes a JSON object a line, a cell's then its
-tenant's sum, IDs in hexadecimal, each with when it was measured: a cell as of its last pass in
+tenant's sum, IDs in base 32, each with when it was measured: a cell as of its last pass in
 full, which nothing under its prefix changed since if passes since skipped it; a cell no pass ended
 on, nulls. It holds a page of tenants, a page of cells and the leases in flight, whatever the
 bucket holds. TASK-394's sum by a listing of the whole bucket is gone, with what it said of what is

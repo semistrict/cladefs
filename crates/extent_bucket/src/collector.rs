@@ -1032,9 +1032,9 @@ async fn resurrected(
         let (kind, before) = (layout::kind(key), marks.epoch);
         log::warn!(
             key, kind:?, marks = before, epoch;
-            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before:x} found no live branch needs \
-             it, and the pass {epoch:x} finds one does: a bug in the collector, which deleting \
-             would have lost it to"
+            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before} found no live branch needs \
+             it, and the pass {epoch} finds one does: a bug in the collector, which deleting \
+             would have lost it to", before = base32_id::Short(before), epoch = base32_id::Short(epoch)
         );
         resurrected.push(marked.key.clone());
     }

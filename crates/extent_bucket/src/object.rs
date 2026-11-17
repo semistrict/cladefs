@@ -107,7 +107,7 @@ mod tests {
     use futures::executor::block_on;
     use std::sync::Arc;
 
-    const KEY: &str = "checkpoints/0000000000000001/0000000000000002";
+    const KEY: &str = "checkpoints/0000000000001/0000000000002";
 
     /// A bucket holding `bytes` at [`KEY`].
     fn holding(bytes: Vec<u8>) -> Arc<SimBucket> {

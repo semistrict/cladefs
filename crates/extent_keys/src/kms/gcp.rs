@@ -97,7 +97,8 @@ fn parse(url: &str) -> Result<(String, KeyNames), String> {
     // The template, as the longest tenant names it: its other tenants' names are as valid.
     check_key(&names.of(u64::MAX)).map_err(|why| format!("{url:?}: the key template, {why}"))?;
     for (tenant, name) in names.overridden() {
-        check_key(name).map_err(|why| format!("{url:?}: tenant {tenant:x}'s key, {why}"))?;
+        check_key(name)
+            .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
     }
     Ok((ring.to_owned(), names))
 }
@@ -162,9 +163,9 @@ fn credentials() -> Result<GcpCredentialProvider, String> {
     Ok(gcs.credentials().clone())
 }
 
-/// What its calls bind the tenant with: `cladefs-tenant:` and the tenant in hexadecimal.
+/// What its calls bind the tenant with: `cladefs-tenant:` and the tenant in base 32.
 fn aad(tenant: u64) -> Vec<u8> {
-    format!("cladefs-tenant:{tenant:x}").into_bytes()
+    format!("cladefs-tenant:{}", base32_id::Short(tenant)).into_bytes()
 }
 
 /// The CRC32C of `bytes`, as the KMS has its integrity fields.
@@ -529,10 +530,7 @@ mod tests {
         let (ring, names) =
             parse(&format!("gcp-kms://{RING}?key=cladefs-tenant-{{tenant}}")).unwrap();
         assert_eq!(ring, RING);
-        assert_eq!(
-            qualified(&ring, &names.of(0x2a)),
-            format!("{RING}/cryptoKeys/cladefs-tenant-2a")
-        );
+        assert_eq!(qualified(&ring, &names.of(42)), format!("{RING}/cryptoKeys/cladefs-tenant-1a"));
         let (_, percent) = parse(&format!("gcp-kms://{RING}?key=t-%7Btenant%7D")).unwrap();
         assert_eq!(percent.of(1), "t-1");
     }
@@ -569,11 +567,11 @@ mod tests {
         assert_eq!(
             refused(&url),
             format!(
-                "{url:?}: the key template, \"t/ffffffffffffffff\", names no key: an ID is 1 to \
+                "{url:?}: the key template, \"t/fzzzzzzzzzzzz\", names no key: an ID is 1 to \
                  63 letters, digits, _ and -"
             )
         );
-        let url = format!("gcp-kms://{RING}?key={}{{tenant}}", "k".repeat(48));
+        let url = format!("gcp-kms://{RING}?key={}{{tenant}}", "k".repeat(51));
         assert!(refused(&url).contains("an ID is 1 to 63"), "{}", refused(&url));
         let url = format!("gcp-kms://{RING}");
         assert_eq!(
@@ -599,7 +597,7 @@ mod tests {
 
     #[test]
     fn tenants_are_bound_as_associated_data() {
-        assert_eq!(aad(0x2a), b"cladefs-tenant:2a");
+        assert_eq!(aad(42), b"cladefs-tenant:1a");
         // RFC 3720's check value of CRC32C.
         assert_eq!(crc32c(b"123456789"), 0xe306_9283);
     }

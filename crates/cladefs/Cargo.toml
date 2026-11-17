@@ -58,6 +58,7 @@ async-trait.workspace = true
 event-listener.workspace = true
 extent_bucket.workspace = true
 extent_frame.workspace = true
+base32_id.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
 tokio.workspace = true

@@ -40,6 +40,7 @@
 
 #![cfg(feature = "shuttle")]
 
+use base32_id::Padded;
 use extent_frame::segment::{Chain, Child, Footer};
 use extent_store::{
     BucketData, Description, Dir, MemDir, Opening, Options, Rules, Store, set_rules,
@@ -888,7 +889,7 @@ fn framing_stalls() -> (Stalling, Arc<Store<Stalling>>) {
     let store = Arc::new(Store::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
-    dir.arm(Op::Create, &format!("segments/{:016x}/framing-{:016x}", BRANCH.id, 0));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
     (dir, store)
 }
 
@@ -1005,7 +1006,7 @@ fn framing_at_a_commit_stalls() -> (Stalling, Arc<Store<Stalling>>) {
     for sequence in 2..5 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
     }
-    dir.arm(Op::Create, &format!("segments/{:016x}/framing-{:016x}", BRANCH.id, 0));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
     (dir, store)
 }
 
@@ -1464,7 +1465,7 @@ fn fails_without(rules: Rules, expected: &[&str], test: fn()) {
 /// on its own that the writer frees, gone.
 #[test]
 fn needs_frees_kept() {
-    let expected = ["no extent", "extents/0000000000000007/0000000000000002 doesn't exist"];
+    let expected = ["no extent", "extents/0000000000007/0000000000002 doesn't exist"];
     fails_without(Rules { keep_frees: false, ..Rules::ALL }, &expected, run);
 }
 

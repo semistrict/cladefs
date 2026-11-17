@@ -1698,7 +1698,8 @@ mod tests {
 
         // The store's files of `kind`, by their contents.
         let files = |kind: &str| -> Vec<Vec<u8>> {
-            let path = dir.path().join("store").join(kind).join(format!("{:016x}", branch.id));
+            let path =
+                dir.path().join("store").join(kind).join(base32_id::Padded(branch.id).to_string());
             let mut files: Vec<_> = std::fs::read_dir(path)
                 .unwrap()
                 .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
@@ -1772,8 +1773,11 @@ mod tests {
         store.commit_ordered(None).unwrap();
         // On the disk, as the store's page cache holds it written (TASK-433).
         extent_store::pages::shared().write_back_all().unwrap();
-        let path =
-            dir.path().join(format!("store/extents/{:016x}/{:016x}", branch.id, extent.sequence));
+        let path = dir.path().join(format!(
+            "store/extents/{}/{}",
+            base32_id::Padded(branch.id),
+            base32_id::Padded(extent.sequence)
+        ));
         let mut bytes = std::fs::read(&path).unwrap();
         let stored = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[1];
         assert_eq!(stored.encoding, extent_frame::Encoding::Raw);
@@ -2520,7 +2524,8 @@ mod tests {
         // never acknowledged: lost sooner, the disk would go as the uploader writes to it, which
         // runs on, forgotten (TASK-165.9: the write-ahead log's segments, before a marker).
         let last = lost.committed().unwrap();
-        let segments = dir.path().join("lost").join(format!("segments/{:016x}", branch.id));
+        let segments =
+            dir.path().join("lost").join(format!("segments/{}", base32_id::Padded(branch.id)));
         let framed = || -> Vec<u64> {
             let files = std::fs::read_dir(&segments).into_iter().flatten();
             let bytes = files.filter_map(|file| std::fs::read(file.unwrap().path()).ok());

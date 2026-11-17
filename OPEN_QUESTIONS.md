@@ -21,6 +21,14 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## IDs in base 32 (TASK-504, 2026-11-17)
+
+Decided without you, after "change ID strings to base32":
+- **Crockford's alphabet, lower case** (`0-9a-z` without `i l o u`), in `crates/base32_id`, our own: no letters read as digits, and ASCII order is value order, so padded keys still list in numeric order. *Instead:* RFC 4648 base32hex (`0-9a-v`), also ordered. *Undo:* change `DIGITS` in one place and update the literals in tests.
+- **Two forms, as hex had:** 13 digits zero-padded wherever a name's width matters (bucket keys, store files, FUSE paths, `cladefsctl mount` output), no leading zeros wherever operators read and type IDs (`TENANT/CELL/ID`, metrics labels, KMS key names, sockets, logs). Input takes either.
+- **Every number in a key went to base 32,** sequence, segment, epoch and pass numbers too, not only tenant, cell and branch IDs: one key in two bases would be worse. Not changed: master-key IDs (key fingerprints), random nonces in test URLs, byte offsets and lengths (still hex), and the KMS errors that print tenants in decimal.
+- **Formats bumped, nothing migrated:** bucket `layout::FORMAT` 15, store `cladefs extent store 14`, boot profile 2.
+
 ## README describes the project; its reference sections are in docs/ (TASK-498, 2026-11-16)
 
 Decided without you, after "the readme does not really describe the project":

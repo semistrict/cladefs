@@ -6,6 +6,7 @@
 
 use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use base32_id::Padded;
 use extent_bucket::cell::Kind;
 use extent_frame::segment::Branch;
 #[cfg(test)]
@@ -23,12 +24,13 @@ use storage_device::ExtentId;
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
-/// with its tenant's cell, `TENANT/CELL/ID` in hexadecimal (TASK-364); 12's names the vdisk of its
-/// cell it is as `vdisk NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records
-/// name the versions cut at their ends, and its description may name a version of its branch it is
-/// a copy of (TASK-476). A store of another format is refused ([`Format`]): nothing reads, converts
-/// or upgrades it.
-pub(crate) const FORMAT: &str = "cladefs extent store 13";
+/// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the vdisk of its cell it is as
+/// `vdisk NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
+/// cut at their ends, and its description may name a version of its branch it is a copy of
+/// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
+/// were in hexadecimal (`base32_id`, TASK-504). A store of another format is refused ([`Format`]):
+/// nothing reads, converts or upgrades it.
+pub(crate) const FORMAT: &str = "cladefs extent store 14";
 
 /// cladefs: the error of a store whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -103,7 +105,7 @@ impl StoreFile {
         let fields = fields(text, FORMAT)?;
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
         let version = (fields.get("version"))
-            .map(|id| u64::from_str_radix(id, 16).with_context(|| format!("bad version {id:?}")))
+            .map(|id| base32_id::parse_padded(id).ok_or_else(|| anyhow!("bad version {id:?}")))
             .transpose()?;
         let vdisk = match (fields.get("vdisk"), fields.get("kind")) {
             (None, None) => None,
@@ -141,7 +143,7 @@ impl StoreFile {
             text += &format!("vdisk {name}\nkind {}\n", kind.name());
         }
         if let Some(id) = version {
-            text += &format!("version {id:016x}\n");
+            text += &format!("version {}\n", Padded(*id));
         }
         text
     }
@@ -164,7 +166,12 @@ pub(crate) const OPEN_EXTENTS: &str = "open-extents";
 
 /// The directory of `branch`'s files of `kind` (`SEGMENTS`, `EXTENTS`, `LOGS`, ...).
 pub(crate) fn branch_dir(kind: &'static str, branch: u64) -> String {
-    format!("{kind}/{branch:016x}")
+    format!("{kind}/{}", Padded(branch))
+}
+
+/// The path of file `number` of `branch`'s of `kind`: a segment's, a log's, an extent's.
+pub(crate) fn numbered_path(kind: &'static str, branch: u64, number: u64) -> String {
+    format!("{}/{}", branch_dir(kind, branch), Padded(number))
 }
 
 /// A segment: the branch that wrote it, and its number among the branch's.
@@ -176,33 +183,33 @@ pub(crate) struct SegmentId {
 
 /// The path of a segment.
 pub(crate) fn segment_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(SEGMENTS, segment.branch), segment.number)
+    numbered_path(SEGMENTS, segment.branch, segment.number)
 }
 
 /// The path of the raw file of a segment while it is open.
 pub(crate) fn open_segment_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(OPEN_SEGMENTS, segment.branch), segment.number)
+    numbered_path(OPEN_SEGMENTS, segment.branch, segment.number)
 }
 
 /// The path of the raw file of `extent`, stored on its own, while it is open.
 pub(crate) fn open_extent_path(extent: ExtentId) -> String {
-    format!("{}/{:016x}", branch_dir(OPEN_EXTENTS, extent.branch), extent.sequence)
+    numbered_path(OPEN_EXTENTS, extent.branch, extent.sequence)
 }
 
 /// The path of the file of `extent`, stored on its own, in its branch's directory.
 pub(crate) fn extent_path(extent: ExtentId) -> String {
-    format!("{}/{:016x}", branch_dir(EXTENTS, extent.branch), extent.sequence)
+    numbered_path(EXTENTS, extent.branch, extent.sequence)
 }
 
 /// cladefs: the path of the log of the commits of a segment, while it is open (TASK-165.9).
 pub(crate) fn log_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(LOGS, segment.branch), segment.number)
+    numbered_path(LOGS, segment.branch, segment.number)
 }
 
 /// The number in a file's name: a segment's, a log's, an extent's sequence number, or a branch's
 /// directory's.
 pub(crate) fn parse_number(name: &str) -> Option<u64> {
-    (name.len() == 16).then(|| u64::from_str_radix(name, 16).ok()).flatten()
+    base32_id::parse_padded(name)
 }
 
 /// cladefs: the prefix of the names of spare logs, in a branch's directory of logs: logs of segments
@@ -211,7 +218,7 @@ pub(crate) const SPARE: &str = "spare-";
 
 /// cladefs: the path of the spare log that was the log of `segment`.
 pub(crate) fn spare_path(segment: SegmentId) -> String {
-    format!("{}/{SPARE}{:016x}", branch_dir(LOGS, segment.branch), segment.number)
+    format!("{}/{SPARE}{}", branch_dir(LOGS, segment.branch), Padded(segment.number))
 }
 
 /// cladefs: the prefix of the names of segments' framed files being made durable, in a branch's
@@ -222,7 +229,7 @@ pub(crate) const FRAMING: &str = "framing-";
 
 /// cladefs: the path of `segment`'s framed file being made durable ([`FRAMING`]).
 pub(crate) fn framing_path(segment: SegmentId) -> String {
-    format!("{}/{FRAMING}{:016x}", branch_dir(SEGMENTS, segment.branch), segment.number)
+    format!("{}/{FRAMING}{}", branch_dir(SEGMENTS, segment.branch), Padded(segment.number))
 }
 
 /// The numbers of the files in `path`, in order; cladefs: but spare logs, which hold none, and
@@ -567,6 +574,7 @@ mod tests {
             "cladefs extent store 7",
             "cladefs extent store 11",
             "cladefs extent store 12",
+            "cladefs extent store 13",
         ] {
             let refused = StoreFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
@@ -577,19 +585,24 @@ mod tests {
         assert!(StoreFile::parse(&format!("{FORMAT}\nblock_size 4096\nbranch 1\n")).is_err());
         // cladefs: its branch is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
-        assert!(text.contains("\nbranch a/ffffffffffffffff/ffffffffffffffff\n"), "{text}");
+        assert!(text.contains("\nbranch a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
         let bare = format!("{FORMAT}\nblock_size 4096\nbranch 1\n{capacity}");
         let refused = StoreFile::parse(&bare).unwrap_err().to_string();
-        assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in hexadecimal: 1");
+        assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in base 32: 1");
         // cladefs: a store kept in a bucket names the vdisk of its cell it is, by name and kind.
         let vdisk = Some(Vdisk { name: "db".into(), kind: Kind::Sqlite });
         let named = StoreFile { vdisk, ..kept.clone() };
         assert!(named.text().ends_with("vdisk db\nkind sqlite\n"));
         assert_eq!(StoreFile::parse(&named.text()).unwrap(), named);
         // cladefs: a version's copy names the version (TASK-476).
-        let copy = StoreFile { version: Some(0xbe), ..kept.clone() };
-        assert!(copy.text().ends_with("version 00000000000000be\n"));
+        let copy = StoreFile { version: Some(190), ..kept.clone() };
+        assert!(copy.text().ends_with("version 000000000005y\n"));
         assert_eq!(StoreFile::parse(&copy.text()).unwrap(), copy);
+        let hex = format!("{}version 00000000000000be\n", kept.text());
+        assert_eq!(
+            StoreFile::parse(&hex).unwrap_err().to_string(),
+            "bad version \"00000000000000be\""
+        );
         for (wrong, refused) in [
             ("vdisk db\n", "a vdisk needs a name and a kind"),
             ("vdisk db\nkind ext4\n", "bad kind \"ext4\""),
@@ -602,12 +615,13 @@ mod tests {
 
     #[test]
     fn names() {
-        let extent = ExtentId::new(0xb, 0x5a);
-        assert_eq!(extent_path(extent), "extents/000000000000000b/000000000000005a");
-        let segment = SegmentId { branch: 0xb, number: 77 };
-        assert_eq!(segment_path(segment), "segments/000000000000000b/000000000000004d");
-        assert_eq!(log_path(segment), "logs/000000000000000b/000000000000004d");
-        assert_eq!(parse_number("000000000000004d"), Some(77));
-        assert_eq!(parse_number("77"), None);
+        let extent = ExtentId::new(11, 90);
+        assert_eq!(extent_path(extent), "extents/000000000000b/000000000002t");
+        let segment = SegmentId { branch: 11, number: 77 };
+        assert_eq!(segment_path(segment), "segments/000000000000b/000000000002d");
+        assert_eq!(log_path(segment), "logs/000000000000b/000000000002d");
+        assert_eq!(parse_number("000000000002d"), Some(77));
+        assert_eq!(parse_number("2d"), None);
+        assert_eq!(parse_number("000000000000004d"), None);
     }
 }

@@ -2771,8 +2771,10 @@ mod tests {
         let follower = store.follow();
         store.free(a).unwrap();
         store.commit(None).unwrap();
-        let segments =
-            dir.path().join("store/segments").join(format!("{:016x}", store.branch().id));
+        let segments = dir
+            .path()
+            .join("store/segments")
+            .join(base32_id::Padded(store.branch().id).to_string());
         assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
         // Commits, each of a segment, until the uploader checkpoints the branch, which then holds
@@ -3343,9 +3345,11 @@ mod tests {
         committed_here(&store);
         for (at, (extent, data, encoding)) in contents.iter().enumerate() {
             // A byte of its third part, as stored: itself if raw, else the middle of the part's.
-            let path = dir
-                .path()
-                .join(format!("store/extents/{:016x}/{:016x}", extent.branch, extent.sequence));
+            let path = dir.path().join(format!(
+                "store/extents/{}/{}",
+                base32_id::Padded(extent.branch),
+                base32_id::Padded(extent.sequence)
+            ));
             let mut bytes = std::fs::read(&path).unwrap();
             let parts = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap();
             let opened = parts.part(2).unwrap();

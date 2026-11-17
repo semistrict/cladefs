@@ -129,7 +129,7 @@ through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 (TASK-43.4). Every call names a tenant by its ID in the bucket (TASK-364), a
 64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
-`<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
+`<ID in base 32>.sock`, for the VM manager to bind-mount into the tenant's jails; a
 connection's tenant is the socket it came in on, and it names stores in the
 tenant's directory alone. The stores in its directory are vdisks of its own
 cells, and its VM processes open no store of another tenant's cell, but fork

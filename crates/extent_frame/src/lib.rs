@@ -177,8 +177,8 @@ pub enum Error {
     #[error(transparent)]
     Corrupt(#[from] Corrupt),
     #[error(
-        "an object encrypted under branch {:x}'s key of generation {}, which its reader doesn't hold",
-        .0.branch,
+        "an object encrypted under branch {}'s key of generation {}, which its reader doesn't hold",
+        base32_id::Short(.0.branch),
         .0.generation
     )]
     NoKey(KeyId),
@@ -1753,7 +1753,7 @@ mod tests {
         let no_key = Error::NoKey(ID);
         assert_eq!(
             no_key.to_string(),
-            "an object encrypted under branch 7b's key of generation 2, which its reader doesn't hold"
+            "an object encrypted under branch 3v's key of generation 2, which its reader doesn't hold"
         );
         assert_eq!(super::data(&bytes, &NoKeys), Err(no_key.clone()));
         let other_generation = HashMap::from([(KeyId { generation: 3, ..ID }, dek())]);

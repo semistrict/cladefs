@@ -440,8 +440,11 @@ mod tests {
             device.flush().await.unwrap();
             for (extent, data, encoding) in &contents {
                 // The middle of its fourth part's stored bytes: of its data at 3.5 MiB, if raw.
-                let path =
-                    image.join(format!("extents/{:016x}/{:016x}", BRANCH.id, extent.sequence));
+                let path = image.join(format!(
+                    "extents/{}/{}",
+                    base32_id::Padded(BRANCH.id),
+                    base32_id::Padded(extent.sequence)
+                ));
                 let mut bytes = std::fs::read(&path).unwrap();
                 let stored =
                     extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[3];

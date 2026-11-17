@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"testing"
 
@@ -29,8 +28,19 @@ type fake struct {
 	extentdv1.UnimplementedExtentdServer
 }
 
+// base32 is id as the daemon names a tenant's socket by it: in base 32, Crockford's digits, lower
+// case, no leading zeros (crates/base32_id).
+func base32(id uint64) string {
+	const digits = "0123456789abcdefghjkmnpqrstvwxyz"
+	name := []byte{digits[id%32]}
+	for id /= 32; id > 0; id /= 32 {
+		name = append([]byte{digits[id%32]}, name...)
+	}
+	return string(name)
+}
+
 func (fake) Grant(_ context.Context, req *extentdv1.GrantRequest) (*extentdv1.GrantResponse, error) {
-	return &extentdv1.GrantResponse{Socket: "/run/tenants/" + strconv.FormatUint(req.Tenant, 16) + ".sock"}, nil
+	return &extentdv1.GrantResponse{Socket: "/run/tenants/" + base32(req.Tenant) + ".sock"}, nil
 }
 
 func (fake) StatStore(ctx context.Context, req *extentdv1.StatStoreRequest) (*extentdv1.StatStoreResponse, error) {
@@ -75,12 +85,12 @@ func client(t *testing.T, socket string) *extentdv1.Client {
 
 func TestCalls(t *testing.T) {
 	client := client(t, serve(t))
-	granted, err := client.Grant(t.Context(), &extentdv1.GrantRequest{Tenant: 0xa, Dir: "/stores/a"})
+	granted, err := client.Grant(t.Context(), &extentdv1.GrantRequest{Tenant: 42, Dir: "/stores/a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if granted.Socket != "/run/tenants/a.sock" {
-		t.Errorf("Grant's socket = %q, want /run/tenants/a.sock", granted.Socket)
+	if granted.Socket != "/run/tenants/1a.sock" {
+		t.Errorf("Grant's socket = %q, want /run/tenants/1a.sock", granted.Socket)
 	}
 	health, err := client.Health.Check(t.Context(), &healthpb.HealthCheckRequest{})
 	if err != nil {

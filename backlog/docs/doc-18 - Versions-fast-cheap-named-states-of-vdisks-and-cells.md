@@ -3,7 +3,7 @@ id: doc-18
 title: 'Versions: fast, cheap named states of vdisks and cells'
 type: specification
 created_date: '2026-11-16 13:05'
-updated_date: '2026-11-16 14:44'
+updated_date: '2026-11-17 02:06'
 ---
 # Versions: fast, cheap named states of vdisks and cells
 
@@ -67,7 +67,7 @@ names, its versions' **at**, kept for as long as the head names the version.
 - **Its ID** is random, 64 bits, unique to its making, as owners are (doc-7, Forks). A version's
   `at` is known only once it is acknowledged: a WAL put after the branch's end by `Wal::rebase`
   renumbers the segments it restamps. The ID names it from the start. A version is named
-  `TENANT/CELL/BRANCH/ID`, with the ID in 16 hexadecimal digits.
+  `TENANT/CELL/BRANCH/ID`, with the ID in base 32 (`base32_id`, TASK-504).
 - **The cut** is a commit of the vdisk's that closes its segment, as a fork's does (doc-7,
   Forks). The commit seals nothing: the store must be quiescent, with no extent written since its
   last commit (`ExtentStore::is_quiescent`), as for a fork today. Its footer names the version

@@ -10,7 +10,7 @@
 //!   kind, as the daemon served them, from their dispatch to their reply's sending.
 //! - `cladefsd_build_info{commit}`, 1: the commit the daemon was built of
 //!   (`crate::BUILD_COMMIT`); `cladefsd_vm_build_info{branch,commit}`: the VM processes
-//!   connected, by their store's branch, in hexadecimal, and the commit they said they were built
+//!   connected, by their store's branch, in base 32, and the commit they said they were built
 //!   of (`wire::BUILD`), a writer and its followers counted together (TASK-111.7).
 //! - `cladefsd_connections`, `cladefsd_stores_open` and `cladefsd_follower_views`:
 //!   the VM processes connected, the stores their connections write, and the followers' views.
@@ -23,7 +23,7 @@
 //!   windows that copy on write, and `cladefsd_window_open_maps_refused_total`, the `MAP`s of
 //!   open extents refused, which no guest makes (backlog doc-13).
 //! - cladefs: of each VM process connected that opened a store, by its store's branch, in
-//!   hexadecimal, and its connection's number (`connection`), which tells a writer and its
+//!   base 32, and its connection's number (`connection`), which tells a writer and its
 //!   followers apart (TASK-111.5): `cladefsd_vm_window_mappings`,
 //!   `cladefsd_vm_window_mapped_bytes`, `cladefsd_vm_window_pages` and
 //!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
@@ -40,7 +40,7 @@
 //!   hold, every tenant's together, its limit, if any, and the most the daemon's kernel has
 //!   (TASK-50.3); `cladefsd_tenant_memory_bytes{tenant}` and
 //!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
-//!   hexadecimal, as cells name it.
+//!   base 32, as cells name it.
 //! - `cladefsd_disk_bytes` and `cladefsd_disk_limit_bytes`: the host's disk every
 //!   tenant's directory takes together, as last counted, and its limit, if any (TASK-94);
 //!   `cladefsd_tenant_disk_bytes{tenant}` and `cladefsd_tenant_disk_limit_bytes{tenant}`:
@@ -49,7 +49,7 @@
 //!   {branch}` and `cladefsd_upload_stalls_total{branch}`: for each open store whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
 //!   many commits waited for the lag to shrink (TASK-91.3); its branch as `TENANT/CELL/ID`, in
-//!   hexadecimal (TASK-364).
+//!   base 32 (TASK-364).
 //! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
 //!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
 //!   every store's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
@@ -225,7 +225,11 @@ pub fn render() -> String {
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
     for ((branch, commit), count) in super::stats::vm_builds() {
-        let _ = writeln!(out, "{name}{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}");
+        let _ = writeln!(
+            out,
+            "{name}{{branch=\"{branch}\",commit=\"{commit}\"}} {count}",
+            branch = base32_id::Short(branch)
+        );
     }
 
     for (name, help, value) in gauges() {
@@ -269,7 +273,10 @@ pub fn render() -> String {
         for vm in &vms {
             if let Some(value) = value(vm) {
                 let (branch, connection) = (vm.branch, vm.connection);
-                let labels = format!("branch=\"{branch:x}\",connection=\"{connection}\"");
+                let labels = format!(
+                    "branch=\"{branch}\",connection=\"{connection}\"",
+                    branch = base32_id::Short(branch)
+                );
                 let _ = writeln!(out, "cladefsd_{name}{{{labels}}} {value}");
             }
         }
@@ -280,14 +287,20 @@ pub fn render() -> String {
     let _ = writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
-        let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
+        let _ = writeln!(
+            out,
+            "{name}{{tenant=\"{}\"}} {}",
+            base32_id::Short(tenant.tenant),
+            tenant.bytes
+        );
     }
     let name = "cladefsd_tenant_memory_limit_bytes";
     let _ = writeln!(out, "# HELP {name} The limit of a tenant's memory, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
         if let Some(limit) = tenant.limit {
-            let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {limit}", tenant.tenant);
+            let _ =
+                writeln!(out, "{name}{{tenant=\"{}\"}} {limit}", base32_id::Short(tenant.tenant));
         }
     }
     // cladefs: their disks' (TASK-94).
@@ -299,14 +312,20 @@ pub fn render() -> String {
     );
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
-        let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
+        let _ = writeln!(
+            out,
+            "{name}{{tenant=\"{}\"}} {}",
+            base32_id::Short(tenant.tenant),
+            tenant.bytes
+        );
     }
     let name = "cladefsd_tenant_disk_limit_bytes";
     let _ = writeln!(out, "# HELP {name} The limit of a tenant's disk, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
         if let Some(limit) = tenant.limit {
-            let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {limit}", tenant.tenant);
+            let _ =
+                writeln!(out, "{name}{{tenant=\"{}\"}} {limit}", base32_id::Short(tenant.tenant));
         }
     }
 

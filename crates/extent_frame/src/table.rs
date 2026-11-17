@@ -287,8 +287,9 @@ mod tests {
     /// is refused.
     #[test]
     fn footers_keys_are_stored_front_coded() {
-        let prefix = "tenants/0000000000000001/cells/0000000000000002/segments/0000000000000003/";
-        let mut keys: Vec<String> = (0..1000).map(|n| format!("{prefix}{n:016x}")).collect();
+        let prefix = "tenants/0000000000001/cells/0000000000002/segments/0000000000003/";
+        let keys = (0..1000).map(|n| format!("{prefix}{}", base32_id::Padded(n)));
+        let mut keys: Vec<String> = keys.collect();
         keys.extend(["".into(), "é1".into(), "é2".into(), "e".into(), "ée".into(), prefix.into()]);
         let footer = TableFooter { rest: b"rest".to_vec(), keys: keys.clone(), blocks: Vec::new() };
         let bytes = bincode::serialize(&footer).unwrap();

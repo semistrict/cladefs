@@ -12,6 +12,7 @@
 
 mod common;
 
+use base32_id::Padded;
 use common::noise;
 use extent_frame::{Corrupt, Encoding, PART, Parts};
 use extent_store::{Description, Dir, File as _, MemDir, Options, Place, Store};
@@ -82,9 +83,11 @@ struct Stored {
 fn stored(dir: &MemDir, store: &Store<MemDir>, extent: ExtentId, offset: u64) -> Stored {
     let (path, at) = match store.place(extent).unwrap().unwrap() {
         Place::Run { branch, number, offset: run } => {
-            (format!("segments/{branch:016x}/{number:016x}"), run + offset)
+            (format!("segments/{}/{}", Padded(branch), Padded(number)), run + offset)
         }
-        Place::Own => (format!("extents/{:016x}/{:016x}", extent.branch, extent.sequence), offset),
+        Place::Own => {
+            (format!("extents/{}/{}", Padded(extent.branch), Padded(extent.sequence)), offset)
+        }
         place => panic!("{extent:?} is {place:?}"),
     };
     let bytes = extent_store::read_whole(&dir.open(&path, true).unwrap()).unwrap();
@@ -163,7 +166,7 @@ fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments() {
     store.write(extent(2), 0, &noise(2, BLOCK)).unwrap();
     assert!(store.close_now().unwrap());
     store.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).unwrap();
-    let segment = format!("segments/{:016x}/{:016x}", BRANCH.id, 0);
+    let segment = format!("segments/{}/{}", Padded(BRANCH.id), Padded(0));
     let bytes = extent_store::read_whole(&dir.open(&segment, true).unwrap()).unwrap();
     let part = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
     assert_eq!(part.encoding, Encoding::Raw);

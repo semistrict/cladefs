@@ -1796,7 +1796,7 @@ fn sealed_stores_open_through_openbao() {
     use extent_keys::testing::openbao::DevServer;
     let Some(bao) = DevServer::start() else { return };
     bao.transit("transit");
-    bao.bao(&["write", "-f", &format!("transit/keys/cladefs-tenant-{TENANT:x}")]);
+    bao.bao(&["write", "-f", &format!("transit/keys/cladefs-tenant-{}", base32_id::Short(TENANT))]);
     let policy = DevServer::cladefs_policy("transit", "cladefs-tenant-*");
     bao.policy("cladefs", &policy);
     let url = bao.url("transit", "key=cladefs-tenant-{tenant}");

@@ -446,7 +446,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let socket = socket.to_str().unwrap();
     assert_eq!(names(&m), Vec::<String>::new());
     let capacity = STORE_SIZE.to_string();
-    let (one, two) = ("0000000000000001", "0000000000000002");
+    let (one, two) = ("0000000000001", "0000000000002");
     // A new cell of each tenant's, of no vdisks: nothing shown.
     let attach = |tenant: &str, cell: &str| {
         cladefsctl_mount(socket, &["attach", tenant, cell]).lines().map(str::to_owned).collect()
@@ -559,7 +559,7 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
     let capacity = STORE_SIZE.to_string();
     cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &capacity]);
-    let vdisk = m.join("0000000000000001").join(&cell).join("root");
+    let vdisk = m.join("0000000000001").join(&cell).join("root");
     std::fs::write(vdisk.join("file"), "drained").unwrap();
 
     let vm = cladefs::DaemonExtentStore::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
@@ -577,7 +577,7 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let (child, socket, m) = cladefsd_mounting(&second, &bucket, 2);
     let socket = socket.to_str().unwrap();
     assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]).lines().count(), 2);
-    let vdisk = m.join("0000000000000001").join(&cell).join("root");
+    let vdisk = m.join("0000000000001").join(&cell).join("root");
     assert_eq!(std::fs::read_to_string(vdisk.join("file")).unwrap(), "drained");
     terminate(child, &m);
 }
@@ -611,7 +611,7 @@ fn a_vdisk_mounted_is_the_mounts_alone() {
     let socket = socket.to_str().unwrap();
     let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
     cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &STORE_SIZE.to_string()]);
-    let store = dir.path().join("stores").join("0000000000000001").join(&cell).join("root");
+    let store = dir.path().join("stores").join("0000000000001").join(&cell).join("root");
 
     let started = std::time::Instant::now();
     let vm = cladefs::DaemonExtentStore::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);

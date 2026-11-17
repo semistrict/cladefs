@@ -21,7 +21,7 @@
 //! collects once, or every SECONDS, a cell at a time (TASK-395.4): every cell of the bucket, found
 //! by delimiter listings a page at a time, listing none of their objects, PASSES of them at once
 //! (16 by default, TASK-395.5; `extent_bucket::sweep`), or the one `--cell` names, its IDs in
-//! hexadecimal. Each cell's pass takes the cell's own lease, lists the cell alone, and deletes there
+//! base 32. Each cell's pass takes the cell's own lease, lists the cell alone, and deletes there
 //! alone, but for the references it retires of its deleted children's under their parents' cells.
 //! It holds the lease for `--lease` SECONDS (600 by default), renewing it between its steps and
 //! letting it go as it ends: a pass, of this process or of any other collecting the bucket at
@@ -74,7 +74,7 @@
 //! The collector keeps what every live branch inherited, whether or not a host holds the branch,
 //! which only hosts know. `--branches` lists the live branches, of every cell or of the one
 //! `--cell` names, one a line, a fork's after the
-//! branch and the segment it forked at, each branch as TENANT/CELL/ID, all in hexadecimal, but
+//! branch and the segment it forked at, each branch as TENANT/CELL/ID, all in base 32, but
 //! those FILE names, as `cladefsctl stat` calls them, separated by white space: with FILE naming
 //! every branch every host holds, those left are no host's, or newer than FILE. `--delete-branch`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
@@ -87,7 +87,7 @@
 //! TASK-395.8): it reads each cell's collector lease, where that pass recorded it, listing none of
 //! the cells' objects, the tenants and their cells listed a page at a time, so that what it holds
 //! at once is a page of each, however many tenants, cells and objects the bucket holds. It streams a JSON object a line: one for each cell of a tenant, then one for
-//! the tenant, IDs in hexadecimal. A cell's: `{"scope":"cell","tenant":"1","cell":"1/2f",
+//! the tenant, IDs in base 32. A cell's: `{"scope":"cell","tenant":"1","cell":"1/2f",
 //! "measured_unix_ms":...,"objects":...,"bytes":...,"kinds":{"segment":{"objects":...,
 //! "bytes":...},...}}`, `measured_unix_ms` when the listing it is of began, by the bucket's clock,
 //! and all four null for a cell no pass ran over to its end yet. A tenant's: `{"scope":"tenant",
@@ -109,6 +109,7 @@
 //! them, finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it
 //! rewraps nothing.
 
+use base32_id::Short;
 use extent_bucket::bucket::Meta;
 use extent_bucket::collector::{Collector, DryRun, Marking, Options, Report};
 use extent_bucket::layout;
@@ -201,7 +202,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         ["--usage"] => Command::Usage { tenant: None },
         ["--rotate-master-key"] => Command::RotateMasterKey,
         ["--usage", "--tenant", tenant] => {
-            Command::Usage { tenant: Some(tenant_id(tenant).ok_or_else(usage)?) }
+            Command::Usage { tenant: Some(base32_id::parse(tenant).ok_or_else(usage)?) }
         }
         flags => parse_collect(flags)?,
     };
@@ -272,7 +273,7 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
     Ok(Command::Collect { every, options, mode, cell, run })
 }
 
-/// The branches `text` names, in hexadecimal, separated by white space.
+/// The branches `text` names, in base 32, separated by white space.
 fn held_branches(text: &str) -> Result<BTreeSet<layout::Branch>, String> {
     let branch = |word: &str| word.parse();
     text.split_whitespace().map(branch).collect()
@@ -283,17 +284,10 @@ fn listed(live: &BTreeMap<layout::Branch, Record>, held: &BTreeSet<layout::Branc
     let listed = live.iter().filter(|(branch, _)| !held.contains(branch));
     listed
         .map(|(branch, record)| match record.origin() {
-            Some(origin) => format!("{branch} {} {:x}\n", origin.parent, origin.at),
+            Some(origin) => format!("{branch} {} {}\n", origin.parent, Short(origin.at)),
             None => format!("{branch}\n"),
         })
         .collect()
-}
-
-/// The tenant `text` names, in hexadecimal, as a cell's first part.
-fn tenant_id(text: &str) -> Option<u64> {
-    let digits =
-        !text.is_empty() && text.len() <= 16 && text.bytes().all(|b| b.is_ascii_hexdigit());
-    digits.then(|| u64::from_str_radix(text, 16).ok()).flatten()
 }
 
 /// How many cells' leases `--usage` reads at once.
@@ -310,7 +304,7 @@ fn cell_line(cell: Cell, usage: Option<&Usage>) -> String {
     let total = usage.map(Usage::total);
     json!({
         "scope": "cell",
-        "tenant": format!("{:x}", cell.tenant),
+        "tenant": Short(cell.tenant).to_string(),
         "cell": cell.to_string(),
         "measured_unix_ms": usage.map(|usage| usage.measured),
         "objects": total.map(|total| total.objects),
@@ -349,7 +343,7 @@ impl Tenant {
         self.kinds.values().for_each(|sum| total += *sum);
         json!({
             "scope": "tenant",
-            "tenant": format!("{tenant:x}"),
+            "tenant": Short(tenant).to_string(),
             "cells": self.cells,
             "measured_cells": self.measured,
             "oldest_measured_unix_ms": self.when.map(|(oldest, _)| oldest),
@@ -1066,15 +1060,15 @@ mod tests {
         let parent = layout::Branch { cell: layout::Cell { tenant: 1, id: 9 }, id: 4 };
         let retired = vec![layout::reference(parent, 5, branch(6))];
         let (listed, summary) = dry_run(&DryRun { doomed, compactable, retired, fenced: false });
-        let at = "tenants/0000000000000001/cells/0000000000000002/";
-        let parents = "tenants/0000000000000001/cells/0000000000000009/";
+        let at = "tenants/0000000000001/cells/0000000000002/";
+        let parents = "tenants/0000000000001/cells/0000000000009/";
         let expected = format!(
-            "{at}segments/0000000000000001/0000000000000001.0000000000000002 segment 100 delete\n\
-             {at}checkpoints/0000000000000003/0000000000000001.0000000000000001 checkpoint 20 \
+            "{at}segments/0000000000001/0000000000001.0000000000002 segment 100 delete\n\
+             {at}checkpoints/0000000000003/0000000000001.0000000000001 checkpoint 20 \
              delete\n\
-             {at}segments/0000000000000001/0000000000000001.0000000000000004 segment 7 compact\n\
-             {parents}refs/0000000000000004/0000000000000005/\
-             0000000000000001.0000000000000002.0000000000000006 reference - retire\n"
+             {at}segments/0000000000001/0000000000001.0000000000004 segment 7 compact\n\
+             {parents}refs/0000000000004/0000000000005/\
+             0000000000001.0000000000002.0000000000006 reference - retire\n"
         );
         assert_eq!(listed, expected);
         assert_eq!(
@@ -1111,7 +1105,7 @@ mod tests {
         assert_eq!(
             marked_line(cell, &marking),
             "cladefs-gc: cell 1/2: marked 2 (11 bytes) in \
-             tenants/0000000000000001/cells/0000000000000002/gc/marks/000000000000002a, deleted 0, \
+             tenants/0000000000001/cells/0000000000002/gc/marks/000000000001a, deleted 0, \
              compacted 3, resurrected 1"
         );
         let report = Report { compacted: 1, ..Report::default() };
@@ -1128,16 +1122,16 @@ mod tests {
     }
 
     /// TASK-79.85: an operator lists what no host holds, and deletes a branch, by IDs as
-    /// `cladefsctl stat` says them: TENANT/CELL/ID, in hexadecimal.
+    /// `cladefsctl stat` says them: TENANT/CELL/ID, in base 32.
     #[test]
-    fn branches_are_listed_and_deleted_by_their_hexadecimal_ids() {
+    fn branches_are_listed_and_deleted_by_their_base_32_ids() {
         let url = "u".to_owned();
         let command = Command::Branches { held: None, cell: None };
         assert_eq!(parsed(&["u", "--branches"]), Ok(Args { url: url.clone(), command }));
         let command = Command::Branches { held: Some("hosts".into()), cell: None };
         let args = parsed(&["u", "--branches", "--held", "hosts"]);
         assert_eq!(args, Ok(Args { url: url.clone(), command }));
-        let args = parsed(&["u", "--delete-branch", "1/2/ff"]);
+        let args = parsed(&["u", "--delete-branch", "1/2/7z"]);
         assert_eq!(args, Ok(Args { url, command: Command::DeleteBranch(branch(0xff)) }));
     }
 
@@ -1149,21 +1143,18 @@ mod tests {
         let live =
             BTreeMap::from([(branch(0xa), base), (branch(0xb), fork.clone()), (branch(0xc), fork)]);
         let held = held_branches("1/2/c\n").unwrap();
-        assert_eq!(listed(&live, &held), "1/2/a\n1/2/b 1/2/a 10\n");
-        let refused = "no branch, TENANT/CELL/ID in hexadecimal: x".to_owned();
-        assert_eq!(held_branches("1/2/c x"), Err(refused));
+        assert_eq!(listed(&live, &held), "1/2/a\n1/2/b 1/2/a g\n");
+        let refused = "no branch, TENANT/CELL/ID in base 32: 1/2/C".to_owned();
+        assert_eq!(held_branches("1/2/c 1/2/C"), Err(refused));
     }
 
-    /// TASK-394, TASK-395.8: `--usage` takes no other flag but `--tenant`, in hexadecimal.
+    /// TASK-394, TASK-395.8: `--usage` takes no other flag but `--tenant`, in base 32.
     #[test]
     fn usage_goes_over_every_tenant_or_one() {
         let usage = |tenant| Ok(Args { url: "u".into(), command: Command::Usage { tenant } });
         assert_eq!(parsed(&["u", "--usage"]), usage(None));
-        assert_eq!(parsed(&["u", "--usage", "--tenant", "2f"]), usage(Some(0x2f)));
-        assert_eq!(
-            parsed(&["u", "--usage", "--tenant", "ffffffffffffffff"]),
-            usage(Some(u64::MAX))
-        );
+        assert_eq!(parsed(&["u", "--usage", "--tenant", "2f"]), usage(Some(79)));
+        assert_eq!(parsed(&["u", "--usage", "--tenant", "fzzzzzzzzzzzz"]), usage(Some(u64::MAX)));
     }
 
     /// TASK-395.8's AC #2: `--usage` holds a page of a tenant's cells at a time, whatever their
@@ -1239,12 +1230,12 @@ mod tests {
     }
 
     /// TASK-395.8: `--usage` says a cell's objects and bytes, of each kind and in all, and when they
-    /// were measured, a JSON object a line, IDs in hexadecimal; nulls for a cell not measured. A
+    /// were measured, a JSON object a line, IDs in base 32; nulls for a cell not measured. A
     /// tenant's line sums its cells measured, and says how many there are, and the oldest and
     /// newest measurement.
     #[test]
     fn usage_says_each_cell_and_tenant_as_measured() {
-        let cell = layout::Cell { tenant: 0xa, id: 0x2f };
+        let cell = layout::Cell { tenant: 10, id: 47 };
         let mut usage = Usage { measured: 1_700_000_000_000, ..Usage::default() };
         let usage = {
             usage.kinds.insert("segment".into(), Sum { objects: 2, bytes: 300 });
@@ -1253,11 +1244,11 @@ mod tests {
         };
         assert_eq!(
             cell_line(cell, Some(&usage)),
-            r#"{"bytes":340,"cell":"a/2f","kinds":{"record":{"bytes":40,"objects":1},"segment":{"bytes":300,"objects":2}},"measured_unix_ms":1700000000000,"objects":3,"scope":"cell","tenant":"a"}"#
+            r#"{"bytes":340,"cell":"a/1f","kinds":{"record":{"bytes":40,"objects":1},"segment":{"bytes":300,"objects":2}},"measured_unix_ms":1700000000000,"objects":3,"scope":"cell","tenant":"a"}"#
         );
         assert_eq!(
             cell_line(cell, None),
-            r#"{"bytes":null,"cell":"a/2f","kinds":null,"measured_unix_ms":null,"objects":null,"scope":"cell","tenant":"a"}"#
+            r#"{"bytes":null,"cell":"a/1f","kinds":null,"measured_unix_ms":null,"objects":null,"scope":"cell","tenant":"a"}"#
         );
         let mut later = Usage { measured: 1_700_000_000_500, ..Usage::default() };
         later.kinds.insert("segment".into(), Sum { objects: 1, bytes: 7 });
@@ -1276,11 +1267,11 @@ mod tests {
     }
 
     /// TASK-395.4: a pass of any mode, and a list of the live branches, go over every cell, or the
-    /// one `--cell` names, TENANT/CELL in hexadecimal, anywhere among their flags.
+    /// one `--cell` names, TENANT/CELL in base 32, anywhere among their flags.
     #[test]
     fn passes_and_lists_go_over_a_cell_or_all() {
         let url = "u".to_owned();
-        let cell = Some(layout::Cell { tenant: 0xa, id: 0x1f });
+        let cell = Some(layout::Cell { tenant: 10, id: 47 });
         let options = Options { compact_below: 0.5, grace: 60_000 };
         let command = Command::Collect {
             every: None,
@@ -1341,7 +1332,7 @@ mod tests {
             report,
             requests,
             slowest: vec![
-                (cell(0x1f), Duration::from_millis(1250)),
+                (cell(47), Duration::from_millis(1250)),
                 (cell(2), Duration::from_millis(5)),
             ],
             took: Duration::from_millis(4321),
@@ -1557,11 +1548,11 @@ cladefs_gc_peak_resident_bytes 67108864
             &["u", "--cell", "1"],
             &["u", "--cell", "1/2/3"],
             &["u", "--cell", "1/2", "--cell", "1/3"],
-            &["u", "--branches", "--cell", "x/2"],
+            &["u", "--branches", "--cell", "X/2"],
             &["u", "--branches", "--cell", "1/2", "--cell", "1/2"],
             &["u", "--usage", "--cell", "1/2"],
             &["u", "--usage", "--tenant"],
-            &["u", "--usage", "--tenant", "x"],
+            &["u", "--usage", "--tenant", "X"],
             &["u", "--usage", "--tenant", "1/2"],
             &["u", "--usage", "--tenant", "10000000000000000"],
             &["u", "--tenant", "1", "--usage"],

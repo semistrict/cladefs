@@ -874,7 +874,7 @@ mod tests {
 
     /// The path of `tenant`'s key in the Transit engine.
     fn key_path(tenant: u64) -> String {
-        format!("{MOUNT}/keys/cladefs-tenant-{tenant:x}")
+        format!("{MOUNT}/keys/cladefs-tenant-{}", base32_id::Short(tenant))
     }
 
     impl Bao {
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(kms.inner.origin.as_str(), "http://bao.internal:8200/");
         assert_eq!(kms.inner.mount, ["transit"]);
         assert_eq!(kms.inner.shown, "openbao://bao.internal:8200/transit");
-        assert_eq!(kms.inner.names.of(0x2a), "t-2a");
+        assert_eq!(kms.inner.names.of(42), "t-1a");
         assert_eq!(kms.inner.namespace, None);
         let kms = OpenBao::new(
             "openbaos://[::1]:8300/kms/transit/?key=t-{tenant}&namespace=team%2Fa",

@@ -60,7 +60,7 @@
 //! Attaching a cell (`Attach`; a cell of 0, a new one) takes it from the daemon's bucket, at the
 //! placement of the token the call gives, the daemon's if none, and every Fxfs vdisk of it into
 //! a store at `STORES/TENANT/CELL/VDISK`, shown at `MOUNT/TENANT/CELL/VDISK`, TENANT and CELL
-//! in 16 hexadecimal digits; its other vdisks, its SQLite databases and what VMs attach, are not
+//! in base 32, padded (`base32_id::Padded`); its other vdisks, its SQLite databases and what VMs attach, are not
 //! shown. `CreateVdisk` makes a new Fxfs vdisk of a cell attached; `Detach` takes a cell's
 //! vdisks away once nothing uses them, written back, or at once if forced; `List` says what is
 //! attached. The mount is the daemon's user's; with `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may

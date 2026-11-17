@@ -152,6 +152,7 @@ follower_history = { path = "crates/follower_history" }
 extent_frame = { path = "crates/extent_frame" }
 extent_keys = { path = "crates/extent_keys" }
 extent_bucket = { path = "crates/extent_bucket" }
+base32_id = { path = "crates/base32_id" }
 bssl-crypto = { path = "crates/bssl-crypto" }
 mundane = { path = "crates/mundane" }
 fidl-fuchsia-io = { path = "crates/fidl-fuchsia-io" }

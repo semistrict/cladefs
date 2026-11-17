@@ -2463,8 +2463,8 @@ type GrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
 	// its directory are vdisks of its cells, under its prefix, and its VM processes open no store of
-	// another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in hexadecimal:
-	// `<tenant>.sock`.
+	// another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in base 32
+	// (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The directory its stores are in, which must exist: its VM processes name stores in it
 	// alone.

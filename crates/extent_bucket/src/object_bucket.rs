@@ -1061,7 +1061,7 @@ fn backoff(failures: u32) -> std::time::Duration {
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
 /// of a version that is not the object's, and one of the object's version succeeds.
 pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
-    let key = format!("probe/{nonce:016x}");
+    let key = format!("probe/{}", base32_id::Padded(nonce));
     let refused = |what: &str, result: &dyn std::fmt::Debug| {
         format!("the store does not honour conditional writes: {what} gave {result:?}")
     };
@@ -1493,7 +1493,7 @@ pub(crate) mod tests {
             let refused = probe(&Careless(Direct(sim.clone())), 2).await.unwrap_err();
             assert!(refused.starts_with("the store does not honour conditional writes: a create"));
         });
-        assert_eq!(sim.keys(), ["probe/0000000000000002"]);
+        assert_eq!(sim.keys(), ["probe/0000000000002"]);
     }
 
     #[test]

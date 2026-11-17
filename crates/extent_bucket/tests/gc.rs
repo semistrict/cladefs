@@ -170,9 +170,13 @@ fn collects_a_file_bucket() {
         writer.checkpoint().await.unwrap();
     });
     // The two segments a pass deletes, and their bytes.
-    let at = "tenants/0000000000000001/cells/0000000000000001";
-    let doomed = [0, 1]
-        .map(|segment| format!("{at}/segments/0000000000000001/0000000000000001.{segment:016x}"));
+    let at = "tenants/0000000000001/cells/0000000000001";
+    let doomed = [0, 1].map(|segment| {
+        format!(
+            "{at}/segments/0000000000001/0000000000001.{segment}",
+            segment = base32_id::Padded(segment)
+        )
+    });
     let bytes: u64 = futures::executor::block_on(async {
         use extent_bucket::Bucket as _;
         let listed = ObjectBucket::from_url(&url).unwrap().list("").await.unwrap();
@@ -203,16 +207,16 @@ fn collects_a_file_bucket() {
             .collect::<Vec<_>>()
     });
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
-    let at = "tenants/0000000000000001/cells/0000000000000001";
-    let branch = "0000000000000001";
+    let at = "tenants/0000000000001/cells/0000000000001";
+    let branch = "0000000000001";
     // Its head, which names its checkpoint (TASK-407); cladefs: its cell's object, keeping its
     // KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
     let kept = [
         format!("{at}/branches/{branch}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
+        format!("{at}/checkpoints/{branch}/0000000000001.0000000000001"),
         format!("{at}/heads/{branch}"),
-        "tenants/0000000000000001/kek".to_owned(),
+        "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(left, kept);
     let out = gc(&[&url, "--branches"]);
@@ -267,9 +271,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     };
     let before = files();
     let out = gc(&[&url, "--dry-run", "--grace", "0"]);
-    let branch = "0000000000000001";
+    let branch = "0000000000001";
     let segment = |number: u64| {
-        format!("tenants/{branch}/cells/{branch}/segments/{branch}/0000000000000001.{number:016x}")
+        format!(
+            "tenants/{branch}/cells/{branch}/segments/{branch}/0000000000001.{number}",
+            number = base32_id::Padded(number)
+        )
     };
     let (holding, freeing) = (segment(0), segment(1));
     let listed = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -293,8 +300,8 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert_eq!(files(), before);
 
     let out = gc(&[&url, "--mark-only", "--grace", "0"]);
-    let at = "tenants/0000000000000001/cells/0000000000000001";
-    let marks = format!("{at}/gc/marks/0000000000000001");
+    let at = "tenants/0000000000001/cells/0000000000001";
+    let marks = format!("{at}/gc/marks/0000000000001");
     assert_eq!(
         said(&out),
         format!(
@@ -332,11 +339,11 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         extent_bucket::layout::MARKING.to_owned(),
         format!("{at}/branches/{branch}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
+        format!("{at}/checkpoints/{branch}/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
         marks,
         format!("{at}/heads/{branch}"),
-        "tenants/0000000000000001/kek".to_owned(),
+        "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(names, kept);
 }
@@ -452,7 +459,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         let (objects, bytes) = total(&kinds);
         json!({
             "scope": "cell",
-            "tenant": format!("{:x}", cell.tenant),
+            "tenant": base32_id::Short(cell.tenant).to_string(),
             "cell": cell.to_string(),
             "measured_unix_ms": when,
             "objects": objects,
@@ -472,7 +479,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         let when: Vec<u64> = when.iter().map(|when| when.as_u64().unwrap()).collect();
         json!({
             "scope": "tenant",
-            "tenant": format!("{tenant:x}"),
+            "tenant": base32_id::Short(tenant).to_string(),
             "cells": of.len() as u64 + unmeasured,
             "measured_cells": of.len(),
             "oldest_measured_unix_ms": when.iter().min(),
@@ -485,7 +492,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let nothing = json!({
         "scope": "cell",
         "tenant": "1",
-        "cell": "1/30",
+        "cell": "1/1g",
         "measured_unix_ms": null,
         "objects": null,
         "bytes": null,

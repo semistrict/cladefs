@@ -370,9 +370,10 @@ mod tests {
         // 10's, whose keys name no epochs, and whose branches have leases, not heads (TASK-407);
         // and 11's, whose clones made say they are forks a recorder may record (TASK-455); and
         // 12's, whose forks of points say nothing of being resumed (TASK-455's review); and 13's,
-        // whose heads name no versions, nor footers the versions cut at their ends (TASK-476).
-        assert_eq!(FORMAT, 14);
-        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13] {
+        // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
+        // 14's, whose keys' numbers are in hexadecimal (TASK-504).
+        assert_eq!(FORMAT, 15);
+        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(

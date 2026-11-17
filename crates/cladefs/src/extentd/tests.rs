@@ -1168,7 +1168,10 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
     let commit = crate::BUILD_COMMIT;
     let daemon = format!("cladefsd_build_info{{commit=\"{commit}\"}} 1");
     let vms = |branch: u64, count: usize| {
-        format!("cladefsd_vm_build_info{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}")
+        format!(
+            "cladefsd_vm_build_info{{branch=\"{branch}\",commit=\"{commit}\"}} {count}",
+            branch = base32_id::Short(branch)
+        )
     };
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 24);
@@ -1204,7 +1207,11 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     let ps = page_size() as usize;
     let series = |name: &str, vm: &super::stats::Vm| -> Option<u64> {
         let metrics = super::metrics::render();
-        let labels = format!("{{branch=\"{:x}\",connection=\"{}\"}} ", vm.branch, vm.connection);
+        let labels = format!(
+            "{{branch=\"{}\",connection=\"{}\"}} ",
+            base32_id::Short(vm.branch),
+            vm.connection
+        );
         let name = format!("cladefsd_{name}{labels}");
         metrics
             .lines()
@@ -2743,7 +2750,7 @@ fn what_guests_free_the_collector_compacts() {
     store.commit_ordered(None).unwrap();
     // 29 extents' worth no extent holds: the guest's room is what its two extents leave.
     wait_for_uploader(&path);
-    let segments = path.join("segments").join(format!("{branch:016x}"));
+    let segments = path.join("segments").join(base32_id::Padded(branch).to_string());
     assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
     assert_eq!(store.info().unwrap().available, 14 * extent_bytes);
     drop(store);

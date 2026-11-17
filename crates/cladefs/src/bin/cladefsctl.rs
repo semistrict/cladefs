@@ -46,7 +46,7 @@
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one vdisk of a
 //! new cell of the default tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
-//! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in hex,
+//! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in base 32,
 //! a vdisk of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! extentd opens it,
 //! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
@@ -82,7 +82,7 @@
 //! the guest seeing the new size while mounted, and shrinks if the guest's filesystem agrees, no
 //! lower than what it holds; otherwise, it grows, and does not shrink. `public` makes the store at
 //! DIR a public base, whose pages every tenant's forks of it share (TASK-43). `stat` prints what the
-//! store at DIR is and holds, one `name value` a line: its branch (hex), capacity, used and
+//! store at DIR is and holds, one `name value` a line: its branch (base 32), capacity, used and
 //! available bytes, and of those used, its own (its branch wrote them) and inherited (from the
 //! branches it was forked from), what billing it alone charges it and what it shares (TASK-49);
 //! how many extents it holds, own and inherited (`own_extents`, `inherited_extents`), which what an
@@ -98,7 +98,7 @@
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
 //! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `extentd`
-//! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `branch` (hex),
+//! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `branch` (base 32),
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
 //! path through that object and a value, `vms.0.guest.counters.seals 12`. Counters only grow: a
@@ -106,25 +106,25 @@
 //!
 //! `grant` and `revoke`, through the daemon alone, are the control API's `Grant` and `Revoke`
 //! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, its ID in the
-//! bucket, in hexadecimal and not 0, the default tenant's (TASK-364), whose stores are in the
+//! bucket, in base 32 and not 0, the default tenant's (TASK-364), whose stores are in the
 //! directory DIR, a VM socket of its own, `TENANT.sock`, its VM processes naming stores in DIR
 //! alone, of its own cells, the socket given to the user UID and the group GID if named, the
 //! daemon's own otherwise, and prints its path; granting a tenant again, of the same directory,
-//! prints it again. `revoke` takes the tenant TENANT's socket away (hexadecimal): its VM processes
+//! prints it again. `revoke` takes the tenant TENANT's socket away (base 32): its VM processes
 //! connected keep their stores, and no more connect.
 //!
 //! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
 //! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
-//! the cell TENANT/CELL (each in hex): takes its wrapped KEKs out of its object in the daemon's
+//! the cell TENANT/CELL (each in base 32): takes its wrapped KEKs out of its object in the daemon's
 //! bucket, so that its vdisks' keys unwrap no more, and has the daemon forget what it holds of
 //! them, halting its stores open there (`EACCES`); run it against every host's daemon, the first
 //! shredding, each forgetting. A bucket that keeps object versions keeps the KEKs in the cell
 //! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
-//! forget the keys of the tenant TENANT (hex), once its KEK is destroyed, or revoked, in the KMS:
+//! forget the keys of the tenant TENANT (base 32), once its KEK is destroyed, or revoked, in the KMS:
 //! its stores there are halted, their pages leave the cache, its fetchers' and KMS's keys of it
 //! go. `shred-tenant`, through the daemon alone too, is the control API's `ShredTenant`
 //! (TASK-411.27, doc-16 The bucket KMS): under the bucket KMS (a master key, no `CLADEFS_KMS`), it
-//! replaces the tenant TENANT's (hex) KEK object in the daemon's bucket by a tombstone, so that no
+//! replaces the tenant TENANT's (base 32) KEK object in the daemon's bucket by a tombstone, so that no
 //! key its KEK wrapped unwraps anywhere and none is made it again, and has the daemon forget its
 //! keys; run it against every host's daemon, the first shredding, each forgetting, and printing
 //! `shredded_now 1` or `0`. A bucket that keeps object versions keeps the KEK in the object's
@@ -133,7 +133,8 @@
 //! value` a line.
 //!
 //! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
-//! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in hex.
+//! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in base 32
+//! (`base32_id`).
 //! `attach` takes CELL (0 for a new one, of no vdisks) from the daemon's bucket, at the placement
 //! whose fencing token is TOKEN if given, the daemon's otherwise, and shows each Fxfs vdisk of it
 //! at `MOUNT/TENANT/CELL/VDISK`; it prints the cell, then each vdisk, `NAME BRANCH`, a line each.
@@ -147,6 +148,11 @@
 use anyhow::{Context as _, bail};
 use cladefs::ExtentStore;
 use std::path::{Path, PathBuf};
+
+/// The ID `given` writes, in base 32 (`base32_id`): `what`, as a refusal names it.
+fn id(what: &str, given: &str) -> anyhow::Result<u64> {
+    base32_id::parse(given).with_context(|| format!("{what} must be in base 32"))
+}
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
@@ -297,11 +303,8 @@ enum Mount {
 impl Mount {
     /// The `mount` command `args` say, the words after `mount`.
     fn parse(args: &[&str]) -> anyhow::Result<Self> {
-        let hex = |what: &str, given: &str| {
-            u64::from_str_radix(given, 16).with_context(|| format!("{what} must be hexadecimal"))
-        };
         let cell = |tenant: &str, cell: &str| -> anyhow::Result<cladefs::Cell> {
-            Ok(cladefs::Cell { tenant: hex("TENANT", tenant)?, id: hex("CELL", cell)? })
+            Ok(cladefs::Cell { tenant: id("TENANT", tenant)?, id: id("CELL", cell)? })
         };
         Ok(match args {
             ["attach", tenant, id, rest @ ..] if rest.len() <= 1 => Self::Attach {
@@ -332,29 +335,29 @@ impl Mount {
     /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
     /// it answers: `attach`, the cell, then each vdisk shown, `NAME BRANCH`, a line each;
     /// `create-vdisk`, the vdisk's branch; `list`, each cell, `TENANT CELL`, and under it its
-    /// vdisks, `detaching` after one being detached. IDs in 16 hexadecimal digits.
+    /// vdisks, `detaching` after one being detached. IDs padded, as the mount's paths have them.
     fn through(self, socket: &Path) -> anyhow::Result<()> {
         let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
         let mount = cladefs::fuse::control::Client::connect(socket).map_err(failed)?;
         match self {
             Self::Attach { cell, token } => {
                 let (cell, vdisks) = mount.attach(cell, token).map_err(failed)?;
-                println!("{:016x}", cell.id);
+                println!("{}", base32_id::Padded(cell.id));
                 for vdisk in vdisks {
-                    println!("{} {:016x}", vdisk.name, vdisk.branch);
+                    println!("{} {}", vdisk.name, base32_id::Padded(vdisk.branch));
                 }
             }
             Self::CreateVdisk { cell, name, capacity } => {
                 let made = mount.create_vdisk(cell, &name, capacity).map_err(failed)?;
-                println!("{:016x}", made.id);
+                println!("{}", base32_id::Padded(made.id));
             }
             Self::Detach { cell, force } => mount.detach(cell, force).map_err(failed)?,
             Self::List => {
                 for cell in mount.list().map_err(failed)? {
-                    println!("{:016x} {:016x}", cell.tenant, cell.cell);
+                    println!("{} {}", base32_id::Padded(cell.tenant), base32_id::Padded(cell.cell));
                     for vdisk in cell.vdisks {
                         let detaching = if vdisk.detaching { " detaching" } else { "" };
-                        println!("  {} {:016x}{detaching}", vdisk.name, vdisk.branch);
+                        println!("  {} {}{detaching}", vdisk.name, base32_id::Padded(vdisk.branch));
                     }
                 }
             }
@@ -368,8 +371,7 @@ impl Command {
         let capacity = |capacity: &str| capacity.parse().context("CAPACITY must be a number");
         let token = |token: &str| token.parse().context("TOKEN must be a number");
         let id = |id: &str, what| id.parse().with_context(|| format!("{what} must be a number"));
-        let tenant =
-            |tenant: &str| u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal");
+        let tenant = |tenant: &str| self::id("TENANT", tenant);
         Ok(match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
             ["take", dir, size, branch, ref rest @ ..] if rest.len() <= 1 => Self::Take {
                 dir: dir.into(),
@@ -415,8 +417,11 @@ impl Command {
             ["revoke", given] => Self::Revoke { tenant: tenant(given)? },
             ["shred-cell", cell] => {
                 let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
-                let hex = |hex| u64::from_str_radix(hex, 16).context("TENANT/CELL must be hex");
-                Self::ShredCell { cell: cladefs::Cell { tenant: hex(tenant)?, id: hex(id)? } }
+                let cell = cladefs::Cell {
+                    tenant: self::id("TENANT", tenant)?,
+                    id: self::id("CELL", id)?,
+                };
+                Self::ShredCell { cell }
             }
             ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
             ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
@@ -676,7 +681,7 @@ fn stats_json(stats: &cladefs::extentd::control::proto::GetStatsResponse) -> ser
         });
         json!({
             "connection": vm.connection,
-            "branch": format!("{:x}", vm.branch),
+            "branch": base32_id::Short(vm.branch).to_string(),
             "path": vm.path,
             "follower": vm.follower,
             "vmm": {

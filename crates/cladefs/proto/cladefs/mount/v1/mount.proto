@@ -7,10 +7,10 @@
 // mount, however many stores: one OS mount, not one per store (TASK-475.2). Attach takes a cell of
 // the daemon's bucket, as its holder, and every Fxfs vdisk of it into a store at
 // DIR/TENANT/CELL/VDISK, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VDISK, TENANT and
-// CELL in 16 hexadecimal digits as the bucket's keys have them; Detach writes them back, so that
-// another host may take the cell. A cell's other vdisks are not shown: its SQLite vdisks'
-// databases open through sqlite_extents' VFS alone, and its vdisks VMs attach are theirs, in the
-// same daemon.
+// CELL in base 32, 13 digits (Crockford's, lower case, zero-padded), as the bucket's keys have
+// them; Detach writes them back, so that another host may take the cell. A cell's other vdisks
+// are not shown: its SQLite vdisks' databases open through sqlite_extents' VFS alone, and its
+// vdisks VMs attach are theirs, in the same daemon.
 //
 // It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
 // (cladefs/extentd/v1/extentd.proto), the daemon's user's alone, mode 0600 whatever its umask, as

@@ -167,7 +167,7 @@ pub async fn create(
     change(bucket, cell, Start::Create, |found| match found {
         None => Ok(Step::Write(object.clone(), ())),
         Some(found) if found.holder == holder && found.epoch == 1 => Ok(Step::Stop(())),
-        Some(_) => Err(Error::Corrupt(format!("cell {:x}/{:x} exists", cell.tenant, cell.id))),
+        Some(_) => Err(Error::Corrupt(format!("cell {cell} exists"))),
     })
     .await?;
     Ok(Held { cell, epoch: 1, holder })
@@ -566,7 +566,7 @@ mod tests {
             asked,
             [
                 "list-delimited tenants/".to_owned(),
-                "list-delimited tenants/0000000000000001/cells/".to_owned()
+                "list-delimited tenants/0000000000001/cells/".to_owned()
             ]
         );
         let (rest, asked) = sim.served(async {
@@ -578,15 +578,17 @@ mod tests {
         });
         taken.extend(rest);
         assert_eq!(taken, cells);
-        let tenant = "tenants/0000000000000002/cells/";
-        let after = |id: u64| format!("list-delimited {tenant} after {tenant}{id:016x}/");
+        let tenant = "tenants/0000000000002/cells/";
+        let after = |id: u64| {
+            format!("list-delimited {tenant} after {tenant}{id}/", id = base32_id::Padded(id))
+        };
         assert_eq!(
             asked,
             [
                 format!("list-delimited {tenant}"),
                 after(LIST_PAGE as u64 - 1),
                 after(LIST_PAGE as u64 * 2 - 1),
-                "list-delimited tenants/0000000000000003/cells/".to_owned(),
+                "list-delimited tenants/0000000000003/cells/".to_owned(),
             ]
         );
     }

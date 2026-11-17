@@ -967,8 +967,8 @@ mod tests {
     use crate::layout::PART;
     use std::sync::Arc;
 
-    const KEY: &str = "segments/0000000000000001/0000000000000002";
-    const OTHER: &str = "segments/0000000000000001/0000000000000003";
+    const KEY: &str = "segments/0000000000001/0000000000002";
+    const OTHER: &str = "segments/0000000000001/0000000000003";
 
     /// `len` bytes that don't compress, from a xorshift generator seeded by `seed`: their objects'
     /// parts are stored raw.
@@ -1253,7 +1253,7 @@ mod tests {
         // What it holds: part 0 of the object, not part 1, nor any part of another key.
         assert!(cache.holds(KEY, 0));
         assert!(!cache.holds(KEY, 1));
-        assert!(!cache.holds("segments/0000000000000002/0000000000000000", 0));
+        assert!(!cache.holds("segments/0000000000002/0000000000000", 0));
         cache.check();
     }
 
@@ -1419,7 +1419,9 @@ mod tests {
         const OBJECTS: u64 = 3;
         const PARTS: u64 = 4;
         let dir = tempfile::tempdir().unwrap();
-        let key = |object: u64| format!("segments/0000000000000001/{object:016x}");
+        let key = |object: u64| {
+            format!("segments/0000000000001/{object}", object = base32_id::Padded(object))
+        };
         let objects: Arc<Vec<_>> =
             Arc::new((0..OBJECTS).map(|at| Object::noise(&key(at), PARTS * PART, at)).collect());
         let cache = Arc::new(Cache::open(dir.path(), 6 * PART, 0).unwrap());
@@ -1486,7 +1488,13 @@ mod tests {
         let read = Object::noise(KEY, PART, 1);
         read.keep(&cache);
         let objects: Vec<_> = (0..PUTS / 8)
-            .map(|at| Object::noise(&format!("segments/0000000000000002/{at:016x}"), 8 * PART, at))
+            .map(|at| {
+                Object::noise(
+                    &format!("segments/0000000000002/{at}", at = base32_id::Padded(at)),
+                    8 * PART,
+                    at,
+                )
+            })
             .collect();
         let keeping = {
             let cache = cache.clone();
@@ -1552,7 +1560,13 @@ mod tests {
     fn earlier_files_failing_their_checks_are_removed() {
         let dir = tempfile::tempdir().unwrap();
         let objects: Vec<_> = (0..4)
-            .map(|at| Object::noise(&format!("segments/0000000000000001/{at:016x}"), 3000, at))
+            .map(|at| {
+                Object::noise(
+                    &format!("segments/0000000000001/{at}", at = base32_id::Padded(at)),
+                    3000,
+                    at,
+                )
+            })
             .collect();
         let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
         for object in &objects {
@@ -1568,7 +1582,7 @@ mod tests {
         let stray = cache.path("segments/stray");
         std::fs::write(&stray, b"stray").unwrap();
         std::os::unix::fs::symlink(path(3), cache.path("segments/link")).unwrap();
-        std::fs::create_dir_all(cache.path("checkpoints/0000000000000001")).unwrap();
+        std::fs::create_dir_all(cache.path("checkpoints/0000000000001")).unwrap();
         drop(cache);
 
         let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
@@ -1811,9 +1825,9 @@ mod tests {
             [
                 Object::noise(KEY, PART + 3000, 1),
                 Object::noise(OTHER, 3000, 2),
-                Object::noise("segments/0000000000000001/0000000000000004", 300_000, 3),
-                Object::new("checkpoints/0000000000000001/0000000000000004", &pattern),
-                Object::noise("segments/0000000000000002/0000000000000001", PART + 100, 4),
+                Object::noise("segments/0000000000001/0000000000004", 300_000, 3),
+                Object::new("checkpoints/0000000000001/0000000000004", &pattern),
+                Object::noise("segments/0000000000002/0000000000001", PART + 100, 4),
             ]
         });
         OBJECTS.clone()

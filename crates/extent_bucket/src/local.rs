@@ -297,7 +297,7 @@ mod tests {
             tokio::runtime::Builder::new_multi_thread().worker_threads(8).build().unwrap();
         runtime.block_on(async {
             let buckets = [file(dir.path()), file(dir.path())];
-            let key = "heads/0000000000000001";
+            let key = "heads/0000000000001";
             let version =
                 buckets[0].put(key, b"first".to_vec().into(), PutMode::Create).await.unwrap();
             let updates = (0..32u8).map(|n| {
@@ -351,14 +351,21 @@ mod tests {
     /// same in every build; those of others mostly don't.
     #[test]
     fn objects_of_a_directory_share_their_lock() {
-        let cell = "tenants/0000000000000001/cells/0000000000000002/";
+        let cell = "tenants/0000000000001/cells/0000000000002/";
         let lease = format!("{cell}gc/lease");
-        assert_eq!(lock_of(&lease), ".cladefs-lock.21");
-        let segment = |number: u64| format!("{cell}segments/0000000000000001/{number:016x}");
+        assert_eq!(lock_of(&lease), ".cladefs-lock.35");
+        let segment = |number: u64| {
+            format!("{cell}segments/0000000000001/{number}", number = base32_id::Padded(number))
+        };
         assert_eq!(lock_of(&segment(1)), lock_of(&segment(2)));
         assert_eq!(lock_of("a"), lock_of("b"));
         let leases: std::collections::BTreeSet<String> = (1..=16u64)
-            .map(|id| lock_of(&format!("tenants/0000000000000001/cells/{id:016x}/gc/lease")))
+            .map(|id| {
+                lock_of(&format!(
+                    "tenants/0000000000001/cells/{id}/gc/lease",
+                    id = base32_id::Padded(id)
+                ))
+            })
             .collect();
         // A sweep's 16 passes at once over a tenant's first cells, each updating its lease: no
         // two of them under one lock.

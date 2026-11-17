@@ -204,9 +204,9 @@ class Timings(unittest.TestCase):
 # 2026-11-15 did (docs/measurements/macos-bucket-lifecycle-2026-11-15,
 # macos-fork-extent-memory-2026-11-15), and gc-sweep.sh's tables (macos-gc-dead-cells-2026-11-15).
 LIFECYCLE = """\
-SETUP extents=1024 point of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000000/cells/point's/branches/point x4]
-PHASE extents=1024 cold fork: requests=6 in-series=6.4 at-once=1 wall-ms=370 bucket-ms=192 up=170 down=158 [create=2 get=3 update=1] again=[get tenants/0000000000000000/cells/cold-fork's/branches/cold-fork x2]
-  REQUEST +0..32ms get tenants/0000000000000000/cells/cold-fork's/branches/cold-fork up=0 down=0
+SETUP extents=1024 point of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000/cells/point's/branches/point x4]
+PHASE extents=1024 cold fork: requests=6 in-series=6.4 at-once=1 wall-ms=370 bucket-ms=192 up=170 down=158 [create=2 get=3 update=1] again=[get tenants/0000000000000/cells/cold-fork's/branches/cold-fork x2]
+  REQUEST +0..32ms get tenants/0000000000000/cells/cold-fork's/branches/cold-fork up=0 down=0
 """
 FORK_MEMORY = """\
 fork memory: extents=1024 parent=point forks=20 held=5475939 per-fork=273796 marginal-per-fork=274175 marginal-per-fork-per-extent=267.7 open=125.29ms

@@ -481,7 +481,8 @@ pub(crate) async fn recover_at<B: Bucket>(
         }
     }
     Err(Error::Lost(format!(
-        "branch {branch} at {at:x}: what its recovery starts from keeps going"
+        "branch {branch} at {at}: what its recovery starts from keeps going",
+        at = base32_id::Short(at)
     )))
 }
 
@@ -508,7 +509,8 @@ pub async fn recover_version(
         }
     }
     Err(Error::Lost(format!(
-        "branch {branch} at {at:x}: what its recovery starts from keeps going"
+        "branch {branch} at {at}: what its recovery starts from keeps going",
+        at = base32_id::Short(at)
     )))
 }
 
@@ -1058,8 +1060,10 @@ fn placed(
 ) -> Result<Footer, Error> {
     if footer.branch != branch || footer.segment != segment || footer.epoch != epoch {
         return Err(Error::Corrupt(format!(
-            "{key} holds segment {:x} of {} by epoch {:x}",
-            footer.segment, footer.branch, footer.epoch
+            "{key} holds segment {} of {} by epoch {}",
+            base32_id::Short(footer.segment),
+            footer.branch,
+            base32_id::Short(footer.epoch)
         )));
     }
     Ok(footer)
@@ -1227,7 +1231,10 @@ fn named_epoch<B: Bucket>(
     at: u64,
 ) -> Result<u64, Attempt> {
     let Some(epoch) = head.and_then(|head| head.epoch_of(at)) else {
-        return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
+        return Err(Attempt::Failed(Error::Lost(format!(
+            "segment {at} of {branch}",
+            at = base32_id::Short(at)
+        ))));
     };
     if let Some(known) = bucket.known() {
         known.named(branch, at, epoch);
@@ -1256,7 +1263,7 @@ pub(crate) async fn checkpoint_at(
 ) -> Result<(), Error> {
     let head = head::get(bucket, branch).await?;
     let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
-        return Err(Error::Lost(format!("segment {at:x} of {branch}")));
+        return Err(Error::Lost(format!("segment {at} of {branch}", at = base32_id::Short(at))));
     };
     let key = layout::checkpoint(branch, at, epoch);
     let listed = bucket::list(bucket, &layout::checkpoints(branch)).await;
@@ -1278,7 +1285,8 @@ pub(crate) async fn checkpoint_at(
         }
     }
     Err(Error::Lost(format!(
-        "branch {branch} at {at:x}: what its recovery starts from keeps going"
+        "branch {branch} at {at}: what its recovery starts from keeps going",
+        at = base32_id::Short(at)
     )))
 }
 

@@ -123,9 +123,9 @@ pub(super) fn check_tenant(tenant: u64) -> Result<(), Errno> {
 }
 
 /// The name of the socket of the tenant `tenant`, in the daemon's directory of them: its ID, in
-/// hexadecimal, as cells name it.
+/// base 32, as cells name it.
 pub(super) fn socket_name(tenant: u64) -> String {
-    format!("{tenant:x}.sock")
+    format!("{tenant}.sock", tenant = base32_id::Short(tenant))
 }
 
 /// A tenant's socket's mode: its owner and group alone connect, those it is given to.
@@ -160,11 +160,11 @@ mod tests {
     use super::{check_tenant, socket_name};
     use crate::Errno;
 
-    /// Tenants' IDs name their sockets, in hexadecimal; the default tenant's is refused.
+    /// Tenants' IDs name their sockets, in base 32; the default tenant's is refused.
     #[test]
     fn ids_name_sockets() {
         assert_eq!(socket_name(0xa), "a.sock");
-        assert_eq!(socket_name(u64::MAX), "ffffffffffffffff.sock");
+        assert_eq!(socket_name(u64::MAX), "fzzzzzzzzzzzz.sock");
         assert_eq!(check_tenant(1), Ok(()));
         assert_eq!(check_tenant(crate::host_store::DEFAULT_TENANT), Err(Errno::EINVAL));
     }

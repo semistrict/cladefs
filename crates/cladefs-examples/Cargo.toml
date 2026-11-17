@@ -13,6 +13,7 @@ publish = false
 
 [dev-dependencies]
 anyhow.workspace = true
+base32_id.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
 # store-bench's stores opened as a host with a KMS opens them (TASK-411.5).

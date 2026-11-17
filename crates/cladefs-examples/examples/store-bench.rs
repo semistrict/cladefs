@@ -263,7 +263,9 @@ fn burst(mib: u64) {
     let closed = store.closed(usize::MAX).unwrap().len();
     let framed = started.elapsed();
     let after = extent_store::written();
-    let own = std::fs::read_dir(temp.path().join(format!("extents/{:016x}", BRANCH.id))).unwrap();
+    let own =
+        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(BRANCH.id))))
+            .unwrap();
     writes.print("writes");
     let ms = |took: Duration| took.as_secs_f64() * 1e3;
     println!(
@@ -305,7 +307,9 @@ fn durable(files: u64) {
         store.flush().unwrap();
         flushes.add(started.elapsed());
     }
-    let own = std::fs::read_dir(temp.path().join(format!("extents/{:016x}", BRANCH.id))).unwrap();
+    let own =
+        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(BRANCH.id))))
+            .unwrap();
     flushes.print(&format!("flushes of commits sealing {files} extents in files of their own"));
     println!("{} extents in files of their own", own.count());
 }

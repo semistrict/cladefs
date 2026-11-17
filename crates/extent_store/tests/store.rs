@@ -6,6 +6,7 @@
 
 mod common;
 
+use base32_id::Padded;
 use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_store::{
@@ -43,7 +44,7 @@ fn extent(sequence: u64) -> ExtentId {
 
 /// The branch's directory of `kind` (`segments`, `extents`, `index`).
 fn of(kind: &str, branch: u64) -> String {
-    format!("{kind}/{branch:016x}")
+    format!("{kind}/{}", Padded(branch))
 }
 
 /// Bytes each their offset modulo 251, from `offset`, plus `seed`.
@@ -256,7 +257,7 @@ fn frees_remove_files() {
         (count("segments"), count("open-segments"))
     };
     assert_eq!(segments(), (1, 1));
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), vec!["0000000000000010"]);
+    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), vec!["000000000000g"]);
     assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
 
     for sequence in 0..=16 {
@@ -405,9 +406,8 @@ fn bucket_location(key: &str, offset: u64, len: u64) -> Location {
 #[test]
 fn extents_the_bucket_holds_are_held_without_their_data() {
     let dir = MemDir::new();
-    let location =
-        bucket_location("segments/0000000000000007/0000000000000003", 8192, 3 * BLOCK as u64);
-    let other = bucket_location("extents/0000000000000008/1.2.9", 0, BLOCK as u64);
+    let location = bucket_location("segments/0000000000007/0000000000003", 8192, 3 * BLOCK as u64);
+    let other = bucket_location("extents/0000000000008/1.2.9", 0, BLOCK as u64);
     let mut state = extent_bucket::State::new(BRANCH);
     state.extents.insert(extent(5), location.clone());
     state.extents.insert(ExtentId::new(BRANCH.id + 1, 9), other);
@@ -629,7 +629,8 @@ fn closed_segments_hold_the_branchs_history() {
     // A run's data is in its segment, framed, where its footer says.
     let (_, _, place) = state.3.iter().find(|(id, ..)| *id == extent(40)).unwrap();
     let Place::Run { number, offset, .. } = *place else { panic!("{place:?}") };
-    let file = dir.open(&format!("{}/{number:016x}", of("segments", BRANCH.id)), true).unwrap();
+    let file =
+        dir.open(&format!("{}/{}", of("segments", BRANCH.id), Padded(number)), true).unwrap();
     let mut bytes = vec![0; extent_store::File::size(&file).unwrap() as usize];
     extent_store::File::read_at(&file, &mut bytes, 0).unwrap();
     let data =
@@ -775,9 +776,9 @@ fn segments_closed_by_commits_are_their_records_once_framed() {
         // opened, and cladefs: segment 2's, placed ahead of it (TASK-384).
         let kept = ["segments", "open-segments", "logs"].iter().flat_map(|kind| {
             let names = crashed.list(&of(kind, BRANCH.id)).unwrap();
-            names.into_iter().filter_map(|name| u64::from_str_radix(&name, 16).ok())
+            names.into_iter().filter_map(|name| base32_id::parse_padded(&name))
         });
-        let open = format!("{:016x}", kept.max().unwrap() + 1);
+        let open = Padded(kept.max().unwrap() + 1).to_string();
         let store = Store::open(crashed.clone(), OPTIONS).unwrap();
         assert_eq!(store.root().unwrap(), b"two", "seed {seed}");
         assert_eq!(read(&store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
@@ -878,7 +879,7 @@ fn segments_closed_between_commits_survive_failures_framing_them() {
 #[test]
 fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_durable() {
     use extent_frame::segment::{Footer, tag};
-    let path = |kind| format!("{}/{:016x}", of(kind, BRANCH.id), 0);
+    let path = |kind| format!("{}/{}", of(kind, BRANCH.id), Padded(0));
     for seed in 0..16 {
         let dir = MemDir::serial();
         let store = create(dir.clone(), 1 << 20);
@@ -1197,7 +1198,7 @@ fn framings_write_back_as_they_go() {
     store.commit(None).unwrap();
     store.wait_framed().unwrap();
     assert_eq!(extent_store::segments_framed_in_place(), in_place, "framed in a copy");
-    let framed = dir.open(&format!("{}/{:016x}", of("segments", BRANCH.id), 0), true).unwrap();
+    let framed = dir.open(&format!("{}/{}", of("segments", BRANCH.id), Padded(0)), true).unwrap();
     let size = framed.size().unwrap();
     assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
     // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
@@ -1297,7 +1298,7 @@ fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     let store = create(dir.clone(), 64 << 20);
     let (go, guard) = framing_held(&store);
     store.flush().unwrap();
-    let name = format!("{:016x}", 0);
+    let name = Padded(0).to_string();
     let held = |kind: &str| dir.list(&of(kind, BRANCH.id)).unwrap().contains(&name);
     assert!(held("open-segments") && held("logs"), "segment 0's raw file or log went, unframed");
     go.send(()).unwrap();
@@ -1333,7 +1334,7 @@ fn names(dir: &MemDir, kind: &str) -> Vec<String> {
 /// TASK-384), once the preparation of them ended.
 fn segment_files(store: &Store<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
     store.prepared().unwrap();
-    let placed = store.placed().map(|number| format!("{number:016x}"));
+    let placed = store.placed().map(|number| Padded(number).to_string());
     let ours = |name: &String| !name.starts_with("spare-") && placed.as_ref() != Some(name);
     names(dir, kind).into_iter().filter(ours).collect()
 }
@@ -1356,7 +1357,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     let footer = extent_bucket::layout::encode(&extent(1));
     let framed = extent_frame::framed(&data, &footer, extent_bucket::testing::encrypting(BRANCH));
     assert_eq!(own_written_since(before), framed.len() - data.len());
-    let name = format!("{:016x}", 1);
+    let name = Padded(1).to_string();
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
     assert_eq!(names(&dir, "extents"), vec![name]);
     assert!(read(&store, extent(1), 0, data.len()) == data, "extent 1 reads otherwise");
@@ -1676,7 +1677,7 @@ fn compressible_large_extents_are_framed_in_copies() {
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
-    assert_eq!(names(&dir, "extents"), vec![format!("{:016x}", 1), format!("{:016x}", 2)]);
+    assert_eq!(names(&dir, "extents"), vec![Padded(1).to_string(), Padded(2).to_string()]);
     drop(store);
     let reopened = Store::open(dir.crash(0), OPTIONS).unwrap();
     for (sequence, data) in [(1, &compressible), (2, &mixed)] {
@@ -1878,7 +1879,7 @@ fn framings_wait_for_no_other_framings_syncs() {
     framings.recv().unwrap();
     assert_eq!(store.framing(), [0, 1], "framed, neither durable yet");
     let raw = |number: u64| {
-        let name = format!("{number:016x}");
+        let name = Padded(number).to_string();
         let held = |kind: &str| dir.list(&of(kind, BRANCH.id)).unwrap().contains(&name);
         held("open-segments") && held("logs")
     };
@@ -2061,7 +2062,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     let closed = store.closed(usize::MAX).unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     assert_eq!(store.framing(), [0], "taken for the upload, its framed file not durable");
-    let framed = format!("{:016x}", segment.number);
+    let framed = Padded(segment.number).to_string();
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
     let mut landed = extent_bucket::State::new(BRANCH);
     landed.apply(&segment.footer);
@@ -2324,7 +2325,7 @@ fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
     }
     // Written back, so that the files hold what was written, written around the host's cache.
     extent_store::pages::shared().write_back_all().unwrap();
-    let path = |kind| temp.path().join(of(kind, BRANCH.id)).join(format!("{:016x}", 0));
+    let path = |kind| temp.path().join(of(kind, BRANCH.id)).join(Padded(0).to_string());
     assert_eq!(cached_pages(&path("open-segments")), 0, "the open segment's pages cached");
     assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");
     store.close_segment().unwrap();
@@ -2578,8 +2579,8 @@ fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
     let place = Place::Run { branch: BRANCH.id, number: 4, offset: 0 };
     assert_eq!(store.place(extent(1)).unwrap(), Some(place));
-    let segments: Vec<String> = (0..4).map(|number| format!("{number:016x}")).collect();
-    assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000000004"]);
+    let segments: Vec<String> = (0..4).map(|number| Padded(number).to_string()).collect();
+    assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000004"]);
     assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), segments);
     for closed in store.closed(usize::MAX).unwrap() {
         let data = extent_frame::data(
@@ -2894,7 +2895,7 @@ fn segments_no_branch_holds_go_as_branches_open() {
     let store = Store::open(dir.clone(), SMALL_SEGMENTS).unwrap();
     assert_eq!(store.extents().unwrap(), [(extent(1), BLOCK as u64)]);
     let segments = dir.list(&of("segments", BRANCH.id)).unwrap();
-    assert_eq!(segments, ["0000000000000000"]);
+    assert_eq!(segments, ["0000000000000"]);
     assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
 }
 
@@ -3477,7 +3478,7 @@ fn extents_larger_than_a_framing_chunk_seal_whole() {
     store.commit(None).unwrap();
     assert_eq!(store.usage().unwrap().own_bytes, data.len() as u64);
     // Its file frames its data, no more.
-    let file = dir.open(&format!("{}/{:016x}", of("extents", BRANCH.id), 1), true).unwrap();
+    let file = dir.open(&format!("{}/{}", of("extents", BRANCH.id), Padded(1)), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
     file.read_at(&mut framed, 0).unwrap();
     assert_eq!(
@@ -3692,7 +3693,7 @@ fn stores_tell_their_own_bytes_from_those_inherited() {
     let dir = MemDir::new();
     let mut state = extent_bucket::State::new(BRANCH);
     for (sequence, blocks) in [(1, 2), (2, 3)] {
-        let key = "segments/0000000000000008/0000000000000001";
+        let key = "segments/0000000000008/0000000000001";
         let location = bucket_location(key, sequence * 8 * BLOCK as u64, blocks * BLOCK as u64);
         state.extents.insert(ExtentId::new(parent, sequence), location);
     }

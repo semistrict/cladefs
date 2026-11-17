@@ -418,7 +418,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     assert!(json["taken_unix_ns"].as_u64() > Some(0), "{json}");
     let vm = &json["vms"][0];
     assert_eq!(vm["path"], path.canonicalize().unwrap().to_str().unwrap());
-    assert_eq!(vm["branch"], format!("{:x}", store.branch()));
+    assert_eq!(vm["branch"], base32_id::Short(store.branch()).to_string());
     assert_eq!((&vm["follower"], &vm["answered"]), (&false.into(), &true.into()));
     assert_eq!(vm["vmm"]["build"], cladefs::BUILD_COMMIT);
     assert_eq!(vm["vmm"]["counters"]["stage_ops"], 0);
