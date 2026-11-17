@@ -199,16 +199,19 @@ impl Vm {
         });
         if window != 0 {
             device["dax_window_size"] = window.into();
-            // cladefs: the window's private pages at most, CLADEFS_DAX_PRIVATE_MAX pages if set,
-            // given the device in bytes (TASK-502); the device's default otherwise, 1 GiB
-            // (TASK-227).
+            // cladefs: the window's private pages' bytes at most, CLADEFS_DAX_PRIVATE_MAX_BYTES if
+            // set, as the device takes them (TASK-502); the device's default otherwise, 1 GiB
+            // (TASK-227). The page count it was, CLADEFS_DAX_PRIVATE_MAX, refused, not read as
+            // bytes.
+            assert!(
+                std::env::var_os("CLADEFS_DAX_PRIVATE_MAX").is_none(),
+                "CLADEFS_DAX_PRIVATE_MAX, a page count, is CLADEFS_DAX_PRIVATE_MAX_BYTES now"
+            );
             if let Some(most) =
-                std::env::var("CLADEFS_DAX_PRIVATE_MAX").ok().filter(|m| !m.is_empty())
+                std::env::var("CLADEFS_DAX_PRIVATE_MAX_BYTES").ok().filter(|m| !m.is_empty())
             {
-                let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX is a count of pages");
-                // SAFETY: Plain system call.
-                let page = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) } as u64;
-                device["dax_private_max_bytes"] = (most * page).into();
+                let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX_BYTES is a count");
+                device["dax_private_max_bytes"] = most.into();
             }
         }
         push(&mut self.config["cladefs"], device);

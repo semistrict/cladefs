@@ -28,13 +28,12 @@
 //! store to a page a copy on the host (fxfs-guest-pgbench-forked, -dax-forked); and so, each VM
 //! kept running once its runs are done, the host's memory measured as each is added
 //! (`crate::measure`): what a VM more costs the host (fxfs-guest-pgbench-density, -dax-density).
-//! CLADEFS_PGBENCH_RUNS and CLADEFS_PGBENCH_RUN_SECS set the runs, CLADEFS_PGBENCH_SCALE its scale, and
+//! CLADEFS_PGBENCH_RUNS and CLADEFS_PGBENCH_RUN_SECS set the runs, CLADEFS_PGBENCH_SCALE its scale,
 //! CLADEFS_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024), and
 //! CLADEFS_PGBENCH_DAEMON_MEMORY the daemon's, in bytes (a page cache of the host's free memory
-//! unless set). With CLADEFS_PGBENCH_COLD
-//! set, the forks' VMs are served by a daemon started once the base's has drained and stopped,
-//! with a part cache of its own, empty, and nothing in memory: a host forking another host's base,
-//! which holds none of its data (TASK-225).
+//! unless set). With CLADEFS_PGBENCH_COLD set, the forks' VMs are served by a daemon started once
+//! the base's has drained and stopped, with a part cache of its own, empty, and nothing in memory:
+//! a host forking another host's base, which holds none of its data (TASK-225).
 
 use macros::{guest, host};
 
@@ -190,12 +189,7 @@ mod host {
     /// cladefs: the daemon's memory, in bytes: CLADEFS_PGBENCH_DAEMON_MEMORY, or none, a page cache
     /// of the host's free memory (TASK-501).
     fn daemon_memory() -> anyhow::Result<Option<u64>> {
-        match std::env::var("CLADEFS_PGBENCH_DAEMON_MEMORY") {
-            Ok(bytes) if !bytes.is_empty() => Ok(Some(
-                bytes.parse().context("CLADEFS_PGBENCH_DAEMON_MEMORY is a count of bytes")?,
-            )),
-            _ => Ok(None),
-        }
+        optional_setting("CLADEFS_PGBENCH_DAEMON_MEMORY")
     }
 
     /// cladefs: the memory of a density case's VMs, in MiB: CLADEFS_PGBENCH_DENSITY_MEMORY_MIB, or
@@ -217,11 +211,18 @@ mod host {
         std::env::var_os("CLADEFS_PGBENCH_COLD").is_some_and(|cold| !cold.is_empty())
     }
 
-    /// The environment's `name`, a count, or `default`.
+    /// The environment's `name`, a count, or `default` if it is unset or empty.
     fn setting(name: &str, default: u64) -> anyhow::Result<u64> {
+        Ok(optional_setting(name)?.unwrap_or(default))
+    }
+
+    /// The environment's `name`, a count, or none if it is unset or empty.
+    fn optional_setting(name: &str) -> anyhow::Result<Option<u64>> {
         match std::env::var(name) {
-            Ok(value) => Ok(value.parse()?),
-            Err(_) => Ok(default),
+            Ok(value) if !value.is_empty() => {
+                Ok(Some(value.parse().with_context(|| format!("{name} is a count"))?))
+            }
+            _ => Ok(None),
         }
     }
 

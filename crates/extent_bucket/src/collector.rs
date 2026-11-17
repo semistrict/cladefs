@@ -1158,7 +1158,10 @@ enum Points {
 /// cladefs: keeps in `live` the states of the fork points `points` it keeps none of yet, each
 /// recovered once, however many forks name it, several at once ([`Live::keep_point`]): the
 /// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
-/// other cells are read there.
+/// other cells are read there. A branch's are recovered in one walk where they share a checkpoint,
+/// each footer read once for them all (`recovery::recover_ats`, TASK-476): a vdisk's versions are
+/// up to 256 states of one history. A walk finding one lost, each is recovered alone, to tell
+/// which.
 async fn keep_points(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
@@ -1166,41 +1169,65 @@ async fn keep_points(
     points: &BTreeSet<Origin>,
     by: Points,
 ) -> Result<(), Error> {
-    let unkept: Vec<Origin> =
-        points.iter().filter(|&origin| live.points.insert(*origin)).copied().collect();
-    let recoveries = futures::stream::iter(unkept)
-        .map(|origin| async move {
-            (origin, recovery::recover_at(checkpoints, origin.parent, origin.at).await)
+    let mut unkept: BTreeMap<Branch, BTreeSet<u64>> = BTreeMap::new();
+    for &origin in points.iter().filter(|&origin| live.points.insert(*origin)) {
+        unkept.entry(origin.parent).or_default().insert(origin.at);
+    }
+    let walks = futures::stream::iter(unkept)
+        .map(|(parent, ats)| async move {
+            let walked = recovery::recover_ats(checkpoints, parent, &ats).await;
+            (parent, ats, walked)
         })
         .buffer_unordered(RECOVERIES_AT_ONCE)
         .collect::<Vec<_>>()
         .await;
-    for (origin, recovered) in recoveries {
-        match recovered {
-            Ok((state, touched)) => live.keep_point(&state, touched),
+    for (parent, ats, walked) in walks {
+        match walked {
+            Ok((walked, touched)) => live.keep_walked(walked, touched),
             Err(Error::Lost(_)) if by == Points::Referred => {
-                let Some(child) = needing(bucket, origin).await? else {
-                    // Decided by its children's records, in other cells.
-                    live.unsettled = true;
-                    continue;
-                };
-                // Recovered again, after the child's record was read: its fork checkpointed the
-                // state at its point before it wrote its reference and the record
-                // (`branch::record_fork`), so this finds it, listing anew. What the first found
-                // lost may be another fork at the same segment number, a writer's that a
-                // takeover's dropped, the takeover's writer forking the child there since, after
-                // the first read the head (TASK-462): references name a fork point by its segment
-                // number alone.
-                match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
-                    Ok((state, touched)) => live.keep_point(&state, touched),
-                    Err(Error::Lost(lost)) => {
-                        return Err(Error::Lost(format!("{lost}, which {child} lives on")));
-                    }
-                    Err(error) => return Err(error),
+                for at in ats {
+                    keep_referred(bucket, checkpoints, live, Origin { parent, at }).await?;
                 }
             }
             Err(error) => return Err(error),
         }
+    }
+    Ok(())
+}
+
+/// cladefs: keeps in `live` the state of the fork point `origin` a reference names, recovered
+/// alone: if it is lost, a child named under it living on it stops the pass; with none, nothing
+/// was lost, the children deleted, being made of a point deleted, claims, or having no record.
+async fn keep_referred(
+    bucket: &impl Bucket,
+    checkpoints: &Checkpoints<'_, impl Bucket>,
+    live: &mut Live,
+    origin: Origin,
+) -> Result<(), Error> {
+    match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
+        Ok((state, touched)) => live.keep_point(&state, touched),
+        Err(Error::Lost(_)) => {
+            let Some(child) = needing(bucket, origin).await? else {
+                // Decided by its children's records, in other cells.
+                live.unsettled = true;
+                return Ok(());
+            };
+            // Recovered again, after the child's record was read: its fork checkpointed the
+            // state at its point before it wrote its reference and the record
+            // (`branch::record_fork`), so this finds it, listing anew. What the first found
+            // lost may be another fork at the same segment number, a writer's that a
+            // takeover's dropped, the takeover's writer forking the child there since, after
+            // the first read the head (TASK-462): references name a fork point by its segment
+            // number alone.
+            match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
+                Ok((state, touched)) => live.keep_point(&state, touched),
+                Err(Error::Lost(lost)) => {
+                    return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -1506,11 +1533,32 @@ impl Live {
     /// kept is off, as a test shows it needed. What its forks freed of it since is no matter: the
     /// collector is conservative.
     fn keep_point(&mut self, state: &State, touched: BTreeSet<String>) {
+        self.keep_read(touched);
+        self.keep_places(&state.extents);
+    }
+
+    /// cladefs: keeps the fork points' states `walked`, a branch's, as [`Live::keep_point`] keeps
+    /// one: each whole, and the places at which those after each name what changed since.
+    fn keep_walked(&mut self, walked: recovery::Walked, touched: BTreeSet<String>) {
+        self.keep_read(touched);
+        for state in &walked.states {
+            self.keep_places(&state.extents);
+        }
+        self.keep_places(walked.changed.iter().map(|(extent, location)| (extent, location)));
+    }
+
+    /// cladefs: keeps `touched`, what recovering fork points' states read, unless the rule that it
+    /// is kept is off, as a test shows it needed.
+    fn keep_read(&mut self, touched: BTreeSet<String>) {
         if rules().fork_points_kept {
             self.touched.extend(touched);
         }
+    }
+
+    /// cladefs: keeps the extents at `places`, along their ways from where they were sealed.
+    fn keep_places<'a>(&mut self, places: impl IntoIterator<Item = (&'a ExtentId, &'a Location)>) {
         let behind = rules().ways_from_seals;
-        for (extent, location) in &state.extents {
+        for (extent, location) in places {
             if behind {
                 self.behind_at(location);
             }
@@ -5307,6 +5355,102 @@ mod tests {
         let location = state.extents.get(&extent).cloned();
         let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
         crate::testing::read(&reader, extent, &location).await
+    }
+
+    /// TASK-476: a pass over a vdisk of many versions reads each segment's footer twice at most,
+    /// once for the vdisk's state and once for all its versions' states, walked to at once
+    /// (`recovery::recover_ats`), not once a version; and each version's checkpoint at its key,
+    /// which none has. 16 versions cut after a commit each, no checkpoint: 33 segments, whose
+    /// footers a pass recovering each version alone read 321 times, in 52 GETs besides
+    /// (`versions-pass-bench` shows how that grew).
+    #[test]
+    fn passes_read_a_vdisks_footers_once_for_all_its_versions() {
+        let (segments, ranged, gets) = block_on(pass_over_versions(16));
+        assert_eq!(segments, 33);
+        assert_eq!((ranged, gets), (2 * segments, 16 + 6));
+    }
+
+    /// A pass over the cell of a vdisk with `versions` versions, each cut after a commit of an
+    /// extent: how many segments it has, and the ranged GETs, which read footers, and the GETs the
+    /// pass made.
+    async fn pass_over_versions(versions: u64) -> (u64, u64, u64) {
+        let bucket = store();
+        let vdisk = test_branch(1);
+        branch::create(&*bucket, vdisk, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), vdisk, 10, 0).await.unwrap();
+        let first = writer.chain().next_sequence();
+        let extent = |n| ExtentId::new(vdisk.id, first + n);
+        commit(
+            &writer,
+            Commit { tag: 1, extents: vec![(extent(0), vec![1])], ..Commit::default() },
+        )
+        .await;
+        for version in 0..versions {
+            let (tag, written) = (2 + 2 * version, extent(1 + version));
+            let frees = vec![extent(version)];
+            let extents = vec![(written, vec![1])];
+            commit(&writer, Commit { tag, extents, frees, ..Commit::default() }).await;
+            let cut = layout::VersionCut { id: 1 + version, cell_cut: None, keep_last: None };
+            let cutting = SegmentBuilder::from(Commit { tag: tag + 1, ..Commit::default() });
+            let objects = cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting());
+            let at = writer.add_segment(objects).unwrap();
+            writer.upload(at).await.unwrap();
+            writer.acknowledge().await.unwrap();
+        }
+        assert_eq!(writer.versions().await.len() as u64, versions);
+        let segments = writer.chain().next_segment();
+        let before = bucket.stats().requests;
+        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, vdisk.cell).await.unwrap();
+        assert!(!dry.fenced);
+        let after = bucket.stats().requests;
+        let made = |request: Request| after[request as usize] - before[request as usize];
+        (segments, made(Request::GetRange), made(Request::Get))
+    }
+
+    /// TASK-476: of a branch's versions, walked to at once, a later one keeps what the branch
+    /// sealed after the first and freed after it, as the first keeps what it names: what a walk
+    /// takes of the states after its first is what changed since (`recovery::Walked`).
+    #[test]
+    fn later_versions_keep_what_changed_since_the_first() {
+        assert_eq!(block_on(read_the_second_version()), Ok(b"later".to_vec()));
+    }
+
+    /// What the second of two versions of a branch reads of an extent the branch sealed on its own
+    /// between them and freed after both, the branch checkpointed past them, sweeps having run until they
+    /// did nothing more: read by a reader of another host's.
+    async fn read_the_second_version() -> Result<Vec<u8>, Error> {
+        let objects: Arc<InMemory> = Arc::new(InMemory::new());
+        let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
+        let branch = celled(1, 1);
+        branch::create(&*bucket, branch, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let first = writer.chain().next_sequence();
+        let (held, later) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
+        let cut = async |tag, id| {
+            let cut = layout::VersionCut { id, cell_cut: None, keep_last: None };
+            let cutting = SegmentBuilder::from(Commit { tag, ..Commit::default() });
+            let objects = cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting());
+            let at = writer.add_segment(objects).unwrap();
+            writer.upload(at).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            at
+        };
+        let extents = vec![(held, b"held".to_vec())];
+        commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+        cut(2, 0xa).await;
+        // On its own, in an object no recovery reads: kept only by the states naming it.
+        let own = vec![(later.sequence, b"later".to_vec())];
+        commit(&writer, Commit { tag: 3, own, ..Commit::default() }).await;
+        let at = cut(4, 0xb).await;
+        commit(&writer, Commit { tag: 5, frees: vec![held, later], ..Commit::default() }).await;
+        writer.checkpoint().await.unwrap();
+        sweep(&*bucket).await?;
+        let reader = Arc::new(ObjectBucket::new(objects, ""));
+        let checkpoints = Checkpoints::new(&*reader, 0);
+        let (state, _) = recovery::recover_at(&checkpoints, branch, at).await?;
+        let location = state.extents.get(&later).cloned();
+        let location = location.ok_or_else(|| Error::Lost(format!("{later:?} of {branch}")))?;
+        crate::testing::read(&reader, later, &location).await
     }
 
     /// TASK-476: a pass gives up on a restore of a version being made, its host dead, once the

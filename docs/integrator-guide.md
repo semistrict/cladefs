@@ -195,11 +195,11 @@ them a VM holds at once (`PUT /cladefs/{id}`, in Firecracker's swagger spec): a 
 size, a page at least, the window's size at most; 1 GiB unless set, or the window's size if less.
 The guest keeps under it, writing back as it nears it, so a smaller cap means earlier writeback.
 The host refuses what would go past it: a `write(2)` fails `EIO`, and a store through a mapping
-stops that VM (exit 159). The VM
-manager sizes it per VM (TASK-502): the cap bounds a burst of writes between writebacks, which grows
-with how fast the guest writes (its vCPUs) and is memory the VM process holds (weigh it against its
-guest memory). Forked pgbench at 2 vCPUs needed 1 GiB (TASK-227); measure your workloads. The cap
-was a page count, `dax_private_max`, before TASK-502: a device naming that field is refused.
+stops that VM (exit 159). The VM manager sizes it per VM (TASK-502): the cap bounds a burst of
+writes between writebacks, which grows with how fast the guest writes (its vCPUs) and is memory the
+VM process holds (weigh it against its guest memory). Forked pgbench at 2 vCPUs needed 1 GiB
+(TASK-227); measure your workloads. The cap was a page count, `dax_private_max`, before TASK-502: a
+device naming that field is refused.
 
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
