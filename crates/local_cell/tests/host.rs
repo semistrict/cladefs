@@ -55,6 +55,46 @@ fn stores_name_their_cell_and_bucket() {
     assert_eq!((opened.bucket(), opened.description().cell), (Some("memory:///host"), CELL));
 }
 
+/// TASK-648: an opening of a store this process is closing waits for its close, then opens it,
+/// rather than fail as at a second opening: a store let go of closes on whatever thread drops it
+/// last, its last commits made durable, seconds on a busy disk. Its close held where it says it is
+/// closing; the opening held where it waits; then the close let go on.
+#[test]
+fn openings_wait_for_a_store_closing() {
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let store = create(&path);
+    let (closing, closing_seen) = std::sync::mpsc::channel();
+    let (go, gone_on) = std::sync::mpsc::channel::<()>();
+    let gone_on = std::sync::Mutex::new(gone_on);
+    // The first close alone held: the opening's own store closes after it, unheld.
+    let first = std::sync::atomic::AtomicBool::new(true);
+    fail::cfg_callback("store::closing", move || {
+        if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            closing.send(()).unwrap();
+            gone_on.lock().unwrap().recv().unwrap();
+        }
+    })
+    .unwrap();
+    let (waiting, waiting_seen) = std::sync::mpsc::channel();
+    let waiting = std::sync::Mutex::new(waiting);
+    fail::cfg_callback("dir::claim_waits", move || waiting.lock().unwrap().send(()).unwrap())
+        .unwrap();
+    let closed = std::thread::spawn(move || drop(store));
+    let wait = std::time::Duration::from_secs(30);
+    closing_seen.recv_timeout(wait).expect("the store never said it was closing");
+    let opening = std::thread::spawn({
+        let path = path.clone();
+        move || open_host(&path).map(drop).map_err(|err| format!("{err:#}"))
+    });
+    waiting_seen.recv_timeout(wait).expect("the opening never waited for the close");
+    go.send(()).unwrap();
+    closed.join().unwrap();
+    assert_eq!(opening.join().unwrap(), Ok(()));
+    scenario.teardown();
+}
+
 /// A store is opened once in a process, as in all: a second opening, and a deletion, of one open
 /// fail at once, rather than wait for the process itself (TASK-165.7).
 #[test]

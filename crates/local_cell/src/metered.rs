@@ -149,6 +149,10 @@ impl<D: Dir> Dir for Metered<D> {
         self.shared.dir.claim()
     }
 
+    fn closing(&self) {
+        self.shared.dir.closing()
+    }
+
     fn unclaim(&self) {
         self.shared.dir.unclaim()
     }

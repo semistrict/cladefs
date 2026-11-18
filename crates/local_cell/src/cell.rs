@@ -1509,6 +1509,12 @@ impl<D: Dir> LocalCell<D> {
     /// making durable among them: another store may open it, and this one reads what it holds, as
     /// caches of its extents may still, and changes nothing.
     pub fn close(&self) -> Result<(), Error> {
+        // cladefs: an opening of the cell in this process meanwhile waits for it, rather than fail
+        // as at a second opening (TASK-648).
+        if let Some((claim, _)) = self.opened.with(Mutex::lock).as_ref() {
+            claim.0.closing();
+            fail::fail_point!("store::closing");
+        }
         // After a flush in flight: its commits are durable, and the files they made unreferenced
         // gone, before another store may open the cell.
         let mut flushing = rules().close_waits_for_flushes.then(|| self.flushing.with(Mutex::lock));

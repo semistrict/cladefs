@@ -189,6 +189,10 @@ impl<D: Dir> Dir for CachedDir<D> {
         self.shared.dir.claim()
     }
 
+    fn closing(&self) {
+        self.shared.dir.closing()
+    }
+
     fn unclaim(&self) {
         self.shared.dir.unclaim()
     }

@@ -4446,10 +4446,10 @@ fn control_forks_failing_fork_again() {
 }
 
 /// TASK-648: a fork of a version made right after its writer's connection went, the store still
-/// open in this process as its last reference is dropped, syncs that store as it is: before, it
-/// opened it again beside it, which this process's claim on its directory refused (`EBUSY`). Here
-/// the store lingers by a reference the test keeps, as a close on a blocking thread, or a busy
-/// host, would.
+/// open in this process, syncs that store as it is, never opening it again beside it. Here the
+/// store lingers by a reference the test keeps, as a fork's read of it would. A store already
+/// closing, its last reference dropped, an opening waits for (local_cell's
+/// `openings_wait_for_a_store_closing`): the window the failing runs met.
 #[test]
 fn forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing() {
     host();

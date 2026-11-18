@@ -5,7 +5,7 @@
 //! The file system a store lives in: a directory of the host's ([`HostDir`]), or of memory
 //! ([`MemDir`](crate::MemDir)), which can simulate crashes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
@@ -156,10 +156,17 @@ pub trait Dir: Send + Sync + 'static {
 
     /// cladefs: claims the directory's store for one store open in this process: what refuses a
     /// second opening of it, or its deletion while open, at once, rather than wait for itself
-    /// (TASK-165.7). A directory no other opening sees claims nothing.
+    /// (TASK-165.7). One claimed by a store closing it waits for, a while: a store let go of in
+    /// this process closes on whatever thread drops it last, its last commits made durable, which
+    /// takes seconds on a busy disk, and an opening of it then is no second opening (TASK-648). A
+    /// directory no other opening sees claims nothing.
     fn claim(&self) -> io::Result<()> {
         Ok(())
     }
+
+    /// cladefs: says the store claimed is closing ([`Dir::claim`]): an opening of it waits for its
+    /// claim to go, rather than fail.
+    fn closing(&self) {}
 
     /// cladefs: lets the claim go, once claimed ([`Dir::claim`]).
     fn unclaim(&self) {}
@@ -443,18 +450,50 @@ impl Dir for DiskDir {
     }
 
     fn claim(&self) -> io::Result<()> {
-        if !CLAIMED.lock().unwrap().insert(self.id()?) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "this process has the store open",
-            ));
+        let id = self.id()?;
+        let deadline = std::time::Instant::now() + CLOSING_WAIT;
+        let mut claimed = CLAIMED.lock().unwrap();
+        loop {
+            match claimed.get(&id) {
+                None => {
+                    claimed.insert(id, false);
+                    return Ok(());
+                }
+                Some(false) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "this process has the store open",
+                    ));
+                }
+                Some(true) => {
+                    let left = deadline.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "this process is still closing the store",
+                        ));
+                    }
+                    fail::fail_point!("dir::claim_waits");
+                    claimed = UNCLAIMED.wait_timeout(claimed, left).unwrap().0;
+                }
+            }
         }
-        Ok(())
+    }
+
+    fn closing(&self) {
+        if let Ok(id) = self.id()
+            && let Some(closing) = CLAIMED.lock().unwrap().get_mut(&id)
+        {
+            *closing = true;
+        }
     }
 
     fn unclaim(&self) {
         match self.id() {
-            Ok(id) => drop(CLAIMED.lock().unwrap().remove(&id)),
+            Ok(id) => {
+                CLAIMED.lock().unwrap().remove(&id);
+                UNCLAIMED.notify_all();
+            }
             Err(err) => log::warn!("extent store: unclaiming {}: {err}", self.path.display()),
         }
     }
@@ -480,8 +519,16 @@ impl Dir for DiskDir {
 /// how many takings of each, and the descriptor holding the `flock`.
 static TAKEN: Mutex<BTreeMap<DirId, (usize, Arc<std::fs::File>)>> = Mutex::new(BTreeMap::new());
 
-/// cladefs: the directories whose stores this process has open ([`Dir::claim`]).
-static CLAIMED: Mutex<BTreeSet<DirId>> = Mutex::new(BTreeSet::new());
+/// cladefs: the directories whose stores this process has open ([`Dir::claim`]), and whether each
+/// is closing ([`Dir::closing`]).
+static CLAIMED: Mutex<BTreeMap<DirId, bool>> = Mutex::new(BTreeMap::new());
+
+/// cladefs: woken as a claim goes ([`Dir::unclaim`]), for openings waiting for a store closing.
+static UNCLAIMED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// cladefs: how long an opening waits for a store of its directory closing in this process
+/// (TASK-648): a close makes its last commits durable, seconds on a busy disk.
+const CLOSING_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A directory's device and inode, which name it however a path names it.
 type DirId = (u64, u64);
