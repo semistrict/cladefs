@@ -136,56 +136,26 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
-    let bucket = Arc::new(ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?);
+    // Its requests of other buckets' cells go there, by the registry of buckets (TASK-633.4).
+    let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
+    let bucket = ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?.routed(resolve);
+    let bucket = Arc::new(bucket);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)
 }
 
-/// cladefs: the buckets this process found by number ([`bucket_numbered`]), by the URL of the
-/// bucket it found them from and the number: each opened once, its identity checked.
-static NUMBERED: Mutex<BTreeMap<(String, u16), Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
-
 /// cladefs: the bucket numbered `number`, as the host whose bucket is at `home` reaches it
-/// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket the registry in
-/// `home`'s root records, or, if that copy records none of that number, the root bucket's
-/// registry, the authority; opened with its own options ([`ObjectBucket::from_url_numbered`]),
-/// and refused unless its identity is the one recorded (`Error::Mismatched`). `NoBucket` if no
-/// registry records it. It blocks.
+/// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket its requests of
+/// that number's cells go to ([`ObjectBucket::numbered`]): the registry in `home`'s root, or the
+/// root bucket's, records it; opened with its own options, and refused unless its identity is the
+/// one recorded (`Error::Mismatched`). `NoBucket` if no registry records it. It blocks.
 pub(crate) fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
-    use bucket_cell::identity::{self, ROOT};
-    let key = (home.to_owned(), number);
-    if let Some(found) = NUMBERED.lock().unwrap().get(&key) {
-        return Ok(found.clone());
-    }
     let ours = bucket(home)?;
-    let identity = upload::block_on(identity::get(&*ours))??;
-    let identity = identity.ok_or(bucket_cell::Error::NoBucket(number))?;
-    if identity.number == number {
+    let identity = upload::block_on(bucket_cell::identity::get(&*ours))??;
+    if identity.is_some_and(|identity| identity.number == number) {
         return Ok(ours);
     }
-    // The bucket an entry records, opened with its options, and checked to be it.
-    let open = |entry: &identity::Entry| -> Result<Arc<ObjectBucket>, Failure> {
-        let url = entry.details.url.as_deref().ok_or(bucket_cell::Error::NoBucket(entry.number))?;
-        let opened =
-            ObjectBucket::from_url_numbered(url, entry.number).map_err(anyhow::Error::msg)?;
-        identity::verified(entry, upload::block_on(identity::get(&opened))??)?;
-        Ok(Arc::new(opened))
-    };
-    let copy = upload::block_on(identity::registry(&*ours))??;
-    let entry = match copy.as_ref().and_then(|copy| copy.bucket(number)) {
-        Some(entry) => entry.clone(),
-        None => {
-            let root = match (identity.number, copy.as_ref().and_then(|copy| copy.bucket(ROOT))) {
-                (ROOT, _) | (_, None) => return Err(bucket_cell::Error::NoBucket(number).into()),
-                (_, Some(root)) => open(root)?,
-            };
-            let registry = upload::block_on(identity::registry(&*root))??;
-            let entry = registry.as_ref().and_then(|registry| registry.bucket(number)).cloned();
-            entry.ok_or(bucket_cell::Error::NoBucket(number))?
-        }
-    };
-    let found = open(&entry)?;
-    Ok(NUMBERED.lock().unwrap().entry(key).or_insert(found).clone())
+    Ok(upload::block_on(ours.numbered(number))??)
 }
 
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its stores hold

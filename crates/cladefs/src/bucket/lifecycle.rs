@@ -653,7 +653,8 @@ fn bucket_lifecycle_by_phase() {
 ///
 /// cladefs: since TASK-633.9 the host's first ID, in [`host`], reads its bucket's identity, which
 /// looks at the collector's marking for the minute after, so the version's open, at once with its
-/// record before, asks it no more: 4 in 4.
+/// record before, asks it no more: 4 in 4. And since TASK-633.5 a child's open, its head given its
+/// keys by the fork, reads no ancestor's head: its taking alone, 1 in 1, where it was 3 in 3.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -675,9 +676,9 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
         [
             ("cold copy-open", (4, 4)),
             ("cold fork", (6, 6)),
-            ("cold fork-open", (3, 3)),
+            ("cold fork-open", (1, 1)),
             ("warm fork", (6, 6)),
-            ("warm fork-open", (3, 3)),
+            ("warm fork-open", (1, 1)),
         ]
     );
     drop((vm, cold, taken));

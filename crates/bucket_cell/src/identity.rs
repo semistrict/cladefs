@@ -115,6 +115,11 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     layout::decode(bytes)
 }
 
+/// The identity an identity object's `bytes` hold, refused if of another format.
+pub fn parse(bytes: &[u8]) -> Result<Identity, Error> {
+    decode(bytes)
+}
+
 /// Whether `number` may be a bucket's: neither [`NAMED`] nor [`NONE`].
 pub fn given(number: u16) -> bool {
     number != NAMED && number != NONE

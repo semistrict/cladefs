@@ -67,6 +67,27 @@ pub struct ObjectBucket {
     /// cladefs: what gives this process's new cells their IDs, out of blocks of the bucket's
     /// (TASK-364).
     objectids: crate::objectid::Allocator,
+    /// cladefs: the other buckets its requests go to, by the bucket of their keys' cells
+    /// ([`ObjectBucket::routed`], TASK-633.4): none for a bucket whose requests all stay in it.
+    route: Option<Route>,
+}
+
+/// cladefs: what opens the bucket numbered `number`, other than `home`, for `home`'s requests of
+/// that bucket's cells (TASK-633.4): [`Registered`] reads it in the registry of buckets.
+pub trait Resolve: Send + Sync {
+    fn open<'a>(
+        &'a self,
+        home: &'a ObjectBucket,
+        number: u16,
+    ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>>;
+}
+
+/// cladefs: a routing bucket's other buckets ([`ObjectBucket::routed`]): how it opens them, its own
+/// number once read, and those it opened, each once.
+struct Route {
+    resolve: Arc<dyn Resolve>,
+    home: std::sync::Mutex<Option<u16>>,
+    members: std::sync::Mutex<std::collections::BTreeMap<u16, Arc<ObjectBucket>>>,
 }
 
 /// The kinds of request a bucket makes.
@@ -540,7 +561,62 @@ impl ObjectBucket {
         let prefix = prefix.trim_matches('/').to_owned();
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids }
+        let route = None;
+        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids, route }
+    }
+
+    /// cladefs: this bucket, its requests of the objects of cells of other buckets sent there
+    /// (TASK-633.4, backlog doc-23): each key's cell's ID names its bucket ([`crate::objectid::bucket_of`]),
+    /// which `resolve` opens, once, unless it is this one, or none (the IDs tests name); keys of no
+    /// cell's (its identity, its registry, blocks of IDs, tenants' KEKs) stay here. A listing goes
+    /// where its prefix's cell is, a batch of deletions to each bucket of its keys. A bucket that
+    /// can't be opened is unavailable to the request, as a bucket failing is, logged: requests try
+    /// again, so that a registry spread meanwhile lets them on.
+    pub fn routed(self, resolve: Arc<dyn Resolve>) -> Self {
+        let (home, members) = Default::default();
+        Self { route: Some(Route { resolve, home, members }), ..self }
+    }
+
+    /// cladefs: the bucket numbered `number`, as this one's requests reach it ([`ObjectBucket::routed`]):
+    /// opened by its resolver, unless opened before. `NoBucket` for a bucket that routes nothing.
+    pub async fn numbered(&self, number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
+        let route = self.route.as_ref().ok_or(crate::Error::NoBucket(number))?;
+        if let Some(member) = route.members.lock().unwrap().get(&number) {
+            return Ok(member.clone());
+        }
+        let opened = route.resolve.open(self, number).await?;
+        Ok(route.members.lock().unwrap().entry(number).or_insert(opened).clone())
+    }
+
+    /// cladefs: its own number, read once from its identity: none if it has none yet.
+    async fn own_number(&self, route: &Route) -> Result<Option<u16>, Error> {
+        if let Some(number) = *route.home.lock().unwrap() {
+            return Ok(Some(number));
+        }
+        let identity = match self.store_get(layout::IDENTITY).await {
+            Ok(object) => crate::identity::parse(&object.bytes).map_err(|err| {
+                log::warn!("bucket: reading its own identity: {err}");
+                Error::Unavailable
+            })?,
+            Err(Error::NotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        *route.home.lock().unwrap() = Some(identity.number);
+        Ok(Some(identity.number))
+    }
+
+    /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
+    async fn member(&self, key: &str) -> Result<Option<Arc<ObjectBucket>>, Error> {
+        let Some(route) = &self.route else { return Ok(None) };
+        let Some(cell) = layout::cell_of(key) else { return Ok(None) };
+        let number = crate::objectid::bucket_of(cell.id);
+        if number == crate::identity::NAMED || self.own_number(route).await? == Some(number) {
+            return Ok(None);
+        }
+        self.numbered(number).await.map(Some).map_err(|err| {
+            log::warn!("bucket: reaching bucket {number}, for {key}: {err}");
+            Error::Unavailable
+        })
     }
 
     /// cladefs: a new object ID of the bucket's, which no other cell of any bucket has, nor will
@@ -738,6 +814,66 @@ pub(crate) struct Reached {
     pub prefix: String,
 }
 
+/// cladefs: opens other buckets by the registry of buckets (TASK-633.3, TASK-633.4): the bucket
+/// numbered `number`, as the registry copy in the home bucket's root records it, or, for one that
+/// copy lacks, the root bucket's registry, the authority; at its URL, with the options `vars` give
+/// it ([`numbered_options`]), refused unless its identity is the one recorded
+/// ([`crate::Error::Mismatched`]); `NoBucket` for a number no registry records.
+pub struct Registered {
+    vars: Vec<(String, String)>,
+}
+
+impl Registered {
+    /// Buckets opened with `vars`' options: the environment's, for a host ([`Registered::from_env`]).
+    pub fn new(vars: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self { vars: vars.into_iter().collect() }
+    }
+
+    pub fn from_env() -> Self {
+        Self::new(std::env::vars())
+    }
+
+    /// The bucket `entry` records, checked to be it.
+    async fn reach(&self, entry: &crate::identity::Entry) -> Result<ObjectBucket, crate::Error> {
+        let number = entry.number;
+        let url = entry.details.url.as_deref().ok_or(crate::Error::NoBucket(number))?;
+        let options = numbered_options(self.vars.iter().cloned(), number);
+        let Reached { objects, pages, prefix } = reach(url, options, &Client::DEFAULT)
+            .map_err(|err| crate::Error::Read(format!("bucket {number} at {url}: {err}")))?;
+        let bucket = ObjectBucket::paged(objects, pages, &prefix);
+        crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
+        Ok(bucket)
+    }
+}
+
+impl Resolve for Registered {
+    fn open<'a>(
+        &'a self,
+        home: &'a ObjectBucket,
+        number: u16,
+    ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
+        use crate::identity::{self, ROOT};
+        Box::pin(async move {
+            let copy = identity::registry(home).await?;
+            let entry = match copy.as_ref().and_then(|copy| copy.bucket(number)) {
+                Some(entry) => entry.clone(),
+                None => {
+                    let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
+                    let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
+                    let root = match (ours.number, root) {
+                        (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
+                        (_, Some(root)) => self.reach(root).await?,
+                    };
+                    let registry = identity::registry(&root).await?;
+                    let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
+                    entry.cloned().ok_or(crate::Error::NoBucket(number))?
+                }
+            };
+            Ok(Arc::new(self.reach(&entry).await?))
+        })
+    }
+}
+
 /// cladefs: the options of the bucket numbered `number`, from the variables `vars` (TASK-633.3):
 /// each `CLADEFSD_BUCKET_<number>_<NAME>` as `NAME`, over the variable `NAME` itself, so that a
 /// host reaches buckets of other clouds, regions or accounts than its own's, each with its own
@@ -852,16 +988,10 @@ fn error(error: &object_store::Error) -> Error {
     }
 }
 
-impl Bucket for ObjectBucket {
-    fn decoded(&self) -> Option<&crate::recovery::Decoded> {
-        Some(&self.decoded)
-    }
-
-    fn known(&self) -> Option<&crate::known::Known> {
-        Some(&self.known)
-    }
-
-    fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
+/// cladefs: its requests of its own objects: those [`Bucket`]'s, routed, send here, or to another
+/// bucket's ([`ObjectBucket::routed`]).
+impl ObjectBucket {
+    fn store_get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
         self.marks.reached(Request::Get, key);
         let refresh = self.marks_due(key);
         let (store, path) = (self.store.clone(), self.path(key));
@@ -879,7 +1009,7 @@ impl Bucket for ObjectBucket {
         async move { futures::join!(get, refresh).0 }
     }
 
-    fn get_range(
+    fn store_get_range(
         &self,
         key: &str,
         range: ByteRange,
@@ -921,7 +1051,7 @@ impl Bucket for ObjectBucket {
         async move { futures::join!(get, refresh).0 }
     }
 
-    fn head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
+    fn store_head(&self, key: &str) -> impl Future<Output = Result<Meta, Error>> + Send {
         self.marks.reached(Request::Head, key);
         let refresh = self.marks_due(key);
         let (store, path) = (self.store.clone(), self.path(key));
@@ -934,7 +1064,7 @@ impl Bucket for ObjectBucket {
         async move { futures::join!(head, refresh).0 }
     }
 
-    fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
+    fn store_list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send {
         let store = self.store.clone();
         let path = self.prefix_path(prefix);
         let refresh = self.marks_due(prefix);
@@ -963,7 +1093,7 @@ impl Bucket for ObjectBucket {
 
     /// cladefs: a page a request where the store pages ([`ObjectBucket::paged`]); else the level
     /// whole, which the page is cut out of ([`Listing::page`]).
-    fn list_delimited(
+    fn store_list_delimited(
         &self,
         prefix: &str,
         page: Page<'_>,
@@ -1018,7 +1148,7 @@ impl Bucket for ObjectBucket {
         }
     }
 
-    fn put(
+    fn store_put(
         &self,
         key: &str,
         bytes: bytes::Bytes,
@@ -1046,7 +1176,7 @@ impl Bucket for ObjectBucket {
         }
     }
 
-    fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
+    fn store_delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send {
         let (store, path) = (self.store.clone(), self.path(key));
         async move {
             let timed = self.counts.request(Request::Delete, Some(&path));
@@ -1064,7 +1194,7 @@ impl Bucket for ObjectBucket {
     /// cladefs: through `object_store`'s `delete_stream`, which deletes in batches where the store
     /// has a batch delete (S3's DeleteObjects, Azure's), and several at once where it has not
     /// (TASK-395.5); cladefs's buckets of files take their lock once a batch ([`crate::local`]).
-    fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
+    fn store_delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
         let store = self.store.clone();
         let paths: Vec<object_store::Result<Path>> =
             keys.iter().map(|key| Ok(self.path(key))).collect();
@@ -1084,6 +1214,90 @@ impl Bucket for ObjectBucket {
             timed.span.set_count(crate::trace::OBJECTS, objects as u64);
             timed.answered(deleted, |_| 0)
         }
+    }
+}
+
+impl Bucket for ObjectBucket {
+    fn decoded(&self) -> Option<&crate::recovery::Decoded> {
+        Some(&self.decoded)
+    }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        Some(&self.known)
+    }
+
+    async fn get(&self, key: &str) -> Result<Object, Error> {
+        match self.member(key).await? {
+            Some(member) => member.store_get(key).await,
+            None => self.store_get(key).await,
+        }
+    }
+
+    async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
+        match self.member(key).await? {
+            Some(member) => member.store_get_range(key, range).await,
+            None => self.store_get_range(key, range).await,
+        }
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        match self.member(key).await? {
+            Some(member) => member.store_head(key).await,
+            None => self.store_head(key).await,
+        }
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
+        match self.member(prefix).await? {
+            Some(member) => member.store_list(prefix).await,
+            None => self.store_list(prefix).await,
+        }
+    }
+
+    async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
+        match self.member(prefix).await? {
+            Some(member) => member.store_list_delimited(prefix, page).await,
+            None => self.store_list_delimited(prefix, page).await,
+        }
+    }
+
+    async fn put(&self, key: &str, bytes: crate::Bytes, mode: PutMode) -> Result<Version, Error> {
+        match self.member(key).await? {
+            Some(member) => member.store_put(key, bytes, mode).await,
+            None => self.store_put(key, bytes, mode).await,
+        }
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        match self.member(key).await? {
+            Some(member) => member.store_delete(key).await,
+            None => self.store_delete(key).await,
+        }
+    }
+
+    /// cladefs: each bucket's keys deleted there, in one batch each (TASK-633.4).
+    async fn delete_batch(&self, keys: &[&str]) -> Result<(), Error> {
+        if self.route.is_none() {
+            return self.store_delete_batch(keys).await;
+        }
+        let mut here = Vec::new();
+        let mut there: Vec<(Arc<ObjectBucket>, Vec<&str>)> = Vec::new();
+        for &key in keys {
+            match self.member(key).await? {
+                None => here.push(key),
+                Some(member) => match there.iter_mut().find(|(m, _)| Arc::ptr_eq(m, &member)) {
+                    Some((_, keys)) => keys.push(key),
+                    None => there.push((member, vec![key])),
+                },
+            }
+        }
+        if !here.is_empty() {
+            self.store_delete_batch(&here).await?;
+        }
+        for (member, keys) in there {
+            member.store_delete_batch(&keys).await?;
+        }
+        Ok(())
     }
 
     fn now(&self) -> u64 {
@@ -1134,6 +1348,61 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
+
+    /// TASK-633.4: a bucket routing by the registry sends the requests of a cell of another bucket
+    /// there, and keeps those of its own cells, of the cells tests name, and of no cell's: reads,
+    /// writes, listings, and each bucket's share of a batch of deletions. A number no registry
+    /// records is unavailable to its request, not answered here.
+    #[test]
+    fn requests_go_to_the_bucket_of_their_cell() {
+        use crate::identity::{self, Details};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let (home_url, other_url) = (url("home"), url("other"));
+            let (home, other) = (
+                ObjectBucket::from_url(&home_url).unwrap(),
+                ObjectBucket::from_url(&other_url).unwrap(),
+            );
+            identity::format(&home, &Details::default()).await.unwrap();
+            let details = Details { url: Some(other_url.clone()), ..Details::default() };
+            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            let routed = ObjectBucket::from_url(&home_url)
+                .unwrap()
+                .routed(Arc::new(Registered::new(Vec::<(String, String)>::new())));
+
+            let theirs = layout::CellId { tenant: 1, id: 2 << 48 | 5 };
+            let ours = layout::CellId { tenant: 1, id: 1 << 48 | 5 };
+            let named = layout::CellId { tenant: 1, id: 7 };
+            for cell in [theirs, ours, named] {
+                let key = layout::head(cell);
+                routed.put(&key, b"head".to_vec().into(), PutMode::Create).await.unwrap();
+                assert_eq!(routed.get(&key).await.map(|object| object.bytes), Ok(b"head".to_vec()));
+            }
+            async fn at(bucket: &ObjectBucket, cell: layout::CellId) -> bool {
+                bucket.store_get(&layout::head(cell)).await.is_ok()
+            }
+            assert_eq!((at(&other, theirs).await, at(&home, theirs).await), (true, false));
+            assert_eq!((at(&home, ours).await, at(&other, ours).await), (true, false));
+            assert_eq!((at(&home, named).await, at(&other, named).await), (true, false));
+            let listed = routed.list(&theirs.prefix()).await.unwrap();
+            assert_eq!(
+                listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(),
+                [layout::head(theirs)]
+            );
+
+            let (theirs_key, ours_key) = (layout::head(theirs), layout::head(ours));
+            routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();
+            assert_eq!((at(&other, theirs).await, at(&home, ours).await), (false, false));
+
+            let unrecorded = layout::head(layout::CellId { tenant: 1, id: 9 << 48 | 1 });
+            assert_eq!(routed.get(&unrecorded).await.map(drop), Err(Error::Unavailable));
+            assert_eq!(routed.numbered(9).await.map(drop), Err(crate::Error::NoBucket(9)));
+        });
+    }
 
     /// TASK-633.3: a bucket's own variables, `CLADEFSD_BUCKET_<number>_<NAME>`, stand for `NAME`
     /// over the variable itself; other buckets' stay as they are, which no builder reads.
