@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: cells (TASK-364, doc-20). A tenant's cell is one filesystem, and its unit of placement:
-//! a host at a time holds it, and with it the branch that is its log, kept under the cell's prefix
+//! cladefs: cells (TASK-364, doc-20). A tenant's cell has one kind, and is its unit of placement:
+//! a host at a time holds it, and with it its branch, kept under the cell's prefix
 //! ([`Cell::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
-//! which placement's fencing token, and which branch, of what kind, its filesystem is.
+//! which placement's fencing token, and its branch and kind.
 //!
 //! Taking a cell is one compare-and-swap of its object, to the next epoch, refused to a placement
 //! of a lower token than the one holding it ([`Error::Stale`]), as a branch's head is. The taker
@@ -14,8 +14,8 @@
 //! its next upload; it can't take it back, its epoch lower. So a cell moves whole, fenced by its
 //! branch's own head, which nothing about cells changes.
 //!
-//! A cell is made with no filesystem, and is given one by the first store of it its holder makes
-//! ([`hold`]): one, never another ([`Error::CellHasBranch`]).
+//! A cell is made with no branch or kind, and is given them by the first store of it its holder
+//! makes ([`hold`]): one branch, never another ([`Error::CellHasBranch`]).
 //!
 //! cladefs: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
 //! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`],
@@ -34,7 +34,7 @@ use crate::{Error, bucket, rules};
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
 
-/// What a cell's filesystem is, which says what opens it (doc-20).
+/// What a cell holds, which says what opens it (doc-20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// An Fxfs filesystem.
@@ -61,13 +61,6 @@ impl Kind {
     }
 }
 
-/// cladefs: a cell's filesystem (doc-20): the branch that is its log, and its kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Filesystem {
-    pub branch: u64,
-    pub kind: Kind,
-}
-
 /// A cell's object.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Object {
@@ -80,8 +73,10 @@ pub struct Object {
     pub holder: u64,
     /// The fencing token of the placement that took it, which no lower one takes it from.
     pub token: u64,
-    /// Its filesystem, once its first store is made.
-    pub filesystem: Option<Filesystem>,
+    /// Its branch, once its first store is made: one, never another (doc-20).
+    pub branch: Option<u64>,
+    /// Its kind, given with its branch.
+    pub kind: Option<Kind>,
     /// Whether it was deleted: then no one takes it again.
     pub deleted: bool,
     /// cladefs: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first
@@ -94,14 +89,15 @@ pub struct Object {
 
 impl Object {
     /// cladefs: a cell's object as its maker makes it, held by `holder` of the placement of `token`
-    /// at epoch 1, of no filesystem yet, its KEK `kek`.
+    /// at epoch 1, of no branch or kind yet, its KEK `kek`.
     fn made(holder: u64, token: u64, kek: Kek) -> Self {
         Self {
             format: FORMAT,
             epoch: 1,
             holder,
             token,
-            filesystem: None,
+            branch: None,
+            kind: None,
             deleted: false,
             keks: vec![kek],
             shredded: false,
@@ -117,9 +113,9 @@ impl Object {
         layout::decode(bytes)
     }
 
-    /// The branch of its filesystem, if it has one.
+    /// Its branch, if it has one.
     pub fn branch(&self, cell: Cell) -> Option<Branch> {
-        self.filesystem.map(|filesystem| Branch { cell, id: filesystem.branch })
+        self.branch.map(|id| Branch { cell, id })
     }
 }
 
@@ -143,7 +139,7 @@ async fn change<R>(
     transition(bucket, &layout::cell(cell), start, decode, step).await
 }
 
-/// Creates `cell`, of no filesystem yet, held by `holder` of the placement of `token` at epoch 1: a
+/// Creates `cell`, of no branch or kind yet, held by `holder` of the placement of `token` at epoch 1: a
 /// create of another's finds its object there. cladefs: its KEK `kek` (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
@@ -161,7 +157,7 @@ pub async fn create(
     Ok(Held { cell, epoch: 1, holder })
 }
 
-/// cladefs: makes `cell`, of no filesystem yet, its KEK `kek`, as `holder` makes it, held by no placement
+/// cladefs: makes `cell`, of no branch or kind yet, its KEK `kek`, as `holder` makes it, held by no placement
 /// (token 0), so that any placement takes it (TASK-411.4): what a fork into a new cell makes as it
 /// gives its child its keys, before the child's store opens, wherever it does. Returns the cell's
 /// object, and whether this made it: one there already, another's, is left as it is.
@@ -253,19 +249,18 @@ async fn change_held<R>(
 
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
 /// takes it as [`take`] does, a shredded one refused; or, if it has no object and `making` gives
-/// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given
-/// `filesystem`, has it be that filesystem, unless it is already: refused if it is another branch's
-/// ([`Error::CellHasBranch`]), as a cell is one filesystem (doc-20). Returns the taking, and the
+/// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given `given`, a
+/// branch and its kind, gives the cell them, unless it has them already: refused if it has another
+/// branch ([`Error::CellHasBranch`]), as a cell has one (doc-20). Returns the taking, and the
 /// object as it left it.
 pub async fn hold(
     bucket: &impl Bucket,
     cell: Cell,
     holding: (u64, u64),
     making: Option<&Kek>,
-    filesystem: Option<Filesystem>,
+    given: Option<(u64, Kind)>,
 ) -> Result<(Held, Object), Error> {
-    let (held, object, _) =
-        hold_from(bucket, cell, Start::Read, holding, making, filesystem).await?;
+    let (held, object, _) = hold_from(bucket, cell, Start::Read, holding, making, given).await?;
     Ok((held, object))
 }
 
@@ -280,7 +275,7 @@ pub async fn hold_from(
     start: Start,
     (holder, token): (u64, u64),
     making: Option<&Kek>,
-    filesystem: Option<Filesystem>,
+    given: Option<(u64, Kind)>,
 ) -> Result<(Held, Object, Option<crate::bucket::Object>), Error> {
     let decode = |bytes: &[u8]| Object::decode(cell, bytes);
     let ((held, object), left) =
@@ -296,12 +291,12 @@ pub async fn hold_from(
                 Some(found) if found.holder == holder => (found, false),
                 Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
             };
-            match (object.filesystem, filesystem) {
-                (Some(had), Some(given)) if had.branch != given.branch => {
-                    return Err(Error::CellHasBranch(had.branch));
+            match (object.branch, given) {
+                (Some(had), Some((branch, _))) if had != branch => {
+                    return Err(Error::CellHasBranch(had));
                 }
-                (None, Some(given)) => {
-                    object.filesystem = Some(given);
+                (None, Some((branch, kind))) => {
+                    (object.branch, object.kind) = (Some(branch), Some(kind));
                     changed = true;
                 }
                 _ => {}
@@ -364,25 +359,25 @@ pub fn shredded(cell: Cell) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
 
-/// Takes `branch`, deleted, out of `cell`, if it is the cell's filesystem: what any placement
+/// Takes `branch`, deleted, out of `cell`, if it is the cell's branch: what any placement
 /// deleting the branch does, whoever holds the cell, which changes nothing of who holds it, nor
 /// its epoch.
 pub async fn forget(bucket: &impl Bucket, cell: Cell, branch: u64) -> Result<(), Error> {
     change(bucket, cell, Start::Read, |found| match found {
-        Some(found) if found.filesystem.is_some_and(|had| had.branch == branch) => {
-            Ok(Step::Write(Object { filesystem: None, ..found }, ()))
+        Some(found) if found.branch == Some(branch) => {
+            Ok(Step::Write(Object { branch: None, kind: None, ..found }, ()))
         }
         _ => Ok(Step::Stop(())),
     })
     .await
 }
 
-/// Marks the cell `held` holds deleted, so that no one takes it again, returning its filesystem,
-/// whose branch stays, to be deleted.
-pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<Option<Filesystem>, Error> {
+/// Marks the cell `held` holds deleted, so that no one takes it again, returning its branch, which
+/// stays, to be deleted.
+pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<Option<u64>, Error> {
     change_held(bucket, held, |found| {
-        let filesystem = found.filesystem;
-        Ok(Step::Write(Object { deleted: true, ..found }, filesystem))
+        let branch = found.branch;
+        Ok(Step::Write(Object { deleted: true, ..found }, branch))
     })
     .await
 }
@@ -428,16 +423,21 @@ mod tests {
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
 
-    const FXFS: Filesystem = Filesystem { branch: 7, kind: Kind::Fxfs };
-    const SQLITE: Filesystem = Filesystem { branch: 8, kind: Kind::Sqlite };
+    const FXFS: (u64, Kind) = (7, Kind::Fxfs);
+    const SQLITE: (u64, Kind) = (8, Kind::Sqlite);
+
+    /// `object`'s branch and kind.
+    fn branch_and_kind(object: &Object) -> Option<(u64, Kind)> {
+        object.branch.zip(object.kind)
+    }
 
     /// A cell's KEK, wrapped, as its object keeps it: none of these tests unwraps it.
     fn kek() -> Kek {
         Kek { generation: crate::keys::FIRST, wrapped: extent_keys::Wrapped(vec![7; 40]) }
     }
 
-    /// A cell made is held by its maker at epoch 1, of no filesystem yet; made again by its maker, whose
-    /// answer was lost, it stands; by another, it exists. One that was never made has no object,
+    /// A cell made is held by its maker at epoch 1, of no branch or kind yet; made again by its
+    /// maker, whose answer was lost, it stands; by another, it exists. One that was never made has no object,
     /// and no one takes it.
     #[test]
     fn cells_are_made_once() {
@@ -453,7 +453,8 @@ mod tests {
             epoch: 1,
             holder: 0x11,
             token: 5,
-            filesystem: None,
+            branch: None,
+            kind: None,
             deleted: false,
             keks: vec![kek()],
             shredded: false,
@@ -562,35 +563,37 @@ mod tests {
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x15, 5)), Err(Error::Stale));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (3, 0x14, 6));
-        assert_eq!(object.filesystem, Some(FXFS));
+        assert_eq!(branch_and_kind(&object), Some(FXFS));
     }
 
-    /// A cell is one filesystem (doc-20): held with it, it is that filesystem, held again with it
-    /// it stays so, and held with another branch's it refuses it, writing nothing. Deleted, it
-    /// returns its filesystem, whose branch stays to be deleted, and no one takes it again; a branch
-    /// deleted is forgotten by its cell.
+    /// A cell has one branch and kind (doc-20): held with them, it has them, held again with them
+    /// it stays so, and held with another branch it refuses it, writing nothing. Deleted, it returns
+    /// its branch, which stays to be deleted, and no one takes it again; a branch deleted is
+    /// forgotten by its cell.
     #[test]
-    fn cells_are_one_filesystem() {
+    fn a_cell_has_one_branch_and_kind() {
         let bucket = Direct(SimBucket::new());
         let (held, object) =
             block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(FXFS))).unwrap();
-        assert_eq!((held.epoch, object.filesystem), (1, Some(FXFS)));
+        assert_eq!((held.epoch, branch_and_kind(&object)), (1, Some(FXFS)));
         assert_eq!(object.branch(TEST_CELL), Some(Branch { cell: TEST_CELL, id: 7 }));
         let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), None, Some(FXFS))).unwrap();
         assert_eq!(again, held);
         let refused = block_on(hold(&bucket, TEST_CELL, (6, 6), None, Some(SQLITE)));
         assert_eq!(refused.map(|(held, _)| held), Err(Error::CellHasBranch(7)));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!((object.epoch, object.holder, object.filesystem), (1, 5, Some(FXFS)));
+        assert_eq!((object.epoch, object.holder, branch_and_kind(&object)), (1, 5, Some(FXFS)));
         block_on(forget(&bucket, TEST_CELL, 8)).unwrap();
-        assert_eq!(block_on(read(&bucket, TEST_CELL)).unwrap().unwrap().filesystem, Some(FXFS));
-        assert_eq!(block_on(delete(&bucket, held)), Ok(Some(FXFS)));
+        let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
+        assert_eq!(branch_and_kind(&object), Some(FXFS));
+        assert_eq!(block_on(delete(&bucket, held)), Ok(Some(7)));
         assert_eq!(block_on(holds(&bucket, held)), Ok(false));
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 9)), Err(Error::Deleted));
         let other = Cell { tenant: 1, id: 9 };
         block_on(hold(&bucket, other, (5, 5), Some(&kek()), Some(SQLITE))).unwrap();
         block_on(forget(&bucket, other, 8)).unwrap();
-        assert_eq!(block_on(read(&bucket, other)).unwrap().unwrap().filesystem, None);
+        let object = block_on(read(&bucket, other)).unwrap().unwrap();
+        assert_eq!((object.branch, object.kind), (None, None));
     }
 
     /// Holding a cell takes it, or makes it if it has no object and its holder may: a holder
@@ -612,7 +615,7 @@ mod tests {
         let (taken, object) =
             block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), None)).unwrap();
         assert_eq!((taken.epoch, object.holder), (2, 6));
-        assert_eq!(object.filesystem, Some(FXFS));
+        assert_eq!(branch_and_kind(&object), Some(FXFS));
     }
 
     /// Kinds go by their names.
@@ -636,7 +639,8 @@ mod tests {
                 epoch: 1,
                 holder: 0x11,
                 token: 5,
-                filesystem: None,
+                branch: None,
+                kind: None,
                 deleted: false,
                 keks: Vec::new(),
                 shredded: false,

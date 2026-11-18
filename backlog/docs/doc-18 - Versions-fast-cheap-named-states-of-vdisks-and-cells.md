@@ -3,7 +3,7 @@ id: doc-18
 title: 'Versions: fast, cheap named states of vdisks and cells'
 type: specification
 created_date: '2026-11-16 13:05'
-updated_date: '2026-11-18 00:24'
+updated_date: '2026-11-18 02:23'
 ---
 # Versions: fast, cheap named states of vdisks and cells
 
@@ -203,7 +203,7 @@ gives the segments' keys: no request beyond those a pass makes now, but the foot
 
 ## Whole-cell cuts
 
-> **Superseded** (2026-11-17) by doc-20, "A cell is one filesystem": a cell has one filesystem, so a version is always the whole cell's, one local commit; a VM snapshot pauses the VM and makes a version of each of its cells, with nothing to coordinate.
+> **Superseded** (2026-11-17) by doc-20, "A cell has one kind": a cell holds one thing, so a version is always the whole cell's, one local commit; a VM snapshot pauses the VM and makes a version of each of its cells, with nothing to coordinate.
 
 The daemon holds every vdisk of a cell it serves (TASK-475): VMs' and the FUSE mount's alike
 (TASK-475.3, `Entry::Mounted`).

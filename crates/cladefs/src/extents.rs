@@ -544,7 +544,7 @@ impl ExtentStore {
 
     /// cladefs: a new store at `path`, of the branch `of` says, as [`ExtentStore::create_in`] or
     /// [`ExtentStore::create_for_branch`] makes it, opened as `opening` says
-    /// ([`ExtentStore::open_with`]): its cell's filesystem, an Fxfs one (TASK-364, doc-20). cladefs: in a span of its own, `store.create`
+    /// ([`ExtentStore::open_with`]): its cell's, an Fxfs one (TASK-364, doc-20). cladefs: in a span of its own, `store.create`
     /// (`extent_bucket::trace`, TASK-258).
     pub fn create_with(
         path: impl AsRef<Path>,
@@ -4223,7 +4223,7 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, data).unwrap();
         publisher.commit(None).unwrap();
-        // A cell of its own, as a cell is one filesystem (doc-20).
+        // A cell of its own, as a cell has one branch (doc-20).
         publisher.fork_to(path, crate::host_store::fork_child(publisher.branch())).unwrap();
         let ancestry = ExtentStore::open(path).unwrap().ancestry();
         (extent, ancestry)

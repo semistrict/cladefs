@@ -6967,11 +6967,10 @@ mod tests {
             let bucket = store();
             let kek = keys::new_cell_kek(&host, layout::TEST_CELL.tenant).await.unwrap();
             let making = Some(&kek.1);
-            let filesystem = crate::cell::Filesystem { branch: 1, kind: crate::cell::Kind::Fxfs };
-            let (_, object) =
-                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(filesystem))
-                    .await
-                    .unwrap();
+            let given = Some((1, crate::cell::Kind::Fxfs));
+            let (_, object) = crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, given)
+                .await
+                .unwrap();
             assert_eq!(object.keks.len(), 1);
             let cell = keys::held(&host, layout::TEST_CELL, object, Some(kek));
             let branch = test_branch(1);

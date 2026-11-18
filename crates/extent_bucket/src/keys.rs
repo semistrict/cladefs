@@ -1548,8 +1548,8 @@ mod tests {
         let bucket = Direct(SimBucket::new());
         let kek = block_on(new_cell_kek(&kms, TEST_CELL.tenant)).unwrap();
         let (secret, wrapped) = (kek.0.expose(), &kek.1);
-        let filesystem = Some(cell::Filesystem { branch: 7, kind: cell::Kind::Fxfs });
-        let made = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), Some(wrapped), filesystem));
+        let given = Some((7, cell::Kind::Fxfs));
+        let made = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), Some(wrapped), given));
         let (_, object) = made.unwrap();
         assert_eq!(&object.keks, std::slice::from_ref(wrapped));
         assert!(!holds(&crate::layout::encode(&object), secret));

@@ -20,8 +20,8 @@ use std::path::Path;
 /// as every host's store's does (TASK-165.6); it is unmade until its maker says it is whole
 /// ([`Store::made`], TASK-196). Its description is made last: until it is durable, the directory
 /// is no store, whatever else is in it. Opening it takes its branch in the bucket
-/// ([`Store::recover`], `crate::upload`), and its branch's cell, whose filesystem, of `kind`, it
-/// is (TASK-364, doc-20).
+/// ([`Store::recover`], `crate::upload`), and its branch's cell, of `kind`, whose branch it is
+/// (TASK-364, doc-20).
 pub fn create_host(
     path: &Path,
     description: Description,

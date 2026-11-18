@@ -80,7 +80,7 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364, doc-20): a tenant's cell is one filesystem, its branch kept under the cell's
+// Cells (TASK-364, doc-20): a tenant's cell has one kind and one branch, kept under the cell's
 // prefix in the bucket, and a host takes a cell whole, its branch's head with it. A branch
 // is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
@@ -111,7 +111,8 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// What a cell's filesystem is (the type's name is renamed with the rest, TASK-508.4).
+// What a cell holds, which says what opens it (the type's name is renamed with the rest,
+// TASK-508.4).
 type VdiskKind int32
 
 const (
@@ -179,16 +180,16 @@ type CreateStoreRequest struct {
 	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE). A point
 	// has no writer, and needs none.
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
-	// The tenant whose cell's filesystem the branch is. Of a new cell in a granted tenant's
+	// The tenant whose cell's branch it is. Of a new cell in a granted tenant's
 	// directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
 	// (PERMISSION_DENIED, EPERM). A point of another tenant's there is the VM manager's to give: the
 	// tenant's VM processes restore from it, each restore a cell of their tenant's, if the point is
 	// shared (SharePoint); otherwise each restore fails (PERMISSION_DENIED, EACCES).
 	Tenant uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell, or 0 for a new one: the store is its filesystem, a new one (ALREADY_EXISTS, EEXIST,
-	// if the cell is another branch's), unless it takes the branch it has.
+	// The cell, or 0 for a new one: the store is the cell's, a new one (ALREADY_EXISTS, EEXIST, if
+	// the cell has another branch), unless it takes the branch it has.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
-	// What the cell's filesystem is, which says what opens it.
+	// The cell's kind, which says what opens it.
 	Kind VdiskKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.VdiskKind" json:"kind,omitempty"`
 	// If not 0, the store is a copy of this version of `branch`, which must be named: the cell's
 	// state at the version, which nothing writes, and which ForkStore forks, on as many hosts at
@@ -361,7 +362,7 @@ type ImportImageRequest struct {
 	Image string `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
 	// The image in the layout to import, by its reference; empty for its only image.
 	Reference string `protobuf:"bytes,4,opt,name=reference,proto3" json:"reference,omitempty"`
-	// The tenant of the new cell whose filesystem the store is. In a granted tenant's directory,
+	// The tenant of the new cell whose store it is. In a granted tenant's directory,
 	// that tenant's ID, or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
 	Tenant        uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -440,7 +441,7 @@ type ImportImageResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, whose filesystem it is.
+	// Its cell, a new one.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -565,7 +566,7 @@ type ForkStoreResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant: `from`'s.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, whose filesystem it is.
+	// Its cell, a new one.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1785,9 +1786,9 @@ type StatStoreResponse struct {
 	// How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
 	// uploader's interval (a second): 0 if none waits.
 	OldestPendingMs uint64 `protobuf:"varint,16,opt,name=oldest_pending_ms,json=oldestPendingMs,proto3" json:"oldest_pending_ms,omitempty"`
-	// The tenant whose cell's filesystem its branch is (TASK-364).
+	// The tenant whose cell's branch it is (TASK-364).
 	Tenant uint64 `protobuf:"varint,17,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell whose filesystem its branch is.
+	// The cell whose branch it is.
 	Cell uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
 	// How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
 	// the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
@@ -1795,8 +1796,11 @@ type StatStoreResponse struct {
 	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
 	// How many it holds that it inherited: those whose bytes are `inherited`.
 	InheritedExtents uint64 `protobuf:"varint,20,opt,name=inherited_extents,json=inheritedExtents,proto3" json:"inherited_extents,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The version of its cell it is a copy of (MakeVersion's `copy`, CreateStore's `version`), or
+	// 0 if it is none: what a copy on another host is made of.
+	Version       uint64 `protobuf:"varint,21,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatStoreResponse) Reset() {
@@ -1965,6 +1969,13 @@ func (x *StatStoreResponse) GetOwnExtents() uint64 {
 func (x *StatStoreResponse) GetInheritedExtents() uint64 {
 	if x != nil {
 		return x.InheritedExtents
+	}
+	return 0
+}
+
+func (x *StatStoreResponse) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
 	}
 	return 0
 }
@@ -2817,7 +2828,7 @@ func (x *ObjectStorageStats) GetFailures() map[string]uint64 {
 type GrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
-	// its directory are its cells' filesystems, under its prefix, and its VM processes open no store of
+	// its directory are its cells', under its prefix, and its VM processes open no store of
 	// another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in base 32
 	// (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
@@ -4166,7 +4177,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
 	"\x11SyncStoreResponse\"&\n" +
 	"\x10StatStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xeb\x04\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x85\x05\n" +
 	"\x11StatStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
@@ -4191,7 +4202,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\"\x13\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x12\x18\n" +
+	"\aversion\x18\x15 \x01(\x04R\aversion\"\x13\n" +
 	"\x11ListStoresRequest\"N\n" +
 	"\x12ListStoresResponse\x128\n" +
 	"\x06stores\x18\x01 \x03(\v2 .cladefs.cladefsd.v1.ListedStoreR\x06stores\"]\n" +

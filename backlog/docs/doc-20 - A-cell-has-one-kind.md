@@ -1,21 +1,21 @@
 ---
 id: doc-20
-title: A cell is one filesystem
+title: A cell has one kind
 type: specification
 created_date: '2026-11-18 00:08'
-updated_date: '2026-11-18 00:24'
+updated_date: '2026-11-18 02:22'
 ---
-# A cell is one filesystem
+# A cell has one kind
 
-Design, 2026-11-17 (TASK-508). The user's decision, 2026-11-17: a cell is one filesystem.
-Supersedes doc-19 and doc-18's whole-cell section.
+Design, 2026-11-17 (TASK-508). The user's decision, 2026-11-17: a cell holds one thing, of one
+kind, and nothing inside it is named apart. Supersedes doc-19 and doc-18's whole-cell section.
 
 ## The model
 
-- **A cell** is one filesystem, of a kind (Fxfs, a SQLite file set, or a VM's memory image), a
-  root and a capacity, with one writer at a time, its log (open segment, write-ahead log, segments,
-  checkpoints), its head, its key (KEK, DEK), and its versions. It is the unit of concurrency,
-  placement, fencing, encryption and collection. A host holds it whole.
+- **A cell** has one kind (Fxfs, SQLite, or a VM's memory image), a root and a capacity, one
+  writer at a time, its branch (open segment, write-ahead log, segments, checkpoints), its head,
+  its key (KEK, DEK), and its versions. It is the unit of concurrency, placement, fencing,
+  encryption and collection. A host holds it whole.
 - **A version** is a read-only state of a cell in its past, kept inside the cell. Only the cell's
   writer makes or drops one. Nothing else writes it.
 - **Making a version is local:** one commit in the cell's local log that closes its segment.
@@ -38,21 +38,20 @@ Supersedes doc-19 and doc-18's whole-cell section.
 
 ## Why
 
-A cell holding several filesystems needed either a log for each, so that a version of the whole
-cell took N pauses, N commits, N uploads, N head swaps and an object naming them (doc-18), or one log
-for all of them (doc-19), which moved the several filesystems into the store's core: per-filesystem
+A cell holding several disks needed either a log for each, so that a version of the whole cell
+took N pauses, N commits, N uploads, N head swaps and an object naming them (doc-18), or one log
+for all of them (doc-19), which moved the several disks into the store's core: per-disk
 uncommitted changes, space and roots, numbers packed into extent IDs, a rule for closing segments
-others still write in, and handles to keep them apart. The branch that built doc-19 grew the code by
-about 3,700 lines. A paused VM needs none of it: a VM snapshot's versions agree because nothing
+others still write in, and handles to keep them apart. The branch that built doc-19 grew the code
+by about 3,700 lines. A paused VM needs none of it: a VM snapshot's versions agree because nothing
 writes while they are made.
 
 ## Order of work
 
 1. Docs, tasks and glossary (this doc).
-2. A cell has one filesystem: the cell object names its one log and kind, `cell_cut` goes, and
-   the daemon, its API, the FUSE mount and the Go bindings make and open cells (TASK-508.1).
+2. A cell has one kind: the cell object names its one branch and kind, `cell_cut` goes, and the
+   daemon, its API, the FUSE mount and the Go bindings make and open cells (TASK-508.1).
 3. Versions are the only named past states: forks only from versions (TASK-508.2).
 4. One concept, one type: the cell object and the head merge, and the types that name a cell today
-   (`Cell`, `Branch`, `cell::Filesystem`) become one, `Cell`: one filesystem with a kind, root and
-   capacity, on one log (TASK-508.3).
+   (`Cell`, `Branch`) become one, `Cell`: one kind, root and capacity, one branch (TASK-508.3).
 5. The code, its protos and docs say the glossary's words throughout (TASK-508.4).

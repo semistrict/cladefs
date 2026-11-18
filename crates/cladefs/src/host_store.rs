@@ -242,8 +242,8 @@ pub(crate) fn options() -> Options {
 
 /// Makes a new store at `path`, which must not exist, holding at most `capacity` bytes, of the
 /// branch `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), its
-/// cell's filesystem, of `kind` (doc-20), and opens it,
-/// its uploader as `keeping` says ([`open`]): whole, as made. Its directory entry is as durable as
+/// cell's, of `kind` (doc-20), and opens it, its uploader as `keeping` says ([`open`]): whole, as
+/// made. Its directory entry is as durable as
 /// it is. A store that is not made whole is removed; what is at `path` already is left as it is.
 pub(crate) fn create(
     path: &Path,
@@ -489,8 +489,8 @@ fn taken(branch: Branch) -> anyhow::Error {
 
 /// Makes the store of `branch`, a fork of `parent`'s branch the bucket has the record of, in the
 /// directory at `path`, made empty: `prepare` writes into it first; then the store's directory, of
-/// the parent's capacity, naming the parent's bucket, of the parent's kind, its own cell's
-/// filesystem, whole (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
+/// the parent's capacity, naming the parent's bucket, of the parent's kind, its own cell's, whole
+/// (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
 /// bucket, as any store's opening does (TASK-165.9), and holds its cell, making it.
 fn make_child(
     parent: &Store<HostDir>,
@@ -502,9 +502,9 @@ fn make_child(
     let capacity = parent.description().capacity;
     let named = || anyhow::anyhow!("{} names no bucket", parent.dir().path().display());
     let url = parent.bucket().map(str::to_owned).ok_or_else(named)?;
-    let kind = parent.kind().ok_or_else(|| {
-        anyhow::anyhow!("{} is no cell's filesystem", parent.dir().path().display())
-    })?;
+    let kind = parent
+        .kind()
+        .ok_or_else(|| anyhow::anyhow!("{} names no cell's kind", parent.dir().path().display()))?;
     let description = Description { block_size: BLOCK_SIZE, capacity, branch };
     extent_store::create_host(path, description, &url, kind)?;
     extent_store::made_host(path)?;
