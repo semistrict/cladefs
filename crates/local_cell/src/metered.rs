@@ -133,11 +133,15 @@ impl<D: Dir> Dir for Metered<D> {
         self.shared.dir.barrier()
     }
 
+    /// The first taking in this process lists it anew ([`Footprint::taken`]): other processes may
+    /// have changed it while they had it.
     fn take(&self) -> io::Result<()> {
-        self.shared.dir.take()
+        self.shared.dir.take()?;
+        self.shared.footprint.taken(&self.shared.dir).inspect_err(|_| self.shared.dir.let_go())
     }
 
     fn let_go(&self) {
+        self.shared.footprint.let_go();
         self.shared.dir.let_go()
     }
 

@@ -62,6 +62,9 @@ pub struct Footprint {
 struct Opened {
     /// The openings alive.
     openings: usize,
+    /// The takings of its store's directory alive in this process ([`Dir::take`]): the first, which
+    /// takes it from other processes, which may have changed it since, lists it anew.
+    takings: usize,
     /// Its files, by name: a file at two names is one.
     files: HashMap<String, Arc<FileLen>>,
     /// Its directories, by path.
@@ -252,6 +255,30 @@ impl Footprint {
         }
         opened.openings += 1;
         Ok(())
+    }
+
+    /// Counts its store's directory, `dir`, taken once more in this process: the first taking, from
+    /// other processes, which may have changed it while they had it, lists it, and counts what it
+    /// finds in place of what was counted before; the files counted before, at names it may have
+    /// changed, counted no more.
+    pub(crate) fn taken<D: Dir>(&self, dir: &D) -> io::Result<()> {
+        let mut opened = self.opened.lock().unwrap();
+        if opened.takings == 0 {
+            let found = dir.entries()?;
+            for file in opened.files.values() {
+                file.forgotten();
+            }
+            let (files, dirs) = self.found(found);
+            opened.files = files;
+            opened.dirs = dirs;
+        }
+        opened.takings += 1;
+        Ok(())
+    }
+
+    /// Counts a taking of its store's directory in this process let go.
+    pub(crate) fn let_go(&self) {
+        self.opened.lock().unwrap().takings -= 1;
     }
 
     /// Its files and directories as `found` lists them, counted in place of what was.
