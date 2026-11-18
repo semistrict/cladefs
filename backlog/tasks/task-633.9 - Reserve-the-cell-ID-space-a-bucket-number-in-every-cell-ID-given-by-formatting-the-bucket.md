@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 17:12'
-updated_date: '2026-11-18 20:24'
+updated_date: '2026-11-18 20:37'
 labels:
   - bucket
   - multi-region
@@ -54,3 +54,9 @@ The user asked (2026-11-18) to reserve the ID space before the rest of TASK-633,
 5. Docs: doc-7, doc-23, CONTEXT.md, operating-a-host.md.
 6. Tests: unit tests of identity and allocator; cladefsctl test; macOS suite; Linux workspace suite on ubu1.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: pushed to main as 0e7977b60 (user: push once basic unit tests pass). macOS: clippy, workspace 2628/2628, sim 41/41. Linux (ubu1) workspace suite of the earlier random-number version: all passed but two daemon tests failing with EBUSY under full-suite load (page_ins_in_flight_are_bounded, restores_over_what_a_failed_cleanup_left_fork_anew): a dropped connection's store still closing when opened_version's sync reopens it. 5 interleaved rounds of cladefsd::tests on main and the branch were clean on both; not shown to be this change. Left: a Linux suite run of 0e7977b60.
+<!-- SECTION:NOTES:END -->
