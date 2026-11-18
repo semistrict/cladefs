@@ -523,6 +523,15 @@ impl DaemonExtentStore {
         made
     }
 
+    /// cladefs: the runs of its window's private pages, by offset, in order: none without a
+    /// window that copies on write (TASK-456.3).
+    pub fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>> {
+        match self.client.stage.get() {
+            Some(stage) => stage.private_runs(),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// cladefs: whether its window copies on write, a writer's
     /// ([`create_dax_window_in_host_memory`](Self::create_dax_window_in_host_memory)).
     pub fn copies_on_write(&self) -> bool {
@@ -606,6 +615,44 @@ impl DaemonExtentStore {
         prefault: Option<Arc<dyn Prefault>>,
         private_max: u64,
     ) -> Result<(), Error> {
+        // SAFETY: As the caller promises.
+        unsafe { self.create_window(base, size, prefault, private_max, None) }
+    }
+
+    /// cladefs: creates the store's window as [`Self::create_dax_window_in_host_memory`] does, a
+    /// writer's, copying on write, of as many private pages as it has, over a VM's memory, whose
+    /// faults on a page the daemon may not have mapped yet have `unmapped` map it first: a memory
+    /// vdisk's (TASK-456.3), whose window nothing else maps.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::create_dax_window_in_host_memory`]'s.
+    pub unsafe fn create_memory_window_in_host_memory(
+        &self,
+        base: NonNull<u8>,
+        size: u64,
+        prefault: Option<Arc<dyn Prefault>>,
+        unmapped: Arc<dyn Unmapped>,
+    ) -> Result<(), Error> {
+        let pages = size / crate::pages::page_size();
+        // SAFETY: As the caller promises.
+        unsafe { self.create_window(base, size, prefault, pages, Some(unmapped)) }
+    }
+
+    /// The window of [`Self::create_dax_window_in_host_memory`], its faults on what isn't mapped
+    /// yet first given to `unmapped`, if any.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::create_dax_window_in_host_memory`]'s.
+    unsafe fn create_window(
+        &self,
+        base: NonNull<u8>,
+        size: u64,
+        prefault: Option<Arc<dyn Prefault>>,
+        private_max: u64,
+        unmapped: Option<Arc<dyn Unmapped>>,
+    ) -> Result<(), Error> {
         let private_max = (private_max != 0).then_some(private_max);
         if private_max.is_some() == self.read_only {
             return Err(Error::new(Errno::EINVAL));
@@ -626,13 +673,18 @@ impl DaemonExtentStore {
         if private_max.is_some() {
             stage.copy_on_write()?;
         }
+        // cladefs: a VM's memory's window, every write a store (TASK-456.3).
+        if unmapped.is_some() {
+            stage.writes_are_stores();
+        }
         let _ = self.client.stage.set(stage.clone());
         // cladefs: and the runs of pages it keeps installed, which the daemon's metrics show
         // (TASK-111.5).
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, private_max, budget })?;
         self.copying.store(private_max.is_some(), Ordering::Release);
-        *faults = Some(stage.serve(Arc::new(DaemonFaults { client: self.client.clone(), size }))?);
+        let faults_of = DaemonFaults { client: self.client.clone(), size, unmapped };
+        *faults = Some(stage.serve(Arc::new(faults_of))?);
         Ok(())
     }
 }
@@ -1436,12 +1488,31 @@ impl Drop for TakenSlot {
 struct DaemonFaults {
     client: Arc<Client>,
     size: u64,
+    /// cladefs: what maps a page the daemon may not have mapped yet, before its fault goes to the
+    /// daemon: a VM's memory's (TASK-456.3).
+    unmapped: Option<Arc<dyn Unmapped>>,
+}
+
+/// cladefs: what maps a window's pages as faults first reach them, the daemon told nothing of
+/// them before: a VM's memory vdisk's (TASK-456.3), whose window maps what its tree names of a
+/// page only once the guest touches it.
+pub trait Unmapped: Send + Sync {
+    /// Maps, if it hasn't, what the window has at `offset`, a fault's page, resolving once the
+    /// daemon has the mapping: the fault goes to the daemon then.
+    fn reach(&self, offset: u64) -> BoxFuture<'static, Result<()>>;
 }
 
 impl DaemonFaults {
     fn fault_with(&self, fault: Fault) -> BoxFuture<'_, Result<()>> {
-        let reply = self.client.request(&Request::Fault(fault));
-        Box::pin(async move { reply.await.map(drop) })
+        let Some(unmapped) = &self.unmapped else {
+            let reply = self.client.request(&Request::Fault(fault));
+            return Box::pin(async move { reply.await.map(drop) });
+        };
+        let reached = unmapped.reach(fault.offset);
+        Box::pin(async move {
+            reached.await?;
+            self.client.request(&Request::Fault(fault)).await.map(drop)
+        })
     }
 }
 

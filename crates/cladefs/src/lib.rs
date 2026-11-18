@@ -182,7 +182,7 @@ pub mod thread;
 mod volume;
 
 #[cfg(target_os = "linux")]
-pub use cladefsd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
+pub use cladefsd::{DaemonConnection, DaemonDevice, DaemonExtentStore, Unmapped};
 #[cfg(target_os = "linux")]
 pub use dax::Prefault;
 pub use dax::failures::{AccessFailures, FailingRun, Failure};

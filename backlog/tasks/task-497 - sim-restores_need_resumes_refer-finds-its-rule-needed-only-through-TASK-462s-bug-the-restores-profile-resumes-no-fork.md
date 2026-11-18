@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-16 16:11'
+updated_date: '2026-11-18 01:22'
 labels:
   - sim
   - test
@@ -32,3 +33,9 @@ On main (d507f8cd6) the test passes at seed 2655, whose violation, 'collector: l
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-17 tried and dropped (user: drop if a lot of work). Added a third choice in World::unfork for a restore a crash stopped whose record says forking: spawn branch::resume_point_fork as upload::resumed does. Resumes then run: restores profile, 2000 seeds, 237 resumes, 19 Ok, 218 Err(Deleted). With resumes_refer off, no seed of 0..20000 found a violation (256 s, sim profile). A tuned profile (crash 6, delete 6, collect 12, open 2) gave 1 Ok resume in 2000 seeds. The violation needs: crash between the record and the reference, a resume while the point lives, then the point deleted and the base's cell collected before the clone's first open: rare. Next try, if picked up: a dedicated profile or a failpoint at point::recorded so the crash lands between record and reference, and resume always when the record says forking. Code reverted; test stays ignored.
+<!-- SECTION:NOTES:END -->

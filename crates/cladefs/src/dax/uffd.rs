@@ -209,6 +209,9 @@ pub(crate) struct UffdSecondStage<H: HostMemory = Syscalls> {
     /// cladefs: its window's private memory, if the window copies on write (backlog doc-13): a
     /// worker's write of a page not here is resolved as a load then (see the module docs).
     private: OnceLock<PrivateMemory>,
+    /// cladefs: whether every write is a store, a VM's memory's window's
+    /// ([`Self::writes_are_stores`]).
+    process_stores: std::sync::atomic::AtomicBool,
     /// cladefs: when it was made, which its pages' last changes are told from
     /// ([`describe_windows`]).
     start: std::time::Instant,
@@ -1020,6 +1023,36 @@ impl UffdSecondStage {
         self.budget
     }
 
+    /// cladefs: the runs of its window's private pages, by their offsets in the window, in order:
+    /// the private memory's pages filled (`SEEK_DATA`, `SEEK_HOLE`), which only private pages are.
+    /// None for a window that copies nothing. A VM's memory's snapshot writes them (TASK-456.3).
+    pub(crate) fn private_runs(&self) -> Result<Vec<std::ops::Range<u64>>> {
+        let Some(private) = self.private.get() else { return Ok(Vec::new()) };
+        let fd = private.fd.as_raw_fd();
+        let size = self.size as libc::off_t;
+        let mut runs = Vec::new();
+        let mut at: libc::off_t = 0;
+        while at < size {
+            // SAFETY: Plain system calls on the private memory's descriptor.
+            let data = unsafe { libc::lseek(fd, at, libc::SEEK_DATA) };
+            if data < 0 {
+                match std::io::Error::last_os_error().raw_os_error() {
+                    // No data past `at`.
+                    Some(libc::ENXIO) => break,
+                    _ => return Err(Errno::EIO),
+                }
+            }
+            // SAFETY: As above.
+            let hole = unsafe { libc::lseek(fd, data, libc::SEEK_HOLE) };
+            if hole < 0 {
+                return Err(Errno::EIO);
+            }
+            runs.push(data as u64..(hole.min(size)) as u64);
+            at = hole;
+        }
+        Ok(runs)
+    }
+
     /// cladefs: the runs of pages it has installed now, each a mapping of the process's, which
     /// [`budget`](Self::budget) bounds (TASK-111.5).
     pub(crate) fn installed(&self) -> u64 {
@@ -1150,6 +1183,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             budget,
             taken,
             private: OnceLock::new(),
+            process_stores: std::sync::atomic::AtomicBool::new(false),
             start: std::time::Instant::now(),
             busy: Busy::default(),
         });
@@ -1180,6 +1214,27 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
         self.leave_out_untouched();
         Ok(())
+    }
+
+    /// cladefs: makes every write a store, whoever's: a VM's memory's window (TASK-456.3), which the
+    /// VMM's threads write too, restoring devices and emulating them, and whose pages its memory
+    /// vdisk installs ahead of the guest's touches, a tree node of them as its first page faults
+    /// (`memory_vdisk`): a load of a page installed takes no fault here, KVM finding it present,
+    /// so a write that faults is a store but on that first page, which KVM may hand to x86's
+    /// asynchronous page fault worker, whose fault is a write whatever the vCPU's access, a load's
+    /// too (docs/research/kvm-async-pf-and-shared-guest-memory.md). That page is made private, at
+    /// most one of each node's, rather than restricted for the worker until the vCPU's own access
+    /// says what it was: lifted at any vCPU's failure, restrictions raced the worker's retry,
+    /// which made nearly every page a guest touched private, and left a store refused until its
+    /// VMM gave up (exit 159).
+    pub(crate) fn writes_are_stores(&self) {
+        self.process_stores.store(true, Ordering::Relaxed);
+    }
+
+    /// cladefs: whether thread `thread`'s write is a store: the guest's own, or any write of a VM's
+    /// memory's window's ([`Self::writes_are_stores`]).
+    fn stores(&self, thread: u32) -> bool {
+        is_guests(thread) || self.process_stores.load(Ordering::Relaxed)
     }
 
     /// cladefs: whether its window copies on write (backlog doc-13).
@@ -1448,7 +1503,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
         // not here, and another fault, a probe or a map installed before the worker ran. That
         // one, taken as a store, made a private page the guest never counted, and its frozen
         // VM's snapshot was refused (TASK-191, GCE r685, r686, r688).
-        let for_worker = access == Access::Write && self.copying() && !is_guests(thread);
+        let for_worker = access == Access::Write && self.copying() && !self.stores(thread);
         // cladefs: a store of the guest's own to a page not here, on a window that copies on write,
         // goes to the window as a store, which makes the page private in place of nothing, rather
         // than installed first, to be stored to and replaced by its private copy, a TLB flush
