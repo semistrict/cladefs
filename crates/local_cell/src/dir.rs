@@ -152,6 +152,12 @@ pub trait Dir: Send + Sync + 'static {
     fn concurrent(&self) -> bool {
         true
     }
+
+    /// cladefs: the disk the directory is on, whose counters its store's files charge and whose
+    /// governor admits its writes against (doc-22): none for a directory no disk counts.
+    fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
+        None
+    }
 }
 
 /// The whole of `file`, read as it is: a store's file that holds no extents' data, whose reads
@@ -227,13 +233,16 @@ pub struct DiskDir {
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<std::fs::File>,
+    /// cladefs: the disk of its filesystem (doc-22).
+    disk: Arc<bucket_cell::host_disk::HostDisk>,
 }
 
 impl DiskDir {
     /// The directory at `path`, which exists.
     pub fn new(path: &Path) -> io::Result<Self> {
         let handle = Arc::new(std::fs::File::open(path)?);
-        Ok(Self { path: path.to_owned(), handle })
+        let disk = bucket_cell::host_disk::HostDisk::of(path)?;
+        Ok(Self { path: path.to_owned(), handle, disk })
     }
 
     /// `file`, opened at `path`, bypassing the host's page cache, or refused, naming it, if its
@@ -376,6 +385,10 @@ impl Dir for DiskDir {
             let _ = &self.handle;
             Ok(())
         }
+    }
+
+    fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
+        Some(&self.disk)
     }
 }
 

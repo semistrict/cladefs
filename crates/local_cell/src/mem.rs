@@ -19,6 +19,7 @@ use crate::cached::{CachedDir, CachedFile};
 use crate::dir::{Dir, File};
 use crate::pages::{Options, PageCache};
 use crate::sync::{Mutex, thread};
+use bucket_cell::host_disk::{self, HostDisk, Sample};
 use rand::rngs::StdRng;
 use rand::{RngExt as _, SeedableRng as _};
 use std::collections::{BTreeMap, HashMap};
@@ -30,9 +31,11 @@ use std::sync::Arc;
 const BLOCK: usize = 512;
 
 /// A store's directory in memory, under its page cache ([`MemDir`]). See the module docs.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemDisk {
     fs: Arc<Mutex<Fs>>,
+    /// cladefs: its disk, of its capacity ([`MemDisk::with_capacity`], doc-22).
+    disk: Arc<HostDisk>,
     /// cladefs: whether the store does all of its I/O in it on its callers' threads
     /// ([`MemDir::serial`]): as it never changes, asking takes no lock ([`Dir::concurrent`]), which
     /// under Shuttle would be a scheduling point of its own.
@@ -64,6 +67,8 @@ struct Fs {
     failed_on: Option<thread::ThreadId>,
     /// The bytes read and written since it was made, or crashed, and the files opened.
     io: Io,
+    /// cladefs: the most it holds, if limited ([`MemDisk::with_capacity`]).
+    capacity: Option<u64>,
 }
 
 /// The bytes a [`MemDir`]'s files were read and written; cladefs: and how many times its files were
@@ -137,6 +142,28 @@ impl Fs {
             .ok_or_else(|| not_found(path))
     }
 
+    /// cladefs: what it holds, as a disk counts it ([`host_disk::counted`]): each file reachable
+    /// once, however many names it has, and each directory but its root a granule.
+    fn used(&self) -> u64 {
+        let mut seen = std::collections::HashSet::new();
+        let files: u64 = (self.dirs.values().flat_map(|entries| entries.values()))
+            .filter(|inode| seen.insert(**inode))
+            .map(|inode| host_disk::counted(self.inodes[inode].data.len() as u64))
+            .sum();
+        files + (self.dirs.len() as u64 - 1) * host_disk::GRANULE
+    }
+
+    /// cladefs: `ENOSPC` unless `more` bytes, counted, fit in its capacity, as a full disk refuses
+    /// what would pass it.
+    fn fits(&self, more: u64) -> io::Result<()> {
+        match self.capacity {
+            Some(capacity) if self.used() + more > capacity => {
+                Err(io::Error::from_raw_os_error(libc::ENOSPC))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn change_dir(&mut self, path: &str, change: DirChange) -> io::Result<()> {
         let (dir, _) = split(path);
         let entries = self.dirs.get_mut(dir).ok_or_else(|| not_found(dir))?;
@@ -167,13 +194,32 @@ impl Fs {
 impl MemDisk {
     /// An empty directory.
     pub fn new() -> Self {
-        let dir = Self::default();
-        {
-            let mut fs = dir.fs.lock().unwrap();
-            fs.dirs.insert(String::new(), BTreeMap::new());
-            fs.durable_dirs.insert(String::new(), BTreeMap::new());
-        }
+        let mut fs = Fs::default();
+        fs.dirs.insert(String::new(), BTreeMap::new());
+        fs.durable_dirs.insert(String::new(), BTreeMap::new());
+        Self::over(fs, false)
+    }
+
+    /// cladefs: an empty directory on a disk of its own of `capacity` bytes, which refuses with
+    /// `ENOSPC` what would pass it, as a full filesystem does: its writes, and its makings of
+    /// files and directories (doc-22).
+    pub fn with_capacity(capacity: u64) -> Self {
+        let dir = Self::new();
+        dir.fs.lock().unwrap().capacity = Some(capacity);
         dir
+    }
+
+    /// The directory holding `fs`, on a disk of its own that says what it holds.
+    fn over(fs: Fs, serial: bool) -> Self {
+        let fs = Arc::new(Mutex::new(fs));
+        let held = Arc::downgrade(&fs);
+        let disk = HostDisk::in_memory(move || {
+            let Some(fs) = held.upgrade() else { return Sample::default() };
+            let fs = fs.lock().unwrap();
+            let (size, used) = (fs.capacity.unwrap_or(u64::MAX), fs.used());
+            Sample { size, free: size.saturating_sub(used), used }
+        });
+        Self { fs, disk, serial }
     }
 
     /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads,
@@ -182,6 +228,11 @@ impl MemDisk {
     /// crash of a seed keeps; as do the directories its crashes leave (TASK-79.79).
     pub fn serial() -> Self {
         Self { serial: true, ..Self::new() }
+    }
+
+    /// cladefs: its disk ([`MemDisk::with_capacity`]).
+    pub fn disk(&self) -> &Arc<HostDisk> {
+        &self.disk
     }
 
     /// Makes every operation that changes the file system fail after `operations` more of them,
@@ -286,8 +337,9 @@ impl MemDisk {
             limited_on: None,
             failed_on: None,
             io: Io::default(),
+            capacity: fs.capacity,
         };
-        MemDisk { fs: Arc::new(Mutex::new(crashed)), serial: self.serial }
+        MemDisk::over(crashed, self.serial)
     }
 }
 
@@ -327,6 +379,11 @@ impl MemDir {
     /// ([`MemDisk::serial`]).
     pub fn serial() -> Self {
         Self::over(MemDisk::serial(), page_cache())
+    }
+
+    /// cladefs: an empty directory on a disk of `capacity` bytes ([`MemDisk::with_capacity`]).
+    pub fn with_capacity(capacity: u64) -> Self {
+        Self::over(MemDisk::with_capacity(capacity), page_cache())
     }
 
     /// As [`MemDisk::fail_after`].
@@ -371,6 +428,8 @@ impl Dir for MemDisk {
 
     fn create(&self, path: &str, _data: bool) -> io::Result<MemDiskFile> {
         let mut fs = self.fs.lock().unwrap();
+        // A full disk makes no file.
+        fs.fits(1)?;
         fs.spend()?;
         let inode = fs.next_inode;
         let (_, name) = split(path);
@@ -424,6 +483,7 @@ impl Dir for MemDisk {
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
         let mut fs = self.fs.lock().unwrap();
+        fs.fits(host_disk::GRANULE)?;
         fs.spend()?;
         if fs.dirs.contains_key(path) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{path} exists")));
@@ -465,6 +525,10 @@ impl Dir for MemDisk {
     fn concurrent(&self) -> bool {
         !self.serial
     }
+
+    fn disk(&self) -> Option<&Arc<HostDisk>> {
+        Some(&self.disk)
+    }
 }
 
 impl File for MemDiskFile {
@@ -481,6 +545,9 @@ impl File for MemDiskFile {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut fs = self.fs.lock().unwrap();
+        let len = fs.inodes[&self.inode].data.len() as u64;
+        let end = (offset + buf.len() as u64).max(len);
+        fs.fits(host_disk::counted(end) - host_disk::counted(len))?;
         fs.spend()?;
         fs.io.written += buf.len() as u64;
         let inode = fs.inodes.get_mut(&self.inode).unwrap();
@@ -591,6 +658,39 @@ mod tests {
         assert!(dir.has_failed());
         // Reads still work.
         assert_eq!(read(&file), b"a");
+    }
+
+    /// cladefs: a directory of a capacity refuses with `ENOSPC` the writes, files and directories
+    /// that would pass it, changing nothing, and its disk says what it holds, each file counted in
+    /// granules once however many names it has (doc-22).
+    #[test]
+    fn a_capacity_refuses_what_would_pass_it() {
+        const G: u64 = host_disk::GRANULE;
+        let full = |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::ENOSPC);
+        let dir = MemDisk::with_capacity(4 * G);
+        let sample = || dir.disk().sample().unwrap();
+        assert_eq!(sample(), Sample { size: 4 * G, free: 4 * G, used: 0 });
+        dir.create_dir("d").unwrap();
+        let file = dir.create("d/f", true).unwrap();
+        file.write_at(&[1; 100], 0).unwrap();
+        dir.link("d/f", "d/g").unwrap();
+        assert_eq!(sample(), Sample { size: 4 * G, free: 2 * G, used: 2 * G });
+        // Past it by a byte, the write is refused whole; within its last granule, not.
+        assert!(full(file.write_at(&[2; 1], 3 * G)));
+        assert_eq!(file.size().unwrap(), 100);
+        file.write_at(&[3; 1], 3 * G - 1).unwrap();
+        assert_eq!(sample().free, 0);
+        // Full, it makes nothing, but rewrites what it holds.
+        assert!(full(dir.create("d/h", false).map(drop)));
+        assert!(full(dir.create_dir("e")));
+        file.write_at(&[4; 100], 0).unwrap();
+        // What goes frees its room.
+        dir.remove("d/g").unwrap();
+        assert_eq!(sample().free, 0, "still at a name");
+        dir.remove("d/f").unwrap();
+        assert_eq!(sample(), Sample { size: 4 * G, free: 3 * G, used: G });
+        // A crash keeps its capacity.
+        assert_eq!(dir.crash(0).disk().sample().unwrap().size, 4 * G);
     }
 
     /// cladefs: it says whether the first operation it failed, since its budget was set, was another

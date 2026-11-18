@@ -63,6 +63,7 @@ pub mod direct;
 pub mod faults;
 pub mod fetch;
 pub mod head;
+pub mod host_disk;
 #[cfg(test)]
 mod heap;
 pub mod keys;

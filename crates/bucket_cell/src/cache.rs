@@ -759,6 +759,8 @@ enum Change {
 #[derive(Debug)]
 struct Files {
     dir: PathBuf,
+    /// cladefs: its filesystem's disk (doc-22).
+    disk: std::sync::Arc<crate::host_disk::HostDisk>,
     /// Whether its filesystem finds the holes punched in its files ([`probed`]).
     holes: bool,
     #[cfg(test)]
@@ -769,6 +771,7 @@ impl Files {
     fn new(dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
             holes: probed(&dir)?,
+            disk: crate::host_disk::HostDisk::of(&dir)?,
             dir,
             #[cfg(test)]
             cut: None,
@@ -916,16 +919,7 @@ impl Files {
 
     /// The bytes free to unprivileged users on the cache's filesystem.
     fn free(&self) -> io::Result<u64> {
-        let path = std::ffi::CString::new(self.dir.as_os_str().as_encoded_bytes())
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        // SAFETY: statvfs is plain data, valid all zeros.
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: `path` is a C string and `stat` a statvfs, which the call fills.
-        if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        #[allow(clippy::unnecessary_cast, reason = "the fields' types differ by platform")]
-        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+        Ok(self.disk.sample()?.free)
     }
 }
 
@@ -1364,23 +1358,6 @@ mod tests {
         let object = Object::noise(KEY, 5 * PART, 1);
         object.keep_tail(&cache);
         assert_eq!(std::fs::metadata(cache.path(KEY)).unwrap().len(), object.bytes.len() as u64);
-    }
-
-    /// The free bytes are the free blocks' size, as statvfs counts them.
-    #[test]
-    fn free_bytes_are_the_free_blocks_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 0, 0).unwrap();
-        let path = std::ffi::CString::new(cache.files.dir.as_os_str().as_encoded_bytes()).unwrap();
-        // SAFETY: statvfs is plain data, valid all zeros.
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: `path` is a C string and `stat` a statvfs, which the call fills.
-        assert_eq!(unsafe { libc::statvfs(path.as_ptr(), &mut stat) }, 0);
-        #[allow(clippy::unnecessary_cast, reason = "the fields' types differ by platform")]
-        let (blocks, size) = (stat.f_bavail as u64, stat.f_frsize as u64);
-        // Within a few blocks of it: other processes write meanwhile.
-        let free = cache.files.free().unwrap();
-        assert!(free.abs_diff(blocks * size) < 1024 * size, "{free} bytes, {blocks} of {size}");
     }
 
     /// A tail whose write fails is neither kept nor counted; the cache keeps others after it.

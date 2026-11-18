@@ -191,6 +191,10 @@ impl<D: Dir> Dir for CachedDir<D> {
     fn concurrent(&self) -> bool {
         self.shared.dir.concurrent()
     }
+
+    fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
+        self.shared.dir.disk()
+    }
 }
 
 /// A file of a [`CachedDir`]: one of its extents' files, through the page cache, or any other, as
