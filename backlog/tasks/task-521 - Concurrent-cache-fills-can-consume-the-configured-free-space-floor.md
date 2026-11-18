@@ -1,9 +1,10 @@
 ---
 id: TASK-521
 title: Concurrent cache fills can consume the configured free-space floor
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18 12:24'
+updated_date: '2026-11-18 17:19'
 labels: []
 dependencies: []
 priority: medium
@@ -23,7 +24,7 @@ Evidence is from source inspection. Runtime reproduction is outstanding.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Concurrent tail and part admissions with space for one allocation preserve the configured free-space floor, including when a write fails.
+- [x] #1 Concurrent tail and part admissions with space for one allocation preserve the configured free-space floor, including when a write fails.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -32,3 +33,9 @@ Evidence is from source inspection. Runtime reproduction is outstanding.
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Fixed by TASK-539.6: the part cache has no free-space floor any more but a limit (its budget and what the disk governor leaves it), against which fills in flight are counted at admission (Index.bytes) under one lock; free_space_admission_reserves_space_for_unwritten_fills, restated against a limit with room for one fill, passes on macOS and Linux.
+<!-- SECTION:FINAL_SUMMARY:END -->

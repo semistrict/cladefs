@@ -76,10 +76,17 @@
 //! `az://container/prefix`) each store it opens keeps its cell in (backlog doc-7), with
 //! credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded behind them, within a second. With
 //! `CLADEFSD_PART_CACHE` naming a directory too, what stores read from the bucket is kept there,
-//! sparse, leaving 4 GiB of its filesystem free, and kept across the daemon's restarts: one daemon
-//! at a time has the directory. `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in bytes, as
-//! a host whose cache shares a disk with its stores needs (TASK-406.1): those read least recently
-//! go first.
+//! sparse, as much as its stores leave of its filesystem, and kept across the daemon's restarts:
+//! one daemon at a time has the directory. `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in
+//! bytes (TASK-406.1): those read least recently go first.
+//!
+//! The host's disks are governed as its memory is (backlog doc-22): every filesystem the daemon
+//! keeps stores or its part cache on is its but for a headroom (`CLADEFSD_DISK_HEADROOM`, bytes or
+//! `N%`; by default a twentieth of the filesystem, 4 GiB at least, half of it at most), and no more
+//! than `CLADEFSD_DISK_BYTES` on all of them together, if set. The stores come first, the part cache
+//! taking what they leave and giving it back at once; near the allowance, the stores' uploaders are
+//! urged and each tenant held to its share by weight; past it, guests' writes are refused with
+//! ENOSPC, while every store goes on committing (`docs/operating-a-host.md`).
 //!
 //! With `CLADEFSD_PEER_ADDRESS` naming this host's `HOST:PORT` among the hosts sharing its
 //! bucket, and `CLADEFSD_PART_CACHE` a cache, the daemon serves them parts of the bucket's objects

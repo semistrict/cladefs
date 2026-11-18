@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
-updated_date: '2026-11-16 22:53'
+updated_date: '2026-11-18 17:19'
 labels:
   - perf
   - review-2026-11-15
@@ -36,3 +36,9 @@ crates/extent_remote/src/cache.rs Kept::make_room evicts until free + freed >= f
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-539.6 (doc-22): the cache's 4 GiB free-space floor is gone, and make_room evicts nothing for a fill that can't fit (fills_that_cant_fit_evict_nothing): the evict-everything behaviour this investigated can't happen. Under disk pressure the cache now yields to the stores first, to nothing if they need it (user's decision, doc-22). The measurement this task asks for, of GETs while the cache is squeezed, is still open.
+<!-- SECTION:NOTES:END -->
