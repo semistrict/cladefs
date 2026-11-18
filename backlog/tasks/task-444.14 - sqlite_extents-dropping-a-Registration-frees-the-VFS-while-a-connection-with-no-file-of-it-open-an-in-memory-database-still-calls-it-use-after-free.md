@@ -3,9 +3,10 @@ id: TASK-444.14
 title: >-
   sqlite_extents: dropping a Registration frees the VFS while a connection with
   no file of it open (an in-memory database) still calls it: use after free
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-16 14:48'
+updated_date: '2026-11-18 03:37'
 labels:
   - bug
   - unsafe
@@ -23,8 +24,8 @@ Registration::drop checked only that no file of the volume was open, then unregi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 What SQLite was given of a registration stays valid for the process; its volume is held only while the registration or an open file holds it
-- [ ] #2 a_connection_outlives_its_registration passes under ASan (leaks not checked: the VFS's few hundred bytes stay by design)
+- [x] #1 What SQLite was given of a registration stays valid for the process; its volume is held only while the registration or an open file holds it
+- [x] #2 a_connection_outlives_its_registration passes under ASan (leaks not checked: the VFS's few hundred bytes stay by design)
 <!-- AC:END -->
 
 ## Definition of Done
@@ -33,3 +34,9 @@ Registration::drop checked only that no file of the volume was open, then unregi
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The sqlite3_vfs, its name and its App are the process's (leaked, a few hundred bytes); the App holds the file set weakly, the Registration strongly; opens after the file set went are refused. Verified: tests/sqlite.rs a_connection_outlives_its_registration red under AddressSanitizer before (heap-use-after-free in sqlite3OsCurrentTimeInt64), green after (detect_leaks=0); sqlite_extents tests pass on macOS and ubu1. Pushed 802160e3d, main 558c354e2.
+<!-- SECTION:FINAL_SUMMARY:END -->

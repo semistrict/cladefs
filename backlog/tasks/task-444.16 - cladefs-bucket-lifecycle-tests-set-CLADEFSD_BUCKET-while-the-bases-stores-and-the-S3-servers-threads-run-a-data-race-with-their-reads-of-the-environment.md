@@ -4,9 +4,10 @@ title: >-
   cladefs bucket lifecycle tests set CLADEFSD_BUCKET while the base's stores'
   and the S3 server's threads run: a data race with their reads of the
   environment
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18 01:06'
+updated_date: '2026-11-18 03:37'
 labels:
   - bug
   - unsafe
@@ -24,8 +25,8 @@ lifecycle.rs's host() called std::env::set_var("CLADEFSD_BUCKET") after Made::ne
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 No test sets CLADEFSD_BUCKET while its process may have other threads
-- [ ] #2 lifecycle's tests pass
+- [x] #1 No test sets CLADEFSD_BUCKET while its process may have other threads
+- [x] #2 lifecycle's tests pass
 <!-- AC:END -->
 
 ## Definition of Done
@@ -34,3 +35,9 @@ lifecycle.rs's host() called std::env::set_var("CLADEFSD_BUCKET") after Made::ne
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+host() makes the host's bucket with host_store::use_host_bucket, which host_bucket_url reads before CLADEFSD_BUCKET; no environment change while threads run. Verified: bucket::lifecycle tests pass on macOS and ubu1; clippy with deny(undocumented_unsafe_blocks) passes on both. Pushed db3dfc36d, main 558c354e2.
+<!-- SECTION:FINAL_SUMMARY:END -->

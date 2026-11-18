@@ -3,9 +3,10 @@ id: TASK-444.13
 title: >-
   cladefs test heap (heap::Bounded) counts allocations the system refused as
   held, and a refused realloc as the new size held and the old freed
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-16 14:22'
+updated_date: '2026-11-18 03:37'
 labels:
   - bug
   - unsafe
@@ -23,8 +24,8 @@ Bounded::check adds a request to HELD before System is asked and nothing takes i
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A refused alloc, alloc_zeroed or realloc leaves held() as it was
-- [ ] #2 heap::tests pass
+- [x] #1 A refused alloc, alloc_zeroed or realloc leaves held() as it was
+- [x] #2 heap::tests pass
 <!-- AC:END -->
 
 ## Definition of Done
@@ -33,3 +34,9 @@ Bounded::check adds a request to HELD before System is asked and nothing takes i
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Bounded counts a request first and takes it back when System refuses it (Bounded::counted); realloc subtracts the old size only on success. Verified: heap::tests::a_refused_allocation_holds_nothing and a_refused_growth_holds_what_it_held red before (9223372036854780722 held, 9011 expected), green after on macOS and ubu1. Pushed f2423c416, main 558c354e2.
+<!-- SECTION:FINAL_SUMMARY:END -->
