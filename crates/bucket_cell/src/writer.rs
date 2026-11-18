@@ -33,10 +33,9 @@ use crate::head::{self, Held};
 use crate::keys::Ring;
 use crate::layout::{self, CellId, Chain, Footer, Location};
 use crate::moves::MovesMaps;
-use crate::record::Record;
 use crate::recovery::{self, Recovered, State};
 use crate::wal::TakenCell;
-use crate::{EPOCH_SHIFT, Error, lifecycle, rules, trace};
+use crate::{EPOCH_SHIFT, Error, rules, trace};
 use futures::{StreamExt as _, TryStreamExt as _};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -130,27 +129,6 @@ struct Inner {
     dropped: BTreeSet<u64>,
 }
 
-/// cladefs: how a writer takes its cell ([`Writer::open_keyed`],
-/// [`Writer::open_recovered_from`]): as `holder`, which must differ from every other taking's, with
-/// the fencing token `token`.
-#[derive(Clone, Copy, Debug)]
-pub struct Taker {
-    pub holder: u64,
-    pub token: u64,
-    /// The holding of the cell whose epoch `token` is, if its host remembers it rather
-    /// than read it before the head's taking: what its fork of the cell left (TASK-449's review).
-    /// A holding found from memory, unchanged, writes nothing, which no condition checks; so the
-    /// taking reads the cell once the head is taken, at once with the record: held still, it held
-    /// it as the head was taken; another's since, the taking is refused ([`Error::Stale`]).
-    pub remembered: Option<crate::cell::Held>,
-}
-
-impl From<(u64, u64)> for Taker {
-    fn from((holder, token): (u64, u64)) -> Self {
-        Self { holder, token, remembered: None }
-    }
-}
-
 struct Pending {
     footer: Footer,
     /// Its object, and those of its extents stored on their own, uploaded first, until they are
@@ -160,18 +138,20 @@ struct Pending {
 
 impl<B: Bucket> Writer<B> {
     /// Takes `cell` over: its head, as `holder`, which must differ from every other taking's, of
-    /// the placement whose fencing token is `token` ([`head::take`]); then its state, recovered from
-    /// it once it holds it. cladefs: under its keys, its cell's KEK unwrapped by `kms`, the host's:
-    /// its cell made, encrypted, if it has no object, its record given its first DEK if it has none
-    /// ([`crate::keys::taking`], TASK-411.28). What takes a cell outside a store: tools, tests.
+    /// the placement whose fencing token is `token`, given the keys it lacks
+    /// ([`crate::keys::taking`]): its KEK unwrapped by `kms`, the host's; then its state, recovered
+    /// from it once it holds it. What takes a cell outside a store: tools, tests.
     pub async fn open_under(
         bucket: Arc<B>,
         cell: CellId,
         (holder, token): (u64, u64),
         kms: &Arc<crate::keys::CachingKms>,
     ) -> Result<Self, Error> {
-        let keys = crate::keys::taking(&*bucket, kms, cell, holder).await?;
-        Self::open_keyed(bucket, cell, (holder, token), keys).await
+        let read = head::read(&*bucket, cell).await;
+        let taking = head::Taking { holder, token, ..head::Taking::default() };
+        let (held, keys) = crate::keys::taking(&*bucket, kms, cell, read, taking).await?;
+        let ring = crate::keys::ring(&*bucket, &keys, cell, &held.head, true).await?;
+        Self::holding(bucket, cell, held, None, ring).await
     }
 
     /// [`Writer::open_under`] the tests' KMS (`keys::testing`): every test's writer encrypts
@@ -187,93 +167,23 @@ impl<B: Bucket> Writer<B> {
         Self::open_under(bucket, cell, (holder, token), &kms).await
     }
 
-    /// cladefs: takes `cell` over as [`Writer::open_under`] does, holding `keys`, its store's ring
-    /// (TASK-411.3), a writer's, which encrypts.
-    pub async fn open_keyed(
+    /// The writer of `cell`, whose head its taking took, `held`, holding `keys`, its store's ring
+    /// (TASK-411.3): its state recovered from the head it took, anew, or on from `before`, a
+    /// recovery of it made before the taking ([`recovery::recover_on`]), which reads only what came
+    /// since (TASK-165.11).
+    pub async fn holding(
         bucket: Arc<B>,
         cell: CellId,
-        taker: impl Into<Taker>,
+        held: Held,
+        before: Option<Recovered>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
-        let record = lifecycle::record(&*bucket, cell).await?.ok_or(Error::NoCell)?;
-        Self::take(bucket, cell, record, (None, None), taker.into(), keys).await
-    }
-
-    /// Takes over the cell `before` recovered, whose record is `record`, as [`Writer::open`]
-    /// does, having found both before it takes the head: its state, once it holds it, is
-    /// `before`'s recovered on ([`recovery::recover_on`]), which reads only what came since.
-    /// cladefs: holding `keys` (TASK-411.3).
-    pub async fn open_recovered(
-        bucket: Arc<B>,
-        record: Record,
-        before: Recovered,
-        (holder, token): (u64, u64),
-        keys: Arc<Ring>,
-    ) -> Result<Self, Error> {
-        let cell = before.state.cell;
-        Self::take(bucket, cell, record, (Some(before), None), (holder, token).into(), keys).await
-    }
-
-    /// Takes over the cell `before` recovered as [`Writer::open_recovered`] does, its head taken
-    /// from `read`, what a read of it found as its record was read ([`head::take_from`]): a round
-    /// trip less on a real bucket (TASK-165.11).
-    pub async fn open_recovered_from(
-        bucket: Arc<B>,
-        record: Record,
-        (before, read): (Recovered, head::Read),
-        taker: impl Into<Taker>,
-        keys: Arc<Ring>,
-    ) -> Result<Self, Error> {
-        let cell = before.state.cell;
-        let found = (Some(before), Some(read));
-        Self::take(bucket, cell, record, found, taker.into(), keys).await
-    }
-
-    /// Takes `cell`, whose record is `record`, over, as [`Writer::open`] says: its state
-    /// recovered from the head it took, anew, or on from `before`, a recovery of it made before;
-    /// the head taken from `read`, a read of it before, if given; as `taker` says.
-    async fn take(
-        bucket: Arc<B>,
-        cell: CellId,
-        record: Record,
-        (before, read): (Option<Recovered>, Option<head::Read>),
-        Taker { holder, token, remembered }: Taker,
-        keys: Arc<Ring>,
-    ) -> Result<Self, Error> {
-        // Before the head: a version has none, and nothing writes it, whoever asks.
-        record.writable()?;
-        let held = match read {
-            Some(read) => head::take_from(&*bucket, cell, read, holder, token).await?,
-            None => head::take(&*bucket, cell, holder, token).await?,
-        };
         let epoch = held.head.epoch;
-        let named = Some(held.head.clone());
-        // Once the head is taken, two reads, neither of which waits for the other, at once: each a
-        // round trip or more on a real bucket, which every opening of a store pays (TASK-165.11).
-        // The record: deleted meanwhile, the cell is gone, whatever its recovery found. And the
-        // cell, recovered from the head it took, which nothing changes but a later taking.
-        // cladefs: and the cell whose holding gave the token, if remembered, not read: held still,
-        // or another's taking since refuses this one (TASK-449's review).
-        let recovering = async {
-            match before {
-                None => recovery::recover_from(&*bucket, cell, record.origin(), named, &keys).await,
-                Some(before) => {
-                    recovery::recover_on(&*bucket, record.origin(), before, named, &keys).await
-                }
-            }
+        let (origin, named) = (held.head.origin(), Some(held.head.clone()));
+        let recovered = match before {
+            None => recovery::recover_from(&*bucket, cell, origin, named, &keys).await,
+            Some(before) => recovery::recover_on(&*bucket, origin, before, named, &keys).await,
         };
-        let confirming = async {
-            match remembered {
-                Some(held) => crate::cell::still_held(&*bucket, held).await,
-                None => Ok(()),
-            }
-        };
-        let (found, recovered, confirmed) =
-            futures::join!(lifecycle::record(&*bucket, cell), recovering, confirming);
-        if found?.is_none_or(|record| record.deleted) {
-            return Err(Error::Deleted);
-        }
-        confirmed?;
         let Recovered { state, layer, .. } = recovered?;
         // Its sequences minted from its epoch's range, past every earlier writer's: what it
         // recovered is what the head it took names, no later writer's segment among it.
@@ -703,6 +613,7 @@ mod tests {
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_cell;
     use crate::layout::{Contents, NewVersion, Segment};
+    use crate::lifecycle;
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
 
@@ -1033,9 +944,8 @@ mod tests {
     }
 
     /// TASK-92.6: a writer taking over a cell recovered before it took the head recovers it on
-    /// from there: it reads the head, takes it, then reads the record and the segments the head
-    /// names that came in between at once (TASK-165.11, TASK-407). Each round a round trip on a
-    /// real bucket.
+    /// from there: it reads the head, takes it, then reads the segments the head names that came
+    /// in between (TASK-165.11, TASK-407, TASK-515). Each round a round trip on a real bucket.
     #[test]
     fn writers_open_on_what_was_recovered_before_their_head() {
         use crate::testing::SimBucket;
@@ -1053,13 +963,16 @@ mod tests {
             bucket.served(first.acknowledge()).0.unwrap();
         };
         commit(1);
-        let record = bucket.served(lifecycle::record(&*bucket, test_cell(1))).0.unwrap().unwrap();
         let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
         assert_eq!(before.end(), 1);
         // Committed in between.
         commit(2);
         let keys = first.keys().clone();
-        let opening = Writer::open_recovered(bucket.clone(), record, before, (11, 0), keys);
+        let opening = async {
+            let read = head::read(&*bucket, test_cell(1)).await;
+            let held = head::take(&*bucket, test_cell(1), read, &taking(11)).await?;
+            Writer::holding(bucket.clone(), test_cell(1), held, Some(before), keys).await
+        };
         let (second, rounds) = bucket.served_in_rounds(opening);
         let second = second.unwrap();
         assert_eq!(second.last_commit(), Some(2));
@@ -1071,23 +984,23 @@ mod tests {
             )
         };
         let head = layout::head(test_cell(1));
-        let record_key = layout::record(test_cell(1));
         assert_eq!(
             rounds,
-            [
-                vec![format!("get {head}")],
-                vec![format!("put {head}")],
-                vec![format!("get {record_key}"), tail(1)],
-            ]
+            [vec![format!("get {head}")], vec![format!("put {head}")], vec![tail(1)]]
         );
         let anew = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
         assert_eq!(second.state(), anew.state);
     }
 
-    /// TASK-165.11: a writer taking over a cell from a read of its head made before, as its
-    /// record was read, takes the head from that read: its first round the head's update, a round
-    /// trip less; and from a read gone stale, another writer having taken the head since, by
-    /// reading it again once its update finds it changed, at the epoch after that writer's.
+    /// The taking of `holder`, of token 0, giving the head nothing.
+    fn taking(holder: u64) -> head::Taking {
+        head::Taking { holder, ..head::Taking::default() }
+    }
+
+    /// TASK-165.11: a writer taking over a cell from a read of its head made before takes the head
+    /// from that read: its first round the head's update, a round trip less; and from a read gone
+    /// stale, another writer having taken the head since, by reading it again once its update
+    /// finds it changed, at the epoch after that writer's.
     #[test]
     fn writers_open_on_a_read_of_their_head_made_before() {
         use crate::testing::SimBucket;
@@ -1099,36 +1012,26 @@ mod tests {
         assert_eq!(first.epoch(), 1);
         let head = layout::head(test_cell(1));
         let found = || {
-            let record =
-                bucket.served(lifecycle::record(&*bucket, test_cell(1))).0.unwrap().unwrap();
             let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
             let read = bucket.served(head::read(&*bucket, test_cell(1))).0;
-            (record, before, read)
+            (before, read)
         };
-        let (record, before, read) = found();
-        let opening = Writer::open_recovered_from(
-            bucket.clone(),
-            record,
-            (before, read),
-            (11, 0),
-            first.keys().clone(),
-        );
-        let (second, rounds) = bucket.served_in_rounds(opening);
+        let opening = |(before, read): (Recovered, head::Read), holder| {
+            let (bucket, keys) = (bucket.clone(), first.keys().clone());
+            async move {
+                let held = head::take(&*bucket, test_cell(1), read, &taking(holder)).await?;
+                Writer::holding(bucket, test_cell(1), held, Some(before), keys).await
+            }
+        };
+        let (second, rounds) = bucket.served_in_rounds(opening(found(), 11));
         let second = second.unwrap();
         assert_eq!(second.epoch(), 2);
         assert_eq!(rounds[0], [format!("put {head}")]);
         // A read of the head, then another writer's taking of it, then the opening.
-        let (record, before, read) = found();
+        let read = found();
         let (third, _) = bucket.served(Writer::open(bucket.clone(), test_cell(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);
-        let opening = Writer::open_recovered_from(
-            bucket.clone(),
-            record,
-            (before, read),
-            (13, 0),
-            first.keys().clone(),
-        );
-        let (fourth, rounds) = bucket.served_in_rounds(opening);
+        let (fourth, rounds) = bucket.served_in_rounds(opening(read, 13));
         assert_eq!(fourth.unwrap().epoch(), 4);
         // Its update refused, its answer read back, as an update whose answer was lost is told
         // apart; then the head, as read back, taken.

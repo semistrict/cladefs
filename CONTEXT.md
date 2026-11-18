@@ -234,7 +234,7 @@ A base whose pages every tenant's forks share, in the default arena.
 A fork of another store attached to a cell, for an Fxfs volume over a read-only base.
 
 **Head**:
-A cell's one swapped object: who writes it, the commit it ends at, and its versions.
+A cell's one object that changes: what made it, its keys, who writes it, the commit it ends at, and its versions. Taking it is taking the cell.
 
 **Writer**:
 The one holder of a cell's head, which alone commits to it and makes and drops its versions.

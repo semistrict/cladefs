@@ -243,7 +243,7 @@ fn keeps_cells_in_the_buckets_their_stores_name() {
     futures::executor::block_on(async {
         let state = bucket_cell::recover(&image, cell, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
-        let record = bucket_cell::lifecycle::record(&*daemons, cell).await.unwrap();
+        let record = bucket_cell::head::get(&*daemons, cell).await.unwrap();
         assert_eq!(record, None, "the daemon's bucket has the image's cell");
     });
     drop(store);
@@ -2450,7 +2450,7 @@ fn stores_made_are_cells_of_their_kinds() {
             (db_cell, "db.sqlite", Kind::Sqlite),
             (memory_cell, "memory", Kind::Memory),
         ] {
-            let object = bucket_cell::cell::read(&*bucket, cell).await.unwrap().unwrap();
+            let object = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
             assert_eq!((object.kind, object.deleted), (Some(kind), false), "{name}");
             let head = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
             assert_eq!(head.token, object.epoch, "{name}: its head taken with its cell's epoch");
@@ -2625,10 +2625,10 @@ fn deleted_stores_cells_keep_what_their_forks_need() {
     let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         use bucket_cell::lifecycle;
-        let deleted = lifecycle::record(&*bucket, base_cell).await.unwrap().unwrap();
+        let deleted = bucket_cell::head::get(&*bucket, base_cell).await.unwrap().unwrap();
         assert!(deleted.deleted);
-        let record = lifecycle::record(&*bucket, fork_cell).await.unwrap().unwrap();
-        assert!(!record.deleted);
+        let record = bucket_cell::head::get(&*bucket, fork_cell).await.unwrap().unwrap();
+        assert!(!record.deleted());
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         bucket_cell::collector::collect(&*bucket, 1, &options).await.unwrap();
         let state = bucket_cell::recover(&*bucket, fork_cell, record.origin()).await.unwrap();
@@ -4643,7 +4643,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     assert!(child_store.is_ok(), "opening the child: {:?}", child_store.err());
     assert_eq!(child_store.as_ref().map(|store| store.cell()).ok(), Some(forked.id));
     let records = bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "cells");
-    let record = control(bucket_cell::lifecycle::record(&records, cell_at(&child))).unwrap();
+    let record = control(bucket_cell::head::get(&records, cell_at(&child))).unwrap();
     let origin = record.and_then(|record| record.origin()).map(|origin| origin.parent);
     assert_eq!(origin, Some(parent));
     drop((child_store, store));

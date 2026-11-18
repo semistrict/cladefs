@@ -201,13 +201,11 @@ fn collects_a_file_bucket() {
     });
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000001/cells/0000000000001";
-    // Its head, which names its checkpoint (TASK-407), and its record; cladefs: its cell's object,
-    // keeping its KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
+    // Its head, which names its checkpoint (TASK-407) and keeps its KEK; and its tenant's KEK
+    // object, the bucket KMS's (TASK-411.28).
     let kept = [
-        format!("{at}/cell"),
         format!("{at}/checkpoints/0000000000001.0000000000001"),
         format!("{at}/head"),
-        format!("{at}/record"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(left, kept);
@@ -329,12 +327,10 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let kept = [
         // The word that the bucket is marked, which an operator removes with the marks.
         bucket_cell::layout::MARKING.to_owned(),
-        format!("{at}/cell"),
         format!("{at}/checkpoints/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
         marks,
         format!("{at}/head"),
-        format!("{at}/record"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(names, kept);

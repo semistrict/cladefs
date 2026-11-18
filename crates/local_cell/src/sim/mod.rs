@@ -358,12 +358,13 @@ fn fresh_cells() -> Profile {
 
 test_holds!(forks_with_children_opening, children());
 
-// cladefs: a pass over a child's cell begun before the child's record, which lists the child's
-// segments after it read no record (TASK-395.4): every restore is to a cell of its own here, so a
-// pass over the parent's cell finds no such child (upload's Shuttle test finds one within a cell).
+// cladefs: a pass over a child's cell begun before the child's head (TASK-395.4): every restore is
+// to a cell of its own here. A cell's one head says whether it lives (TASK-515), so a pass reading
+// none finds no writer's objects to lose; what the rule `candidates_first` keeps, a child's head
+// made after the pass read none, the simulation finds no seed for, nor does a cell's own writer
+// lose anything without it, the head's epoch keeping what it may yet name: specs/bucket's
+// NoCandidatesFirst shows it needed.
 test_holds!(passes_over_cells_being_made, fresh_cells());
-
-test_needs!(collection_needs_candidates_first, candidates_first, fresh_cells());
 
 // A host's store naming what it reads where it was acknowledged, the collector deleting that and
 // the moves after, compacted again, which its writer's checkpoints followed (TASK-195).
@@ -635,8 +636,8 @@ test_needs!(collection_needs_references, references, deleted_bases());
 test_needs!(collection_needs_origins_kept, origins_kept, deleted_bases());
 
 // ...and a reference stays while its child's cell holds references of its own, a generation's
-// forks inheriting through it.
-test_needs!(collection_needs_references_held, references_held, forks());
+// forks inheriting through it: no seed of the simulation's shows it since a cell's one head
+// (TASK-515); specs/bucket's NoReferencesHeld does.
 
 // A clone's reference written before it reads its version has no search here: collector::tests'
 // direct one shows it needed

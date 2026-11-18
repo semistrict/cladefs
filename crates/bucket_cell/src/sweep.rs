@@ -965,7 +965,6 @@ mod tests {
                     writer.checkpoint().await.unwrap();
                     drop(writer);
                     lifecycle::delete(&*bucket, cell, 11, 1).await.unwrap();
-                    crate::cell::forget(&*bucket, cell).await.unwrap();
                 }
             });
             let swept = [0; 3].map(|_| block_on(sweep(1).run(&bucket, |_| {})));

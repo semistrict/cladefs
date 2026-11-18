@@ -431,8 +431,9 @@ impl Host {
         let cell = local_cell::CellId { tenant, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
-        let kind = kind;
         LocalCell::make(&dir, description, Some("memory:///bench"), Some(kind)).unwrap();
+        let making = bucket_cell::lifecycle::create(&*self.bucket, cell, id);
+        self.runtime.block_on(making).unwrap();
         let recovering = LocalCell::recover_unmade(dir).unwrap();
         let interval = Duration::from_secs(3600);
         let uploading =

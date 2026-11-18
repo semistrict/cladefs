@@ -550,27 +550,37 @@ pub async fn fork_version(
 /// cladefs: gives `child` what [`fork_version`] leaves, for tests that need a child recovering
 /// from an origin, whatever version was there: the parent's checkpoint at the origin, which its
 /// recovery reads (`recovery::checkpoint_at`); its reference, which keeps that state; and its
-/// record, a clone's ([`crate::record::Kind::Clone`]).
+/// head, a clone's ([`crate::record::Made::Clone`]), never taken.
 pub async fn forked_at(bucket: &impl Bucket, child: CellId, origin: layout::Origin) {
     let kms = crate::keys::testing::host_kms();
     let parents = crate::keys::Parents::Kms(&kms, None);
     crate::recovery::checkpoint_at(bucket, origin.parent, origin.at, parents).await.unwrap();
     let reference = layout::reference(origin.parent, origin.at, child);
     crate::bucket::create(bucket, &reference, layout::encode(&layout::Reference::of(0))).await;
-    let record = crate::record::Kind::Clone(origin).of(0);
-    crate::bucket::create(bucket, &layout::record(child), layout::encode(&record)).await;
+    let head = layout::Head::of(crate::record::Made::Clone(origin), 0);
+    crate::bucket::create(bucket, &layout::head(child), layout::encode(&head)).await;
+}
+
+/// cladefs: takes `cell`'s head as `holder`, of the placement of `token`, giving it nothing
+/// ([`crate::head::take`]): what a test's stale or late taker does.
+pub async fn take(
+    bucket: &impl Bucket,
+    cell: CellId,
+    holder: u64,
+    token: u64,
+) -> Result<crate::head::Held, crate::Error> {
+    let taking = crate::head::Taking { holder, token, ..crate::head::Taking::default() };
+    crate::head::take(bucket, cell, crate::head::read(bucket, cell).await, &taking).await
 }
 
 /// cladefs: the live cells of every cell of `bucket`, as `cladefs-gc --cells` lists them
 /// (TASK-395.4).
-pub async fn live(
-    bucket: &impl Bucket,
-) -> Result<BTreeMap<CellId, crate::record::Record>, crate::Error> {
+pub async fn live(bucket: &impl Bucket) -> Result<BTreeMap<CellId, layout::Head>, crate::Error> {
     use futures::StreamExt as _;
     let mut live = BTreeMap::new();
     let mut cells = std::pin::pin!(crate::cell::listed(bucket));
     while let Some(cell) = cells.next().await {
-        live.extend(crate::lifecycle::live(bucket, cell).await?.map(|record| (cell, record)));
+        live.extend(crate::head::live(bucket, cell).await?.map(|head| (cell, head)));
     }
     Ok(live)
 }
@@ -623,24 +633,22 @@ pub const SWEEPS: u64 = 32;
 /// at once, but a live cell's fork's, whose writers record it yet: no pass would ever retire it
 /// (TASK-395.10); so is one whose child's record names another origin, or none, and one marked
 /// retired, which its parent's cell's pass deletes (TASK-395.13); the collector's leases and marks
-/// stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose records are
-/// each a root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, records,
-/// heads, object and lease (TASK-455); and a cell's of no record, its heads, and its lease once
-/// nothing else is left. A final head of a cell of no record, a deletion's fence, stays, and
-/// keeps its cell (TASK-455's review).
+/// stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose head is a
+/// root's or a clone's made, deleted, of an ID an allocator gave, which goes whole, head and lease
+/// (TASK-455); and the lease of a cell of no head once nothing else is left.
 pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
     use crate::layout::{Location, Origin};
-    use crate::record::Record;
+    use layout::Head;
     use storage_device::ExtentId;
     let keys: BTreeSet<String> =
         crate::bucket::list(bucket, "").await.into_iter().map(|meta| meta.key).collect();
-    let mut records: BTreeMap<CellId, Record> = BTreeMap::new();
+    let mut records: BTreeMap<CellId, Head> = BTreeMap::new();
     let mut references = Vec::new();
     for key in &keys {
         match layout::kind(key) {
-            Kind::Record { cell } => {
-                if let Ok(Some(record)) = crate::lifecycle::record(bucket, cell).await {
-                    records.insert(cell, record);
+            Kind::Head { cell } => {
+                if let Ok(Some(head)) = crate::head::get(bucket, cell).await {
+                    records.insert(cell, head);
                 }
             }
             Kind::Reference { parent, at, child } => references.push((key, parent, at, child)),
@@ -649,28 +657,10 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     // A cell no live cell and no reference keeps, whose pass retires its children's references.
     let dead = |cell: layout::CellId| {
-        records.iter().filter(|(of, _)| **of == cell).all(|(_, record)| record.deleted)
+        records.iter().filter(|(of, _)| **of == cell).all(|(_, record)| record.deleted())
             && !references.iter().any(|(_, parent, _, _)| *parent == cell)
     };
-    // cladefs: the heads of cells of no record, final: deletions' fences, whose records may yet
-    // come, which stay and keep their cells (TASK-455's review). Any other head of no record, a
-    // stale taker's, is garbage.
-    let mut fences = BTreeSet::new();
-    for key in &keys {
-        if let Kind::Head { cell } = layout::kind(key)
-            && !records.contains_key(&cell)
-            && crate::head::epoch(bucket, cell)
-                .await
-                .is_ok_and(|epoch| epoch == layout::Head::FINAL)
-        {
-            fences.insert(key.clone());
-        }
-    }
-    let fenced = |cell: layout::CellId| {
-        fences.iter().any(|key| matches!(layout::kind(key), Kind::Head { cell: of } if of == cell))
-    };
-    // Whether a cell goes whole: dead, no mark under it, no fence, each of its records, one at
-    // least, one it may go with.
+    // Whether a cell goes whole: dead, no mark under it, its head one it may go with.
     let marked_under = |cell: layout::CellId| {
         keys.iter().any(|key| match layout::kind(key) {
             Kind::Retired { parent, .. } => parent == cell,
@@ -683,7 +673,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         held.peek().is_some()
             && dead(cell)
             && !marked_under(cell)
-            && !fenced(cell)
             && held.all(|(_, record)| record.removable())
     };
     let recorded = |cell: layout::CellId| records.keys().any(|of| *of == cell);
@@ -695,24 +684,20 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         listed.cloned().collect()
     };
     let mut maps = MovesMaps::default();
-    let mut needed = fences.clone();
+    let mut needed = BTreeSet::new();
     let mut touched = BTreeSet::new();
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
     let mut versions: BTreeSet<Origin> = BTreeSet::new();
     let mut retirable = BTreeSet::new();
     for (&cell, record) in &records {
-        let key = layout::record(cell);
-        // Deleted cells' records stay (TASK-174), and every cell's head, a deleted one's
-        // final, which fences its writers (TASK-407): but those of a cell that goes whole
-        // (TASK-455).
-        if record.deleted {
+        // Every cell's head stays, a deleted one's final, which fences its writers (TASK-174,
+        // TASK-407): but that of a cell that goes whole (TASK-455).
+        if record.deleted() {
             if !removed(cell) {
                 needed.insert(layout::head(cell));
-                needed.insert(key);
             }
             continue;
         }
-        needed.insert(key);
         needed.insert(layout::head(cell));
         let origin = record.origin();
         let Ok(recovered) = crate::recovery::recover(bucket, cell, origin).await else {
@@ -771,7 +756,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for &(key, parent, at, child) in &references {
         let origin = Origin { parent, at };
         let named = records.get(&child).is_some_and(|record| record.origin() == Some(origin));
-        let retired = named && records[&child].deleted && child != parent && dead(child);
+        let retired = named && records[&child].deleted() && child != parent && dead(child);
         // Marked, retired or taken back before: a stale writer's, written after, garbage
         // (TASK-395.13, TASK-395.14).
         let marked = keys.contains(&layout::retired(parent, at, child));
@@ -813,18 +798,16 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     let mut left = Vec::new();
     for key in &keys {
-        // cladefs: cells' objects stay, as their cells' records do, their epochs fencing their
-        // volumes' heads; blocks of object IDs taken, for good (TASK-364); and the collector's
-        // leases and marks, and references not yet retirable (TASK-395); tenants' KEK objects,
-        // for good (TASK-411.27).
+        // cladefs: blocks of object IDs taken, for good (TASK-364); and the collector's leases and
+        // marks, and references not yet retirable (TASK-395); tenants' KEK objects, for good
+        // (TASK-411.27).
         let alone = |cell: layout::CellId| {
             let prefix = cell.prefix();
             keys.iter().filter(|other| other.starts_with(&prefix)).count() == 1
         };
         let kept = match layout::kind(key) {
-            // cladefs: but a cell's that goes whole; and the lease of a cell of no record alone in
+            // cladefs: but a cell's that goes whole; and the lease of a cell of no head alone in
             // it, a removal stopped short of it (TASK-455).
-            Kind::Cell { cell } => !removed(cell),
             Kind::CollectorLease { cell } => !removed(cell) && (recorded(cell) || !alone(cell)),
             Kind::ObjectIds { .. }
             | Kind::Kek { .. }
@@ -894,20 +877,16 @@ fn cell_of_key(key: &str) -> Option<CellId> {
     }
 }
 
-/// cladefs: the ring a reader of `cell`'s store holds, as a host opening it reads it: its record,
-/// and its cell's object, its KEK unwrapped by the tests' KMS (`keys::testing`), which every test
-/// writer encrypts under (TASK-411.28).
+/// cladefs: the ring a reader of `cell`'s store holds, as a host opening it reads it: its head,
+/// its KEK unwrapped by the tests' KMS (`keys::testing`), which every test writer encrypts under
+/// (TASK-411.28).
 pub async fn ring_of(
     bucket: &impl Bucket,
     cell: CellId,
 ) -> Result<Arc<crate::keys::Ring>, crate::Error> {
-    let record = crate::lifecycle::record(bucket, cell).await?.ok_or(crate::Error::NoCell)?;
-    let kms = crate::keys::testing::host_kms();
-    let keys = match crate::cell::read(bucket, cell).await? {
-        Some(object) => crate::keys::CellKeys::of(cell, &object, kms),
-        None => crate::keys::CellKeys::objectless(cell, kms),
-    };
-    crate::keys::ring(bucket, &keys, cell, &record, false).await
+    let head = crate::head::get(bucket, cell).await?.ok_or(crate::Error::NoCell)?;
+    let keys = crate::keys::CellKeys::of(cell, &head, crate::keys::testing::host_kms());
+    crate::keys::ring(bucket, &keys, cell, &head, false).await
 }
 
 /// cladefs: [`crate::fetch::read`] holding the ring of the cell whose object `location` names

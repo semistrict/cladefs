@@ -15,7 +15,7 @@
 //! anew on the writer's chain ([`Recovering::open`]). A log another writer's commits moved past
 //! refuses to open (`bucket_cell::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
 //! one that plainly diverged before the head is taken refuses before, fencing no writer. A cell
-//! with no record is made, a root (`bucket_cell::lifecycle::create`).
+//! is made by its maker, a root, before its store first opens (`bucket_cell::lifecycle::create`).
 //!
 //! **A store at a version** takes no head (doc-20): its store holds the version's state, recovered,
 //! which nothing writes, and no log; nothing it does goes to the bucket but its forks' records
@@ -49,11 +49,10 @@ use bucket_cell::cache::Cache;
 use bucket_cell::fetch::Budget;
 use bucket_cell::keys::{self, CellKeys, Ring, RingHold};
 use bucket_cell::known::Learned;
-use bucket_cell::layout::{CellId, Chain, Child, Origin, epoch_of};
+use bucket_cell::layout::{CellId, Chain, Child, Head, Origin, epoch_of};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::record::Record;
 use bucket_cell::wal::TakenCell;
-use bucket_cell::{Body, Objects, Recovered, Taker, Writer, cell, lifecycle};
+use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
 use event_listener::{Event, Listener as _};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
@@ -182,14 +181,8 @@ impl<T> Retried<T> {
 /// (TASK-39.4). Deleting it again does nothing. A later placement's cell, whose token is higher,
 /// is not deleted (`bucket_cell::Error::Stale`, TASK-45.1).
 ///
-/// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
-/// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`bucket_cell::cell::forget`, TASK-364).
 pub fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Result<(), Failure> {
-    Ok(block_on(async {
-        lifecycle::delete(bucket, cell, rand::random(), token).await?;
-        cell::forget(bucket, cell).await
-    })??)
+    Ok(block_on(lifecycle::delete(bucket, cell, rand::random(), token))??)
 }
 
 /// Why uploading stopped, or a cell could not be uploaded to, or opened: the error as it was,
@@ -590,63 +583,49 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// Makes the fork of the version the store is at to `child` (`lifecycle::fork_version`): its
-    /// record, which fails if the version was dropped ([`Failure::VersionDropped`]), and, for a
-    /// child of another cell, the checkpoint at the version, sealed under the version's cell's
-    /// keys (TASK-476).
+    /// head, which fails if the version was dropped ([`Failure::VersionDropped`]), and, for a child
+    /// of another cell, the checkpoint at the version, sealed under the version's cell's keys
+    /// (TASK-476).
     ///
-    /// cladefs: a fork into another cell, `inheriting` given ([`Uploader::inheriting`]), then gives
-    /// its child its keys, once its record is made: its cell made with the KEK from the host's
-    /// pool, its record given its DEK and those it inherits, rewrapped under that KEK
-    /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
-    ///
-    /// cladefs: it says what it left of the child to the child's store's first opening here
-    /// ([`Learned`], TASK-449): its record, and that it has no head. Its cell the child's store
-    /// makes, encrypted, as it opens (every cell is, TASK-411.28).
-    pub fn forked(
-        &self,
-        child: Child,
-        inheriting: Option<keys::Inheriting>,
-    ) -> Result<(), Failure> {
+    /// cladefs: the child's head made with the keys `inheriting` gives ([`Uploader::inheriting`]):
+    /// a KEK from the host's pool, its DEK and those it inherits, rewrapped under that KEK
+    /// (TASK-411.4). Failing, the fork fails, which its host deletes. It says what it left of the
+    /// child's head to the child's store's first opening here ([`Learned`], TASK-449).
+    pub fn forked(&self, child: Child, inheriting: keys::Inheriting) -> Result<(), Failure> {
         failing!("upload::forked");
         let at = self.shared.at_version.get().expect("a fork is of a store at a version");
         let keys = keys::Parents::Held(&at.sealing);
-        let forking = lifecycle::fork_version_with(
+        let given = (child.owner, Some(inheriting.given()));
+        let forking = lifecycle::fork_version_keyed(
             &*self.bucket,
             child.cell,
             at.version,
             at.origin,
-            child.owner,
+            given,
             keys,
-            async { None },
         );
-        let (mut record, cell) = match block_on(forking)? {
+        let made = match block_on(forking)? {
             Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
             Err(err) => return Err(err.into()),
-            Ok((record, cell)) => (record, cell.flatten()),
+            Ok(made) => made,
         };
-        if let Some(inheriting) = inheriting {
-            let holder = self.shared.holder();
-            let given = block_on(keys::give_inherited(&*self.bucket, inheriting, holder))??;
-            record = record.map(|_| given);
-        }
-        if let (Some(record), Some(known)) = (record, bucket_cell::Bucket::known(&*self.bucket)) {
-            known.learn(child.cell, Learned { record, cell, headless: true });
+        if let Some(head) = made {
+            inheriting.made();
+            if let Some(known) = bucket_cell::Bucket::known(&*self.bucket) {
+                known.learn(child.cell, Learned { head });
+            }
         }
         Ok(())
     }
 
     /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
-    /// fork is made, its commit or its record, so that a fork refused makes nothing (TASK-411.4):
-    /// if `child` is of another cell, no version, and the store's keys, which it inherits, are of
-    /// cells of other cells than its own, those keys and a KEK for the child's cell from the
-    /// host's pool; none otherwise. Refused if the host's KMS last heard a tenant of theirs
-    /// revoked or destroyed, or as the KMS refuses a KEK (`keys::inheriting`). No KMS call is made
-    /// with the pool not empty.
-    pub fn inheriting(&self, child: Child) -> Result<Option<keys::Inheriting>, Failure> {
-        let store = self.store();
-        let (source, parent) = (store.keys(), store.description().cell);
-        let kms = &self.shared.keys.kms;
-        Ok(block_on(keys::inheriting(kms, source, parent, child))??)
+    /// fork is made, its commit or its head, so that a fork refused makes nothing (TASK-411.4): the
+    /// store's keys, which it inherits, and a KEK for the child's cell from the host's pool. Refused
+    /// if the host's KMS last heard a tenant of theirs revoked or destroyed, or as the KMS refuses
+    /// a KEK (`keys::inheriting`). No KMS call is made with the pool not empty.
+    pub fn inheriting(&self, child: Child) -> Result<keys::Inheriting, Failure> {
+        let source = self.store().keys();
+        Ok(block_on(keys::inheriting(&self.shared.keys.kms, source, child))??)
     }
 
     /// Deletes `child` in object storage, a fork of the version the store is at that
@@ -795,22 +774,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// from now on.
     fn hold_ring(&self, ring: &Arc<Ring>) {
         *self.held.lock().unwrap() = Some(self.keys.ring.hold(ring.clone()));
-    }
-
-    /// cladefs: the keys of `cell` as read now, to be held by `placement` next
-    /// ([`CellKeys::to_hold`]): none, of a cell with no object, a version's.
-    async fn cell_keys(
-        &self,
-        bucket: &B,
-        cell: bucket_cell::layout::CellId,
-        placement: Option<u64>,
-    ) -> Result<CellKeys, Failure> {
-        let kms = self.keys.kms.clone();
-        Ok(match (cell::read(bucket, cell).await?, placement) {
-            (Some(object), Some(placement)) => CellKeys::to_hold(cell, &object, kms, placement),
-            (Some(object), None) => CellKeys::of(cell, &object, kms),
-            (None, _) => CellKeys::objectless(cell, kms),
-        })
     }
 
     /// A holder, or an owner, of the uploader's own, after its first taking's ([`Holders`]).
@@ -1057,120 +1020,68 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
         let kms = &self.keys.kms;
-        let (found, read, from) = first_reads(&**bucket, cell, learned, kms).await?;
-        let found = match found {
-            // A cell the bucket acknowledged commits of, which it no longer has: deleted, or
-            // another bucket. Making it anew would lose them.
-            None if recovering.start().is_some() => {
-                return Err(bucket_cell::Error::NoCell.into());
-            }
-            // cladefs: made once its cell is held, which gives it its DEK (TASK-411.3).
-            None => None,
-            Some(record) if let Some(id) = recovering.version() => {
-                let (Recovered { state, layer, .. }, keys) =
-                    self.version(bucket, cell, record, read.head()?, id).await?;
-                let opening =
-                    Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
-                let store = blocking(|| recovering.open(options, opening))?;
-                let _ = self.store.set(Arc::new(store));
-                self.hold_ring(&keys);
-                let mut progress = self.progress.lock().unwrap();
-                progress.uploaded_through(u64::MAX);
-                return Ok(None);
-            }
-            Some(record) => {
-                // cladefs: recovered under its keys: its cell's, as this placement holds it next,
-                // unwrapped once for that taking (TASK-411.3); holding none, a record not given
-                // its DEK yet (a fork's child's), read anew once it is, below.
-                let before = match record.deks.is_empty() {
-                    true => Ring::keyless(),
-                    false => {
-                        let keys = self.cell_keys(bucket, cell, Some(placement)).await?;
-                        keys::ring(&**bucket, &keys, cell, &record, true).await?
-                    }
-                };
-                // From the head read with the record, which the taking goes on from.
+        let read = first_read(&**bucket, cell, learned, kms).await?;
+        // A cell with no head is none: its maker makes it before its store first opens.
+        let Some(found) = read.head(cell)? else {
+            return Err(match recovering.version() {
+                Some(_) => Failure::VersionDropped,
+                None => bucket_cell::Error::NoCell.into(),
+            });
+        };
+        if let Some(id) = recovering.version() {
+            let (Recovered { state, layer, .. }, keys) =
+                self.version(bucket, cell, found, id).await?;
+            let opening =
+                Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
+            let store = blocking(|| recovering.open(options, opening))?;
+            let _ = self.store.set(Arc::new(store));
+            self.hold_ring(&keys);
+            let mut progress = self.progress.lock().unwrap();
+            progress.uploaded_through(u64::MAX);
+            return Ok(None);
+        }
+        // cladefs: a cell deleted takes no writer.
+        if found.deleted() {
+            return Err(bucket_cell::Error::Deleted.into());
+        }
+        // cladefs: recovered before the taking under its keys, as the taking will hold them,
+        // unwrapped once for it (TASK-411.3); a head with none yet, a fork's child's or a new
+        // cell's, which its taking gives them, recovered once it is taken.
+        let before = match found.deks.is_empty() {
+            false => {
+                let keys = CellKeys::to_take(cell, &found, kms.clone(), holder);
+                let ring = keys::ring(&**bucket, &keys, cell, &found, true).await?;
                 let recovered = bucket_cell::recovery::recover_under_from(
                     &**bucket,
                     cell,
-                    record.origin(),
-                    read.head()?,
-                    &before,
+                    found.origin(),
+                    Some(found.clone()),
+                    &ring,
                 )
                 .await?;
                 // Where the writer's chain would go: the log's restamping, not looked at here.
                 let chain = Chain::new(cell, 0, recovered.end(), 0);
                 let head = recovered.head.clone().unwrap_or_default();
-                let found = TakenCell::of(head, &recovered.state, chain);
-                if !recovering.follows(&found) {
+                if !recovering.follows(&TakenCell::of(head, &recovered.state, chain)) {
                     return Err(bucket_cell::Error::Diverged.into());
                 }
-                Some((record, recovered, before))
+                Some(recovered)
             }
+            true => None,
         };
-        // cladefs: a cell deleted takes no writer, whatever placement holds its cell.
-        if let Some((record, ..)) = &found
-            && record.deleted
-        {
-            return Err(bucket_cell::Error::Deleted.into());
-        }
-        // cladefs: its cell, held by this placement, whose epoch is the token the cell's head is
-        // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
-        // cell whose cell has no object yet, new or a fork's child, makes it; one deleted takes
-        // no writer (`Deleted`). The cell is of the store's kind from now on, unless it is of
-        // another (`OtherKind`, doc-20): all in one compare-and-swap of the cell's
-        // object, a read alone when nothing changes. Not
-        // a version's, which no writer takes, and any number of hosts open at once. cladefs: a cell
-        // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
-        // of a cell with DEKs is there already (TASK-411.3).
-        let given = recovering.kind();
-        let kms = &self.keys.kms;
-        let kek = match &found {
-            Some((record, ..)) if !record.deks.is_empty() => None,
-            _ => Some(keys::new_cell_kek(kms, cell.tenant).await?),
-        };
-        let making = kek.as_ref().map(|(_, kek)| kek);
-        let holding = (placement, placement);
-        let remembered = matches!(from, CellFrom::Remembered(_));
-        let holding = cell::hold_from(&**bucket, cell, from.start(), holding, making, given);
-        let (held, object) = match holding.await.map(|(held, object, _)| (held, object)) {
-            Ok(held) => held,
-            Err(err) => {
-                if let Some((secret, kek)) = kek {
-                    kms.give_back(cell.tenant, (secret, kek.wrapped));
-                }
-                return Err(err.into());
-            }
-        };
-        let cell_keys = keys::held(kms, cell, object, kek);
+        // cladefs: its head taken by this placement, in one conditional write that gives the cell
+        // what it lacks (TASK-515): a new cell's KEK from the host's pool, wrapped by its tenant's
+        // ahead (every cell is encrypted, TASK-411.28), its DEK, and the kind of the store, unless
+        // it is of another (`OtherKind`, doc-20). Not a version's, which no writer
+        // takes, and any number of hosts open at once. A cell with no head is no cell: its maker
+        // makes it, before its store opens (`lifecycle::create`), and no taking does.
+        let taking = head::Taking { holder, token: placement, kind: recovering.kind(), keys: None };
+        let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
         // its stores into new cells take, filled off this path (TASK-411.4).
         kms.refill(cell.tenant);
-        let token = held.epoch;
-        let taker = Taker { holder, token, remembered: remembered.then_some(held) };
-        // Its state, once it holds the head, recovered on from what was found before. cladefs:
-        // under its keys, its DEK given it first if it has none: a new cell's, or a fork's
-        // child's, whose recovery, read holding no key, it recovers anew under them (TASK-411.3).
-        let keyed = |record| self.ring_of(bucket, &cell_keys, cell, record);
-        let writer = match found {
-            None => {
-                failing!("upload::create_cell");
-                lifecycle::create(&**bucket, cell, self.holder()).await?;
-                let keys = keyed(None).await?;
-                Writer::open_keyed(bucket.clone(), cell, taker, keys).await?
-            }
-            Some((record, recovered, before)) => {
-                let keys = keyed(Some(record.clone())).await?;
-                match before.is_empty() && !keys.is_empty() {
-                    true => Writer::open_keyed(bucket.clone(), cell, taker, keys).await?,
-                    false => {
-                        let found = (recovered, read);
-                        Writer::open_recovered_from(bucket.clone(), record, found, taker, keys)
-                            .await?
-                    }
-                }
-            }
-        };
+        let keys = keys::ring(&**bucket, &cell_keys, cell, &held.head, true).await?;
+        let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
@@ -1178,27 +1089,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let store = blocking(|| recovering.open(options, opening))?;
         let _ = self.store.set(Arc::new(store));
         self.hold_ring(&keys);
-        let _ = self.token.set(token);
-        self.took(&writer, token);
+        let _ = self.token.set(placement);
+        self.took(&writer, placement);
         Ok(Some(writer))
-    }
-
-    /// cladefs: the keys of the store of `cell`, of the cell `cell_keys` are of, its writer's: its
-    /// record's DEKs, given it its first if it has none, and its ancestors' (`keys::with_dek`,
-    /// `keys::ring`, TASK-411.3). Its record is `record`, if read, or read now.
-    async fn ring_of(
-        &self,
-        bucket: &Arc<B>,
-        cell_keys: &CellKeys,
-        cell: bucket_cell::layout::CellId,
-        record: Option<Record>,
-    ) -> Result<Arc<Ring>, Failure> {
-        let record = match record {
-            Some(record) => record,
-            None => lifecycle::record(&**bucket, cell).await?.ok_or(bucket_cell::Error::NoCell)?,
-        };
-        let record = keys::with_dek(&**bucket, cell_keys, cell, record).await?;
-        Ok(keys::ring(&**bucket, cell_keys, cell, &record, true).await?)
     }
 
     /// `writer` took the cell, with the fencing token `token`: the store names what it reads in
@@ -1224,26 +1117,24 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.changed.notify(usize::MAX);
     }
 
-    /// cladefs: opens the store of `cell`, whose record is `record`, as a copy of its version
-    /// `id`, which `head`, what a read of its head found, must name (TASK-476): its state at the
-    /// version, which never changes, as recovered, with its keys, its cell's, under its cell's
-    /// KEK as read, taking it not. No taking: nothing the store does goes to the bucket but its
-    /// forks' records. Fails if the version is named no more ([`Failure::VersionDropped`]).
+    /// cladefs: opens the store of `cell`, whose head is `head`, as a copy of its version `id`,
+    /// which the head must name (TASK-476): its state at the version, which never changes, as
+    /// recovered, with its keys, under its KEK as read, taking it not. No taking: nothing the store
+    /// does goes to the bucket but its forks' heads. Fails if the version is named no more
+    /// ([`Failure::VersionDropped`]).
     async fn version(
         &self,
         bucket: &Arc<B>,
         cell: CellId,
-        record: Record,
-        head: Option<bucket_cell::layout::Head>,
+        head: Head,
         id: u64,
     ) -> Result<(Recovered, Arc<Ring>), Failure> {
-        let named = head.as_ref().and_then(|head| head.version(id).copied());
-        let Some(version) = named.filter(|_| !record.deleted) else {
+        let Some(version) = head.version(id).copied() else {
             return Err(Failure::VersionDropped);
         };
         let origin = Origin { parent: cell, at: version.at };
-        let cell_keys = self.cell_keys(bucket, cell, None).await?;
-        let keys = keys::ring(&**bucket, &cell_keys, cell, &record, true).await?;
+        let cell_keys = CellKeys::of(cell, &head, self.keys.kms.clone());
+        let keys = keys::ring(&**bucket, &cell_keys, cell, &head, true).await?;
         let recovering = bucket_cell::recovery::recover_version(&**bucket, cell, version.at, &keys);
         let recovered = recovering.await?;
         // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
@@ -1348,66 +1239,35 @@ fn learned<B: bucket_cell::Bucket, D: Dir>(
     learned.filter(|_| recovering.start().is_none())
 }
 
-/// What an opening of the store of `cell` reads first, at once (TASK-165.11, TASK-449): its
-/// record ([`resumed`]), its head, which the writer's taking goes on from and its recovery starts
-/// from, and its cell's object, which its holding goes on from, returning what the holding starts
-/// from. Of a cell this host has just made or taken, `learned` ([`learned`]) stands for those
-/// reads: its record as it left it, its cell's object, if it held it, and its head, none, if it
-/// knows it has none, a clone made or a version. Each is as a read made then: the head's taking is
-/// conditional on what it starts from, and so is the cell's holding if it writes; the record is
-/// read again once the head is taken, and the cell too if its holding wrote nothing
-/// ([`CellFrom::Remembered`]; `Writer::take`).
-async fn first_reads<B: bucket_cell::Bucket>(
+/// What an opening of the store of `cell` reads first (TASK-165.11, TASK-449): its head, which
+/// the taking goes on from and its recovery starts from; of a cell this host has just made,
+/// `learned` ([`learned`]) stands for that read: its head as its fork left it, as a read made then,
+/// the taking conditional on it. A fork of a version its host crashed in the middle of, its head
+/// saying so, is resumed first ([`lifecycle::resume_version_fork`]: its reference written, the
+/// fork made), which fails if the version was dropped: so the store takes no state of a fork not
+/// made.
+async fn first_read<B: bucket_cell::Bucket>(
     bucket: &B,
     cell: CellId,
     learned: Option<Learned>,
     kms: &Arc<keys::CachingKms>,
-) -> Result<(Option<Record>, bucket_cell::head::Read, CellFrom), Failure> {
-    use bucket_cell::head::{self, Read};
-    let key = bucket_cell::layout::cell(cell);
-    let cell_read = || bucket_cell::bucket::get(bucket, &key);
-    let Some(Learned { record, cell: object, headless }) = learned else {
-        let (found, read, object) = futures::join!(
-            async { resumed(bucket, cell, lifecycle::record(bucket, cell).await?, kms).await },
-            head::read(bucket, cell),
-            cell_read(),
-        );
-        return Ok((found?, read, CellFrom::Read(object)));
+) -> Result<head::Read, Failure> {
+    let found = match learned {
+        Some(Learned { head }) => Some(head),
+        None => bucket_cell::bucket::get(bucket, &bucket_cell::layout::head(cell)).await,
     };
-    let reading = async {
-        match headless {
-            true => Read::absent(),
-            false => head::read(bucket, cell).await,
-        }
-    };
-    let holding = async {
-        match object {
-            Some(object) => CellFrom::Remembered(object),
-            None => CellFrom::Read(cell_read().await),
-        }
-    };
-    let (found, read, object) =
-        futures::join!(resumed(bucket, cell, Some(record), kms), reading, holding);
-    Ok((found?, read, object))
-}
-
-/// The record of `cell`, `found`, if it has one: a fork of a version its host crashed in the
-/// middle of, its record saying so, resumed first ([`lifecycle::resume_version_fork`]: its reference
-/// written, the fork made), which fails if the version was dropped. So the store takes no state of a fork
-/// not made.
-async fn resumed<B: bucket_cell::Bucket>(
-    bucket: &B,
-    cell: CellId,
-    found: Option<Record>,
-    kms: &Arc<keys::CachingKms>,
-) -> Result<Option<Record>, Failure> {
-    if !found.as_ref().is_some_and(|record| !record.deleted && record.forking().is_some()) {
-        return Ok(found);
+    let read = head::Read::found(found.clone());
+    if !read.head(cell)?.is_some_and(|head| !head.deleted() && head.forking().is_some()) {
+        return Ok(read);
     }
     // cladefs: a version's restore into another cell writes its checkpoint at the version under
     // the version's cell's keys, unwrapped by the host's KMS (TASK-476).
-    lifecycle::resume_version_fork(bucket, cell, keys::Parents::Kms(kms, None)).await?;
-    Ok(lifecycle::record(bucket, cell).await?)
+    let start = lifecycle::Start::Found(found);
+    match lifecycle::resume_version_fork(bucket, cell, start, keys::Parents::Kms(kms, None)).await?
+    {
+        Some(left) => Ok(head::Read::found(Some(left))),
+        None => Ok(head::read(bucket, cell).await),
+    }
 }
 
 /// The bytes of `file`, an extent's of its own a segment of the write-ahead log names, read only
@@ -1417,26 +1277,6 @@ fn stored<F: File>(file: &Arc<F>) -> Result<Body, Failure> {
     let size = file.size().map_err(|err| Failure::local(err, "a file to upload"))?;
     let file = file.clone();
     Ok(Body::new(size, move || blocking(|| read_object(&*file))))
-}
-
-/// What the holding of a store's cell starts from ([`first_reads`]).
-enum CellFrom {
-    /// What a read made with the opening's first reads found.
-    Read(Option<bucket_cell::bucket::Object>),
-    /// What this host's fork of the cell left, as it held the cell: a read made earlier. Its
-    /// holding, finding it held by this placement already, writes nothing, which no condition
-    /// checks; so the writer's taking reads the cell once the head is taken, which another's
-    /// holding since refuses (`bucket_cell::Taker::remembered`, TASK-449's review).
-    Remembered(bucket_cell::bucket::Object),
-}
-
-impl CellFrom {
-    fn start(self) -> lifecycle::Start {
-        match self {
-            Self::Read(found) => lifecycle::Start::Found(found),
-            Self::Remembered(found) => lifecycle::Start::Found(Some(found)),
-        }
-    }
 }
 
 /// What a gather did ([`Shared::gather`]).
@@ -1588,37 +1428,31 @@ mod tests {
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
-        let kind = cell::Kind::Fxfs;
+        let kind = bucket_cell::cell::Kind::Fxfs;
         LocalCell::make(&dir, description, Some("memory:///cells"), Some(kind)).unwrap();
+        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
         let (store, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .unwrap();
         store.made().unwrap();
-        let object = runtime.block_on(cell::read(&*bucket, CELL)).unwrap().unwrap();
-        assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
-        assert_eq!(object.kind, Some(cell::Kind::Fxfs));
         let head = runtime.block_on(bucket_cell::head::get(&*bucket, CELL)).unwrap().unwrap();
-        assert_eq!((head.epoch, head.token), (1, 1));
+        assert_eq!((head.epoch, head.holder, head.token), (1, 1, 5));
+        assert_eq!(head.kind, Some(bucket_cell::cell::Kind::Fxfs));
 
         store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
         uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
-        // Another placement takes the cell, and its writer the cell with the cell's epoch,
-        // fencing it (TASK-371).
-        let taken = runtime.block_on(async {
-            let (held, _) = cell::hold(&*bucket, CELL, (6, 6), None, None).await.unwrap();
-            drop(bucket_cell::Writer::open(bucket.clone(), CELL, 0x66, held.epoch).await.unwrap());
-            held
-        });
-        assert_eq!(taken.epoch, 2);
+        // Another placement takes the cell, fencing it (TASK-371).
+        let taken = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x66, 6));
+        assert_eq!(taken.map(|held| held.head.epoch), Ok(2));
         store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
         let fenced = uploader.wait_uploaded(store.last_commit().unwrap());
         assert!(matches!(fenced, Err(Failure::Bucket(bucket_cell::Error::Fenced))), "{fenced:?}");
-        let back = runtime.block_on(cell::hold(&*bucket, CELL, (5, 5), None, None));
-        assert_eq!(back.map(|(held, _)| held), Err(bucket_cell::Error::Stale));
+        let back = runtime.block_on(bucket_cell::testing::take(&*bucket, CELL, 0x55, 5));
+        assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
     }
 
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
@@ -1636,6 +1470,7 @@ mod tests {
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
         LocalCell::make(&dir, description, Some("memory:///gathers"), None).unwrap();
+        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = LocalCell::recover_unmade(dir).unwrap();
@@ -1694,7 +1529,6 @@ mod shuttle_tests {
     const BLOCK: usize = 4096;
     const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
     /// The cell the writer forks.
-    const CHILD: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(CELL.id + 1);
 
     /// Small segments, so that commits close several, and extents of two blocks or more in
     /// objects of their own, which upload before the segments naming them (TASK-79.3); flushes of
@@ -1849,8 +1683,8 @@ mod shuttle_tests {
         holds: &BTreeMap<ExtentId, Vec<u8>>,
     ) -> Result<(), String> {
         let failed = |err: bucket_cell::Error| format!("cell {cell}: {err}");
-        let record = shuttle::future::block_on(lifecycle::record(&**bucket, cell));
-        let record = record.map_err(failed)?.ok_or(format!("cell {cell}: no record"))?;
+        let record = shuttle::future::block_on(bucket_cell::head::get(&**bucket, cell));
+        let record = record.map_err(failed)?.ok_or(format!("cell {cell}: no head"))?;
         let recovering = bucket_cell::recover(&**bucket, cell, record.origin());
         let state = shuttle::future::block_on(recovering).map_err(failed)?.state;
         let held: Vec<&ExtentId> = state.extents.keys().collect();
@@ -1892,6 +1726,7 @@ mod shuttle_tests {
             let dir = MemDir::new();
             let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, cell };
             LocalCell::make(&dir, description, None, None).unwrap();
+            shuttle::future::block_on(lifecycle::create(&**bucket, cell, holder)).unwrap();
             let recovering = LocalCell::recover_unmade(dir).unwrap();
             // Its interval never runs out: the writer asks for what it commits.
             let never: Clock = Arc::new(|_| futures::future::pending().boxed());
@@ -1951,12 +1786,10 @@ mod shuttle_tests {
         }
     }
 
-    /// One schedule: the writer writes, frees, commits and forks, asking for uploads; once the
-    /// fork is made, the child's store, on another host, writes, frees what it inherited and
-    /// commits, meanwhile; their uploaders upload; passes of the collector run all along. Then the
-    /// uploaders upload what is left and stop, a last pass runs alone, and each cell, recovered
-    /// from the bucket, holds what its store's last commit left, each extent reading as it was
-    /// written. What went wrong, if anything did.
+    /// One schedule: the writer writes, frees and commits, asking for uploads; its uploader uploads;
+    /// passes of the collector run all along. Then the uploader uploads what is left and stops, a
+    /// last pass runs alone, and the cell, recovered from the bucket, holds what its store's last
+    /// commit left, each extent reading as it was written. What went wrong, if anything did.
     fn collected_while_committing() -> Result<(), String> {
         let bucket = Turns::new();
         let mut parent = Session::open(&bucket, CELL, 1);
@@ -1989,41 +1822,21 @@ mod shuttle_tests {
         parent.store.commit(None).unwrap();
         parent.ask();
         parent.write(3, 1);
-        parent.store.commit_fork(Child { cell: CHILD, owner: 9 }).unwrap();
-        let fork = parent.store.last_commit().unwrap();
+        parent.store.commit(None).unwrap();
         parent.ask();
-        until(|| parent.uploader.forked() >= fork);
-        // The child, made by the fork, whose record the collector may not have read yet: what its
-        // store uploads, it knows nothing of until it reads the record, its segments not those of a
-        // cell it recovered.
-        let mut child = Session::open(&bucket, CHILD, 2);
-        child.holds = parent.holds.clone();
-        child.write(0, 1);
-        child.free(parent.extent(1));
-        child.store.commit_ordered(None).unwrap();
-        child.ask();
         parent.free(parent.extent(1));
         parent.write(4, 2);
         parent.store.commit_ordered(None).unwrap();
         parent.ask();
-        child.write(1, 3);
-        child.store.commit(None).unwrap();
-        child.ask();
         parent.free(parent.extent(3));
         parent.store.commit(None).unwrap();
         parent.ask();
-        child.free(parent.extent(2));
-        child.write(2, 1);
-        child.store.commit(None).unwrap();
-        child.ask();
         let parent = parent.end()?;
-        let child = child.end()?;
         writing.store(false, SeqCst);
         collecting.join().unwrap()?;
         let pass = collector::collect(&*bucket, 200, &COLLECTING);
         shuttle::future::block_on(pass).map_err(|err| format!("the last pass: {err}"))?;
-        differs(&bucket, CELL, &parent)?;
-        differs(&bucket, CHILD, &child)
+        differs(&bucket, CELL, &parent)
     }
 
     /// Runs `schedule` under `scheduler`'s interleavings.
@@ -2033,14 +1846,9 @@ mod shuttle_tests {
         shuttle::Runner::new(scheduler, config).run(schedule);
     }
 
-    /// TASK-291.1: whatever the interleaving, what each store committed and its uploader
-    /// acknowledged stays its cell's, the parent's and its fork's child's, the collector running
-    /// all along.
-    ///
-    /// No rule of the collector's off has it lose anything here in thousands of schedules (seven
-    /// tried, `candidates_first` among them): once the cell has a checkpoint of its own, each
-    /// pass lists the records again after recovering what they name, which leaves a pass's loss
-    /// little room between two of its requests. [`listed_while_forking`] holds a pass up there.
+    /// TASK-291.1: whatever the interleaving, what the store committed and its uploader
+    /// acknowledged stays its cell's, the collector running all along. [`listed_while_committing`]
+    /// holds a pass up as it lists.
     #[test]
     fn collection_keeps_what_a_store_commits_meanwhile() {
         let schedule = || collected_while_committing().unwrap();
@@ -2048,12 +1856,12 @@ mod shuttle_tests {
         explore(PctScheduler::new(3, runs()), schedule);
     }
 
-    /// One schedule: a pass of the collector, held up as it lists the bucket's objects, while the
-    /// store's fork to the child is made and the child's store, opened, commits and its uploader
-    /// uploads its segment. Then the pass goes on, the uploaders upload what is left and stop, a
-    /// last pass runs alone, and each cell, recovered from the bucket, holds what its store's
-    /// last commit left. What went wrong, if anything did.
-    fn listed_while_forking() -> Result<(), String> {
+    /// One schedule: a pass of the collector, held up as it lists the cell's objects, while the
+    /// store commits and its uploader uploads its segment and acknowledges it. Then the pass goes
+    /// on, the uploader uploads what is left and stops, a last pass runs alone, and the cell,
+    /// recovered from the bucket, holds what its store's last commit left. What went wrong, if
+    /// anything did.
+    fn listed_while_committing() -> Result<(), String> {
         let bucket = Turns::new();
         let mut parent = Session::open(&bucket, CELL, 1);
         parent.write(0, 1);
@@ -2062,8 +1870,6 @@ mod shuttle_tests {
         parent.ask();
         let before = parent.store.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= before);
-        parent.store.commit_fork(Child { cell: CHILD, owner: 9 }).unwrap();
-        let fork = parent.store.last_commit().unwrap();
         bucket.gate.arm();
         let passing = {
             let bucket = bucket.clone();
@@ -2073,49 +1879,24 @@ mod shuttle_tests {
             })
         };
         bucket.gate.reached();
+        parent.write(2, 1);
+        parent.free(parent.extent(0));
+        parent.store.commit_ordered(None).unwrap();
         parent.ask();
-        until(|| parent.uploader.forked() >= fork);
-        let mut child = Session::open(&bucket, CHILD, 2);
-        child.holds = parent.holds.clone();
-        child.write(0, 1);
-        child.free(parent.extent(0));
-        child.store.commit_ordered(None).unwrap();
-        child.ask();
-        let committed = child.store.last_commit().unwrap();
-        until(|| child.uploader.last_uploaded() >= committed);
+        let committed = parent.store.last_commit().unwrap();
+        until(|| parent.uploader.last_uploaded() >= committed);
         bucket.gate.open();
         passing.join().unwrap()?;
         let parent = parent.end()?;
-        let child = child.end()?;
         let pass = collector::collect(&*bucket, 200, &COLLECTING);
         shuttle::future::block_on(pass).map_err(|err| format!("the last pass: {err}"))?;
-        differs(&bucket, CELL, &parent)?;
-        differs(&bucket, CHILD, &child)
+        differs(&bucket, CELL, &parent)
     }
 
-    /// A pass listing the bucket's objects before it reads the cells' records keeps what a
-    /// child, made after the listing began, uploads before it ends: the pass reads the child's
-    /// record, and its recovery names the segment.
+    /// A pass listing the cell's objects before it reads its head keeps what the writer uploads
+    /// and acknowledges after the listing began: none of it is a candidate.
     #[test]
-    fn a_pass_keeps_what_a_child_made_as_it_lists_uploads() {
-        explore(RandomScheduler::new(runs() / 10), || listed_while_forking().unwrap());
-    }
-
-    /// The collector listing the bucket's objects after it read what the cells need, not before:
-    /// a child whose record no pass read, made meanwhile, has its segment listed, which no cell
-    /// the pass recovered names, and deleted.
-    #[test]
-    fn a_pass_keeping_what_a_child_made_as_it_lists_uploads_needs_candidates_first() {
-        let all = bucket_cell::Rules::ALL;
-        let off = bucket_cell::Rules { candidates_first: false, ..all };
-        explore(RandomScheduler::new(runs() / 10), move || {
-            bucket_cell::set_rules(off);
-            let listed = listed_while_forking();
-            bucket_cell::set_rules(all);
-            let extent = "ExtentId { cell: 8, sequence: 1099511627776 }";
-            let segment = bucket_cell::layout::segment(CHILD, 0, 1);
-            let lost = format!("cell {CHILD}: {extent} reads Err(Lost(\"{extent} in {segment}\"))");
-            assert_eq!(listed, Err(lost));
-        });
+    fn a_pass_keeps_what_a_writer_uploads_as_it_lists() {
+        explore(RandomScheduler::new(runs() / 10), || listed_while_committing().unwrap());
     }
 }

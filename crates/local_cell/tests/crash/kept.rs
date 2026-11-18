@@ -272,6 +272,8 @@ const DESCRIPTION: Description =
 fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Crashed {
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let bucket = host.bucket();
+    host.runtime.block_on(bucket_cell::lifecycle::create(&*bucket, CELL, 1)).unwrap();
     let (store, uploader) =
         host.open(LocalCell::recover_unmade(dir.clone()).unwrap(), 1, interval).unwrap();
     store.made().unwrap();

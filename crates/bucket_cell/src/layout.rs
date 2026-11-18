@@ -51,9 +51,9 @@ pub struct Child {
 /// keys name their writers' epochs, a cell's head ([`head`], [`Head`]) names the segments it
 /// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
 /// nothing reads 10's. 12: a fork of a version, made, says so
-/// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
+/// ([`Made::Clone`](crate::record::Made::Clone)), so that the collector removes a dead cell of
 /// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a version says whether
-/// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
+/// another than its host resumed it ([`Head::resumed`]), whose
 /// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a cell's head
 /// names its versions, and a footer those made at its end ([`Head::versions`], [`NewVersion`];
 /// doc-18, TASK-476); a fork being made says whether it is of a version or a version; nothing reads
@@ -63,8 +63,9 @@ pub struct Child {
 /// and a version names no cut of several cells; nothing reads 15's. 17: forks are of versions
 /// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
 /// 16's. 18: no writable forks: a record is its kind, not flags, and a footer names no forks
-/// (TASK-508.3); nothing reads 17's.
-pub const FORMAT: u32 = 18;
+/// (TASK-508.3); nothing reads 17's. 19: a cell's head is its one swapped object, holding what its
+/// record and its cell's object held (TASK-515); nothing reads 18's.
+pub const FORMAT: u32 = 19;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -125,13 +126,9 @@ pub fn checkpoint(cell: CellId, segment: u64, epoch: u64) -> String {
     format!("{}{}.{}", checkpoints(cell), Padded(keyed(epoch)), Padded(segment))
 }
 
-/// cladefs: `cell`'s record: where it came from, and whether it was deleted (doc-20).
-pub fn record(cell: CellId) -> String {
-    format!("{}record", cell.prefix())
-}
-
-/// The head of `cell` ([`Head`]): its writer's taking, the segments it holds and its newest
-/// checkpoint, swapped with a condition (TASK-407).
+/// The head of `cell` ([`Head`]), its one swapped object: what made it, its keys, its writer's
+/// taking, the segments it holds, its newest checkpoint and its versions, swapped with a
+/// condition (TASK-407, TASK-515).
 pub fn head(cell: CellId) -> String {
     format!("{}head", cell.prefix())
 }
@@ -165,11 +162,6 @@ pub fn kek(tenant: u64) -> String {
 
 /// cladefs: what [`kek`] names under a tenant's prefix.
 const KEK: &str = "kek";
-
-/// cladefs: the object of `cell` itself: who holds it, and its volumes ([`crate::cell`]).
-pub fn cell(cell: CellId) -> String {
-    format!("{}cell", cell.prefix())
-}
 
 /// cladefs: the cell whose prefix `key` is under, and the rest of it: none for a key of no cell's.
 fn in_cell(key: &str) -> Option<(CellId, &str)> {
@@ -343,14 +335,7 @@ pub enum Kind<'a> {
         segment: u64,
         epoch: u64,
     },
-    Record {
-        cell: CellId,
-    },
     Head {
-        cell: CellId,
-    },
-    /// cladefs: a cell's own object ([`cell`]).
-    Cell {
         cell: CellId,
     },
     /// cladefs: a block of object IDs taken ([`objectid_block`]).
@@ -404,9 +389,7 @@ impl Kind<'_> {
             Self::Segment { .. } => "segment",
             Self::Extent { .. } => "extent",
             Self::Checkpoint { .. } => "checkpoint",
-            Self::Record { .. } => "record",
             Self::Head { .. } => "head",
-            Self::Cell { .. } => "cell",
             Self::ObjectIds { .. } => "objectid",
             Self::Kek { .. } => "kek",
             Self::CollectorLease { .. } => "gc-lease",
@@ -428,13 +411,10 @@ pub fn owner(key: &str) -> Option<CellId> {
         Kind::Segment { cell, .. }
         | Kind::Extent { cell, .. }
         | Kind::Checkpoint { cell, .. }
-        | Kind::Record { cell }
         | Kind::Head { cell }
         | Kind::Reference { parent: cell, .. }
         | Kind::Retired { parent: cell, .. } => Some(cell),
-        Kind::Cell { cell } | Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => {
-            Some(cell)
-        }
+        Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. } | Kind::Kek { .. } | Kind::Marking | Kind::Unknown => None,
     }
@@ -459,9 +439,6 @@ pub fn kind(key: &str) -> Kind<'_> {
             return Some(Kind::Kek { tenant: number(tenant)? });
         }
         let (cell, rest) = in_cell(key)?;
-        if rest == "cell" {
-            return Some(Kind::Cell { cell });
-        }
         if let Some(moves) = rest.strip_prefix(MOVES) {
             let (of, pass) = moves.rsplit_once('/')?;
             return (!of.is_empty()).then_some(Kind::Moves { cell, of, pass: number(pass)? });
@@ -487,9 +464,6 @@ pub fn kind(key: &str) -> Kind<'_> {
         if let Some(rest) = rest.strip_prefix(RETIRED) {
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Retired { parent, at, child });
-        }
-        if rest == "record" {
-            return Some(Kind::Record { cell });
         }
         if rest == "head" {
             return Some(Kind::Head { cell });
@@ -551,22 +525,57 @@ pub struct Origin {
     pub at: u64,
 }
 
-/// A cell's head (TASK-407): its writer's taking, of the epoch after the taking before, by
-/// `holder`, with the fencing token `token`; and what the cell holds, its segments to `end` and
-/// its newest checkpoint. Swapped with a condition (S3 If-Match, GCS generation), by its writer
-/// alone while it holds it: a segment or a checkpoint is the cell's only once the head names it,
-/// so that one its writer uploaded, taken over before it swapped the head, never is, nor ever will
-/// be, and the collector deletes it. A takeover swaps it to the next epoch, which fences the writer
-/// before: its next swap fails. A head of [`Head::FINAL`] is a deleted cell's: no writer takes it
-/// again. Heads are never deleted.
+/// A cell's head (TASK-407, TASK-515), its one swapped object: what made it and whose it is
+/// ([`crate::record`]), its keys ([`crate::keys`]), its kind ([`crate::cell`]), its writer's
+/// taking, of the epoch after the taking before, by `holder`, with the fencing token `token`; and
+/// what the cell holds, its segments to `end`, its newest checkpoint and its versions. Swapped with
+/// a condition (S3 If-Match, GCS generation), by its writer alone while it holds it: a segment or a
+/// checkpoint is the cell's only once the head names it, so that one its writer uploaded, taken
+/// over before it swapped the head, never is, nor ever will be, and the collector deletes it. A
+/// takeover swaps it to the next epoch, which fences the writer before: its next swap fails. Epoch
+/// 0 is a head made and never taken, a fork's child's until its fork is made; [`Head::FINAL`] a
+/// deleted cell's: no writer takes it again. Heads are never deleted, but with a dead cell
+/// ([`Head::removable`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
+    /// The format of the cell's objects ([`FORMAT`]), first, so that a reader of any format reads
+    /// it before the rest, which it reads only if it is of its own ([`Head::decode`], TASK-141.2,
+    /// TASK-165.3).
+    pub format: u32,
+    /// The cell's owner: a number its maker chose at random, unique to that making, which every
+    /// head of the cell names, whoever writes it ([`Child::owner`]). So no two makers of one cell
+    /// ID write the same bytes, and a create that finds a head there tells its own, landed though
+    /// its answer was lost, from another's (TASK-79.82, TASK-153.9).
+    pub owner: u64,
+    /// What made the cell ([`crate::record::Made`]).
+    pub made: crate::record::Made,
+    /// cladefs: of a fork of a version, being made or made, whether another than the host that
+    /// began it resumed it ([`crate::lifecycle::resume_version_fork`], TASK-455's review): so a
+    /// clone made says it if anyone but its host may write its reference after, whose retirement
+    /// is then marked ([`Head::retires_unmarked`]).
+    pub resumed: bool,
+    /// cladefs: what the cell holds, which says what opens it, given by its first writer (doc-20).
+    pub kind: Option<crate::cell::Kind>,
+    /// cladefs: the cell's KEK, every generation of it, each wrapped by its tenant's KEK in the
+    /// KMS (doc-16, TASK-411.3): every cell is made with one, none in the clear (TASK-411.28).
+    pub keks: Vec<crate::keys::Kek>,
+    /// cladefs: whether the cell was shredded, its KEKs taken out ([`crate::keys::shred`],
+    /// TASK-411.7): no one takes it again.
+    pub shredded: bool,
+    /// cladefs: the cell's DEK, each generation of it, wrapped by its KEK, oldest first: given by
+    /// its first writer's taking ([`crate::keys::taking`]); a writer's ring of a head with none is
+    /// refused (TASK-411.28).
+    pub deks: Vec<crate::keys::Dek>,
+    /// cladefs: the DEKs of every ancestor of another cell whose objects the cell reads, each
+    /// generation, rewrapped under its own KEK (doc-16, Forks and shared versions; TASK-411.4),
+    /// given by its fork's host as it makes the fork, so that its readers need no other cell's
+    /// KEK, nor another tenant's KMS.
+    pub inherited: Vec<crate::keys::InheritedDek>,
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
-    /// The fencing token it was taken with, which no lower one takes the head from (TASK-39.7): the
-    /// epoch of the taking of the cell by its writer's placement ([`crate::cell::Held`],
-    /// TASK-364), which a later taking of the cell exceeds; `u64::MAX` once deleted.
+    /// The fencing token it was taken with, its writer's placement's, which no lower one takes the
+    /// head from (TASK-39.7); `u64::MAX` once deleted.
     pub token: u64,
     /// The number of segments the cell holds: 0 to `end`, without gaps.
     pub end: u64,
@@ -600,9 +609,24 @@ pub const MAX_VERSIONS: usize = 256;
 impl Head {
     pub const FINAL: u64 = u64::MAX;
 
-    /// The head `bytes` encode.
-    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
+    /// A head of `cell` made by `made`, of `owner`, of this format, never taken.
+    pub fn of(made: crate::record::Made, owner: u64) -> Self {
+        Self { format: FORMAT, owner, made, ..Self::default() }
+    }
+
+    /// The head of `cell` that `bytes` encode, unless it is of another format than this one, newer
+    /// or older, which its first bytes say ([`crate::Error::Format`]).
+    pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, crate::Error> {
+        let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
+        if format != FORMAT {
+            return Err(crate::Error::Format { cell, format });
+        }
         decode(bytes)
+    }
+
+    /// Whether the cell was deleted: no writer takes it again.
+    pub fn deleted(&self) -> bool {
+        self.epoch == Self::FINAL
     }
 
     /// The epoch of the writer of segment `segment`, if the head names it.
@@ -868,9 +892,7 @@ mod tests {
             segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
-            record(cell),
             head(cell),
-            self::cell(cell),
             moves(&segment(cell, 7, 2)),
             moves(&moves(&segment(cell, 7, 2))),
             collector_lease(cell),
@@ -879,7 +901,7 @@ mod tests {
         ] {
             assert!(key.starts_with(prefix) && key.starts_with(TENANTS), "{key}");
         }
-        assert_eq!(record(cell), format!("{prefix}record"));
+        assert_eq!(head(cell), format!("{prefix}head"));
         assert_eq!(
             moves(&segment(cell, 7, 2)),
             format!("{prefix}moves/segments/0000000000002.0000000000007/0000000000001")
@@ -971,9 +993,7 @@ mod tests {
         let earlier = format!("{}extents/0000000000003/0000000000002.0000000000009", cell.prefix());
         assert_eq!(kind(&earlier), Kind::Unknown);
         assert_eq!(kind(&checkpoint(cell, 7, 2)), Kind::Checkpoint { cell, segment: 7, epoch: 2 });
-        assert_eq!(kind(&record(cell)), Kind::Record { cell });
         assert_eq!(kind(&head(cell)), Kind::Head { cell });
-        assert_eq!(kind(&self::cell(cell)), Kind::Cell { cell });
         assert_eq!(objectid_block(0x2a), "objectid/000000000001a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
@@ -1022,7 +1042,7 @@ mod tests {
         assert_eq!(kind("gc/marks/000000000001a"), Kind::Unknown);
         assert_eq!(kind(&format!("moves/{from}")), Kind::Unknown);
         assert_eq!(cell_of_prefix(&cell.prefix()), Some(cell));
-        assert_eq!(cell_of_prefix(&record(cell)), None);
+        assert_eq!(cell_of_prefix(&head(cell)), None);
         assert_eq!(cell_of_prefix(""), None);
     }
 
@@ -1037,9 +1057,7 @@ mod tests {
             segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
             checkpoint(cell, 7, 2),
-            record(cell),
             head(cell),
-            self::cell(cell),
             moves(&segment(cell, 7, 2)),
             moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
             collector_lease(cell),
@@ -1073,8 +1091,10 @@ mod tests {
             runs: vec![(0, 1), (3, 4)],
             checkpoint: Some((2, 1)),
             versions: vec![Version { id: 0xbe, at: 3, shared: true }],
+            kind: Some(crate::cell::Kind::Sqlite),
+            ..Head::of(crate::record::Made::Root, 3)
         };
-        assert_eq!(Head::decode(&encode(&head)), Ok(head));
+        assert_eq!(Head::decode(TEST_CELL, &encode(&head)), Ok(head));
     }
 
     /// TASK-476: a head names the versions cut at the segments it names, in order, each once; a

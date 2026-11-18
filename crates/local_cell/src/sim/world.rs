@@ -1272,7 +1272,7 @@ impl World {
                 open == takeover
             })
             .filter(|&(&cell, _)| {
-                matches!(block_on(lifecycle::record(&direct, sim_cell(cell))), Ok(Some(_)))
+                matches!(block_on(bucket_cell::head::get(&direct, sim_cell(cell))), Ok(Some(_)))
             })
             .map(|(&cell, _)| cell)
             .collect();
@@ -1753,8 +1753,8 @@ impl World {
             .keys()
             .copied()
             .filter(|&id| {
-                let record = block_on(lifecycle::record(&direct, sim_cell(id)));
-                matches!(record, Ok(Some(record)) if !record.deleted)
+                let head = block_on(bucket_cell::head::get(&direct, sim_cell(id)));
+                matches!(head, Ok(Some(head)) if !head.deleted())
             })
             .collect()
     }
@@ -1786,7 +1786,10 @@ impl World {
         let after: BTreeSet<String> = self.bucket.keys().into_iter().collect();
         let moves = |key: &&String| matches!(layout::kind(key), layout::Kind::Moves { .. });
         let reference = |key: &&String| matches!(layout::kind(key), layout::Kind::Reference { .. });
-        let gone = || before.keys().filter(|key| !after.contains(*key));
+        // The collector's leases, its own, which it reports not.
+        let lease =
+            |key: &&String| matches!(layout::kind(key), layout::Kind::CollectorLease { .. });
+        let gone = || before.keys().filter(|key| !after.contains(*key) && !lease(key));
         let made = || after.iter().filter(|key| !before.contains_key(*key));
         let retired = gone().filter(reference).count();
         let expected = |reported: &collector::Report| collector::Report {
@@ -1804,15 +1807,11 @@ impl World {
             // left locked (TASK-411.6, TASK-411.28).
             locked: 0,
             uncompacted: 0,
-            // cladefs: the cells whose records went, as only a dead cell's removal deletes them,
-            // all of them at once (TASK-455).
-            removed: (gone())
-                .filter_map(|key| match layout::kind(key) {
-                    layout::Kind::Record { cell } => Some(cell),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>()
-                .len(),
+            // cladefs: the cells whose heads went, as only a dead cell's removal deletes them
+            // (TASK-455).
+            removed: gone()
+                .filter(|key| matches!(layout::kind(key), layout::Kind::Head { .. }))
+                .count(),
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}
@@ -2008,8 +2007,8 @@ impl World {
             if self.unforks.contains_key(&id) {
                 continue;
             }
-            let record = match block_on(lifecycle::record(&*direct, sim_cell(id))) {
-                Ok(Some(record)) if !record.deleted => record,
+            let record = match block_on(bucket_cell::head::get(&*direct, sim_cell(id))) {
+                Ok(Some(record)) if !record.deleted() => record,
                 Ok(Some(_)) if !cell.deleting => {
                     violations.push(format!(
                         "cell {id} is deleted, though no delete of it held",
@@ -2034,38 +2033,15 @@ impl World {
                 violations
                     .push(format!("cell {id}, told made, is being made still", id = Short(id)));
             }
-            // No placement took it back from a later one. cladefs: a placement takes the cell,
-            // and its head with the cell's epoch, which no taking of the cell by a later
-            // placement lowers (TASK-364).
-            let object = block_on(bucket_cell::cell::read(&*direct, sim_cell(id)));
-            let head = block_on(bucket_cell::head::get(&*direct, sim_cell(id)));
-            match (object, head) {
-                (Ok(Some(object)), Ok(Some(head))) => {
-                    if object.token < cell.taken {
-                        violations.push(format!(
-                            "cell {id}'s object is an earlier placement's: token {} after {}",
-                            object.token,
-                            cell.taken,
-                            id = Short(id)
-                        ));
-                    }
-                    // A deletion's head, final, is taken with the highest token there is.
-                    if head.epoch != layout::Head::FINAL && head.token > object.epoch {
-                        violations.push(format!(
-                            "cell {id}'s head was taken at epoch {} of its object, of epoch {}",
-                            head.token,
-                            object.epoch,
-                            id = Short(id)
-                        ));
-                    }
-                }
-                (Ok(_), Ok(None)) if cell.taken > 0 => {
-                    violations.push(format!("cell {id}, taken, has no head", id = Short(id)));
-                }
-                (Ok(_), Ok(_)) => {}
-                (Err(error), _) | (_, Err(error)) => {
-                    violations.push(format!("cell {id}'s cell or head: {error}", id = Short(id)));
-                }
+            // No placement took it back from a later one: no taking by an earlier placement
+            // lowers its head's token (TASK-39.7, TASK-515).
+            if record.token < cell.taken {
+                violations.push(format!(
+                    "cell {id}'s head is an earlier placement's: token {} after {}",
+                    record.token,
+                    cell.taken,
+                    id = Short(id)
+                ));
             }
             let recovered =
                 match block_on(recovery::recover(&*direct, sim_cell(id), record.origin())) {
@@ -2277,8 +2253,9 @@ impl World {
                 else {
                     continue;
                 };
-                let head = block_on(bucket_cell::head::epoch(&*direct, sim_cell(id)));
-                if writer.stopped().is_some() || head != Ok(writer.epoch()) {
+                let head = block_on(bucket_cell::head::get(&*direct, sim_cell(id)));
+                let epoch = head.map(|head| head.map_or(0, |head| head.epoch));
+                if writer.stopped().is_some() || epoch != Ok(writer.epoch()) {
                     continue;
                 }
                 if session.uploader.failed().is_some() {

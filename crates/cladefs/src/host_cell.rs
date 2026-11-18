@@ -23,10 +23,10 @@
 use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
+use bucket_cell::cell;
 use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Child};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::{cell, lifecycle};
 use local_cell::upload::{self, Failure, Uploader};
 use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
 use std::collections::BTreeMap;
@@ -110,8 +110,9 @@ pub enum CellOf {
     /// A cell the store's bucket has (`ENOENT` otherwise), which the store takes as it opens, or
     /// reads, if a version.
     Taken(CellId),
-    /// A new cell of an ID given: the bucket's already ([`new_cell_at`]), as the FUSE mount's
-    /// are, or one a test chose, no allocator's, for tests that write extents of a cell they name.
+    /// The cell of an ID given, made unless the bucket has it: a new one, its ID the bucket's
+    /// already ([`new_cell_at`]), as the FUSE mount's are, or one a test chose, no allocator's, for
+    /// tests that write extents of a cell they name, or take it again.
     Named(CellId),
 }
 
@@ -274,21 +275,42 @@ pub(crate) fn create_unmade(
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = || -> Result<Opened, Failure> {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
+        let bucket = self::bucket(&url)?;
+        // A new cell made here, a root, its KEK from the host's pool, before its store first opens
+        // (TASK-515): a tenant the KMS refuses gets nothing made (TASK-411.28); its first taking
+        // gives it its DEK and kind.
+        let made = |cell: CellId| -> Result<(), Failure> {
+            let kms = crate::bucket::kms()?;
+            upload::block_on(bucket_cell::keys::make(&*bucket, &kms, cell, rand::random()))??;
+            Ok(())
+        };
+        // Its head, read to see the bucket has it, is what the store's opening, next, would read
+        // first: learned for it, a read less (`bucket_cell::known`, TASK-449).
+        let taken = |cell: CellId| -> Result<bool, Failure> {
+            let read = upload::block_on(bucket_cell::head::read(&*bucket, cell))?;
+            let found = read.head(cell)?.is_some();
+            if let (Some(known), Some(head)) = (bucket_cell::Bucket::known(&*bucket), read.object())
+            {
+                known.learn(cell, Learned { head });
+            }
+            Ok(found)
+        };
         let cell = match of {
-            CellOf::New(tenant) => new_cell(&*self::bucket(&url)?, tenant)?,
-            // Its record, read to see the bucket has it, is what the store's opening, next, would
-            // read first: learned for it, a read less (`bucket_cell::known`, TASK-449).
-            CellOf::Taken(cell) => {
-                let bucket = self::bucket(&url)?;
-                let found = upload::block_on(lifecycle::record(&*bucket, cell))??;
-                let record = found.ok_or(bucket_cell::Error::NoCell)?;
-                if let Some(known) = bucket_cell::Bucket::known(&*bucket) {
-                    let learned = Learned { record, cell: None, headless: false };
-                    known.learn(cell, learned);
+            CellOf::New(tenant) => {
+                let cell = new_cell(&bucket, tenant)?;
+                made(cell)?;
+                cell
+            }
+            CellOf::Named(cell) => {
+                if !taken(cell)? {
+                    made(cell)?;
                 }
                 cell
             }
-            CellOf::Named(cell) => cell,
+            CellOf::Taken(cell) => match taken(cell)? {
+                true => cell,
+                false => return Err(bucket_cell::Error::NoCell.into()),
+            },
         };
         let description = Description { block_size: BLOCK_SIZE, capacity, cell };
         local_cell::create_host(path, description, &url, kind)?;
@@ -661,14 +683,14 @@ mod tests {
         assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
         // cladefs: under its cell's prefix (TASK-364).
         let cell = own.join(store.description().cell.prefix());
-        assert!(cell.join("record").exists(), "{:?}", std::fs::read_dir(&cell).unwrap());
+        assert!(cell.join("head").exists(), "{:?}", std::fs::read_dir(&cell).unwrap());
         // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);
         delete(&made, Some(&bucket), || Ok(1)).unwrap();
         assert!(!made.exists() && own.exists());
-        let record = futures::executor::block_on(bucket_cell::lifecycle::record(&*bucket, forked));
-        assert_eq!(record.unwrap().map(|record| record.deleted), Some(false));
+        let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, forked));
+        assert_eq!(record.unwrap().map(|record| record.deleted()), Some(false));
     }
 
     /// TASK-165.6: a store made by older code, of an older format, is refused by its format,

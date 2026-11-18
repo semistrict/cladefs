@@ -27,20 +27,14 @@
 
 use crate::bucket::Object;
 use crate::layout::CellId;
-use crate::record::Record;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-/// What a host learned of a cell before it opens it ([`Known`]).
+/// What a host learned of a cell before it opens it ([`Known`]): its head, as this host's last
+/// write of it left it, of the version that write made: what the store's taking starts from.
 #[derive(Clone, Debug)]
 pub struct Learned {
-    /// Its record, as this host's last write or read of it left it.
-    pub record: Record,
-    /// Its cell's object, as this host held it last, if it did: what the store's holding of the
-    /// cell starts from, written, of the version that write made.
-    pub cell: Option<Object>,
-    /// Whether it has no head: a clone this host made, which no writer took yet.
-    pub headless: bool,
+    pub head: Object,
 }
 
 /// What a host knows of its bucket ([`crate::Bucket::known`]; see the module's docs).
@@ -137,9 +131,10 @@ mod tests {
         let cell = test_cell(3);
         known.named(cell, 7, 2);
         assert_eq!((known.epoch(cell, 7), known.epoch(cell, 6)), (Some(2), None));
-        let record = crate::record::Kind::Root.of(1);
-        known.learn(cell, Learned { record, cell: None, headless: true });
-        assert!(known.take(cell).is_some_and(|learned| learned.headless));
+        let head = crate::layout::encode(&crate::layout::Head::of(crate::record::Made::Root, 1));
+        let head = Object::written(&crate::layout::head(cell), head, Default::default(), 0);
+        known.learn(cell, Learned { head: head.clone() });
+        assert!(known.take(cell).is_some_and(|learned| learned.head.bytes == head.bytes));
         assert!(known.take(cell).is_none());
     }
 }

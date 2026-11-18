@@ -644,12 +644,11 @@ fn bucket_lifecycle_by_phase() {
 /// Requests are counted as they reach the object store, round trips as the longest chain of them
 /// each begun once the one before it was answered.
 ///
-/// cladefs: those counts were a clear restore's. Every restore is encrypted since TASK-411.28, and
-/// asks more, pinned here as it is: the version's open reads the version's cell and the base's record
-/// and cell, for the keys its recovery unwraps (7 requests in 6); the fork gives the child its keys
-/// after its record is made, the cell made with a KEK of the host's pool and the record given its
-/// DEKs (7 in 6); and the child's open holds the cell then, reading it twice and the base's record
-/// twice (7 in 7, TASK-460). A restore 14 in 13, against a clear one's 8 in 6: TASK-485's to cut.
+/// cladefs: those counts were a clear restore's. Every restore is encrypted since TASK-411.28; with
+/// one object a cell, its head (TASK-515), the fork makes its child's head with its keys, a KEK of
+/// the host's pool, its DEK and those it inherits, in the head's create (6 requests in 6); and the
+/// child's open takes the head from what the fork left, reading the base's head for its origin (3
+/// in 3). A restore 9 in 9, where it was 14 in 13; the version's open 5 in 4, where it was 8 in 5.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -669,11 +668,11 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold copy-open", (8, 5)),
-            ("cold fork", (9, 8)),
-            ("cold fork-open", (7, 7)),
-            ("warm fork", (9, 8)),
-            ("warm fork-open", (7, 7)),
+            ("cold copy-open", (5, 4)),
+            ("cold fork", (6, 6)),
+            ("cold fork-open", (3, 3)),
+            ("warm fork", (6, 6)),
+            ("warm fork-open", (3, 3)),
         ]
     );
     drop((vm, cold, taken));
@@ -697,7 +696,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_cell::keeping().unwrap().token + 1;
-    let holding = bucket_cell::cell::hold(&elsewhere, clone, (later, later), None, None);
+    let holding = bucket_cell::testing::take(&elsewhere, clone, later, later);
     local_cell::upload::block_on(holding).unwrap().unwrap();
     let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
     assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));

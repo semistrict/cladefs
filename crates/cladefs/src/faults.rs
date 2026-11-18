@@ -70,10 +70,9 @@ pub const RESTORE_STEPS: [&str; 8] = [
 pub const DAEMON_STEPS: [&str; 3] =
     ["cladefsd::fork", "cladefsd::fork_uploaded", "cladefsd::forked"];
 
-/// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone, in
-/// order: the first two, or the last, by whether the child has a record.
-pub const CLEANUP_STEPS: [&str; 3] =
-    ["lifecycle::claimed", "lifecycle::claim_head_ended", "lifecycle::head_ended"];
+/// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone: its
+/// head ended, made so if it has none.
+pub const CLEANUP_STEPS: [&str; 1] = ["lifecycle::head_ended"];
 
 /// One in how many steps a seed fails.
 const FAILING: u64 = 8;

@@ -94,7 +94,7 @@ pub use fetch::read;
 pub use layout::Location;
 pub use recovery::{Recovered, State, recover};
 pub use wal::{Rebased, TakenCell, Wal};
-pub use writer::{Body, Objects, Taker, Writer};
+pub use writer::{Body, Objects, Writer};
 
 /// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,
 /// so that a writer never mints an ID one before it minted, even one whose upload landed after it
@@ -160,6 +160,10 @@ pub enum Error {
     /// cladefs: the cell is of another kind, this one: a cell has one (doc-20).
     #[error("the cell is of kind {0}")]
     OtherKind(&'static str),
+    /// cladefs: a taking found the head's keys changed from those it made what it gives for
+    /// ([`head::Given`]): another's taking gave them first. Its keys are made anew.
+    #[error("another taking gave the cell its keys first")]
+    Raced,
     /// cladefs: a fork of a version to a cell of another tenant's cell than the version's
     /// cell's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
     #[error("cell {0}'s version is another tenant's, not shared")]

@@ -220,11 +220,11 @@ impl World {
                 let (bucket, child, taken) = (self.bucket.clone(), self.child, self.taken.clone());
                 FailGuard::with_callback(step, move || {
                     if !taken.load(Ordering::SeqCst)
-                        && block_on(lifecycle::create(&*bucket, child, 0)).is_ok()
+                        && block_on(lifecycle::create(&*bucket, child, 0)) == Ok(true)
                     {
                         taken.store(true, Ordering::SeqCst);
                         let taking =
-                            bucket_cell::head::take(&*bucket, child, rand::random(), TOKEN);
+                            bucket_cell::testing::take(&*bucket, child, rand::random(), TOKEN);
                         assert_eq!(block_on(taking).map(|held| held.head.epoch), Ok(1));
                     }
                 })
@@ -285,8 +285,8 @@ impl World {
     }
 
     /// The child's record, if it has one.
-    fn record(&self, child: crate::CellId) -> Option<bucket_cell::record::Record> {
-        block_on(lifecycle::record(&*self.bucket, child)).unwrap()
+    fn record(&self, child: crate::CellId) -> Option<bucket_cell::layout::Head> {
+        block_on(bucket_cell::head::get(&*self.bucket, child)).unwrap()
     }
 
     /// The cells live in the bucket.
@@ -435,21 +435,18 @@ impl World {
                 // cladefs: no reference stays: the cell that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
-                // A deleted cell's record stays, but with its dead cell, removed whole, if its
-                // cell's ID is an allocator's (TASK-455): gone, it is not listed.
-                Kind::Record { cell } => {
-                    !kept(cell) && !self.record(cell).is_some_and(|record| record.deleted)
+                // A deleted cell's head stays, final, fencing its writers (TASK-407), but with its
+                // dead cell, removed whole, if its ID is an allocator's (TASK-455): gone, it is not
+                // listed.
+                Kind::Head { cell } => {
+                    !kept(cell) && !self.record(cell).is_some_and(|record| record.deleted())
                 }
-                // A cell's object stays, as its records do (TASK-364); so do references' marks,
-                // retired or taken back (TASK-395.13), every cell's head, a deleted one's
-                // final, fencing its writers (TASK-407), and a tenant's KEK object, for good
-                // (TASK-411.27).
-                Kind::Head { .. }
-                | Kind::CollectorLease { .. }
+                // References' marks stay, retired or taken back (TASK-395.13), and a tenant's KEK
+                // object, for good (TASK-411.27).
+                Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
                 | Kind::Retired { .. }
-                | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Kek { .. } => false,
                 Kind::Moves { .. } | Kind::Unknown => true,
@@ -530,7 +527,7 @@ fn forks_take_their_steps_in_order() {
     assert_eq!(traced(&[]), FORK_STEPS);
     let cleanup = traced(&[Fault::Fails("upload::forked")]);
     let cleaned: Vec<_> = cleanup.into_iter().filter(|step| !FORK_STEPS.contains(step)).collect();
-    assert_eq!(cleaned, ["lifecycle::claimed", "lifecycle::claim_head_ended"]);
+    assert_eq!(cleaned, ["lifecycle::head_ended"]);
 }
 
 /// A step of a fork that fails fails the fork, and what must hold holds.
@@ -652,7 +649,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let moved = world.temp.path().join("moved");
     let parent = kept_in(&moved, (1 << 30, Some(world.cell)), &world.bucket, options()).unwrap();
     let reopen = moved.clone();
-    assert!(world.record(world.child).is_some_and(|record| !record.deleted), "no orphan");
+    assert!(world.record(world.child).is_some_and(|record| !record.deleted()), "no orphan");
     let state = block_on(bucket_cell::recover(&*world.bucket, world.cell, None));
     let key = state.unwrap().state.extents[&large].key.clone();
     assert!(matches!(layout::kind(&key), Kind::Extent { .. }), "{key}");

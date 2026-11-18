@@ -2686,8 +2686,7 @@ mod tests {
         store.fork_to(dir.path().join("fork"), child).unwrap();
         let fork = OpenCell::open(dir.path().join("fork")).unwrap();
         assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
-        let record =
-            local_cell::upload::block_on(bucket_cell::lifecycle::record(&**fork.bucket(), child));
+        let record = local_cell::upload::block_on(bucket_cell::head::get(&**fork.bucket(), child));
         let record = record.unwrap().unwrap().unwrap();
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
         assert_eq!((record.deks.len(), inherited), (1, vec![store.cell()]));
@@ -2716,8 +2715,7 @@ mod tests {
         let refused = common.fork_to(dir.path().join("into-none"), into).unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(!dir.path().join("into-none").exists());
-        let found =
-            local_cell::upload::block_on(bucket_cell::lifecycle::record(&**common.bucket(), into));
+        let found = local_cell::upload::block_on(bucket_cell::head::get(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
     }
 
@@ -2747,14 +2745,14 @@ mod tests {
 
         let cell = store.cell();
         let bucket = store.bucket().clone();
-        let object = local_cell::upload::block_on(bucket_cell::cell::read(&*bucket, cell));
+        let object = local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell));
         let object = object.unwrap().unwrap().unwrap();
         let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
         assert!(kek.wrapped.0.starts_with(b"fxkr\x01\x07gcp-kms"), "{:?}", kek.wrapped);
         let kms = extent_keys::kms::from_url(&url).unwrap();
         let unwrapped = local_cell::upload::block_on(kms.unwrap_dyn(5, &kek.wrapped)).unwrap();
         let unwrapped = unwrapped.unwrap();
-        let record = local_cell::upload::block_on(bucket_cell::lifecycle::record(&*bucket, cell));
+        let record = local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell));
         let record = record.unwrap().unwrap().unwrap();
         let wrapped_dek = bucket_cell::keys::unwrap_dek(&unwrapped, cell, &record.deks[0]);
         assert_eq!(wrapped_dek.unwrap().expose(), &dek);

@@ -114,9 +114,9 @@ use bucket_cell::bucket::Meta;
 use bucket_cell::collector::{Collector, DryRun, Marking, Options, Report};
 use bucket_cell::layout;
 use bucket_cell::layout::CellId;
+use bucket_cell::layout::Head;
 use bucket_cell::object_bucket::{ObjectBucket, Request, probe};
 use bucket_cell::passed::{self, Sum, Usage};
-use bucket_cell::record::Record;
 use bucket_cell::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
 use bucket_cell::{cell, lifecycle};
 use futures::{Stream, StreamExt as _};
@@ -286,7 +286,7 @@ fn held_cells(text: &str) -> Result<BTreeSet<layout::CellId>, String> {
 }
 
 /// What `--cells` prints of `live`, but those `held`.
-fn listed(live: &BTreeMap<layout::CellId, Record>, held: &BTreeSet<layout::CellId>) -> String {
+fn listed(live: &BTreeMap<layout::CellId, Head>, held: &BTreeSet<layout::CellId>) -> String {
     let listed = live.iter().filter(|(cell, _)| !held.contains(cell));
     listed
         .map(|(cell, record)| match record.origin() {
@@ -943,7 +943,7 @@ fn main() -> Result<(), String> {
                 let mut live = BTreeMap::new();
                 let mut cells = std::pin::pin!(cells(&bucket, cell));
                 while let Some(cell) = cells.next().await {
-                    let found = lifecycle::live(&*bucket, cell).await;
+                    let found = bucket_cell::head::live(&*bucket, cell).await;
                     let found = found.map_err(|err| format!("cell {cell}: {err}"))?;
                     live.extend(found.map(|record| (cell, record)));
                 }
@@ -964,7 +964,7 @@ mod tests {
     use super::*;
     use bucket_cell::bucket::Version;
     use bucket_cell::layout::Origin;
-    use bucket_cell::record::Kind;
+    use bucket_cell::record::Made;
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| arg.to_string()))
@@ -1132,8 +1132,8 @@ mod tests {
     /// TASK-79.85: a list names the live cells but those held, a fork's with where it forked.
     #[test]
     fn lists_leave_out_what_is_held() {
-        let base = Kind::Root.of(0);
-        let fork = Kind::Clone(Origin { parent: cell(0xa), at: 0x10 }).of(0);
+        let base = Head::of(Made::Root, 0);
+        let fork = Head::of(Made::Clone(Origin { parent: cell(0xa), at: 0x10 }), 0);
         let live =
             BTreeMap::from([(cell(0xa), base), (cell(0xb), fork.clone()), (cell(0xc), fork)]);
         let held = held_cells("1/c\n").unwrap();
@@ -1167,7 +1167,7 @@ mod tests {
         let tokio = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         tokio.block_on(async {
             for &cell in &cells {
-                let key = layout::record(cell);
+                let key = layout::head(cell);
                 bucket.put(&key, vec![1].into(), PutMode::Create).await.unwrap();
             }
         });

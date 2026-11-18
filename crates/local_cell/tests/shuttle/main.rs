@@ -41,7 +41,7 @@
 #![cfg(feature = "shuttle")]
 
 use base32_id::Padded;
-use extent_frame::segment::{Chain, Child, Footer};
+use extent_frame::segment::{Chain, Footer, NewVersion};
 use local_cell::{
     BucketData, Description, Dir, LocalCell, MemDir, Opening, Options, Rules, set_rules,
 };
@@ -100,18 +100,15 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
 /// What the store holds as of a commit: each extent's data.
 type Holds = BTreeMap<ExtentId, Vec<u8>>;
 
-/// The writer's steps: extents written (sequence, blocks), freed, commits, and a fork, which
+/// The writer's steps: extents written (sequence, blocks), freed, commits, and a version's, which
 /// commits durably.
 #[derive(Clone, Copy)]
 enum Step {
     Write(u64, usize),
     Free(u64),
     Commit { durable: bool },
-    Fork,
+    Version,
 }
-
-/// The cell the writer forks.
-const CHILD: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(CELL.id + 1);
 
 const STEPS: &[Step] = &[
     Step::Write(1, 1),
@@ -122,7 +119,7 @@ const STEPS: &[Step] = &[
     Step::Commit { durable: true },
     Step::Free(2),
     Step::Write(4, 1),
-    Step::Fork,
+    Step::Version,
     Step::Commit { durable: false },
     Step::Free(3),
     Step::Write(5, 1),
@@ -172,7 +169,7 @@ fn run_with(Run { steps, follow }: Run) {
     // What the store holds as of each commit, by epoch, the writer's record.
     let history = Arc::new(Mutex::new(vec![Holds::new()]));
     let written = Arc::new(AtomicBool::new(false));
-    // The fork's commit, which the segment naming the fork ends at.
+    // The version's commit, which the segment naming the version ends at.
     let forked = Arc::new(Mutex::new(None::<u64>));
 
     let writer = {
@@ -191,11 +188,12 @@ fn run_with(Run { steps, follow }: Run) {
                         store.free(extent(sequence)).unwrap();
                         holds.remove(&extent(sequence));
                     }
-                    Step::Commit { .. } | Step::Fork => {
+                    Step::Commit { .. } | Step::Version => {
                         match *step {
-                            Step::Fork => {
-                                let child = Child { cell: CHILD, owner: 0 };
-                                *forked.lock().unwrap() = Some(store.commit_fork(child).unwrap());
+                            Step::Version => {
+                                let cut = NewVersion { id: 0xa, keep_last: None };
+                                *forked.lock().unwrap() =
+                                    Some(store.commit_version(cut, false).unwrap());
                             }
                             Step::Commit { durable: true } => store.commit(None).unwrap(),
                             _ => store.commit_ordered(None).unwrap(),
@@ -313,8 +311,8 @@ fn run_with(Run { steps, follow }: Run) {
                             "{extent:?} of commit {last} uploads other data than was written"
                         );
                     }
-                    // A fork's ends at the fork, as the fork's commit closed it (doc-7, Forks).
-                    if !closed.footer.contents.forks.is_empty() {
+                    // A version's ends at the version, as its commit closed it (doc-18).
+                    if !closed.footer.contents.versions.is_empty() {
                         let fork = loop {
                             if let Some(epoch) = *forked.lock().unwrap() {
                                 break epoch;
@@ -323,7 +321,7 @@ fn run_with(Run { steps, follow }: Run) {
                         };
                         assert!(
                             last == fork,
-                            "a fork's segment ends after the fork: at commit {last}, of {fork}"
+                            "a version's segment ends after it: at commit {last}, of {fork}"
                         );
                     }
                     // Uploaded: acknowledged, the frees of its commits, whose extents' own files it

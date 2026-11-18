@@ -161,19 +161,19 @@ impl Control {
     }
 
     /// Attaches `cell`'s filesystem at its path, as [`mount_cell`] takes and mounts it, placed at
-    /// `token` if given: a new one of `capacity` bytes if `new`, else the one `object` names, if
-    /// an Fxfs one. Returns whether it shows it.
+    /// `token` if given: a new one of `capacity` bytes if `new`, else the one its head, of `kind`,
+    /// names, if an Fxfs one. Returns whether it shows it.
     async fn attach_cell(
         &self,
         cell: CellId,
-        object: &cell::Object,
+        kind: Option<Kind>,
         (new, capacity): (bool, u64),
         token: Option<u64>,
     ) -> Result<bool, Error> {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
         };
-        let of = match (new, object.kind) {
+        let of = match (new, kind) {
             (true, _) => (CellOf::Named(cell), capacity),
             (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),
             (false, _) => return Ok(false),
@@ -234,43 +234,25 @@ impl proto::mount_server::Mount for Control {
         let attached = whole(async move {
             let attached = async {
                 let url = control.stores.bucket.clone();
-                let held = tokio::task::spawn_blocking(move || {
+                // A cell of the bucket's, its head read for its kind: its store's opening takes it,
+                // as a new one's makes it, encrypted (TASK-411.28, TASK-515).
+                let read = tokio::task::spawn_blocking(move || {
+                    if make {
+                        return Ok(None);
+                    }
                     let bucket = crate::host_cell::bucket(&url).map_err(Error::new)?;
-                    let placement = match token {
-                        Some(token) => token,
-                        None => crate::host_cell::token().map_err(Error::new)?,
-                    };
-                    // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is encrypted
-                    // (TASK-411.3, TASK-411.28).
-                    let kms = crate::bucket::kms()?;
-                    let holding = async {
-                        let kek = match make {
-                            true => Some(keys::new_cell_kek(&kms, cell.tenant).await?),
-                            false => None,
-                        };
-                        let making = kek.as_ref().map(|(_, kek)| kek);
-                        let held = cell::hold(&*bucket, cell, (placement, placement), making, None);
-                        let (held, object) = match held.await {
-                            Ok(held) => held,
-                            Err(err) => {
-                                if let Some((secret, kek)) = kek {
-                                    kms.give_back(cell.tenant, (secret, kek.wrapped));
-                                }
-                                return Err(err);
-                            }
-                        };
-                        drop(keys::held(&kms, cell, object.clone(), kek));
-                        Ok::<_, bucket_cell::Error>((held, object))
-                    };
-                    let held = local_cell::upload::block_on(holding).map_err(Error::new)?;
-                    let (_, object) = held.map_err(|err| {
+                    let found =
+                        local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell))
+                            .map_err(Error::new)?;
+                    let head = found.and_then(|found| found.ok_or(bucket_cell::Error::NoCell));
+                    let head = head.map_err(|err| {
                         let errno = cell_errno(&err);
                         Error::new(anyhow::Error::new(err).context(errno))
                     })?;
-                    Ok::<_, Error>(object)
+                    Ok::<_, Error>(head.kind)
                 });
-                let object = held.await.map_err(Error::new)??;
-                control.attach_cell(cell, &object, (make, capacity), token).await
+                let kind = read.await.map_err(Error::new)??;
+                control.attach_cell(cell, kind, (make, capacity), token).await
             }
             .await;
             let mut cells = control.cells.lock().unwrap();

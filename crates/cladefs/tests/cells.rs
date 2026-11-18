@@ -90,7 +90,7 @@ fn forks_and_takes_cells_in(url: &str) {
         cell(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
     let child_cell: cladefs::CellId = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let record = runtime.block_on(bucket_cell::lifecycle::record(&*bucket, child_cell));
+    let record = runtime.block_on(bucket_cell::head::get(&*bucket, child_cell));
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_cell));
     let forked = attached(&path("child"));
     assert_eq!(forked.cell(), child_cell);

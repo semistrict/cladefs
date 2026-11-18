@@ -231,15 +231,14 @@
 (*   recovery on the same host was.                                        *)
 (*                                                                         *)
 (* Steps are what the code does between two requests, or merged: a         *)
-(* writer's taking reads the record, swaps the head and reads the record   *)
-(* again in one step, the first read of it from before the cell's deletion *)
-(* if "staleTake" is in Can; it reads the head's checkpoint then, and the  *)
-(* segments the head names in a step after. The collector's recoveries     *)
+(* writer's taking swaps the head, the one object saying whether its cell *)
+(* lives (TASK-515), in one step; it reads the head's checkpoint then, and *)
+(* the segments the head names in a step after. The collector's recoveries     *)
 (* read the bucket at once. A checkpoint's PUT lands after its writer took *)
 (* its moves, in a step of its own, while its writer's session lasts, and  *)
 (* its swap into the head in another. Passes overlap if "overlap" is in    *)
 (* Can, of any cells, a later one of a cell taking its collector lease;    *)
-(* MaxPasses bounds them all. A pass lists its cell; reads its record,     *)
+(* MaxPasses bounds them all. A pass lists its cell; reads its head,       *)
 (* giving up on a fork being made, and recovers the cell in a step after;  *)
 (* lists its references in the next (referencesRelisted); then compacts    *)
 (* and deletes. Reads of other cells' objects (a parent's state, a         *)
@@ -283,7 +282,7 @@ AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "cand
              "versionsAcked"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "restore", "delete", "place", "checkpoint",
-           "collect", "compact", "compactMoves", "crash", "disk", "staleTake", "overlap", "span",
+           "collect", "compact", "compactMoves", "crash", "disk", "overlap", "span",
            "spanOn", "cut", "deleteRoot", "landInOrder", "resume", "version", "dropVersion"}
 
 ASSUME Rules \subseteq AllRules
@@ -305,11 +304,12 @@ VARIABLES
     seg,        \* seg[b][s][e]: segment s of b by the writer of epoch e, or None
     own,        \* the extents stored on their own: [b, e, s, x], at the key of writer e's segment s
     ckpt,       \* ckpt[b][s][e]: b's checkpoint as of segment s by the writer of epoch e, or None
-    rec,        \* rec[b]: b's record, or None
-    head,       \* head[b]: [epoch, token, holder, end, chain, ckpt, vers], or None: the holder its
-                \* taking's, unique; the segments 0..end-1 committed, chain[s + 1] the epoch of s;
-                \* ckpt the newest checkpoint, <<s, e>>, or <<>>; vers its versions, each [id, at]:
-                \* the ID its commit's footer names (its tag), and the segment it is at
+    head,       \* head[b]: b's one swapped object (TASK-515), or None: what made it (a Record's
+                \* fields), and [epoch, token, holder, end, chain, ckpt, vers]: epoch 0 never taken,
+                \* Final deleted; the holder its taking's, unique; the segments 0..end-1 committed,
+                \* chain[s + 1] the epoch of s; ckpt the newest checkpoint, <<s, e>>, or <<>>; vers
+                \* its versions, each [id, at]: the ID its commit's footer names (its tag), and the
+                \* segment it is at
     moves,      \* moves[b][s][e][p]: the moves the collector's passes p made of segment <<s, e>> of
                 \* b: p = <<i>>, pass i's moves of the segment; <<i, j>>, pass j's of those; or None.
                 \* Each [pass, names]: its pass, and the extents it holds
@@ -348,7 +348,7 @@ VARIABLES
     \* Bounds.
     gen, takes, passes, places, crashes, mints
 
-bucketVars == <<seg, own, ckpt, rec, head, moves, mflight, inflight, refs, marked, retired, written, gone>>
+bucketVars == <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone>>
 hostVars == <<ses, wal, tok, proc>>
 truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
 countVars == <<gen, takes, passes, places, crashes, mints>>
@@ -369,12 +369,15 @@ Drop(f, x) == [y \in DOMAIN f \ {x} |-> f[y]]
 Nothing == [x \in {} |-> None]
 
 \* A record: its kind ("root", "forking", "fork": a version's fork being made, or made), its origin
-\* <<parent, at>>, the version a fork is of, <<cell, id>> (<<>> if none), whether deleted, and, of
+\* <<parent, at>>, the version a fork is of, <<cell, id>> (<<>> if none), and, of
 \* a fork, whether another than the restore that began it resumed it (resumesMarked); and, not in
 \* the bucket's bytes, the commit its cell starts from and the making it is of.
 Record(kind, origin, o, base) ==
-    [kind |-> kind, origin |-> origin, ver |-> <<>>, deleted |-> FALSE, resumed |-> FALSE,
-     base |-> base, maker |-> o]
+    [kind |-> kind, origin |-> origin, ver |-> <<>>, resumed |-> FALSE, base |-> base, maker |-> o,
+     epoch |-> 0, token |-> 0, holder |-> 0, end |-> 0, chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]
+
+\* Whether the head x is a deleted cell's: of the final epoch.
+Deleted(x) == x.epoch = Final
 
 \* How many times the collector moves what was in a segment: into its moves, then those moves'.
 Hops == 2
@@ -494,11 +497,11 @@ StateAt(b, at) ==
        LET c == Newest(cs)
            k == <<"ckpt", b, c[1], c[2]>>
        IN FollowChain(b, Obj(k), c[1] + 1, at + 1, Chain(b), {k})
-    ELSE IF rec[b] = None THEN [ok |-> FALSE, st |-> Fresh, touched |-> {}]
-    ELSE IF rec[b].origin = <<>> THEN FollowChain(b, Fresh, 0, at + 1, Chain(b), {<<"rec", b>>})
-    ELSE LET p == StateAt(rec[b].origin[1], rec[b].origin[2]) IN
+    ELSE IF head[b] = None THEN [ok |-> FALSE, st |-> Fresh, touched |-> {}]
+    ELSE IF head[b].origin = <<>> THEN FollowChain(b, Fresh, 0, at + 1, Chain(b), {<<"head", b>>})
+    ELSE LET p == StateAt(head[b].origin[1], head[b].origin[2]) IN
          IF ~p.ok THEN p
-         ELSE FollowChain(b, Inherit(p.st), 0, at + 1, Chain(b), p.touched \cup {<<"rec", b>>})
+         ELSE FollowChain(b, Inherit(p.st), 0, at + 1, Chain(b), p.touched \cup {<<"head", b>>})
 
 Lost == [ok |-> FALSE, st |-> Fresh, end |-> 0, touched |-> {}, ckpt |-> <<>>]
 
@@ -594,8 +597,8 @@ Made == UNION {makers[b] : b \in Cells}
 \* A writer's guest's state: what it acknowledged, then its WAL.
 View(h, b) == ApplyAll(ses[h][b].st, b, wal[h][b])
 
-\* Whether b's record says it lives: a root, a fork made.
-LiveRec(b) == rec[b] # None /\ ~rec[b].deleted /\ rec[b].kind \in {"root", "fork"}
+\* Whether b's head says it lives: a root, a fork made.
+LiveRec(b) == head[b] # None /\ ~Deleted(head[b]) /\ head[b].kind \in {"root", "fork"}
 
 \* The reference of the fork of p's version at its segment at to c, under p's cell (TASK-395).
 RefOf(p, at, c) == [p |-> p, at |-> at, c |-> c]
@@ -608,19 +611,19 @@ RefsUnder(c) == {r \in refs : r.p = c}
 
 Stopped(h, b) == ses' = [ses EXCEPT ![h][b].pc = "stopped"]
 
-\* The head the writer whose session is s writes: its taking, with what it committed.
-HeadOf(s) == [epoch |-> s.epoch, token |-> s.token, holder |-> s.gen, end |-> s.end,
-              chain |-> s.chain, ckpt |-> s.hckpt, vers |-> s.vers]
+\* The head of b the writer whose session is s writes: its taking, with what it committed.
+HeadOf(s, b) == [head[b] EXCEPT !.epoch = s.epoch, !.token = s.token, !.holder = s.gen,
+                                !.end = s.end, !.chain = s.chain, !.ckpt = s.hckpt, !.vers = s.vers]
 
 \* s, the session of a writer of b, its recovery started from b's head H as it swapped it: from
 \* the head's checkpoint, or its origin's state; stopped, what that needs gone.
 Started(s, b, H) ==
     LET p == StateAt(s.origin[1], s.origin[2])
-        newest == IF H = None THEN <<>> ELSE H.ckpt
-        s1 == [s EXCEPT !.end = IF H = None THEN 0 ELSE H.end,
-                        !.chain = IF H = None THEN <<>> ELSE H.chain,
+        newest == H.ckpt
+        s1 == [s EXCEPT !.end = H.end,
+                        !.chain = H.chain,
                         !.hckpt = newest,
-                        !.vers = IF H = None \/ ~R("versionsCarried") THEN {} ELSE H.vers]
+                        !.vers = IF ~R("versionsCarried") THEN {} ELSE H.vers]
     IN IF newest # <<>> THEN
           IF Obj(CkptKey(b, newest[1], newest[2])) = None THEN [s1 EXCEPT !.pc = "stopped"]
           ELSE [s1 EXCEPT !.pc = "read", !.st = Obj(CkptKey(b, newest[1], newest[2])),
@@ -629,53 +632,29 @@ Started(s, b, H) ==
        ELSE IF p.ok THEN [s1 EXCEPT !.pc = "read", !.st = Inherit(p.st), !.at = 0]
        ELSE [s1 EXCEPT !.pc = "stopped"]
 
-\* h takes b's head, as a writer of b, of its placement's token, its taking's holder, once it
-\* read b's record: swapped to the next epoch, what it names kept. Then, the record read again,
-\* its recovery starts, or, deleted since, it stops (Writer::take). With "staleTake", the first
-\* read is from before b's deletion, whose head says so: the swap is refused.
+\* h takes b's head, as a writer of b, of its placement's token, its taking's holder, in one
+\* conditional swap of the one object that says whether b lives (TASK-515): to the next epoch, what
+\* it names kept; then its recovery starts. Not a deleted cell's, nor a fork's being made; nor, its
+\* token higher, a later placement's (tokens).
 Open(h, b) ==
     /\ takes < MaxTakes
     /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
-    /\ rec[b] # None
-    /\ ~rec[b].deleted \/ ("staleTake" \in Can /\ rec[b].maker \in makers[b])
-    /\ rec[b].kind \in {"root", "fork"}
-    \* Not deleted's; nor, its token higher, a later placement's (tokens).
-    /\ IF head[b] = None THEN TRUE
-       ELSE head[b].epoch # Final /\ (R("tokens") => head[b].token <= tok[h][b])
-    /\ LET e == IF head[b] = None THEN 1 ELSE head[b].epoch + 1
+    /\ LiveRec(b)
+    /\ R("tokens") => head[b].token <= tok[h][b]
+    /\ LET e == head[b].epoch + 1
            s == [gen |-> gen + 1, pc |-> "read", epoch |-> e, token |-> tok[h][b],
-                 origin |-> rec[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
+                 origin |-> head[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
                  hckpt |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
                  ckptThrough |-> -1, ckptPut |-> None, durable |-> None, vers |-> {}]
-       IN /\ head' = [head EXCEPT ![b] = [epoch |-> e, token |-> tok[h][b], holder |-> gen + 1,
-                                          end |-> End(b), chain |-> Chain(b), ckpt |-> HeadCkpt(b),
-                                          vers |-> IF R("versionsCarried") THEN HeadVers(b)
-                                                   ELSE {}]]
-          /\ ses' = [ses EXCEPT ![h][b] = IF rec[b].deleted THEN [s EXCEPT !.pc = "stopped"]
-                                          ELSE Started(s, b, head[b])]
+       IN /\ head' = [head EXCEPT ![b] = [@ EXCEPT !.epoch = e, !.token = tok[h][b],
+                                                   !.holder = gen + 1,
+                                                   !.vers = IF R("versionsCarried") THEN @ ELSE {}]]
+          /\ ses' = [ses EXCEPT ![h][b] = Started(s, b, head[b])]
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
-    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, wal, tok,
+    /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, wal, tok,
                    proc, gc>>
-    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
-    /\ UNCHANGED <<passes, places, crashes, mints>>
-
-\* With "staleTake", a taking of b whose first read of b's record came before b's deletion, b's
-\* cell removed since: its swap finds no head and creates one, its read of the record again finds
-\* none, and it stops, leaving the head: garbage, which a pass over the cell deletes, the cell
-\* holding no record (Writer::take).
-OpenGone(h, b) ==
-    /\ "staleTake" \in Can /\ takes < MaxTakes
-    /\ b \in gone /\ rec[b] = None /\ head[b] = None
-    /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
-    /\ head' = [head EXCEPT ![b] = [epoch |-> 1, token |-> tok[h][b], holder |-> gen + 1, end |-> 0,
-                                    chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]]
-    /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
-    /\ gen' = gen + 1
-    /\ takes' = takes + 1
-    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone,
-                   hostVars, gc>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
     /\ UNCHANGED <<passes, places, crashes, mints>>
 
@@ -850,7 +829,7 @@ Upload(h, b) ==
                  ELSE own \cup {[b |-> b, e |-> w.o.epoch, s |-> w.s, x |-> w.o.own]}
        /\ inflight' = inflight \cup {[h |-> h, b |-> b, g |-> s.gen, s |-> w.s, o |-> w.o]}
        /\ ses' = [ses EXCEPT ![h][b].up = @ \cup {w.s}]
-       /\ UNCHANGED <<seg, ckpt, rec, head, moves, mflight, refs, marked, retired, written, gone, wal, tok, proc,
+       /\ UNCHANGED <<seg, ckpt, head, moves, mflight, refs, marked, retired, written, gone, wal, tok, proc,
                       gc, truthVars, countVars>>
 
 \* A PUT lands, whenever, though its writer has gone: at its key, its writer's alone, over what
@@ -867,7 +846,7 @@ Land(m) ==
        /\ seg' = [seg EXCEPT ![m.b][m.s][k[4]] = m.o]
        /\ written' = written \cup {<<k, m.o>>}
        /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].done = @ \cup {m.s}] ELSE ses
-       /\ UNCHANGED <<own, ckpt, rec, head, moves, mflight, refs, marked, retired, gone, wal, tok, proc, gc,
+       /\ UNCHANGED <<own, ckpt, head, moves, mflight, refs, marked, retired, gone, wal, tok, proc, gc,
                       truthVars, countVars>>
 
 \* The acknowledgement of the WAL's prefix landed: the head swapped to name it, with the
@@ -893,11 +872,11 @@ Ack(h, b) ==
     IN /\ Ready(h, b) /\ n > 0
        /\ IF R("headSwap") /\ ~Taking(s, b) THEN
              Stopped(h, b) /\ UNCHANGED <<head, wal, acked>>
-          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
                /\ wal' = [wal EXCEPT ![h][b] = SubSeq(ws, n + 1, Len(ws))]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
                /\ acked' = [acked EXCEPT ![b] = @ \cup CommitsOf(P)]
-       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, tok,
+       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, tok,
                       proc, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed, errors>>
 
@@ -910,10 +889,10 @@ DropVersion(h, b) ==
     /\ \E v \in s.vers :
          IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED <<head, commits>>
          ELSE LET s2 == [s EXCEPT !.vers = @ \ {v}] IN
-              /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+              /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
               /\ ses' = [ses EXCEPT ![h][b] = s2]
               /\ commits' = [commits EXCEPT ![v.id].dropped = TRUE]
-    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone,
+    /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone,
                    wal, tok, proc, gc, countVars>>
     /\ UNCHANGED <<nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
 
@@ -940,7 +919,7 @@ CheckpointLand(h, b) ==
        /\ ckpt' = [ckpt EXCEPT ![b][s.ckptPut.q][k[4]] = s.ckptPut.st]
        /\ written' = written \cup {<<k, s.ckptPut.st>>}
        /\ ses' = [ses EXCEPT ![h][b].ckptPut.landed = TRUE]
-       /\ UNCHANGED <<seg, own, rec, head, moves, mflight, inflight, refs, marked, retired, gone, wal, tok, proc,
+       /\ UNCHANGED <<seg, own, head, moves, mflight, inflight, refs, marked, retired, gone, wal, tok, proc,
                       gc, truthVars, countVars>>
 
 \* The checkpoint landed swapped into the head, with the condition that it is the writer's taking
@@ -952,9 +931,9 @@ CheckpointSwap(h, b) ==
                                     ELSE [@ EXCEPT !.swapped = TRUE]]
     IN /\ Ready(h, b) /\ s.ckptPut # None /\ s.ckptPut.landed /\ ~s.ckptPut.swapped
        /\ IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED head
-          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2, b)]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
-       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, wal,
+       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone, wal,
                       tok, proc, gc, truthVars, countVars>>
 
 \* The swap answered, the writer names what the checkpoint moved where it went, only forward
@@ -967,7 +946,7 @@ CheckpointTaken(h, b) ==
 
 WriterNext ==
     \E h \in Hosts, b \in Cells :
-        \/ Open(h, b) \/ OpenGone(h, b) \/ RecoverRead(h, b) \/ Mint(h, b) \/ Commit(h, b)
+        \/ Open(h, b) \/ RecoverRead(h, b) \/ Mint(h, b) \/ Commit(h, b)
         \/ Upload(h, b) \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b)
         \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b) \/ DropVersion(h, b)
 
@@ -1009,7 +988,7 @@ Crash(h) ==
 
 \* b placed on h: a fencing token above every earlier placement's.
 Place(h, b) ==
-    /\ "place" \in Can /\ places < MaxPlaces /\ rec[b] # None
+    /\ "place" \in Can /\ places < MaxPlaces /\ head[b] # None
     /\ tok' = [tok EXCEPT ![h][b] = placed[b] + 1]
     /\ placed' = [placed EXCEPT ![b] = @ + 1]
     /\ places' = places + 1
@@ -1023,12 +1002,12 @@ Place(h, b) ==
 \* late, it may delete b's making. With "deleteRoot" alone, of the root alone.
 StartDelete(h, b) ==
     /\ proc[h] = None
-    /\ rec[b] # None /\ ~rec[b].deleted
+    /\ head[b] # None /\ ~Deleted(head[b])
     /\ \/ "delete" \in Can
        \/ "deleteRoot" \in Can /\ b = Root
     /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", o |-> <<>>,
                                     tk |-> tok[h][b], og |-> <<>>, bs |-> 0, v |-> <<>>]]
-    /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {rec[b].maker} ELSE doomed
+    /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {head[b].maker} ELSE doomed
     /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
 
@@ -1049,12 +1028,12 @@ Restoring(h, q) ==
     IN /\ IF first THEN
              /\ refs' = refs \cup ForkRefs(q)
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = "fork"]]
-             /\ UNCHANGED rec
+             /\ UNCHANGED head
           ELSE
-             /\ rec' = [rec EXCEPT ![q.b] = Forking(q)]
+             /\ head' = [head EXCEPT ![q.b] = Forking(q)]
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
              /\ UNCHANGED refs
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
+       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, truthVars, countVars>>
 
 \* A restore of a version of b to c (TASK-476): of b at the version's segment, its base the
@@ -1062,7 +1041,7 @@ Restoring(h, q) ==
 \* no cell's, nor a removed one's. Its record names the version.
 StartRestore(h, c, b) ==
     /\ "restore" \in Can /\ proc[h] = None
-    /\ rec[c] = None /\ c \notin {Root, b} \cup gone
+    /\ head[c] = None /\ c \notin {Root, b} \cup gone
     /\ \E v \in HeadVers(b) :
          Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", o |-> <<"restore", c, h>>,
                        tk |-> tok[h][c], og |-> <<b, v.at>>, bs |-> v.id, v |-> <<b, v.id>>])
@@ -1073,27 +1052,27 @@ StartRestore(h, c, b) ==
 \* restore goes on, its reference (resumesRefer), the head naming the version read, and the fork
 \* made. Without resumesRefer, no reference: the fork made as the version is read.
 ResumeRestore(h, c) ==
-    LET r == rec[c]
+    LET r == head[c]
         q == [op |-> "restore", b |-> c, pc |-> "check", o |-> r.maker, tk |-> tok[h][c],
               og |-> r.origin, bs |-> r.base, v |-> r.ver]
         refers == R("resumesRefer") /\ R("forksReferFirst") /\ ForkRefs(q) # {}
     IN /\ "resume" \in Can /\ proc[h] = None
-       /\ r # None /\ r.kind = "forking" /\ ~r.deleted
-       /\ rec' = [rec EXCEPT ![c].resumed = TRUE]
+       /\ r # None /\ r.kind = "forking" /\ ~Deleted(r)
+       /\ head' = [head EXCEPT ![c].resumed = TRUE]
        /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written,
+       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written,
                       gone, ses, wal, tok, gc, truthVars, countVars>>
 
 Done(h) == proc' = [proc EXCEPT ![h] = None]
 \* A deletion of the cell proc[h] names, after a failed restore.
 Deleting(h) == proc' = [proc EXCEPT ![h] = [@ EXCEPT !.op = "delete", !.pc = "end"]]
 
-\* b's head swapped to the final epoch, what it names kept, but its versions, which go with it
-\* (doc-18): made so, if b has none.
-Ended(b) ==
+\* b's head swapped to the final epoch by a deletion on h, what it names kept, but its versions,
+\* which go with it (doc-18): made so, if b has none, deleted from the first.
+Ended(h, b) ==
     head' = [head EXCEPT ![b] = IF @ = None
-                                THEN [epoch |-> Final, token |-> 0, holder |-> 0, end |-> 0,
-                                      chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]
+                                THEN [Record("fork", <<>>, <<"deletion", h>>, 0)
+                                         EXCEPT !.epoch = Final]
                                 ELSE [@ EXCEPT !.epoch = Final, !.token = 0, !.holder = 0,
                                                !.vers = {}]]
 
@@ -1103,49 +1082,40 @@ ProcStep(h) ==
         failed == q.op = "restore" /\ q.pc = "check" /\ R("forksCheck") /\ VersionGone(q.v)
     IN /\ q # None
        /\ CASE q.op = "delete" /\ q.pc = "end" ->
-                 \* end_head, its head swapped to the final epoch, unless a later placement took
+                 \* Its head swapped to the final epoch, in one swap, unless a later placement took
                  \* the cell (deleteTokens). No writer swaps it after: the head is the fence.
-                 /\ IF head[b] # None /\ head[b].epoch # Final /\ R("deleteTokens")
+                 /\ IF head[b] # None /\ ~Deleted(head[b]) /\ R("deleteTokens")
                        /\ head[b].token > q.tk
-                    THEN Done(h) /\ UNCHANGED head
-                    ELSE Ended(b) /\ proc' = [proc EXCEPT ![h].pc = "mark"]
-                 /\ UNCHANGED <<rec, refs, makers>>
-            [] q.op = "delete" /\ q.pc = "mark" ->
-                 \* Its record, deleted, or made so if it has none: removed with its cell since,
-                 \* by another deletion's.
-                 /\ rec' = [rec EXCEPT ![b] = IF @ = None
-                                              THEN [Record("fork", <<>>, <<"deletion", h>>, 0)
-                                                       EXCEPT !.deleted = TRUE]
-                                              ELSE [@ EXCEPT !.deleted = TRUE]]
+                    THEN UNCHANGED head
+                    ELSE Ended(h, b)
                  /\ Done(h)
-                 /\ UNCHANGED <<head, refs, makers>>
+                 /\ UNCHANGED <<refs, makers>>
             [] q.op = "restore" /\ q.pc = "refer" ->
-                 \* Its reference, its record made (forksRecordFirst), before the version's read.
+                 \* Its reference, its head made (forksRecordFirst), before the version's read.
                  /\ refs' = refs \cup ForkRefs(q)
                  /\ proc' = [proc EXCEPT ![h].pc = "check"]
-                 /\ UNCHANGED <<rec, head, makers>>
+                 /\ UNCHANGED <<head, makers>>
             [] q.op = "restore" /\ q.pc = "fork" ->
-                 \* Without forksRecordFirst: the child's record, its reference made, unless the
+                 \* Without forksRecordFirst: the child's head, its reference made, unless the
                  \* ID was taken since, the reference then left for good.
-                 /\ IF rec[b] = None THEN /\ rec' = [rec EXCEPT ![b] = Forking(q)]
-                                          /\ proc' = [proc EXCEPT ![h].pc = "check"]
-                    ELSE Done(h) /\ UNCHANGED rec
-                 /\ UNCHANGED <<head, refs, makers>>
+                 /\ IF head[b] = None THEN /\ head' = [head EXCEPT ![b] = Forking(q)]
+                                           /\ proc' = [proc EXCEPT ![h].pc = "check"]
+                    ELSE Done(h) /\ UNCHANGED head
+                 /\ UNCHANGED <<refs, makers>>
             [] q.op = "restore" /\ q.pc = "check" ->
                  \* The head naming the version read after the child's record (forksCheck): the
                  \* version named no more, the fork fails, and its host deletes the child.
                  /\ IF failed THEN Deleting(h) ELSE proc' = [proc EXCEPT ![h].pc = "make"]
-                 /\ UNCHANGED <<rec, head, refs, makers>>
+                 /\ UNCHANGED <<head, refs, makers>>
             [] q.op = "restore" /\ q.pc = "make" ->
                  \* No longer being made, with a condition: unless deleted, given up on. Without
                  \* forksReferFirst, its reference made now, after the version's read.
-                 /\ IF rec[b] # None /\ ~rec[b].deleted THEN
-                       /\ rec' = [rec EXCEPT ![b].kind = IF @ = "forking" THEN "fork" ELSE @]
+                 /\ IF head[b] # None /\ ~Deleted(head[b]) THEN
+                       /\ head' = [head EXCEPT ![b].kind = IF @ = "forking" THEN "fork" ELSE @]
                        /\ makers' = [makers EXCEPT ![b] = @ \cup {q.o}]
                        /\ refs' = IF R("forksReferFirst") THEN refs ELSE refs \cup ForkRefs(q)
-                    ELSE UNCHANGED <<rec, makers, refs>>
+                    ELSE UNCHANGED <<head, makers, refs>>
                  /\ Done(h)
-                 /\ UNCHANGED head
        /\ doomed' = IF failed THEN doomed \cup {q.o} ELSE doomed
        /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, countVars>>
@@ -1173,7 +1143,6 @@ Listing(c) ==
     {<<"seg", c, k[1], k[2]>> : k \in {k \in Seqs \X Epochs : seg[c][k[1]][k[2]] # None}}
     \cup {<<"own", o.b, o.e, o.s, o.x>> : o \in {o \in own : o.b = c}}
     \cup {<<"ckpt", c, k[1], k[2]>> : k \in {k \in Seqs \X Epochs : ckpt[c][k[1]][k[2]] # None}}
-    \cup (IF rec[c] # None THEN {<<"rec", c>>} ELSE {})
     \cup (IF head[c] # None THEN {<<"head", c>>} ELSE {})
     \cup {<<"moves", c, k[1], k[2], k[3]>> :
             k \in {k \in Seqs \X Epochs \X Ways : moves[c][k[1]][k[2]][k[3]] # None}}
@@ -1233,15 +1202,15 @@ GcStart(c) ==
 GcRecover(i) ==
     LET g == gc[i]
         c == g.cell
-        r == rec[c]
-        ab == /\ R("collectorAbandons") /\ r # None /\ ~r.deleted /\ r.kind = "forking"
+        r == head[c]
+        ab == /\ R("collectorAbandons") /\ r # None /\ ~Deleted(r) /\ r.kind = "forking"
               /\ VersionGone(r.ver)
-        r1 == IF ab THEN [r EXCEPT !.deleted = TRUE] ELSE r
-        live == r1 # None /\ ~r1.deleted
+        r1 == IF ab THEN [r EXCEPT !.epoch = Final] ELSE r
+        live == r1 # None /\ ~Deleted(r1)
         got == Recover(c, r1.origin)
         vs == IF R("versionsKept") THEN {Origin(c, v.at) : v \in HeadVers(c)} ELSE {}
     IN /\ g.pc = "recover"
-       /\ rec' = [rec EXCEPT ![c] = r1]
+       /\ head' = [head EXCEPT ![c] = r1]
        /\ IF live /\ (~got.ok \/ \E fp \in vs : ~fp.ok) THEN
              /\ errors' = errors \cup {"a pass lost what a live cell needs"}
              /\ gc' = [gc EXCEPT ![i] = Idle(g)]
@@ -1259,7 +1228,7 @@ GcRecover(i) ==
                                    !.pts = IF live THEN {Kept(fp) : fp \in vs} ELSE {},
                                    !.pc = "relist"]]
              /\ UNCHANGED errors
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone,
+       /\ UNCHANGED <<seg, own, ckpt, moves, mflight, inflight, refs, marked, retired, written, gone,
                       hostVars, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
@@ -1351,10 +1320,9 @@ GcFinish(i) ==
                                   /\ ~ahead(k[2], k[3], k[4])
                              ELSE "compactMoves" \in Can /\ Depth(k) < Hops
                           /\ movesOf(k) = {}}
-        dead == (r = None \/ r.deleted) /\ g.refs = {}
+        dead == (r = None \/ Deleted(r)) /\ g.refs = {}
         \* Removed whole: dead, and no mark of a reference under it, which a slow restore's
-        \* reference written again goes by. A stale writer's head, of a cell removed (OpenGone),
-        \* goes with a cell of no record.
+        \* reference written again goes by.
         removed == dead /\ \A m \in marked : m.p # c
         doomedKey(k) ==
             CASE k[1] = "ckpt" -> k \notin touched /\ ~ckptAhead(k[2], k[3], k[4])
@@ -1367,14 +1335,13 @@ GcFinish(i) ==
                    /\ k \notin hops
                    /\ IF k \in named THEN Depth(k) < Hops /\ movesOf(k) # {}
                       ELSE Key(k[2], k[3], k[4], SubSeq(Way(k), 1, Depth(k) - 1)) \notin objs
-              \* The record and head only with the cell: a deleted cell's final head fences its
-              \* writers.
-              [] k[1] \in {"rec", "head"} -> removed
+              \* The head only with the cell: a deleted cell's final head fences its writers.
+              [] k[1] = "head" -> removed
         D == IF Fenced(i) THEN {} ELSE {k \in objs : doomedKey(k)}
         \* The cell's reference, of the origin its record names, never listed, marked unless its
         \* fork was made by its restore alone (retirementsMarked), whether it is there or not
         \* (collector's retired).
-        retiring == IF \/ Fenced(i) \/ r = None \/ ~r.deleted \/ r.origin = <<>>
+        retiring == IF \/ Fenced(i) \/ r = None \/ ~Deleted(r) \/ r.origin = <<>>
                        \/ (R("referencesHeld") /\ ~dead)
                     THEN {} ELSE {RefOf(r.origin[1], r.origin[2], c)}
         \* The cell's own references listed marked: retired before.
@@ -1391,9 +1358,8 @@ GcFinish(i) ==
        /\ own' = {o \in own : <<"own", o.b, o.e, o.s, o.x>> \notin D}
        /\ ckpt' = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |->
                      IF <<"ckpt", b, s, e>> \in D THEN None ELSE ckpt[b][s][e]]]]
-       /\ rec' = [b \in Cells |-> IF <<"rec", b>> \in D THEN None ELSE rec[b]]
        /\ head' = [b \in Cells |-> IF <<"head", b>> \in D THEN None ELSE head[b]]
-       /\ gone' = gone \cup {b \in Cells : <<"rec", b>> \in D}
+       /\ gone' = gone \cup {b \in Cells : <<"head", b>> \in D}
        /\ refs' = refs \ (retiring \cup stale)
        /\ retired' = retired \cup retiring
        /\ marked' = marked \cup (IF retiring # {} /\ R("retirementsMarked") /\ ~Unmarked(r)
@@ -1410,7 +1376,7 @@ GcLand(m) ==
           /\ moves' = [moves EXCEPT ![m.k[2]][m.k[3]][m.k[4]][m.k[5]] = m.o]
           /\ written' = written \cup {<<m.k, m.o>>}
        ELSE UNCHANGED <<moves, written>>
-    /\ UNCHANGED <<seg, own, ckpt, rec, head, inflight, refs, marked, retired, gone, hostVars, gc,
+    /\ UNCHANGED <<seg, own, ckpt, head, inflight, refs, marked, retired, gone, hostVars, gc,
                    truthVars, countVars>>
 
 GcNext ==
@@ -1424,9 +1390,8 @@ Init ==
     /\ seg = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
     /\ own = {}
     /\ ckpt = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
-    /\ rec = [b \in Cells |-> IF b = Root THEN Record("root", <<>>, <<"root", Root>>, 0)
-                              ELSE None]
-    /\ head = [b \in Cells |-> None]
+    /\ head = [b \in Cells |-> IF b = Root THEN Record("root", <<>>, <<"root", Root>>, 0)
+                               ELSE None]
     /\ moves = [b \in Cells |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |-> None]]]]
     /\ mflight = {}
     /\ inflight = {}
@@ -1472,7 +1437,7 @@ LiveRecs == {b \in Cells : LiveRec(b)}
 \* where its state acknowledged says it is.
 NothingNeededGone ==
     /\ \A b \in LiveRecs :
-          LET r == Recover(b, rec[b].origin) IN
+          LET r == Recover(b, head[b].origin) IN
           /\ r.ok
           /\ \A x \in DOMAIN r.st.ext : Readable(x, r.st.ext[x])
           /\ taken[b] >= 0 => head[b] # None
@@ -1490,8 +1455,8 @@ NothingNeededGone ==
 \* history to the version's commit (TASK-476).
 HistoriesOwn ==
     /\ \A b \in LiveRecs :
-          LET r == Recover(b, rec[b].origin) IN
-          r.ok => /\ OwnStart(b, r.st.tip) = rec[b].base
+          LET r == Recover(b, head[b].origin) IN
+          r.ok => /\ OwnStart(b, r.st.tip) = head[b].base
                   /\ ~r.st.dup
                   /\ r.st.hist = Anc(r.st.tip)
                   /\ DOMAIN r.st.ext = MadeBy(Path(r.st.tip), {})
@@ -1516,7 +1481,7 @@ VersionsStay ==
 \* whose taking the head is.
 NoAckedLost ==
     /\ \A b \in LiveRecs :
-          LET r == Recover(b, rec[b].origin) IN r.ok => acked[b] \subseteq Anc(r.st.tip)
+          LET r == Recover(b, head[b].origin) IN r.ok => acked[b] \subseteq Anc(r.st.tip)
     /\ \A h \in Hosts, b \in LiveRecs :
           (Ready(h, b) /\ Taking(ses[h][b], b)) =>
               acked[b] \subseteq Anc(View(h, b).tip)
@@ -1530,8 +1495,8 @@ HeadsCurrent == \A b \in Cells : head[b] # None /\ head[b].epoch # Final =>
 
 \* A making told it made a cell loses it only to a deletion of it asked by who may.
 DeletedOnlyByDeletes ==
-    \A b \in Cells : rec[b] # None /\ rec[b].deleted /\ rec[b].maker \in Made =>
-                         rec[b].maker \in doomed
+    \A b \in Cells : head[b] # None /\ Deleted(head[b]) /\ head[b].maker \in Made =>
+                         head[b].maker \in doomed
 
 \* One making, not deleted, is told it made each cell.
 OneMaker == \A b \in Cells : Cardinality(makers[b] \ doomed) <= 1
@@ -1553,7 +1518,7 @@ KeysWrittenOnce == \A p, q \in written : p[1] = q[1] => p[2] = q[2]
 \* ever.
 ReferencesNamed ==
     \A r \in refs :
-        \/ rec[r.c] # None /\ rec[r.c].origin = <<r.p, r.at>>
+        \/ head[r.c] # None /\ head[r.c].origin = <<r.p, r.at>>
         \/ \E h \in Hosts : /\ proc[h] # None /\ proc[h].op = "restore" /\ proc[h].b = r.c
                            /\ proc[h].og = <<r.p, r.at>>
         \/ r \in marked
@@ -1566,14 +1531,14 @@ ReferencesRetiredMarked == \A r \in refs \cap retired : r \in marked
 
 \* A cell a pass removed whole never lives again, nor is being made again (TASK-455): no restore
 \* takes its ID. A deletion run again may leave it a record deleted.
-RemovedStayGone == \A b \in gone : rec[b] = None \/ rec[b].deleted
+RemovedStayGone == \A b \in gone : head[b] = None \/ Deleted(head[b])
 
 \* No writer holds a deleted cell (TASK-455's review): a deletion's final head, its fence, stands
 \* from its swap until the record says the cell is deleted, and after, while the record does; no
 \* writer takes it, and the one that held it stops at its next swap.
 DeletedUntaken ==
     \A h \in Hosts, b \in Cells :
-        (Ready(h, b) /\ Taking(ses[h][b], b)) => rec[b] # None /\ ~rec[b].deleted
+        (Ready(h, b) /\ Taking(ses[h][b], b)) => head[b] # None /\ ~Deleted(head[b])
 
 \* A segment a head names keeps its epoch while the head stands (TASK-449): an acknowledgement
 \* names more, a takeover goes on from the head's end, a deletion keeps what it names, and nothing
@@ -1589,5 +1554,5 @@ NamedEpochsStay ==
 \* written before it is made, retired only once it is deleted.
 ReferencesStand ==
     \A b \in LiveRecs :
-        rec[b].origin # <<>> => RefOf(rec[b].origin[1], rec[b].origin[2], b) \in refs
+        head[b].origin # <<>> => RefOf(head[b].origin[1], head[b].origin[2], b) \in refs
 =============================================================================

@@ -1636,7 +1636,7 @@ pub(crate) mod tests {
         assert_eq!(state.extents.keys().copied().collect::<Vec<_>>(), [large]);
         let origin = Some(Origin { parent: test_cell(root), at: fork });
         assert_eq!(
-            lifecycle::record(&*bucket, test_cell(child)).await.unwrap().unwrap().origin(),
+            crate::head::get(&*bucket, test_cell(child)).await.unwrap().unwrap().origin(),
             origin
         );
         let inherited = recovery::recover(&*bucket, test_cell(child), origin).await.unwrap().state;

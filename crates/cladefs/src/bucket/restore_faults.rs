@@ -92,7 +92,8 @@ fn in_bucket(
     child: crate::CellId,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
-        let record = lifecycle::record(&**bucket, child).await.map_err(|err| err.to_string())?;
+        let record =
+            bucket_cell::head::get(&**bucket, child).await.map_err(|err| err.to_string())?;
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::bucket::kms().map_err(|err| err.to_string())?;
@@ -452,24 +453,14 @@ impl Hosts {
                 | Kind::Checkpoint { .. }
                 | Kind::Extent { .. }
                 | Kind::Moves { .. } => true,
-                Kind::Record { cell } => !block_on(lifecycle::record(&*self.bucket, cell))
+                // A head is left over if its cell lives (TASK-407, TASK-515).
+                Kind::Head { cell } => !block_on(bucket_cell::head::get(&*self.bucket, cell))
                     .unwrap()
-                    .is_some_and(|record| record.deleted),
-                // cladefs: a cell's object stays, as its cell's record does, its epoch fencing
-                // its cell's head (TASK-364): left over only if it names a live cell.
-                Kind::Cell { cell } => {
-                    let object = block_on(bucket_cell::cell::read(&*self.bucket, cell));
-                    let object = object.unwrap().expect("a cell listed");
-                    object.kind.is_some() && {
-                        let record = block_on(lifecycle::record(&*self.bucket, cell)).unwrap();
-                        record.is_some_and(|record| !record.deleted)
-                    }
-                }
+                    .is_some_and(|head| head.deleted()),
                 // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
-                // mark, retired or taken back (TASK-395.13), every cell's head (TASK-407), and a
-                // tenant's KEK object (TASK-411.27).
-                Kind::Head { .. }
-                | Kind::CollectorLease { .. }
+                // mark, retired or taken back (TASK-395.13), and a tenant's KEK object
+                // (TASK-411.27).
+                Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Kek { .. }
@@ -631,7 +622,7 @@ fn encrypted_restores_with_nothing_going_wrong() {
     let copy = hosts.copies[1].as_ref().unwrap();
     let child = crate::host_cell::new_alone();
     copy.fork_to(hosts.disks[1].join("child"), child).unwrap();
-    let record = block_on(lifecycle::record(&*hosts.bucket, child)).unwrap().unwrap();
+    let record = block_on(bucket_cell::head::get(&*hosts.bucket, child)).unwrap().unwrap();
     let source = hosts.source.as_ref().unwrap().cell();
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
     assert_eq!((record.deks.len(), inherited), (1, vec![source]));

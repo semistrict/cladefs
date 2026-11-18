@@ -144,7 +144,7 @@ mod tests {
     use super::*;
     use crate::{Filesystem, Owner};
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::record::Kind as Record;
+    use bucket_cell::record::Made;
     use futures::executor::block_on;
     use rand::rngs::StdRng;
     use rand::{RngExt as _, SeedableRng as _};
@@ -178,7 +178,7 @@ mod tests {
     /// and its root.
     fn kept(bucket: &ObjectBucket, cell: crate::CellId) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = local_cell::upload::block_on(async {
-            let record = bucket_cell::lifecycle::record(bucket, cell).await?;
+            let record = bucket_cell::head::get(bucket, cell).await?;
             bucket_cell::recover(bucket, cell, record.and_then(|record| record.origin())).await
         });
         let state = recovered.unwrap().unwrap().state;
@@ -234,8 +234,8 @@ mod tests {
             let child = image(&fork).store().description().cell;
             let bucket = bucket_of(&fork_path);
             assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
-            let record = bucket_cell::lifecycle::record(&*bucket, child).await.unwrap().unwrap();
-            let Record::Clone(origin) = record.kind else { panic!("{record:?}") };
+            let record = bucket_cell::head::get(&*bucket, child).await.unwrap().unwrap();
+            let Made::Clone(origin) = record.made else { panic!("{record:?}") };
             assert_eq!(origin.parent, parent);
 
             let fs = Filesystem::mount(fork).await.unwrap();
@@ -259,10 +259,10 @@ mod tests {
             let child = image(&fork).store().description().cell;
             drop((fork, storage));
             let bucket = bucket_of(&path);
-            let record = |cell| bucket_cell::lifecycle::record(&*bucket, cell);
-            assert!(!record(child).await.unwrap().unwrap().deleted);
+            let record = |cell| bucket_cell::head::get(&*bucket, cell);
+            assert!(!record(child).await.unwrap().unwrap().deleted());
             Storage::delete(&fork_path).unwrap();
-            assert!(record(child).await.unwrap().unwrap().deleted);
+            assert!(record(child).await.unwrap().unwrap().deleted());
         })
     }
 

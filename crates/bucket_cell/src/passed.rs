@@ -392,7 +392,7 @@ mod tests {
     /// was written, its version; and not with where one key ends and the next begins.
     #[test]
     fn digests_change_with_every_part_of_a_listing() {
-        let record = layout::record(CellId { tenant: TEST_CELL.tenant, id: 1 });
+        let record = layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 });
         let base = [meta(&record, 10, 5, "1")];
         let changed = [
             vec![meta(&record, 11, 5, "1")],
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn leases_count_themselves() {
         let mut usage = Usage { measured: 3, ..Usage::default() };
-        usage.add(&layout::record(CellId { tenant: TEST_CELL.tenant, id: 1 }), 40);
+        usage.add(&layout::head(CellId { tenant: TEST_CELL.tenant, id: 1 }), 40);
         let deferred = vec![Deferred { key: "k".into(), due: 9 }];
         let passed = Passed {
             listing: Some([7; 32]),

@@ -740,10 +740,12 @@ fn version_dir(cell: CellId, version: u64) -> PathBuf {
 }
 
 /// cladefs: the directory the version `version` of `cell` is kept open in for forks here
-/// ([`version_dir`]), made if it isn't, of `capacity` bytes: from the bucket, once the cell's commits
-/// here, if its writer is here, are uploaded, the version's among them, as a version is local as it
-/// is made and uploaded behind. `ENOENT` if the bucket has no such cell.
+/// ([`version_dir`]), made if it isn't, of `capacity` bytes, a block at least, as a restore asking
+/// none for the version's own gives: from the bucket, once the cell's commits here, if its writer
+/// is here, are uploaded, the version's among them, as a version is local as it is made and
+/// uploaded behind. `ENOENT` if the bucket has no such cell.
 async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
+    let capacity = capacity.max(OpenCell::BLOCK_SIZE as u64);
     let dir = version_dir(cell, version);
     let held = hold(&dir).await?;
     if dir.exists() && !crate::host_cell::unmade(&dir) {
@@ -761,7 +763,7 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
             std::fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
         }
         let bucket = daemon_bucket()?;
-        let found = local_cell::upload::block_on(bucket_cell::cell::read(&*bucket, cell));
+        let found = local_cell::upload::block_on(bucket_cell::head::get(&*bucket, cell));
         let object = found.map_err(|_| Errno::EIO)?.map_err(|_| Errno::EIO)?;
         let object = object.ok_or(Errno::ENOENT)?;
         let kind = object.kind.ok_or(Errno::ENOENT)?;

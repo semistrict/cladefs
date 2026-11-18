@@ -51,7 +51,7 @@ use bucket_cell::bucket::Bucket as _;
 use bucket_cell::keys::{self, CachingKms};
 use bucket_cell::layout::{CellId, NewVersion, Origin};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::{Bytes, Writer, cell, lifecycle};
+use bucket_cell::{Bytes, Writer, lifecycle};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -356,10 +356,9 @@ async fn write(
     }
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
     let failed = |err: bucket_cell::Error| err.to_string();
-    make_cell(&bucket, kms, cell).await.map_err(failed)?;
     let id = cell;
     match of {
-        None => lifecycle::create(&*bucket, id, 0).await.map_err(failed)?,
+        None => drop(lifecycle::create(&*bucket, id, 0).await.map_err(failed)?),
         Some(version) => {
             let keys = keys::Parents::Kms(kms, None);
             lifecycle::fork_version(&*bucket, id, version.id, version.origin, WRITER.0, keys)
@@ -417,20 +416,8 @@ async fn write(
     if let Shape::Garbage { deleted: true, .. } = shape {
         // As a host deletes a cell (`local_cell::upload::delete_cell`).
         lifecycle::delete(&*bucket, id, DELETER, WRITER.1).await.map_err(failed)?;
-        cell::forget(&*bucket, cell).await.map_err(failed)?;
     }
     Ok(Written { bucket, version: versioned })
-}
-
-/// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its cell's record is given its DEK
-/// by its writer.
-async fn make_cell(
-    bucket: &ObjectBucket,
-    kms: &Arc<CachingKms>,
-    cell: CellId,
-) -> Result<(), bucket_cell::Error> {
-    let (_, kek) = keys::new_cell_kek(kms, cell.tenant).await?;
-    cell::create(bucket, cell, WRITER, kek).await.map(drop)
 }
 
 /// Copies every object of `bucket`, one in memory, into `files`, but those of `but`, which the
@@ -630,8 +617,8 @@ mod tests {
             sandbox,
             Some(&filled.bases[0]),
         ));
-        // Its cell's object, its record, its head, two segments, a checkpoint, and its reference.
-        assert_eq!(sum.unwrap().objects, 7);
+        // Its head, two segments, a checkpoint, and its reference.
+        assert_eq!(sum.unwrap().objects, 5);
         assert_eq!(of_base(&bucket), [1, 0]);
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [1, 0, 0]);

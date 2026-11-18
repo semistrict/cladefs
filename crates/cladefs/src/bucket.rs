@@ -100,9 +100,15 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // A cell of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Bucket(Error::Format { .. }) => Some(Errno::ENOTSUP),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
-        // hold is unread, as data it failed to read is (TASK-411.2).
+        // hold is unread, as data it failed to read is (TASK-411.2); and a taking's race for the
+        // cell's keys, which it takes again (`bucket_cell::keys::taking`).
         Failure::Bucket(
-            Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
+            Error::Lost(_)
+            | Error::Corrupt(_)
+            | Error::Read(_)
+            | Error::Left(_)
+            | Error::NoKey(_)
+            | Error::Raced,
         )
         | Failure::Local(_) => None,
     }
@@ -296,17 +302,17 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     forgotten
 }
 
-/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::cell::shred`]): its wrapped KEKs taken out of
-/// its object, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
-/// already, its object stays as it is, and the host forgets them all the same: what each host told
+/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::keys::shred`]): its wrapped KEKs taken out of
+/// its head, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
+/// already, its head stays as it is, and the host forgets them all the same: what each host told
 /// of the shredding does. Returns how many generations of its KEK it took out, and what the host
-/// forgot. Only as strong as `bucket` keeps no older version of the cell's object (doc-16).
+/// forgot. Only as strong as `bucket` keeps no older version of the cell's head (doc-16).
 pub async fn shred_cell(
     bucket: &ObjectBucket,
     cell: crate::CellId,
 ) -> Result<(usize, Forgotten), bucket_cell::Error> {
-    let removed = bucket_cell::cell::shred(bucket, cell).await?;
-    let why = bucket_cell::cell::shredded(cell).to_string();
+    let removed = bucket_cell::keys::shred(bucket, cell).await?;
+    let why = bucket_cell::keys::shredded(cell).to_string();
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
@@ -1354,7 +1360,7 @@ mod tests {
         // over it counts as its own.
         let cell = stores[0].cell();
         let state = futures::executor::block_on(async {
-            let record = lifecycle::record(&*bucket, cell).await.unwrap().unwrap();
+            let record = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
             recover(&*bucket, cell, record.origin()).await.unwrap().state
         });
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
@@ -1874,8 +1880,8 @@ mod tests {
         assert_eq!(state.root, Some(b"second".to_vec()));
 
         OpenCell::delete(&second_path, Some(&bucket)).unwrap();
-        let deleted = futures::executor::block_on(bucket_cell::lifecycle::record(&*bucket, cell));
-        assert!(deleted.unwrap().unwrap().deleted, "the cell lives");
+        let deleted = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
+        assert!(deleted.unwrap().unwrap().deleted(), "the cell lives");
     }
 
     /// TASK-39.7: a store's copy never placed takes its cell with its host's token, as a store
@@ -1889,11 +1895,7 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
         let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
         let head = head.unwrap().unwrap();
-        // cladefs: its cell taken with the host's token, its cell's head with the cell's epoch
-        // (TASK-364).
-        let cell = bucket_cell::cell::read(&*bucket, store.cell());
-        let cell = futures::executor::block_on(cell).unwrap().unwrap();
-        assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
+        assert_eq!((head.token, head.epoch), (9, 1));
     }
 
     /// TASK-165.9: a store whose bucket acknowledged commits of its cell, opened where the
@@ -2734,19 +2736,14 @@ mod tests {
         let tails: u64 = (0..4)
             .map(|segment| sizes[&layout::segment(cell, segment, 1)].min(bucket_cell::object::TAIL))
             .sum();
-        let (record, head) = (sizes[&layout::record(cell)], sizes[&layout::head(cell)]);
-        let cell_object = sizes[&layout::cell(cell)];
-        // The record, before the head and after; cladefs: its cell's object, held, read alone, its
-        // holder's as it was and naming the cell (TASK-364), and read before for the KEK its
-        // recovery unwraps the cell's DEK under, every cell encrypted (TASK-411.28, TASK-460);
-        // the head, read once, at once with the record and the cell, the recovery starting from it,
-        // then swapped to take it (TASK-449). The segments' tails it names, all at once: no listing
-        // (TASK-407).
+        let head = sizes[&layout::head(cell)];
+        // Its head, read once, the recovery starting from it, then swapped to take it (TASK-449,
+        // TASK-515). The segments' tails it names, all at once: no listing (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
-                    ("get", 5),
+                    ("get", 1),
                     ("get-range", 4),
                     ("head", 0),
                     ("list", 0),
@@ -2757,7 +2754,7 @@ mod tests {
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + head + 2 * cell_object
+                tails + head
             )
         );
         let mut data = vec![0; 1 << 20];
@@ -3164,7 +3161,7 @@ mod tests {
         source.share_version(version, true).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, theirs.cell()));
+        let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, theirs.cell()));
         let record = record.unwrap().unwrap();
         let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
         assert_eq!((record.deks.len(), inherited), (1, vec![source.cell()]));
@@ -3209,7 +3206,7 @@ mod tests {
             let refused = kept_in(dir.path().join(name), (1 << 30, Some(cell)), &bucket, idle());
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
-            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, cell));
+            let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
             assert_eq!(cell, Ok(None), "{name}");
         }
     }
@@ -3340,9 +3337,10 @@ mod tests {
             .collect();
         assert!(crate::bucket::bucket_kms().is_some());
         for (store, _, _) in &stores {
-            let record = futures::executor::block_on(lifecycle::record(&*bucket, store.cell()));
+            let record =
+                futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
-            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, store.cell()));
+            let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
             assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
         }
         let kek = |tenant| {
@@ -3372,7 +3370,7 @@ mod tests {
         let new = of(1);
         let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
-        let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, new));
+        let cell = futures::executor::block_on(bucket_cell::head::get(&*bucket, new));
         assert_eq!(cell, Ok(None));
         let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
         assert_eq!(again.0, Destroyed::Already);
@@ -3475,7 +3473,7 @@ mod tests {
         parent.commit(None).unwrap();
 
         let record =
-            futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap().unwrap();
+            futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap().unwrap();
         let origin = record.origin().unwrap();
 
         assert_eq!(origin.parent, parent.cell());
@@ -3689,7 +3687,7 @@ mod tests {
         // read.
         let mut newer = (bucket_cell::layout::FORMAT + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
-        let (key, overwrite) = (bucket_cell::layout::record(cell), PutMode::Overwrite);
+        let (key, overwrite) = (bucket_cell::layout::head(cell), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
         let listed = || {
             let listed = futures::executor::block_on(bucket.list("")).unwrap();
@@ -3717,11 +3715,11 @@ mod tests {
         bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
         child: crate::CellId,
-    ) -> bucket_cell::record::Record {
+    ) -> bucket_cell::layout::Head {
         write(parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         parent.fork_to(path, child).unwrap();
-        futures::executor::block_on(lifecycle::record(&**bucket, child)).unwrap().unwrap()
+        futures::executor::block_on(bucket_cell::head::get(&**bucket, child)).unwrap().unwrap()
     }
 
     /// TASK-79.78: a fork to a child it made before, as a fork retried to another path, fails
@@ -3786,18 +3784,14 @@ mod tests {
     /// A fork, waiting in a thread of its own: what it gives.
     type Forking = std::thread::JoinHandle<Result<(), crate::Error>>;
 
-    /// The record of a cell no fork made, its store's own, of no parent, but for its owner
-    /// ([`unowned`]).
-    fn own_record() -> bucket_cell::record::Record {
-        bucket_cell::record::Kind::Root.of(0)
+    /// What made the cell of `head`, and whether it lives: as the tests that are not of owners,
+    /// keys or takings compare heads.
+    fn made(head: bucket_cell::layout::Head) -> (bucket_cell::record::Made, bool) {
+        (head.made, !head.deleted())
     }
 
-    /// `record`, but for its owner, which its maker chose at random, and its keys, wrapped under
-    /// keys made at random (TASK-411.28): as the tests that are not of owners or keys compare
-    /// records.
-    fn unowned(record: bucket_cell::record::Record) -> bucket_cell::record::Record {
-        bucket_cell::record::Record { owner: 0, deks: Vec::new(), inherited: Vec::new(), ..record }
-    }
+    /// What [`made`] says of a cell no fork made, its store's own, of no parent, live.
+    const OWN: (bucket_cell::record::Made, bool) = (bucket_cell::record::Made::Root, true);
 
     /// The store of another cell, `cell`, at `path`, attached to `bucket`, holding an extent
     /// and a root: what a guest may name as its fork's child.
@@ -3846,8 +3840,8 @@ mod tests {
         // The parent commits and uploads on, its cell naming no fork.
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, other)).unwrap();
-        assert_eq!((record.map(unowned), live(&others, &bucket)), (Some(own_record()), lives()));
+        let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, other)).unwrap();
+        assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
     }
 
     /// A parent attached to the bucket through `gated`, in `dir`, holding an extent and a root,
@@ -3909,8 +3903,8 @@ mod tests {
         assert_eq!((forked, errno), (anothers(child), Err(Some(crate::Errno::EEXIST))));
         assert!(!path.exists(), "the handle of a fork that failed is left");
 
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        assert_eq!((record.map(unowned), live(&others, &bucket)), (Some(own_record()), lives()));
+        let record = futures::executor::block_on(bucket_cell::head::get(&*bucket, child)).unwrap();
+        assert_eq!((record.map(made), live(&others, &bucket)), (Some(OWN), lives()));
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));

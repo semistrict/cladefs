@@ -230,19 +230,17 @@ fn a_database_is_fenced_with_its_cell() {
     let ours = control.cell(&store).unwrap();
     let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let held = runtime.block_on(cell::read(&objects, ours)).unwrap().unwrap();
+    let held = runtime.block_on(bucket_cell::head::get(&objects, ours)).unwrap().unwrap();
     assert_eq!(held.kind, Some(cell::Kind::Sqlite));
     assert_eq!((held.epoch, held.token), (1, 1));
 
-    // Another host's, placed later.
+    // Another host's, placed later: its writer fences the cell (TASK-371), unwrapping the cell's
+    // KEK through the host's KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none
+    // of it.
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
-        let (held, _) = cell::hold(&*objects, ours, (2, 2), None, None).await.unwrap();
-        // Its writer fences the cell (TASK-371), unwrapping the cell's KEK through the host's
-        // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
         let kms = cladefs::bucket::kms().unwrap();
-        let writer =
-            bucket_cell::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
+        let writer = bucket_cell::Writer::open_under(objects.clone(), ours, (0x22, 2), &kms);
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();

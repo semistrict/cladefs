@@ -1639,7 +1639,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (9, 0x6fd8_ca81_93f3_6596);
+        const WIRE: (u64, u64) = (10, 0x6acf_0161_4bd7_8a8e);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

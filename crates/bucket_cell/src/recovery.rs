@@ -26,7 +26,6 @@
 use crate::bucket::{self, Bucket, Meta};
 use crate::keys::Ring;
 use crate::layout::{self, CellId, Contents, Footer, Head, Location, Origin};
-use crate::record::Record;
 use crate::{Error, head, object};
 use extent_frame::spent::Spent;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
@@ -1261,12 +1260,12 @@ async fn walk<B: Bucket>(
             Layered::of(Arc::unwrap_or_clone(state))
         }
         None => {
-            let key = layout::record(cell);
+            let key = layout::head(cell);
             let inherited = match bucket::get(bucket, &key).await {
                 None => Err(Attempt::Failed(Error::Lost(key))),
                 Some(object) => {
                     touched.insert(key);
-                    match Record::decode(cell, &object.bytes)?.origin() {
+                    match Head::decode(cell, &object.bytes)?.origin() {
                         None => Ok(None),
                         Some(origin) => {
                             let from = cell;
@@ -1792,7 +1791,7 @@ mod tests {
                 .await;
             let origin = Some(Origin { parent: test_cell(1), at });
             assert_eq!(
-                lifecycle::record(&*bucket, test_cell(2)).await.unwrap().unwrap().origin(),
+                crate::head::get(&*bucket, test_cell(2)).await.unwrap().unwrap().origin(),
                 origin
             );
 

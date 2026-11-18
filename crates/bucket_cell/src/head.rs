@@ -2,18 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a cell's head (doc-7, The head; TASK-407): its writer's taking and its commit, one
-//! object ([`Head`]). Every object of a cell's is written once, at a key naming its writer's
-//! epoch, and is the cell's only once the head names it: a writer acknowledges its segments by
-//! swapping the head to name them, with the condition that it is still the version it last wrote,
-//! its own taking's. A takeover swaps it to the next epoch, so that the writer before fails at its
-//! next swap: the head is the fence. A deletion swaps it to [`Head::FINAL`], which no writer takes,
-//! and nothing swaps after.
+//! cladefs: a cell's head (doc-7, The head; TASK-407, TASK-515): its one swapped object ([`Head`]),
+//! what made it, its keys, its writer's taking and its commit. Every object of a cell's is written
+//! once, at a key naming its writer's epoch, and is the cell's only once the head names it: a writer
+//! acknowledges its segments by swapping the head to name them, with the condition that it is
+//! still the version it last wrote, its own taking's. A takeover swaps it to the next epoch, so that
+//! the writer before fails at its next swap: the head is the fence. A deletion swaps it to
+//! [`Head::FINAL`], which no writer takes, and nothing swaps after.
+//!
+//! A taking is a host's placement of the cell and its writer's at once, one conditional write
+//! ([`take`]): refused to a placement of a lower token than the one holding it ([`Error::Stale`]),
+//! so that a placement cut off takes no cell back from the one after it (TASK-39.7). It gives the
+//! cell what it lacks in the same write: a kind, a KEK, a DEK ([`Taking`]).
 //!
 //! Every swap is a conditional write of bytes unique to its writer, a head naming its holder, so
 //! that one that landed though its answer was lost is recognised by reading it back.
 
 use crate::bucket::{self, Bucket, Object, PutMode, Version};
+use crate::cell::Kind;
+use crate::keys::{Dek, InheritedDek, Kek};
 use crate::layout::{self, CellId, Head};
 use crate::{Error, rules};
 use bytes::Bytes;
@@ -26,87 +33,135 @@ pub struct Held {
     version: Version,
 }
 
-/// `cell`'s head as a read finds it, for a taking of it after ([`take_from`]).
-pub struct Read(Option<Object>);
-
-impl Read {
-    /// cladefs: what a read of the head of a cell known to have none finds, without the read
-    /// (`crate::known`, TASK-449): a clone its host just made, which no writer took yet. Wrong, a
-    /// taking from it finds the head there and goes on from it, its create being conditional.
-    pub fn absent() -> Self {
-        Self(None)
-    }
-
-    /// The head read, if there was one.
-    pub fn head(&self) -> Result<Option<Head>, Error> {
-        self.0.as_ref().map(|object| Head::decode(&object.bytes)).transpose()
+impl Held {
+    /// The head as its write left it, raw: what a later change of it starts from
+    /// ([`crate::lifecycle::Start::Found`]), a read less.
+    pub fn object(&self, cell: CellId) -> Object {
+        let bytes = layout::encode(&self.head);
+        Object::written(&layout::head(cell), bytes, self.version.clone(), 0)
     }
 }
 
-/// Reads `cell`'s head for a taking of it after ([`take_from`]), as with other reads a taking
-/// needs, at once (TASK-165.11).
+/// `cell`'s head as a read finds it, raw, for a taking of it after ([`take`]).
+pub struct Read(pub(crate) Option<Object>);
+
+impl Read {
+    /// What was found: the head as a change of it left it ([`Held::object`], TASK-449), which a
+    /// taking goes on from, its write conditional on it as on what a read found.
+    pub fn found(object: Option<Object>) -> Self {
+        Self(object)
+    }
+
+    /// What was found, raw: what a host learns for an opening of the cell after
+    /// ([`crate::known::Learned`]).
+    pub fn object(self) -> Option<Object> {
+        self.0
+    }
+
+    /// The head read, if there was one.
+    pub fn head(&self, cell: CellId) -> Result<Option<Head>, Error> {
+        self.0.as_ref().map(|object| Head::decode(cell, &object.bytes)).transpose()
+    }
+}
+
+/// Reads `cell`'s head for a taking of it after ([`take`]), as with other reads a taking needs,
+/// at once (TASK-165.11).
 pub async fn read(bucket: &impl Bucket, cell: CellId) -> Read {
     Read(bucket::get(bucket, &layout::head(cell)).await)
 }
 
-/// `cell`'s head, if it has one.
+/// `cell`'s head, if it has one: [`Error::Format`] if it is of another format than this one,
+/// whose objects this reads none of.
 pub async fn get(bucket: &impl Bucket, cell: CellId) -> Result<Option<Head>, Error> {
-    match bucket::get(bucket, &layout::head(cell)).await {
-        Some(object) => Ok(Some(Head::decode(&object.bytes)?)),
-        None => Ok(None),
+    read(bucket, cell).await.head(cell)
+}
+
+/// `cell`'s head, if it says the cell is live: an operator's look, to compare with what hosts
+/// hold (`cladefs-gc --cells`, TASK-395.4). A fork whose child has no head yet isn't live.
+pub async fn live(bucket: &impl Bucket, cell: CellId) -> Result<Option<Head>, Error> {
+    Ok(get(bucket, cell).await?.filter(|head| !head.deleted()))
+}
+
+/// What a taking of a cell writes beside its epoch, holder and token: what the cell lacks, given
+/// in the same write.
+#[derive(Clone, Debug, Default)]
+pub struct Taking {
+    /// Who takes it: unique to each taking, so that a write of it is recognised.
+    pub holder: u64,
+    /// The fencing token of the taker's placement.
+    pub token: u64,
+    /// The kind the cell is of, given it if it has none: refused if it has another
+    /// ([`Error::OtherKind`]), as a cell has one (doc-20).
+    pub kind: Option<Kind>,
+    /// cladefs: the keys given a head with none, as found when they were made
+    /// ([`crate::keys::taking`]).
+    pub keys: Option<Given>,
+}
+
+/// cladefs: keys a taking gives the head it takes, made for the head as found then
+/// ([`crate::keys::taking`]): a KEK if it had none, and its first DEK, with those it inherits,
+/// if it had none. Given only if the head is still without them: else the taking stops, its keys
+/// to be made anew ([`Error::Raced`]).
+#[derive(Clone, Debug)]
+pub struct Given {
+    pub kek: Option<Kek>,
+    pub deks: Option<(Vec<Dek>, Vec<InheritedDek>)>,
+}
+
+impl Given {
+    /// Whether these were made for `head`: its KEKs and DEKs as they found them.
+    fn fits(&self, head: &Head) -> bool {
+        self.kek.is_some() == head.keks.is_empty() && self.deks.is_some() == head.deks.is_empty()
     }
 }
 
-/// The epoch of `cell`'s head: 0 if it has none.
-pub async fn epoch(bucket: &impl Bucket, cell: CellId) -> Result<u64, Error> {
-    Ok(get(bucket, cell).await?.map_or(0, |head| head.epoch))
-}
-
-/// Takes `cell`'s head, of the epoch after its last, as `holder`, which must differ from every
-/// other taking's, of the placement whose fencing token is `token`: what it names, the segments the
-/// cell holds and its newest checkpoint, kept. Fails for a deleted cell's, and for one a later
-/// placement took, whose token is higher ([`Error::Stale`]): a placement cut off takes no cell
-/// back from the one after it (TASK-39.7).
+/// Takes `cell`'s head as [`Taking`] says, of the epoch after its last, starting from `read`,
+/// what a read of it before found ([`read`]): its write is conditional on what `read` found, so
+/// that another's taking since, which changed it, is read and gone on from. What it named, the
+/// segments the cell holds and its newest checkpoint, kept. Refused for a cell with no head, which
+/// its maker makes ([`crate::lifecycle::create`]) and a taking never ([`Error::NoCell`]); for a
+/// deleted cell's ([`Error::Deleted`]), a shredded one's, a fork's not made ([`Error::NoCell`]),
+/// one a later placement took, whose token is higher ([`Error::Stale`]), and one whose keys
+/// changed from those [`Taking::keys`] were made for ([`Error::Raced`]).
 pub async fn take(
     bucket: &impl Bucket,
     cell: CellId,
-    holder: u64,
-    token: u64,
-) -> Result<Held, Error> {
-    take_from(bucket, cell, read(bucket, cell).await, holder, token).await
-}
-
-/// Takes `cell`'s head as [`take`] does, starting from `read`, what a read of it before found
-/// ([`read`]), rather than reading it again: its write is conditional on what `read` found, so that
-/// another's taking since, which changed it, is read and gone on from, as after a read of its own.
-/// A round trip less, on a real bucket, for every opening of a store (TASK-165.11).
-pub async fn take_from(
-    bucket: &impl Bucket,
-    cell: CellId,
     read: Read,
-    holder: u64,
-    token: u64,
+    taking: &Taking,
 ) -> Result<Held, Error> {
+    let Taking { holder, token, .. } = *taking;
     let key = layout::head(cell);
     let mut found = read.0;
     loop {
-        let head = match &found {
-            None => Head { epoch: 1, holder, token, ..Head::default() },
-            Some(object) => match Head::decode(&object.bytes)? {
-                head if head.epoch == Head::FINAL => return Err(Error::Deleted),
-                head if rules().tokens && head.token > token => return Err(Error::Stale),
-                // cladefs: naming what it named, its versions among them (rule `versions_carried`,
-                // TASK-476); without the rule, as a test shows it needed, none.
-                head => match rules().versions_carried {
-                    true => Head { epoch: head.epoch + 1, holder, token, ..head },
-                    false => {
-                        Head { epoch: head.epoch + 1, holder, token, versions: Vec::new(), ..head }
-                    }
-                },
-            },
+        let Some(object) = &found else { return Err(Error::NoCell) };
+        let head = Head::decode(cell, &object.bytes)?;
+        head.writable()?;
+        if head.shredded {
+            return Err(crate::keys::shredded(cell));
+        }
+        if rules().tokens && head.token > token {
+            return Err(Error::Stale);
+        }
+        let kind = match (head.kind, taking.kind) {
+            (Some(had), Some(kind)) if had != kind => return Err(Error::OtherKind(had.name())),
+            (had, given) => had.or(given),
         };
-        let version = found.as_ref().map(|object| object.meta.version.clone());
-        match write(bucket, &key, &head, version).await {
+        let mut next = Head { epoch: head.epoch + 1, holder, token, kind, ..head };
+        // cladefs: naming what it named, its versions among them (rule `versions_carried`,
+        // TASK-476); without the rule, as a test shows it needed, none.
+        if !rules().versions_carried {
+            next.versions.clear();
+        }
+        if let Some(given) = &taking.keys {
+            if !given.fits(&next) {
+                return Err(Error::Raced);
+            }
+            next.keks.extend(given.kek.clone());
+            if let Some((deks, inherited)) = given.deks.clone() {
+                (next.deks, next.inherited) = (deks, inherited);
+            }
+        }
+        match write(bucket, &key, &next, Some(object.meta.version.clone())).await {
             Ok(held) => return Ok(held),
             Err(changed) => found = changed,
         }
@@ -115,7 +170,8 @@ pub async fn take_from(
 
 /// Swaps `cell`'s head from `held`, as its holder last wrote it, to `next`: with the condition
 /// that it is still that version (rule `head_swap`), and so that taking still, which it fails
-/// otherwise ([`Error::Fenced`]): another taking, or the cell's deletion, swapped it since.
+/// otherwise ([`Error::Fenced`]): another taking, or the cell's deletion or shredding, swapped it
+/// since.
 pub async fn swap(
     bucket: &impl Bucket,
     cell: CellId,
@@ -130,42 +186,6 @@ pub async fn swap(
         return Ok(Held { head: next, version });
     }
     write(bucket, &key, &next, Some(held.version.clone())).await.map_err(|_| Error::Fenced)
-}
-
-/// Ends `cell`'s head, as a deletion does first: swapped to its final epoch, which no writer
-/// takes, as `holder` of the placement whose fencing token is `token`, unless a later placement
-/// took it ([`Error::Stale`]). What it names, it keeps: the head the deletion recovers the cell
-/// from, which nothing swaps after, so that every deletion of the cell finds the same forks
-/// (TASK-183); but its versions, which go with the cell (doc-18, TASK-476). Starts from `found`,
-/// what a read of it found ([`read`]). Returns it.
-pub(crate) async fn end(
-    bucket: &impl Bucket,
-    cell: CellId,
-    found: Read,
-    holder: u64,
-    token: u64,
-) -> Result<Head, Error> {
-    let key = layout::head(cell);
-    let mut found = found.0;
-    loop {
-        let head = match &found {
-            None => Head::default(),
-            Some(object) => Head::decode(&object.bytes)?,
-        };
-        if head.epoch == Head::FINAL {
-            return Ok(head);
-        }
-        if rules().delete_tokens && head.token > token {
-            return Err(Error::Stale);
-        }
-        let ended =
-            Head { epoch: Head::FINAL, holder, token: u64::MAX, versions: Vec::new(), ..head };
-        let version = found.as_ref().map(|object| object.meta.version.clone());
-        match write(bucket, &key, &ended, version).await {
-            Ok(held) => return Ok(held.head),
-            Err(changed) => found = changed,
-        }
-    }
 }
 
 /// Writes `head` at `key`: created where `version` is none, else updated from it. A write that
