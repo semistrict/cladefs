@@ -653,7 +653,6 @@ fn closed_segments_hold_the_branchs_history() {
         .commit_fork(Child {
             branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
             owner: 0,
-            point: false,
         })
         .unwrap();
     let places = store.places().unwrap();
@@ -1056,7 +1055,6 @@ fn segments_close_for_the_writer_of_their_chain() {
         .commit_fork(Child {
             branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
             owner: 0,
-            point: false,
         })
         .unwrap();
     let closed = store.closed(usize::MAX).unwrap();
@@ -1068,8 +1066,7 @@ fn segments_close_for_the_writer_of_their_chain() {
             vec![tag(3, 2)],
             vec![Child {
                 branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
-                owner: 0,
-                point: false
+                owner: 0
             }]
         )
     );
@@ -3335,7 +3332,7 @@ fn forks_give_their_commits_epoch() {
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
     let forked =
-        Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0, point: false };
+        Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 };
     assert_eq!(store.commit_fork(forked).unwrap(), 2);
     assert_eq!(store.last_commit().unwrap(), 2);
     let forking = closed_one(&store);
@@ -3352,7 +3349,7 @@ fn forks_take_no_id_of_their_lineage() {
     store.commit(None).unwrap();
     let elsewhere = extent_bucket::layout::Cell { tenant: 9, id: 9 };
     let child = extent_bucket::layout::Branch { cell: elsewhere, id: BRANCH.id };
-    let forked = Child { branch: child, owner: 0, point: false };
+    let forked = Child { branch: child, owner: 0 };
     let refused = store.commit_fork(forked).unwrap_err();
     assert_eq!(refused.downcast_ref(), Some(&extent_store::InheritedId(child)));
     assert_eq!(store.last_commit().unwrap(), 1);

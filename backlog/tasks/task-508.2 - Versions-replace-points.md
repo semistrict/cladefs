@@ -1,10 +1,10 @@
 ---
 id: TASK-508.2
 title: Versions are the only named past states
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 01:01'
+updated_date: '2026-11-18 02:41'
 labels:
   - bucket
   - host
@@ -55,4 +55,6 @@ d. Measure net lines; docs (doc-7 Points, doc-10's generations as shared version
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: not started in code. Blocked by TASK-476's daemon versions (another session, same ground) and by the Firecracker fork's snapshot contract (point path and branch in the VMM's persisted state). Plan recorded.
+
+2026-11-18 (t3/cell-versions 2674fdd85, 258965a41): the daemon's versions, local-first (MakeVersion one local commit; ListVersions, DropVersions, ShareVersion; CreateStore's version makes a copy elsewhere; StatStore says a copy's version); a VM snapshot (quiescent FORK) makes a version and a copy at its path, no upload in its pause; ForkStore's point/shared and SharePoint gone; a version's copy records its source, a daemon fork of it uploads the source first; copies delete nothing in the bucket. Fixed on the way: a fork of a version copy into another cell sealed its checkpoint under the copy's unwritten key (children could not read). Restores of a version cost 9 requests in 8 per fork against a point's 7 in 6 (pinned in lifecycle). Remaining: the bucket's point mechanism itself (Record::point, fork_point*, keys for points, Child.point, branch::share, the collector's point-only paths, specs/bucket's point configs), Firecracker's persisted point/point_branch names (semantics already a version copy), docs.
 <!-- SECTION:NOTES:END -->

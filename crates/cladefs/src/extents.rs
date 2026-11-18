@@ -1023,7 +1023,7 @@ impl ExtentStore {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
-        let child = extent_bucket::layout::Child { branch, owner: rand::random(), point: false };
+        let child = extent_bucket::layout::Child { branch, owner: rand::random() };
         // cladefs: what is attached to it stays attached to the fork, a restored VM's too; and what
         // is public of it, and what it was forked from.
         let inherited = |to: &Path| -> anyhow::Result<()> {

@@ -29,19 +29,14 @@ pub enum Kind {
     Own,
     /// A fork's child, forked from its origin's state: given its record by its parent's writers,
     /// or its parent's deletion, once the fork's segment was acknowledged
-    /// ([`crate::branch::record_fork`]); or by its own host, once its fork of a point was made
-    /// ([`crate::branch::fork_point`]).
+    /// ([`crate::branch::record_fork`]).
     Fork(Origin),
-    /// A point, from its first: no branch to write, but a name of its origin's state, which any
-    /// number of hosts read and fork. It has no head, no segment and no checkpoint, and no writer
-    /// takes it ([`Error::Point`]; doc-7, Points).
-    Point(Origin),
-    /// A fork of a point, or of a version, naming the origin it names as its own, until the fork is
-    /// made ([`crate::branch::fork_point`], [`crate::branch::fork_version`]): until then it holds
-    /// nothing, and nothing relies on it. The collector gives it up once that point is deleted, or
-    /// that version is named by its branch's head no more ([`crate::branch::abandon`]).
-    Forking { origin: Origin, of: Forked },
-    /// cladefs: a fork of a point, made ([`crate::branch::finish_point_fork`]): what
+    /// A fork of a version, naming the origin the version names as its own, until the fork is made
+    /// ([`crate::branch::fork_version`]): until then it holds nothing, and nothing relies on it.
+    /// The collector gives it up once its branch's head names the version no more
+    /// ([`crate::branch::abandon`]).
+    Forking { origin: Origin, version: u64 },
+    /// cladefs: a fork of a version, made ([`crate::branch::finish_version_fork`]): what
     /// [`Kind::Forking`] becomes, a fork's child as [`Kind::Fork`] is, but given its record by its
     /// own host alone, which no parent's writer records, no state naming the fork; and its
     /// reference, written before it was made, by that host alone (TASK-455). So, of an ID an
@@ -63,7 +58,6 @@ impl Kind {
             owner,
             kind: self,
             deleted: false,
-            shared: false,
             resumed: false,
             deks: Vec::new(),
             inherited: Vec::new(),
@@ -76,20 +70,10 @@ impl Kind {
             Self::Root | Self::Own => None,
             Self::Fork(origin)
             | Self::Clone(origin)
-            | Self::Point(origin)
             | Self::Claim(origin) => Some(origin),
             Self::Forking { origin, .. } => Some(origin),
         }
     }
-}
-
-/// cladefs: what a fork being made is of ([`Kind::Forking`]): a point, by its branch; or a version
-/// of the branch its origin names, at the segment its origin names, by the version's ID, which that
-/// branch's head names while the version is kept (doc-18, TASK-476).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Forked {
-    Point(Branch),
-    Version(u64),
 }
 
 /// A branch's record: of its kind, which says where it came from, and whether it was deleted.
@@ -111,21 +95,16 @@ pub struct Record {
     /// its ID could make again were it removed; but a given root's and clone's, which go with
     /// their cell once it is dead ([`Record::removable`]).
     pub deleted: bool,
-    /// cladefs: whether a point's forks may be of other tenants' cells than its own: a base image or
-    /// a snapshot many tenants clone (TASK-395.7). Of a point alone, which its maker's trusted
-    /// control API shares and unshares ([`crate::branch::share`]); a fork of another tenant's point
-    /// not shared is refused as it reads the point's record ([`Record::may_fork_into`]). Unshared, a
-    /// point's forks made stay.
-    pub shared: bool,
-    /// cladefs: of a fork of a point, being made or made, whether another than the host that began
-    /// it resumed it ([`crate::branch::resume_point_fork`]): a store opening its child, its host
-    /// dead or slow, or a fork of the point finding the record its own (TASK-455's review). Said
+    /// cladefs: of a fork of a version, being made or made, whether another than the host that
+    /// began it resumed it ([`crate::branch::resume_version_fork`]): a store opening its child, its
+    /// host dead or slow, or a fork of the version finding the record its own (TASK-455's
+    /// review). Said
     /// with a condition, while the fork is being made, before the resume writes its reference:
     /// so a clone made says it if anyone but its host may write its reference after, whose
     /// retirement is then marked ([`Record::retires_unmarked`]).
     pub resumed: bool,
     /// cladefs: the branch's DEK, each generation of it, wrapped by its cell's KEK, oldest first:
-    /// none before its first writer took it, nor of a point, which nothing writes (TASK-411.3);
+    /// none before its first writer took it (TASK-411.3);
     /// a writer's ring of a record with none is refused (TASK-411.28). Given by its writer ([`crate::keys::with_dek`]), whoever made
     /// the record: the parent's writers recording a fork write none, so that they write the same.
     pub deks: Vec<Dek>,
@@ -155,21 +134,10 @@ impl Record {
         self.kind.origin()
     }
 
-    /// Whether it is a point ([`Kind::Point`]).
-    pub fn is_point(&self) -> bool {
-        matches!(self.kind, Kind::Point(_))
-    }
-
-    /// cladefs: whether a fork of `point`, whose record it is, may make a branch of a cell of
-    /// `tenant`'s: of the point's own tenant, or of any if the point is shared (TASK-395.7).
-    pub fn may_fork_into(&self, point: Branch, tenant: u64) -> bool {
-        point.cell.tenant == tenant || self.shared
-    }
-
-    /// The point or version it is being forked from, until the fork is made ([`Kind::Forking`]).
-    pub fn forking(&self) -> Option<Forked> {
+    /// The version it is being forked from, until the fork is made ([`Kind::Forking`]).
+    pub fn forking(&self) -> Option<u64> {
         match self.kind {
-            Kind::Forking { of, .. } => Some(of),
+            Kind::Forking { version, .. } => Some(version),
             _ => None,
         }
     }
@@ -182,15 +150,13 @@ impl Record {
         self.kind != Kind::Root && self.owner == owner
     }
 
-    /// Whether a writer may take the branch, and if not why: not once it is deleted; not a point,
-    /// which nothing writes, whoever asks; nor a fork of a point not yet made, which holds nothing
-    /// and may be given up on.
+    /// Whether a writer may take the branch, and if not why: not once it is deleted; nor a fork of
+    /// a version not yet made, which holds nothing and may be given up on.
     pub fn writable(&self) -> Result<(), Error> {
         if self.deleted {
             return Err(Error::Deleted);
         }
         match self.kind {
-            Kind::Point(_) if rules().points_take_no_writer => Err(Error::Point),
             Kind::Forking { .. } => Err(Error::NoBranch),
             _ => Ok(()),
         }
@@ -200,7 +166,7 @@ impl Record {
     /// one an allocator gave, `given` ([`crate::objectid::given`]): deleted, a root's or a clone's
     /// made ([`Kind::Clone`]), records their makers alone make, once, no fork naming an
     /// allocator's ID (doc-7, Object IDs; TASK-455). Any other stays for good: a deleted fork's
-    /// child's (and a point's, a claim's), a writer of its parent that is slow to record the fork,
+    /// child's (and a claim's), a writer of its parent that is slow to record the fork,
     /// or its next writer, could make again, the branch live again naming what the collector
     /// reclaimed; a deletion's of a branch it found none of ([`Kind::Own`]), which may be a fork's
     /// child yet to be recorded; a clone's never made, whose host may yet write its reference; and
@@ -238,15 +204,14 @@ impl Record {
         }
     }
 
-    /// cladefs: it, of a fork of a point being made, said resumed ([`Record::resumed`]).
+    /// cladefs: it, of a fork of a version being made, said resumed ([`Record::resumed`]).
     pub fn resumed(self) -> Self {
         Self { resumed: true, ..self }
     }
 }
 
-/// A record as object storage holds it (doc-7, Layout): flags, which say its [`Kind`] together,
-/// and whether a point is shared; cladefs: and its DEKs (TASK-411.3) and those it inherits
-/// (TASK-411.4).
+/// A record as object storage holds it (doc-7, Layout): flags, which say its [`Kind`] together;
+/// cladefs: and its DEKs (TASK-411.3) and those it inherits (TASK-411.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Flags {
     format: u32,
@@ -255,16 +220,12 @@ struct Flags {
     /// Whether it is a fork's: of every kind but [`Kind::Root`].
     forked: bool,
     deleted: bool,
-    point: bool,
-    forking: Option<Branch>,
-    /// cladefs: of a fork of a version being made, the version ([`Forked::Version`], TASK-476).
-    forking_version: Option<u64>,
+    /// cladefs: of a fork of a version being made, the version ([`Kind::Forking`], TASK-476).
+    forking: Option<u64>,
     claimed: bool,
-    /// cladefs: a fork of a point, made ([`Kind::Clone`], TASK-455).
+    /// cladefs: a fork of a version, made ([`Kind::Clone`], TASK-455).
     cloned: bool,
-    /// cladefs: of a point alone ([`Record::shared`], TASK-395.7).
-    shared: bool,
-    /// cladefs: of a fork of a point alone, being made or made ([`Record::resumed`]).
+    /// cladefs: of a fork of a version alone, being made or made ([`Record::resumed`]).
     resumed: bool,
     /// cladefs: [`Record::deks`].
     deks: Vec<Dek>,
@@ -274,19 +235,16 @@ struct Flags {
 
 impl From<Record> for Flags {
     fn from(record: Record) -> Self {
-        let Record { format, owner, kind, deleted, shared, resumed, deks, inherited } = record;
+        let Record { format, owner, kind, deleted, resumed, deks, inherited } = record;
         let flags = Flags {
             format,
             owner,
             origin: kind.origin(),
             forked: kind != Kind::Root,
             deleted,
-            point: false,
             forking: None,
-            forking_version: None,
             claimed: false,
             cloned: false,
-            shared,
             resumed,
             deks,
             inherited,
@@ -294,13 +252,7 @@ impl From<Record> for Flags {
         match kind {
             Kind::Root | Kind::Own | Kind::Fork(_) => flags,
             Kind::Clone(_) => Flags { cloned: true, ..flags },
-            Kind::Point(_) => Flags { point: true, ..flags },
-            Kind::Forking { of: Forked::Point(point), .. } => {
-                Flags { forking: Some(point), ..flags }
-            }
-            Kind::Forking { of: Forked::Version(id), .. } => {
-                Flags { forking_version: Some(id), ..flags }
-            }
+            Kind::Forking { version, .. } => Flags { forking: Some(version), ..flags },
             Kind::Claim(_) => Flags { claimed: true, ..flags },
         }
     }
@@ -310,35 +262,27 @@ impl TryFrom<Flags> for Record {
     type Error = String;
 
     /// The record `flags` say, if they say a [`Kind`]: a fork's, of every kind but a root; an
-    /// origin, of every kind but a root and one of its own; and one at most of being a point,
-    /// being forked from one or from a version, being a claim and being a clone made, each of an
-    /// origin. Shared only if a point; resumed only if being forked from one or a clone made.
+    /// origin, of every kind but a root and one of its own; and one at most of being forked from
+    /// a version, being a claim and being a clone made, each of an origin. Resumed only if being
+    /// forked or a clone made.
     fn try_from(flags: Flags) -> Result<Self, String> {
-        let forking = match (flags.forking, flags.forking_version) {
-            (None, None) => None,
-            (Some(point), None) => Some(Forked::Point(point)),
-            (None, Some(id)) => Some(Forked::Version(id)),
-            (Some(_), Some(_)) => return Err(format!("a branch's record of no kind: {flags:?}")),
-        };
-        let said = (flags.point, forking, flags.claimed, flags.cloned);
+        let said = (flags.forking, flags.claimed, flags.cloned);
         let kind = match (flags.forked, flags.origin, said) {
-            (false, None, (false, None, false, false)) => Kind::Root,
-            (true, None, (false, None, false, false)) => Kind::Own,
-            (true, Some(origin), (false, None, false, false)) => Kind::Fork(origin),
-            (true, Some(origin), (true, None, false, false)) => Kind::Point(origin),
-            (true, Some(origin), (false, Some(of), false, false)) => Kind::Forking { origin, of },
-            (true, Some(origin), (false, None, true, false)) => Kind::Claim(origin),
-            (true, Some(origin), (false, None, false, true)) => Kind::Clone(origin),
+            (false, None, (None, false, false)) => Kind::Root,
+            (true, None, (None, false, false)) => Kind::Own,
+            (true, Some(origin), (None, false, false)) => Kind::Fork(origin),
+            (true, Some(origin), (Some(version), false, false)) => {
+                Kind::Forking { origin, version }
+            }
+            (true, Some(origin), (None, true, false)) => Kind::Claim(origin),
+            (true, Some(origin), (None, false, true)) => Kind::Clone(origin),
             _ => return Err(format!("a branch's record of no kind: {flags:?}")),
         };
-        if flags.shared && !flags.point {
-            return Err(format!("a branch's record shared, no point: {flags:?}"));
-        }
         if flags.resumed && !matches!(kind, Kind::Forking { .. } | Kind::Clone(_)) {
-            return Err(format!("a branch's record resumed, no fork of a point: {flags:?}"));
+            return Err(format!("a branch's record resumed, no fork of a version: {flags:?}"));
         }
-        let Flags { format, owner, deleted, shared, resumed, deks, inherited, .. } = flags;
-        Ok(Self { format, owner, kind, deleted, shared, resumed, deks, inherited })
+        let Flags { format, owner, deleted, resumed, deks, inherited, .. } = flags;
+        Ok(Self { format, owner, kind, deleted, resumed, deks, inherited })
     }
 }
 
@@ -371,9 +315,9 @@ mod tests {
         // and 11's, whose clones made say they are forks a recorder may record (TASK-455); and
         // 12's, whose forks of points say nothing of being resumed (TASK-455's review); and 13's,
         // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
-        // 14's, whose keys' numbers are in hexadecimal (TASK-504); and 15's, whose cells name maps
-        // of vdisks (TASK-508.1).
-        assert_eq!(FORMAT, 16);
+        // 14's, whose keys' numbers are in hexadecimal (TASK-504); 15's, whose cells name maps
+        // of vdisks (TASK-508.1); and 16's, whose records name points (TASK-508.2).
+        assert_eq!(FORMAT, 17);
         for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
@@ -385,17 +329,16 @@ mod tests {
         assert!(matches!(Record::decode(test_branch(3), &bytes[..3]), Err(Error::Corrupt(_))));
     }
 
-    /// TASK-160.14: every combination of a record's ten flags (whether it names an origin, is a
-    /// fork's, is deleted, is a point, is being forked from one, is a claim, is shared, is a clone
-    /// made, TASK-455, was resumed, TASK-455's review, and is being forked from a version,
-    /// TASK-476) decodes to the one kind it says, deleted or not, shared or not if a point, resumed
-    /// or not if a fork of a point or a version, or is refused: 24 records, and 1,000 refused. What
-    /// a record encodes decodes back to it.
+    /// TASK-160.14: every combination of a record's seven flags (whether it names an origin, is a
+    /// fork's, is deleted, is being forked from a version, TASK-476, is a claim, is a clone made,
+    /// TASK-455, and was resumed, TASK-455's review) decodes to the one kind it says, deleted or not,
+    /// resumed or not if a fork of a version, or is refused: 16 records, and 112 refused. What a
+    /// record encodes decodes back to it.
     #[test]
     fn records_decode_to_the_kinds_their_flags_say() {
         let origin = Origin { parent: test_branch(1), at: 7 };
         let mut decoded = Vec::new();
-        for bits in 0..=1023u16 {
+        for bits in 0..=127u16 {
             let flag = |bit: u16| bits & (1 << bit) != 0;
             let flags = Flags {
                 format: FORMAT,
@@ -403,13 +346,10 @@ mod tests {
                 origin: flag(0).then_some(origin),
                 forked: flag(1),
                 deleted: flag(2),
-                point: flag(3),
-                forking: flag(4).then_some(test_branch(5)),
-                forking_version: flag(9).then_some(0xbe),
-                claimed: flag(5),
-                cloned: flag(7),
-                shared: flag(6),
-                resumed: flag(8),
+                forking: flag(3).then_some(0xbe),
+                claimed: flag(4),
+                cloned: flag(5),
+                resumed: flag(6),
                 deks: Vec::new(),
                 inherited: Vec::new(),
             };
@@ -417,70 +357,53 @@ mod tests {
             if let Some(record) = said {
                 assert_eq!(Flags::from(record.clone()), flags, "{record:?}");
                 assert_eq!(Record::decode(test_branch(2), &encode(&record)), Ok(record.clone()));
-                decoded.push((bits, record.kind, record.deleted, record.shared, record.resumed));
+                decoded.push((bits, record.kind, record.deleted, record.resumed));
             }
         }
-        let forking = Kind::Forking { origin, of: Forked::Point(test_branch(5)) };
-        let versioned = Kind::Forking { origin, of: Forked::Version(0xbe) };
-        // Bits: origin 1, forked 2, deleted 4, point 8, forking 16, claimed 32, shared 64, cloned
-        // 128, resumed 256, forking a version 512.
+        let forking = Kind::Forking { origin, version: 0xbe };
+        // Bits: origin 1, forked 2, deleted 4, forking 8, claimed 16, cloned 32, resumed 64.
         let kinds = [
-            (0, Kind::Root, false, false, false),
-            (2, Kind::Own, false, false, false),
-            (3, Kind::Fork(origin), false, false, false),
-            (4, Kind::Root, true, false, false),
-            (6, Kind::Own, true, false, false),
-            (7, Kind::Fork(origin), true, false, false),
-            (11, Kind::Point(origin), false, false, false),
-            (15, Kind::Point(origin), true, false, false),
-            (19, forking, false, false, false),
-            (23, forking, true, false, false),
-            (35, Kind::Claim(origin), false, false, false),
-            (39, Kind::Claim(origin), true, false, false),
-            (75, Kind::Point(origin), false, true, false),
-            (79, Kind::Point(origin), true, true, false),
-            (131, Kind::Clone(origin), false, false, false),
-            (135, Kind::Clone(origin), true, false, false),
-            (275, forking, false, false, true),
-            (279, forking, true, false, true),
-            (387, Kind::Clone(origin), false, false, true),
-            (391, Kind::Clone(origin), true, false, true),
-            (515, versioned, false, false, false),
-            (519, versioned, true, false, false),
-            (771, versioned, false, false, true),
-            (775, versioned, true, false, true),
+            (0, Kind::Root, false, false),
+            (2, Kind::Own, false, false),
+            (3, Kind::Fork(origin), false, false),
+            (4, Kind::Root, true, false),
+            (6, Kind::Own, true, false),
+            (7, Kind::Fork(origin), true, false),
+            (11, forking, false, false),
+            (15, forking, true, false),
+            (19, Kind::Claim(origin), false, false),
+            (23, Kind::Claim(origin), true, false),
+            (35, Kind::Clone(origin), false, false),
+            (39, Kind::Clone(origin), true, false),
+            (75, forking, false, true),
+            (79, forking, true, true),
+            (99, Kind::Clone(origin), false, true),
+            (103, Kind::Clone(origin), true, true),
         ];
         assert_eq!(decoded, kinds);
         let refused = Flags {
             format: FORMAT,
             owner: 9,
             origin: None,
-            forked: true,
+            forked: false,
             deleted: false,
-            point: true,
             forking: None,
-            forking_version: None,
-            claimed: false,
+            claimed: true,
             cloned: false,
-            shared: false,
             resumed: false,
             deks: Vec::new(),
             inherited: Vec::new(),
         };
         let corrupt = format!(
             "a branch's record of no kind: Flags {{ format: {FORMAT}, owner: 9, origin: None, \
-             forked: true, deleted: false, point: true, forking: None, forking_version: None, \
-             claimed: false, cloned: false, shared: false, resumed: false, deks: [], inherited: [] }}"
+             forked: false, deleted: false, forking: None, claimed: true, cloned: false, \
+             resumed: false, deks: [], inherited: [] }}"
         );
         let refused = Record::decode(test_branch(2), &encode(&refused));
         assert_eq!(refused, Err(Error::Corrupt(corrupt)));
-        // Shared, of a fork: only a point is.
-        let fork = Flags { shared: true, ..Flags::from(Kind::Fork(origin).of(9)) };
-        let corrupt = format!("a branch's record shared, no point: {fork:?}");
-        assert_eq!(Record::decode(test_branch(2), &encode(&fork)), Err(Error::Corrupt(corrupt)));
-        // Resumed, of a writable fork: only a fork of a point is.
+        // Resumed, of a writable fork: only a fork of a version is.
         let fork = Flags { resumed: true, ..Flags::from(Kind::Fork(origin).of(9)) };
-        let corrupt = format!("a branch's record resumed, no fork of a point: {fork:?}");
+        let corrupt = format!("a branch's record resumed, no fork of a version: {fork:?}");
         assert_eq!(Record::decode(test_branch(2), &encode(&fork)), Err(Error::Corrupt(corrupt)));
     }
 }

@@ -112,7 +112,7 @@ impl KeptImage {
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let cell = host_store::fork_cell(self.store.description().branch);
         let branch = host_store::new_branch(self.uploader.bucket(), cell).map_err(Error::from)?;
-        let child = Child { branch, owner: rand::random(), point: false };
+        let child = Child { branch, owner: rand::random() };
         host_store::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
     }
 

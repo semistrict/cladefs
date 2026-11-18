@@ -101,13 +101,11 @@ impl std::str::FromStr for Branch {
 }
 
 /// cladefs: a fork made at a segment's end: its child's branch, the child's owner, which every
-/// record of the child names, whoever writes it (TASK-79.82, TASK-153.9), and whether the child is
-/// a point: a name of the branch's state there, which nothing writes (doc-7, Points).
+/// record of the child names, whoever writes it (TASK-79.82, TASK-153.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Child {
     pub branch: Branch,
     pub owner: u64,
-    pub point: bool,
 }
 
 /// What a segment holds after its data: its place in its writer's chain, and the commits it makes,
@@ -393,11 +391,10 @@ mod tests {
                 root: Some(b"root".to_vec()),
                 next_sequence: 13,
                 forks: vec![
-                    Child { branch: branch(3), owner: 0x33, point: false },
+                    Child { branch: branch(3), owner: 0x33 },
                     Child {
                         branch: Branch { cell: Cell { tenant: 5, id: 6 }, id: 4 },
                         owner: 0x44,
-                        point: true,
                     },
                 ],
                 capacity: Some(1 << 30),

@@ -1556,13 +1556,11 @@ mod tests {
         let made = held(&kms, TEST_CELL, object.clone(), Some(kek.clone()));
         assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
 
-        // Branches: 7, a root; 8 its fork's child; 9 a point of it; with DEKs given by writers.
+        // Branches: 7, a root; 8 its fork's child; with DEKs given by writers.
         let origin = Origin { parent: test_branch(7), at: 3 };
         block_on(branch::create(&bucket, test_branch(7), 1)).unwrap();
-        let child = crate::layout::Child { branch: test_branch(8), owner: 2, point: false };
+        let child = crate::layout::Child { branch: test_branch(8), owner: 2 };
         block_on(branch::record_fork(&bucket, child, origin, Parents::Kms(&kms, None))).unwrap();
-        let point = crate::layout::Child { branch: test_branch(9), owner: 3, point: true };
-        block_on(branch::record_fork(&bucket, point, origin, Parents::Kms(&kms, None))).unwrap();
         let record = |id| block_on(branch::record(&bucket, test_branch(id))).unwrap().unwrap();
         for id in [7, 8] {
             block_on(with_dek(&bucket, &made, test_branch(id), record(id))).unwrap();
@@ -1571,12 +1569,12 @@ mod tests {
         assert_eq!(again, record(7));
         assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
 
-        // Another host takes the cell: one unwrap for the three.
+        // Another host takes the cell: one unwrap for the three rings, one of 7 that writes nothing.
         counted.reset();
         let (_, other) = kms_over(&counted);
         let (_, taken) = block_on(cell::hold(&bucket, TEST_CELL, (6, 6), None, None)).unwrap();
         let keys = CellKeys::of(TEST_CELL, &taken, other.clone());
-        let rings: Vec<_> = [(7, true), (8, true), (9, false)]
+        let rings: Vec<_> = [(7, true), (8, true), (7, false)]
             .into_iter()
             .map(|(id, writes)| {
                 block_on(ring(&bucket, &keys, test_branch(id), &record(id), writes))
@@ -1754,7 +1752,6 @@ mod tests {
         let child = crate::layout::Child {
             branch: Branch { cell: Cell { tenant: 2, id: 9 }, id: 8 },
             owner: 1,
-            point: false,
         };
         let refused = runtime.block_on(inheriting(&kms, &source, test_branch(7), child));
         assert_eq!(refused.map(|_| ()), Err(Error::Kms("tenant 1: its KEK is revoked".into())));
@@ -1763,10 +1760,7 @@ mod tests {
         assert_eq!(kms.refuses(tenant), None);
         runtime.block_on(kms.filled(tenant));
         assert_eq!(kms.in_pool(tenant), 3);
-        // A point, or a child of the parent's cell, takes nothing.
-        let point = crate::layout::Child { point: true, ..child };
-        let none = runtime.block_on(inheriting(&kms, &source, test_branch(7), point));
-        assert!(none.unwrap().is_none());
+        // A child of the parent's cell takes nothing.
         let within = crate::layout::Child { branch: test_branch(8), ..child };
         let none = runtime.block_on(inheriting(&kms, &source, test_branch(7), within));
         assert!(none.unwrap().is_none());
@@ -1826,7 +1820,6 @@ mod tests {
         let child = crate::layout::Child {
             branch: Branch { cell: Cell { tenant, id: 9 }, id: 8 },
             owner: 1,
-            point: false,
         };
         let parent = Branch { cell: Cell { tenant: 2, id: 1 }, id: 7 };
         let forking = runtime.block_on(inheriting(&kms, &source, parent, child));

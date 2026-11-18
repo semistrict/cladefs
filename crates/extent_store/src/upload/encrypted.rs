@@ -588,7 +588,7 @@ fn forks_and_points_within_an_encrypted_cell_read_what_they_inherit() {
     written(&store, &uploader, inherited, &noise(1, 4096));
 
     // A fork's child, of the parent's cell.
-    let child = Child { branch: test_branch(8), owner: 0x81, point: false };
+    let child = Child { branch: test_branch(8), owner: 0x81 };
     forked(&store, &uploader, child).unwrap();
     assert_eq!(world.record(child.branch).deks, Vec::new());
     let (forked_store, forked_uploader) = open_on(&world, &host, &made(child.branch)).unwrap();
@@ -602,17 +602,6 @@ fn forks_and_points_within_an_encrypted_cell_read_what_they_inherit() {
     let at = location(&forked_store, own).key;
     assert_eq!(segment_key(&at, &world.object(&at)), KeyId { branch: 8, generation: 1 });
     assert_eq!(read(&world, &host, &forked_store, own, 4096), Ok(noise(2, 4096)));
-
-    // A point, of the parent's cell: no DEK of its own, nothing writing it.
-    let point = Child { branch: test_branch(9), owner: 0x91, point: true };
-    forked(&store, &uploader, point).unwrap();
-    let (point_store, _point_uploader) = open_on(&world, &host, &made(point.branch)).unwrap();
-    assert_eq!(world.record(point.branch).deks, Vec::new());
-    assert_eq!(point_store.keys().generations(7), [1]);
-    // Its store's open segment, which nothing writes, encrypted under a key of its own, of
-    // generation 0, which no record keeps.
-    assert_eq!(point_store.keys().encrypting().1, KeyId { branch: 9, generation: 0 });
-    assert_eq!(read(&world, &host, &point_store, inherited, 4096), Ok(noise(1, 4096)));
 }
 
 /// TASK-411.4 AC #2, #3, #4: a fork into a cell of another tenant's, and its fork into a third

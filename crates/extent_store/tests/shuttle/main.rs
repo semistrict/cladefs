@@ -194,7 +194,7 @@ fn run_with(Run { steps, follow }: Run) {
                     Step::Commit { .. } | Step::Fork => {
                         match *step {
                             Step::Fork => {
-                                let child = Child { branch: CHILD, owner: 0, point: false };
+                                let child = Child { branch: CHILD, owner: 0 };
                                 *forked.lock().unwrap() = Some(store.commit_fork(child).unwrap());
                             }
                             Step::Commit { durable: true } => store.commit(None).unwrap(),

@@ -654,7 +654,7 @@ mod tests {
         let Opened { store, bucket, uploader } =
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
         let forked = new_branch(&bucket, fork_cell(store.description().branch)).unwrap();
-        let child = Child { branch: forked, owner: 1, point: false };
+        let child = Child { branch: forked, owner: 1 };
         super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());

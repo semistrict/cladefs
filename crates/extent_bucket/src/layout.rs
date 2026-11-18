@@ -53,8 +53,10 @@ pub use extent_frame::segment::{
 /// 13's. 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`Branch`] is
 /// displayed in its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one
 /// kind (doc-20, TASK-508.1): its object names its one branch and kind, not a map of vdisks,
-/// and a version names no cut of a cell's vdisks; nothing reads 15's.
-pub const FORMAT: u32 = 16;
+/// and a version names no cut of a cell's vdisks; nothing reads 15's. 17: forks are of versions
+/// alone: a record names no point, nor a point it is being forked from (TASK-508.2); nothing reads
+/// 16's.
+pub const FORMAT: u32 = 17;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -544,8 +546,6 @@ pub fn kind(key: &str) -> Kind<'_> {
 pub struct Fork {
     pub child: Branch,
     pub at: u64,
-    /// Whether its child is a point ([`Kind::Point`](crate::record::Kind::Point)).
-    pub point: bool,
     /// cladefs: its child's owner, which every record of the child names
     /// ([`Record::owner`](crate::record::Record::owner)).
     pub owner: u64,
@@ -554,7 +554,7 @@ pub struct Fork {
 impl Fork {
     /// The fork its segment `at`'s footer names, `child`.
     pub fn at(at: u64, child: &Child) -> Self {
-        Self { child: child.branch, at, point: child.point, owner: child.owner }
+        Self { child: child.branch, at, owner: child.owner }
     }
 }
 
@@ -569,7 +569,7 @@ pub struct Segment {
 /// alike.
 #[cfg(test)]
 pub(crate) fn child(branch: Branch) -> Child {
-    Child { branch, owner: 0, point: false }
+    Child { branch, owner: 0 }
 }
 
 /// cladefs: the cell of tests' branches, of tenant 1.
@@ -1195,7 +1195,7 @@ mod tests {
                 frees: vec![ExtentId::new(1, 1)],
                 root: Some(b"root".to_vec()),
                 next_sequence: 6,
-                forks: vec![Child { branch: test_branch(7), owner: 8, point: false }],
+                forks: vec![Child { branch: test_branch(7), owner: 8 }],
                 capacity: Some(1 << 30),
                 continued: None,
                 versions: vec![NewVersion { id: 9, keep_last: Some(11) }],

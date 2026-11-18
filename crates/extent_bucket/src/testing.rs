@@ -499,6 +499,54 @@ impl Bucket for Direct {
     }
 }
 
+/// cladefs: the ID of the version [`versioned`] names.
+pub const VERSION: u64 = 0xa;
+
+/// cladefs: what tests fork versions of (TASK-508.2): `branch`, made, its writer of epoch 10, which
+/// commits `extents` in a segment that ends in the version [`VERSION`], uploaded and acknowledged.
+/// The writer, and the version's origin.
+pub async fn versioned<B: Bucket + 'static>(
+    bucket: &Arc<B>,
+    branch: Branch,
+    extents: Vec<(storage_device::ExtentId, Vec<u8>)>,
+) -> (crate::writer::Writer<B>, layout::Origin) {
+    crate::branch::create(&**bucket, branch, 0).await.unwrap();
+    let writer = crate::writer::Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+    let at = versioned_by(&writer, extents, VERSION).await;
+    (writer, layout::Origin { parent: branch, at })
+}
+
+/// cladefs: commits `extents` by `writer` in a segment that ends in the version `id`, uploaded and
+/// acknowledged: the segment.
+pub async fn versioned_by<B: Bucket + 'static>(
+    writer: &crate::writer::Writer<B>,
+    extents: Vec<(storage_device::ExtentId, Vec<u8>)>,
+    id: u64,
+) -> u64 {
+    use crate::batch::{Commit, SegmentBuilder};
+    let cut = layout::NewVersion { id, keep_last: None };
+    let batch = SegmentBuilder::from(Commit { tag: id, extents, ..Commit::default() });
+    let framed = batch.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting());
+    let at = writer.add_segment(framed).unwrap();
+    writer.upload(at).await.unwrap();
+    writer.acknowledge().await.unwrap();
+    at
+}
+
+/// cladefs: a fork of the version `id` of `origin`'s branch to `child`, of `owner`, under the tests'
+/// KMS ([`crate::branch::fork_version`]).
+pub async fn fork_version(
+    bucket: &impl Bucket,
+    child: Branch,
+    id: u64,
+    origin: layout::Origin,
+    owner: u64,
+) -> Result<(), crate::Error> {
+    let kms = crate::keys::testing::host_kms();
+    let parents = crate::keys::Parents::Kms(&kms, None);
+    crate::branch::fork_version(bucket, child, id, origin, owner, parents).await
+}
+
 /// cladefs: the live branches of every cell of `bucket`, as `cladefs-gc --branches` lists them
 /// (TASK-395.4).
 pub async fn live(
@@ -665,14 +713,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         }
         needed.insert(key);
         needed.insert(layout::head(branch));
-        let (origin, point): (Option<Origin>, bool) = match record.kind {
-            Made::Root | Made::Own => (None, false),
-            Made::Fork(origin)
-            | Made::Clone(origin)
-            | Made::Claim(origin)
-            | Made::Forking { origin, .. } => (Some(origin), false),
-            Made::Point(origin) => (Some(origin), true),
-        };
+        let origin = record.origin();
         let Ok(recovered) = crate::recovery::recover(bucket, branch, origin).await else {
             continue;
         };
@@ -721,16 +762,12 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 key = from;
             }
             // Its readers follow the moves of what its state names, until a checkpoint records
-            // where they went: as a point's do for as long as it lives, as it has no writer to
-            // record them, and a branch's whose writer has not checkpointed since.
+            // where they went: a branch's whose writer has not checkpointed since.
             let mut at: Location = location.clone();
             while !moves_of(&at.key).is_empty() {
                 let Ok(Moved::To(to)) = maps.moved(bucket, extent, &at.key).await else { break };
                 needed.extend(moves_of(&at.key));
                 needed.insert(to.key.clone());
-                if point {
-                    named.entry(to.key.clone()).or_default().insert(extent, to.len);
-                }
                 at = to;
             }
         }

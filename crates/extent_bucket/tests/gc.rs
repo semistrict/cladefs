@@ -569,7 +569,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
         // swaps it (TASK-407); its writer dies before it records the child.
         let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let forked = Child { branch: child, owner: 0x109, point: false };
+        let forked = Child { branch: child, owner: 0x109 };
         let forking = forking.fork(forked, &mut writer.chain());
         let at = writer.add_segment(forking.frame(ring.encrypting())).unwrap();
         writer.upload(at).await.unwrap();

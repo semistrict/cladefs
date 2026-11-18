@@ -639,7 +639,7 @@ impl<B: Bucket> Writer<B> {
         futures::stream::iter(forks)
             .map(|fork| async move {
                 let origin = Origin { parent: self.branch, at: fork.at };
-                let child = Child { branch: fork.child, owner: fork.owner, point: fork.point };
+                let child = Child { branch: fork.child, owner: fork.owner };
                 let keys = crate::keys::Parents::Held(&self.keys);
                 match branch::record_fork(&*self.bucket, child, origin, keys).await {
                     Ok(()) => {}

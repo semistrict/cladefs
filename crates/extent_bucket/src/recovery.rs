@@ -1787,9 +1787,8 @@ mod tests {
                 .fork(child(test_branch(2)), &mut parent.chain())
                 .frame(parent.keys().encrypting());
             let forked = Origin { parent: test_branch(1), at: landed(&parent, forked).await };
-            let point = Child { branch: test_branch(3), owner: 0, point: true };
             let pointed = SegmentBuilder::default()
-                .fork(point, &mut parent.chain())
+                .fork(child(test_branch(3)), &mut parent.chain())
                 .frame(parent.keys().encrypting());
             let pointed = Origin { parent: test_branch(1), at: landed(&parent, pointed).await };
             landed(

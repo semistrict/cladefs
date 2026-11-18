@@ -2175,7 +2175,7 @@ mod shuttle_tests {
         parent.store.commit(None).unwrap();
         parent.ask();
         parent.write(3, 1);
-        parent.store.commit_fork(Child { branch: CHILD, owner: 9, point: false }).unwrap();
+        parent.store.commit_fork(Child { branch: CHILD, owner: 9 }).unwrap();
         let fork = parent.store.last_commit().unwrap();
         parent.ask();
         until(|| parent.uploader.forked() >= fork);
@@ -2248,7 +2248,7 @@ mod shuttle_tests {
         parent.ask();
         let before = parent.store.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= before);
-        parent.store.commit_fork(Child { branch: CHILD, owner: 9, point: false }).unwrap();
+        parent.store.commit_fork(Child { branch: CHILD, owner: 9 }).unwrap();
         let fork = parent.store.last_commit().unwrap();
         bucket.gate.arm();
         let passing = {
