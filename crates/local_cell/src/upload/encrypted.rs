@@ -656,7 +656,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     // Its cell, made at the fork with a KEK of the pool, held by no placement: the parent's DEK
     // unwraps under it, for the child alone.
     let made_cell = world.cell_of(child.branch).unwrap();
-    assert_eq!((made_cell.epoch, made_cell.token, made_cell.branch), (1, 0, None));
+    assert_eq!((made_cell.epoch, made_cell.token, made_cell.kind), (1, 0, None));
     let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
     let dek = keys::unwrap_inherited(&kek, child.branch, &record.inherited[0]).unwrap();
     assert_eq!(dek.expose(), store.keys().encrypting().0.expose());
@@ -872,7 +872,7 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
         assert_eq!(opened, Err(refused.clone()), "{branch}");
     }
     assert_eq!(world.cell_of(elsewhere), None);
-    assert_eq!(world.cell().branch, None);
+    assert_eq!(world.cell().kind, None);
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
     let child = child_in(TENANT, 10);

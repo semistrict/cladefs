@@ -428,7 +428,7 @@ async fn write(
     if let Shape::Garbage { deleted: true, .. } = shape {
         // As a host deletes a branch (`local_cell::upload::delete_branch`).
         branch::delete(&*bucket, id, DELETER, WRITER.1, kms).await.map_err(failed)?;
-        cell::forget(&*bucket, cell, id.id).await.map_err(failed)?;
+        cell::forget(&*bucket, cell).await.map_err(failed)?;
     }
     Ok(Written { bucket, version: versioned })
 }

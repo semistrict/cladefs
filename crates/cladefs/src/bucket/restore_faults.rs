@@ -462,10 +462,10 @@ impl Hosts {
                 Kind::Cell { cell } => {
                     let object = block_on(bucket_cell::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
-                    object.branch(cell).is_some_and(|branch| {
-                        let record = block_on(branch::record(&*self.bucket, branch)).unwrap();
+                    object.kind.is_some() && {
+                        let record = block_on(branch::record(&*self.bucket, cell)).unwrap();
                         record.is_some_and(|record| !record.deleted)
-                    })
+                    }
                 }
                 // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
                 // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a

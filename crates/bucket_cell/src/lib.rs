@@ -160,9 +160,9 @@ pub enum Error {
     /// cladefs: the cell has no object: no such cell (TASK-364).
     #[error("no such cell")]
     NoCell,
-    /// cladefs: the cell has another branch, this one: a cell has one (doc-20).
-    #[error("the cell has branch {0:x}")]
-    CellHasBranch(u64),
+    /// cladefs: the cell is of another kind, this one: a cell has one (doc-20).
+    #[error("the cell is of kind {0}")]
+    OtherKind(&'static str),
     /// cladefs: a fork of a version to a branch of another tenant's cell than the version's
     /// branch's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
     #[error("branch {0}'s version is another tenant's, not shared")]

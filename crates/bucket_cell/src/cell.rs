@@ -14,8 +14,8 @@
 //! its next upload; it can't take it back, its epoch lower. So a cell moves whole, fenced by its
 //! branch's own head, which nothing about cells changes.
 //!
-//! A cell is made with no branch or kind, and is given them by the first store of it its holder
-//! makes ([`hold`]): one branch, never another ([`Error::CellHasBranch`]).
+//! A cell is made with no kind, and is given one by the first store of it its holder makes
+//! ([`hold`]): one kind, never another ([`Error::OtherKind`]).
 //!
 //! cladefs: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
 //! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`],
@@ -73,9 +73,7 @@ pub struct Object {
     pub holder: u64,
     /// The fencing token of the placement that took it, which no lower one takes it from.
     pub token: u64,
-    /// Its branch, once its first store is made: one, never another (doc-20).
-    pub branch: Option<u64>,
-    /// Its kind, given with its branch.
+    /// Its kind, once its first store is made: one, never another (doc-20).
     pub kind: Option<Kind>,
     /// Whether it was deleted: then no one takes it again.
     pub deleted: bool,
@@ -89,14 +87,13 @@ pub struct Object {
 
 impl Object {
     /// cladefs: a cell's object as its maker makes it, held by `holder` of the placement of `token`
-    /// at epoch 1, of no branch or kind yet, its KEK `kek`.
+    /// at epoch 1, of no kind yet, its KEK `kek`.
     fn made(holder: u64, token: u64, kek: Kek) -> Self {
         Self {
             format: FORMAT,
             epoch: 1,
             holder,
             token,
-            branch: None,
             kind: None,
             deleted: false,
             keks: vec![kek],
@@ -111,11 +108,6 @@ impl Object {
             return Err(Error::Format { branch, format });
         }
         layout::decode(bytes)
-    }
-
-    /// Its branch, if it has one.
-    pub fn branch(&self, cell: CellId) -> Option<CellId> {
-        self.branch.map(|id| CellId { tenant: cell.tenant, id: id })
     }
 }
 
@@ -250,15 +242,15 @@ async fn change_held<R>(
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
 /// takes it as [`take`] does, a shredded one refused; or, if it has no object and `making` gives
 /// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given `given`, a
-/// branch and its kind, gives the cell them, unless it has them already: refused if it has another
-/// branch ([`Error::CellHasBranch`]), as a cell has one (doc-20). Returns the taking, and the
-/// object as it left it.
+/// kind, gives the cell it, unless it has it already: refused if it has another
+/// ([`Error::OtherKind`]), as a cell has one (doc-20). Returns the taking, and the object as it
+/// left it.
 pub async fn hold(
     bucket: &impl Bucket,
     cell: CellId,
     holding: (u64, u64),
     making: Option<&Kek>,
-    given: Option<(u64, Kind)>,
+    given: Option<Kind>,
 ) -> Result<(Held, Object), Error> {
     let (held, object, _) = hold_from(bucket, cell, Start::Read, holding, making, given).await?;
     Ok((held, object))
@@ -275,7 +267,7 @@ pub async fn hold_from(
     start: Start,
     (holder, token): (u64, u64),
     making: Option<&Kek>,
-    given: Option<(u64, Kind)>,
+    given: Option<Kind>,
 ) -> Result<(Held, Object, Option<crate::bucket::Object>), Error> {
     let decode = |bytes: &[u8]| Object::decode(cell, bytes);
     let ((held, object), left) =
@@ -291,14 +283,9 @@ pub async fn hold_from(
                 Some(found) if found.holder == holder => (found, false),
                 Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
             };
-            match (object.branch, given) {
-                (Some(had), Some((branch, _))) if had != branch => {
-                    return Err(Error::CellHasBranch(had));
-                }
-                (None, Some((branch, kind))) => {
-                    (object.branch, object.kind) = (Some(branch), Some(kind));
-                    changed = true;
-                }
+            match (object.kind, given) {
+                (Some(had), Some(kind)) if had != kind => return Err(Error::OtherKind(had.name())),
+                (None, Some(kind)) => (object.kind, changed) = (Some(kind), true),
                 _ => {}
             }
             let held = Held { cell, epoch: object.epoch, holder };
@@ -359,25 +346,24 @@ pub fn shredded(cell: CellId) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
 
-/// Takes `branch`, deleted, out of `cell`, if it is the cell's branch: what any placement
-/// deleting the branch does, whoever holds the cell, which changes nothing of who holds it, nor
-/// its epoch.
-pub async fn forget(bucket: &impl Bucket, cell: CellId, branch: u64) -> Result<(), Error> {
+/// Takes the kind out of `cell`, its log deleted: what any placement deleting it does, whoever
+/// holds the cell, which changes nothing of who holds it, nor its epoch.
+pub async fn forget(bucket: &impl Bucket, cell: CellId) -> Result<(), Error> {
     change(bucket, cell, Start::Read, |found| match found {
-        Some(found) if found.branch == Some(branch) => {
-            Ok(Step::Write(Object { branch: None, kind: None, ..found }, ()))
+        Some(found) if found.kind.is_some() => {
+            Ok(Step::Write(Object { kind: None, ..found }, ()))
         }
         _ => Ok(Step::Stop(())),
     })
     .await
 }
 
-/// Marks the cell `held` holds deleted, so that no one takes it again, returning its branch, which
-/// stays, to be deleted.
-pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<Option<u64>, Error> {
+/// Marks the cell `held` holds deleted, so that no one takes it again, returning whether it has a
+/// log, which stays, to be deleted.
+pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<bool, Error> {
     change_held(bucket, held, |found| {
-        let branch = found.branch;
-        Ok(Step::Write(Object { deleted: true, ..found }, branch))
+        let logged = found.kind.is_some();
+        Ok(Step::Write(Object { deleted: true, ..found }, logged))
     })
     .await
 }
@@ -423,20 +409,15 @@ mod tests {
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
 
-    const FXFS: (u64, Kind) = (7, Kind::Fxfs);
-    const SQLITE: (u64, Kind) = (8, Kind::Sqlite);
-
-    /// `object`'s branch and kind.
-    fn branch_and_kind(object: &Object) -> Option<(u64, Kind)> {
-        object.branch.zip(object.kind)
-    }
+    const FXFS: Kind = Kind::Fxfs;
+    const SQLITE: Kind = Kind::Sqlite;
 
     /// A cell's KEK, wrapped, as its object keeps it: none of these tests unwraps it.
     fn kek() -> Kek {
         Kek { generation: crate::keys::FIRST, wrapped: extent_keys::Wrapped(vec![7; 40]) }
     }
 
-    /// A cell made is held by its maker at epoch 1, of no branch or kind yet; made again by its
+    /// A cell made is held by its maker at epoch 1, of no kind yet; made again by its
     /// maker, whose answer was lost, it stands; by another, it exists. One that was never made has no object,
     /// and no one takes it.
     #[test]
@@ -453,7 +434,6 @@ mod tests {
             epoch: 1,
             holder: 0x11,
             token: 5,
-            branch: None,
             kind: None,
             deleted: false,
             keks: vec![kek()],
@@ -566,37 +546,32 @@ mod tests {
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x15, 5)), Err(Error::Stale));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (3, 0x14, 6));
-        assert_eq!(branch_and_kind(&object), Some(FXFS));
+        assert_eq!(object.kind, Some(FXFS));
     }
 
-    /// A cell has one branch and kind (doc-20): held with them, it has them, held again with them
-    /// it stays so, and held with another branch it refuses it, writing nothing. Deleted, it returns
-    /// its branch, which stays to be deleted, and no one takes it again; a branch deleted is
-    /// forgotten by its cell.
+    /// A cell has one kind (doc-20): held with it, it has it, held again with it it stays so, and
+    /// held with another it refuses it, writing nothing. Deleted, it says it has a log, which stays
+    /// to be deleted, and no one takes it again; its log deleted, the cell forgets its kind.
     #[test]
-    fn a_cell_has_one_branch_and_kind() {
+    fn a_cell_has_one_kind() {
         let bucket = Direct(SimBucket::new());
         let (held, object) =
             block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(FXFS))).unwrap();
-        assert_eq!((held.epoch, branch_and_kind(&object)), (1, Some(FXFS)));
-        assert_eq!(object.branch(TEST_CELL), Some(CellId { tenant: TEST_CELL.tenant, id: 7 }));
+        assert_eq!((held.epoch, object.kind), (1, Some(FXFS)));
         let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), None, Some(FXFS))).unwrap();
         assert_eq!(again, held);
         let refused = block_on(hold(&bucket, TEST_CELL, (6, 6), None, Some(SQLITE)));
-        assert_eq!(refused.map(|(held, _)| held), Err(Error::CellHasBranch(7)));
+        assert_eq!(refused.map(|(held, _)| held), Err(Error::OtherKind("fxfs")));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!((object.epoch, object.holder, branch_and_kind(&object)), (1, 5, Some(FXFS)));
-        block_on(forget(&bucket, TEST_CELL, 8)).unwrap();
-        let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!(branch_and_kind(&object), Some(FXFS));
-        assert_eq!(block_on(delete(&bucket, held)), Ok(Some(7)));
+        assert_eq!((object.epoch, object.holder, object.kind), (1, 5, Some(FXFS)));
+        assert_eq!(block_on(delete(&bucket, held)), Ok(true));
         assert_eq!(block_on(holds(&bucket, held)), Ok(false));
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 9)), Err(Error::Deleted));
         let other = CellId { tenant: 1, id: 9 };
         block_on(hold(&bucket, other, (5, 5), Some(&kek()), Some(SQLITE))).unwrap();
-        block_on(forget(&bucket, other, 8)).unwrap();
+        block_on(forget(&bucket, other)).unwrap();
         let object = block_on(read(&bucket, other)).unwrap().unwrap();
-        assert_eq!((object.branch, object.kind), (None, None));
+        assert_eq!(object.kind, None);
     }
 
     /// Holding a cell takes it, or makes it if it has no object and its holder may: a holder
@@ -618,7 +593,7 @@ mod tests {
         let (taken, object) =
             block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), None)).unwrap();
         assert_eq!((taken.epoch, object.holder), (2, 6));
-        assert_eq!(branch_and_kind(&object), Some(FXFS));
+        assert_eq!(object.kind, Some(FXFS));
     }
 
     /// Kinds go by their names.
@@ -642,7 +617,6 @@ mod tests {
                 epoch: 1,
                 holder: 0x11,
                 token: 5,
-                branch: None,
                 kind: None,
                 deleted: false,
                 keks: Vec::new(),

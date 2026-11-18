@@ -92,7 +92,7 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::NoBranch | Error::NoCell) | Failure::VersionDropped => {
             Some(Errno::ENOENT)
         }
-        Failure::Bucket(Error::IdTaken(_) | Error::CellHasBranch(_)) => Some(Errno::EEXIST),
+        Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).

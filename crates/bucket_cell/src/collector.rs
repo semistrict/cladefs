@@ -6891,7 +6891,7 @@ mod tests {
             let bucket = store();
             let kek = keys::new_cell_kek(&host, layout::TEST_CELL.tenant).await.unwrap();
             let making = Some(&kek.1);
-            let given = Some((1, crate::cell::Kind::Fxfs));
+            let given = Some(crate::cell::Kind::Fxfs);
             let (_, object) = crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, given)
                 .await
                 .unwrap();

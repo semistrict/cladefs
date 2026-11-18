@@ -195,7 +195,7 @@ pub fn delete_branch(
 ) -> Result<(), Failure> {
     Ok(block_on(async {
         branch::delete(bucket, branch, rand::random(), token, kms).await?;
-        cell::forget(bucket, branch, branch.id).await
+        cell::forget(bucket, branch).await
     })??)
 }
 
@@ -1207,13 +1207,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // cladefs: its cell, held by this placement, whose epoch is the token the branch's head is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
         // branch whose cell has no object yet, new or a fork's child, makes it; one deleted takes
-        // no writer (`Deleted`). The store's branch is its cell's from now on, of its kind, unless
-        // the cell has another (`CellHasBranch`, doc-20): all in one compare-and-swap of the cell's
+        // no writer (`Deleted`). The cell is of the store's kind from now on, unless it is of
+        // another (`OtherKind`, doc-20): all in one compare-and-swap of the cell's
         // object, a read alone when nothing changes. Not
         // a version's, which no writer takes, and any number of hosts open at once. cladefs: a cell
         // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
         // of a branch with DEKs is there already (TASK-411.3).
-        let given = recovering.kind().map(|kind| (branch.id, kind));
+        let given = recovering.kind();
         let kms = &self.keys.kms;
         let kek = match &found {
             Some((record, ..)) if !record.deks.is_empty() => None,
@@ -1719,7 +1719,7 @@ mod tests {
         store.made().unwrap();
         let object = runtime.block_on(cell::read(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
-        assert_eq!((object.branch, object.kind), (Some(BRANCH.id), Some(cell::Kind::Fxfs)));
+        assert_eq!(object.kind, Some(cell::Kind::Fxfs));
         let head = runtime.block_on(bucket_cell::head::get(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((head.epoch, head.token), (1, 1));
 
