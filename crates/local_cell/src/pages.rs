@@ -149,7 +149,7 @@ pub struct PageCache {
     flushing: Mutex<bool>,
     /// Wakes writers held back.
     drained: Condvar,
-    holding: Mutex<()>,
+    holding: Mutex<Option<io::Error>>,
     /// cladefs: what its pages are held in: frames of slabs of its own, those of pages gone
     /// holding the next (TASK-433.9).
     frames: Arc<Frames>,
@@ -202,7 +202,7 @@ impl PageCache {
             flush: Condvar::new(),
             flushing: Mutex::new(false),
             drained: Condvar::new(),
-            holding: Mutex::new(()),
+            holding: Mutex::new(None),
             frames: Frames::new(),
         })
     }
@@ -363,20 +363,23 @@ impl PageCache {
     /// write-back brings it under, the flusher woken. With no flusher, its writers keep it under
     /// [`Options::background`] as they go ([`PageCache::dirtied`]); what failed to be written
     /// stays dirty, which none waits for. Its flusher dead, it panics, as none would let it go.
-    fn throttle(&self) {
+    fn throttle(&self) -> io::Result<()> {
         if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
-            return;
+            return Ok(());
         }
-        self.wake();
         let mut holding = self.holding.lock().unwrap();
         while self.dirty.load(Ordering::Relaxed) > self.hard() {
             assert!(
                 !self.flusher_died(),
                 "the page cache's flusher died: nothing writes back for a writer held at its bound"
             );
-            holding = self.drained.wait_timeout(holding, Duration::from_millis(10)).unwrap().0;
+            if let Some(error) = holding.as_ref() {
+                return Err(io::Error::new(error.kind(), error.to_string()));
+            }
             self.wake();
+            holding = self.drained.wait(holding).unwrap();
         }
+        Ok(())
     }
 
     /// Pages became clean, or went: writers held back may go on.
@@ -408,6 +411,7 @@ impl PageCache {
     /// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files
     /// dirty the longest, 16 [`CHUNK`]s' worth of writes each in turn.
     fn flush_pass(&self, now: Instant) {
+        let mut failure = None;
         loop {
             let Some((file, range)) = self.begun.lock().unwrap().pop_front() else { break };
             let Some(file) = file.upgrade() else { continue };
@@ -423,8 +427,11 @@ impl PageCache {
             }
             if let Err(err) = file.write_back(16 * CHUNK) {
                 log::warn!("extent store: writing back a file's pages: {err}");
+                failure.get_or_insert(err);
             }
         }
+        *self.holding.lock().unwrap() = failure;
+        self.drained.notify_all();
     }
 }
 
@@ -496,8 +503,12 @@ struct Page {
     writing: bool,
 }
 
+#[cfg(test)]
+thread_local! { static WRITE_BACK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// A file's pages, and what the cache knows of the file.
 struct Pages {
+    dirty_pages: u64,
     pages: BTreeMap<u64, Page>,
     /// The file's size: its own, or past it, what was written.
     size: u64,
@@ -561,7 +572,13 @@ impl<F: File> Cached<F> {
         let shared = Arc::new(Shared {
             file,
             cache: cache.clone(),
-            pages: Mutex::new(Pages { pages: BTreeMap::new(), size, dirtied: None, failed: None }),
+            pages: Mutex::new(Pages {
+                dirty_pages: 0,
+                pages: BTreeMap::new(),
+                size,
+                dirtied: None,
+                failed: None,
+            }),
             writeback: Mutex::new(()),
             used: AtomicU64::new(cache.used()),
             unlinked: AtomicBool::new(false),
@@ -646,10 +663,11 @@ impl<F: File> Shared<F> {
             let page = pages.pages.remove(&index).unwrap();
             self.cache.held.fetch_sub(PAGE, Ordering::Relaxed);
             if page.dirty.is_some() {
+                pages.dirty_pages -= 1;
                 self.cache.dirty.fetch_sub(PAGE, Ordering::Relaxed);
             }
         }
-        if !pages.pages.values().any(|page| page.dirty.is_some()) {
+        if pages.dirty_pages == 0 {
             pages.dirtied = None;
         }
         drop(pages);
@@ -670,7 +688,7 @@ impl<F: File> Shared<F> {
         through: Option<u64>,
         mut most: Option<u64>,
     ) -> io::Result<()> {
-        let (first, last) = (range.start / PAGE, range.end.div_ceil(PAGE));
+        let (mut first, last) = (range.start / PAGE, range.end.div_ceil(PAGE));
         let covers =
             |page: &Page| page.dirty.is_some_and(|dirty| through.is_none_or(|t| dirty <= t));
         let _writeback = self.writeback();
@@ -682,6 +700,8 @@ impl<F: File> Shared<F> {
             // The first run of pages it covers not in flight, contiguous, up to a chunk.
             let mut run: Vec<u64> = Vec::new();
             for (&index, page) in pages.pages.range(first..last) {
+                #[cfg(test)]
+                WRITE_BACK_VISITS.set(WRITE_BACK_VISITS.get() + 1);
                 let fits = run.last().is_none_or(|&before| index == before + 1)
                     && (run.len() as u64) * PAGE < CHUNK;
                 match (covers(page), run.is_empty()) {
@@ -694,6 +714,7 @@ impl<F: File> Shared<F> {
             if run.is_empty() {
                 break;
             }
+            first = run[run.len() - 1] + 1;
             let start = run[0] * PAGE;
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
             // Assembled in memory aligned to blocks, which direct I/O writes as it is: whole
@@ -721,6 +742,7 @@ impl<F: File> Shared<F> {
                 }
                 if page.last == last {
                     page.dirty = None;
+                    pages.dirty_pages -= 1;
                     self.cache.dirty.fetch_sub(PAGE, Ordering::Relaxed);
                 } else {
                     // Written again while it was written back: what it holds since is the next
@@ -728,7 +750,7 @@ impl<F: File> Shared<F> {
                     page.dirty = Some(last + 1);
                 }
             }
-            if !pages.pages.values().any(|page| page.dirty.is_some()) {
+            if pages.dirty_pages == 0 {
                 pages.dirtied = None;
             }
             self.cache.drained();
@@ -877,9 +899,9 @@ impl<F: File> File for Cached<F> {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
-        shared.cache.throttle();
-        let number = shared.cache.writes.fetch_add(1, Ordering::Relaxed) + 1;
+        shared.cache.throttle()?;
         let mut pages = shared.lock();
+        let number = shared.cache.writes.fetch_add(1, Ordering::Relaxed) + 1;
         let end = offset + buf.len() as u64;
         let mut at = offset;
         let (mut added, mut dirtied) = (0, 0);
@@ -927,6 +949,7 @@ impl<F: File> File for Cached<F> {
         // cladefs: what it wrote before a read failed counted as what it wrote whole is: the pages
         // it holds go uncounted no more, to be taken off the counts as they go (TASK-433.10).
         pages.size = pages.size.max(at);
+        pages.dirty_pages += dirtied;
         if at > offset {
             pages.dirtied.get_or_insert_with(Instant::now);
         }

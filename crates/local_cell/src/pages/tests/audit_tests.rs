@@ -100,3 +100,32 @@ fn bench_sparse_write_back() {
         }
     }
 }
+
+#[test]
+fn sparse_write_back_visits_scale_with_page_count() {
+    fn visits(pages: usize) -> usize {
+        let disk = MemDisk::new();
+        let cache = PageCache::without_flusher(Options::default());
+        let file = Cached::new(disk.create("file", true).unwrap(), &cache).unwrap();
+        for index in 0..pages {
+            file.write_at(&[index as u8; PAGE as usize], 2 * index as u64 * PAGE).unwrap();
+        }
+
+        super::WRITE_BACK_VISITS.set(0);
+        file.sync().unwrap();
+        let visits = super::WRITE_BACK_VISITS.get();
+        assert!(visits >= pages, "counted {visits} visits for {pages} isolated dirty pages");
+        assert_eq!(cache.usage().dirty, 0);
+        let mut read = [0; PAGE as usize];
+        for index in 0..pages {
+            file.file().read_at(&mut read, 2 * index as u64 * PAGE).unwrap();
+            assert_eq!(read, [index as u8; PAGE as usize]);
+        }
+        visits
+    }
+
+    // TASK-524: quadrupling isolated runs used to cost about sixteen times as many visits.
+    let small = visits(32);
+    let large = visits(128);
+    assert!(large <= 5 * small, "range entries inspected grew from {small} to {large}");
+}

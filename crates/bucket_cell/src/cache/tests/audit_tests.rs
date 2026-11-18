@@ -56,3 +56,35 @@ fn free_space_admission_reserves_space_for_unwritten_fills() {
         assert!(!fits, "pending tail = {pending_tail}: two fills spent the same space");
     }
 }
+
+#[test]
+fn failed_cache_fills_release_their_free_space_reservation() {
+    for failing_tail in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let object = Object::noise(KEY, PART, 1);
+        if !failing_tail {
+            object.keep_tail(&cache);
+        }
+        let needed = if failing_tail { object.tail_len() } else { object.stored(0).len };
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("direct::bypass", "return").unwrap();
+        let result = if failing_tail {
+            cache.keep_tail(&object.key, &object.tail)
+        } else {
+            cache.keep_part(&object.key, 0, object.part(0))
+        };
+        scenario.teardown();
+        result.expect_err("the admitted fill must reach the injected failure");
+
+        let floor = 16 * PART;
+        let (fits, evicted) = cache.kept.lock().unwrap().make_room(
+            (cache.capacity(), floor),
+            floor + needed,
+            needed,
+            needed,
+        );
+        assert!(fits, "failed tail = {failing_tail}: the next fill must fit");
+        assert!(evicted.is_empty(), "a failed fill must release its reservation");
+    }
+}
