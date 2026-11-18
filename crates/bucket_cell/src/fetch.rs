@@ -1077,6 +1077,8 @@ impl<B: Bucket> Fetching<B> {
 
 #[cfg(test)]
 mod tests {
+    mod audit_tests;
+
     use super::*;
     use crate::bucket::PutMode;
     use crate::layout::test_cell;

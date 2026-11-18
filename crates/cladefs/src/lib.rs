@@ -155,6 +155,8 @@ pub mod renamed;
 pub mod request;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_testing;
+#[cfg(test)]
+mod sparse_shrink_tests;
 pub mod stats;
 mod storage;
 mod sync;

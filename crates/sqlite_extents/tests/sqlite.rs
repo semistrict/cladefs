@@ -577,3 +577,24 @@ fn a_connection_outlives_its_registration() {
     let expected = 2_440_587.5 + since.as_secs_f64() / 86_400.0;
     assert!((now - expected).abs() < 10.0 / 86_400.0, "{now} is not {expected}, within 10 s");
 }
+
+/// TASK-530: closing a file that was never committed returns its region for the next open.
+#[test]
+fn closing_an_uncommitted_file_returns_its_mapping_region() {
+    let files = FileSet::open_mapped(
+        DeviceHolder::new(device()),
+        Box::new(CopyingWindow::new()),
+        Options { window_regions: 1, ..Options::default() },
+    )
+    .unwrap();
+    files.open_file("empty", true).unwrap();
+    files.close_file("empty");
+    assert!(!files.exists("empty").unwrap());
+
+    files.open_file("database", true).unwrap();
+    files.write("database", 0, &[5; BLOCK as usize]).unwrap();
+    files.sync("database").unwrap();
+    let mapped = files.fetch("database", 0, BLOCK as u64).unwrap();
+    assert!(mapped.is_some(), "the only mapping region should be available again");
+    files.unfetch("database");
+}

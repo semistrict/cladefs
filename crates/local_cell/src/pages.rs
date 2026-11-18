@@ -984,6 +984,8 @@ impl<F: File> File for Cached<F> {
 
 #[cfg(test)]
 mod tests {
+    mod audit_tests;
+
     use super::*;
     use crate::dir::Dir as _;
     use crate::mem::MemDisk;

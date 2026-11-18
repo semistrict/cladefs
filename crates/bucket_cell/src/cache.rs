@@ -964,6 +964,8 @@ fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod audit_tests;
+
     use super::*;
     use crate::layout::PART;
     use std::sync::Arc;
