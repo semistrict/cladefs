@@ -3,10 +3,11 @@ id: TASK-540
 title: >-
   Closing a file set frees the dying list its root names, so it never opens
   again
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:23'
-updated_date: '2026-11-18 17:48'
+updated_date: '2026-11-18 18:56'
 labels: []
 dependencies: []
 priority: high
@@ -43,6 +44,13 @@ When a commit leaves more than FREE_BATCH (64) extents dying, commit_root mints 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Keep the list extent the last root names out of inner.dying: a field of its own (Inner::list), set by recover and commit_root, moved among the next commit's dying, restored on a failed write, counted by extents(); close() frees only inner.dying.
+2. Prove: extent_files model (both fixed cases: close after a listing commit; crash then close with no commit), sqlite rounds closed after each, and a memory-cell close-and-reopen test in cladefsd tests on ubu1.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

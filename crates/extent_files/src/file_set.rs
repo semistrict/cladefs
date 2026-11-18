@@ -114,6 +114,9 @@ struct Inner {
     mint: u64,
     /// Extents left unreferenced whose frees failed, or have not been made yet.
     dying: Vec<ExtentId>,
+    /// The extent listing dying extents that the last root names, which the next opening reads:
+    /// dying once a root that names it not is durable, as the next commit's (TASK-540).
+    list: Option<ExtentId>,
     failed: Option<String>,
     /// The window's regions no file holds.
     regions: Vec<u64>,
@@ -194,6 +197,7 @@ impl FileSet {
             files: BTreeMap::new(),
             mint: next.max(floor),
             dying: Vec::new(),
+            list: None,
             failed: None,
             regions: Vec::new(),
         };
@@ -223,8 +227,7 @@ impl FileSet {
             // Sealed before anything is written past them.
             device.flush().await.context("sealing the frees of what a crash left")?;
         }
-        // The list goes once a root that names it not is durable, as its next commit's.
-        inner.dying.extend(root.dying_list.map(|(list, _)| list));
+        inner.list = root.dying_list.map(|(list, _)| list);
         Ok(inner)
     }
 
@@ -233,7 +236,8 @@ impl FileSet {
     pub fn close(&self) -> Result<(), Error> {
         let mut inner = self.lock()?;
         // What waits to be freed, which the last root names, so that a crash before the device's
-        // closing seals the frees frees them again.
+        // closing seals the frees frees them again; not the list it names, which the next opening
+        // reads.
         let dying = std::mem::take(&mut inner.dying);
         inner.dying = block_on(free(&**self.device, &dying));
         block_on(self.device.close()).context("closing the device")
@@ -261,7 +265,7 @@ impl FileSet {
     /// tree read whole for it, and those it has yet to free.
     pub fn extents(&self) -> Result<Vec<ExtentId>, Error> {
         let inner = self.lock()?;
-        let mut extents: Vec<_> = inner.dying.clone();
+        let mut extents: Vec<_> = inner.dying.iter().chain(&inner.list).copied().collect();
         for file in inner.files.values() {
             extents.extend(block_on(file.pages.extents(&**self.device))?);
         }
@@ -584,8 +588,10 @@ impl FileSet {
         } else {
             files.remove(name);
         }
+        // The last root's list among them: the root this commits names it not.
         let carried = std::mem::take(&mut inner.dying);
-        let dying: Vec<_> = carried.iter().copied().chain(dead).collect();
+        let named = inner.list.take();
+        let dying: Vec<_> = carried.iter().chain(&named).copied().chain(dead).collect();
         // Too many for the root: listed in an extent of their own.
         let list = (dying.len() > FREE_BATCH).then(|| {
             inner.mint += 1;
@@ -620,7 +626,7 @@ impl FileSet {
                 // Nothing names what it wrote: freed, or, failing that, dying.
                 let wrote: Vec<_> =
                     list.into_iter().chain(plan.into_iter().flat_map(Plan::extents)).collect();
-                inner.dying = carried;
+                (inner.dying, inner.list) = (carried, named);
                 inner.dying.extend(block_on(free(device, &wrote)));
                 return Err(error);
             }
@@ -634,8 +640,7 @@ impl FileSet {
             true => block_on(free(device, &dying)),
             false => dying,
         };
-        // A list goes once a root that names it not is durable.
-        inner.dying.extend(list);
+        inner.list = list;
         Ok(())
     }
 
