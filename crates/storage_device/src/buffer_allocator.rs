@@ -172,7 +172,6 @@ mod buffer_source {
 /// buffers are plain memory, which only Fxfs and its device use, so they are all trusted.
 #[cfg(not(target_os = "fuchsia"))]
 mod buffer_source {
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
     use std::ops::Range;
     use std::sync::Arc;
     use storage_ptr_slice::MutPtrByteSlice;
@@ -189,15 +188,9 @@ mod buffer_source {
     unsafe impl Sync for BufferSource {}
 
     impl BufferSource {
-        fn layout(size: usize) -> Layout {
-            Layout::from_size_align(size, 4096).unwrap()
-        }
-
         pub fn new(size: usize) -> Self {
-            // SAFETY: The layout is not empty.
-            let base = unsafe { alloc_zeroed(Self::layout(size)) };
-            assert!(!base.is_null(), "no memory for {size} bytes of buffers");
-            Self { base, size }
+            assert!(size > 0, "a buffer source of no bytes");
+            Self { base: memory::map(size), size }
         }
 
         pub fn new_trusted(size: usize) -> Self {
@@ -272,8 +265,68 @@ mod buffer_source {
 
     impl Drop for BufferSource {
         fn drop(&mut self) {
-            // SAFETY: Frees what `new` allocated.
-            unsafe { dealloc(self.base, Self::layout(self.size)) };
+            // SAFETY: What `new` mapped, which nothing uses once the source goes.
+            unsafe { memory::unmap(self.base, self.size) };
+        }
+    }
+
+    /// On a host, anonymous memory, which reads as zeros until written and is committed as it is
+    /// touched, as a VMO is: `alloc_zeroed` of a page's alignment zeroes every page at once on
+    /// Linux, 64 MiB for each FakeDevice made, most of an extent_files model test's time.
+    #[cfg(unix)]
+    mod memory {
+        pub fn map(size: usize) -> *mut u8 {
+            // SAFETY: A new mapping of anonymous memory, which nothing else refers to.
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert!(
+                base != libc::MAP_FAILED,
+                "no memory for {size} bytes of buffers: {}",
+                std::io::Error::last_os_error()
+            );
+            base.cast()
+        }
+
+        /// # Safety
+        ///
+        /// `base` and `size` are a mapping [`map`] made, which nothing uses any more.
+        pub unsafe fn unmap(base: *mut u8, size: usize) {
+            // SAFETY: As the caller promises.
+            let unmapped = unsafe { libc::munmap(base.cast(), size) };
+            assert_eq!(unmapped, 0, "unmapping buffers: {}", std::io::Error::last_os_error());
+        }
+    }
+
+    /// In the guest kernel, the kernel's memory, zeroed.
+    #[cfg(not(unix))]
+    mod memory {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        fn layout(size: usize) -> Layout {
+            Layout::from_size_align(size, 4096).unwrap()
+        }
+
+        pub fn map(size: usize) -> *mut u8 {
+            // SAFETY: The layout is not empty.
+            let base = unsafe { alloc_zeroed(layout(size)) };
+            assert!(!base.is_null(), "no memory for {size} bytes of buffers");
+            base
+        }
+
+        /// # Safety
+        ///
+        /// `base` and `size` are memory [`map`] allocated, which nothing uses any more.
+        pub unsafe fn unmap(base: *mut u8, size: usize) {
+            // SAFETY: As the caller promises.
+            unsafe { dealloc(base, layout(size)) };
         }
     }
 }

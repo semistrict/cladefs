@@ -7,7 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-17 02:10'
-updated_date: '2026-11-18 01:37'
+updated_date: '2026-11-18 21:43'
 labels:
   - bug
   - test
@@ -37,4 +37,6 @@ Fails on CI's test (workspace) job on main (run of 001032beb, job 133692118967) 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: seen on ubu1 too, once in a whole-workspace nextest under load (branch t3/cell-is-one-filesystem); 6 reruns alone passed.
+
+Seen again on macOS 2026-11-18 (scripts/test.sh workspace, keys.rs:1737: left 0, right 1). The tree had storage_device's BufferSource change, which bucket_cell doesn't use. The test alone then passed 10 of 10, so it is flaky on macOS too, under the suite's parallel load.
 <!-- SECTION:NOTES:END -->

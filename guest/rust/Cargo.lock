@@ -231,6 +231,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cladefs-linux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "event-listener",
+ "follower",
+ "futures",
+ "fxfs",
+ "fxfs-posix",
+ "getrandom",
+ "linux-rt",
+ "log",
+ "rustc-hash",
+ "storage_device",
+]
+
+[[package]]
 name = "cmov"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,24 +668,6 @@ dependencies = [
  "storage_xts",
  "zerocopy",
  "zx-status",
-]
-
-[[package]]
-name = "cladefs-linux"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "event-listener",
- "follower",
- "futures",
- "fxfs",
- "fxfs-posix",
- "getrandom",
- "linux-rt",
- "log",
- "rustc-hash",
- "storage_device",
 ]
 
 [[package]]
@@ -1209,6 +1209,7 @@ dependencies = [
  "fprint",
  "fuchsia-sync",
  "futures",
+ "libc",
  "log",
  "num",
  "rand 0.10.3",
