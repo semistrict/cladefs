@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 16:45'
+updated_date: '2026-11-18 18:09'
 labels:
   - testing
 dependencies: []
@@ -32,3 +33,9 @@ crates/cladefs/mutants.sh --check, which scripts/test.sh's scripts part runs (CI
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18, origin/main 03b655f63: a seventh, tenants-name-any-store (cladefsd/server.rs, since ab5226324's grant serialization), also no longer applies. TASK-539's branch retargets walks-forget-writes-in-flight (as a-stores-reserve-forgotten) and the other disk mutants.
+<!-- SECTION:NOTES:END -->
