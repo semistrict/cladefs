@@ -173,12 +173,12 @@ impl Control {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
         };
-        let of = match (new, object.filesystem) {
-            (true, _) => (BranchOf::New(cell), capacity),
-            (false, Some(filesystem)) if filesystem.kind == Kind::Fxfs => {
-                (BranchOf::Taken(Branch { cell, id: filesystem.branch }), TAKEN_CAPACITY)
+        let of = match (new, object.branch, object.kind) {
+            (true, ..) => (BranchOf::New(cell), capacity),
+            (false, Some(branch), Some(Kind::Fxfs)) => {
+                (BranchOf::Taken(Branch { cell, id: branch }), TAKEN_CAPACITY)
             }
-            (false, _) => return Ok(0),
+            (false, ..) => return Ok(0),
         };
         let shown = cell_path(cell);
         let path = self.stores.dir.join(&shown);
