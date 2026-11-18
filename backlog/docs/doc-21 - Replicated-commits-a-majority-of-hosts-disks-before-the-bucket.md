@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-18T12:36:00Z'
+updated_date: '2026-11-18T15:52:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -79,7 +79,7 @@ Within one configuration there is one writer and one sequence, so every member's
 
 ```rust
 replicas: Option<Replicas>,       // None: an unreplicated cell, as today
-struct Replicas { config: u64, epoch: u64, f: u8, members: Vec<String> /* HOST:PORT, the writer's first */ }
+struct Replicas { config: u64, epoch: u64, f: u8, members: Vec<(String, u64)> /* HOST:PORT and incarnation, the writer's first */ }
 ```
 
 The head is written by `head::take` (`head.rs:125`) and swapped by `head::swap` (`head.rs:180`),
@@ -100,6 +100,8 @@ replicas/<tenant>/<cell>/<config>/logs/<n>      the writer's log n: its header, 
 replicas/<tenant>/<cell>/promise                the greatest epoch it promised (synced, small)
 ```
 
+**Incarnations** (found by TLC, TASK-537.2): a member's promises live on its disk, so a host that lost its disk lost them. A zombie writer could then fill the empty host's log again and gather its quorum, and a host that lost its disk could retake the cell and count its own copy, now empty, as the old writer's. So each daemon's `replicas/` directory has an incarnation, a random 64-bit number made when the directory is created, and kept in it. A configuration names its members as (address, incarnation). A member refuses an `Open`, `Append` or `Seal` that names another incarnation, and a taker counts a member's read only in the incarnation the head names, its own included. This is BookKeeper's cookies. The spec's `NoIncarnation` mutation loses an acknowledged commit without it.
+
 A member therefore holds what the bucket holds and no more: data in ciphertext, and commit metadata
 (`Contents`: extent IDs, offsets, the root) in the clear but MACed, as framed footers are in the bucket
 (doc-16). It can verify nothing and needs no key. Recovery checks the MACs with the cell's key, so a
@@ -110,7 +112,7 @@ than take them.
 
 | RPC | What |
 |---|---|
-| `Append(stream AppendRequest) → stream AppendResponse` | One stream from a writer to a member for each (cell, configuration). `Open{cell, config, epoch, members}` first, then `Log{n, header}`, `Records{n, bytes}`, and `Acknowledged{through_n}` (the bucket's end, below). The member answers `End{tag}` after each sync. It refuses everything if `epoch < promise` (`FAILED_PRECONDITION`, with its promise). |
+| `Append(stream AppendRequest) → stream AppendResponse` | One stream from a writer to a member for each (cell, configuration). `Open{cell, config, epoch, members, incarnation}` first, then `Log{n, header}`, `Records{n, bytes}`, and `Acknowledged{through_n}` (the bucket's end, below). The member answers `End{tag}` after each sync. It refuses everything if `epoch < promise` (`FAILED_PRECONDITION`, with its promise). |
 | `Seal{cell, config, epoch} → {logs: [(n, len)], end}` | Raises the promise to `epoch`, synced, before it answers. Appends of any older epoch are refused afterwards. It returns what it holds of that configuration. |
 | `ReadLog{cell, config, n, from} → stream bytes` | A log's bytes, for recovery. |
 | `Drop{cell, below_config}` | Removes the logs of configurations older than this one. |
@@ -204,7 +206,11 @@ so in the stats file and in `/metrics` (`cladefsd_replication_degraded`, `…_me
 as a warning, as the bucket failing does (doc-12). Its uploader closes and uploads segments at once
 rather than every interval (`close_for_upload`), and it starts a replacement. Its waiters are released
 by Uploaded meanwhile, by the rule above. If no peer can be had at all, the writer may swap the head
-to an `f = 0` configuration (itself alone), after which takers trust the bucket alone. That swap waits until
+to an `f = 0` configuration (itself alone), after which takers trust the bucket alone. An `f = 0`
+configuration has no quorum, so from the moment the writer starts that drop, no commit is told
+Replicated: the joint rule needs a quorum in both configurations (found by TLC: with the drop's swap
+landed but not yet learned, a commit told Replicated on the old configuration and the writer's own
+copy, while a taker that read `f = 0` recovered the bucket alone). That swap waits until
 Uploaded has reached everything the writer acknowledged as Replicated, which is the joint rule
 again. It is safe because, from then on, everything the writer tells durable is Uploaded.
 
@@ -230,13 +236,33 @@ configuration's logs once the head names a greater configuration, or the cell is
 - **Unmount** and the daemon closing a store wait for Replicated. A store closing for good (drain,
   TASK-141.4) uploads everything, then sends `Drop`.
 - **Followers** (doc-8) and forks see only what is uploaded, as before.
-## What the spec must check (TASK-537.2)
+## The spec (TASK-537.2)
 
-A new module, `specs/replication/Replication.tla`, holds the writers, the members' logs and promises,
-the head (epoch, `end`, `replicas`), crashes (a host's disk lost, a member lost), message loss and
-reordering on each stream, and the uploader in the abstract (a prefix lands, then the head swaps). It
-is cut down from `Bucket.tla`'s `Open`, `Commit`, `Ack` and `Crash(lose)`, without forks or versions.
-It keeps Bucket.tla's names where they mean the same thing (`head`, `ses`, `wal`, `acked`).
+`specs/replication/Replication.tla` holds the writers, the members' logs, drops, promises and
+incarnations, the head (epoch, active configuration, uploaded prefix), each configuration's stream
+(`sent`, kept after its writer dies, as messages in flight are), crashes of a daemon (its sessions
+gone, its disk kept) and losses of a disk (its logs and promises gone, a new incarnation), and
+uploads in two steps (land, then the head's swap). A writer learns it was fenced only by a refused
+CAS, so a fenced writer goes on as a zombie. `told` is the truth: the commits a guest was told are
+Replicated or Uploaded. Each of the protocol's rules is a member of `Rules`, and each kind of step a
+model may leave out (uploads, drops, sweeps, drops to f = 0) a member of `Can`, so that each model
+checks the rules its steps reach in minutes: the first models, every step in each, ran past 15
+minutes at 11M states and more.
+
+| Model | What it covers | Distinct states | Time on ubu1 |
+|---|---|---|---|
+| `Replication` | takes: zombies, seals, recovery, activation; 1 commit, 3 takes | 182,512 | 6 s |
+| `ReplicationCommits` | 3 commits, 2 takes: recovery takes the longest prefix | 136,441 | 5 s |
+| `ReplicationUploads` | uploads and drops, 2 commits, 2 takes | 2,326,920 | 101 s |
+| `ReplicationReplaces` | a replacement, its swap landing and learned, under takes | 3,793,205 | 190 s |
+| `ReplicationZero` | a drop to f = 0 with uploads, under takes | 158,133 | 8 s |
+| `ReplicationFailures` | a disk lost and a daemon crashed, 2 commits, 2 takes | 480,946 | 16 s |
+| `ReplicationSweeps` | sweeps of superseded configurations, 3 takes | 238,260 | 11 s |
+| `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
+| `ReplicationFailuresDeep` (deep) | failures over 3 takes | 8,108,108 | 256 s |
+
+All on four hosts with f = 1, symmetric in hosts, under fxjob (`check-tla.sh`, 13.5 minutes for all
+twenty models and mutations, the deep ones included).
 
 **Safety**
 
@@ -246,18 +272,13 @@ It keeps Bucket.tla's names where they mean the same thing (`head`, `ses`, `wal`
 - `HistoryIsPrefix`: what a writer serves after recovery is a prefix of some earlier writer's commits
   followed by its own. No two writers' commits interleave at the same place.
 - `MembersArePrefixes`: in every configuration, every member's log is a prefix of its writer's.
-- `ActiveHoldsQuorum`: every commit told Replicated and not yet acknowledged by the head is held by
-  f+1 members of the configuration the head names. This is the inductive form of the first property.
 - `DropsOnlyAcknowledged`: a member drops a record only once the head acknowledged its segment.
-- `NoAckedLost` and the rest of Bucket.tla's invariants keep holding for the uploads.
 
-**Liveness** (weak fairness; at most f members down; the bucket up):
+**Liveness** is not checked yet: every commit eventually Replicated or Uploaded, a degraded cell's
+waiters released with the bucket up, and a take completing once f+1 members of the active
+configuration other than the old writer are up (TASK-537.3 tests them on daemons).
 
-- Every commit is eventually Replicated or Uploaded.
-- With the bucket up, a degraded cell's waiters are released.
-- A take completes once f+1 members of the active configuration other than the old writer are up.
-
-**Mutations**, each a config under `mutations/` that TLC must show breaking a property:
+**Mutations**, each a config under `mutations/` that TLC shows violating `ReplicatedSurvives` in seconds:
 
 | Mutation | Breaks |
 |---|---|
@@ -270,6 +291,8 @@ It keeps Bucket.tla's names where they mean the same thing (`head`, `ses`, `wal`
 | `DropBeforeAck`: drop on the upload's landing, before the head's swap | an ack lost when the swap loses |
 | `NoPromise`: members accept appends of a fenced epoch | a zombie's ack lost |
 | `ZeroFWithoutUpload`: swap to `f = 0` before Uploaded catches up | an ack lost |
+| `NoIncarnation`: a member is a host, whatever disk it has | an ack lost after a disk loss |
+| `NoZeroQuorum`: an f = 0 configuration counts as a quorum of one | an ack lost during a drop to f = 0 |
 
 ## What each failure keeps (rows for doc-12)
 

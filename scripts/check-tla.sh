@@ -17,6 +17,8 @@
 # - specs/journal: Fxfs's journal, objects' flushes, device flushes and the super-block
 #   (crates/fxfs's write_super_block, TASK-149.11): a super-block claims only what its journal
 #   flushed, which the objects' offsets read after the device's flush broke (TASK-149.5);
+# - specs/replication: replicated commits (doc-21, TASK-537.2): a cell's commits on f+1 of 2f+1
+#   hosts' disks before the bucket, takes sealing and recovering them, members replaced, disks lost;
 #
 #   check-tla.sh [MODEL...|deep]
 #   check-tla.sh cover MODEL [NAME=VALUE...]
