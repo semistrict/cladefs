@@ -637,6 +637,18 @@ impl ObjectBucket {
     }
 
     /// What it did so far.
+    /// cladefs: what it asked of each bucket (TASK-633.4): its own requests under its number (0
+    /// until read), then each other bucket's its requests went to, by number.
+    pub fn stats_by_bucket(&self) -> Vec<(u16, Stats)> {
+        let own = self.route.as_ref().and_then(|route| *route.home.lock().unwrap());
+        let mut all = vec![(own.unwrap_or(0), self.stats())];
+        if let Some(route) = &self.route {
+            let members = route.members.lock().unwrap();
+            all.extend(members.iter().map(|(number, member)| (*number, member.stats())));
+        }
+        all
+    }
+
     pub fn stats(&self) -> Stats {
         let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
         Stats {
@@ -1397,6 +1409,13 @@ pub(crate) mod tests {
             let (theirs_key, ours_key) = (layout::head(theirs), layout::head(ours));
             routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();
             assert_eq!((at(&other, theirs).await, at(&home, ours).await), (false, false));
+
+            let by_bucket = routed.stats_by_bucket();
+            let numbers: Vec<u16> = by_bucket.iter().map(|(number, _)| *number).collect();
+            assert_eq!(numbers, [1, 2]);
+            // Its identity's, read as it was opened, and the head's.
+            assert_eq!(by_bucket[1].1.requests(Request::Get), 2, "bucket 2's reads");
+            assert_eq!(by_bucket[1].1.requests(Request::Create), 1, "bucket 2's one write");
 
             let unrecorded = layout::head(layout::CellId { tenant: 1, id: 9 << 48 | 1 });
             assert_eq!(routed.get(&unrecorded).await.map(drop), Err(Error::Unavailable));
