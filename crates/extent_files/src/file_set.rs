@@ -339,16 +339,26 @@ impl FileSet {
                 log::error!(
                     "extent_files: mapping {name}, read from the device from now on: {error:#}"
                 );
-                file.pages.set_region(None);
-                file.region = None;
-                match window.unmap(region, *region_bytes) {
-                    Ok(()) => regions.push(region),
-                    Err(error) => {
-                        log::error!("extent_files: unmapping {name}'s region: {error:#}")
-                    }
-                }
+                self.release_region(name, file, regions);
             }
         }
+    }
+
+    fn release_region(&self, name: &str, file: &mut File, regions: &mut Vec<u64>) {
+        if let Some(region) = file.region.take() {
+            let (window, bytes) = self.window.as_ref().expect("a region belongs to a window");
+            file.pages.set_region(None);
+            match window.unmap(region, *bytes) {
+                Ok(()) => regions.push(region),
+                Err(error) => log::error!("extent_files: unmapping {name}'s region: {error:#}"),
+            }
+        }
+    }
+
+    fn remove_file(&self, inner: &mut Inner, name: &str) -> File {
+        let mut file = inner.files.remove(name).expect("a file to remove");
+        self.release_region(name, &mut file, &mut inner.regions);
+        file
     }
 
     /// Maps file `name`'s chunks commits changed since its region was last mapped, as the last
@@ -420,7 +430,7 @@ impl FileSet {
             log::warn!("extent_files: {name} closed with changes not committed, which are lost");
         }
         if file.opens == 0 && !file.committed {
-            inner.files.remove(name);
+            self.remove_file(&mut inner, name);
         }
     }
 
@@ -515,17 +525,11 @@ impl FileSet {
         if file.opens > 0 {
             bail!("deleting {name}, open");
         }
-        let file = inner.files.remove(name).unwrap();
-        if let (Some((window, region_bytes)), Some(region)) = (&self.window, file.region) {
-            match window.unmap(region, *region_bytes) {
-                Ok(()) => inner.regions.push(region),
-                Err(error) => log::error!("extent_files: unmapping {name}'s region: {error:#}"),
-            }
-        }
         if file.committed {
             let dead: Vec<_> = block_on(file.pages.extents(&**self.device))?.into_iter().collect();
-            self.commit_root(&mut inner, None, dead, None)?;
+            self.commit_root(&mut inner, name, dead, None)?;
         }
+        self.remove_file(&mut inner, name);
         Ok(true)
     }
 
@@ -545,8 +549,7 @@ impl FileSet {
         // What it minted is spent, whatever came of it.
         inner.mint = next;
         let plan = plan?;
-        let changed = Some((name, plan.root.clone()));
-        let committed = self.commit_root(inner, changed, plan.dead.clone(), Some(&plan));
+        let committed = self.commit_root(inner, name, plan.dead.clone(), Some(&plan));
         committed.with_context(|| format!("committing {name}"))?;
         let inner = &mut *inner;
         let file = inner.files.get_mut(name).expect("a file open");
@@ -560,14 +563,14 @@ impl FileSet {
         Ok(())
     }
 
-    /// Commits the root: each file committed as it is, but `changed`, if given, as it says, `plan`'s
+    /// Commits the root: each file committed as it is, except `name`, replaced by `plan` or deleted. The plan's
     /// extents written first, the last write carrying the root; and `dead` among the dying, freed
     /// once a batch of them waits ([`FREE_BATCH`]), their root durable. A failure before the root
     /// changes nothing, but that what it wrote is freed; one committing it fails the file set.
     fn commit_root(
         &self,
         inner: &mut Inner,
-        changed: Option<(&str, format::FileRoot)>,
+        name: &str,
         dead: Vec<ExtentId>,
         plan: Option<&Plan>,
     ) -> Result<(), Error> {
@@ -576,8 +579,10 @@ impl FileSet {
             .filter(|(_, file)| file.committed)
             .map(|(name, file)| (name.clone(), file.pages.root()))
             .collect();
-        if let Some((name, root)) = changed {
-            files.insert(name.to_owned(), root);
+        if let Some(plan) = plan {
+            files.insert(name.to_owned(), plan.root.clone());
+        } else {
+            files.remove(name);
         }
         let carried = std::mem::take(&mut inner.dying);
         let dying: Vec<_> = carried.iter().copied().chain(dead).collect();

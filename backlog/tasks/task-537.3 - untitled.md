@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18T12:36:00Z'
-updated_date: '2026-11-18T12:36:00Z'
+updated_date: '2026-11-18 17:04'
 labels:
   - durability
   - peers
@@ -38,3 +38,9 @@ The implementation follows the spec and is built on the peer network of TASK-406
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18, doc-23 (TASK-633): the user chose a bucket per cloud region. doc-21's failure domain (zone or cloud region) is still undecided by the user; doc-23 argues for a zone, as a member outside the cell's home cloud region keeps the tail but gives no availability. Settle it before building the member pool. Members, like peers, are kept per bucket number.
+<!-- SECTION:NOTES:END -->

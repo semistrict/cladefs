@@ -948,8 +948,18 @@ impl<P: Platform> Fxfs<P> {
 
     /// The pieces of the file `ino`'s data in `range`, in order, which a DAX window maps it from.
     pub async fn dax_extents(&self, ino: u64, range: Range<u64>) -> Result<Vec<DaxExtent>, Error> {
+        self.dax_extent_batch(ino, range, usize::MAX).await
+    }
+
+    /// The first `limit` pieces, skipping holes in the same tree traversal.
+    pub async fn dax_extent_batch(
+        &self,
+        ino: u64,
+        range: Range<u64>,
+        limit: usize,
+    ) -> Result<Vec<DaxExtent>, Error> {
         let file = self.file(ino).await?;
-        let extents = file.extents_in(range).await?;
+        let extents = file.extent_batch(range, limit).await?;
         let allocator = self.filesystem.allocator();
         Ok(extents
             .iter()

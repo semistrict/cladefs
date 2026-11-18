@@ -345,6 +345,7 @@ struct cladefs_vfs_inode {
 	/* cladefs: a directory's entries, kept while it is cached, under i_lock (super.c). */
 	struct cladefs_vfs_dir_listing *listing;
 	/* Its attribute flags (FS_*_FL), which Fxfs keeps in its mode (CLADEFS_MODE_*). */
+	struct mutex attr_lock; /* Serializes attribute writeback with flag publication. */
 	u32 fsflags;
 	/* cladefs: how far the journal was written as i_blocks was read (cladefs_vfs_getattr). */
 	u64 blocks_as_of;

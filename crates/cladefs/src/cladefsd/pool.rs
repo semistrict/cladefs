@@ -54,27 +54,29 @@ impl Pool {
     }
 
     /// Runs `job` on a thread of the pool: an idle one, or a new one, unless it runs as many as it
-    /// may already, when the job waits for one.
-    pub(super) fn run(&'static self, job: Job) {
+    /// may already, when the job waits for one. Returns false if no worker could take it.
+    pub(super) fn run(&'static self, job: Job) -> bool {
         let mut state = self.state.lock().unwrap();
-        state.jobs.push_back(job);
-        if state.idle >= state.jobs.len() {
-            self.work.notify_one();
-            return;
-        }
-        if state.threads < self.max {
-            state.threads += 1;
-            let spawned =
-                std::thread::Builder::new().name(self.name.into()).spawn(move || self.work_on());
-            if let Err(err) = spawned {
-                state.threads -= 1;
-                log::error!("cladefsd: starting a thread, {}: {err}", self.name);
+        if state.idle <= state.jobs.len() && state.threads < self.max {
+            match std::thread::Builder::new().name(self.name.into()).spawn(move || self.work_on()) {
+                Ok(_) => state.threads += 1,
+                Err(err) => {
+                    log::error!("cladefsd: starting a thread, {}: {err}", self.name);
+                    if state.threads == 0 {
+                        // No worker can own this job. Dropping it closes its reply.
+                        drop(state);
+                        return false;
+                    }
+                }
             }
         }
+        state.jobs.push_back(job);
+        self.work.notify_one();
+        true
     }
 
     /// cladefs: runs `work` on a thread of the pool, as [`Pool::run`] runs a job, and returns what it
-    /// returns, once it has, holding no thread while it waits: none if it panicked.
+    /// returns, once it has, holding no thread while it waits: none if it panicked or could not start.
     pub(super) async fn call<T: Send + 'static>(
         &'static self,
         work: impl FnOnce() -> T + Send + 'static,

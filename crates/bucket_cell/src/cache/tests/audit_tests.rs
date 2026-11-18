@@ -52,3 +52,34 @@ fn free_space_admission_reserves_space_for_unwritten_fills() {
         assert!(!fits, "pending tail = {pending_tail}: two fills spent the same space");
     }
 }
+
+/// A fill that fails gives back what it was admitted as: the next fits in a limit with room for
+/// it alone, evicting nothing, and its disk counts nothing of it (TASK-539.6, where a floor's
+/// reservation of free space was released).
+#[test]
+fn failed_cache_fills_release_their_admission() {
+    for failing_tail in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        let object = Object::noise(KEY, PART, 1);
+        if !failing_tail {
+            object.keep_tail(&cache);
+        }
+        let needed = if failing_tail { object.tail_len() } else { object.stored(0).len };
+        let (kept, writing) = (cache.bytes(), cache.disk().cache_writing.get());
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("direct::bypass", "return").unwrap();
+        let result = if failing_tail {
+            cache.keep_tail(&object.key, &object.tail)
+        } else {
+            cache.keep_part(&object.key, 0, object.part(0))
+        };
+        scenario.teardown();
+        result.expect_err("the admitted fill must reach the injected failure");
+        assert_eq!((cache.bytes(), cache.disk().cache_writing.get()), (kept, writing));
+        let limit = cache.bytes() + needed;
+        let (fits, evicted) = cache.kept.lock().unwrap().make_room(limit, needed);
+        assert!(fits, "failed tail = {failing_tail}: the next fill must fit");
+        assert!(evicted.is_empty(), "a failed fill must release its admission");
+    }
+}

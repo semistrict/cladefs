@@ -348,9 +348,32 @@ A commit the daemon has, in order, not yet on disk.
 A commit synced to the host's disk.
 _Avoid_: durable, durable locally
 
+**Replicated**:
+A commit on the disks of f+1 of its configuration's 2f+1 members, the writer's counting as one (doc-21); between Local and Uploaded, and released by Uploaded too.
+_Avoid_: durable, quorum-committed
+
 **Uploaded**:
 A commit whose segments the bucket has acknowledged.
 _Avoid_: durable
+
+**Configuration**:
+A replicated cell's writer and 2f peers at one time, holding a write-once log of the commits the bucket has not acknowledged; the head names the active one.
+_Avoid_: ensemble, replica set (in code, say configuration)
+
+**Member**:
+A host in an incarnation, holding a configuration's log; the writer is one.
+_Avoid_: replica (alone), follower (a follower reads, doc-8)
+
+**Incarnation**:
+A random number a daemon's replica directory is made with, new when its disk is lost: a member is a host in one incarnation, so a host that lost its disk, and its promises with it, is no longer that member. Erlang's node creation; BookKeeper's cookie.
+_Avoid_: cookie (Erlang's is a shared secret for authentication), generation
+
+**Fence** (a member):
+What a take does to f+1 members of the active configuration before it reads their logs: raises each one's promise to the take's epoch, so that it refuses the appends of every older one (BookKeeper's word). A head's swap fences a writer as a fencing token fences a placement.
+_Avoid_: seal (a barrier seals extents)
+
+**Promise**:
+The greatest epoch that fenced a member, on its disk.
 
 **Crash bound**:
 How much of what was ordered a crash may lose: at most a second's worth.

@@ -701,6 +701,9 @@ static void cladefs_dax_dropped(struct cladefs_dax *dax, struct cladefs_dax_rang
 	struct cladefs_dax_file *file = range->file;
 	struct cladefs_dax_volume *volume;
 
+	lockdep_assert_held_write(&range->file->sem);
+	if (took.dirty && !cladefs_dax_range_dirty(range))
+		xa_clear_mark(&file->ranges, range->chunk, XA_MARK_0);
 	cladefs_dax_count(dax, file, freed ? took.private : 0, took.dirty);
 	if (!freed)
 		atomic_long_add(took.private, &file->private_pages);
@@ -2285,8 +2288,14 @@ static unsigned long cladefs_dax_keep(struct inode *inode, struct cladefs_dax_ba
 	size_t i;
 
 	down_write(&file->sem);
-	for (i = 0; i < nr; i++)
-		made += cladefs_dax_pages_redirty(batch[i].range->state, batch[i].kept);
+	for (i = 0; i < nr; i++) {
+		struct cladefs_dax_range *range = batch[i].range;
+		unsigned long n = cladefs_dax_pages_redirty(range->state, batch[i].kept);
+
+		if (n)
+			xa_set_mark(&file->ranges, range->chunk, XA_MARK_0);
+		made += n;
+	}
 	cladefs_dax_count(cladefs_dax_of(inode), file, 0, made);
 	up_write(&file->sem);
 	if (!made)
@@ -2324,8 +2333,8 @@ static size_t cladefs_dax_dirty_ranges(struct cladefs_dax_file *file)
 	size_t dirty = 0;
 
 	lockdep_assert_held(&file->sem);
-	xa_for_each(&file->ranges, chunk, range)
-		dirty += cladefs_dax_range_dirty(range);
+	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0)
+		dirty++;
 	return dirty;
 }
 
@@ -2402,9 +2411,8 @@ static int cladefs_dax_write_back_keeping(struct inode *inode, bool keep)
 		batch = NULL;
 		most = now;
 	}
-	xa_for_each(&file->ranges, chunk, range) {
-		if (!cladefs_dax_range_dirty(range))
-			continue;
+	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
+		xa_clear_mark(&file->ranges, chunk, XA_MARK_0);
 		batch[nr].range = range;
 		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */
 		atomic_inc(&range->users);
@@ -2843,6 +2851,7 @@ static int cladefs_dax_dirty(struct inode *inode, struct cladefs_dax_range *rang
 	if (fresh > made.dirty)
 		cladefs_release_dirty(fs, inode->i_ino, (u64)(fresh - made.dirty) << PAGE_SHIFT);
 	if (made.dirty) {
+		xa_set_mark(&range->file->ranges, range->chunk, XA_MARK_0);
 		atomic_long_add(made.dirty, &dax->dirty);
 		atomic_long_add(made.dirty, &range->file->dirty_pages);
 		WRITE_ONCE(range->file->dirtied, jiffies);

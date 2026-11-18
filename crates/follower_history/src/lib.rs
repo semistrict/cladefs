@@ -109,6 +109,13 @@ impl<V: PartialEq> Versions<V> {
 }
 
 #[derive(Debug)]
+enum Observation<C> {
+    /// Index in the named reads exposed by History::reads.
+    Named(usize),
+    Held(HeldRead<C>),
+}
+
+#[derive(Debug)]
 pub struct History<N, C> {
     /// Each name's file, across the models.
     names: BTreeMap<N, Versions<Option<File<C>>>>,
@@ -118,7 +125,7 @@ pub struct History<N, C> {
     links: BTreeMap<u64, (usize, C)>,
     bounds: Vec<Bounds>,
     reads: Vec<Read<N, C>>,
-    held_reads: Vec<HeldRead<C>>,
+    observations: Vec<Observation<C>>,
 }
 
 impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
@@ -130,7 +137,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
             links: BTreeMap::new(),
             bounds: Vec::new(),
             reads: Vec::new(),
-            held_reads: Vec::new(),
+            observations: Vec::new(),
         }
     }
 
@@ -201,14 +208,15 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     }
 
     pub fn read(&mut self, read: Read<N, C>) {
+        self.observations.push(Observation::Named(self.reads.len()));
         self.reads.push(read);
     }
 
     pub fn held_read(&mut self, read: HeldRead<C>) {
-        self.held_reads.push(read);
+        self.observations.push(Observation::Held(read));
     }
 
-    /// The readers' operations, in the order they were recorded.
+    /// The named reads, in the order they were recorded.
     pub fn reads(&self) -> &[Read<N, C>] {
         &self.reads
     }
@@ -216,13 +224,14 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     /// How many reads of files held open were of files the writer had deleted, in every model
     /// their commits may show.
     pub fn held_reads_of_deleted(&self) -> usize {
-        let deleted = |read: &&HeldRead<C>| {
+        let deleted = |observation: &&Observation<C>| {
+            let Observation::Held(read) = observation else { return false };
             let models = self.models_as_of(&read.commits);
             self.objects.get(&read.object_id).is_none_or(|versions| {
                 versions.pieces(models).iter().all(|(_, contents)| contents.is_none())
             })
         };
-        self.held_reads.iter().filter(deleted).count()
+        self.observations.iter().filter(deleted).count()
     }
 
     /// The models a follower as of a commit in `commits` may show: those after the operations
@@ -240,7 +249,15 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     pub fn check(&self) -> Result<(), String> {
         // The oldest model each reader's operations so far may all have read.
         let mut since = BTreeMap::<usize, usize>::new();
-        for read in &self.reads {
+        for observation in &self.observations {
+            let read = match observation {
+                Observation::Named(index) => &self.reads[*index],
+                Observation::Held(read) => {
+                    let since = since.entry(read.reader).or_default();
+                    *since = self.check_held(read, *since)?;
+                    continue;
+                }
+            };
             let Read { reader, commits, name, found } = read;
             let since = since.entry(*reader).or_insert(0);
             let found = found
@@ -260,7 +277,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
                 )
             })?;
         }
-        self.held_reads.iter().try_for_each(|read| self.check_held(read))
+        Ok(())
     }
 
     /// The file `name` names across the models `range`, in pieces of the models it is the same in.
@@ -280,7 +297,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
 
     /// Checks a read of a file a reader held open: whole, as a model its follower's commit may
     /// show holds the file, or, if none does, as the last model before them that did.
-    fn check_held(&self, read: &HeldRead<C>) -> Result<(), String> {
+    fn check_held(&self, read: &HeldRead<C>, since: usize) -> Result<usize, String> {
         let HeldRead { reader, commits, object_id, found } = read;
         let found = found.as_ref().map_err(|error| {
             format!("reader {reader} holding object {object_id} as of commits {commits:?}: {error}")
@@ -292,14 +309,19 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         let Some((last, _)) = held.iter().rev().find(|(_, contents)| contents.is_some()) else {
             return Err(unheld());
         };
-        let from = (*models.start()).min(*last.end());
+        let earliest = since.max(*models.start());
+        if earliest > *models.end() {
+            return Err(format!("reader {reader} has no model from {earliest} in {models:?}"));
+        }
+        // After unlink the contents stay at their last version, but the reader's model advances.
+        let from = earliest.min(*last.end());
         let allowed: Vec<(usize, &C)> = versions
             .pieces(from..=*models.end())
             .into_iter()
             .filter_map(|(range, contents)| Some((*range.start(), contents.as_ref()?)))
             .collect();
-        if allowed.iter().any(|(_, contents)| *contents == found) {
-            return Ok(());
+        if let Some((at, _)) = allowed.iter().find(|(_, contents)| *contents == found) {
+            return Ok(earliest.max(*at));
         }
         Err(format!(
             "reader {reader} holding object {object_id} read {found:?} as of commits {commits:?}, \
