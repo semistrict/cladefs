@@ -4,7 +4,7 @@ title: 'Hardening: a moment of disk-full does not fail stores'
 status: Done
 assignee: []
 created_date: '2026-11-18 14:17'
-updated_date: '2026-11-18 17:01'
+updated_date: '2026-11-18 19:44'
 labels:
   - extentd
   - disk
@@ -43,6 +43,8 @@ The headroom is not a proof against neighbours. Today one ENOSPC write-back fail
 
 <!-- SECTION:NOTES:BEGIN -->
 Deviation: ACs #2-#4 asked for separate tasks; done here instead, each with its test.
+
+Merged with main (6fb73ca0a fixed TASK-517 at the same time): main's PageCache::throttle, which gives a held writer the flusher's last pass's failure, replaced this task's failure counter; this task's sync change, acknowledgement retries and ENOSPC mapping stand. Main's write_back_reporting and File::disk_identity, used only by the walk TASK-539.5 deletes, went with it.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
