@@ -159,6 +159,18 @@ pub(crate) fn inherit(
     forked_from: &[(u64, PathBuf)],
     to: &Path,
 ) -> Result<()> {
+    inherit_attached(from, to)?;
+    let from = from.canonicalize().map_err(|err| failed(from, "finding the store", err))?;
+    let mut text = format!("{} {}\n", Short(cell), from.display());
+    for &(cell, ref dir) in forked_from {
+        text += &format!("{} {}\n", Short(cell), dir.display());
+    }
+    write(to, ANCESTRY, &text).map_err(|err| failed(to, "recording what it was forked from", err))
+}
+
+/// What the store in `to` inherits of the store in `from` that its guest reads: what is attached
+/// to it, and the cells marked public, its own and those it inherited from ([`inherit`]).
+pub(crate) fn inherit_attached(from: &Path, to: &Path) -> Result<()> {
     let attached = attached(from)?;
     if !attached.is_empty() {
         write_attached(to, &attached)?;
@@ -167,12 +179,7 @@ pub(crate) fn inherit(
     if !public.is_empty() {
         mark_public(to, &public)?;
     }
-    let from = from.canonicalize().map_err(|err| failed(from, "finding the store", err))?;
-    let mut text = format!("{} {}\n", Short(cell), from.display());
-    for &(cell, ref dir) in forked_from {
-        text += &format!("{} {}\n", Short(cell), dir.display());
-    }
-    write(to, ANCESTRY, &text).map_err(|err| failed(to, "recording what it was forked from", err))
+    Ok(())
 }
 
 #[cfg(test)]

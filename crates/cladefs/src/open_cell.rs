@@ -1907,7 +1907,9 @@ impl OpenCell {
     /// the newest `keep_last` are kept then, if given, the rest dropped. Returns its ID.
     /// `ENOTSUP` without an uploader, which names versions.
     pub fn make_version(&self, keep_last: Option<u32>) -> Result<u64, Error> {
-        self.at_rest(|| self.commit_version(keep_last, true))
+        let id = self.at_rest(|| self.commit_version(keep_last, true))?;
+        host_cell::made_version(self.cell(), id, &self.path);
+        Ok(id)
     }
 
     /// cladefs: commits a version as [`OpenCell::make_version`] does, of the store quiescent if

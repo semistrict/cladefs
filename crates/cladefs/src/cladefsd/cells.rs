@@ -770,8 +770,17 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
         let url = crate::host_cell::bucket_for(&made).map_err(|_| Errno::EIO)?;
         let description =
             local_cell::Description { block_size: OpenCell::BLOCK_SIZE, capacity, cell };
-        OpenCell::create_at_version(&made, (&url, kind), description, version)
-            .map_err(|err| errno_of(format_args!("opening version {version} of {cell} here"), err))
+        OpenCell::create_at_version(&made, (&url, kind), description, version).map_err(|err| {
+            errno_of(format_args!("opening version {version} of {cell} here"), err)
+        })?;
+        // What is attached to the store the version was made of, if made here, is attached to
+        // the version's forks, a restored VM's too.
+        match crate::host_cell::version_made_of(cell, version) {
+            Some(of) => crate::cell_dir::inherit_attached(&of, &made).map_err(|err| {
+                errno_of(format_args!("inheriting what is attached to {}", of.display()), err)
+            }),
+            None => Ok(()),
+        }
     })
     .await?;
     Ok(dir)
@@ -819,15 +828,23 @@ pub(super) async fn fork_of_version(
 /// since, or a fork of the version an earlier restore made, its VM having written nothing
 /// (TASK-194). `EEXIST` otherwise, logged: its guest, of the snapshot's memory, would read extents
 /// freed since and commit over what was written since. Nothing of the store is changed.
-pub(super) async fn at_version(
+pub(super) async fn at_version<S>(
     (cell, version): (CellId, u64),
     capacity: u64,
     path: &Path,
-    store: &OpenCell,
-) -> Result<(), Errno> {
+    store: &Arc<S>,
+) -> Result<(), Errno>
+where
+    S: Borrow<OpenCell> + Send + Sync + 'static,
+{
+    // The snapshotted store itself: its commits uploaded first, the version's among them, as a
+    // version is local as it is made and uploaded behind.
+    if (**store).borrow().cell() == cell {
+        uploaded(store).await?;
+    }
     let from = opened_version(cell, version, capacity).await?;
     let (kept, _) = kept_or_open(&from, capacity).await?;
-    if store.holds_what(&kept.store)? {
+    if (**store).borrow().holds_what(&kept.store)? {
         return Ok(());
     }
     log::warn!(

@@ -450,6 +450,23 @@ pub(crate) fn fork(
     Err(Error::new(err))
 }
 
+/// cladefs: the stores this process made versions of, by the version (cell and ID): what a store at
+/// the version made here inherits of what cladefs keeps beside its store, what is attached to it
+/// ([`cell_dir::inherit_attached`]), as a fork of the store does. In memory alone: a restore on
+/// another host, or after the process went, inherits none.
+static VERSIONS_MADE: Mutex<BTreeMap<(CellId, u64), PathBuf>> = Mutex::new(BTreeMap::new());
+
+/// cladefs: the store at `path`, of `cell`, made the version `version` here.
+pub(crate) fn made_version(cell: CellId, version: u64, path: &Path) {
+    VERSIONS_MADE.lock().unwrap().insert((cell, version), path.to_owned());
+}
+
+/// cladefs: where the store this process made the version `version` of `cell` of is, if it did.
+#[cfg(target_os = "linux")]
+pub(crate) fn version_made_of(cell: CellId, version: u64) -> Option<PathBuf> {
+    VERSIONS_MADE.lock().unwrap().get(&(cell, version)).cloned()
+}
+
 /// cladefs: where a store at the version `version` of `cell` is kept for forks of it: a directory of
 /// its own, in the process's temporary directory, gone with the process, as such a store holds
 /// nothing of its own.
