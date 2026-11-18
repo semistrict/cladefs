@@ -100,6 +100,18 @@ impl Host {
     }
 }
 
+/// A runtime for a host the test loses.
+fn runtime_of_its_own() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
+}
+
+/// Loses `host`, and what of it `leaked` is: its runtime stopped, nothing of its uploads going on,
+/// and the rest left as a host's crash leaves it, never dropped (a drop would upload, or close).
+fn lose(host: Host, leaked: impl Sized) {
+    std::mem::forget(leaked);
+    host.runtime.shutdown_background();
+}
+
 fn until(what: &str, done: impl Fn() -> bool) {
     let started = Instant::now();
     while !done() {
@@ -135,13 +147,15 @@ fn what_a_member_holds_recovers_on_another_host() {
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
     let runtime = runtime.unwrap();
     let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-    let host = Host { runtime, bucket };
+    let host = Host { runtime, bucket: bucket.clone() };
     let cell = DESCRIPTION.cell;
     host.runtime.block_on(bucket_cell::lifecycle::create(&*host.bucket, cell, 1)).unwrap();
+    // The writer's host, on a runtime of its own, which goes with it: nothing of it uploads after.
+    let lost = Host { runtime: runtime_of_its_own(), bucket };
 
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
-    let (store, uploader) = host.open(LocalCell::recover_unmade(dir).unwrap(), 1);
+    let (store, uploader) = lost.open(LocalCell::recover_unmade(dir).unwrap(), 1);
     store.made().unwrap();
     // What it made opening, uploaded, its segment closed: what no member holds is in the bucket.
     let base = store.last_commit().unwrap();
@@ -165,15 +179,16 @@ fn what_a_member_holds_recovers_on_another_host() {
     let last = store.last_commit().unwrap();
     until("the commits replicated", || replicator.told(uploader.last_uploaded()) >= last);
     uploader.wait_replicated(last).unwrap();
-    let expected = host.contents(&store);
+    let expected = lost.contents(&store);
     assert!(member.logs.lock().unwrap().keys().any(|log| log & 1 == 1), "own extents sent");
     // What it sends is spooled on the store's disk, not held in memory (TASK-537.3.3).
     assert!(replicator.spooled() > 0);
 
     // The host is lost: what the member holds, and the bucket, are all there is.
-    drop(uploader);
-    drop(store);
-    drop(replicator);
+    lose(lost, (uploader, store, replicator));
+    let bucket = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell, None)).unwrap();
+    let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
+    assert!(uploaded < last, "the bucket holds commit {uploaded}, of {last}: nothing to recover");
     let logs: Vec<(u64, Vec<u8>)> = member.logs.lock().unwrap().clone().into_iter().collect();
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
@@ -349,10 +364,11 @@ fn takes_recover_what_a_lost_writers_members_hold() {
     let peers = |me: &str, all: &Directories| Peers { me: me.into(), all: all.clone() };
 
     // Host a takes the cell, replicated with f = 1: b and c its members.
+    let lost = Host { runtime: runtime_of_its_own(), bucket: host.bucket.clone() };
     let dir = MemDir::new();
     LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
     let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
-    let (store, uploader) = host
+    let (store, uploader) = lost
         .open_replicated(LocalCell::recover_unmade(dir).unwrap(), 1, wish, peers("a", &all))
         .unwrap();
     let replicator = store.replicator().expect("replicating");
@@ -371,14 +387,14 @@ fn takes_recover_what_a_lost_writers_members_hold() {
     store.flush().unwrap();
     let last = store.last_commit().unwrap();
     uploader.wait_replicated(last).unwrap();
-    let expected = host.contents(&store);
+    let expected = lost.contents(&store);
+
+    // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
+    lose(lost, (uploader, store, replicator));
     // The bucket holds not all of them: the take must recover the rest from the members.
     let bucket = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell, None)).unwrap();
     let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
     assert!(uploaded < last, "the bucket holds commit {uploaded}, of {last}: nothing to recover");
-
-    // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
-    drop((uploader, store, replicator));
     let mut left = all.clone();
     left.remove("a");
     let elsewhere = MemDir::new();

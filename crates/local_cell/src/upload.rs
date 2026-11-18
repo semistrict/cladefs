@@ -1260,9 +1260,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let logs = self.read_longest(cell, old, &fenced).await?;
                 let last = writer.taken().last_commit;
                 let seed = crate::replicate::trimmed(cell, &logs, last)?;
-                let recovering = match recovering.has_wal() {
-                    true => recovering,
-                    false => blocking(|| recovering.restored(&seed, last))?,
+                // Its own write-ahead log, if it holds one, recovered unless the members' go past
+                // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's review).
+                let own = recovering.last_commit_held();
+                let members = crate::replicate::last_commit(cell, &seed);
+                let recovering = match crate::replicate::members_ahead(own, members) {
+                    false => recovering,
+                    true => blocking(|| -> Result<_, Failure> {
+                        let mut recovering = recovering;
+                        if recovering.has_wal() {
+                            log::warn!(
+                                "cladefs: {cell:?}: its members hold past its own log ({own:?} < \
+                                 {members:?}): recovered from them"
+                            );
+                            recovering.drop_wal()?;
+                        }
+                        Ok(recovering.restored(&seed, last)?)
+                    })?,
                 };
                 (seed, recovering)
             }
@@ -1276,10 +1290,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let _ = self.token.set(placement);
         self.took(&writer, placement);
         // cladefs: a replicated cell's commits replicated from now on (doc-21, TASK-537.3.3).
-        if let Some(replication) = writer.taken().head.replication.clone()
-            && replication.wish.f >= 1
-        {
-            self.replicate(&writer, replication, old, seed).await?;
+        // cladefs: and, of a cell whose head names a configuration, replicated at its f at least,
+        // whatever this taking asked: its head goes on naming a live configuration, whose
+        // members hold what the one before held, until its writer drops it to f = 0 once the
+        // bucket holds all it told (TASK-537.3.5; TASK-537.3.4's review).
+        if let Some(mut replication) = writer.taken().head.replication.clone() {
+            let before = old.as_ref().map_or(0, |old| old.f);
+            replication.wish.f = replication.wish.f.max(before);
+            if replication.wish.f >= 1 {
+                self.replicate(&writer, replication, old, seed).await?;
+            }
         }
         Ok(Some(writer))
     }

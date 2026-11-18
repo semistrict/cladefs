@@ -243,3 +243,41 @@ fn a_spool_failing_breaks_the_replicator() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(members[0].log(log_of(1)), b"");
 }
+
+/// TASK-537.3.4's review: a member is sent each segment's own extents before its records, so that
+/// one holding a record holds the files of the extents it stored on their own.
+#[test]
+fn own_extents_go_before_their_records() {
+    #[derive(Default)]
+    struct Ordered(Mutex<Vec<u64>>);
+    impl MemberLink for Ordered {
+        fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
+            self.0.lock().unwrap().push(log);
+            Ok(offset + bytes.len() as u64)
+        }
+        fn drop_through(&self, _: u64) -> Result<(), LinkError> {
+            Ok(())
+        }
+    }
+    let ordered = Arc::new(Ordered::default());
+    let links: Vec<Arc<dyn MemberLink>> = vec![ordered.clone(), Arc::new(Fake::default())];
+    // Started with its sends held back by a flush of both at once.
+    let replicator = Replicator::start(1, 0, Arc::new(MemSpool::default()), links, || {});
+    replicator.flushed(flushed(1, &[(log_of(3), 0, b"records"), (own_of(3), 0, b"own")])).unwrap();
+    until("both sent", || ordered.0.lock().unwrap().len() == 2);
+    assert_eq!(*ordered.0.lock().unwrap(), [own_of(3), log_of(3)]);
+}
+
+/// TASK-537.3.4's review: a store's own log is recovered unless its members' go past it: a later
+/// writer's commits, or the same writer's beyond its own log (sent before its own sync).
+#[test]
+fn members_go_past_own_logs_by_writer_then_commit() {
+    let tag = |writer: u64, commit: u64| (writer << 40) | commit;
+    assert!(!members_ahead(Some(tag(3, 9)), None));
+    assert!(members_ahead(None, Some(tag(3, 9))));
+    assert!(members_ahead(Some(tag(3, 9)), Some(tag(4, 6))), "a later writer's");
+    assert!(members_ahead(Some(tag(3, 9)), Some(tag(3, 10))), "beyond its own sync");
+    assert!(!members_ahead(Some(tag(3, 9)), Some(tag(3, 9))), "the same");
+    assert!(!members_ahead(Some(tag(3, 12)), Some(tag(3, 9))), "its own Local commits past them");
+    assert!(!members_ahead(Some(tag(4, 2)), Some(tag(3, 9))), "an earlier writer's");
+}

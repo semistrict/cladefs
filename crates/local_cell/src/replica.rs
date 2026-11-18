@@ -20,7 +20,7 @@
 //! are refused by (doc-21, Incarnations; the spec's `NoIncarnation`).
 //!
 //! The directory is flat, as a [`Dir`] removes no directories: `incarnation`, then for each cell
-//! `<tenant>.<cell>.promise`, and its logs `<tenant>.<cell>.<number>.<epoch>.<log>`, keyed by the
+//! `<tenant>.<cell>.promise.<epoch>`, and its logs `<tenant>.<cell>.<number>.<epoch>.<log>`, keyed by the
 //! configuration's number and the epoch of the writer that made it: two takers racing may both
 //! make the configuration after the active one, each its own.
 
@@ -313,7 +313,18 @@ impl<D: Dir> Replicas<D> {
             return Err(Refused::Fenced { promise: held.promise }.into());
         }
         if epoch > held.promise {
-            write_text(&self.dir, &promise_path(cell), &format!("{epoch}\n"))?;
+            // A file of each promise, made and synced before the one before goes: a crash
+            // between leaves both, the greatest read. Nothing renamed over another (TASK-537.3.4's
+            // review: `Dir::rename` renames to no file there).
+            let path = promise_path(cell, epoch);
+            let file = self.dir.create(&path, false).with_context(|| format!("making {path}"))?;
+            file.sync().with_context(|| format!("syncing {path}"))?;
+            self.dir.sync_dir("").context("syncing the replica directory")?;
+            if held.promise > 0 {
+                let before = promise_path(cell, held.promise);
+                self.dir.remove(&before).with_context(|| format!("removing {before}"))?;
+                self.dir.sync_dir("").context("syncing the replica directory")?;
+            }
             held.promise = epoch;
         }
         Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
@@ -397,7 +408,7 @@ impl<D: Dir> Replicas<D> {
         };
         self.remove(cell, &mut held, &gone)?;
         if swept == Swept::Gone && held.promise > 0 {
-            self.dir.remove(&promise_path(cell)).context("removing a promise")?;
+            self.dir.remove(&promise_path(cell, held.promise)).context("removing a promise")?;
             self.dir.sync_dir("").context("syncing the replica directory")?;
             held.promise = 0;
         }
@@ -433,9 +444,10 @@ impl<D: Dir> Replicas<D> {
         for name in self.dir.list("").context("listing the replica directory")? {
             match parse_name(&name) {
                 Some((of, None)) if of == cell => {
-                    let text = read_text(&self.dir, &name)?;
-                    held.promise = (text.trim().parse())
-                        .with_context(|| format!("{name}: bad promise {text:?}"))?;
+                    let epoch = name.rsplit('.').next().and_then(|epoch| epoch.parse().ok());
+                    let epoch = epoch.ok_or_else(|| anyhow!("bad promise {name:?}"))?;
+                    // A crash between a promise and the removal of the one before leaves both.
+                    held.promise = held.promise.max(epoch);
                 }
                 Some((of, Some(key))) if of == cell => {
                     let log = name.rsplit('.').next().and_then(|log| log.parse().ok());
@@ -467,8 +479,8 @@ pub enum Swept {
     Gone,
 }
 
-fn promise_path(cell: CellId) -> String {
-    format!("{}.{}.promise", cell.tenant, cell.id)
+fn promise_path(cell: CellId, epoch: u64) -> String {
+    format!("{}.{}.promise.{epoch}", cell.tenant, cell.id)
 }
 
 fn log_path(cell: CellId, key: Key, log: u64) -> String {
@@ -481,7 +493,10 @@ fn parse_name(name: &str) -> Option<(CellId, Option<Key>)> {
     let number = |at: usize| parts.get(at).and_then(|part| part.parse::<u64>().ok());
     let cell = CellId { tenant: number(0)?, id: number(1)? };
     match parts.len() {
-        3 if parts[2] == "promise" => Some((cell, None)),
+        4 if parts[2] == "promise" => {
+            number(3)?;
+            Some((cell, None))
+        }
         5 => {
             number(4)?;
             Some((cell, Some(Key { number: number(2)?, epoch: number(3)? })))

@@ -214,7 +214,7 @@ fn drops_and_sweeps_remove_what_no_take_reads() {
 #[test]
 fn directories_without_incarnations_are_refused() {
     let dir = MemDir::new();
-    dir.create("3.9.promise", false).unwrap();
+    dir.create("3.9.promise.5", false).unwrap();
     let opened = Replicas::open(dir, MOST);
     assert!(matches!(opened, Err(Error::Io(_))), "{:?}", opened.err());
 
@@ -223,4 +223,19 @@ fn directories_without_incarnations_are_refused() {
     dir.create("incarnation.new", false).unwrap();
     let opened = Replicas::open(dir.clone(), MOST).unwrap();
     assert_eq!(Replicas::open(dir, MOST).unwrap().incarnation(), opened.incarnation());
+}
+
+/// TASK-537.3.4's review: a cell fenced again by a later take, its promise a file of each epoch,
+/// none renamed over another; a crash leaving two reads the greater.
+#[test]
+fn cells_are_fenced_again_by_later_takes() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    replicas.fence(me, 5).unwrap();
+    replicas.fence(me, 7).unwrap();
+    assert_eq!(refused(replicas.append(me, 1, 0, b"x")), Refused::Fenced { promise: 7 });
+    dir.create("3.9.promise.6", false).unwrap();
+    let reopened = Replicas::open(dir, MOST).unwrap();
+    assert_eq!(refused(reopened.fence(me, 6)), Refused::Fenced { promise: 7 });
 }

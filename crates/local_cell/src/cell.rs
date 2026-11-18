@@ -868,6 +868,13 @@ impl<D: Dir> Recovering<D> {
         self.file.cell
     }
 
+    /// cladefs: the last commit its write-ahead log holds, if it holds any.
+    pub fn last_commit_held(&self) -> Option<u64> {
+        let segments = self.wal.segments.iter().map(|(footer, _)| &footer.contents);
+        let closing = self.wal.closing.values().flatten();
+        segments.chain(closing).filter_map(|contents| contents.commits.last().copied()).last()
+    }
+
     /// cladefs: whether it recovered a write-ahead log: segments not yet in its cell's bucket.
     pub fn has_wal(&self) -> bool {
         !self.wal.segments.is_empty() || !self.wal.closing.is_empty()

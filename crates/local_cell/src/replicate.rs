@@ -128,6 +128,35 @@ pub fn trimmed(
     Ok(logs.iter().filter(|(log, _)| kept.contains(&(log >> 1))).cloned().collect())
 }
 
+/// The last commit `logs`, what members hold of a replicated cell `cell`'s writer's logs, name.
+pub fn last_commit(cell: extent_frame::segment::CellId, logs: &[(u64, Vec<u8>)]) -> Option<u64> {
+    let segment = |log: u64| crate::layout::SegmentId { cell: cell.id, number: log >> 1 };
+    let mut last = None;
+    for (log, bytes) in logs.iter().filter(|(log, _)| log & 1 == 0) {
+        last = crate::wal::replica_commits(bytes, segment(*log)).last().copied().or(last);
+    }
+    last
+}
+
+/// Whether what members hold, ending at the commit `members`, goes past a store's own write-ahead
+/// log, ending at `own` (TASK-537.3.4's review): a later writer's commits, or the same writer's
+/// beyond what its own log holds (sent before its own sync, which a crash cut). Then the members'
+/// logs, not its own, are what the store recovers: they hold every commit a guest was told
+/// replicated, and a member holding a flush holds every flush before it. Else its own log holds
+/// all they do, and Local commits besides.
+pub fn members_ahead(own: Option<u64>, members: Option<u64>) -> bool {
+    use extent_frame::segment::{epoch_of, writer_of};
+    match (own, members) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(own), Some(members)) => match writer_of(members).cmp(&writer_of(own)) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => epoch_of(members) > epoch_of(own),
+        },
+    }
+}
+
 /// Writes what a member holds of a replicated cell's writer's logs, `logs` by their numbers in its
 /// directory, into `dir`, a store's directory of `cell`, made and holding no write-ahead log, as
 /// its write-ahead log after the commit `last`, the last the cell's head names (TASK-537.3.4's
@@ -349,7 +378,13 @@ impl State {
         if self.dropped > member.dropped {
             return self.dropped.map(Sending::Drop);
         }
-        self.logs.iter().find_map(|(&log, &have)| {
+        // Each segment's own extents before its records: a member holding a record holds the
+        // files of the extents it stored on their own, or a take recovering it could not open
+        // (TASK-537.3.4's review).
+        let mut order: Vec<(u64, u64)> =
+            self.logs.iter().map(|(&log, &have)| (log, have)).collect();
+        order.sort_by_key(|&(log, _)| (log >> 1, log & 1 == 0));
+        order.into_iter().find_map(|(log, have)| {
             let end = member.ends.get(&log).copied().unwrap_or(0);
             (end < have).then(|| {
                 let len = (have - end).min(PIECE as u64);
