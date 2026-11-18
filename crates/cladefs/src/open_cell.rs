@@ -494,10 +494,22 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         Errno::ENOSPC
     } else if error.is::<Unaligned>() || error.is::<Unsectored>() || error.is::<TooLong>() {
         Errno::EINVAL
+    } else if full_disk(&error) {
+        // cladefs: the host's disk refusing what the store makes for the request, a raw file or a
+        // segment's, its admission past (doc-22, TASK-539.12): a full disk to the guest, as its
+        // admission's refusal is, not an I/O error. A store failed says so instead, and has none.
+        Errno::ENOSPC
     } else {
         log::error!("cladefs: extent store: {error:#}");
         Errno::EIO
     }
+}
+
+/// cladefs: whether `error` is the host's disk saying it is full.
+fn full_disk(error: &anyhow::Error) -> bool {
+    error.chain().filter_map(|cause| cause.downcast_ref::<std::io::Error>()).any(|err| {
+        err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == std::io::ErrorKind::StorageFull
+    })
 }
 
 // cladefs: closing the store frees its cell to be opened again, though caches of its extents may
@@ -2353,6 +2365,21 @@ fn replay(
         if let Err(err) = spawned {
             log::warn!("cladefs: starting a boot profile's replay: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod errno_tests {
+    use super::{Errno, errno};
+
+    /// TASK-539.12: the host's disk full, as making a store's file finds it, is `ENOSPC` to the
+    /// guest; a store failed for it says so, and is `EIO`.
+    #[test]
+    fn a_full_disk_is_enospc_and_a_failed_store_eio() {
+        let full = std::io::Error::from_raw_os_error(libc::ENOSPC);
+        assert_eq!(errno(anyhow::Error::new(full).context("creating a raw file")), Errno::ENOSPC);
+        let failed = anyhow::anyhow!("the extent store failed: framing a segment: no space");
+        assert_eq!(errno(failed), Errno::EIO);
     }
 }
 

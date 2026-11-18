@@ -29,8 +29,11 @@
 //!   write-back, as `balance_dirty_pages` has them.
 //! - **A sync** ([`Cached::sync`]) writes back what was dirty as it began, waits for every write of
 //!   the file in flight, the flusher's too, then syncs the file: what it covers is a snapshot, so
-//!   that a writer going on never keeps it from ending (`PAGECACHE_TAG_TOWRITE`). A write-back that
-//!   failed fails the sync after it, once ([`Pages::failed`], errseq's semantics for one opener).
+//!   that a writer going on never keeps it from ending (`PAGECACHE_TAG_TOWRITE`). cladefs: a
+//!   write-back that failed leaves its pages dirty, which the sync after it writes back again: the
+//!   sync fails only if that does (TASK-539.12). Linux's reports it once, errseq's, as it drops
+//!   the pages it failed to write; before TASK-539.12 this did too ([`Pages::failed`]), which failed
+//!   a store's flush, and the store, for a moment of a full disk long gone.
 //! - **Eviction** takes clean pages alone, of the files used least recently first
 //!   ([`PageCache::evict_to`]), never writing any: what is dirty is the flusher's to write.
 //! - **Files are ordered by their keys as they were once** ([`PageCache::files_by`]): when they
@@ -150,6 +153,10 @@ pub struct PageCache {
     /// Wakes writers held back.
     drained: Condvar,
     holding: Mutex<()>,
+    /// cladefs: how many write-backs failed, and the last's error, which a writer held back while
+    /// nothing drains is given ([`PageCache::throttle`], TASK-517).
+    failures: AtomicU64,
+    failure: Mutex<Option<(io::ErrorKind, String)>>,
     /// cladefs: what its pages are held in: frames of slabs of its own, those of pages gone
     /// holding the next (TASK-433.9).
     frames: Arc<Frames>,
@@ -203,6 +210,8 @@ impl PageCache {
             flushing: Mutex::new(false),
             drained: Condvar::new(),
             holding: Mutex::new(()),
+            failures: AtomicU64::new(0),
+            failure: Mutex::new(None),
             frames: Frames::new(),
         })
     }
@@ -363,20 +372,38 @@ impl PageCache {
     /// write-back brings it under, the flusher woken. With no flusher, its writers keep it under
     /// [`Options::background`] as they go ([`PageCache::dirtied`]); what failed to be written
     /// stays dirty, which none waits for. Its flusher dead, it panics, as none would let it go.
-    fn throttle(&self) {
+    /// cladefs: a write-back failing while it waits, and nothing drained meanwhile, it gives the
+    /// writer that failure, which dirties nothing, rather than hold it for as long as the disk
+    /// refuses: a disk full, or failing, held every store's writers sharing the cache (TASK-517).
+    fn throttle(&self) -> io::Result<()> {
         if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
-            return;
+            return Ok(());
         }
         self.wake();
+        let failures = self.failures.load(Ordering::Relaxed);
         let mut holding = self.holding.lock().unwrap();
         while self.dirty.load(Ordering::Relaxed) > self.hard() {
             assert!(
                 !self.flusher_died(),
                 "the page cache's flusher died: nothing writes back for a writer held at its bound"
             );
+            let dirty = self.dirty.load(Ordering::Relaxed);
             holding = self.drained.wait_timeout(holding, Duration::from_millis(10)).unwrap().0;
+            let drained = self.dirty.load(Ordering::Relaxed) < dirty;
+            if !drained && self.failures.load(Ordering::Relaxed) > failures {
+                let failure = self.failure.lock().unwrap().clone();
+                let (kind, said) = failure.expect("a failure counted is kept");
+                return Err(io::Error::new(kind, format!("writing back the page cache: {said}")));
+            }
             self.wake();
         }
+        Ok(())
+    }
+
+    /// cladefs: a write-back failed with `err`: what a writer held back is given, if nothing drains.
+    fn failed(&self, err: &io::Error) {
+        *self.failure.lock().unwrap() = Some((err.kind(), err.to_string()));
+        self.failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Pages became clean, or went: writers held back may go on.
@@ -735,6 +762,7 @@ impl<F: File> Shared<F> {
             if let Err(err) = wrote {
                 let kept = io::Error::new(err.kind(), err.to_string());
                 pages.failed.get_or_insert(kept);
+                self.cache.failed(&err);
                 return Err(err);
             }
             if let Some(most) = &mut most {
@@ -877,7 +905,7 @@ impl<F: File> File for Cached<F> {
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let shared = &*self.shared;
-        shared.cache.throttle();
+        shared.cache.throttle()?;
         let number = shared.cache.writes.fetch_add(1, Ordering::Relaxed) + 1;
         let mut pages = shared.lock();
         let end = offset + buf.len() as u64;
@@ -971,9 +999,8 @@ impl<F: File> File for Cached<F> {
         // What was written before it, a snapshot: writes after it are the next sync's.
         let through = shared.cache.writes.load(Ordering::Relaxed);
         shared.flush(0..u64::MAX, Some(through))?;
-        if let Some(failed) = shared.lock().failed.take() {
-            return Err(failed);
-        }
+        // Written back whole since: what failed before is on the file now.
+        shared.lock().failed = None;
         shared.file.sync()
     }
 

@@ -943,6 +943,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             if let Err(err) = self.observe() {
                 return self.fail(&writer, err);
             }
+            // cladefs: acknowledgements the store's disk refused before, tried again.
+            if !in_flight.acknowledging.is_empty()
+                && let Err(err) = self.acknowledge_pending(&mut in_flight)
+            {
+                return self.fail(&writer, err);
+            }
             let (stop, cut) = {
                 let mut progress = self.progress.lock().unwrap();
                 urgent |= std::mem::take(&mut progress.wanted);
@@ -1227,13 +1233,41 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let through = writer.acknowledge().await?;
         failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
-        let Some(epoch) = acked.last().map(Uploading::epoch) else { return Ok(()) };
-        blocking(|| {
-            for segment in &acked {
-                self.store().acknowledged(segment.number)?;
+        in_flight.acknowledging.extend(acked);
+        self.acknowledge_pending(in_flight)
+    }
+
+    /// cladefs: has the store record the segments the writer acknowledged, in order, which leave it
+    /// then, and counts their commits uploaded: as many as its disk lets it, the rest kept for the
+    /// next pass, as a full disk fails the record of an acknowledgement, which leaves the one before
+    /// it whole (`wal::StartFile`), and the store goes on; any other failure is the uploader's
+    /// (TASK-539.12). Before, the store failed for it.
+    fn acknowledge_pending(&self, in_flight: &mut InFlight) -> Result<(), Failure> {
+        let mut epoch = None;
+        let stored = blocking(|| {
+            while let Some(segment) = in_flight.acknowledging.front() {
+                if let Err(err) = self.store().acknowledged(segment.number) {
+                    return Err(err);
+                }
+                epoch = Some(segment.epoch());
+                in_flight.acknowledging.pop_front();
             }
-            Ok::<_, Failure>(())
-        })?;
+            Ok(())
+        });
+        match stored {
+            Ok(()) => in_flight.acknowledging_failed = false,
+            Err(err) if err.chain().any(|cause| cause.is::<std::io::Error>()) => {
+                if !std::mem::replace(&mut in_flight.acknowledging_failed, true) {
+                    log::warn!(
+                        "cladefs: cell {}'s store records no acknowledgement for now, tried again \
+                         each pass: {err:#}",
+                        self.store().description().cell
+                    );
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+        let Some(epoch) = epoch else { return Ok(()) };
         failing!("upload::released");
         self.progress.lock().unwrap().uploaded_through(epoch);
         self.changed.notify(usize::MAX);
@@ -1326,6 +1360,12 @@ impl Uploading {
 struct InFlight {
     segments: VecDeque<Uploading>,
     uploads: FuturesOrdered<BoxFuture<'static, Result<(), bucket_cell::Error>>>,
+    /// cladefs: the segments the writer acknowledged that the store hasn't yet, its last try at
+    /// recording it failing on its disk, as a full one fails it: tried again at each pass
+    /// ([`Shared::acknowledge_pending`], TASK-539.12).
+    acknowledging: VecDeque<Uploading>,
+    /// cladefs: whether the store's last try failed so: said once until one succeeds.
+    acknowledging_failed: bool,
 }
 
 impl InFlight {
@@ -1508,6 +1548,46 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left unuploaded");
+    }
+
+    /// TASK-539.12: the store's disk refusing the record of an acknowledgement, as a full one does,
+    /// fails neither the store nor its uploader: the record before it whole, the store writes and
+    /// commits on, its segments wait in it, and the uploader records them once it can, which lets
+    /// them go. Before, the store failed for good.
+    #[test]
+    fn acknowledgements_a_full_disk_refuses_wait_for_room() {
+        let scenario = fail::FailScenario::setup();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let host = Runtime {
+            handle: runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let dir = MemDir::new();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///full"), None).unwrap();
+        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        let options = Options { interval: Duration::from_millis(20), ..Options::default() };
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .unwrap();
+        store.made().unwrap();
+        fail::cfg("wal::start", "return").unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
+        store.commit(None).unwrap();
+        let epoch = store.last_commit().unwrap();
+        // Its interval's passes, 25 of them, each trying again.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(uploader.last_uploaded() < epoch, "counted uploaded, unrecorded");
+        store.write(ExtentId::new(CELL.id, 2), 0, &[2; 4096]).unwrap();
+        store.commit(None).unwrap();
+        fail::remove("wal::start");
+        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+        assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left in it");
+        scenario.teardown();
     }
 
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,

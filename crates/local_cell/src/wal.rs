@@ -119,6 +119,11 @@ impl StartFile {
                 file
             }
         };
+        // A test's: its disk full, as a write of the record fails then.
+        fail::fail_point!("wal::start", |_| Err(Error::new(std::io::Error::from_raw_os_error(
+            libc::ENOSPC
+        ))
+        .context("writing the WAL's start")));
         let serial = self.serial + 1;
         let record = encode(&Slot { serial, start });
         assert!(record.len() as u64 <= SLOT, "a start's record fits its slot");

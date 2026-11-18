@@ -75,6 +75,29 @@ fn a_write_back_error_reaches_a_writer_held_at_the_shared_bound() {
     assert_eq!(bytes, data);
 }
 
+/// TASK-539.12: a write-back that failed, as a full disk fails it, then succeeds, fails nothing: the
+/// sync after it writes back its pages, dirty still, and the file holds them. Before, the sync
+/// reported the earlier failure once, which failed a store's flush, and the store, for good.
+#[test]
+fn a_write_back_that_failed_then_succeeds_fails_no_sync() {
+    let disk = MemDisk::new();
+    let cache = PageCache::without_flusher(Options::default());
+    let file = Cached::new(
+        WriteFault { file: disk.create("full", true).unwrap(), failing: AtomicBool::new(true) },
+        &cache,
+    )
+    .unwrap();
+    let data = pattern(3, 2 * PAGE as usize);
+    file.write_at(&data, 0).unwrap();
+    assert!(cache.write_back_all().is_err(), "the disk was full");
+    assert_eq!(cache.usage().dirty, 2 * PAGE, "its pages kept dirty");
+    file.file().failing.store(false, Ordering::SeqCst);
+    file.sync().unwrap();
+    let mut bytes = vec![0; data.len()];
+    file.file().read_at(&mut bytes, 0).unwrap();
+    assert_eq!((bytes, cache.usage().dirty), (data, 0));
+}
+
 #[test]
 #[ignore = "sparse write-back scaling benchmark (TASK-524); run alone"]
 fn bench_sparse_write_back() {

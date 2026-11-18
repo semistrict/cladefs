@@ -2786,11 +2786,9 @@ impl<D: Dir> LocalCell<D> {
                 _ => bail!("segment {} is not the first of the write-ahead log", Short(number)),
             }
         };
-        if let Err(err) = start.write(&*self.dir, after) {
-            let err = err.context("recording an acknowledgement");
-            self.lock().fail(&err);
-            return Err(err);
-        }
+        // cladefs: failing, it leaves the record before it whole, which the store goes on with: the
+        // uploader tries again (TASK-539.12). Before, a full disk failed the store here.
+        start.write(&*self.dir, after).context("recording an acknowledgement")?;
         let (leaving, raw) = {
             let mut state = self.state()?;
             let state = &mut *state;
