@@ -777,7 +777,10 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
         // the version's forks, a restored VM's too.
         match crate::host_cell::version_made_of(cell, version) {
             Some(of) => crate::cell_dir::inherit_attached(&of, &made).map_err(|err| {
-                errno_of(format_args!("inheriting what is attached to {}", of.display()), err)
+                errno_of(
+                    format_args!("inheriting what is attached to {}", of.display()),
+                    err.into(),
+                )
             }),
             None => Ok(()),
         }
