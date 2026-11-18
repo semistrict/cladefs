@@ -15,6 +15,11 @@ use std::sync::{Arc, Mutex};
 
 /// A file of a store.
 pub trait File: Send + Sync + 'static {
+    /// The host file's identity for disk accounting, when available.
+    fn disk_identity(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     /// Reads `buf.len()` bytes at `offset`. Bytes past the file's end read as zeros.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
 
@@ -436,6 +441,11 @@ impl AsRawFd for DiskFile {
 }
 
 impl File for DiskFile {
+    fn disk_identity(&self) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        self.file.metadata().ok().map(|metadata| (metadata.dev(), metadata.ino()))
+    }
+
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         bucket_cell::direct::read_at(&self.file, buf, offset)
     }

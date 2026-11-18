@@ -1164,7 +1164,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
             let log = "ERROR local_cell::upload: cladefs: uploading cell \
-                       0/3t/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
+                       0/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
                        cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
                        writer::upload\n";
             let cell = cladefs::CellId { tenant: 0, id: 0xfb23_2d47_39d5_69c0 };

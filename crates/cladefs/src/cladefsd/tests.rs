@@ -599,7 +599,7 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let (store, served) = connect(&path, 1 << 24);
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
 
     // The daemon holds the read, saying it has it, until let go: at its failpoint, named as the
@@ -6387,4 +6387,206 @@ fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
 /// The cell `version` is of.
 fn version_cell(version: crate::CellVersion) -> crate::CellId {
     crate::CellId { tenant: version.tenant, id: version.cell }
+}
+
+/// TASK-522: a request submitted to an empty pool gets a failure if the host
+/// refuses to start its worker, even when no more requests come in.
+#[test]
+fn first_request_completes_when_worker_creation_fails() {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    let pool = Box::leak(Box::new(super::pool::Pool::new("spawn refused", 1)));
+    refuse_system_call(libc::SYS_clone3, &[], libc::EAGAIN as u16);
+    refuse_system_call(libc::SYS_clone, &[], libc::EAGAIN as u16);
+    runtime.block_on(async {
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(2), pool.call(|| 7)).await;
+        assert_eq!(reply.expect("request still waiting after worker creation failed"), None);
+    });
+}
+
+/// TASK-520: failed write-back must leave a completed admission charged. The
+/// dirty data is still in the cache and will cost disk blocks when it is written.
+#[test]
+fn failed_writeback_preserves_disk_admission() {
+    use local_cell::{Dir, File};
+    use std::os::fd::AsRawFd;
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = local_cell::HostDir::new(root.path()).unwrap();
+    let file = dir.create("data", true).unwrap();
+    let tenant = 0x520;
+    let disk = super::disk::Disk::new(tenant, root.path());
+    let page = local_cell::pages::PAGE;
+    let limit = disk.used() + page;
+    super::disk::set_limit(Some(tenant), Some(limit)).unwrap();
+    refuse_system_call(libc::SYS_pwrite64, &[(0, file.as_raw_fd() as u32)], libc::EIO as u16);
+    let writing = disk.admit(page).unwrap();
+    file.write_at(&vec![0x5a; page as usize], 0).unwrap();
+    drop(writing);
+    disk.recount();
+    assert_eq!(disk.admit(page).map(drop), Err(Errno::ENOSPC));
+}
+
+/// TASK-529: compare the cost of the same unmatched lookups as the number of
+/// grants grows. Both paths are missing leaves in an existing directory.
+#[test]
+#[ignore = "a grant lookup scaling measurement on the test host"]
+fn measure_unmatched_grant_lookups() {
+    host();
+    let root = tempfile::tempdir().unwrap();
+    let grants = super::grants::Grants::new(root.path().to_owned());
+    let first = root.path().join("missing-a");
+    let second = root.path().join("missing-b");
+    let mut last = 0;
+    for tenants in [1, 8, 32] {
+        for tenant in last + 1..=tenants {
+            let dir = root.path().join(format!("dir-{tenant}"));
+            std::fs::create_dir(&dir).unwrap();
+            grants.grant(tenant, &dir, (None, None)).unwrap();
+        }
+        last = tenants;
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            assert_eq!(grants.tenant_at(&first), None);
+            assert!(grants.same_tenant(&first, &second));
+        }
+        eprintln!("{tenants} grants, 1000 lookup pairs: {:?}", start.elapsed());
+    }
+    for tenant in 1..=last {
+        grants.revoke(tenant).unwrap();
+    }
+}
+
+/// TASK-525: vary the number of disks and the number of resident cache pages
+/// independently. Timings include only full recounts of already clean files.
+#[test]
+#[ignore = "a disk recount scaling measurement on the test host"]
+fn measure_disk_recounts_with_resident_pages() {
+    use local_cell::{Dir, File};
+    let root = tempfile::tempdir().unwrap();
+    let mut disks = Vec::new();
+    for tenants in [1, 8, 32] {
+        while disks.len() < tenants {
+            let id = disks.len() as u64 + 1;
+            let path = root.path().join(format!("tenant-{id}"));
+            std::fs::create_dir(&path).unwrap();
+            disks.push(super::disk::Disk::new(id, &path));
+        }
+        let store = local_cell::HostDir::new(&root.path().join("tenant-1")).unwrap();
+        let file = store.create("resident", true).unwrap();
+        for pages in [0, 2048] {
+            if pages > 0 {
+                file.write_at(&vec![1; pages * local_cell::pages::PAGE as usize], 0).unwrap();
+                file.sync().unwrap();
+            }
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                super::disk::count(None).unwrap();
+            }
+            eprintln!(
+                "{tenants} disks, {pages} resident pages, 20 recounts: {:?}",
+                start.elapsed()
+            );
+        }
+        drop(file);
+        store.remove("resident").unwrap();
+    }
+}
+
+/// Gives the test control over when this thread's next unlink enters the
+/// filesystem. Only the revoke thread installs the filter, so a simultaneous
+/// grant is free to remove a stale socket and bind its replacement.
+fn pause_socket_unlink() -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+    let load_nr = libc::sock_filter {
+        code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        jt: 0,
+        jf: 0,
+        k: std::mem::offset_of!(libc::seccomp_data, nr) as u32,
+    };
+    let notify_on = |nr: libc::c_long| libc::sock_filter {
+        code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        jt: 0,
+        jf: 1,
+        k: nr as u32,
+    };
+    let ret = |k| libc::sock_filter { code: (libc::BPF_RET | libc::BPF_K) as u16, jt: 0, jf: 0, k };
+    let mut code = [
+        load_nr,
+        #[cfg(target_arch = "x86_64")]
+        notify_on(libc::SYS_unlink),
+        #[cfg(target_arch = "x86_64")]
+        ret(libc::SECCOMP_RET_USER_NOTIF),
+        notify_on(libc::SYS_unlinkat),
+        ret(libc::SECCOMP_RET_USER_NOTIF),
+        ret(libc::SECCOMP_RET_ALLOW),
+    ];
+    let filter = libc::sock_fprog { len: code.len() as u16, filter: code.as_mut_ptr() };
+    // SAFETY: This thread installs a filter copied by the kernel. Success
+    // returns a new descriptor owned by the test.
+    unsafe {
+        assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        let fd = libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            &filter,
+        );
+        assert!(fd >= 0, "installing unlink filter: {}", std::io::Error::last_os_error());
+        std::os::fd::OwnedFd::from_raw_fd(fd as i32)
+    }
+}
+
+/// TASK-519: the pathname returned to a regrant must stay connectable when
+/// an overlapping revoke finishes. Pause the old unlink in the kernel and
+/// let the regrant finish first if the locking permits it.
+#[test]
+fn a_racing_revoke_preserves_the_regranted_socket() {
+    use std::os::fd::AsRawFd;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    host();
+    let root = tempfile::tempdir().unwrap();
+    let grants = Arc::new(super::grants::Grants::new(root.path().to_owned()));
+    let dir = root.path().join("tenant");
+    std::fs::create_dir(&dir).unwrap();
+    grants.grant(1, &dir, (None, None)).unwrap();
+    let (send_fd, recv_fd) = mpsc::channel();
+    let revoking = grants.clone();
+    let revoke = std::thread::spawn(move || {
+        send_fd.send(pause_socket_unlink()).unwrap();
+        revoking.revoke(1).unwrap();
+    });
+
+    let listener = recv_fd.recv().unwrap();
+    let fd = listener.as_raw_fd();
+    let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    // SAFETY: A single pollfd referring to the live listener.
+    assert_eq!(unsafe { libc::poll(&mut poll, 1, 5000) }, 1, "revoke never attempted its unlink");
+    // SAFETY: All-zero is a valid empty notification that the kernel fills.
+    let mut notification: libc::seccomp_notif = unsafe { std::mem::zeroed() };
+    // SAFETY: The ioctl writes a notification of the indicated type and size.
+    assert_eq!(unsafe { libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_RECV, &mut notification) }, 0);
+
+    let granting = grants.clone();
+    let (started, ready) = mpsc::channel();
+    let (finished, result) = mpsc::channel();
+    let grant = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        finished.send(granting.grant(1, &dir, (None, None))).unwrap();
+    });
+    ready.recv().unwrap();
+    let early = result.recv_timeout(Duration::from_secs(2));
+    let mut resume = libc::seccomp_notif_resp {
+        id: notification.id,
+        val: 0,
+        error: 0,
+        flags: libc::SECCOMP_USER_NOTIF_FLAG_CONTINUE as u32,
+    };
+    // SAFETY: Answers the paused call's notification on the same listener.
+    assert_eq!(unsafe { libc::ioctl(fd, libc::SECCOMP_IOCTL_NOTIF_SEND, &mut resume) }, 0);
+    revoke.join().unwrap();
+    grant.join().unwrap();
+    let socket = early.unwrap_or_else(|_| result.recv().unwrap()).unwrap();
+    UnixStream::connect(socket).expect("the earlier revoke removed the new grant's socket");
+    grants.revoke(1).unwrap();
 }

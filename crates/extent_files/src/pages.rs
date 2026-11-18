@@ -38,8 +38,8 @@ use storage_device::{Device, ExtentId, WriteFlags, WriteOptions};
 /// The reads a lookup of many nodes keeps in flight.
 const READS_IN_FLIGHT: usize = 32;
 
-/// The most bytes one write to the device carries.
-const WRITE_PIECE: usize = 1 << 20;
+/// The most bytes one data transfer to the device carries.
+const TRANSFER_PIECE: usize = 1 << 20;
 
 /// A node's children: a ref, or a hole, for each of `fanout`, holes past the tree's end.
 type Node = Box<[Option<Ref>]>;
@@ -205,6 +205,44 @@ impl Tree {
         Ok(())
     }
 
+    /// Visits allocated places on paths to chunks at or beyond `first`.
+    async fn visit_suffix(
+        &mut self,
+        device: &dyn Device,
+        first: u64,
+        mut visit: impl FnMut(Place, Ref),
+    ) -> Result<(), Error> {
+        let Some(top) = self.top else { return Ok(()) };
+        if first >= self.counts[0] {
+            return Ok(());
+        }
+        let mut boundary = vec![first];
+        for level in 1..=self.height() {
+            boundary.push(boundary[level as usize - 1] / self.fanout);
+        }
+        visit((self.height(), 0), top);
+        let mut nodes = vec![0];
+        for level in (1..=self.height()).rev() {
+            self.load(device, nodes.iter().map(|&index| (level, index))).await?;
+            let mut below = Vec::new();
+            for index in nodes {
+                for (slot, child) in self.nodes[&(level, index)].iter().enumerate() {
+                    let child_index = index * self.fanout + slot as u64;
+                    if let Some(child) = child
+                        && child_index >= boundary[level as usize - 1]
+                    {
+                        visit((level - 1, child_index), *child);
+                        if level > 1 {
+                            below.push(child_index);
+                        }
+                    }
+                }
+            }
+            nodes = below;
+        }
+        Ok(())
+    }
+
     /// The refs at `places`, read as needed.
     async fn lookup(
         &mut self,
@@ -346,16 +384,10 @@ impl Pages {
             nodes: HashMap::new(),
         };
         let mut extents = BTreeSet::new();
-        extents.extend(tree.top.map(|at| at.extent));
-        if tree.height() == 0 {
-            return Ok(extents);
-        }
-        tree.load(device, (0..tree.counts[1]).map(|index| (1, index))).await?;
-        for (place, node) in &tree.nodes {
-            let children = tree.counts[place.0 as usize - 1] - place.1 * tree.fanout;
-            let named = node.iter().take(children.min(tree.fanout) as usize).flatten();
-            extents.extend(named.map(|at| at.extent));
-        }
+        tree.visit_suffix(device, 0, |_, at| {
+            extents.insert(at.extent);
+        })
+        .await?;
         Ok(extents)
     }
 
@@ -577,6 +609,38 @@ impl Pages {
         let mut at = offset;
         while at < end {
             let (index, within) = (at / block_size, (at % block_size) as usize);
+            let on_device = |index| {
+                if self.dirty.contains_key(&index)
+                    || self.recent.contains_key(&index)
+                    || self.mapped(index * block_size, block_size).is_some()
+                {
+                    return None;
+                }
+                self.committed_chunk(index)
+            };
+            if let Some(first) = on_device(index) {
+                let mut blocks = 1;
+                let limit = (TRANSFER_PIECE as u64 / block_size).max(1);
+                while blocks < limit
+                    && index + blocks < end.div_ceil(block_size)
+                    && on_device(index + blocks).is_some_and(|next| {
+                        next.extent == first.extent
+                            && u64::from(next.block) == u64::from(first.block) + blocks
+                    })
+                {
+                    blocks += 1;
+                }
+                let mut transfer = device.allocate_buffer((blocks * block_size) as usize).await;
+                device
+                    .read(first.extent, u64::from(first.block) * block_size, transfer.as_mut())
+                    .await?;
+                let len = (end - at).min(blocks * block_size - within as u64) as usize;
+                transfer
+                    .subslice(within..within + len)
+                    .copy_to_slice(&mut buf[(at - offset) as usize..][..len]);
+                at += len as u64;
+                continue;
+            }
             let len = ((block_size - within as u64).min(end - at)) as usize;
             let out = &mut buf[(at - offset) as usize..][..len];
             match self.dirty.get(&index) {
@@ -656,11 +720,11 @@ impl Pages {
     pub async fn truncate(&mut self, device: &dyn Device, size: u64) -> Result<(), Error> {
         if size < self.size {
             let kept = chunks(size, self.block_size());
-            self.dirty.split_off(&kept);
             let within = (size % self.block_size() as u64) as usize;
             if within > 0 {
                 self.dirty_chunk(device, kept - 1, false).await?[within..].fill(0);
             }
+            self.dirty.split_off(&kept);
             self.cut = self.cut.min(kept);
         }
         self.size = size;
@@ -738,12 +802,17 @@ impl Pages {
         if n > 0 && (n != old_n || height != old_height || self.cut < old_n) {
             above(&mut rebuilt, 1, (n - 1) / fanout);
         }
-        let had = n.min(old_n);
-        if self.cut < had {
-            for node in self.cut / fanout..=(had - 1) / fanout {
-                above(&mut rebuilt, 1, node);
-            }
-        }
+        let mut left = BTreeSet::new();
+        self.tree
+            .visit_suffix(device, self.cut, |place @ (level, index), _| {
+                if !in_new(place) || level == 0 {
+                    left.insert(place);
+                }
+                if level == 0 && index < n {
+                    above(&mut rebuilt, 1, index / fanout);
+                }
+            })
+            .await?;
         for (level, index) in forced {
             above(&mut rebuilt, level, index);
         }
@@ -755,14 +824,8 @@ impl Pages {
 
         // What the commit replaces or leaves: everything it places, the chunks cut, and the nodes
         // past its shape. Read, with what the nodes rewritten name now.
-        let placed_places: BTreeSet<Place> =
-            written.keys().map(|index| (0, *index)).chain(rebuilt.iter().copied()).collect();
-        let mut left: BTreeSet<Place> = placed_places.clone();
-        left.extend((self.cut..old_n).map(|index| (0, index)));
-        for level in 1..=old_height {
-            let kept = counts.get(level as usize).copied().unwrap_or(0);
-            left.extend((kept..old_counts[level as usize]).map(|index| (level, index)));
-        }
+        left.extend(written.keys().map(|index| (0, *index)));
+        left.extend(rebuilt.iter().copied());
         let parents: Vec<Place> = (left.iter().map(|place| self.tree.parent(*place)))
             .chain(rebuilt.iter().copied())
             .collect();
@@ -990,8 +1053,8 @@ impl Plan {
         }
         let mut writes = Vec::new();
         for (extent, bytes) in &whole {
-            for (piece, bytes) in bytes.chunks(WRITE_PIECE).enumerate() {
-                writes.push((*extent, (piece * WRITE_PIECE) as u64, bytes));
+            for (piece, bytes) in bytes.chunks(TRANSFER_PIECE).enumerate() {
+                writes.push((*extent, (piece * TRANSFER_PIECE) as u64, bytes));
             }
         }
         let last = writes.len().checked_sub(1);

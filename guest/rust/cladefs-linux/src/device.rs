@@ -45,7 +45,7 @@ use std::time::Instant;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
 use storage_device::{
-    Device, ExtentId, NoExtent, OpenExtents, OtherBranch, Previous, ReadOptions, SealedExtent,
+    Device, ExtentId, NoExtent, OpenExtents, OtherCell, Previous, ReadOptions, SealedExtent,
     WriteFlags, WriteOptions,
 };
 
@@ -66,7 +66,7 @@ mod ffi {
         pub max_io: u32,
         pub max_root: u32,
         pub flags: u32,
-        pub branch: u64,
+        pub cell: u64,
         pub max_extent: u64,
     }
 
@@ -75,7 +75,7 @@ mod ffi {
     pub struct Op {
         pub type_: u32,
         pub flags: u32,
-        pub branch: u64,
+        pub cell: u64,
         pub sequence: u64,
         pub offset: u64,
         pub data: *mut c_void,
@@ -152,8 +152,8 @@ struct InfoReply {
     available: u64,
     next_sequence: u64,
     sequence_floor: u64,
-    /// `DEVICE_FREEZE`: the branch the guest mints extents of.
-    branch: u64,
+    /// `DEVICE_FREEZE`: the cell the guest mints extents of.
+    cell: u64,
 }
 
 /// `struct virtio_extent_commit_number`: little-endian.
@@ -230,8 +230,8 @@ pub struct ExtentDevice {
     uploading: Arc<AtomicUsize>,
     /// cladefs: what writes, frees and commits pass, unless the device is frozen.
     gate: Arc<Gate>,
-    /// cladefs: the guest's branch, which thawing may change (`Freezer`).
-    branch: Arc<AtomicU64>,
+    /// cladefs: the guest's cell, which thawing may change (`Freezer`).
+    cell: Arc<AtomicU64>,
     /// cladefs: the number of the commit a follower's device last advanced to (`Device::advance`).
     advanced: Arc<AtomicU64>,
     /// cladefs: whether its filesystem writes nothing, mounted read-only (-o ro, or a follower's):
@@ -514,17 +514,17 @@ impl ExtentDevice {
             },
             uploading: Arc::default(),
             gate: Arc::default(),
-            branch: Arc::new(AtomicU64::new(info.branch)),
+            cell: Arc::new(AtomicU64::new(info.cell)),
             advanced: Arc::default(),
             writes_nothing: false,
         };
         let info = this.info().await?;
         this.capacity.store(info.capacity, Ordering::Release);
-        // The branch, as the device says it now: the configuration the driver read as it bound
-        // the device says the branch of the store its VM had then, which a VM restored from a
+        // The cell, as the device says it now: the configuration the driver read as it bound
+        // the device says the cell of the store its VM had then, which a VM restored from a
         // snapshot doesn't have (TASK-39.1).
         if this.info.flags & DEVICE_FREEZE != 0 {
-            this.branch.store(info.branch, Ordering::Release);
+            this.cell.store(info.cell, Ordering::Release);
         }
         Ok(this)
     }
@@ -549,7 +549,7 @@ impl ExtentDevice {
             freeze: self.info.flags & DEVICE_FREEZE != 0,
             writes_nothing: self.writes_nothing,
             gate: self.gate.clone(),
-            branch: self.branch.clone(),
+            cell: self.cell.clone(),
         }
     }
 
@@ -860,7 +860,7 @@ fn info_reply(reply: &InfoReply) -> InfoReply {
         available: u64::from_le(reply.available),
         next_sequence: u64::from_le(reply.next_sequence),
         sequence_floor: u64::from_le(reply.sequence_floor),
-        branch: u64::from_le(reply.branch),
+        cell: u64::from_le(reply.cell),
     }
 }
 
@@ -868,12 +868,12 @@ fn info_reply(reply: &InfoReply) -> InfoReply {
 /// needs it, and thaws it (TASK-39.1).
 pub struct Freezer {
     sealer: Sealer,
-    /// Whether the device takes FREEZE, and INFO says the branch.
+    /// Whether the device takes FREEZE, and INFO says the cell.
     freeze: bool,
     /// Whether its filesystem writes nothing, which leaves nothing to seal.
     writes_nothing: bool,
     gate: Arc<Gate>,
-    branch: Arc<AtomicU64>,
+    cell: Arc<AtomicU64>,
 }
 
 // SAFETY: The device's requests work from any thread.
@@ -908,8 +908,8 @@ impl Freezer {
         frozen
     }
 
-    /// Tells the device the filesystem thaws, and takes its branch, which is of a store of its own
-    /// in a VM restored from a snapshot; returns the branch. Its capacity, which may differ too, is
+    /// Tells the device the filesystem thaws, and takes its cell, which is of a store of its own
+    /// in a VM restored from a snapshot; returns the cell. Its capacity, which may differ too, is
     /// for the filesystem to take (`resize`), which compares it with the device's and grows the
     /// allocator with it (TASK-79.52). The device takes writes, frees and commits again once opened
     /// (`Freezer::open`).
@@ -919,9 +919,9 @@ impl Freezer {
             let thawed = op(T_FREEZE, 0, None, 0, std::ptr::null_mut(), 0);
             call(device, thawed, None).await?;
             let info = info(device).await?;
-            self.branch.store(info.branch, Ordering::Release);
+            self.cell.store(info.cell, Ordering::Release);
         }
-        Ok(self.branch.load(Ordering::Acquire))
+        Ok(self.cell.load(Ordering::Acquire))
     }
 
     /// Opens the device to writes, frees and commits again.
@@ -943,7 +943,7 @@ fn op(
     ffi::Op {
         type_,
         flags,
-        branch: extent.branch,
+        cell: extent.cell,
         sequence: extent.sequence,
         offset,
         data,
@@ -1066,12 +1066,12 @@ impl Device for ExtentDevice {
         self.sealer.stats.writes.add(began);
         self.sealer.stats.write_bytes.fetch_add(len as u64, Ordering::Relaxed);
         let written = match finished {
-            // The device refuses writes to extents sealed or of other branches alike.
+            // The device refuses writes to extents sealed or of other cells alike.
             Err(error) if error.downcast_ref::<DeviceError>().is_some_and(|e| e.errno == EPERM) => {
-                Err(if extent.branch == self.branch() {
+                Err(if extent.cell == self.cell() {
                     SealedExtent(extent).into()
                 } else {
-                    OtherBranch(extent).into()
+                    OtherCell(extent).into()
                 })
             }
             result => result,
@@ -1087,8 +1087,8 @@ impl Device for ExtentDevice {
         Ok(())
     }
 
-    fn branch(&self) -> u64 {
-        self.branch.load(Ordering::Acquire)
+    fn cell(&self) -> u64 {
+        self.cell.load(Ordering::Acquire)
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
@@ -1123,7 +1123,7 @@ impl Device for ExtentDevice {
             let mut data: Vec<u8> = rest
                 .iter()
                 .flat_map(|extent| {
-                    extent.branch.to_le_bytes().into_iter().chain(extent.sequence.to_le_bytes())
+                    extent.cell.to_le_bytes().into_iter().chain(extent.sequence.to_le_bytes())
                 })
                 .collect();
             let (flags, ptr) = match rest.is_empty() {

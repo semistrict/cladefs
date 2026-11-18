@@ -383,7 +383,10 @@ impl Tenant {
     fn holds(&self, path: &Path) -> Result<(), Errno> {
         let held = match &self.policy.stores {
             Stores::Dir(dir) => in_dir(path, dir),
-            Stores::Roots(Some(roots)) => roots.iter().any(|root| in_dir(path, root)),
+            Stores::Roots(Some(roots)) => {
+                let key = store_key(path);
+                roots.iter().any(|root| key_in_dir(&key, root))
+            }
             Stores::Roots(None) => true,
         };
         if held { Ok(()) } else { Err(Errno::EACCES) }
@@ -948,8 +951,12 @@ fn roots() -> Option<&'static [PathBuf]> {
 /// Whether `path` names a store in `dir`, a canonical directory, whichever way it names it:
 /// through symlinks, or `..`.
 pub(super) fn in_dir(path: &Path, dir: &Path) -> bool {
+    key_in_dir(&store_key(path), dir)
+}
+
+/// Membership for an already resolved store key.
+pub(super) fn key_in_dir(key: &Path, dir: &Path) -> bool {
     use std::path::Component;
-    let key = cells::store_key(path);
     // A path not resolved, its directory not there, holds no `..` that leads out.
     let plain =
         key.components().all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
@@ -1241,24 +1248,29 @@ impl Connection {
     /// Serves the next request waiting, if any, on the [`Pool`], the last having been served; or,
     /// with none, counts one fewer running.
     fn next_turn(self: Arc<Self>) {
-        let mut requests = self.requests.with(Mutex::lock);
-        match requests.waiting.pop_front() {
-            Some(next) => {
+        loop {
+            let mut requests = self.requests.with(Mutex::lock);
+            if let Some(next) = requests.waiting.pop_front() {
                 drop(requests);
-                Pool::get().run(Box::new(move || self.serve_in_turn(next)));
-            }
-            None => {
-                requests.running -= 1;
-                let drained = requests.is_done().then(|| self.drained.clone());
-                drop(requests);
-                // Told once this holds the connection no more: the last to hold it lets its
-                // store go, before its path is released (`finish_connection`), and a store still
-                // held then is still open, to a delete (TASK-54).
-                drop(self);
-                if let Some(drained) = drained {
-                    drained.notify(usize::MAX);
+                let header = next.header;
+                let connection = self.clone();
+                if Pool::get().run(Box::new(move || connection.serve_in_turn(next))) {
+                    return;
                 }
+                let answer = Answer::new(&self, header, None);
+                let reply = answer.reply_header();
+                answer.send(Err(Errno::EAGAIN), reply, Vec::new(), Vec::new());
+                continue;
             }
+            requests.running -= 1;
+            let drained = requests.is_done().then(|| self.drained.clone());
+            drop(requests);
+            // Release the connection before waking the waiter (TASK-54).
+            drop(self);
+            if let Some(drained) = drained {
+                drained.notify(usize::MAX);
+            }
+            return;
         }
     }
 

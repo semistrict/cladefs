@@ -94,9 +94,9 @@ pub struct Filesystem {
 enum Frozen {
     /// The device closed to writes, frees and commits, and told it is frozen; the filesystem's
     /// commits held by the task, and its journal's compactions paused, unless it writes nothing.
-    /// Next: telling the device it thaws, taking its branch, and opening it.
+    /// Next: telling the device it thaws, taking its cell, and opening it.
     Closed { commits: Option<Task<()>> },
-    /// The device open again, on its branch, the commits still held. Next: renewing the journal's
+    /// The device open again, on its cell, the commits still held. Next: renewing the journal's
     /// tail, before anything commits, then letting commits go on.
     Opened { commits: Option<Task<()>> },
     /// The journal's tail renewed, commits going on, compactions still paused. Next: recording the
@@ -316,7 +316,7 @@ impl Filesystem {
         frozen
     }
 
-    /// cladefs: thaws the filesystem: tells the device, and takes its branch, which is a store's
+    /// cladefs: thaws the filesystem: tells the device, and takes its cell, which is a store's
     /// of its own in a VM restored from a snapshot taken frozen: the allocator mints extents of it,
     /// and the journal continues in new ones of it before anything else commits, which a
     /// super-block then records. Then it compacts again. A step that fails leaves it frozen at
@@ -351,8 +351,8 @@ impl Filesystem {
         }
         match frozen {
             Frozen::Closed { commits } => match self.freezer.unfreeze().await {
-                Ok(branch) => {
-                    self.filesystem.allocator().set_branch(branch);
+                Ok(cell) => {
+                    self.filesystem.allocator().set_cell(cell);
                     self.freezer.open();
                     // One that writes nothing has no journal to renew.
                     Ok(commits.is_some().then_some(Frozen::Opened { commits }))

@@ -41,6 +41,18 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         &self,
         range: Range<u64>,
     ) -> Result<Vec<(FileExtent, ExtentAccess)>, Error> {
+        self.extent_batch(range, usize::MAX).await
+    }
+
+    /// cladefs: stop the tree walk once the caller's batch is full.
+    pub async fn extent_batch(
+        &self,
+        range: Range<u64>,
+        limit: usize,
+    ) -> Result<Vec<(FileExtent, ExtentAccess)>, Error> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let store = self.store();
         let device = store.device();
         let layer_set = store.tree().layer_set();
@@ -80,6 +92,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         device_start..device_start + (part.end - part.start),
                     );
                     extents.push((FileExtent::new(part.start, device_range)?, access));
+                    if extents.len() == limit {
+                        return Ok(extents);
+                    }
                 }
             }
             iter.advance().await?;
@@ -92,27 +107,36 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 /// written: all of it, but of an allocation's extent, whose bitmap says which of its blocks were,
 /// those written alone. The others the device doesn't hold, and they read as zeros, as holes do: a
 /// window mapping them would map what isn't there (TASK-149.36).
-fn written(
-    mode: &ExtentMode,
+fn written<'a>(
+    mode: &'a ExtentMode,
     key: &Range<u64>,
     range: Range<u64>,
     block_size: u64,
-) -> Vec<Range<u64>> {
-    let ExtentMode::OverwritePartial(bitmap) = mode else { return vec![range] };
-    let mut parts: Vec<Range<u64>> = Vec::new();
-    let mut block = (range.start - key.start) / block_size;
-    while key.start + block * block_size < range.end {
-        let from = max(key.start + block * block_size, range.start);
-        let to = min(key.start + (block + 1) * block_size, range.end);
-        if bitmap.get(block as usize).unwrap_or(false) {
-            match parts.last_mut() {
-                Some(last) if last.end == from => last.end = to,
-                _ => parts.push(from..to),
+) -> impl Iterator<Item = Range<u64>> + 'a {
+    let key_start = key.start;
+    let mut at = range.start;
+    std::iter::from_fn(move || {
+        if at >= range.end {
+            return None;
+        }
+        let ExtentMode::OverwritePartial(bitmap) = mode else {
+            let start = at;
+            at = range.end;
+            return Some(start..at);
+        };
+        let mut start = None;
+        while at < range.end {
+            let block = (at - key_start) / block_size;
+            let from = at;
+            at = min(range.end, key_start + (block + 1) * block_size);
+            if bitmap.get(block as usize).unwrap_or(false) {
+                start.get_or_insert(from);
+            } else if let Some(start) = start {
+                return Some(start..from);
             }
         }
-        block += 1;
-    }
-    parts
+        start.map(|start| start..at)
+    })
 }
 
 #[cfg(test)]

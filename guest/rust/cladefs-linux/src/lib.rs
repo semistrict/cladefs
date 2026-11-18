@@ -449,6 +449,26 @@ pub unsafe extern "C" fn cladefs_dax_extents(
     unsafe { copy_extents(result, out, max) }
 }
 
+/// # Safety
+///
+/// `fs` is mounted, and `out` has room for `max` extents.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cladefs_extent_batch(
+    fs: *const Fxfs,
+    ino: u64,
+    offset: u64,
+    len: u64,
+    out: *mut DaxExtent,
+    max: usize,
+) -> isize {
+    // SAFETY: As the caller promises.
+    let fs = unsafe { &*fs };
+    let range = offset..offset.saturating_add(len);
+    let result = block_on(fs.reading(|| fs.dax_extent_batch(ino, range.clone(), max)));
+    // SAFETY: As the caller promises.
+    unsafe { copy_extents(result, out, max) }
+}
+
 /// Writes `result`'s attributes to `attr`: 0, or its error's -errno.
 ///
 /// # Safety

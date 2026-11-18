@@ -381,7 +381,13 @@ struct KeptTail {
     /// Which read of it it is.
     read: u64,
     size: u64,
-    flight: Flight<Option<Arc<Tail>>>,
+    flight: TailState,
+}
+
+// Only active callers own a pending GET and its budget slot.
+enum TailState {
+    Reading(futures::future::WeakShared<BoxFuture<'static, Result<Option<Arc<Tail>>, Error>>>),
+    Ready(Arc<Tail>),
 }
 
 impl Tails {
@@ -392,7 +398,12 @@ impl Tails {
         self.by_use.remove(&kept.used);
         kept.used = self.clock;
         self.by_use.insert(self.clock, key.to_owned());
-        Some(kept.flight.clone())
+        match &kept.flight {
+            TailState::Reading(flight) => flight.upgrade(),
+            TailState::Ready(tail) => {
+                Some(futures::future::ready(Ok(Some(tail.clone()))).boxed().shared())
+            }
+        }
     }
 
     /// The number of the next read of a tail.
@@ -404,6 +415,7 @@ impl Tails {
     /// Keeps `flight`, read `read` of the tail of the object at `key`, now going.
     fn insert(&mut self, key: &str, read: u64, flight: Flight<Option<Arc<Tail>>>) {
         self.remove(key, None);
+        let flight = TailState::Reading(flight.downgrade().expect("new tail read"));
         self.kept.insert(key.to_owned(), KeptTail { used: read, read, size: 0, flight });
         self.by_use.insert(read, key.to_owned());
         self.settle(key, read, TAIL);
@@ -925,7 +937,7 @@ impl<B: Bucket> Fetching<B> {
         if let Some(fetched) = self.recent_part(key, part) {
             return Ok(FetchedPart::Data(fetched));
         }
-        let bytes = match self.kept(key, part) {
+        let bytes = match self.kept(key, part)? {
             Some(bytes) => bytes,
             None => {
                 let slot = given.await;
@@ -995,14 +1007,10 @@ impl<B: Bucket> Fetching<B> {
 
     /// The stored bytes of part `part` of the object at `key`, if the cache has them: checked,
     /// those that fail dropped from the cache ([`Cache::part`]).
-    fn kept(&self, key: &str, part: u64) -> Option<Vec<u8>> {
-        match self.cached(|cache| cache.part(key, part))? {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                log::warn!("cladefs: reading part {part} of {key} from the cache: {err}");
-                None
-            }
-        }
+    fn kept(&self, key: &str, part: u64) -> Result<Option<Vec<u8>>, Error> {
+        self.cached(|cache| cache.part(key, part))
+            .unwrap_or(Ok(None))
+            .map_err(|err| Error::Read(format!("part {part} of {key} from the part cache: {err}")))
     }
 
     /// Keeps `bytes`, part `part`'s stored bytes, checked, in the cache.
@@ -1024,7 +1032,14 @@ impl<B: Bucket> Fetching<B> {
             let fetched = shared.read_tail(&key_owned).await;
             let mut tails = shared.memory.tails.lock().unwrap();
             match &fetched {
-                Ok(Some((_, size))) => tails.settle(&key_owned, read, *size),
+                Ok(Some((tail, size))) => {
+                    if let Some(entry) =
+                        tails.kept.get_mut(&key_owned).filter(|entry| entry.read == read)
+                    {
+                        entry.flight = TailState::Ready(tail.clone());
+                        tails.settle(&key_owned, read, *size);
+                    }
+                }
                 // What failed, or found the object gone, is not kept.
                 _ => tails.remove(&key_owned, Some(read)),
             }
@@ -1039,7 +1054,7 @@ impl<B: Bucket> Fetching<B> {
     /// cache's copy of it, or one read from the bucket, under a place in the budget, and kept in
     /// the cache then.
     async fn read_tail(&self, key: &str) -> Result<Option<(Arc<Tail>, u64)>, Error> {
-        let tail = match self.kept_tail(key) {
+        let tail = match self.kept_tail(key)? {
             Some(tail) => tail,
             None => {
                 let slot = self.budget.enter(Priority::Demand, TAIL).1.await;
@@ -1057,14 +1072,10 @@ impl<B: Bucket> Fetching<B> {
 
     /// The tail of the object at `key`, if the cache has it: checked, one that fails dropped from
     /// the cache ([`Cache::tail`]).
-    fn kept_tail(&self, key: &str) -> Option<object::Tail> {
-        match self.cached(|cache| cache.tail(key))? {
-            Ok(tail) => tail,
-            Err(err) => {
-                log::warn!("cladefs: reading the tail of {key} from the cache: {err}");
-                None
-            }
-        }
+    fn kept_tail(&self, key: &str) -> Result<Option<object::Tail>, Error> {
+        self.cached(|cache| cache.tail(key))
+            .unwrap_or(Ok(None))
+            .map_err(|err| Error::Read(format!("the tail of {key} from the part cache: {err}")))
     }
 
     /// Keeps `tail`, the tail of the object at `key`, as read, in the cache.
@@ -1077,6 +1088,8 @@ impl<B: Bucket> Fetching<B> {
 
 #[cfg(test)]
 mod tests {
+    mod audit_tests;
+
     use super::*;
     use crate::bucket::PutMode;
     use crate::layout::test_cell;

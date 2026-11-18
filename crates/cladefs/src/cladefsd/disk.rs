@@ -203,20 +203,7 @@ impl Disk {
     /// yet: it writes them back first, after reading what is being written, so that a write done
     /// meanwhile is either counted being written or written back and walked.
     pub(super) fn recount(&self) {
-        let _counting = self.counting.lock().unwrap();
-        let before = self.used.load(Ordering::SeqCst);
-        let writing = self.writing.load(Ordering::SeqCst);
-        if let Err(err) = local_cell::pages::shared().write_back_all() {
-            log::warn!(
-                "cladefsd: writing back the stores' page cache to count tenant {}'s disk: {err}",
-                base32_id::Short(self.tenant)
-            );
-        }
-        let walked = walk(&self.dir);
-        // Only admissions add to it meanwhile.
-        let delta = (walked + writing).wrapping_sub(before);
-        self.used.fetch_add(delta, Ordering::SeqCst);
-        USED.fetch_add(delta, Ordering::SeqCst);
+        recount(std::iter::once(self));
     }
 
     /// Has it counted anew soon, on the daemon's thread that counts disks ([`recounter`]).
@@ -226,6 +213,43 @@ impl Disk {
             *nudged.lock().unwrap() = true;
             wake.notify_one();
         }
+    }
+}
+
+/// Snapshot all selected disks before one shared flush. Callers visit disks in registry
+/// order, so concurrent passes acquire their recount locks in the same order.
+fn recount<'a>(disks: impl Iterator<Item = &'a Disk>) {
+    let snapshots: Vec<_> = disks
+        .map(|disk| {
+            let guard = disk.counting.lock().unwrap();
+            let before = disk.used.load(Ordering::SeqCst);
+            let writing = disk.writing.load(Ordering::SeqCst);
+            (disk, guard, before, writing)
+        })
+        .collect();
+    if snapshots.is_empty() {
+        return;
+    }
+    let mut failed = HashSet::new();
+    let mut unknown = false;
+    local_cell::pages::shared().write_back_reporting(|file, err| {
+        log::warn!("cladefsd: writing back {file:?} for disk accounting: {err}");
+        match file {
+            Some(id) => {
+                failed.insert(id);
+            }
+            None => unknown = true,
+        }
+    });
+    for (disk, _guard, before, writing) in snapshots {
+        let (walked, incomplete) = walk(&disk.dir, &failed);
+        let counted = walked + writing;
+        // A walk may miss completed admissions if any of its files failed to flush. Keep
+        // their previous charge and let unrelated tenants reclaim theirs.
+        let counted = if unknown || incomplete { counted.max(before) } else { counted };
+        let delta = counted.wrapping_sub(before);
+        disk.used.fetch_add(delta, Ordering::SeqCst);
+        USED.fetch_add(delta, Ordering::SeqCst);
     }
 }
 
@@ -272,11 +296,13 @@ fn recounter() {
                 if all {
                     every = Instant::now();
                 }
-                for disk in alive() {
-                    if disk.nudged.swap(false, Ordering::Relaxed) || all {
-                        disk.recount();
-                    }
-                }
+                let disks = alive();
+                recount(
+                    disks
+                        .iter()
+                        .map(Arc::as_ref)
+                        .filter(|disk| disk.nudged.swap(false, Ordering::Relaxed) || all),
+                );
                 std::thread::sleep(RECOUNT_GAP);
             }
         });
@@ -295,12 +321,13 @@ fn alive() -> Vec<Arc<Disk>> {
 /// filesystem alone, without following links, each file once however many links it has: what
 /// `du -sx` says. What goes as it is walked is not counted; what can't be read is logged, and not
 /// counted.
-fn walk(dir: &Path) -> u64 {
+fn walk(dir: &Path, failed: &HashSet<(u64, u64)>) -> (u64, bool) {
+    let mut incomplete = false;
     let root = match std::fs::symlink_metadata(dir) {
         Ok(root) => root,
         Err(err) => {
             log::warn!("cladefsd: counting {}: {err}", dir.display());
-            return 0;
+            return (0, err.kind() != std::io::ErrorKind::NotFound);
         }
     };
     let mut bytes = root.blocks() * 512;
@@ -312,6 +339,7 @@ fn walk(dir: &Path) -> u64 {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
                 log::warn!("cladefsd: counting {}: {err}", dir.display());
+                incomplete = true;
                 continue;
             }
         };
@@ -322,6 +350,7 @@ fn walk(dir: &Path) -> u64 {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
                     log::warn!("cladefsd: counting in {}: {err}", dir.display());
+                    incomplete = true;
                     continue;
                 }
             };
@@ -330,13 +359,14 @@ fn walk(dir: &Path) -> u64 {
             {
                 continue;
             }
+            incomplete |= !failed.is_empty() && failed.contains(&(metadata.dev(), metadata.ino()));
             bytes += metadata.blocks() * 512;
             if metadata.is_dir() {
                 dirs.push(path);
             }
         }
     }
-    bytes
+    (bytes, incomplete)
 }
 
 /// Limits the disk of the tenant `tenant` to `bytes`, or every tenant's together, without one; or
@@ -378,7 +408,7 @@ pub fn total() -> u64 {
 pub fn count(tenant: Option<u64>) -> Result<(u64, Option<u64>), Errno> {
     let disks: Vec<_> =
         alive().into_iter().filter(|disk| tenant.is_none_or(|id| disk.tenant == id)).collect();
-    disks.iter().for_each(|disk| disk.recount());
+    recount(disks.iter().map(Arc::as_ref));
     let Some(id) = tenant else { return Ok((total(), total_limit())) };
     if disks.is_empty() {
         return Err(Errno::ENOENT);

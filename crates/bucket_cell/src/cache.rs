@@ -53,6 +53,8 @@ pub struct Cache {
 /// The cache's index: the objects it keeps parts of, and those parts by when they were last read.
 #[derive(Debug, Default)]
 struct Index {
+    /// Disk space promised to admitted fills until their writes settle.
+    pending: u64,
     objects: HashMap<String, Object>,
     /// The parts kept, by when they were last read.
     by_use: BTreeMap<u64, (String, u64)>,
@@ -173,7 +175,10 @@ impl Index {
     ) -> (bool, Vec<Evicted>) {
         let (mut evicted, mut freed, mut from) = (Vec::new(), 0, 0);
         let fits = loop {
-            if self.bytes + len <= capacity && free + freed >= floor + needed {
+            if self.bytes + len <= capacity
+                && (free as u128 + freed as u128)
+                    >= floor as u128 + needed as u128 + self.pending as u128
+            {
                 break true;
             }
             let Some((&used, (key, part))) = self.by_use.range(from..).next() else { break false };
@@ -223,6 +228,7 @@ impl Index {
     /// that leaves it nothing.
     fn written(&mut self, key: &str, part: u64, written: bool) -> Option<Evicted> {
         let object = self.objects.get_mut(key).expect("an object its busy parts keep");
+        self.pending -= object.len(part);
         if written && !object.forgotten {
             object.busy.remove(&part);
             self.keep(key, part);
@@ -374,7 +380,6 @@ impl Cache {
         if len > self.capacity {
             return Ok(());
         }
-        let free = self.files.free()?;
         let mut kept = self.kept.lock().unwrap();
         if let Some(object) = kept.objects.get(key)
             && object.parts != tail.parts
@@ -395,10 +400,12 @@ impl Cache {
             None if kept.removing.contains(key) => return Ok(()),
             None => {}
         }
+        let free = self.files.free()?;
         kept.objects.insert(key.to_owned(), Object::writing(tail.parts.clone(), TAIL));
         let (fits, mut evicted) = kept.make_room((self.capacity, self.floor), free, len, len);
         if fits {
             kept.bytes += len;
+            kept.pending += len;
         } else {
             evicted.extend(kept.freed(key, TAIL));
         }
@@ -432,7 +439,6 @@ impl Cache {
         if len > self.capacity {
             return Ok(());
         }
-        let free = self.files.free()?;
         let (fits, evicted) = {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get_mut(key) else { return Ok(()) };
@@ -443,10 +449,12 @@ impl Cache {
             {
                 return Ok(());
             }
+            let free = self.files.free()?;
             object.busy.insert(part, Busy::Writing);
             let (fits, mut evicted) = kept.make_room((self.capacity, self.floor), free, len, len);
             if fits {
                 kept.bytes += len;
+                kept.pending += len;
             } else {
                 evicted.extend(kept.freed(key, part));
             }
@@ -484,9 +492,9 @@ impl Cache {
         if len > self.capacity {
             return Ok(false);
         }
-        let free = self.files.free()?;
         let (fits, evicted) = {
             let mut kept = self.kept.lock().unwrap();
+            let free = self.files.free()?;
             match kept.objects.get(key) {
                 _ if kept.removing.contains(key) => return Ok(false),
                 Some(object) if !object.busy.is_empty() => return Ok(false),
@@ -964,6 +972,8 @@ fn punch(file: &File, offset: u64, len: u64) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod audit_tests;
+
     use super::*;
     use crate::layout::PART;
     use std::sync::Arc;

@@ -95,7 +95,7 @@ static void cladefs_vfs_set_flags(struct inode *inode, u32 fsflags)
 	for (i = 0; i < ARRAY_SIZE(cladefs_vfs_flags); i++)
 		if (fsflags & cladefs_vfs_flags[i].fs)
 			i_flags |= cladefs_vfs_flags[i].i_flag;
-	cladefs_vfs_inode(inode)->fsflags = fsflags;
+	WRITE_ONCE(cladefs_vfs_inode(inode)->fsflags, fsflags);
 	inode_set_flags(inode, i_flags, S_IMMUTABLE | S_APPEND | S_NOATIME);
 }
 
@@ -112,9 +112,9 @@ static u32 cladefs_vfs_mode_flags(u32 mode)
 }
 
 /* Fxfs's mode of `inode`: the kernel's, with its attribute flags above. */
-static u32 cladefs_vfs_mode(struct inode *inode)
+static u32 cladefs_vfs_mode(struct inode *inode, u32 fsflags)
 {
-	u32 fsflags = cladefs_vfs_inode(inode)->fsflags, mode = inode->i_mode;
+	u32 mode = inode->i_mode;
 	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(cladefs_vfs_flags); i++)
@@ -222,14 +222,13 @@ static void cladefs_vfs_update_attr(struct inode *inode, const struct cladefs_at
  * Writes what the kernel keeps of `inode` to Fxfs: its mode, owner and times, and with
  * CLADEFS_SET_SIZE in `valid`, its size.
  */
-int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
+static int cladefs_vfs_store_attr(struct inode *inode, u32 valid, u32 flags, struct timespec64 ctime)
 {
 	struct timespec64 atime = inode_get_atime(inode), mtime = inode_get_mtime(inode);
-	struct timespec64 ctime = inode_get_ctime(inode);
 	struct cladefs_setattr set = {
 		.valid = valid | CLADEFS_SET_MODE | CLADEFS_SET_UID | CLADEFS_SET_GID | CLADEFS_SET_ATIME |
 			 CLADEFS_SET_MTIME | CLADEFS_SET_CTIME,
-		.mode = cladefs_vfs_mode(inode),
+		.mode = cladefs_vfs_mode(inode, flags),
 		.uid = i_uid_read(inode),
 		.gid = i_gid_read(inode),
 		.size = i_size_read(inode),
@@ -239,6 +238,17 @@ int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
 	};
 
 	return cladefs_nofs(cladefs_write_inode(cladefs_vfs_fs(inode->i_sb), inode->i_ino, &set));
+}
+
+int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
+{
+	struct cladefs_vfs_inode *fi = cladefs_vfs_inode(inode);
+	int err;
+
+	mutex_lock(&fi->attr_lock);
+	err = cladefs_vfs_store_attr(inode, valid, fi->fsflags, inode_get_ctime(inode));
+	mutex_unlock(&fi->attr_lock);
+	return err;
 }
 
 static struct dentry *cladefs_vfs_lookup(struct inode *dir, struct dentry *dentry,
@@ -907,7 +917,7 @@ static int cladefs_vfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, s
 /* FS_IOC_GETFLAGS and FS_IOC_FSGETXATTR (lsattr): the inode's attribute flags. */
 static int cladefs_vfs_fileattr_get(struct dentry *dentry, struct file_kattr *fa)
 {
-	fileattr_fill_flags(fa, cladefs_vfs_inode(d_inode(dentry))->fsflags);
+	fileattr_fill_flags(fa, READ_ONCE(cladefs_vfs_inode(d_inode(dentry))->fsflags));
 	return 0;
 }
 
@@ -920,20 +930,28 @@ static int cladefs_vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dent
 				 struct file_kattr *fa)
 {
 	struct inode *inode = d_inode(dentry);
+	struct cladefs_vfs_inode *fi = cladefs_vfs_inode(inode);
+	struct timespec64 ctime;
+	int err;
 
 	if (fileattr_has_fsx(fa) || fa->flags & ~CLADEFS_VFS_FL)
 		return -EOPNOTSUPP;
-	cladefs_vfs_set_flags(inode, fa->flags);
-	inode_set_ctime_current(inode);
-	return cladefs_vfs_write_attr(inode, 0);
+	mutex_lock(&fi->attr_lock);
+	ctime = current_time(inode);
+	err = cladefs_vfs_store_attr(inode, 0, fa->flags, ctime);
+	if (!err) {
+		cladefs_vfs_set_flags(inode, fa->flags);
+		inode_set_ctime_to_ts(inode, ctime);
+	}
+	mutex_unlock(&fi->attr_lock);
+	return err;
 }
 
-/* The most of a file's data whose pieces one call asks Fxfs for, and so the most pieces. */
-#define CLADEFS_EXTENT_WINDOW (1 << 20)
-#define CLADEFS_EXTENT_BATCH (CLADEFS_EXTENT_WINDOW / PAGE_SIZE)
+/* Limit the number of pieces copied per lookup, irrespective of the distance between them. */
+#define CLADEFS_EXTENT_BATCH 256
 
 /*
- * Calls `fn` with each piece of `inode`'s data within `start` to `end`, in order, a window at a
+ * Calls `fn` with each piece of `inode`'s data within `start` to `end`, in order, a batch at a
  * time, until it returns nonzero, which this returns; or 0, or a -errno.
  */
 static int cladefs_vfs_each_extent(struct inode *inode, loff_t start, loff_t end,
@@ -947,12 +965,12 @@ static int cladefs_vfs_each_extent(struct inode *inode, loff_t start, loff_t end
 	if (!extents)
 		return -ENOMEM;
 	while (!ret && at < end) {
-		u64 len = min_t(u64, CLADEFS_EXTENT_WINDOW, end - at);
+		u64 len = end - at;
 		ssize_t count, i;
 
 		/* cladefs: a follower's window as of one state; `fn` may copy out, which may fault. */
 		cladefs_vfs_fill_begin(inode->i_sb);
-		count = cladefs_nofs(cladefs_dax_extents(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
+		count = cladefs_nofs(cladefs_extent_batch(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
 						   extents, CLADEFS_EXTENT_BATCH));
 		cladefs_vfs_fill_end(inode->i_sb);
 		if (count < 0) {
@@ -961,7 +979,9 @@ static int cladefs_vfs_each_extent(struct inode *inode, loff_t start, loff_t end
 		}
 		for (i = 0; i < count && !ret; i++)
 			ret = fn(arg, &extents[i]);
-		at += len;
+		if (count < CLADEFS_EXTENT_BATCH)
+			break;
+		at = extents[count - 1].offset + extents[count - 1].len;
 	}
 	kfree(extents);
 	return ret;
@@ -2879,6 +2899,7 @@ static struct inode *cladefs_vfs_alloc_inode(struct super_block *sb)
 	cladefs_dax_inode_init(&fi->dax);
 	atomic64_set(&fi->gen, 0);
 	fi->listing = NULL;
+	mutex_init(&fi->attr_lock);
 	fi->fsflags = 0;
 	fi->blocks_as_of = 0;
 	return &fi->vfs;
