@@ -164,9 +164,8 @@ pub enum Error {
     /// cladefs: the cell has no object: no such cell (TASK-364).
     #[error("no such cell")]
     NoCell,
-    /// cladefs: the cell is the filesystem of another branch, this one: a cell is one filesystem
-    /// (doc-20).
-    #[error("the cell is branch {0:x}'s filesystem")]
+    /// cladefs: the cell has another branch, this one: a cell has one (doc-20).
+    #[error("the cell has branch {0:x}")]
     CellHasBranch(u64),
     /// cladefs: a fork of the point to a branch of another tenant's cell than the point's, which the
     /// point's record doesn't say is shared ([`record::Record::shared`], TASK-395.7).

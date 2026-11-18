@@ -2457,13 +2457,13 @@ fn stores_are_deleted_while_their_forks_are_open() {
     assert_eq!(missing.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
 }
 
-/// TASK-364, doc-20: a store a connection makes is the filesystem of a new cell: an Fxfs one, or,
+/// TASK-364, doc-20: a store a connection makes is a new cell's: an Fxfs one, or,
 /// made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite one, which a host's
 /// FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory (TASK-456.2). The
 /// cell's object, under its tenant's prefix in the bucket, says so; and the store's branch's head
 /// was taken with the cell's epoch.
 #[test]
-fn stores_made_are_their_cells_filesystems_of_their_kinds() {
+fn stores_made_are_cells_of_their_kinds() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2489,8 +2489,8 @@ fn stores_made_are_their_cells_filesystems_of_their_kinds() {
             (memory_branch, "memory", Kind::Memory),
         ] {
             let cell = extent_bucket::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
-            let filesystem = extent_bucket::cell::Filesystem { branch: branch.id, kind };
-            assert_eq!((cell.filesystem, cell.deleted), (Some(filesystem), false), "{name}");
+            let made = (cell.branch, cell.kind, cell.deleted);
+            assert_eq!(made, (Some(branch.id), Some(kind), false), "{name}");
             let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
             assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }

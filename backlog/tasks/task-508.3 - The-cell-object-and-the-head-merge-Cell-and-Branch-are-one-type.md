@@ -4,7 +4,7 @@ title: 'One concept, one type: a cell'
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 01:38'
+updated_date: '2026-11-18 02:23'
 labels:
   - bucket
 dependencies:
@@ -18,7 +18,7 @@ ordinal: 900000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Today three types name what is one thing, a cell: one filesystem with a kind, a root and a capacity, on one log (doc-20). Cell (the cell object: holder, epoch, token, KEKs, shredded), Branch (its log, whose head is a second swapped object) and cell::Filesystem (its kind and log) fold into one, Cell, with one swapped object.
+Today two types name what is one thing, a cell, of one kind, with a root and a capacity (doc-20): Cell (the cell object: holder, epoch, token, KEKs, shredded, its branch and kind) and Branch (its log, whose head is a second swapped object) fold into one, Cell, with one swapped object.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

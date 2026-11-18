@@ -1215,13 +1215,13 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         // cladefs: its cell, held by this placement, whose epoch is the token the branch's head is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
         // branch whose cell has no object yet, new or a fork's child, makes it; one deleted takes
-        // no writer (`Deleted`). The store's branch is its cell's filesystem from now on, unless
-        // the cell is another's (`CellHasBranch`, doc-20): all in one compare-and-swap of the cell's
+        // no writer (`Deleted`). The store's branch is its cell's from now on, of its kind, unless
+        // the cell has another (`CellHasBranch`, doc-20): all in one compare-and-swap of the cell's
         // object, a read alone when nothing changes. Not
         // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
         // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
         // of a branch with DEKs is there already (TASK-411.3).
-        let filesystem = recovering.kind().map(|kind| cell::Filesystem { branch: branch.id, kind });
+        let given = recovering.kind().map(|kind| (branch.id, kind));
         let kms = &self.keys.kms;
         let kek = match &found {
             Some((record, ..)) if !record.deks.is_empty() => None,
@@ -1230,8 +1230,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         let making = kek.as_ref().map(|(_, kek)| kek);
         let holding = (placement, placement);
         let remembered = matches!(cell, CellFrom::Remembered(_));
-        let holding =
-            cell::hold_from(&**bucket, branch.cell, cell.start(), holding, making, filesystem);
+        let holding = cell::hold_from(&**bucket, branch.cell, cell.start(), holding, making, given);
         let (held, object) = match holding.await.map(|(held, object, _)| (held, object)) {
             Ok(held) => held,
             Err(err) => {
@@ -1749,8 +1748,8 @@ mod tests {
         );
     }
 
-    /// TASK-364: a store opened takes its branch's cell, making it for a new branch, and is its
-    /// filesystem from then on (doc-20); its branch's head is taken with the cell's epoch. A later placement's
+    /// TASK-364: a store opened takes its branch's cell, making it for a new branch, whose branch
+    /// it is from then on (doc-20); its branch's head is taken with the cell's epoch. A later placement's
     /// taking of the cell, and of the branch's head with the epoch it took it at, fences the
     /// store's writer: its next commit's upload fails, and a placement of a lower token takes the
     /// cell back no more.
@@ -1776,8 +1775,7 @@ mod tests {
         store.made().unwrap();
         let object = runtime.block_on(cell::read(&*bucket, BRANCH.cell)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
-        let root = cell::Filesystem { branch: BRANCH.id, kind: cell::Kind::Fxfs };
-        assert_eq!(object.filesystem, Some(root));
+        assert_eq!((object.branch, object.kind), (Some(BRANCH.id), Some(cell::Kind::Fxfs)));
         let head = runtime.block_on(extent_bucket::head::get(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((head.epoch, head.token), (1, 1));
 

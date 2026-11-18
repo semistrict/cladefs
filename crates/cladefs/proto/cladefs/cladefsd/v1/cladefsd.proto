@@ -80,7 +80,7 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364, doc-20): a tenant's cell is one filesystem, its branch kept under the cell's
+// Cells (TASK-364, doc-20): a tenant's cell has one kind and one branch, kept under the cell's
 // prefix in the bucket, and a host takes a cell whole, its branch's head with it. A branch
 // is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
@@ -249,20 +249,21 @@ message CreateStoreRequest {
   // last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE). A point
   // has no writer, and needs none.
   optional uint64 token = 4;
-  // The tenant whose cell's filesystem the branch is. Of a new cell in a granted tenant's
+  // The tenant whose cell's branch it is. Of a new cell in a granted tenant's
   // directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
   // (PERMISSION_DENIED, EPERM). A point of another tenant's there is the VM manager's to give: the
   // tenant's VM processes restore from it, each restore a cell of their tenant's, if the point is
   // shared (SharePoint); otherwise each restore fails (PERMISSION_DENIED, EACCES).
   uint64 tenant = 5;
-  // The cell, or 0 for a new one: the store is its filesystem, a new one (ALREADY_EXISTS, EEXIST,
-  // if the cell is another branch's), unless it takes the branch it has.
+  // The cell, or 0 for a new one: the store is the cell's, a new one (ALREADY_EXISTS, EEXIST, if
+  // the cell has another branch), unless it takes the branch it has.
   uint64 cell = 6;
-  // What the cell's filesystem is, which says what opens it.
+  // The cell's kind, which says what opens it.
   VdiskKind kind = 7;
 }
 
-// What a cell's filesystem is (the type's name is renamed with the rest, TASK-508.4).
+// What a cell holds, which says what opens it (the type's name is renamed with the rest,
+// TASK-508.4).
 enum VdiskKind {
   // An Fxfs filesystem: a VM's disk, or a host's mount's.
   VDISK_KIND_FXFS = 0;
@@ -294,7 +295,7 @@ message ImportImageRequest {
   string image = 3;
   // The image in the layout to import, by its reference; empty for its only image.
   string reference = 4;
-  // The tenant of the new cell whose filesystem the store is. In a granted tenant's directory,
+  // The tenant of the new cell whose store it is. In a granted tenant's directory,
   // that tenant's ID, or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
   uint64 tenant = 5;
 }
@@ -305,7 +306,7 @@ message ImportImageResponse {
   uint64 branch = 1;
   // Its tenant.
   uint64 tenant = 2;
-  // Its cell, a new one, whose filesystem it is.
+  // Its cell, a new one.
   uint64 cell = 3;
 }
 
@@ -322,7 +323,7 @@ message ForkStoreRequest {
   // `to` deletes, and the fork stands or never was, as the bucket has it.
   string to = 2;
   // Once the fork's branch, named; now always a new one, its ID the bucket's to give (TASK-364):
-  // the filesystem of a new cell of the granted tenant's whose directory `to` is in, or else of
+  // the branch of a new cell of the granted tenant's whose directory `to` is in, or else of
   // `from`'s tenant.
   reserved 3;
   // Whether the fork is a point (TASK-158): a name of `from`'s state as it is, which any number of
@@ -343,7 +344,7 @@ message ForkStoreResponse {
   uint64 branch = 1;
   // Its tenant: `from`'s.
   uint64 tenant = 2;
-  // Its cell, a new one, whose filesystem it is.
+  // Its cell, a new one.
   uint64 cell = 3;
 }
 
@@ -474,9 +475,9 @@ message StatStoreResponse {
   // How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
   // uploader's interval (a second): 0 if none waits.
   uint64 oldest_pending_ms = 16;
-  // The tenant whose cell's filesystem its branch is (TASK-364).
+  // The tenant whose cell's branch it is (TASK-364).
   uint64 tenant = 17;
-  // The cell whose filesystem its branch is.
+  // The cell whose branch it is.
   uint64 cell = 18;
   // How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
   // the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
@@ -643,7 +644,7 @@ message ObjectStorageStats {
 // Grants a tenant.
 message GrantRequest {
   // Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
-  // its directory are its cells' filesystems, under its prefix, and its VM processes open no store of
+  // its directory are its cells', under its prefix, and its VM processes open no store of
   // another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in base 32
   // (Crockford's digits, lower case, no leading zeros): `<tenant>.sock`.
   uint64 tenant = 1;

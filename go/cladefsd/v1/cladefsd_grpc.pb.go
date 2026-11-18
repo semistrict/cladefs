@@ -80,7 +80,7 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364, doc-20): a tenant's cell is one filesystem, its branch kept under the cell's
+// Cells (TASK-364, doc-20): a tenant's cell has one kind and one branch, kept under the cell's
 // prefix in the bucket, and a host takes a cell whole, its branch's head with it. A branch
 // is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a

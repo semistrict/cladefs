@@ -1,10 +1,10 @@
 ---
 id: TASK-508
-title: A cell is one filesystem
+title: A cell has one kind
 status: In Progress
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 00:44'
+updated_date: '2026-11-18 02:23'
 labels:
   - bucket
   - host
@@ -19,12 +19,12 @@ ordinal: 897000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The user (2026-11-17) decided a cell is one filesystem with one writer, its log, head, key and versions, and a VM is several cells. A cell holding several filesystems needed either N-way coordination for a whole-cell version (doc-18) or one log for all of them (doc-19), which moved them into the store's core and grew the code by about 3,700 lines on t3/one-log-per-cell. A paused VM needs neither: its VM snapshot makes a local version in each of its cells and writes a record naming them. Supersedes doc-19.
+The user (2026-11-17) decided a cell has one kind, one writer, its head, key and versions, and a VM is several cells. A cell holding several disks needed either N-way coordination for a whole-cell version (doc-18) or one log for all of them (doc-19), which moved them into the store's core and grew the code by about 3,700 lines on t3/one-log-per-cell. A paused VM needs neither: its VM snapshot makes a local version in each of its cells and writes a record naming them. Supersedes doc-19.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cell has one filesystem: no vdisk map, no cell cuts
+- [ ] #1 A cell has one kind: no vdisk map, no cell cuts
 - [ ] #2 Making a version is one local commit closing the segment; nothing on that path touches the bucket
 - [ ] #3 Forks are made only from versions; points are gone
 - [ ] #4 The code, protos and docs say only the glossary's words for cells, versions and forks
@@ -40,5 +40,5 @@ The user (2026-11-17) decided a cell is one filesystem with one writer, its log,
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-11-17 run: TASK-508.1 done in code (069c56a1e), DoD's whole-workspace nextest not run. Not started: TASK-508.2 (the code's points: about 1,700 references in 119 files), TASK-508.3 (Cell, Branch and cell::Filesystem into one type; the cell object and head into one swapped object), TASK-508.4 (identifiers, protos such as VdiskKind, MemoryVdisk, the extent ID's first half, Fxfs, the guest kernel's vext_id, doc-18 and other docs; about 150 vdisk mentions remain outside backlog and Go).
+2026-11-17 run: TASK-508.1 done in code (069c56a1e), DoD's whole-workspace nextest not run. Not started: TASK-508.2 (the code's points: about 1,700 references in 119 files), TASK-508.3 (Cell and Branch into one type; the cell object and head into one swapped object), TASK-508.4 (identifiers, protos such as VdiskKind, MemoryVdisk, the extent ID's first half, Fxfs, the guest kernel's vext_id, doc-18 and other docs; about 150 vdisk mentions remain outside backlog and Go).
 <!-- SECTION:NOTES:END -->

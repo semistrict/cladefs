@@ -434,7 +434,7 @@ fn cladefsctl_mount(socket: &str, args: &[&str]) -> String {
 }
 
 /// One mount of many stores (TASK-302), of tenants' cells (TASK-364), cladefsd's (TASK-475.2): a cell
-/// is one filesystem (doc-20), made or attached through its control socket and shown at
+/// has one kind (doc-20), made or attached through its control socket and shown at
 /// TENANT/CELL (nothing renamed between cells, nothing made in the mount's directories of its
 /// own); its cell's objects in the bucket under its tenant's prefix. A cell detached goes, written
 /// back, so that it attaches again from its store, or, that gone, from the bucket; a cell with a

@@ -57,11 +57,11 @@
 //! for their stores, the daemon mounts a directory of tenants' cells there with FUSE, none at first
 //! (TASK-302, TASK-364, TASK-475.2), and serves its Mount service on the control socket
 //! (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount`), which `CLADEFSD_GRPC` must name.
-//! Attaching a cell (`Attach`; a cell of 0, a new one, its Fxfs filesystem made empty) takes it
+//! Attaching a cell (`Attach`; a cell of 0, a new Fxfs one, its filesystem made empty) takes it
 //! from the daemon's bucket, at the placement of the token the call gives, the daemon's if none,
-//! and its filesystem, a cell being one (doc-20), if Fxfs, into a store at `STORES/TENANT/CELL`,
-//! shown at `MOUNT/TENANT/CELL`, TENANT and CELL in base 32, padded (`base32_id::Padded`); a
-//! SQLite cell, or a VM's, is not shown. `Detach` takes a cell's filesystem away once nothing uses
+//! into a store at `STORES/TENANT/CELL`, an Fxfs cell shown at `MOUNT/TENANT/CELL` (doc-20),
+//! TENANT and CELL in base 32, padded (`base32_id::Padded`); a
+//! SQLite cell, or a VM's, is not shown. `Detach` takes a cell away once nothing uses
 //! it, written back, or at once if forced; `List` says what is attached. The mount is the daemon's user's; with `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may
 //! use it as its permissions say (for a user other than root, `/etc/fuse.conf` must have
 //! `user_allow_other`). Root mounts with mount(2), any other user through libfuse's

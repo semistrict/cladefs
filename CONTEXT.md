@@ -66,7 +66,7 @@ A barrier that also records the cell's new root; the unit the store recovers to.
 _Avoid_: flush, sync (a sync waits for a commit's level)
 
 **Root**:
-The one mutable record of a cell: where its filesystem's metadata starts.
+The one mutable record of a cell: where its metadata starts.
 
 **Free**:
 The guest's telling the store an extent is no longer referenced.
@@ -191,7 +191,7 @@ The object storage holding every cell's durable copy.
 _Avoid_: remote, object store, S3
 
 **Cell**:
-One filesystem, of a kind (Fxfs, SQLite, or a VM's memory image), a root and a capacity, with one writer at a time: its log, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole.
+A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole.
 _Avoid_: volume, disk, store (a store holds a cell)
 
 **Store**:

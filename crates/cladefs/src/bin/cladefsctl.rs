@@ -44,10 +44,10 @@
 //! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
-//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the filesystem of a
-//! new cell of the default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the branch.
+//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, a new cell's of the
+//! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the branch.
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in base 32,
-//! its cell's filesystem, TASK-364), which its bucket has (`ENOENT` otherwise): once
+//! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! cladefsd opens it,
 //! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
@@ -136,10 +136,10 @@
 //! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in base 32
 //! (`base32_id`).
 //! `attach` takes CELL from the daemon's bucket, at the placement whose fencing token is TOKEN if
-//! given, the daemon's otherwise, and shows its filesystem, if Fxfs, at `MOUNT/TENANT/CELL`; it
-//! prints the cell, then its branch, if shown. `create` makes a new cell of TENANT's, its
-//! filesystem a new, empty Fxfs one of CAPACITY bytes, attached so, and prints the same.
-//! `detach` takes the cell's filesystem away, and returns once its store is unmounted and written
+//! given, the daemon's otherwise, and shows it, if an Fxfs cell, at `MOUNT/TENANT/CELL`; it
+//! prints the cell, then its branch, if shown. `create` makes a new Fxfs cell of TENANT's, its
+//! filesystem empty, of CAPACITY bytes, attached so, and prints the same.
+//! `detach` takes the cell away, and returns once its store is unmounted and written
 //! back: once nothing has a file of it open, or a directory of it as its current one; with
 //! `--force`, at once, what is open of it failing from then on. `list` prints the cells attached,
 //! a line each, `TENANT CELL BRANCH`, and `detaching` after one being detached.
@@ -290,7 +290,7 @@ enum Command {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Mount {
     /// A cell attached, at `token`'s placement if given; or, `capacity` given, a new one of its
-    /// tenant's, its filesystem a new Fxfs one of `capacity` bytes.
+    /// tenant's, a new Fxfs cell of `capacity` bytes.
     Attach { cell: cladefs::Cell, capacity: u64, token: Option<u64> },
     /// A cell detached, at once if `force`.
     Detach { cell: cladefs::Cell, force: bool },
@@ -330,8 +330,8 @@ impl Mount {
 #[cfg(target_os = "linux")]
 impl Mount {
     /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
-    /// it answers: `attach` and `create`, the cell, then the branch of its filesystem shown, if
-    /// any, a line each; `list`, each cell, `TENANT CELL BRANCH`, `detaching` after one being
+    /// it answers: `attach` and `create`, the cell, then its branch, if shown, a line each;
+    /// `list`, each cell, `TENANT CELL BRANCH`, `detaching` after one being
     /// detached. IDs padded, as the mount's paths have them.
     fn through(self, socket: &Path) -> anyhow::Result<()> {
         let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");

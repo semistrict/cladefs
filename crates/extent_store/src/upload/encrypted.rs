@@ -156,7 +156,7 @@ impl<K: Kms> World<K> {
 }
 
 /// A store's directory, made, of `branch`, of a cell several of these tests' branches share: none
-/// is the cell's filesystem, which a branch of a cell of its own is (doc-20), so that each opens.
+/// is the cell's branch, which a branch of a cell of its own is (doc-20), so that each opens.
 fn made(branch: Branch) -> MemDir {
     let dir = MemDir::new();
     let description = Description { block_size: 4096, capacity: 1 << 30, branch };
@@ -655,7 +655,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     // Its cell, made at the fork with a KEK of the pool, held by no placement: the parent's DEK
     // unwraps under it, for the child alone.
     let made_cell = world.cell_of(child.branch.cell).unwrap();
-    assert_eq!((made_cell.epoch, made_cell.token, made_cell.filesystem), (1, 0, None));
+    assert_eq!((made_cell.epoch, made_cell.token, made_cell.branch), (1, 0, None));
     let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
     let dek = keys::unwrap_inherited(&kek, child.branch, &record.inherited[0]).unwrap();
     assert_eq!(dek.expose(), store.keys().encrypting().0.expose());
@@ -874,7 +874,7 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
         assert_eq!(opened, Err(refused.clone()), "{branch}");
     }
     assert_eq!(world.cell_of(elsewhere.cell), None);
-    assert_eq!(world.cell().filesystem, None);
+    assert_eq!(world.cell().branch, None);
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
     let child = child_in(TENANT, 3, 10, false);

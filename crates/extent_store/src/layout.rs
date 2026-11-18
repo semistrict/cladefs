@@ -29,7 +29,7 @@ use storage_device::ExtentId;
 /// cut at their ends, and its description may name a version of its branch it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
-/// cell is one filesystem, of no vdisk's name (doc-20, TASK-508.1). A store of another format is
+/// cell has one kind, of no vdisk's name (doc-20, TASK-508.1). A store of another format is
 /// refused ([`Format`]): nothing reads, converts or upgrades it.
 pub(crate) const FORMAT: &str = "cladefs extent store 15";
 

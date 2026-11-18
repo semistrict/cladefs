@@ -4,7 +4,7 @@
 
 //! The control API of a FUSE mount of many stores (TASK-302): gRPC, whose calls and errors are
 //! `proto/cladefs/mount/v1/mount.proto`'s, served on cladefsd's control socket (TASK-475.2). It
-//! attaches tenants' cells of the mount's bucket (TASK-364), each one filesystem (doc-20), an Fxfs
+//! attaches tenants' cells of the mount's bucket (TASK-364), each of one kind (doc-20), an Fxfs
 //! one taken into a store in the mount's directory of stores, at `TENANT/CELL`, and shown at that
 //! path in the mount; and detaches them.
 //!

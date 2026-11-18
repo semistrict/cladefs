@@ -118,8 +118,8 @@ of these stands in with the items the code copied from Fuchsia uses:
   number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
   attach`, `create`, `detach`, `list`), takes a tenant's cell of the bucket
-  (TASK-364), its head with it, a cell being one filesystem (doc-20), an Fxfs
-  one into `DIR/TENANT/CELL` and shown at `MOUNTPOINT/TENANT/CELL`, and
+  (TASK-364), its head with it, into `DIR/TENANT/CELL`, an Fxfs cell shown
+  at `MOUNTPOINT/TENANT/CELL` (doc-20), and
   detaches the cell once the kernel lets go of it, written back; the daemon's
   drain closes the mount. A cell is so held by one process, whether VMs or the
   mount serve it. macOS has no open-source FUSE, so no mounts
