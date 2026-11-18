@@ -1255,6 +1255,29 @@ pub(super) fn bucket_stats() -> Option<bucket_cell::object_bucket::Stats> {
     BUCKET.get().map(|bucket| bucket.stats())
 }
 
+/// cladefs: what the daemon asked of each bucket, its own and those of other buckets' cells
+/// (TASK-633.4), by number (`metrics`).
+pub(super) fn bucket_stats_by_bucket() -> Vec<(u16, bucket_cell::object_bucket::Stats)> {
+    BUCKET.get().map(|bucket| bucket.stats_by_bucket()).unwrap_or_default()
+}
+
+/// cladefs: the stats file's line of what the daemon asked of other buckets than its own
+/// (TASK-633.4): each one's GETs, downloaded and uploaded bytes, by number.
+fn buckets_line(bucket: &bucket_cell::object_bucket::ObjectBucket) -> String {
+    use bucket_cell::object_bucket::{Request, Upload};
+    let others: Vec<String> = (bucket.stats_by_bucket().into_iter().skip(1))
+        .map(|(number, stats)| {
+            let gets = stats.requests(Request::Get) + stats.requests(Request::GetRange);
+            let uploaded: u64 = Upload::ALL.iter().map(|upload| stats.uploaded(*upload)).sum();
+            format!("{number} gets={gets} downloaded={} uploaded={uploaded}", stats.downloaded)
+        })
+        .collect();
+    match others.is_empty() {
+        true => "buckets: its own alone".to_owned(),
+        false => format!("buckets: {}", others.join("; ")),
+    }
+}
+
 /// How many stores connections have open, to write (`metrics`).
 pub(super) fn open_count() -> usize {
     table().writers()
@@ -1410,6 +1433,7 @@ fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>
                     super::metrics::requests_line(),
                     uploads_line(),
                     cache_line(),
+                    buckets_line(&bucket),
                     super::disk::line(),
                     super::peers::line().unwrap_or_else(|| "peers: none".to_owned()),
                     super::process::line(),

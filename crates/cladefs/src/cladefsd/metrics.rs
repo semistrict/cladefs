@@ -79,7 +79,10 @@
 //!   extent cache's pages (`super::process`, TASK-330.2).
 //! - `cladefsd_object_storage_requests_total{request}`,
 //!   `cladefsd_object_storage_uploaded_bytes_total{object}` and
-//!   `cladefsd_object_storage_downloaded_bytes_total`: what the daemon did with its bucket,
+//!   `cladefsd_object_storage_downloaded_bytes_total`: what the daemon did with its bucket;
+//!   `cladefsd_object_storage_bucket_gets_total{bucket}` and
+//!   `cladefsd_object_storage_bucket_downloaded_bytes_total{bucket}`, by bucket number, its own and
+//!   those of other buckets' cells (TASK-633.4),
 //!   once it opened a store.
 
 use super::wire::*;
@@ -562,6 +565,22 @@ pub fn render() -> String {
         let _ = writeln!(out, "# HELP {name} Bytes downloaded from the bucket.");
         let _ = writeln!(out, "# TYPE {name} counter");
         let _ = writeln!(out, "{name} {}", stats.downloaded);
+        // cladefs: by bucket, the daemon's own and those of other buckets' cells (TASK-633.4):
+        // what crosses to another cloud region shows here.
+        let by_bucket = super::cells::bucket_stats_by_bucket();
+        let name = "cladefsd_object_storage_bucket_gets_total";
+        let _ = writeln!(out, "# HELP {name} GETs of each bucket, by its number.");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        for (number, stats) in &by_bucket {
+            let gets = stats.requests(Request::Get) + stats.requests(Request::GetRange);
+            let _ = writeln!(out, "{name}{{bucket=\"{number}\"}} {gets}");
+        }
+        let name = "cladefsd_object_storage_bucket_downloaded_bytes_total";
+        let _ = writeln!(out, "# HELP {name} Bytes downloaded from each bucket, by its number.");
+        let _ = writeln!(out, "# TYPE {name} counter");
+        for (number, stats) in &by_bucket {
+            let _ = writeln!(out, "{name}{{bucket=\"{number}\"}} {}", stats.downloaded);
+        }
     }
     out
 }
