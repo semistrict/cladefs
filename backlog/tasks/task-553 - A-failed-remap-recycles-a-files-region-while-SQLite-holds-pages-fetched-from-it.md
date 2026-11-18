@@ -3,9 +3,11 @@ id: TASK-553
 title: >-
   A failed remap recycles a file's region while SQLite holds pages fetched from
   it
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:25'
+updated_date: '2026-11-18 22:36'
 labels: []
 dependencies: []
 priority: high
@@ -39,3 +41,9 @@ FileSet::remap's error branch (crates/extent_files/src/file_set.rs) takes the re
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+<!-- SECTION:NOTES:END -->

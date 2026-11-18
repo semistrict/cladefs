@@ -58,6 +58,15 @@ after the batch's test run.
 
 A branch lives only as long as the batch on it: once its tests pass, it goes into main, is pushed, and is deleted, locally and on the remote. Pushing to main needs no question. Never leave finished work waiting on a branch, nor start a batch from a branch other than main: merge main in often, so that nothing drifts far from it.
 
+## Claim tasks on main at once
+
+Sessions work beside each other and learn what the others do from main's backlog. So a task's
+change of hands goes to main as soon as it happens, alone, never waiting for the code it is about:
+when you start a task (In Progress, your name on it), and whenever you change a task in any other
+way short of closing it (notes, plan, a task filed, another's scope changed), commit just the
+backlog change and push it to main at once. Only closing a task (Done, its acceptance criteria
+checked, its final summary) may wait to land with the code that closes it.
+
 ## Don't wait on the user: decide, and record it in OPEN_QUESTIONS.md
 
 Never ask the user anything directly: not in a reply, not with a question tool, not as a choice at the end of a message. The user doesn't read through output for questions. Everything you'd need from them goes in `OPEN_QUESTIONS.md` at the repo root.
