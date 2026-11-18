@@ -158,7 +158,7 @@ impl<Q: RequestQueue> Shared<Q> {
 struct Worker<Q> {
     index: u16,
     /// Returns the queue, as the worker left it.
-    thread: cladefs::thread::Thread<Q>,
+    thread: cladefs::thread::Thread<Option<Q>>,
     stop: OwnedFd,
 }
 
@@ -168,9 +168,19 @@ impl<Q: RequestQueue> Worker<Q> {
         let stop = eventfd()?;
         let stop_theirs = stop.try_clone()?;
         let shared = Arc::new(Shared { queue: Mutex::new(queue), interrupt, requests });
+        let (ready, started) = std::sync::mpsc::channel();
         let thread = cladefs::thread::spawn(format!("{name}{index}"), move || {
-            work(shared, &event, &stop_theirs)
+            let epoll = match watch(&event, &stop_theirs) {
+                Ok(epoll) => epoll,
+                Err(err) => {
+                    let _ = ready.send(Err(err));
+                    return None;
+                }
+            };
+            let _ = ready.send(Ok(()));
+            Some(work(shared, &event, &stop_theirs, &epoll))
         })?;
+        started.recv().map_err(io::Error::other)??;
         Ok(Self { index, thread, stop })
     }
 
@@ -184,14 +194,19 @@ impl<Q: RequestQueue> Worker<Q> {
         if stopped.is_err() {
             error!("extent device: the worker panicked");
         }
-        stopped.ok()
+        stopped.ok().flatten()
     }
 }
 
 /// Serves the queue until `stop` is signalled, then waits for the requests it took to be returned
 /// to the driver, and returns the queue as they left it.
-fn work<Q: RequestQueue>(shared: Arc<Shared<Q>>, event: &OwnedFd, stop: &OwnedFd) -> Q {
-    take_requests(&shared, event, stop);
+fn work<Q: RequestQueue>(
+    shared: Arc<Shared<Q>>,
+    event: &OwnedFd,
+    stop: &OwnedFd,
+    epoll: &OwnedFd,
+) -> Q {
+    take_requests(&shared, event, stop, epoll);
     shared.requests.wait_idle();
     shared.requests.served().log();
     // The requests returned, the last of them dropped its share.
@@ -199,14 +214,12 @@ fn work<Q: RequestQueue>(shared: Arc<Shared<Q>>, event: &OwnedFd, stop: &OwnedFd
     shared.queue.into_inner().expect("Poisoned lock")
 }
 
-/// Takes the requests off the queue as the driver notifies `event`, and serves them, until `stop`
-/// is signalled.
-fn take_requests<Q: RequestQueue>(shared: &Arc<Shared<Q>>, event: &OwnedFd, stop: &OwnedFd) {
+/// Registers both descriptors under the worker thread's confinement.
+fn watch(event: &OwnedFd, stop: &OwnedFd) -> io::Result<OwnedFd> {
     // SAFETY: A plain system call, whose result is checked.
     let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epoll < 0 {
-        error!("extent worker: epoll: {}", io::Error::last_os_error());
-        return;
+        return Err(io::Error::last_os_error());
     }
     // SAFETY: A new descriptor, this one's alone.
     let epoll = unsafe { OwnedFd::from_raw_fd(epoll) };
@@ -216,10 +229,21 @@ fn take_requests<Q: RequestQueue>(shared: &Arc<Shared<Q>>, event: &OwnedFd, stop
         // SAFETY: Adds `fd`, open for as long as `epoll` is, with its event.
         if unsafe { libc::epoll_ctl(epoll.as_raw_fd(), libc::EPOLL_CTL_ADD, fd, &mut watched) } < 0
         {
-            error!("extent worker: epoll: {}", io::Error::last_os_error());
-            return;
+            return Err(io::Error::last_os_error());
         }
     }
+    Ok(epoll)
+}
+
+/// Takes the requests off the queue as the driver notifies `event`, and serves them, until `stop`
+/// is signalled.
+fn take_requests<Q: RequestQueue>(
+    shared: &Arc<Shared<Q>>,
+    event: &OwnedFd,
+    stop: &OwnedFd,
+    epoll: &OwnedFd,
+) {
+    let (event_fd, stop_fd) = (event.as_raw_fd(), stop.as_raw_fd());
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
     loop {
         // SAFETY: Fills at most `events.len()` events.

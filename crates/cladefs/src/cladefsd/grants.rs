@@ -7,7 +7,7 @@
 //! manager to bind-mount into the tenant's jails. A connection's tenant is the socket it came in
 //! on. Grants live as long as the daemon: after a restart, the VM manager grants again.
 
-use super::server::{Tenant, in_dir, serve_tenant};
+use super::server::{Tenant, key_in_dir, serve_tenant};
 use crate::Errno;
 use std::collections::HashMap;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -85,28 +85,36 @@ impl Grants {
     /// The ID in the bucket of the granted tenant whose directory the store at `path` is in, if
     /// any (TASK-364).
     pub fn tenant_at(&self, path: &Path) -> Option<u64> {
+        let key = super::cells::store_key(path);
         let granted = self.granted.lock().unwrap();
         let mut grants = granted.values().map(|grant| &grant.tenant);
-        grants.find(|tenant| tenant.dir().is_some_and(|dir| in_dir(path, dir))).map(|t| t.id())
+        grants.find(|tenant| tenant.dir().is_some_and(|dir| key_in_dir(&key, dir))).map(|t| t.id())
     }
 
     /// Whether the stores at `one` and `other` are of one tenant, or of none: their paths in one
     /// tenant's directory, as VM processes name them.
     pub fn same_tenant(&self, one: &Path, other: &Path) -> bool {
+        let one = super::cells::store_key(one);
+        let other = super::cells::store_key(other);
         let granted = self.granted.lock().unwrap();
         let tenant_of = |path: &Path| {
-            granted.values().filter_map(|grant| grant.tenant.dir()).find(|dir| in_dir(path, dir))
+            granted
+                .values()
+                .filter_map(|grant| grant.tenant.dir())
+                .find(|dir| key_in_dir(path, dir))
         };
-        tenant_of(one) == tenant_of(other)
+        tenant_of(&one) == tenant_of(&other)
     }
 
     /// Revokes the grant of the tenant of the ID `id` (`ENOENT` if it has none): its socket goes,
     /// and takes no more connections. The tenant goes once its VM processes connected do.
     pub fn revoke(&self, id: u64) -> Result<(), Errno> {
-        let grant = self.granted.lock().unwrap().remove(&id).ok_or(Errno::ENOENT)?;
+        let mut granted = self.granted.lock().unwrap();
+        let grant = granted.remove(&id).ok_or(Errno::ENOENT)?;
         if let Err(err) = std::fs::remove_file(&grant.socket) {
             log::warn!("cladefsd: removing {}: {err}", grant.socket.display());
         }
+        drop(granted);
         // Its thread's accept fails with `EINVAL`, and it stops.
         super::shut_down(std::os::fd::AsFd::as_fd(&grant.listener));
         Ok(())

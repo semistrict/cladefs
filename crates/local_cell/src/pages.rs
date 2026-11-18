@@ -292,13 +292,21 @@ impl PageCache {
     /// daemon counting what tenants' files take on disk. A file failing leaves the others written;
     /// the first failure is returned, and each file's next sync reports its own.
     pub fn write_back_all(&self) -> io::Result<()> {
-        let mut failed = Ok(());
+        let mut first = None;
+        self.write_back_reporting(|_, err| {
+            first.get_or_insert(err);
+        });
+        first.map_or(Ok(()), Err)
+    }
+
+    /// As write_back_all, reporting each failed file by its device and inode so a directory
+    /// walk can tell whether its count covers all pending writes.
+    pub fn write_back_reporting(&self, mut failed: impl FnMut(Option<(u64, u64)>, io::Error)) {
         for file in self.files() {
             if let Err(err) = file.write_back_all() {
-                failed = failed.and(Err(err));
+                failed(file.disk_identity(), err);
             }
         }
-        failed
     }
 
     /// The files it holds pages of, those gone dropped.
@@ -475,6 +483,10 @@ impl Drop for Dying {
 
 /// A file a [`PageCache`] holds pages of, as its flusher and its eviction see it.
 trait Paged: Send + Sync {
+    fn disk_identity(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     /// When it was used last ([`PageCache::used`]).
     fn used(&self) -> u64;
     /// When its oldest dirty page was dirtied, if it has one.
@@ -828,6 +840,10 @@ impl<F: File> Drop for Shared<F> {
 }
 
 impl<F: File> Paged for Shared<F> {
+    fn disk_identity(&self) -> Option<(u64, u64)> {
+        self.file.disk_identity()
+    }
+
     fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
