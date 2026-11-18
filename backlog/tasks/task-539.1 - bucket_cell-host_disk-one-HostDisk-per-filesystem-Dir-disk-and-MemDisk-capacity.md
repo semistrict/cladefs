@@ -3,9 +3,11 @@ id: TASK-539.1
 title: >-
   bucket_cell::host_disk: one HostDisk per filesystem; Dir::disk and MemDisk
   capacity
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 14:15'
+updated_date: '2026-11-18 14:44'
 labels:
   - extentd
   - disk
@@ -38,3 +40,11 @@ Refactor first. Both the stores and the part cache must charge one per-filesyste
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. bucket_cell::host_disk: HostDisk per filesystem (st_dev registry of Weak), fstatvfs sampler or in-memory sampler, Count counters (stores, unframed, pledged, cache, cache_writing), governed allowance/headroom/pressure, wake_governor/wait_for_governor.
+2. The part cache samples free space through its HostDisk; the free-space test moves to host_disk.rs.
+3. Dir::disk() (default None); DiskDir holds HostDisk::of(path); CachedDir forwards; MemDisk has a disk of its own, MemDisk/MemDir::with_capacity(n) refusing writes, files and directories past n with ENOSPC; its disk's sample says n minus what it holds (files counted in granules once per inode, directories a granule).
+<!-- SECTION:PLAN:END -->

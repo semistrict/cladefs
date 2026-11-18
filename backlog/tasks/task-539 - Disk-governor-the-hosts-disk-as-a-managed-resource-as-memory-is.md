@@ -1,9 +1,11 @@
 ---
 id: TASK-539
 title: 'Disk governor: the host''s disk as a managed resource, as memory is'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 14:15'
+updated_date: '2026-11-18 14:44'
 labels:
   - extentd
   - disk

@@ -595,7 +595,7 @@ impl<F: File> Cached<F> {
     }
 
     /// Drops every page, the dirty ones unwritten: the file is the host's now
-    /// ([`crate::CachedDir`]'s `host_path`), or a test's to damage.
+    /// (given by [`crate::CachedDir`]'s `give`), or a test's to damage.
     pub(crate) fn cancel(&self) {
         self.shared.drop_pages(0..u64::MAX);
     }

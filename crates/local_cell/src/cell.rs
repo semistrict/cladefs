@@ -896,18 +896,11 @@ impl<D: Dir> Recovering<D> {
         // cladefs: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
-        if let (Some(cache), Some(here)) = (&cache, dir.host_path("")) {
-            use std::os::unix::fs::MetadataExt as _;
-            let device = |path: &std::path::Path| {
-                std::fs::metadata(path)
-                    .map(|metadata| metadata.dev())
-                    .with_context(|| format!("{}", path.display()))
-            };
+        if let (Some(cache), Some(here)) = (&cache, dir.disk().and_then(|disk| disk.dev())) {
             ensure!(
-                device(&here)? == device(cache.dir())?,
-                "the store at {} is on another filesystem than the host's cache at {}: the \
-                 store's segments go into the cache by renaming them",
-                here.display(),
+                cache.disk().dev() == Some(here),
+                "the store is on another filesystem than the host's cache at {}: the store's \
+                 segments go into the cache by renaming them",
                 cache.dir().display()
             );
         }
@@ -1135,9 +1128,9 @@ fn own_footer(extent: ExtentId) -> Vec<u8> {
 /// holding it.
 fn leave<D: Dir>(dir: &D, cache: Option<&Cache>, leaving: Vec<(String, Option<String>)>) {
     for (path, key) in leaving {
-        let adopted = match (cache, key, dir.host_path(&path)) {
-            (Some(cache), Some(key), Some(from)) => {
-                cache.adopt(&key, &from).unwrap_or_else(|err| {
+        let adopted = match (cache, key) {
+            (Some(cache), Some(key)) => {
+                dir.give(&path, &mut |from| cache.adopt(&key, from)).unwrap_or_else(|err| {
                     log::warn!("extent store: {path} into the cache, as {key}: {err}");
                     false
                 })

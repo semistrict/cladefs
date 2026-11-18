@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 /// A directory, `D`, its extents' files through a page cache. See the module docs.
@@ -173,19 +173,20 @@ impl<D: Dir> Dir for CachedDir<D> {
         self.shared.dir.unclaim()
     }
 
-    /// A file handed to the host by its path, as the host's cache of objects takes one by renaming
-    /// it (TASK-165.8), has its dirty pages written back first, and its pages dropped: the host
-    /// reads and moves it around the cache.
-    fn host_path(&self, path: &str) -> Option<PathBuf> {
-        if let Some(cached) = self.cached(path) {
-            if let Err(err) = cached.settle(0..u64::MAX) {
-                log::warn!("extent store: writing {path} back for the host: {err}");
-                return None;
-            }
+    /// A file given to the host by its path, as the host's cache of objects takes one by renaming
+    /// it (TASK-165.8), has its dirty pages written back first, and, taken, its pages dropped: the
+    /// host reads and moves it around the cache.
+    fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
+        let cached = self.cached(path);
+        if let Some(cached) = &cached {
+            cached.settle(0..u64::MAX)?;
+        }
+        let given = self.shared.dir.give(path, to)?;
+        if given && let Some(cached) = cached {
             self.shared.files.lock().unwrap().remove(path);
             cached.cancel();
         }
-        self.shared.dir.host_path(path)
+        Ok(given)
     }
 
     fn concurrent(&self) -> bool {
@@ -297,5 +298,57 @@ impl<F: File> File for CachedFile<F> {
             Self::Raw(file) => file.sync_cached(),
             Self::Cached(cached) => cached.sync_cached(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dir::{Dir as _, File as _, HostDir};
+    use crate::pages::{Options, PageCache};
+
+    const PAGE: usize = 4096;
+
+    /// A directory of the host's over a page cache of its own, with no flusher: what it holds
+    /// dirty stays so until written back.
+    fn host_dir(path: &std::path::Path) -> HostDir {
+        HostDir::over(crate::dir::DiskDir::new(path).unwrap(), PageCache::without_flusher(Options::default()))
+    }
+
+    /// TASK-539.2: a data file given is written back before the taker reads it, and, taken, its
+    /// pages go and it leaves the directory; one the taker refuses keeps its pages and stays.
+    #[test]
+    fn files_given_are_written_back_and_taken_files_leave() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = host_dir(temp.path());
+        let file = dir.create("taken", true).unwrap();
+        file.write_at(&[7; PAGE], 0).unwrap();
+        assert_eq!(dir.cache().usage().dirty, PAGE as u64);
+        let to = temp.path().join("elsewhere");
+        let taken = dir
+            .give("taken", &mut |from| {
+                assert_eq!(std::fs::read(from)?, [7; PAGE], "written back before it is taken");
+                std::fs::rename(from, &to).map(|()| true)
+            })
+            .unwrap();
+        assert!(taken);
+        assert_eq!(dir.cache().usage().held, 0, "its pages went with it");
+        assert_eq!(dir.list("").unwrap(), ["elsewhere"]);
+
+        let kept = dir.create("kept", true).unwrap();
+        kept.write_at(&[8; PAGE], 0).unwrap();
+        assert!(!dir.give("kept", &mut |_| Ok(false)).unwrap());
+        assert_eq!(dir.cache().usage().held, PAGE as u64, "its pages stay");
+        let mut read = [0; PAGE];
+        dir.open("kept", true).unwrap().read_at(&mut read, 0).unwrap();
+        assert_eq!(read, [8; PAGE]);
+        assert!(dir.list("").unwrap().contains(&"kept".to_owned()));
+    }
+
+    /// A directory in memory gives nothing: none of its files is on the host's filesystem.
+    #[test]
+    fn a_directory_in_memory_gives_nothing() {
+        let dir = crate::MemDir::new();
+        dir.create("f", true).unwrap();
+        assert!(!dir.give("f", &mut |_| panic!("given")).unwrap());
     }
 }

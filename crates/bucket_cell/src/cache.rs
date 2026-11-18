@@ -544,6 +544,11 @@ impl Cache {
         self.evict(Vec::from_iter(evicted))
     }
 
+    /// cladefs: the disk of its filesystem (doc-22).
+    pub fn disk(&self) -> &std::sync::Arc<crate::host_disk::HostDisk> {
+        &self.files.disk
+    }
+
     /// The most bytes of objects it keeps.
     pub fn capacity(&self) -> u64 {
         self.capacity

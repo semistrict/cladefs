@@ -3703,9 +3703,8 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     assert_eq!(
         refused.to_string(),
         format!(
-            "the store at {}/ is on another filesystem than the host's cache at {}: the store's \
+            "the store is on another filesystem than the host's cache at {}: the store's \
              segments go into the cache by renaming them",
-            temp.path().display(),
             cache_dir.display()
         )
     );

@@ -137,10 +137,13 @@ pub trait Dir: Send + Sync + 'static {
     /// cladefs: lets the claim go, once claimed ([`Dir::claim`]).
     fn unclaim(&self) {}
 
-    /// cladefs: the path on the host's file system of the file at `path`, if it is on it: what a
-    /// store's file leaving it for the host's cache of objects is renamed from (TASK-165.8).
-    fn host_path(&self, _path: &str) -> Option<PathBuf> {
-        None
+    /// cladefs: gives the file at `path` to `to`, by its path on the host's filesystem, which `to`
+    /// takes it from, by a rename, or not: as a store's file leaving it goes into the host's cache
+    /// of objects (TASK-165.8). Returns whether `to` took it, which goes from the directory then,
+    /// as a removal would take it; a directory not on the host's filesystem gives nothing.
+    fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
+        let _ = (path, to);
+        Ok(false)
     }
 
     /// cladefs: whether the store may do I/O in the directory on threads of its own, alongside its
@@ -302,8 +305,8 @@ impl Dir for DiskDir {
         Ok(names)
     }
 
-    fn host_path(&self, path: &str) -> Option<PathBuf> {
-        Some(self.path.join(path))
+    fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
+        to(&self.path.join(path))
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
