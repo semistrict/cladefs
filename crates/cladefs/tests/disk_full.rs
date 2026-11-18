@@ -197,10 +197,14 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     // The cache gave way first: no more than a band of the headroom left of it.
     let cache = cache_at_refusal.unwrap();
     assert!(cache <= HEADROOM / 4, "{cache} bytes cached as the first write was refused");
-    // Refused, its store commits, and refuses its writes, not failed.
+    // Refused, its store commits, not failed: its commit frees what its extents open held, which
+    // a few more writes take, then it refuses again, and commits again.
     vm.commit_ordered(None).unwrap();
-    assert_eq!(write(&vm, 1 + written, 1), Err(Errno::ENOSPC));
+    let more = (0..64).take_while(|more| write(&vm, 1 + written + more, 3).is_ok()).count() as u64;
+    assert!(more < 64, "refused no more after its commit");
+    assert_eq!(write(&vm, 1 + written + more, 4), Err(Errno::ENOSPC));
     vm.commit_ordered(None).unwrap();
+    written += more;
 
     // The bucket back: what waited uploads and leaves the disk; the VM writes again.
     std::fs::write(&faults, "failing=not").unwrap();
