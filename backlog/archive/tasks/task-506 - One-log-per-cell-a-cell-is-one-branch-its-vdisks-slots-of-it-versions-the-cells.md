@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-17 02:46'
+updated_date: '2026-11-18 00:11'
 labels:
   - bucket
   - host
@@ -38,3 +39,9 @@ The user (2026-11-17) wants a cell to be one distributed object with one writer,
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Superseded 2026-11-17 by TASK-508 (doc-20, a cell is one filesystem). Built on t3/one-log-per-cell, kept unmerged as a reference.
+<!-- SECTION:NOTES:END -->
