@@ -11,7 +11,7 @@
 //!     [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] [--metrics FILE]
 //! cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] [--compact-below FRACTION]
 //! cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE]
-//! cladefs-gc URL --delete-cell TENANT/CELL/ID
+//! cladefs-gc URL --delete-cell TENANT/CELL
 //! cladefs-gc URL --usage [--tenant TENANT]
 //! cladefs-gc URL --rotate-master-key
 //! ```
@@ -74,7 +74,7 @@
 //! The collector keeps what every live cell inherited, whether or not a host holds the cell,
 //! which only hosts know. `--cells` lists the live cells, of every cell or of the one
 //! `--cell` names, one a line, a fork's after the
-//! cell and the segment it forked at, each cell as TENANT/CELL/ID, all in base 32, but
+//! cell and the segment it forked at, each cell as TENANT/CELL, all in base 32, but
 //! those FILE names, as `cladefsctl stat` calls them, separated by white space: with FILE naming
 //! every cell every host holds, those left are no host's, or newer than FILE. `--delete-cell`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
@@ -132,7 +132,7 @@ fn usage() -> String {
      cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] \
      [--compact-below FRACTION] | \
      cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] | \
-     cladefs-gc URL --delete-cell TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] | \
+     cladefs-gc URL --delete-cell TENANT/CELL | cladefs-gc URL --usage [--tenant TENANT] | \
      cladefs-gc URL --rotate-master-key (every cell, or the one --cell names; --mark-only deletes nothing, writing each cell's \
      gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds less than a pass deletes)"
         .into()
@@ -499,21 +499,10 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
     }
 }
 
-/// Deletes `cell` of `bucket`, whichever placement took it last, as an operator does, under
-/// `kms`, the host's (TASK-411.14): a cell's forks into other cells that it records, their
-/// children having no record yet (their writer died between the fork's acknowledgement and
-/// recording it), get its checkpoint at their origins authenticated under its DEK, its cell's
-/// KEK unwrapped by the KMS, as their children refuse one under another key. The KMS refusing it,
-/// such a deletion fails, naming the tenant, the cell left as a deletion stopped partway, its
-/// lease ended: running it again once the KMS answers finishes it.
-async fn delete_cell(
-    bucket: &ObjectBucket,
-    cell: layout::CellId,
-    kms: extent_keys::kms::Shared,
-) -> Result<(), String> {
-    let keys = bucket_cell::keys::CachingKms::new(kms);
+/// Deletes `cell` of `bucket`, whichever placement took it last, as an operator does.
+async fn delete_cell(bucket: &ObjectBucket, cell: layout::CellId) -> Result<(), String> {
     // Whichever placement took it last: u64::MAX is no lower than any's token.
-    let deleted = lifecycle::delete(bucket, cell, rand::random(), u64::MAX, &keys);
+    let deleted = lifecycle::delete(bucket, cell, rand::random(), u64::MAX);
     deleted.await.map_err(|err| format!("deleting cell {cell}: {err}"))
 }
 
@@ -955,12 +944,13 @@ fn main() -> Result<(), String> {
                 let mut cells = std::pin::pin!(cells(&bucket, cell));
                 while let Some(cell) = cells.next().await {
                     let found = lifecycle::live(&*bucket, cell).await;
-                    live.extend(found.map_err(|err| format!("cell {cell}: {err}"))?);
+                    let found = found.map_err(|err| format!("cell {cell}: {err}"))?;
+                    live.extend(found.map(|record| (cell, record)));
                 }
                 print!("{}", listed(&live, &held));
                 Ok(())
             }
-            Command::DeleteCell(id) => delete_cell(&bucket, id, kms(&bucket)?).await,
+            Command::DeleteCell(id) => delete_cell(&bucket, id).await,
             Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&bucket, tenant, &mut std::io::stdout().lock()).await
@@ -1069,10 +1059,10 @@ mod tests {
         let at = "tenants/0000000000001/cells/0000000000002/";
         let parents = "tenants/0000000000001/cells/0000000000009/";
         let expected = format!(
-            "{at}segments/0000000000001/0000000000001.0000000000002 segment 100 delete\n\
+            "{at}segments/0000000000001.0000000000002 segment 100 delete\n\
              {at}checkpoints/0000000000003/0000000000001.0000000000001 checkpoint 20 \
              delete\n\
-             {at}segments/0000000000001/0000000000001.0000000000004 segment 7 compact\n\
+             {at}segments/0000000000001.0000000000004 segment 7 compact\n\
              {parents}refs/0000000000004/0000000000005/\
              0000000000001.0000000000002.0000000000006 reference - retire\n"
         );
@@ -1128,7 +1118,7 @@ mod tests {
     }
 
     /// TASK-79.85: an operator lists what no host holds, and deletes a cell, by IDs as
-    /// `cladefsctl stat` says them: TENANT/CELL/ID, in base 32.
+    /// `cladefsctl stat` says them: TENANT/CELL, in base 32.
     #[test]
     fn cells_are_listed_and_deleted_by_their_base_32_ids() {
         let url = "u".to_owned();
@@ -1137,7 +1127,7 @@ mod tests {
         let command = Command::Cells { held: Some("hosts".into()), cell: None };
         let args = parsed(&["u", "--cells", "--held", "hosts"]);
         assert_eq!(args, Ok(Args { url: url.clone(), command }));
-        let args = parsed(&["u", "--delete-cell", "1/2/7z"]);
+        let args = parsed(&["u", "--delete-cell", "1/7z"]);
         assert_eq!(args, Ok(Args { url, command: Command::DeleteCell(cell(0xff)) }));
     }
 
@@ -1145,13 +1135,13 @@ mod tests {
     #[test]
     fn lists_leave_out_what_is_held() {
         let base = Kind::Root.of(0);
-        let fork = Kind::Fork(Origin { parent: cell(0xa), at: 0x10 }).of(0);
+        let fork = Kind::Clone(Origin { parent: cell(0xa), at: 0x10 }).of(0);
         let live =
             BTreeMap::from([(cell(0xa), base), (cell(0xb), fork.clone()), (cell(0xc), fork)]);
-        let held = held_cells("1/2/c\n").unwrap();
-        assert_eq!(listed(&live, &held), "1/2/a\n1/2/b 1/2/a g\n");
-        let refused = "no cell, TENANT/CELL/ID in base 32: 1/2/C".to_owned();
-        assert_eq!(held_cells("1/2/c 1/2/C"), Err(refused));
+        let held = held_cells("1/c\n").unwrap();
+        assert_eq!(listed(&live, &held), "1/a\n1/b 1/a g\n");
+        let refused = "no cell, TENANT/CELL in base 32: 1/2/C".to_owned();
+        assert_eq!(held_cells("1/c 1/C"), Err(refused));
     }
 
     /// TASK-394, TASK-395.8: `--usage` takes no other flag but `--tenant`, in base 32.
@@ -1552,7 +1542,7 @@ cladefs_gc_peak_resident_bytes 67108864
             &["u", "--dry-run", "--usage"],
             &["u", "--cell"],
             &["u", "--cell", "1"],
-            &["u", "--cell", "1/2/3"],
+            &["u", "--cell", "1/3"],
             &["u", "--cell", "1/2", "--cell", "1/3"],
             &["u", "--cells", "--cell", "X/2"],
             &["u", "--cells", "--cell", "1/2", "--cell", "1/2"],

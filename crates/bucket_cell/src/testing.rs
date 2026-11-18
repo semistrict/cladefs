@@ -547,6 +547,18 @@ pub async fn fork_version(
     crate::lifecycle::fork_version(bucket, child, id, origin, owner, parents).await
 }
 
+/// cladefs: gives `child` the record of a fork of a version made at `origin`, a clone's
+/// ([`crate::record::Kind::Clone`]), and the parent's checkpoint at the origin, which its recovery
+/// reads (`recovery::checkpoint_at`): what [`fork_version`] leaves, for tests that need a child
+/// recovering from an origin, whatever version was there.
+pub async fn forked_at(bucket: &impl Bucket, child: CellId, origin: layout::Origin) {
+    let kms = crate::keys::testing::host_kms();
+    let parents = crate::keys::Parents::Kms(&kms, None);
+    crate::recovery::checkpoint_at(bucket, origin.parent, origin.at, parents).await.unwrap();
+    let record = crate::record::Kind::Clone(origin).of(0);
+    crate::bucket::create(bucket, &layout::record(child), layout::encode(&record)).await;
+}
+
 /// cladefs: the live cells of every cell of `bucket`, as `cladefs-gc --cells` lists them
 /// (TASK-395.4).
 pub async fn live(
@@ -556,7 +568,7 @@ pub async fn live(
     let mut live = BTreeMap::new();
     let mut cells = std::pin::pin!(crate::cell::listed(bucket));
     while let Some(cell) = cells.next().await {
-        live.extend(crate::lifecycle::live(bucket, cell).await?);
+        live.extend(crate::lifecycle::live(bucket, cell).await?.map(|record| (cell, record)));
     }
     Ok(live)
 }
@@ -616,7 +628,7 @@ pub const SWEEPS: u64 = 32;
 /// keeps its cell (TASK-455's review).
 pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
     use crate::layout::{Location, Origin};
-    use crate::record::{Kind as Made, Record};
+    use crate::record::Record;
     use storage_device::ExtentId;
     let keys: BTreeSet<String> =
         crate::bucket::list(bucket, "").await.into_iter().map(|meta| meta.key).collect();
@@ -638,14 +650,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         records.iter().filter(|(of, _)| **of == cell).all(|(_, record)| record.deleted)
             && !references.iter().any(|(_, parent, _, _)| *parent == cell)
     };
-    // cladefs: the cells of deleted roots and clones whose IDs an allocator gave (TASK-455).
-    let mut given = BTreeSet::new();
-    for (&cell, record) in &records {
-        let asked = matches!(record.kind, Made::Root | Made::Clone(_));
-        if record.deleted && asked && crate::objectid::given(bucket, cell.id).await {
-            given.insert(cell);
-        }
-    }
     // cladefs: the heads of cells of no record, final: deletions' fences, whose records may yet
     // come, which stay and keep their cells (TASK-455's review). Any other head of no record, a
     // stale taker's, is garbage.
@@ -678,7 +682,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             && dead(cell)
             && !marked_under(cell)
             && !fenced(cell)
-            && held.all(|(cell, record)| record.removable(given.contains(cell)))
+            && held.all(|(_, record)| record.removable())
     };
     let recorded = |cell: layout::CellId| records.keys().any(|of| *of == cell);
     // The moves of a location's object listed, every pass's (TASK-407.1): none of no cell's, which
@@ -694,9 +698,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
     let mut versions: BTreeSet<Origin> = BTreeSet::new();
     let mut retirable = BTreeSet::new();
-    // The forks of live cells to other cells: their records and references to come, or to be
-    // taken back, from the cells' next writers or deletions (TASK-395.10).
-    let mut pending = BTreeSet::new();
     for (&cell, record) in &records {
         let key = layout::record(cell);
         // Deleted cells' records stay (TASK-174), and every cell's head, a deleted one's
@@ -716,13 +717,6 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             continue;
         };
         let (epoch, end, checkpoint) = (recovered.epoch(), recovered.end(), recovered.checkpoint());
-        // Its forks to other cells, whose children may have no references yet.
-        for fork in &recovered.state.forks {
-            if fork.child != cell {
-                versions.insert(Origin { parent: cell, at: fork.at });
-                pending.insert((cell, fork.at, fork.child));
-            }
-        }
         // cladefs: its versions, each its state at the segment its head names it at, kept whole as
         // an origin is (TASK-476).
         for version in recovered.head.iter().flat_map(|head| &head.versions) {
@@ -781,7 +775,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let marked = keys.contains(&layout::retired(parent, at, child));
         if retired {
             retirable.insert(key.clone());
-        } else if !marked && (named || pending.contains(&(parent, at, child))) {
+        } else if !marked && named {
             versions.insert(origin);
         } else {
             unnamed.insert(key.clone());

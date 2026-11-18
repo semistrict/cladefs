@@ -362,7 +362,7 @@ mod tests {
         assert!(held(&segment));
         assert!(!held(&layout::segment(test_cell(1), 3, 1)));
         let other = CellId { tenant: 1, id: 2 };
-        let elsewhere = layout::segment(layout::CellId { tenant: other.tenant, id: 1 }, 2, 1);
+        let elsewhere = layout::segment(other, 2, 1);
         assert!(!held(&elsewhere));
         assert_eq!(
             [

@@ -3755,11 +3755,7 @@ mod tests {
         assert_eq!(errno, Err(Some(crate::Errno::EEXIST)));
         drop(parent);
 
-        let parent = reopened(dir.path().join("parent"), idle()).unwrap();
-        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
-        let forks = parents.unwrap().state.forks;
-        let forks: Vec<_> = forks.iter().map(|fork| (fork.child, fork.at)).collect();
-        assert_eq!(forks, [(child, 1)]);
+        reopened(dir.path().join("parent"), idle()).unwrap();
     }
 
     /// TASK-165.7: a fork whose host crashed as its parent's head swapped to name its segment
@@ -3856,100 +3852,6 @@ mod tests {
     /// A fork, waiting in a thread of its own: what it gives.
     type Forking = std::thread::JoinHandle<Result<(), crate::Error>>;
 
-    /// A fork that fails once its segment landed, its parent's writer taken over before it
-    /// acknowledged it (TASK-79.72): the parent, in `dir`, reaches the bucket, `memory`, through
-    /// `gated`, which holds the fork's segment while its next writer takes its cell, swapping
-    /// its head (TASK-407): the fork's segment, landing then, is no head's, and the parent's
-    /// writer's swap fails. The parent holds an extent in a segment and one stored on its own,
-    /// [`FailedFork::OWN`], which the child inherits.
-    struct FailedFork {
-        memory: Arc<dyn object_store::ObjectStore>,
-        gated: Arc<Gated>,
-        cell: crate::CellId,
-        child: crate::CellId,
-    }
-
-    impl FailedFork {
-        /// The parent's extent stored on its own.
-        const OWN: u64 = 2;
-
-        /// Forks the parent to a handle in `dir`, the fork's segment held, and the next writer
-        /// takes the parent's cell: the fork, waiting for the segment in a thread of its own.
-        fn new(dir: &std::path::Path) -> (Self, Forking) {
-            let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-            let gated = Arc::new(Gated::over(memory.clone()));
-            let parent = Arc::new(
-                kept_in(
-                    dir.join("parent"),
-                    (1 << 30, None),
-                    &Arc::new(ObjectBucket::new(gated.clone(), "")),
-                    idle(),
-                )
-                .unwrap(),
-            );
-            let cell = parent.cell();
-            write(&parent, 1, &pattern(1, BLOCK));
-            write(&parent, Self::OWN, &pattern(2, (4 << 20) as usize));
-            parent.commit(Some(b"root")).unwrap();
-            let forking = bucket_cell::layout::segment(cell, 1, 1);
-            gated.hold.send_replace(Hold::Key(forking));
-            let child = crate::host_cell::fork_child(cell);
-            let fork = {
-                let path = dir.join("child");
-                std::thread::spawn(move || parent.fork_to(path, child))
-            };
-            gated.wait_held(1);
-            let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-            let token = crate::host_cell::token().unwrap();
-            futures::executor::block_on(bucket_cell::Writer::open(bucket, cell, 3, token)).unwrap();
-            (Self { memory, gated, cell, child }, fork)
-        }
-
-        /// Lands the fork's segment, after which the parent's writer finds its cell taken, and
-        /// the fork fails: the writes of what follows held as `then` says.
-        fn land(&self, then: Hold) {
-            self.gated.hold.send_replace(then);
-            self.gated.wait_went(1);
-        }
-
-        /// The bucket as it is.
-        fn bucket(&self) -> Arc<ObjectBucket> {
-            Arc::new(ObjectBucket::new(self.memory.clone(), ""))
-        }
-
-        /// The child's record.
-        fn record(&self) -> Option<bucket_cell::record::Record> {
-            futures::executor::block_on(lifecycle::record(&*self.bucket(), self.child)).unwrap()
-        }
-    }
-
-    /// A fork that failed, its writer taken over once the fork's segment landed, before it
-    /// acknowledged it, leaves its child no cell in object storage, as it leaves it no handle:
-    /// the child's cell there is deleted from the first, as the parent's head never names the
-    /// fork's segment (TASK-407), and the collector keeps nothing the child inherited for it.
-    #[test]
-    fn forks_failed_once_their_segment_landed_leave_their_child_no_cell() {
-        let dir = tempfile::tempdir().unwrap();
-        let (failed, fork) = FailedFork::new(dir.path());
-        failed.land(Hold::Nothing);
-        let forked = fork.join().unwrap().map_err(|err| err.to_string());
-        let handle = dir.path().join("child");
-        assert_eq!((forked, handle.exists()), (taken_over(failed.child), false));
-
-        // TASK-79.82: its deletion gave it the record its fork would first, naming the fork:
-        // deleted, as its parent's cell holds no fork.
-        let origin = bucket_cell::layout::Origin { parent: failed.cell, at: 1 };
-        // Of the fork's owner, which its footer names.
-        let owner = failed.record().unwrap().owner;
-        let deleted = bucket_cell::record::Record {
-            deleted: true,
-            ..bucket_cell::record::Kind::Fork(origin).of(owner)
-        };
-        assert_eq!(failed.record(), Some(deleted));
-        let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.cell, None));
-        assert_eq!(parents.unwrap().state.forks, []);
-    }
-
     /// TASK-79.78: a fork that failed whose deletion in object storage is refused changes nothing
     /// there, and leaves nothing here. Here its parent's head names it, and its child has its
     /// record, live, when its store is not made, its path gone; and a later placement takes the
@@ -3976,10 +3878,11 @@ mod tests {
         let unmade = format!("forking to cell {child}: making its store");
         assert_eq!((forked, path.exists()), (Err(unmade), false));
 
-        let origin = bucket_cell::layout::Origin { parent: cell, at: 1 };
-        let live = bucket_cell::record::Kind::Fork(origin).of(0);
         let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        assert_eq!(record.map(unowned), Some(live));
+        let record = record.unwrap();
+        let of_cell =
+            |kind| matches!(kind, bucket_cell::record::Kind::Clone(o) if o.parent == cell);
+        assert!(of_cell(record.kind) && !record.deleted, "{record:?}");
     }
 
     /// The record of a cell no fork made, its store's own, of no parent, but for its owner
@@ -4042,8 +3945,6 @@ mod tests {
         // The parent commits and uploads on, its cell naming no fork.
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
-        assert_eq!(parents.unwrap().state.forks, []);
         let record = futures::executor::block_on(lifecycle::record(&*bucket, other)).unwrap();
         assert_eq!((record.map(unowned), live(&others, &bucket)), (Some(own_record()), lives()));
     }
@@ -4112,42 +4013,6 @@ mod tests {
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-    }
-
-    /// TASK-79.78, TASK-79.82: a fork that fails once its commit was made, here as its flush
-    /// fails, is deleted in object storage, as one failing later is: the segment its commit ends,
-    /// which names the fork, uploads after, and the parent's writer, giving the child its record,
-    /// finds it deleted, so that no cell is kept there that no store holds. It leaves nothing at
-    /// its path.
-    #[test]
-    fn forks_failed_once_committed_leave_their_child_no_cell() {
-        let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let parent =
-            kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        write(&parent, 1, &pattern(1, BLOCK));
-        parent.commit(Some(b"root")).unwrap();
-        let child = crate::host_cell::fork_child(parent.cell());
-        let path = dir.path().join("child");
-        let flushed = fail::FailGuard::new("fork::flushed", "return").unwrap();
-        let forked = parent.fork_to(&path, child).map_err(|err| format!("{err:#}"));
-        drop(flushed);
-        assert!(!path.exists(), "the fork's directory is left");
-
-        parent.commit(Some(b"later")).unwrap();
-        assert_eq!(parent.wait_uploaded(), Ok(()));
-        let deleted =
-            bucket_cell::record::Record { deleted: true, ..bucket_cell::record::Kind::Own.of(0) };
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        assert_eq!(record.map(unowned), Some(deleted));
-        // The checkpoint at the fork, its child deleted, names it no more.
-        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
-        assert_eq!(parents.unwrap().state.forks, []);
-        let unflushed = format!(
-            "forking to cell {child}: the fork to cell {child} failed once its commit was \
-             made: failpoint fork::flushed"
-        );
-        assert_eq!(forked, Err(unflushed));
     }
 
     /// A store of a cell taken elsewhere keeps what it reads from the bucket in the host's cache,

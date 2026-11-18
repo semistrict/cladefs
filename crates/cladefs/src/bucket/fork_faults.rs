@@ -306,13 +306,8 @@ impl World {
         }
         assert!(failed, "{case}: a fork made left orphans: {orphans:x?}");
         assert_eq!(orphans, [self.child], "{case}: orphans");
-        let deleted = block_on(lifecycle::delete(
-            &*self.bucket,
-            self.child,
-            rand::random(),
-            u64::MAX,
-            &bucket_cell::keys::testing::host_kms(),
-        ));
+        let deleted =
+            block_on(lifecycle::delete(&*self.bucket, self.child, rand::random(), u64::MAX));
         assert_eq!(deleted, Ok(()), "{case}: deleting the orphan");
     }
 
@@ -514,7 +509,6 @@ fn forks_take_their_steps_in_order() {
     let traced = |faults: &[Fault]| {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let guards: Vec<_> = (FORK_STEPS.into_iter().chain(CLEANUP_STEPS))
-            .chain(["lifecycle::record_fork", "lifecycle::recorded_fork"])
             .filter(|step| !faults.contains(&Fault::Fails(step)))
             .map(|step| {
                 let steps = steps.clone();
@@ -570,10 +564,11 @@ fn cells_taking_the_childs_id_at_each_step() {
 #[test]
 fn cells_taking_the_id_of_a_fork_whose_host_dies() {
     host();
-    let after_free = FORK_STEPS.iter().position(|step| *step == "upload::child_free").unwrap();
-    all(FORK_STEPS[after_free + 1..].iter().flat_map(|&step| {
+    let taken = "fork::uploaded";
+    let after = FORK_STEPS.iter().position(|step| *step == taken).unwrap();
+    all(FORK_STEPS[after + 1..].iter().flat_map(|&step| {
         [Leftover::Deleted, Leftover::Opened]
-            .map(|leftover| (vec![Fault::Taken("upload::child_free"), Fault::Dies(step)], leftover))
+            .map(|leftover| (vec![Fault::Taken(taken), Fault::Dies(step)], leftover))
     }));
 }
 
@@ -606,11 +601,11 @@ fn each_write_of_a_fork_meeting_the_collector() {
         .map(|write| (vec![Fault::Write(write, Mishap::Collected)], Leftover::Deleted)));
 }
 
-/// Where a fork may fail for what its cleanup finds: nothing of it in object storage, its segment
-/// on its way, there unacknowledged, and acknowledged, its child's record given; and its child's
+/// Where a fork may fail for what its cleanup finds: nothing of it in object storage, its version
+/// named and no child's record yet, its child's record being made, and made; and its child's
 /// store made.
 const FAILING_FOR_CLEANUPS: [&str; 5] =
-    ["fork::committed", "writer::upload", "writer::uploaded", "writer::checkpoint", "fork::made"];
+    ["version::committed", "fork::uploaded", "version::referred", "fork::recorded", "fork::made"];
 
 /// A failed fork's cleanup failing, or its host dying, at each step, or a write of it going wrong,
 /// leaves nothing here, and in the bucket what stands, as an orphan, which an operator deletes.
@@ -677,16 +672,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let held = [world.cell, world.other.cell()];
     let orphans: Vec<_> = world.live().into_iter().filter(|live| !held.contains(live)).collect();
     assert_eq!(orphans, [world.child]);
-    assert_eq!(
-        block_on(lifecycle::delete(
-            &*world.bucket,
-            world.child,
-            9,
-            u64::MAX,
-            &bucket_cell::keys::testing::host_kms()
-        )),
-        Ok(())
-    );
+    assert_eq!(block_on(lifecycle::delete(&*world.bucket, world.child, 9, u64::MAX)), Ok(()));
     // TASK-395.4: the fork in a cell of its own, the parent's cell keeps the origin while the
     // parent's state names the fork, as the fork may lack its reference yet: until the parent's
     // writer checkpoints, which drops the fork, its child deleted.

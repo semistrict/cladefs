@@ -964,9 +964,7 @@ mod tests {
                     writer.acknowledge().await.unwrap();
                     writer.checkpoint().await.unwrap();
                     drop(writer);
-                    lifecycle::delete(&*bucket, cell, 11, 1, &crate::keys::testing::host_kms())
-                        .await
-                        .unwrap();
+                    lifecycle::delete(&*bucket, cell, 11, 1).await.unwrap();
                     crate::cell::forget(&*bucket, cell).await.unwrap();
                 }
             });
@@ -1025,8 +1023,10 @@ mod tests {
             .holding(Holding { lease: LEASE, since: Some(began) });
         assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
-        // A record written in the cell: the next pass, either's, goes over it in full.
-        block_on(lifecycle::create(&*bucket, CellId { tenant: cell.tenant, id: 2 }, 0)).unwrap();
+        // A reference written in the cell: the next pass, either's, goes over it in full.
+        let reference = layout::reference(cell, 1, CellId { tenant: cell.tenant, id: 2 });
+        let bytes = layout::encode(&layout::Reference::of(2));
+        block_on(crate::bucket::create(&*bucket, &reference, bytes));
         assert_eq!(run(&first).report, Report::default());
         let rewritten = recorded().unwrap();
         assert_ne!(rewritten.listing, settled.listing);

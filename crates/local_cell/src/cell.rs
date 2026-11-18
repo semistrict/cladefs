@@ -43,9 +43,7 @@ use bucket_cell::keys::Ring;
 use bucket_cell::recovery::{Places, Seal};
 use bucket_cell::trace;
 use bucket_cell::wal::{Rebased, Wal};
-use extent_frame::segment::{
-    CellId, Chain, Child, Contents, Footer, Location, NewVersion, epoch_of,
-};
+use extent_frame::segment::{CellId, Chain, Contents, Footer, Location, NewVersion, epoch_of};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -56,23 +54,6 @@ use storage_device::{ExtentId, OtherCell, SealedExtent};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the extent store is full")]
 pub struct NoSpace;
-
-/// cladefs: the context of a fork's failure once its commit was made ([`LocalCell::commit_fork`]): the
-/// commit stands, the segment it ends naming the fork in its footer, which what keeps the cell's
-/// segments elsewhere, as an uploader does, may have taken, and whose fork it makes there, so that
-/// the child is to be deleted there as a fork made is (TASK-79.82).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the fork to cell {child} failed once its commit was made")]
-pub struct ForkCommitted {
-    /// The fork's child.
-    pub child: CellId,
-}
-
-/// cladefs: the error of a fork whose child's ID is the cell's, or that of a cell whose extents
-/// the cell holds: its child's extents' IDs would be theirs (TASK-364).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("the fork's child {0} has the ID of its parent's or of a cell it inherits from")]
-pub struct InheritedId(pub CellId);
 
 /// cladefs: the error of a version cut of a store that is not quiescent: extents written since its
 /// last commit, which a version holds not, as its guest committed them not (TASK-476).
@@ -229,10 +210,6 @@ pub struct LocalCell<D: Dir> {
     dir: Arc<D>,
     block_size: u32,
     cell: CellId,
-    /// cladefs: the IDs of the cells whose extents it held as it opened, its own among them: no
-    /// fork's child takes one, as an extent's ID names its cell by its ID alone, and cells
-    /// are unique by theirs only within their cells (TASK-364).
-    lineage: BTreeSet<u64>,
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
     kind: Option<Kind>,
     /// cladefs: the version of its cell it is at, if it is one (TASK-476).
@@ -1002,8 +979,6 @@ impl<D: Dir> Recovering<D> {
         }
         let holding = Holding::of(cell.id, extents.lens());
         let mut own_sizes = HashMap::new();
-        let mut lineage = BTreeSet::from([cell.id]);
-        lineage.extend(extents.lens().map(|(extent, _)| extent.cell));
         // What of their data is here is in its own layer: the bucket's layer's is in the bucket.
         for (extent, entry) in extents.own() {
             match &entry.data {
@@ -1067,7 +1042,6 @@ impl<D: Dir> Recovering<D> {
             dir,
             block_size,
             cell,
-            lineage,
             bucket,
             kind,
             version,
@@ -1347,38 +1321,17 @@ impl<D: Dir> LocalCell<D> {
         Ok(DirHold { _taken: taken.clone() })
     }
 
-    /// cladefs: commits, durably, a commit whose segment's footer names `child`, a fork of the
-    /// cell, which its owner and whether it is a version say (doc-7, Forks): the fork is made where
-    /// the cell's segments go, as they go, and nowhere here (TASK-165.7). Its segment closes at
-    /// the commit. Returns the commit's epoch. One that fails once its commit was made fails with
-    /// [`ForkCommitted`]: the segment names the fork, as a host crashing then would leave it.
-    pub fn commit_fork(&self, child: Child) -> Result<u64, Error> {
-        if self.lineage.contains(&child.cell.id) {
-            bail!(InheritedId(child.cell));
-        }
-        let committing = self.committing.with(Mutex::lock);
-        self.writable()?.segments.close_for_fork(child);
-        self.commit_locked(&committing, None)?;
-        let epoch = self.lock().epoch;
-        let made = || -> Result<u64, Error> {
-            failpoint!("fork::committed");
-            self.flush()?;
-            failpoint!("fork::flushed");
-            Ok(epoch)
-        };
-        made().context(ForkCommitted { child: child.cell })
-    }
-
     /// cladefs: commits, durably, a commit whose segment's footer names the version `cut` cut at its
     /// end, a name for the cell's state as of the commit, which the acknowledgement naming the
     /// segment names in the cell's head (doc-18, TASK-476). Its segment closes at the commit.
-    /// The store must be quiescent, no extent written since its last commit
-    /// ([`LocalCell::has_open`]), so that the version holds what its guest committed and nothing more:
-    /// refused otherwise ([`NotQuiescent`]). Returns the commit's number: the version is
-    /// local until the bucket acknowledges it ([`LocalCell::local_versions`]).
-    pub fn commit_version(&self, cut: NewVersion) -> Result<u64, Error> {
+    /// If `quiescent`, the store must be, no extent written since its last commit
+    /// ([`LocalCell::has_open`]), so that the version holds all its guest wrote, as a VM
+    /// snapshot's must: refused otherwise ([`NotQuiescent`]). A fork's need not: it holds what the
+    /// guest committed. Returns the commit's number: the version is local until the bucket
+    /// acknowledges it ([`LocalCell::local_versions`]).
+    pub fn commit_version(&self, cut: NewVersion, quiescent: bool) -> Result<u64, Error> {
         let committing = self.committing.with(Mutex::lock);
-        if self.has_open()? {
+        if quiescent && self.has_open()? {
             bail!(NotQuiescent);
         }
         self.writable()?.segments.close_for_version(cut);
@@ -3345,12 +3298,6 @@ impl<D: Dir> LocalCell<D> {
     #[cfg(feature = "testing")]
     pub fn shares_extents_with<E: Dir>(&self, other: &LocalCell<E>) -> Result<bool, Error> {
         Ok(self.state()?.extents.shares_bucket_with(&other.state()?.extents))
-    }
-
-    /// cladefs: the decoded state its bucket's layer shares, if it shares one (TASK-453).
-    #[cfg(feature = "testing")]
-    pub fn extents_layer(&self) -> Result<Option<Arc<bucket_cell::State>>, Error> {
-        Ok(self.state()?.extents.layer().cloned())
     }
 
     /// The extents the store holds, with their lengths, in order.

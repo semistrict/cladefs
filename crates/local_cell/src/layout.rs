@@ -24,7 +24,7 @@ use storage_device::ExtentId;
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its cell
-/// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the cell it is as
+/// with its tenant's cell, `TENANT/CELL` (TASK-364); 12's names the cell it is as
 /// `cell NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
 /// cut at their ends, and its description may name a version of its cell it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
@@ -572,7 +572,7 @@ mod tests {
         assert!(text.contains("\ncell a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
         let bare = format!("{FORMAT}\nblock_size 4096\ncell 1\n{capacity}");
         let refused = CellFile::parse(&bare).unwrap_err().to_string();
-        assert_eq!(refused, "bad cell: no cell, TENANT/CELL/ID in base 32: 1");
+        assert_eq!(refused, "bad cell: no cell, TENANT/CELL in base 32: 1");
         // cladefs: a store kept in a bucket names its cell's kind (doc-20).
         let named = CellFile { kind: Some(Kind::Sqlite), ..kept.clone() };
         assert!(named.text().ends_with("\nkind sqlite\n"));

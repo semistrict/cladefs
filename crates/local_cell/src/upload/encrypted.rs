@@ -569,19 +569,25 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
 }
 
 /// Forks a store's cell, as of its last commit, to `child`, as a host does: what the child
-/// inherits asked for first, then the fork's commit made, then the fork in the bucket, its child's
-/// record and checkpoint, and its keys.
-fn forked(
+/// inherits asked for first; then, of a store at no version, a version of that commit made and
+/// uploaded, and a store at it opened on `host`, which forks; then the fork in the bucket, its
+/// child's record and checkpoint, and its keys.
+fn forked<K: Kms>(
+    (world, host): (&World<K>, &Host),
     store: &LocalCell<MemDir>,
     uploader: &Uploader<MemDir>,
     child: Child,
 ) -> Result<(), Failure> {
     let inheriting = uploader.inheriting(child)?;
-    let epoch = match uploader.is_at_version() {
-        true => 0,
-        false => store.commit_fork(child).unwrap(),
-    };
-    uploader.forked(epoch, child, inheriting)
+    if uploader.is_at_version() {
+        return uploader.forked(child, inheriting);
+    }
+    let id = rand::random::<u64>().max(1);
+    let version = extent_frame::segment::NewVersion { id, keep_last: None };
+    uploader.wait_uploaded(store.commit_version(version, false).unwrap())?;
+    let dir = made_at_version(store.description().cell, id);
+    let (_at, at_version) = open_on(world, host, &dir)?;
+    at_version.forked(child, inheriting)
 }
 
 /// TASK-411.3: a fork within an encrypted cell, and a version there, read what they inherit under
@@ -600,7 +606,7 @@ fn forks_and_versions_within_an_encrypted_cell_read_what_they_inherit() {
 
     // A fork's child, of the parent's cell.
     let child = Child { cell: test_cell(8), owner: 0x81 };
-    forked(&store, &uploader, child).unwrap();
+    forked((&world, &host), &store, &uploader, child).unwrap();
     assert_eq!(world.record(child.cell).deks, Vec::new());
     let (forked_store, forked_uploader) = open_on(&world, &host, &made(child.cell)).unwrap();
     assert_eq!(world.record(child.cell).deks.len(), 1);
@@ -642,7 +648,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     world.kms.reset();
 
     let child = child_in(OTHER, 8);
-    forked(&store, &uploader, child).unwrap();
+    forked((&world, &host), &store, &uploader, child).unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(kms.in_pool(OTHER), 3);
     let record = world.record(child.cell);
@@ -674,7 +680,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     // Its fork into a third cell keeps both its parents' DEKs: the child's, and the parent's the
     // child kept.
     let grandchild = child_in(OTHER, 9);
-    forked(&child_store, &child_uploader, grandchild).unwrap();
+    forked((&world, &host), &child_store, &child_uploader, grandchild).unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(inherited(&world.record(grandchild.cell)), [(parent, 1, 1), (child.cell, 1, 1)]);
     let grandchild_dir = made(grandchild.cell);
@@ -685,7 +691,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     }
     // A take leaving the pool low refills it: a batch of wraps, once the fork took its KEK.
     assert_eq!(kms.in_pool(OTHER), 2);
-    forked(&child_store, &child_uploader, child_in(OTHER, 10)).unwrap();
+    forked((&world, &host), &child_store, &child_uploader, child_in(OTHER, 10)).unwrap();
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((4, 0), 5));
     drop((store, uploader, child_store, child_uploader, grandchild_store, _grandchild_uploader));
@@ -725,7 +731,8 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let a = ExtentId::new(7, 1);
     written(&store, &uploader, a, &noise(1, 4096));
     let id = 0xa;
-    let epoch = store.commit_version(extent_frame::segment::NewVersion { id, keep_last: None });
+    let epoch =
+        store.commit_version(extent_frame::segment::NewVersion { id, keep_last: None }, true);
     uploader.wait_uploaded(epoch.unwrap()).unwrap();
     uploader.share_version(id, true).unwrap();
     drop((store, uploader));
@@ -746,7 +753,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     world.runtime.block_on(kms.filled(OTHER));
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
     let clone = child_in(OTHER, 10);
-    let refused = forked(&copy, &version_uploader, clone).unwrap_err();
+    let refused = forked((&world, &forker), &copy, &version_uploader, clone).unwrap_err();
     let revoked = bucket_cell::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert!(!world.has_record(clone.cell) && world.cell_of(clone.cell).is_none());
@@ -763,7 +770,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
     world.kms.reset();
-    forked(&copy, &version_uploader, clone).unwrap();
+    forked((&world, &forker), &copy, &version_uploader, clone).unwrap();
     assert_eq!(world.calls(), (0, 0));
     let record = world.record(clone.cell);
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
@@ -804,26 +811,26 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert_eq!(kms.in_pool(OTHER), 0);
     world.kms.reset();
     let child = child_in(OTHER, 8);
-    let refused = forked(&store, &uploader, child).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, child).unwrap_err();
     let revoked = bucket_cell::Error::Kms("tenant 2: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert_eq!(world.calls(), (1, 0));
     assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
 
     world.kms.inner().unrevoke(OTHER).unwrap();
-    forked(&store, &uploader, child).unwrap();
+    forked((&world, &host), &store, &uploader, child).unwrap();
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((1 + 1 + 4, 0), 4));
 
     world.kms.inner().destroy(OTHER).unwrap();
     for id in [9, 10, 11] {
-        forked(&store, &uploader, child_in(OTHER, id)).unwrap();
+        forked((&world, &host), &store, &uploader, child_in(OTHER, id)).unwrap();
     }
     // The last take left 1: its refill, refused, dropped the pool.
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!(kms.in_pool(OTHER), 0);
     let last = child_in(OTHER, 12);
-    let refused = forked(&store, &uploader, last).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, last).unwrap_err();
     let destroyed = bucket_cell::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
     assert_eq!(kms.refuses(OTHER), Some(destroyed));
@@ -840,7 +847,7 @@ fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
     let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     let child = child_in(3, 8);
-    let refused = forked(&store, &uploader, child).unwrap_err();
+    let refused = forked((&world, &host), &store, &uploader, child).unwrap_err();
     let none = bucket_cell::Error::Kms("tenant 3: no KEK in the KMS".into());
     assert_eq!(refused, Failure::Bucket(none));
     assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
@@ -875,7 +882,7 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
     let child = child_in(TENANT, 10);
-    assert_eq!(forked(&store, &remote, child), Err(refused));
+    assert_eq!(forked((&world, &first), &store, &remote, child), Err(refused));
     assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
     drop((store, remote));
     let objects: Vec<String> = world.objects().into_iter().map(|(key, _)| key).collect();
@@ -1469,7 +1476,7 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     written(&their_store, &their_uploader, their_extent, &their_data);
     let their_at = location(&their_store, their_extent);
     let child = child_in(OTHER, 8);
-    forked(&store, &uploader, child).unwrap();
+    forked((&world, &writer), &store, &uploader, child).unwrap();
     let child_dir = made(child.cell);
     let (child_store, _child_uploader) = open_on(&world, &writer, &child_dir).unwrap();
     let first = uploaded_data[..4096].to_vec();

@@ -94,14 +94,6 @@ fn first(block: u64) -> u64 {
     0
 }
 
-/// cladefs: whether `id` is one an allocator gave: of a block an allocator took, whose object is
-/// there, kept for good, and not block 0, the IDs tests name (TASK-455). A request a call: a
-/// GET of the block's object.
-pub async fn given(bucket: &impl Bucket, id: u64) -> bool {
-    let block = id / ID_BLOCK;
-    block != 0 && bucket::get(bucket, &layout::objectid_block(block)).await.is_some()
-}
-
 /// Takes a block of `bucket`'s that no allocator took, at random, and returns it.
 async fn take(bucket: &impl Bucket) -> u64 {
     let bytes = layout::encode(&BlockTaker { taker: rand::random() });
@@ -170,18 +162,14 @@ mod tests {
     }
 
     /// No ID of block 0 is given, 0 among them, which names no cell: no allocator takes the
-    /// block, whose IDs tests name, and none of them is given though its object were there
-    /// (TASK-455). An allocator's ID is given; one of a block no allocator took is not.
+    /// block, whose IDs tests name, though its object were there (TASK-455).
     #[test]
     fn no_id_is_0() {
         futures::executor::block_on(async {
             let bucket = memory();
             bucket::create(&bucket, &layout::objectid_block(0), b"by hand".to_vec()).await;
-            assert_eq!((given(&bucket, 0).await, given(&bucket, 1).await), (false, false));
             let id = Allocator::new().next(&bucket).await;
             assert!(id >= ID_BLOCK, "{id} of block 0");
-            let untaken = if id / ID_BLOCK == 1 { 2 } else { 1 } * ID_BLOCK;
-            assert_eq!((given(&bucket, id).await, given(&bucket, untaken).await), (true, false));
         });
     }
 }

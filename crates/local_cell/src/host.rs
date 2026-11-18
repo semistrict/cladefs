@@ -5,7 +5,7 @@
 //! Stores in directories of the host's, as cladefs's images and cladefsd's stores are: a directory
 //! holds one store, of one cell (TASK-165.7). Forks, versions and deletions are the bucket's,
 //! which the store's description names: the store makes nothing of them but the commit that names
-//! a fork ([`LocalCell::commit_fork`]).
+//! a version ([`LocalCell::commit_version`]).
 
 use crate::cell::{LocalCell, UNMADE};
 use crate::dir::{Dir as _, HostDir};
@@ -364,7 +364,7 @@ mod tests {
         assert!(refused.is_err() && path.join(DESCRIPTION).exists(), "{refused:?}");
         drop(opened);
         let stopped = delete_host(&path, |cell| Err(anyhow!("stopped at {cell}")));
-        assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/1/3".to_owned()));
+        assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/3".to_owned()));
         assert!(open(&path).is_ok(), "a store stopped opens no more");
         let called = std::cell::Cell::new(None);
         delete_host(&path, |cell| Ok(called.set(Some(cell)))).unwrap();

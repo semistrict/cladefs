@@ -58,17 +58,9 @@ impl std::str::FromStr for CellId {
     }
 }
 
-/// cladefs: a fork made at a segment's end: its child's cell, the child's owner, which every
-/// record of the child names, whoever writes it (TASK-79.82, TASK-153.9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Child {
-    pub cell: CellId,
-    pub owner: u64,
-}
-
 /// What a segment holds after its data: its place in its writer's chain, and the commits it makes,
 /// its [`Contents`]. A segment with no data is a footer alone: commits that only free extents or
-/// set the root, or forks.
+/// set the root, or make versions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footer {
     pub cell: CellId,
@@ -104,7 +96,7 @@ impl Footer {
 /// length, at the writer's keys ([`Footer::own`]): an inherited extent a cell uploads goes in its
 /// data, as a key of the extents a cell uploads names that cell alone (TASK-150.1); the extents
 /// they free, the cell's, or inherited; the root, if they set one; the cell's next sequence
-/// number as of them, at least; the forks made at its end, by their children; and the cell's
+/// number as of them, at least; and the cell's
 /// capacity, the most bytes its extents may hold, if they set it: a resize is a commit's, ordered
 /// with the others, so that the cell has it wherever it is taken, its forks inherit it, and a
 /// version keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
@@ -117,7 +109,6 @@ pub struct Contents {
     pub frees: Vec<ExtentId>,
     pub root: Option<Vec<u8>>,
     pub next_sequence: u64,
-    pub forks: Vec<Child>,
     pub capacity: Option<u64>,
     pub continued: Option<Continued>,
     /// cladefs: the versions made at its end, which the acknowledgement naming it names in the
@@ -344,10 +335,6 @@ mod tests {
                 frees: vec![ExtentId { cell: 1, sequence: 1 }],
                 root: Some(b"root".to_vec()),
                 next_sequence: 13,
-                forks: vec![
-                    Child { cell: cell(3), owner: 0x33 },
-                    Child { cell: CellId { tenant: 5, id: 4 }, owner: 0x44 },
-                ],
                 capacity: Some(1 << 30),
                 continued: Some(Continued {
                     commit: tag(4, 13),
@@ -387,7 +374,7 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// cladefs: a cell reads as it displays, `TENANT/CELL/ID` in base 32; anything else is no
+    /// cladefs: a cell reads as it displays, `TENANT/CELL` in base 32; anything else is no
     /// cell.
     #[test]
     fn cells_parse_as_they_display() {
@@ -396,7 +383,7 @@ mod tests {
         assert_eq!("a/bp/11".parse(), Ok(cell));
         assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(cell));
         for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
-            let refused = format!("no cell, TENANT/CELL/ID in base 32: {wrong}");
+            let refused = format!("no cell, TENANT/CELL in base 32: {wrong}");
             assert_eq!(wrong.parse::<CellId>(), Err(refused));
         }
     }

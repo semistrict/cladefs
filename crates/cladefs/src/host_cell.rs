@@ -364,45 +364,34 @@ pub(crate) fn unmade(path: &Path) -> bool {
     local_cell::unmade_host(path)
 }
 
-/// Forks `store`, as of its last commit, made durable first, to `child`, a new cell holding what
-/// it holds, whose store is a new directory at `path`, which [`open`] opens: `EEXIST` if anything is
-/// at `path`. The fork is made in the bucket alone (doc-7, Forks; TASK-165.7): `uploader`, the
-/// store's uploader, uploads the store's commit naming the child ([`LocalCell::commit_fork`]), whose
-/// acknowledgement gives the child its record, inheriting the store's extents rather than copies;
-/// `held`, given, is let go of once that commit is made, before its upload goes. Only then is the
-/// child's store made, at `path`, holding nothing of its own: opening it recovers the child's
-/// state from the bucket, as any store's opening does (TASK-165.9), every extent of it there, at
-/// its location there, read from there, or the host's cache. `prepare` writes what the caller keeps beside the store into its
-/// directory first, before its description, which makes it a store. A fork of a store with no
-/// uploader fails with `ENOTSUP`, making nothing: its callers attach one first, an image's
-/// (`storage::kept`), and an extent store's opened where no daemon serves it
-/// (`OpenCell::kept_in_bucket`).
+/// Forks `store`, a store at a version (`uploader.is_at_version`), to `child`, a new cell holding
+/// what the version holds, whose store is a new directory at `path`, which [`open`] opens:
+/// `EEXIST` if anything is at `path`. The fork is the child's record alone (doc-7, Forks;
+/// `Uploader::forked`), inheriting the version's extents rather than copies, which fails with
+/// `ENOENT` once the version is dropped, and with `EACCES` if the child is of another tenant's
+/// cell than the version, which isn't shared (TASK-395.7). Only then is the child's store made,
+/// at `path`, holding nothing of its own: opening it recovers the child's state from the bucket,
+/// as any store's opening does (TASK-165.9). `prepare` writes what the caller keeps beside the
+/// store into its directory first, before its description, which makes it a store. A fork to
+/// another tenant's cell fails with `EACCES` before anything is made, unless the store is the
+/// default tenant's ([`may_fork_into`], TASK-395.9).
 ///
 /// The caller names the child: a fork to a child whose ID another cell has in the bucket fails
-/// with `EEXIST`, making nothing; and so does one whose child's ID another cell took as it was
-/// made, its commit standing, which names a child its parent's writers leave be (TASK-79.82). A
-/// fork that fails once its commit was made, its upload failing, or the store's, is deleted in the
-/// bucket as the fork's alone (`Uploader::unfork`), so that its segment, landing late, makes
-/// nothing (TASK-79.78); its host crashing, it stands, or never was, as the bucket has it.
-///
-/// A fork of a version commits nothing: its child's record is the fork, which fails with `ENOENT`
-/// once the version is deleted (`Uploader::forked`), and with `EACCES` if the child is of another
-/// tenant's cell than the version, which isn't shared (`lifecycle::finish_point_fork`, TASK-395.7). A
-/// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
-/// made, unless the store is the default tenant's ([`may_fork_into`], TASK-395.9).
+/// with `EEXIST`, making nothing (TASK-79.82). A fork that fails once its record was made is
+/// deleted in the bucket as the fork's alone (`Uploader::unfork`); its host crashing, it stands,
+/// or never was, as the bucket has it.
 ///
 /// cladefs: a fork of an encrypted store into another cell, as every fork here is, gives its child
 /// the keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
 /// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
 /// `EACCES` if the child's tenant has no KEK in the KMS (TASK-411.28), or the host heard a tenant
 /// whose keys it inherits, or the child's, revoked or destroyed.
-pub(crate) fn fork<H>(
+pub(crate) fn fork(
     store: &LocalCell<HostDir>,
     uploader: &Uploader<HostDir>,
     path: &Path,
     child: Child,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
-    held: H,
 ) -> Result<(), Error> {
     may_fork_into(store.description().cell, uploader, child.cell.tenant)?;
     let inheriting = uploader.inheriting(child)?;
@@ -412,23 +401,6 @@ pub(crate) fn fork<H>(
         }
         _ => Error::new(anyhow::Error::new(err).context(format!("creating {}", path.display()))),
     })?;
-    let forked = fork_in(store, uploader, path, (child, inheriting), prepare, held);
-    if forked.is_err() {
-        // Leave nothing half made behind.
-        let _ = std::fs::remove_dir_all(path);
-    }
-    forked
-}
-
-/// Forks `store` to `child` as [`fork`] does, into the directory at `path`, made empty.
-fn fork_in<H>(
-    store: &LocalCell<HostDir>,
-    uploader: &Uploader<HostDir>,
-    path: &Path,
-    (child, inheriting): (Child, Option<bucket_cell::keys::Inheriting>),
-    prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
-    held: H,
-) -> Result<(), Error> {
     let cell = child.cell;
     let failed = |err: Failure| match err {
         Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(cell),
@@ -440,32 +412,7 @@ fn fork_in<H>(
         }
         err => anyhow::anyhow!("forking to cell {cell}: {err}"),
     };
-    // A fork of a version needs no look first: its child's record's create refuses a record there
-    // alike (`Uploader::child_free`, TASK-449).
-    if !uploader.is_at_version()
-        && !uploader.child_free(cell).map_err(|err| Error::new(failed(err)))?
-    {
-        return Err(Error::new(taken(cell)));
-    }
-    let made = match uploader.is_at_version() {
-        true => {
-            drop(held);
-            uploader.forked(0, child, inheriting).map_err(failed)
-        }
-        false => {
-            let committed = store.commit_fork(child);
-            drop(held);
-            match committed {
-                Ok(epoch) => uploader.forked(epoch, child, inheriting).map_err(failed),
-                Err(err) if err.downcast_ref::<local_cell::ForkCommitted>().is_some() => {
-                    Err(err.context(format!("forking to cell {cell}")))
-                }
-                // It made nothing.
-                Err(err) => return Err(Error::new(err)),
-            }
-        }
-    };
-    let made = made.and_then(|()| {
+    let made = uploader.forked(child, inheriting).map_err(failed).and_then(|()| {
         failpoint!("fork::recorded");
         make_child(store, path, cell, prepare)
             .with_context(|| format!("forking to cell {cell}: making its store"))?;
@@ -473,11 +420,41 @@ fn fork_in<H>(
         Ok(())
     });
     let Err(err) = made else { return Ok(()) };
-    // Leave no fork whose store went behind, as the fork's alone: its segment may land yet.
+    // Leave nothing half made behind: no store, and no fork whose store went.
+    let _ = std::fs::remove_dir_all(path);
     if let Err(why) = uploader.unfork(child) {
         log::warn!("cladefs: leaving cell {cell}, whose fork failed: {why}");
     }
     Err(Error::new(err))
+}
+
+/// Forks `store`, its cell's version `version` made and uploaded, to `child` as [`fork`] does:
+/// from a store at the version beside `path`, made, then deleted, and the version dropped, the
+/// child keeping what it inherits by its reference. So a store with a writer forks: forks are of
+/// versions alone (TASK-508.3).
+pub(crate) fn fork_through(
+    store: &LocalCell<HostDir>,
+    uploader: &Uploader<HostDir>,
+    version: u64,
+    path: &Path,
+    child: Child,
+    prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
+) -> Result<(), Error> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let at = path.with_file_name(format!(".{name}.{}", base32_id::Padded(version)));
+    let (kind, url) = (store.kind().ok_or(Errno::EINVAL)?, store.bucket().ok_or(Errno::EINVAL)?);
+    std::fs::create_dir(&at).map_err(|err| {
+        Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
+    })?;
+    let forked = local_cell::create_host_at_version(&at, store.description(), url, kind, version)
+        .and_then(|()| local_cell::made_host(&at))
+        .map_err(Error::new)
+        .and_then(|()| open(&at, uploader.options().clone()).map_err(Error::from))
+        .and_then(|at| fork(&at.store, &at.uploader, path, child, prepare));
+    let _ = std::fs::remove_dir_all(&at);
+    let dropped = uploader.drop_versions(&std::collections::BTreeSet::from([version]));
+    forked?;
+    Ok(dropped?)
 }
 
 /// The error of a fork to `cell`, whose ID another cell has in the bucket.
@@ -531,8 +508,7 @@ pub(crate) fn delete(
         Some(bucket) => {
             let placed = local_cell::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
-            let kms = crate::bucket::kms()?;
-            local_cell::upload::delete_cell(bucket, cell, token, &kms)
+            local_cell::upload::delete_cell(bucket, cell, token)
         }
         None => Ok(()),
     })
@@ -655,7 +631,9 @@ mod tests {
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
         let forked = new_cell(&bucket, store.description().cell.tenant).unwrap();
         let child = Child { cell: forked, owner: 1 };
-        super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
+        let version = bucket_cell::layout::NewVersion { id: 1, keep_last: None };
+        uploader.wait_uploaded(store.commit_version(version, false).unwrap()).unwrap();
+        fork_through(&store, &uploader, version.id, &fork, child, |_| Ok(())).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {

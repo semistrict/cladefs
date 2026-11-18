@@ -31,7 +31,7 @@ use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
 use crate::head::{self, Held};
 use crate::keys::Ring;
-use crate::layout::{self, CellId, Chain, Child, Footer, Location, Origin};
+use crate::layout::{self, CellId, Chain, Footer, Location};
 use crate::moves::MovesMaps;
 use crate::record::Record;
 use crate::recovery::{self, Recovered, State};
@@ -47,11 +47,6 @@ use storage_device::ExtentId;
 /// four at once, 60 a second at 15 ms a PUT, held commits up for minutes as they reached the bound
 /// on their lag (GCE r353, pgbench's checkpoint at shutdown: TASK-142).
 const OWN_AT_ONCE: usize = 32;
-
-/// How many forks' children's records are read, or made, at once: each a round trip to object
-/// storage, which one at a time held a checkpoint, and the uploader with it, up for a round trip
-/// a fork, 300 forks of a base 6-9 s at 25 ms of latency (TASK-92.4).
-const RECORDS_AT_ONCE: usize = 32;
 
 /// The bytes of an object a writer uploads, read only as its upload goes, within the writer's
 /// budget, and held only while it does.
@@ -128,13 +123,6 @@ struct Inner {
     pending: BTreeMap<u64, Pending>,
     /// The newest checkpoint, its own or the one the head named as it took it.
     checkpoint: Option<u64>,
-    /// The forks whose children have their records.
-    recorded: BTreeSet<CellId>,
-    /// The children of those forks whose IDs another cell has: their forks made no cell.
-    refused: BTreeSet<CellId>,
-    /// The child of a fork whose record a checkpoint read last, looking for those deleted, which
-    /// the next goes on after (TASK-92.4).
-    looked: Option<CellId>,
     /// Why it stopped, if it did.
     stopped: Option<Error>,
     /// cladefs: the versions dropped, which no acknowledgement names, local ones among them, cut
@@ -305,9 +293,6 @@ impl<B: Bucket> Writer<B> {
                 chain,
                 pending: BTreeMap::new(),
                 checkpoint,
-                recorded: BTreeSet::new(),
-                refused: BTreeSet::new(),
-                looked: None,
                 stopped: None,
                 dropped: BTreeSet::new(),
             }),
@@ -315,8 +300,6 @@ impl<B: Bucket> Writer<B> {
             keys,
             layer,
         };
-        // Forks acknowledged by the writers before, whose children may lack their records.
-        writer.record_forks().await?;
         Ok(writer)
     }
 
@@ -340,6 +323,12 @@ impl<B: Bucket> Writer<B> {
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap()
+    }
+
+    /// The bucket it writes to: for tests.
+    #[cfg(test)]
+    pub(crate) fn bucket(&self) -> &B {
+        &self.bucket
     }
 
     pub fn cell(&self) -> CellId {
@@ -560,7 +549,6 @@ impl<B: Bucket> Writer<B> {
             }
         }
         failpoint!("writer::acknowledged");
-        self.record_forks().await?;
         Ok(self.inner().state.through)
     }
 
@@ -614,49 +602,6 @@ impl<B: Bucket> Writer<B> {
         Ok(())
     }
 
-    /// Whether another cell has the ID of `child`, a fork's child, acknowledged: the fork made no
-    /// cell.
-    pub fn refused(&self, child: CellId) -> bool {
-        self.inner().refused.contains(&child)
-    }
-
-    /// Gives the children of acknowledged forks their records: but one whose ID another cell took
-    /// while its fork was made, which is that cell's, and this one's segments go on sound; its
-    /// writers would fail on it for ever otherwise, taking the cell or not (TASK-79.82).
-    async fn record_forks(&self) -> Result<(), Error> {
-        let forks: Vec<_> = {
-            let inner = self.inner();
-            inner
-                .state
-                .forks
-                .iter()
-                .filter(|fork| !inner.recorded.contains(&fork.child))
-                .copied()
-                .collect()
-        };
-        futures::stream::iter(forks)
-            .map(|fork| async move {
-                let origin = Origin { parent: self.cell, at: fork.at };
-                let child = Child { cell: fork.child, owner: fork.owner };
-                let keys = crate::keys::Parents::Held(&self.keys);
-                match lifecycle::record_fork(&*self.bucket, child, origin, keys).await {
-                    Ok(()) => {}
-                    Err(Error::IdTaken(child)) => drop(self.inner().refused.insert(child)),
-                    Err(error) => return Err(error),
-                }
-                // cladefs: without the rule that the reference comes first, as a test shows it
-                // needed, after (TASK-395.3).
-                if !crate::rules().references_first {
-                    lifecycle::refer_fork(&*self.bucket, child, origin).await;
-                }
-                self.inner().recorded.insert(fork.child);
-                Ok::<_, Error>(())
-            })
-            .buffer_unordered(RECORDS_AT_ONCE)
-            .try_collect()
-            .await
-    }
-
     /// Writes a checkpoint as of the last segment acknowledged, with the extents the collector
     /// moved where they went: where the writer names them from then on, before the checkpoint
     /// lands, so that it never names one before where a checkpoint of its own does, which the
@@ -686,55 +631,23 @@ impl<B: Bucket> Writer<B> {
         let segment = state.through.unwrap();
         span.set_count(trace::SEGMENT, segment);
         span.set_count(trace::EXTENTS, state.extents.len() as u64);
-        // Forks whose children were deleted. Their records stay; their forks need not. Of a few
-        // forks' children each checkpoint, in turn, after those the last looked at: every child's,
-        // each checkpoint, made a storm of forks, a checkpoint each, read their records N^2 / 2
-        // times (TASK-92.4). A child deleted has its fork go within as many checkpoints as there
-        // are forks to read RECORDS_AT_ONCE at a time.
-        let mut children: Vec<CellId> = state.forks.iter().map(|fork| fork.child).collect();
-        children.sort_unstable();
-        children.dedup();
-        let after = children.partition_point(|&child| Some(child) <= self.inner().looked);
-        let children: Vec<CellId> = children[after..]
-            .iter()
-            .chain(&children[..after])
-            .take(RECORDS_AT_ONCE)
-            .copied()
-            .collect();
-        let looked = children.last().copied();
-        let looking = futures::stream::iter(children)
-            .map(|child| async move {
-                let record = lifecycle::record(&*self.bucket, child).await?;
-                Ok::<_, Error>(record.is_some_and(|record| record.deleted).then_some(child))
-            })
-            .buffer_unordered(RECORDS_AT_ONCE)
-            .try_filter_map(|gone| async move { Ok(gone) })
-            .try_collect::<Vec<CellId>>();
-        // The moves of the objects its extents are in, followed, alongside those records' reads:
-        // neither waits for the other, a round trip less for each checkpoint, and so each fork,
-        // on a real bucket (TASK-165.11).
-        let following = async {
-            let mut maps = MovesMaps::default();
-            let keys = state.extents.values().map(|location| location.key.clone());
-            maps.read(&*self.bucket, keys).await?;
-            let mut moved = Vec::new();
-            for (extent, old) in &state.extents {
-                let location = maps.follow(&*self.bucket, *extent, old).await?;
-                if location != *old {
-                    moved.push((*extent, old.clone(), location));
-                }
+        // The moves of the objects its extents are in, followed.
+        let mut maps = MovesMaps::default();
+        let keys = state.extents.values().map(|location| location.key.clone());
+        maps.read(&*self.bucket, keys).await?;
+        let mut moved = Vec::new();
+        for (extent, old) in &state.extents {
+            let location = maps.follow(&*self.bucket, *extent, old).await?;
+            if location != *old {
+                moved.push((*extent, old.clone(), location));
             }
-            Ok::<_, Error>(moved)
-        };
-        let (moved, gone) = futures::join!(following, looking);
-        let (moved, gone) = (moved?, gone?);
+        }
         for (extent, _, location) in &moved {
             state.extents.insert(*extent, location.clone());
         }
         if rules().moves_taken_first {
             self.take_moves(&moved);
         }
-        state.forks.retain(|fork| !gone.contains(&fork.child));
         failpoint!("writer::checkpoint");
         let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
@@ -757,8 +670,6 @@ impl<B: Bucket> Writer<B> {
             self.take_moves(&moved);
         }
         let mut inner = self.inner();
-        inner.state.forks.retain(|fork| !gone.contains(&fork.child));
-        inner.looked = looked.or(inner.looked);
         inner.checkpoint = inner.checkpoint.max(Some(segment));
         Ok(inner.checkpoint)
     }
@@ -791,7 +702,7 @@ mod tests {
     use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_cell;
-    use crate::layout::{Contents, NewVersion, Segment, child};
+    use crate::layout::{Contents, NewVersion, Segment};
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
 
@@ -882,9 +793,7 @@ mod tests {
             assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xc, c)]);
             assert_eq!(writer.drop_versions(&BTreeSet::from([0xc])).await, Err(Error::Fenced));
             drop(next);
-            lifecycle::delete(&*bucket, cell, 12, 0, &crate::keys::testing::host_kms())
-                .await
-                .unwrap();
+            lifecycle::delete(&*bucket, cell, 12, 0).await.unwrap();
             let ended = head::get(&*bucket, cell).await.unwrap().unwrap();
             assert_eq!((ended.epoch, named(Some(ended))), (layout::Head::FINAL, vec![]));
         });
@@ -1051,103 +960,6 @@ mod tests {
             bucket.complete(0, Fault::None);
         }
         assert_eq!(most, OWN_AT_ONCE);
-    }
-
-    /// TASK-92.4: a fork's children's records are made, as their forks are acknowledged, and read,
-    /// as a checkpoint looks for those deleted, a few at once: one at a time, 300 forks of a base
-    /// held the uploader up for a round trip each.
-    #[test]
-    fn forks_records_are_made_and_read_a_few_at_once() {
-        use crate::layout::Segment;
-        use crate::testing::{Fault, SimBucket};
-        use std::task::{Context, Poll};
-        let bucket = SimBucket::new();
-        let (writer, _) = bucket.served(async {
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
-        });
-        let children =
-            (2..2 + 2 * RECORDS_AT_ONCE as u64 + 1).map(|id| child(test_cell(id))).collect();
-        let footer = writer.chain().close(Contents { forks: children, ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() };
-        let segment = writer.add_segment(Objects {
-            footer,
-            segment: segment.encode(writer.keys().encrypting()).into(),
-            own: Vec::new(),
-        });
-        bucket.served(writer.upload(segment.unwrap())).0.unwrap();
-        let mut context = Context::from_waker(futures::task::noop_waker_ref());
-        // The most requests waiting at once, until `future` is done.
-        let mut most_waiting = |future: std::pin::Pin<&mut dyn Future<Output = _>>| {
-            let mut future = future;
-            let mut most = 0;
-            while let Poll::Pending = future.as_mut().poll(&mut context) {
-                most = most.max(bucket.waiting());
-                bucket.complete(0, Fault::None);
-            }
-            most
-        };
-        let acknowledged = most_waiting(std::pin::pin!(async {
-            writer.acknowledge().await.unwrap();
-        }));
-        assert_eq!(acknowledged, RECORDS_AT_ONCE, "the records made at once");
-        let checkpointed = most_waiting(std::pin::pin!(async {
-            writer.checkpoint().await.unwrap();
-        }));
-        assert_eq!(checkpointed, RECORDS_AT_ONCE, "the records read at once");
-    }
-
-    /// TASK-92.4: a storm of forks, each acknowledged and checkpointed as the uploader does, its
-    /// children's records made as each is: a checkpoint reads the records of a few of the forks'
-    /// children at most, looking for those deleted, taking them in turn, not every child's each
-    /// time, which made a storm of N forks read N^2/2 records; and the forks of a child deleted go
-    /// within as many checkpoints as there are forks to read a few at a time.
-    #[test]
-    fn checkpoints_read_a_few_forks_records_at_most() {
-        const FORKS: u64 = 4 * RECORDS_AT_ONCE as u64;
-        futures::executor::block_on(async {
-            let bucket = memory();
-            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let mut most = 0;
-            let mut first = None;
-            for n in 0..FORKS {
-                let batch = SegmentBuilder::from(Commit { tag: n + 1, ..Commit::default() });
-                let forked = batch
-                    .fork(child(test_cell(2 + n)), &mut writer.chain())
-                    .frame(writer.keys().encrypting());
-                let segment = writer.add_segment(forked).unwrap();
-                first.get_or_insert(segment);
-                writer.upload(segment).await.unwrap();
-                writer.acknowledge().await.unwrap();
-                let before = bucket.stats().requests(Request::Get);
-                writer.checkpoint().await.unwrap();
-                most = most.max(bucket.stats().requests(Request::Get) - before);
-            }
-            assert_eq!(most, RECORDS_AT_ONCE as u64, "the most records a checkpoint read");
-            // The first child deleted: its fork goes within FORKS / RECORDS_AT_ONCE checkpoints.
-            let origin = Origin { parent: test_cell(1), at: first.unwrap() };
-            let forked = crate::record::Kind::Fork(origin);
-            lifecycle::delete_fork(
-                &*bucket,
-                test_cell(2),
-                forked,
-                child(test_cell(2)).owner,
-                (9, 0),
-                &crate::keys::testing::host_kms(),
-            )
-            .await
-            .unwrap();
-            let forks = |writer: &Writer<ObjectBucket>| writer.inner().state.forks.len() as u64;
-            for n in 0..FORKS / RECORDS_AT_ONCE as u64 {
-                let segment =
-                    add(&writer, Commit { tag: FORKS + n + 1, ..Commit::default() }).unwrap();
-                writer.upload(segment).await.unwrap();
-                writer.acknowledge().await.unwrap();
-                writer.checkpoint().await.unwrap();
-            }
-            assert_eq!(forks(&writer), FORKS - 1);
-        });
     }
 
     /// TASK-79.19: a writer uploading within a budget reads each object only once the budget has
@@ -1362,7 +1174,6 @@ mod tests {
                     frees: vec![],
                     root: Some(b"root".to_vec()),
                     next_sequence: 4,
-                    forks: vec![],
                     capacity: None,
                     continued: None,
                     versions: vec![],
@@ -1384,7 +1195,7 @@ mod tests {
             assert_eq!((writer.epoch(), segment), (1, 0));
             let wanted = format!("{:?}", (test_cell(1), 0, 1));
             let misplaced = |place: &str| {
-                Error::Corrupt(format!("a segment of cell 1/1/1, {place}, not {wanted}"))
+                Error::Corrupt(format!("a segment of cell 1/1, {place}, not {wanted}"))
             };
             for (wrong, refused) in [
                 (Footer { segment: segment + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),

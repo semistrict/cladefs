@@ -78,7 +78,7 @@ fn spans_trace_requests_commits_and_uploads() {
     let cell = write_read_commit();
     provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
-    // cladefs: as `TENANT/CELL/ID`, in base 32 (TASK-364, TASK-504).
+    // cladefs: as `TENANT/CELL`, in base 32 (TASK-364, TASK-504).
     let named = Value::from(cell.to_string());
 
     let opened = the(&spans, "cladefsd.open");

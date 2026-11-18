@@ -25,30 +25,26 @@ macro_rules! failpoint {
 }
 pub(crate) use failpoint;
 
-/// The steps of a fork, in the order it takes them, those that fail: finding its child's ID free
-/// in the bucket, its commit naming the child, then, on the uploader's side, its segment's upload
-/// and acknowledgement, which gives the child its reference under the parent's cell (TASK-395.3)
-/// and its record, and the checkpoint that makes it; then
-/// the child's store made, taking its state from the bucket (TASK-165.7).
-pub const FORK_STEPS: [&str; 20] = [
-    "fork::uploaded",
-    "upload::child_free",
-    "fork::committed",
-    "fork::flushed",
-    "upload::forked",
+/// The steps of a fork of a store with a writer, in the order it takes them, those that fail: a
+/// version of its last commit made, then, on the uploader's side, its segment's upload and
+/// acknowledgement, which names the version in the head; then the fork of the version, as a
+/// restore's steps (TASK-508.3).
+pub const FORK_STEPS: [&str; 17] = [
+    "version::committed",
     "upload::gather",
     "writer::upload",
     "writer::uploaded",
     "writer::acknowledge",
     "writer::acknowledged",
-    "lifecycle::record_fork",
-    "lifecycle::referred",
-    "lifecycle::recorded_fork",
     "upload::acknowledged",
     "upload::released",
-    "writer::checkpoint",
-    "writer::checkpointed",
-    "upload::checkpointed",
+    "fork::uploaded",
+    "upload::forked",
+    "version::record",
+    "version::recorded",
+    "version::referred",
+    "version::checked",
+    "version::made",
     "fork::recorded",
     "fork::made",
 ];
@@ -76,13 +72,9 @@ pub const DAEMON_STEPS: [&str; 3] =
     ["cladefsd::fork", "cladefsd::fork_uploaded", "cladefsd::forked"];
 
 /// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone, in
-/// order: the first two, or the next two, by whether the child has a record.
-pub const CLEANUP_STEPS: [&str; 4] = [
-    "lifecycle::claimed",
-    "lifecycle::claim_head_ended",
-    "lifecycle::head_ended",
-    "lifecycle::children_recorded",
-];
+/// order: the first two, or the last, by whether the child has a record.
+pub const CLEANUP_STEPS: [&str; 3] =
+    ["lifecycle::claimed", "lifecycle::claim_head_ended", "lifecycle::head_ended"];
 
 /// One in how many steps a seed fails.
 const FAILING: u64 = 8;

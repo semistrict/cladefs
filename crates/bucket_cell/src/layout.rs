@@ -14,9 +14,16 @@ use std::collections::BTreeSet;
 use storage_device::ExtentId;
 
 pub use extent_frame::segment::{
-    CellId, Chain, Child, Contents, Continued, Footer, Location, NewVersion, epoch_of, tag,
-    writer_of,
+    CellId, Chain, Contents, Continued, Footer, Location, NewVersion, epoch_of, tag, writer_of,
 };
+
+/// cladefs: a fork's child: its cell, and its owner, which every record of the child names,
+/// whoever writes it (TASK-79.82, TASK-153.9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Child {
+    pub cell: CellId,
+    pub owner: u64,
+}
 
 /// cladefs: the format of a cell's objects, which its record says first
 /// ([`Record::format`](crate::record::Record::format)): a reader refuses a cell of any other,
@@ -55,8 +62,9 @@ pub use extent_frame::segment::{
 /// kind (doc-20, TASK-508.1): its object names its one cell and kind, not a map of cells,
 /// and a version names no cut of several cells; nothing reads 15's. 17: forks are of versions
 /// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
-/// 16's.
-pub const FORMAT: u32 = 17;
+/// 16's. 18: no writable forks: a record is its kind, not flags, and a footer names no forks
+/// (TASK-508.3); nothing reads 17's.
+pub const FORMAT: u32 = 18;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -511,23 +519,6 @@ pub fn kind(key: &str) -> Kind<'_> {
     parsed().unwrap_or(Kind::Unknown)
 }
 
-/// A fork of a cell, made at the end of the commits of its segment `at`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Fork {
-    pub child: CellId,
-    pub at: u64,
-    /// cladefs: its child's owner, which every record of the child names
-    /// ([`Record::owner`](crate::record::Record::owner)).
-    pub owner: u64,
-}
-
-impl Fork {
-    /// The fork its segment `at`'s footer names, `child`.
-    pub fn at(at: u64, child: &Child) -> Self {
-        Self { child: child.cell, at, owner: child.owner }
-    }
-}
-
 /// A segment: its data, then its footer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Segment {
@@ -850,18 +841,16 @@ mod tests {
     }
 
     /// A cell's extents stored on their own, whichever writer uploaded them, are under its
-    /// prefix, and no other cell's are, of its cell or another.
+    /// prefix, and no other cell's are.
     #[test]
     fn extents_are_under_their_cells_prefix() {
         let cell = test_cell(0x12);
         let elsewhere = CellId { tenant: 1, id: 2 };
-        let expected = "tenants/0000000000001/cells/0000000000001/extents/000000000000j/";
-        assert_eq!(extents(cell), expected);
+        assert_eq!(extents(cell), "tenants/0000000000001/cells/000000000000j/extents/");
         for epoch in [1, 7] {
-            let key = extent(TEST_CELL, epoch, 3, ExtentId::new(0x12, 5));
+            let key = extent(cell, epoch, 3, ExtentId::new(0x12, 5));
             assert!(key.starts_with(&extents(cell)));
         }
-        assert!(!extent(TEST_CELL, 1, 3, ExtentId::new(0x13, 5)).starts_with(&extents(cell)));
         assert!(!extent(elsewhere, 1, 3, ExtentId::new(0x12, 5)).starts_with(&extents(cell)));
     }
 
@@ -890,29 +879,23 @@ mod tests {
         ] {
             assert!(key.starts_with(prefix) && key.starts_with(TENANTS), "{key}");
         }
-        assert_eq!(record(cell), format!("{prefix}cells/0000000000003"));
+        assert_eq!(record(cell), format!("{prefix}record"));
         assert_eq!(
             moves(&segment(cell, 7, 2)),
-            format!(
-                "{prefix}moves/segments/0000000000003/0000000000002.0000000000007/\
-                 0000000000001"
-            )
+            format!("{prefix}moves/segments/0000000000002.0000000000007/0000000000001")
         );
         assert_eq!(
             moves(&moves(&segment(cell, 7, 2))),
             format!(
-                "{prefix}moves/moves/segments/0000000000003/0000000000002.0000000000007/\
-                 0000000000001/0000000000001"
+                "{prefix}moves/moves/segments/0000000000002.0000000000007/0000000000001/\
+                 0000000000001"
             )
         );
         assert_eq!(collector_lease(cell), format!("{prefix}gc/lease"));
         assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000001a"));
         assert_eq!(
             reference(cell, 7, elsewhere),
-            format!(
-                "{prefix}refs/0000000000003/0000000000007/\
-                 000000000000b.000000000000d.0000000000004"
-            )
+            format!("{prefix}refs/0000000000007/000000000000b.0000000000004")
         );
     }
 
@@ -939,7 +922,7 @@ mod tests {
         let (once, twice) = (moves(&sealed), moves(&moves(&sealed)));
         assert!(further(&sealed, &once) && further(&sealed, &twice) && further(&once, &twice));
         assert!(!further(&once, &sealed) && !further(&twice, &once) && !further(&sealed, &sealed));
-        let other = segment(CellId { tenant: 0xa, id: 3 }, 7, 2);
+        let other = segment(CellId { tenant: 0xa, id: 4 }, 7, 2);
         assert!(!further(&other, &once) && !further(&sealed, &moves(&other)));
         assert_eq!(moved_from(&once), Some(sealed.clone()));
         assert_eq!(moved_from(&twice), Some(once.clone()));
@@ -951,7 +934,7 @@ mod tests {
     #[test]
     fn passes_moves_of_one_object_are_at_keys_of_their_own() {
         let cell = CellId { tenant: 0xa, id: 0xc };
-        let sealed = segment(CellId { tenant: cell.tenant, id: 3 }, 7, 2);
+        let sealed = segment(cell, 7, 2);
         let (first, second) =
             (super::moves(&sealed, 1).unwrap(), super::moves(&sealed, 2).unwrap());
         assert_ne!(first, second);
@@ -961,10 +944,10 @@ mod tests {
             (moved_from(&first), moved_from(&second)),
             (Some(sealed.clone()), Some(sealed.clone()))
         );
-        let next = segment(CellId { tenant: cell.tenant, id: 3 }, 8, 2);
+        let next = segment(cell, 8, 2);
         assert!(!super::moves(&next, 1).unwrap().starts_with(&prefix));
         assert!(!moves(&first).starts_with(&prefix));
-        let of = "segments/0000000000003/0000000000002.0000000000007";
+        let of = "segments/0000000000002.0000000000007";
         assert_eq!(kind(&second), Kind::Moves { cell, of, pass: 2 });
     }
 
@@ -1006,7 +989,7 @@ mod tests {
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
         let from = segment(cell, 7, 2);
-        let of = "segments/0000000000003/0000000000002.0000000000007";
+        let of = "segments/0000000000002.0000000000007";
         assert_eq!(kind(&moves(&from)), Kind::Moves { cell, of, pass: 1 });
         let moved = format!("moves/{of}/0000000000001");
         assert_eq!(kind(&moves(&moves(&from))), Kind::Moves { cell, of: &moved, pass: 1 });
@@ -1150,7 +1133,6 @@ mod tests {
                 frees: vec![ExtentId::new(1, 1)],
                 root: Some(b"root".to_vec()),
                 next_sequence: 6,
-                forks: vec![Child { cell: test_cell(7), owner: 8 }],
                 capacity: Some(1 << 30),
                 continued: None,
                 versions: vec![NewVersion { id: 9, keep_last: Some(11) }],

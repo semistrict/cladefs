@@ -6,7 +6,7 @@
 //! hosts' stores, this crate's, and their uploaders (`upload`), writing, committing, forking,
 //! taken over and crashing, and by deletions and collectors, over a bucket that delays, reorders
 //! and fails requests (TASK-88: bucket_cell's until then, whose writers made their segments
-//! with `SegmentBuilder`, so that the store's choice of what a segment seals, frees and forks never
+//! with `SegmentBuilder`, so that the store's choice of what a segment seals and frees never
 //! met a takeover or a collector), checked after every step against what each cell's guests did
 //! and were told, every object a cell's acknowledged segments name there, and what its live
 //! writer and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
@@ -177,37 +177,23 @@ fn one() {
             "collector_epochs" => rules.collector_epochs = false,
             "moves_by_pass" => rules.moves_by_pass = false,
             "epoch_sequences" => rules.epoch_sequences = false,
-            "records_after_ack" => rules.records_after_ack = false,
             "candidates_first" => rules.candidates_first = false,
-            "forks_from_states" => rules.forks_from_states = false,
             "tokens" => rules.tokens = false,
             "delete_tokens" => rules.delete_tokens = false,
-            "fork_claims_ids" => rules.fork_claims_ids = false,
-            "fork_claims_landed" => rules.fork_claims_landed = false,
             "forks_check_versions" => rules.forks_check_versions = false,
             "forks_pending" => rules.forks_pending = false,
             "collector_abandons" => rules.collector_abandons = false,
-            "records_relisted" => rules.records_relisted = false,
-            "records_owned" => rules.records_owned = false,
             "ways_from_seals" => rules.ways_from_seals = false,
             "moves_taken_first" => rules.moves_taken_first = false,
             "stores_follow_moves" => rules.stores_follow_moves = false,
-            "passes_fenced_stop" => rules.passes_fenced_stop = false,
-            "recoveries_by_origins" => rules.recoveries_by_origins = false,
-            "records_kept" => rules.records_kept = false,
             "wal_follows" => rules.wal_follows = false,
             "references" => rules.references = false,
-            "references_first" => rules.references_first = false,
             "clones_refer_first" => rules.clones_refer_first = false,
             "clones_record_first" => rules.clones_record_first = false,
-            "references_taken_back" => rules.references_taken_back = false,
             "retirements_marked" => rules.retirements_marked = false,
             "references_held" => rules.references_held = false,
             "references_relisted" => rules.references_relisted = false,
             "origins_kept" => rules.origins_kept = false,
-            "ids_given" => rules.ids_given = false,
-            "clones_made_unmarked" => rules.clones_made_unmarked = false,
-            "fences_kept" => rules.fences_kept = false,
             "resumes_refer" => rules.resumes_refer = false,
             "resumes_marked" => rules.resumes_marked = false,
             "versions_kept" => rules.versions_kept = false,
@@ -231,15 +217,12 @@ fn one() {
         "children" => children(),
         "fresh_cells" => fresh_cells(),
         "recovering" => recovering(),
-        "failed" => failed_forks(),
+        "twins" => twin_restores(),
         "restores" => restores(),
         "forgotten" => forgotten_restores(),
         "whole_restores" => whole_restores(),
-        "taking_ids" => restores_taking_ids(),
-        "usurped" => usurped(),
-        "deleted_forking" => deleted_forking(),
         "wals" => wals(),
-        "forked_wals" => forked_wals(),
+        "versioned_wals" => versioned_wals(),
         "late_checkpoints" => late_checkpoints(),
         "versions" => versions(),
         other => panic!("no profile {other}"),
@@ -260,13 +243,12 @@ fn one() {
 fn seeds_replay() {
     let profiles = [
         Profile::default(),
-        deleted_forking(),
         deleted_bases(),
         restores(),
-        forked_wals(),
+        versioned_wals(),
         late_checkpoints(),
         recreated(),
-        failed_forks(),
+        twin_restores(),
     ];
     for profile in profiles {
         replays(profile, 0..20);
@@ -279,11 +261,12 @@ fn everything() {
     holds(Profile::default(), 0..300);
 }
 
-/// Case 1: frees before and after forks, by parents and children. Case 2: chains of generations,
-/// some deleted in the middle.
+/// Case 1: frees before and after versions, by parents and the children restored from them. Case
+/// 2: chains of generations, some deleted in the middle.
 fn forks() -> Profile {
     weights(|weights| {
-        weights.fork = 4;
+        weights.version = 4;
+        weights.restore_version = 4;
         weights.open = 6;
         weights.delete = 2;
     })
@@ -291,11 +274,12 @@ fn forks() -> Profile {
 
 test_holds!(forks_and_frees, forks());
 
-/// Bases deleted while their forks live (TASK-39.4): the forks write, fork and are taken over, and
-/// collectors run, keeping what the forks need of the bases.
+/// Bases deleted while the cells restored from their versions live (TASK-39.4): those write, cut
+/// versions, are restored and taken over, and collectors run, keeping what they need of the bases.
 fn deleted_bases() -> Profile {
     weights(|weights| {
-        weights.fork = 4;
+        weights.version = 3;
+        weights.restore_version = 4;
         weights.open = 6;
         weights.delete_base = 3;
         weights.collect = 6;
@@ -326,29 +310,11 @@ test_needs!(fencing_needs_tokens, tokens, stale_placements());
 
 test_needs!(deletes_need_tokens, delete_tokens, stale_placements());
 
-/// Cells forking, deleted twice at once, by a placement cut off and the latest one, while their
-/// writers' fork segments are in flight and collectors run (TASK-183).
-fn deleted_forking() -> Profile {
-    let mut profile = weights(|weights| {
-        weights.fork = 6;
-        weights.open = 6;
-        weights.takeover = 2;
-        weights.stale_delete = 4;
-        weights.delete = 3;
-        weights.collect = 8;
-    });
-    // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
-    // passes over every cell, none in 20,000 seeds with half the passes over one cell.
-    profile.one_cell = 0.0;
-    profile
-}
-
-test_holds!(cells_deleted_twice_while_forking, deleted_forking());
-
-/// Case 3: forks racing collection and compaction.
+/// Case 3: restores racing collection and compaction.
 fn collected() -> Profile {
     let mut profile = weights(|weights| {
-        weights.fork = 3;
+        weights.version = 2;
+        weights.restore_version = 3;
         weights.open = 6;
         weights.collect = 8;
         weights.checkpoint = 6;
@@ -360,24 +326,26 @@ fn collected() -> Profile {
 
 test_holds!(forks_racing_collection, collected());
 
-/// Forks whose children open soon after, while collectors run: a child's record and head come
+/// Restores whose children open soon after, while collectors run: a child's record and head come
 /// while a pass reads cells.
 fn children() -> Profile {
     weights(|weights| {
-        weights.fork = 6;
+        weights.version = 3;
+        weights.restore_version = 6;
         weights.open = 10;
         weights.collect = 10;
         weights.crash = 2;
     })
 }
 
-/// cladefs: forks whose children open at once, passes over one cell alone, the child's
+/// cladefs: restores whose children open at once, passes over one cell alone, the child's
 /// among them, which may have no record yet as the pass starts, and requests slow to complete, so
 /// that a pass spans the child's opening and first upload (TASK-395.4).
 fn fresh_cells() -> Profile {
     let mut profile = weights(|weights| {
         weights.complete = 15;
-        weights.fork = 8;
+        weights.version = 4;
+        weights.restore_version = 8;
         weights.open = 12;
         weights.collect = 12;
         weights.crash = 0;
@@ -391,13 +359,11 @@ fn fresh_cells() -> Profile {
 test_holds!(forks_with_children_opening, children());
 
 // cladefs: a pass over a child's cell begun before the child's record, which lists the child's
-// segments after it read no record (TASK-395.4): every fork is to a cell of its own here, so a
+// segments after it read no record (TASK-395.4): every restore is to a cell of its own here, so a
 // pass over the parent's cell finds no such child (upload's Shuttle test finds one within a cell).
 test_holds!(passes_over_cells_being_made, fresh_cells());
 
 test_needs!(collection_needs_candidates_first, candidates_first, fresh_cells());
-
-test_needs!(collection_needs_forks_from_states, forks_from_states, collected());
 
 // A host's store naming what it reads where it was acknowledged, the collector deleting that and
 // the moves after, compacted again, which its writer's checkpoints followed (TASK-195).
@@ -474,7 +440,8 @@ fn late_checkpoints() -> Profile {
         weights.open = 2;
         weights.crash = 0;
         weights.delete = 0;
-        weights.fork = 0;
+        weights.version = 0;
+        weights.restore_version = 0;
         weights.collect = 12;
         weights.stale_checkpoint = 6;
         weights.tick = 8;
@@ -512,12 +479,14 @@ test_holds!(takeovers_racing_collection, taken());
 // Case 10: extents minted after a takeover.
 test_needs!(takeovers_need_epoch_sequences, epoch_sequences, takeovers());
 
-/// Case 5: crashes between a segment's upload and the next, and between a fork and its child's
-/// record. Case 6: frees in commits never made durable.
+/// Case 5: crashes between a segment's upload and the next, and amid restores. Case 6: frees in
+/// commits never made durable.
 fn crashes() -> Profile {
     let mut profile = weights(|weights| {
         weights.crash = 4;
-        weights.fork = 3;
+        weights.version = 2;
+        weights.restore_version = 3;
+        weights.unfork = 2;
         weights.open = 8;
     });
     profile.fail_before = 0.1;
@@ -525,8 +494,6 @@ fn crashes() -> Profile {
 }
 
 test_holds!(crashes_anywhere, crashes());
-
-test_needs!(forks_need_records_after_acks, records_after_ack, crashes());
 
 /// Hosts crashing, keeping their write-ahead logs or losing them, and taking their cells back,
 /// at once as they start again or later, while other hosts take them over and write, and the
@@ -539,7 +506,8 @@ fn wals() -> Profile {
         weights.open = 8;
         weights.takeover = 3;
         weights.close = 6;
-        weights.fork = 0;
+        weights.version = 0;
+        weights.restore_version = 0;
         weights.delete = 0;
         weights.checkpoint = 0;
         weights.collect = 0;
@@ -549,22 +517,23 @@ fn wals() -> Profile {
     profile
 }
 
-/// Logs as [`wals`] makes them, holding forks, which their next writers make again where they
-/// are put, while roots take their children's IDs (TASK-174), checkpoints come and collectors run.
-fn forked_wals() -> Profile {
+/// Logs as [`wals`] makes them, holding versions, which their next writers name again where they
+/// are put, dropped and restored, while checkpoints come and collectors run.
+fn versioned_wals() -> Profile {
     let mut profile = wals();
-    profile.weights.fork = 3;
+    profile.weights.version = 3;
+    profile.weights.drop_version = 1;
+    profile.weights.restore_version = 2;
     profile.weights.delete = 1;
     profile.weights.checkpoint = 2;
     profile.weights.collect = 4;
     profile.weights.stop_collector = 1;
-    profile.weights.usurp = 2;
     profile
 }
 
 test_holds!(logs_put_after_takeovers, wals());
 
-test_holds!(logs_of_forks_put_after_takeovers, forked_wals());
+test_holds!(logs_of_versions_put_after_takeovers, versioned_wals());
 
 // A host's log put after another host's acknowledged commit, which it loses.
 test_needs!(logs_need_to_follow, wal_follows, wals());
@@ -581,41 +550,12 @@ fn spanning_wals() -> Profile {
 
 test_holds!(spanning_logs_put_after_takeovers, spanning_wals());
 
-/// Forks that fail and are deleted, as their hosts' cleanups delete them, those crashing partway
-/// and going on, while their segments land or not, the parents' next writers give them records,
-/// collectors run, and other cells take their IDs, other forks' among them (TASK-79.82,
-/// TASK-79.78).
-fn failed_forks() -> Profile {
-    let mut profile = weights(|weights| {
-        weights.fork = 6;
-        weights.unfork = 6;
-        weights.contest = 2;
-        weights.twins = 2;
-        weights.open = 4;
-        weights.takeover = 2;
-        weights.collect = 6;
-        weights.crash = 3;
-        weights.close = 2;
-    });
-    profile.fail_after = 0.1;
-    profile
-}
-
-test_holds!(failed_forks_deleted_anywhere, failed_forks());
-
-test_needs!(failed_forks_need_claims_of_ids, fork_claims_ids, failed_forks());
-
-test_needs!(failed_forks_need_claims_of_what_landed, fork_claims_landed, failed_forks());
-
-test_needs!(forks_to_one_child_need_records_owned, records_owned, failed_forks());
-
 /// Case 11: versions restored on several hosts at once (doc-20): forks of one racing each other,
 /// passes of the collector, and the version's drop, whose hosts die at each step, what they leave
 /// opened or deleted; while the cell it names goes on, frees what it held, and is deleted in
 /// turn. Requests land late, after their hosts die.
 fn restores() -> Profile {
     let mut profile = weights(|weights| {
-        weights.fork = 1;
         weights.version = 4;
         weights.drop_version = 1;
         weights.restore_version = 10;
@@ -658,22 +598,9 @@ test_holds!(restores_forgotten_leave_nothing_behind, forgotten_restores());
 // Written first, a reference whose record never landed stays for ever.
 test_leaks!(forgotten_restores_need_clones_record_first, clones_record_first, forgotten_restores());
 
-// A reference whose child's ID another cell took stays for ever, no record naming it, when no
-// recorder takes it back (TASK-395.10); `uncollected` excused one until retirements were marked
-// (TASK-395.13). Its direct test is bucket_cell's
-// `forks_whose_childrens_ids_are_taken_need_references_taken_back`.
-test_leaks!(restores_need_references_taken_back, references_taken_back, restores());
-
-// A stale recorder's reference, written after its take-back or its retirement, stays for ever
-// unmarked: no recorder, nor pass of its child's cell, skipping it, looks at it again
-// (TASK-395.13, TASK-395.14). Its direct test is bucket_cell's
-// `stale_recorders_references_need_retirements_marked`.
+// A slow host's reference, written after its retirement, stays for ever unmarked: no pass of its
+// child's cell, skipping it, looks at it again (TASK-395.13, TASK-395.14).
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
-
-// cladefs: a clone's reference retired unmarked while it is being made, its host writing it after,
-// stays for ever: no record names it, and no mark has its parent's cell's pass delete it
-// (TASK-455). Its model is specs/bucket's NoForksMadeUnmarked.
-test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores());
 
 // cladefs: a clone a store resumed, its host having died after its record, made with no reference:
 // once its version goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
@@ -687,49 +614,20 @@ fn restores_need_resumes_refer() {
     needed(Rules { resumes_refer: false, ..Rules::ALL }, restores(), 0..20_000);
 }
 
-/// Restores as [`restores`] makes them, fewer and among more forks, so that more take the IDs of
-/// forks' children whose segments are not yet acknowledged, as guests may name any: whichever's
-/// record comes first takes the ID, the other refused (TASK-173). Its rule,
-/// `recoveries_by_origins`, needs a pass to list the records before the version's cell's head
-/// and read the parent's state after the restore, the version's drop and a checkpoint, which no
-/// seed of 0..20,000 of this profile or [`restores`] does: the direct test
-/// `children_restored_from_versions_keeping_their_origins_need_recoveries_by_origins` shows it.
-fn restores_taking_ids() -> Profile {
+/// Restores as [`restores`] makes them, and pairs of them to one child, as guests may name any ID:
+/// whichever's record comes first takes it, the other refused (TASK-79.82, TASK-173).
+fn twin_restores() -> Profile {
     let mut profile = restores();
-    profile.weights.fork = 4;
-    profile.weights.restore_version = 2;
-    profile.weights.crash = 1;
+    profile.weights.twins = 4;
+    profile.weights.restore_version = 4;
     profile
 }
 
-test_holds!(restores_taking_forks_ids, restores_taking_ids());
+test_holds!(restores_racing_for_one_child, twin_restores());
 
-/// Roots taking the IDs of forks' children whose segments are not yet acknowledged, and deleted,
-/// while the forks' parents are deleted and collectors run: a parent's writer slow to record its
-/// fork finds the root's record, deleted (TASK-174).
-fn usurped() -> Profile {
-    weights(|weights| {
-        weights.fork = 6;
-        weights.open = 6;
-        weights.usurp = 4;
-        weights.delete = 3;
-        weights.collect = 8;
-        weights.checkpoint = 2;
-    })
-}
-
-test_holds!(forks_ids_taken_by_roots_deleted, usurped());
-
-test_needs!(collection_needs_records_kept, records_kept, usurped());
-
-// cladefs: the roots' IDs here named, as a guest's, no allocator's: a dead cell of them goes whole
-// only if the collector takes them for given, when a slow writer of a parent records its fork to
-// one after (TASK-455).
-test_needs!(collection_needs_ids_given, ids_given, usurped());
-
-// cladefs: the per-cell collector's rules (TASK-395.3, TASK-395.4), every fork of the simulation's
-// to a cell of its own. A base's cell's pass, the base deleted, keeps what its forks inherited only
-// by their references...
+// cladefs: the per-cell collector's rules (TASK-395.3, TASK-395.4), every restore of the
+// simulation's to a cell of its own. A base's cell's pass, the base deleted, keeps what its forks
+// inherited only by their references...
 test_needs!(collection_needs_references, references, deleted_bases());
 
 // ...and its state at their origins whole, what recovering it reads too: a fork with no
@@ -740,12 +638,10 @@ test_needs!(collection_needs_origins_kept, origins_kept, deleted_bases());
 // forks inheriting through it.
 test_needs!(collection_needs_references_held, references_held, forks());
 
-// A deletion's references written before it marks the parent deleted, and a clone's before it
-// reads its version, have no search here: collector::tests' direct ones show them needed
-// (`deletions_referring_before_they_mark_parents_deleted_need_references_first`,
-// `clones_keeping_what_they_inherit_as_their_versions_go_need_clones_refer_first`), as do
-// specs/bucket's NoReferencesFirst and NoForksReferFirst; references listed after the states,
-// NoReferencesRelisted alone.
+// A clone's reference written before it reads its version has no search here: collector::tests'
+// direct one shows it needed
+// (`clones_keeping_what_they_inherit_as_their_versions_go_need_clones_refer_first`), as does
+// specs/bucket's NoForksReferFirst; references listed after the states, NoReferencesRelisted alone.
 
 /// Restores as [`restores`] makes them, but no host dying, no collector stopped and no request
 /// failing once it took effect: a pass that misses a restored cell then reclaims what it inherited,
@@ -757,14 +653,6 @@ fn whole_restores() -> Profile {
     profile.weights.stop_collector = 0;
     profile.fail_after = 0.0;
     profile
-}
-
-// TASK-395.1: a clone's reference, listed after the states, finds what listing the records again
-// finds: with references gone too, as specs/bucket's NoRecordsRelisted has it.
-#[test]
-fn collection_needs_records_listed_after_states() {
-    let rules = Rules { records_relisted: false, references: false, ..Rules::ALL };
-    needed(rules, whole_restores(), 0..20_000);
 }
 
 /// Case 7: collectors stopping midway, two at once, one fenced by another. Case 8: writers' indexes

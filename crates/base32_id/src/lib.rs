@@ -10,7 +10,7 @@
 //!
 //! Two forms: [`Padded`], [`WIDTH`] digits, leading zeros kept, as bucket keys and file names hold
 //! IDs, so that listings come in the IDs' order and a name's parts are told apart by width; and
-//! [`Short`], no leading zeros, as operators read and type IDs (`TENANT/CELL/ID`). [`parse`] reads
+//! [`Short`], no leading zeros, as operators read and type IDs (`TENANT/CELL`). [`parse`] reads
 //! either; [`parse_padded`] only the first, for names whose width is part of what they are.
 
 use std::fmt;

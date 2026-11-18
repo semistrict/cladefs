@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     const KEY: &str = "tenants/0000000000001/cells/0000000000001/\
-                       segments/0000000000001/0000000000001.0000000000000";
+                       segments/0000000000001.0000000000000";
 
     /// Bytes that compress.
     fn pattern(len: u64) -> Vec<u8> {

@@ -106,14 +106,19 @@ impl KeptImage {
         Ok(self.uploader.wait_uploaded(self.store.last_commit()?)?)
     }
 
-    /// Forks the store's cell, as of its last commit, to a new cell, the one cell of a new
-    /// cell of its tenant's (TASK-364), whose handle is a new directory at `path`, in its bucket
-    /// too ([`host_cell::fork`]): `held` is let go of once the fork's commit is made.
+    /// Forks the store's cell, as of its last commit, to a new cell of its tenant's (TASK-364),
+    /// whose handle is a new directory at `path`, in its bucket too, through a version of that
+    /// commit ([`host_cell::fork_through`]): `held` is let go of once the version's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let tenant = self.store.description().cell.tenant;
         let cell = host_cell::new_cell(self.uploader.bucket(), tenant).map_err(Error::from)?;
         let child = Child { cell, owner: rand::random() };
-        host_cell::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
+        let id = rand::random::<u64>().max(1);
+        let version = bucket_cell::layout::NewVersion { id, keep_last: None };
+        let epoch = self.store.commit_version(version, false).map_err(Error::new)?;
+        drop(held);
+        self.uploader.wait_uploaded(epoch).map_err(Error::from)?;
+        host_cell::fork_through(&self.store, &self.uploader, id, path, child, |_| Ok(()))
     }
 
     /// The bucket's collector in this process, if it is the image's own.
@@ -230,7 +235,7 @@ mod tests {
             let bucket = bucket_of(&fork_path);
             assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
             let record = bucket_cell::lifecycle::record(&*bucket, child).await.unwrap().unwrap();
-            let Record::Fork(origin) = record.kind else { panic!("{record:?}") };
+            let Record::Clone(origin) = record.kind else { panic!("{record:?}") };
             assert_eq!(origin.parent, parent);
 
             let fs = Filesystem::mount(fork).await.unwrap();

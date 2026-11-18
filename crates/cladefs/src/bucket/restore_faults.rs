@@ -114,15 +114,13 @@ fn in_bucket(
     })
 }
 
-/// Deletes `cell` as an operator does, as `holder`, of no placement, under the host's KMS: what
-/// the deletion records of a cell's forks to other cells is authenticated (TASK-411.4).
+/// Deletes `cell` as an operator does, as `holder`, of no placement.
 async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
     cell: crate::CellId,
     holder: u64,
 ) -> Result<(), bucket_cell::Error> {
-    let kms = crate::bucket::kms().unwrap();
-    lifecycle::delete(&**bucket, cell, holder, u64::MAX, &kms).await
+    lifecycle::delete(&**bucket, cell, holder, u64::MAX).await
 }
 
 impl Hosts {

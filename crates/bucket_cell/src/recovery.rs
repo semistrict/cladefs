@@ -25,7 +25,7 @@
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::keys::Ring;
-use crate::layout::{self, CellId, Contents, Footer, Fork, Head, Location, Origin};
+use crate::layout::{self, CellId, Contents, Footer, Head, Location, Origin};
 use crate::record::Record;
 use crate::{Error, head, object};
 use extent_frame::spent::Spent;
@@ -49,7 +49,6 @@ pub struct State<P = Extents> {
     pub root: Option<Vec<u8>>,
     /// The tag of the last commit, which may be the parent's, before the fork.
     pub last_commit: Option<u64>,
-    pub forks: Vec<Fork>,
     /// The last segment applied.
     pub through: Option<u64>,
     /// The sequence numbers of the cell's own extents it freed, which it writes no more: one
@@ -118,7 +117,6 @@ impl<P> State<P> {
             next_sequence: 0,
             root: None,
             last_commit: None,
-            forks: Vec::new(),
             through: None,
             spent: Spent::default(),
             capacity: None,
@@ -145,25 +143,13 @@ impl<P> State<P> {
             next_sequence,
             root,
             last_commit,
-            forks,
             through,
             spent,
             capacity,
             begun,
         } = self;
         let extents = place(extents);
-        State {
-            cell,
-            extents,
-            next_sequence,
-            root,
-            last_commit,
-            forks,
-            through,
-            spent,
-            capacity,
-            begun,
-        }
+        State { cell, extents, next_sequence, root, last_commit, through, spent, capacity, begun }
     }
 }
 
@@ -176,8 +162,8 @@ impl<P: Places> State<P> {
 
     /// Applies `contents`, those of the cell's segment `segment`, of the writer of epoch
     /// `epoch`: what its commits sealed, where they sealed it, then what they freed; the root they
-    /// set, their last commit, the cell's next sequence number, the largest named, the forks at
-    /// its end, and the capacity they set. Every free of the cell's own extents spends it, as
+    /// set, their last commit, the cell's next sequence number, the largest named, and the
+    /// capacity they set. Every free of the cell's own extents spends it, as
     /// the store that freed it spent it: a footer frees only what a commit held, not what was
     /// freed while open (TASK-160.15), and one sealed and freed within the segment is a free and no
     /// seal (TASK-165.3). cladefs: first, the runs of a commit the segments before began ([`Begun`]),
@@ -215,7 +201,6 @@ impl<P: Places> State<P> {
             self.last_commit = Some(commit);
         }
         self.next_sequence = self.next_sequence.max(contents.next_sequence);
-        self.forks.extend(contents.forks.iter().map(|child| Fork::at(segment, child)));
         if contents.capacity.is_some() {
             self.capacity = contents.capacity;
         }
@@ -1482,40 +1467,12 @@ async fn unless_checkpointed(
 }
 
 /// Whether the cell `origin` names holds the fork made at the end of its segment there to
-/// `child`, of `owner`: its head names the segment, whose footer names the fork, and the state as
-/// of it reads whole, as the fork's recovery from there needs. Asked once: what is going, as a pass
-/// of the collector takes it, reads as not held.
-pub(crate) async fn holds_fork(
-    bucket: &impl Bucket,
-    origin: Origin,
-    child: CellId,
-    owner: u64,
-) -> Result<bool, Error> {
-    let Origin { parent, at } = origin;
-    let Some(epoch) = head::get(bucket, parent).await?.and_then(|head| head.epoch_of(at)) else {
-        return Ok(false);
-    };
-    let Some(footer) = segment_footer((bucket, &**KEYLESS), parent, at, epoch).await? else {
-        return Ok(false);
-    };
-    let forked = |fork: &layout::Child| fork.cell == child && fork.owner == owner;
-    if !footer.contents.forks.iter().any(forked) {
-        return Ok(false);
-    }
-    let checkpoints = Checkpoints::new(bucket, 0);
-    match state_at(&checkpoints, parent, at, &mut BTreeSet::new(), parent, false).await {
-        Ok(_) => Ok(true),
-        Err(Attempt::Restart | Attempt::Failed(Error::Lost(_))) => Ok(false),
-        Err(Attempt::Failed(error)) => Err(error),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_cell;
-    use crate::layout::{Continued, Segment, child};
+    use crate::layout::{Continued, Segment};
     use crate::lifecycle;
     use crate::object_bucket::ObjectBucket;
     use crate::testing::SimBucket;
@@ -1592,7 +1549,7 @@ mod tests {
             Footer { cell: test_cell(1), segment: 2, epoch: 1, contents: Contents::default() };
         assert_eq!(placed("here", footer.clone(), test_cell(1), 2, 1), Ok(footer.clone()));
         for (cell, segment, epoch) in [(1, 3, 1), (4, 2, 1), (1, 2, 2)] {
-            let corrupt = Error::Corrupt("here holds segment 2 of 1/1/1 by epoch 1".into());
+            let corrupt = Error::Corrupt("here holds segment 2 of 1/1 by epoch 1".into());
             let found = placed("here", footer.clone(), test_cell(cell), segment, epoch);
             assert_eq!(found, Err(corrupt));
         }
@@ -1775,14 +1732,15 @@ mod tests {
                 writer.acknowledge().await.unwrap();
                 segment
             };
-            let forked = resize(1, 1 << 20)
-                .fork(child(test_cell(2)), &mut parent.chain())
-                .frame(parent.keys().encrypting());
+            let forked =
+                resize(1, 1 << 20).close(&mut parent.chain()).frame(parent.keys().encrypting());
             let forked = Origin { parent: test_cell(1), at: landed(&parent, forked).await };
+            crate::testing::forked_at(&*bucket, test_cell(2), forked).await;
             let pointed = SegmentBuilder::default()
-                .fork(child(test_cell(3)), &mut parent.chain())
+                .close(&mut parent.chain())
                 .frame(parent.keys().encrypting());
             let pointed = Origin { parent: test_cell(1), at: landed(&parent, pointed).await };
+            crate::testing::forked_at(&*bucket, test_cell(3), pointed).await;
             landed(
                 &parent,
                 resize(2, 2 << 20).close(&mut parent.chain()).frame(parent.keys().encrypting()),
@@ -1826,14 +1784,12 @@ mod tests {
             let extents = vec![(extent, b"one".to_vec())];
             let batch = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
             let at = parent
-                .add_segment(
-                    batch
-                        .fork(child(test_cell(2)), &mut parent.chain())
-                        .frame(parent.keys().encrypting()),
-                )
+                .add_segment(batch.close(&mut parent.chain()).frame(parent.keys().encrypting()))
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
+            crate::testing::forked_at(&*bucket, test_cell(2), Origin { parent: test_cell(1), at })
+                .await;
             let origin = Some(Origin { parent: test_cell(1), at });
             assert_eq!(
                 lifecycle::record(&*bucket, test_cell(2)).await.unwrap().unwrap().origin(),
@@ -1867,7 +1823,7 @@ mod tests {
                 .unwrap();
             // Read by another host, which decoded nothing of it before: a key names one object,
             // which a host's bucket keeps decoded (TASK-407).
-            let corrupt = format!("{key} holds a checkpoint of 1/1/1");
+            let corrupt = format!("{key} holds a checkpoint of 1/1");
             let other = ObjectBucket::new(memory, "");
             assert_eq!(
                 recover(&other, test_cell(2), origin).await.unwrap_err(),

@@ -1601,12 +1601,12 @@ pub(crate) mod tests {
         let segment = add(&first, commit);
         first.upload(segment).await.unwrap();
         assert_eq!(first.acknowledge().await, Ok(Some(segment)));
-        let forking = SegmentBuilder::default()
-            .fork(crate::layout::child(test_cell(child)), &mut first.chain())
-            .frame(first.keys().encrypting());
-        let fork = first.add_segment(forking).unwrap();
+        let forking = SegmentBuilder::default().close(&mut first.chain());
+        let fork = first.add_segment(forking.frame(first.keys().encrypting())).unwrap();
         first.upload(fork).await.unwrap();
         first.acknowledge().await.unwrap();
+        let origin = Origin { parent: test_cell(root), at: fork };
+        crate::testing::forked_at(&*bucket, test_cell(child), origin).await;
         let segment = add(&first, Commit { tag: 2, frees: vec![small], ..Commit::default() });
         first.upload(segment).await.unwrap();
         first.acknowledge().await.unwrap();

@@ -51,7 +51,7 @@ use bucket_cell::keys::{self, CellKeys, Ring, RingHold};
 use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Chain, Child, Origin, epoch_of};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::record::{Kind, Record};
+use bucket_cell::record::Record;
 use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Taker, Writer, cell, lifecycle};
 use event_listener::{Event, Listener as _};
@@ -184,17 +184,10 @@ impl<T> Retried<T> {
 ///
 /// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`bucket_cell::cell::forget`, TASK-364). An encrypted cell's forks to
-/// other cells it records get its checkpoint at their origins under its keys, its cell's KEK
-/// unwrapped by `kms`, the host's (`lifecycle::delete`, TASK-411.4).
-pub fn delete_cell(
-    bucket: &ObjectBucket,
-    cell: CellId,
-    token: u64,
-    kms: &Arc<keys::CachingKms>,
-) -> Result<(), Failure> {
+/// taken out of the cell (`bucket_cell::cell::forget`, TASK-364).
+pub fn delete_cell(bucket: &ObjectBucket, cell: CellId, token: u64) -> Result<(), Failure> {
     Ok(block_on(async {
-        lifecycle::delete(bucket, cell, rand::random(), token, kms).await?;
+        lifecycle::delete(bucket, cell, rand::random(), token).await?;
         cell::forget(bucket, cell).await
     })??)
 }
@@ -380,9 +373,6 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     token: std::sync::OnceLock<u64>,
     /// cladefs: the version the store is at, if it is one (TASK-476).
     at_version: std::sync::OnceLock<AtVersion>,
-    /// The origins of the forks of the segments the uploader took, by their children: what a fork
-    /// that fails deletes its child by (TASK-165.7).
-    forks: Mutex<std::collections::BTreeMap<CellId, Origin>>,
     progress: Mutex<Progress>,
     /// Notified as the progress changes: what waits for uploads listens to it, blocking or not
     /// (TASK-43.6).
@@ -461,9 +451,6 @@ fn stalled(pending: u64, max: u64, commits: u64, oldest: Option<Duration>) -> St
 struct Progress {
     /// The last epoch uploaded.
     uploaded: u64,
-    /// The last epoch uploaded whose forks are made in object storage: their children have their
-    /// records, and a checkpoint at them, which their recovery starts from.
-    forked: u64,
     /// Why uploading stopped, if it did.
     failed: Option<Failure>,
     /// Whether a commit waits to be uploaded: the next batch goes now.
@@ -528,11 +515,6 @@ impl Progress {
         while self.seen.front().is_some_and(|(seen, _)| *seen <= self.uploaded) {
             self.seen.pop_front();
         }
-    }
-
-    /// Notes the forks of the store's commits through `epoch`, uploaded, made in object storage.
-    fn forked_through(&mut self, epoch: u64) {
-        self.forked = self.forked.max(epoch);
     }
 }
 
@@ -607,34 +589,41 @@ impl<D: Dir> Uploader<D> {
         shared.wait(|progress| shared.reached(progress, epoch, true))
     }
 
-    /// Makes the fork the store made of its cell with its commit `epoch`
-    /// ([`LocalCell::commit_fork`]) a fork of the cell in object storage, once the commits up to the
-    /// fork are uploaded: the segment the fork's commit ends names `child`, whose record the
-    /// acknowledgement makes, naming the cell and the segment as its origin, and a checkpoint at
-    /// the fork is where its recovery starts. `child`'s ID may be another cell's by then, which
-    /// took it after [`Uploader::child_free`] found it free (`bucket_cell::Error::IdTaken`): the
-    /// fork failed, and the uploader goes on.
-    ///
-    /// A fork of a store at a version commits nothing: the child's record is the fork, and fails if
-    /// the version was dropped ([`Failure::VersionDropped`]; `lifecycle::fork_version`).
+    /// Makes the fork of the version the store is at to `child` (`lifecycle::fork_version`): its
+    /// record, which fails if the version was dropped ([`Failure::VersionDropped`]), and, for a
+    /// child of another cell, the checkpoint at the version, sealed under the version's cell's
+    /// keys (TASK-476).
     ///
     /// cladefs: a fork into another cell, `inheriting` given ([`Uploader::inheriting`]), then gives
     /// its child its keys, once its record is made: its cell made with the KEK from the host's
     /// pool, its record given its DEK and those it inherits, rewrapped under that KEK
     /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
     ///
-    /// cladefs: a fork of a version this host made says what it left of the child to the child's
-    /// store's first opening here ([`Learned`], TASK-449): its record, and that it has no head. Its
-    /// cell the child's store makes, encrypted, as it opens (every cell is, TASK-411.28; a fork
-    /// holding it, made, at once with the reference's write is TASK-485's).
+    /// cladefs: it says what it left of the child to the child's store's first opening here
+    /// ([`Learned`], TASK-449): its record, and that it has no head. Its cell the child's store
+    /// makes, encrypted, as it opens (every cell is, TASK-411.28).
     pub fn forked(
         &self,
-        epoch: u64,
         child: Child,
         inheriting: Option<keys::Inheriting>,
     ) -> Result<(), Failure> {
         failing!("upload::forked");
-        let Made { mut record, cell } = self.fork_made(epoch, child)?;
+        let at = self.shared.at_version.get().expect("a fork is of a store at a version");
+        let keys = keys::Parents::Held(&at.sealing);
+        let forking = lifecycle::fork_version_with(
+            &*self.bucket,
+            child.cell,
+            at.version,
+            at.origin,
+            child.owner,
+            keys,
+            async { None },
+        );
+        let (mut record, cell) = match block_on(forking)? {
+            Err(bucket_cell::Error::Deleted) => return Err(Failure::VersionDropped),
+            Err(err) => return Err(err.into()),
+            Ok((record, cell)) => (record, cell.flatten()),
+        };
         if let Some(inheriting) = inheriting {
             let holder = self.shared.holder();
             let given = block_on(keys::give_inherited(&*self.bucket, inheriting, holder))??;
@@ -644,44 +633,6 @@ impl<D: Dir> Uploader<D> {
             known.learn(child.cell, Learned { record, cell, headless: true });
         }
         Ok(())
-    }
-
-    /// Makes the fork the store made of its cell with its commit `epoch` a fork of the cell in
-    /// object storage, its child's record and checkpoint ([`Uploader::forked`]). A fork of a store at a version
-    /// of a version says what it made: its checkpoint at the version, for a child of another cell,
-    /// sealed under the version's cell's keys (TASK-476).
-    fn fork_made(&self, epoch: u64, child: Child) -> Result<Made, Failure> {
-        let shared = &self.shared;
-        if let Some(at) = shared.at_version.get() {
-            let holding = async { None };
-            let (child, owner) = (child.cell, child.owner);
-            let keys = keys::Parents::Held(&at.sealing);
-            let forking = lifecycle::fork_version_with(
-                &*self.bucket,
-                child,
-                at.version,
-                at.origin,
-                owner,
-                keys,
-                holding,
-            );
-            return match block_on(forking)? {
-                Err(bucket_cell::Error::Deleted) => Err(Failure::VersionDropped),
-                Err(err) => Err(err.into()),
-                Ok((record, cell)) => Ok(Made { record, cell: cell.flatten() }),
-            };
-        }
-        let child = child.cell;
-        // Its commit's segment uploads now, if it is not yet uploaded.
-        shared.ask(epoch, false)?;
-        shared.wait(|progress| match progress.forked >= epoch {
-            true => Some(Ok(())),
-            false => progress.failed.clone().map(Err),
-        })?;
-        match shared.writer() {
-            Some(writer) if writer.refused(child) => Err(bucket_cell::Error::IdTaken(child).into()),
-            _ => Ok(Made::default()),
-        }
     }
 
     /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
@@ -698,35 +649,15 @@ impl<D: Dir> Uploader<D> {
         Ok(block_on(keys::inheriting(kms, source, parent, child))??)
     }
 
-    /// Deletes `child` in object storage, a fork the store made that [`Uploader::forked`] failed to
-    /// make: its segment may land after all, its writer taken over before acknowledging it, and the
-    /// cell's next writer gives the child a record then, which would keep what it inherited for
-    /// ever, no store holding it. Deleted first, it gets a record saying so, which the segment
-    /// landing finds (TASK-79.78). Only a cell the fork made is deleted, its record naming the
-    /// fork's owner: one of another's, which took the child's ID, is left as it is (TASK-79.82). As
-    /// the fork's segment gave the child its origin, if the uploader took it; or of no parent, if
-    /// it never did. It is deleted as the host's placement (`Options::token`).
-    ///
-    /// cladefs: a fork of a version, this store at it, as a fork of the version, naming its
-    /// origin: its record deleted then names it, so that its cell's pass of the collector retires
-    /// the reference the fork wrote under the origin's cell (TASK-395.3). As a cell of its own,
-    /// naming none, the reference would stay for ever.
+    /// Deletes `child` in object storage, a fork of the version the store is at that
+    /// [`Uploader::forked`] failed to make: its record may land after all, a dead host's, which
+    /// would keep what it inherited for ever, no store holding it. Only a cell the fork made is
+    /// deleted, its record naming the fork's owner: one of another's, which took the child's ID, is
+    /// left as it is (TASK-79.82). It is deleted as the host's placement (`Options::token`).
     pub fn unfork(&self, child: Child) -> Result<(), Failure> {
-        let origin = self.shared.fork_origin(child.cell);
-        let forked = match (self.shared.at_version.get(), origin) {
-            (Some(at), _) => Kind::Forking { origin: at.origin, version: at.version },
-            (None, None) => Kind::Own,
-            (None, Some(origin)) => Kind::Fork(origin),
-        };
         let (holder, token) = (self.shared.holder(), self.shared.options.token);
-        let deleting = lifecycle::delete_fork(
-            &*self.bucket,
-            child.cell,
-            forked,
-            child.owner,
-            (holder, token),
-            &self.shared.keys.kms,
-        );
+        let deleting =
+            lifecycle::delete_fork(&*self.bucket, child.cell, child.owner, (holder, token));
         if !block_on(deleting)?? {
             log::warn!(
                 "cladefs: leaving cell {} in object storage, another's: a fork to its ID failed \
@@ -735,17 +666,6 @@ impl<D: Dir> Uploader<D> {
             );
         }
         Ok(())
-    }
-
-    /// Whether `child`'s ID is free in object storage for a fork the store is making of its
-    /// cell, before the fork's commit: unless another cell has it, as a guest may give any,
-    /// whose record its parent's writers, finding it another's, would fail on for ever. One GET of
-    /// the child's record. cladefs: a fork of a store at a version needs none: its child's record's
-    /// create finds any there, and refuses it alike (`lifecycle::fork_version`, TASK-449).
-    pub fn child_free(&self, child: CellId) -> Result<bool, Failure> {
-        let found = block_on(lifecycle::record(&*self.bucket, child))??;
-        failing!("upload::child_free");
-        Ok(found.is_none())
     }
 
     /// cladefs: the store's versions (doc-18, TASK-476): those its cell's head names, uploaded,
@@ -795,6 +715,11 @@ impl<D: Dir> Uploader<D> {
     /// The bucket the store's cell is kept in.
     pub fn bucket(&self) -> &ObjectBucket {
         &self.bucket
+    }
+
+    /// What it keeps the store's cell as.
+    pub fn options(&self) -> &Options {
+        &self.shared.options
     }
 
     /// How many commits waited for the lag to shrink.
@@ -854,7 +779,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             writer: Default::default(),
             token: Default::default(),
             at_version: Default::default(),
-            forks: Default::default(),
             progress: Mutex::new(Progress::default()),
             changed: Event::new(),
             wake: tokio::sync::Notify::new(),
@@ -899,13 +823,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.progress.lock().unwrap().uploaded
     }
 
-    /// The epoch of the store's latest commit whose forks are made, their children's records
-    /// and the checkpoint at them in the bucket.
-    #[cfg(all(test, feature = "shuttle"))]
-    pub(crate) fn forked(&self) -> u64 {
-        self.progress.lock().unwrap().forked
-    }
-
     /// The lowest sequence number the store's guest may mint extents' IDs from.
     pub(crate) fn next_sequence(&self) -> u64 {
         self.progress.lock().unwrap().next_sequence
@@ -919,12 +836,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// The cell's writer, once one took it.
     pub(crate) fn writer(&self) -> Option<Arc<Writer<B>>> {
         self.writer.lock().unwrap().clone()
-    }
-
-    /// Where the fork to `child` is in the cell, once the uploader took the segment its commit
-    /// ends.
-    pub(crate) fn fork_origin(&self, child: CellId) -> Option<Origin> {
-        self.forks.lock().unwrap().get(&child).copied()
     }
 
     /// Has the uploader stop: once it uploaded what its store made durable, its open segment's
@@ -1165,7 +1076,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 self.hold_ring(&keys);
                 let mut progress = self.progress.lock().unwrap();
                 progress.uploaded_through(u64::MAX);
-                progress.forked_through(u64::MAX);
                 return Ok(None);
             }
             Some(record) => {
@@ -1309,7 +1219,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {
             progress.uploaded_through(epoch_of(last));
-            progress.forked_through(epoch_of(last));
         }
         drop(progress);
         self.changed.notify(usize::MAX);
@@ -1386,8 +1295,6 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let mut segments = Vec::with_capacity(closed.len());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
-            let forks: Vec<CellId> =
-                closed.footer.contents.forks.iter().map(|forked| forked.cell).collect();
             let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
             let own = own.collect::<Result<_, Failure>>()?;
             let footer = closed.footer.clone();
@@ -1395,10 +1302,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let closed = Arc::new(closed);
             let body = Body::new(size, move || blocking(|| closed.bytes()));
             let segment = writer.add_segment(Objects { footer, segment: body, own })?;
-            // Where each fork it ends is, which a fork failing deletes its child by.
-            let origin = Origin { parent: writer.cell(), at: segment };
-            self.forks.lock().unwrap().extend(forks.iter().map(|&child| (child, origin)));
-            segments.push(Uploading { segment, number, tag, forks: !forks.is_empty() });
+            segments.push(Uploading { segment, number, tag });
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
@@ -1425,23 +1329,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             Ok::<_, Failure>(())
         })?;
         failing!("upload::released");
-        let forks = acked.iter().any(|segment| segment.forks);
-        {
-            let mut progress = self.progress.lock().unwrap();
-            progress.uploaded_through(epoch);
-            if !forks {
-                progress.forked_through(epoch);
-            }
-        }
+        self.progress.lock().unwrap().uploaded_through(epoch);
         self.changed.notify(usize::MAX);
-        if forks {
-            // Their children have their records, which the acknowledgement made: the checkpoint
-            // makes the forks.
-            writer.checkpoint().await?;
-            failing!("upload::checkpointed");
-            self.progress.lock().unwrap().forked_through(epoch);
-            self.changed.notify(usize::MAX);
-        }
         Ok(())
     }
 }
@@ -1550,14 +1439,6 @@ impl CellFrom {
     }
 }
 
-/// cladefs: what a fork made ([`Uploader::forked`]): of a version's, the child's record as it left
-/// it, a clone made, and its cell's object, if it held it.
-#[derive(Default)]
-struct Made {
-    record: Option<Record>,
-    cell: Option<bucket_cell::bucket::Object>,
-}
-
 /// What a gather did ([`Shared::gather`]).
 struct Gathered {
     /// Whether it took segments the store closed: the store may have closed more meanwhile.
@@ -1567,13 +1448,12 @@ struct Gathered {
     closed: bool,
 }
 
-/// A segment uploading: its number in the cell, and in the store; the tag of the store's commit
-/// it ends with; and whether forks are made at its end.
+/// A segment uploading: its number in the cell, and in the store; and the tag of the store's
+/// commit it ends with.
 struct Uploading {
     segment: u64,
     number: u64,
     tag: u64,
-    forks: bool,
 }
 
 impl Uploading {

@@ -454,11 +454,10 @@ mod tests {
             CellId { tenant: 1, id: 0x10 },
             CellId { tenant: 3, id: 1 },
         ];
-        let cell = |cell: CellId, id| CellId { tenant: cell.tenant, id };
         let keys = [
             layout::cell(cells[2]),
-            layout::record(cell(cells[0], 4)),
-            layout::segment(cell(cells[0], 4), 0, 1),
+            layout::record(cells[0]),
+            layout::segment(cells[0], 0, 1),
             layout::collector_lease(cells[1]),
             layout::objectid_block(1),
         ];
@@ -482,7 +481,7 @@ mod tests {
         let mut cells: Vec<CellId> = (0..many).map(|id| CellId { tenant: 2, id }).collect();
         cells.extend([CellId { tenant: 1, id: 7 }, CellId { tenant: 3, id: 1 }]);
         for &cell in &cells {
-            let key = layout::record(CellId { tenant: cell.tenant, id: 1 });
+            let key = layout::record(cell);
             block_on(bucket.put(&key, vec![1].into(), PutMode::Create)).unwrap();
         }
         cells.sort();

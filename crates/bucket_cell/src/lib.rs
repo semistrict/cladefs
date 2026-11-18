@@ -230,27 +230,15 @@ pub struct Rules {
     /// A fork's child gets its record once the segment holding the fork is acknowledged.
     /// TLA+: `specs/bucket/mutations/NoRecordsAfterAck.cfg`.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub records_after_ack: bool,
     /// The collector lists objects before it reads what cells need.
     /// TLA+: `specs/bucket/mutations/NoCandidatesFirst.cfg`.
     pub candidates_first: bool,
-    /// The collector finds forks in their parents' states, not only by their records.
-    /// TLA+: `specs/bucket/mutations/NoForksFromStates.cfg`.
-    pub forks_from_states: bool,
     /// A writer takes a cell's head only with a fencing token as high as the head's.
     /// TLA+: `specs/bucket/mutations/NoTokens.cfg`.
     pub tokens: bool,
     /// A cell is deleted only with a fencing token as high as its head's (TASK-45.1).
     /// TLA+: `specs/bucket/mutations/NoDeleteTokens.cfg`.
     pub delete_tokens: bool,
-    /// The deletion of a failed fork takes its child's ID with a record, before it ends the child's
-    /// head, though its fork's segment never went (TASK-79.82).
-    /// TLA+: `specs/bucket/mutations/NoForkClaimsIds.cfg`.
-    pub fork_claims_ids: bool,
-    /// That record says the child lives only if the cell it was forked from holds the fork's
-    /// segment, which reading it needs; and that it is a claim, which that proves no more than.
-    /// TLA+: `specs/bucket/mutations/NoForkClaimsLanded.cfg`.
-    pub fork_claims_landed: bool,
     /// A fork of a version reads its cell's head after it creates its own record: a version
     /// dropped before that fails it, its pass of the collector not having seen the child.
     /// TLA+: `specs/bucket/mutations/NoForksCheckVersions.cfg`.
@@ -262,15 +250,6 @@ pub struct Rules {
     /// The collector gives up on the forks being made of versions dropped.
     /// TLA+: `specs/bucket/mutations/NoCollectorAbandons.cfg`.
     pub collector_abandons: bool,
-    /// The collector lists the records again after it read the cells' states: a state it read
-    /// names no fork deleted since, nor that fork's children, whose records came after its listing.
-    /// TLA+: `specs/bucket/mutations/NoRecordsRelisted.cfg`.
-    pub records_relisted: bool,
-    /// Every record names its cell's owner, chosen by its maker, unique to that making: two
-    /// makers of one cell ID, two forks naming one child, never write the same bytes, which a
-    /// create reading back what it finds would take for its own (TASK-79.82, TASK-153.9).
-    /// TLA+: `specs/bucket/mutations/NoRecordsOwned.cfg`.
-    pub records_owned: bool,
     /// The collector keeps every moves on the way to an extent from where it was sealed, not only
     /// from where the cell's state says it is, unless that state's checkpoint is by the writer
     /// holding the cell's head, read after the checkpoint was: a checkpoint of another writer's,
@@ -291,25 +270,6 @@ pub struct Rules {
     /// Simulation only (`sim::stores_need_to_follow_moves`): specs/bucket models the writer's
     /// state, not a store's names.
     pub stores_follow_moves: bool,
-    /// A pass of the collector that finds what a live cell needs lost stops, without failing, if
-    /// a later pass took the collector's lease from it: what it read before may be older than what
-    /// that pass, deleting since, read (TASK-180).
-    /// TLA+: `specs/bucket/mutations/NoPassesFencedStop.cfg`.
-    pub passes_fenced_stop: bool,
-    /// The collector recovers a cell by every origin it finds it named by, its record's and the
-    /// parent's states naming a fork to it, not by the first alone: a child it recovered by its
-    /// parent's state, that fork refused, may have a record of another origin, a restore's that
-    /// took the ID, which listing the records again finds (TASK-173).
-    /// TLA+: `specs/bucket/mutations/NoRecoveriesByOrigins.cfg`.
-    pub recoveries_by_origins: bool,
-    /// The collector removes a record only with its cell, dead, and only a deleted root's or
-    /// clone's made, of an ID an allocator gave, which no recorder makes again
-    /// ([`record::Record::removable`], TASK-455): a writer of a parent slow to record a fork whose
-    /// child was deleted, or whose child's ID a root took, and was deleted, would make the record
-    /// again, naming what the collector reclaimed (TASK-174). Without it, a dead cell goes whole
-    /// whatever its records.
-    /// TLA+: `specs/bucket/mutations/NoRecordsKept.cfg`.
-    pub records_kept: bool,
     /// A host's write-ahead log is put after the cell's end only if the cell's last commit is
     /// one of the log's or the one it started from: otherwise another writer's commits came after
     /// what the log holds, and it diverged (doc-14, Opening a store).
@@ -321,12 +281,6 @@ pub struct Rules {
     /// the parent deleted, would delete what the child inherits (TASK-395.3).
     /// TLA+: `specs/bucket/mutations/NoReferences.cfg`.
     pub references: bool,
-    /// A writable fork's reference is written before its child's record, by whoever writes the
-    /// record: the fork's host, the parent's writers, the parent's deletion, before that marks the
-    /// parent deleted ([`lifecycle::record_fork`]). After it, a pass reading the parent deleted finds
-    /// no reference.
-    /// TLA+: `specs/bucket/mutations/NoReferencesFirst.cfg`.
-    pub references_first: bool,
     /// A version's clone writes its reference before it reads its cell's head (and after its own
     /// record, [`Rules::clones_record_first`]), whatever its cell, its origin's own too
     /// ([`lifecycle::fork_version`]): one that read the version named then wrote it before the
@@ -355,12 +309,6 @@ pub struct Rules {
     /// reference no record names, which no pass retires (TASK-395.10).
     /// TLA+: `specs/bucket/mutations/NoForksRecordFirst.cfg`.
     pub clones_record_first: bool,
-    /// Whoever finds the record of a fork's child naming another origin than the fork's, or none,
-    /// deletes the fork's reference: the fork made no cell, and no record will name it. Every
-    /// writer of the child's record looks, the parent's next writer and its deletion among them,
-    /// so that one dying first leaves it to the next (TASK-395.10).
-    /// TLA+: `specs/bucket/mutations/NoReferencesTakenBack.cfg`.
-    pub references_taken_back: bool,
     /// A reference retired, or taken back, is marked first ([`layout::retired`]), the mark kept for
     /// good under the parent's cell, and a pass over that cell deletes the references it lists
     /// marked: a writer whose read of the child's record came before, finding none, writes it
@@ -369,29 +317,6 @@ pub struct Rules {
     /// (TASK-395.14). Its write changes the parent's cell's listing, whose next pass finds it.
     /// TLA+: `specs/bucket/mutations/NoRetirementsMarked.cfg`.
     pub retirements_marked: bool,
-    /// cladefs: the collector removes a dead cell's root's or clone's record only if its ID is one
-    /// an allocator gave ([`objectid::given`]), which no fork names: one a guest named, a fork may
-    /// name too, its slow writer recording the child after the cell went (TASK-455). Without it,
-    /// whatever the ID.
-    /// TLA+: `specs/bucket/mutations/NoIdsGivenOnce.cfg` (the model's forks naming given IDs,
-    /// as the code's collector taking named ones for given).
-    pub ids_given: bool,
-    /// cladefs: a reference is retired unmarked only if its child is a clone made of an ID an
-    /// allocator gave: its host, its one writer, wrote it before it made it
-    /// ([`record::Record::retires_unmarked`], TASK-455), so that a base's cell keeps no mark of a
-    /// clone made and gone. Without it, any clone's, one being made among them, whose host, slow,
-    /// writes it after its retirement, unmarked, for good.
-    /// TLA+: `specs/bucket/mutations/NoForksMadeUnmarked.cfg`.
-    pub clones_made_unmarked: bool,
-    /// cladefs: a head of a cell whose record the pass did not list goes only if it is not
-    /// final, and no record of the cell is there to read: a stale taker's, of a cell removed
-    /// with its cell. A final one is a deletion's fence, of a fork's child whose record is yet to
-    /// come, the deletion's own or its parent's slow writer's (TASK-79.78): it stays, and keeps its
-    /// cell from removal ([`collector`], TASK-455's review). Without it, as a test shows it needed,
-    /// a pass over a cell of no record deletes it, a writer takes the child once its parent's
-    /// writer records it, and the deletion, going on, marks it deleted under that writer.
-    /// TLA+: `specs/bucket/mutations/NoFencesKept.cfg`.
-    pub fences_kept: bool,
     /// cladefs: a fork of a version resumed by another than its host, a store opening its child,
     /// writes its reference before it makes it, as its host does ([`lifecycle::resume_version_fork`]).
     /// Without it, as a test shows it needed, a host dying between the fork's record and its
@@ -432,37 +357,23 @@ impl Rules {
         collector_epochs: true,
         moves_by_pass: true,
         epoch_sequences: true,
-        records_after_ack: true,
         candidates_first: true,
-        forks_from_states: true,
         tokens: true,
         delete_tokens: true,
-        fork_claims_ids: true,
-        fork_claims_landed: true,
         forks_check_versions: true,
         forks_pending: true,
         collector_abandons: true,
-        records_relisted: true,
-        records_owned: true,
         ways_from_seals: true,
         moves_taken_first: true,
         stores_follow_moves: true,
-        passes_fenced_stop: true,
-        recoveries_by_origins: true,
-        records_kept: true,
         wal_follows: true,
         references: true,
-        references_first: true,
         clones_refer_first: true,
         references_held: true,
         references_relisted: true,
         origins_kept: true,
         clones_record_first: true,
-        references_taken_back: true,
         retirements_marked: true,
-        ids_given: true,
-        clones_made_unmarked: true,
-        fences_kept: true,
         resumes_refer: true,
         resumes_marked: true,
         versions_kept: true,

@@ -9,9 +9,9 @@
 //! Extents are written once: from their first write until the next commit, which seals them. They
 //! are freed whole. A store holds one cell, a filesystem, which mints its extents' IDs under its
 //! cell; it may hold extents of other cells' too, whose data is in the bucket, as a fork's
-//! inherited ones are (doc-7). cladefs: forks, versions and deletion are the bucket's (doc-14,
-//! TASK-165.7): the store makes nothing of them but the commit that names a fork
-//! ([`LocalCell::commit_fork`]). A store's directory holds:
+//! inherited ones are (doc-7). cladefs: forks and deletion are the bucket's (doc-14,
+//! TASK-165.7): the store makes nothing of them but the commit that names a version
+//! ([`LocalCell::commit_version`]). A store's directory holds:
 //!
 //! - `store`, its description: its format, block size, cell, and the bucket its cell is kept
 //!   in;
@@ -187,8 +187,8 @@ pub use cached::{CachedDir, CachedFile};
 #[cfg(any(test, feature = "unkept"))]
 pub use cell::UNKEPT_DEK;
 pub use cell::{
-    BucketData, DirHold, ForkCommitted, Info, InheritedId, LocalCell, NoSpace, NotQuiescent,
-    Opening, Options, Recovering, SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    BucketData, DirHold, Info, LocalCell, NoSpace, NotQuiescent, Opening, Options, Recovering,
+    SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
 /// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).

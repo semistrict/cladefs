@@ -11,7 +11,7 @@
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
 //! as they upload ([`objects`]).
 
-use crate::layout::{self, CellId, Chain, Child, Contents, Footer, NewVersion, Segment};
+use crate::layout::{self, CellId, Chain, Contents, Footer, NewVersion, Segment};
 use crate::writer::{Body, Objects};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -156,18 +156,13 @@ impl Plan {
     /// Closes it on `chain`, as the writer's next segment, which the chain goes on after: its
     /// footer, stamped, whose objects read their data as they upload ([`objects`]).
     pub fn close(self, chain: &mut Chain) -> Footer {
-        self.close_ending(chain, Vec::new(), Vec::new())
+        self.close_ending(chain, Vec::new())
     }
 
-    /// Closes it on `chain`, as [`Plan::close`] does, with forks of the cell at its end to
-    /// `forks`, their children, and the versions `versions` cut there (TASK-476).
-    fn close_ending(
-        self,
-        chain: &mut Chain,
-        forks: Vec<Child>,
-        versions: Vec<NewVersion>,
-    ) -> Footer {
-        chain.close(Contents { forks, versions, ..self.contents(chain.cell()) })
+    /// Closes it on `chain`, as [`Plan::close`] does, with the versions `versions` cut at its
+    /// end (TASK-476).
+    fn close_ending(self, chain: &mut Chain, versions: Vec<NewVersion>) -> Footer {
+        chain.close(Contents { versions, ..self.contents(chain.cell()) })
     }
 }
 
@@ -249,30 +244,18 @@ impl SegmentBuilder {
     /// Closes it on `chain`, its writer's, as the writer's next segment, which the chain goes on
     /// after: its footer, stamped, its data yet to be framed.
     pub fn close(self, chain: &mut Chain) -> Unframed {
-        self.close_ending(chain, Vec::new(), Vec::new())
-    }
-
-    /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the cell to
-    /// `child` at its end, of its owner, a version if it says so: a fork ends its segment, which its
-    /// child inherits the whole of (doc-7, Forks, Versions).
-    pub fn fork(self, child: Child, chain: &mut Chain) -> Unframed {
-        self.close_ending(chain, vec![child], Vec::new())
+        self.close_ending(chain, Vec::new())
     }
 
     /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its end:
     /// a name for the cell's state there, which the acknowledgement naming the segment names in
     /// the cell's head (doc-18, TASK-476).
     pub fn cut(self, cut: NewVersion, chain: &mut Chain) -> Unframed {
-        self.close_ending(chain, Vec::new(), vec![cut])
+        self.close_ending(chain, vec![cut])
     }
 
-    fn close_ending(
-        self,
-        chain: &mut Chain,
-        forks: Vec<Child>,
-        versions: Vec<NewVersion>,
-    ) -> Unframed {
-        let footer = self.plan.close_ending(chain, forks, versions);
+    fn close_ending(self, chain: &mut Chain, versions: Vec<NewVersion>) -> Unframed {
+        let footer = self.plan.close_ending(chain, versions);
         Unframed { footer, data: Data { segment: self.data, own: self.own } }
     }
 }
@@ -321,8 +304,8 @@ impl Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::Footer;
     use crate::layout::test_cell;
-    use crate::layout::{Footer, child};
 
     /// The next sequence number the footer of `commit`'s segment, closed on `chain`, names.
     fn next_sequence(commit: Commit, chain: &mut Chain) -> u64 {
@@ -376,9 +359,7 @@ mod tests {
         batch.commit(Commit { tag: 8, own, frees, root, capacity, ..Commit::default() });
         batch.commit(Commit { tag: 9, ..Commit::default() });
         assert!(!batch.is_empty());
-        let objects = batch
-            .fork(child(test_cell(9)), &mut chain)
-            .frame(crate::testing::encrypting(test_cell(1)));
+        let objects = batch.close(&mut chain).frame(crate::testing::encrypting(test_cell(1)));
         let segment = objects.segment.read().unwrap();
         let footer: Footer = layout::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
@@ -392,8 +373,8 @@ mod tests {
         );
         let contents = footer.contents;
         assert_eq!(
-            (contents.frees, contents.root, contents.forks, contents.capacity),
-            (vec![freed], Some(b"two".to_vec()), vec![child(test_cell(9))], Some(2 << 20))
+            (contents.frees, contents.root, contents.capacity),
+            (vec![freed], Some(b"two".to_vec()), Some(2 << 20))
         );
         let keys = crate::testing::ring([test_cell(1)]);
         let data = |bytes: &[u8]| layout::data_under(bytes, &keys.of(1)).unwrap();

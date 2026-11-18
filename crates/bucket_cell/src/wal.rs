@@ -19,9 +19,9 @@
 //! before, at the keys of none of what landed. A head names a writer's segments only between its
 //! commits, so that the log keeps a commit whole until the cell has it whole.
 
-use crate::layout::{CellId, Chain, Footer, Head};
+use crate::layout::{Chain, Footer, Head};
 use crate::{Error, rules};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 
 /// What a writer taking a cell over found ([`Writer::taken`]): the head as it took it, what it
 /// names, the cell's segments; the cell's last commit, and the forks it holds, by their
@@ -33,7 +33,6 @@ use std::collections::{BTreeSet, VecDeque};
 pub struct TakenCell {
     pub head: Head,
     pub last_commit: Option<u64>,
-    pub forks: BTreeSet<(CellId, u64)>,
     pub chain: Chain,
 }
 
@@ -41,8 +40,7 @@ impl TakenCell {
     /// What a writer whose chain is `chain` found taking a cell whose head is `head`, `state` the
     /// cell's state as it names it.
     pub fn of(head: Head, state: &crate::State, chain: Chain) -> Self {
-        let forks = state.forks.iter().map(|fork| (fork.child, fork.owner)).collect();
-        Self { head, last_commit: state.last_commit, forks, chain }
+        Self { head, last_commit: state.last_commit, chain }
     }
 }
 
@@ -151,18 +149,7 @@ impl<T> Wal<T> {
         let last = taken.last_commit;
         let heads = self.heads();
         let landed = match heads.iter().position(|&head| head == last) {
-            Some(landed) => {
-                // And the segments of forks alone after it, those the cell holds.
-                let held = |footer: &Footer| {
-                    footer.contents.commits.is_empty()
-                        && footer.contents.continued.is_none()
-                        && !footer.contents.forks.is_empty()
-                        && (footer.contents.forks.iter())
-                            .all(|fork| taken.forks.contains(&(fork.cell, fork.owner)))
-                };
-                let after = self.segments.iter().skip(landed);
-                landed + after.take_while(|(footer, _)| held(footer)).count()
-            }
+            Some(landed) => landed,
             None if self.segments.is_empty() || !rules().wal_follows => 0,
             None => return Err(Error::Diverged),
         };
@@ -181,7 +168,7 @@ mod tests {
     use super::*;
     use crate::batch::{Commit, Data, SegmentBuilder, Unframed};
     use crate::layout::test_cell;
-    use crate::layout::{self, Contents, Continued, child};
+    use crate::layout::{self, Contents, Continued};
     use crate::object_bucket::ObjectBucket;
     use crate::{Writer, head, lifecycle};
     use object_store::memory::InMemory;
@@ -539,32 +526,6 @@ mod tests {
             let third = open(&bucket, 12).await;
             assert_eq!(rebase(&third, &mut wal).await, Ok(vec![]));
             assert_eq!((wal.start(), wal.head()), (Some(3), Some(3)));
-        });
-    }
-
-    /// The segments the head names are the log's landed, exactly, by their numbers and epochs: a
-    /// segment making no commit, a fork's alone, after the cell's last commit, is not taken as
-    /// landed, as it was when the log was put after the cell by commits; stamped again, it lands
-    /// once.
-    #[test]
-    fn segments_the_head_names_are_landed_exactly() {
-        futures::executor::block_on(async {
-            let bucket = bucket().await;
-            let first = open(&bucket, 10).await;
-            let mut wal = log(&first);
-            let segment = close(&first, &mut wal, commit(1));
-            let Unframed { footer, data } =
-                SegmentBuilder::default().fork(child(test_cell(2)), &mut first.chain());
-            first.add_segment(data.frame(&footer, first.keys().encrypting())).unwrap();
-            wal.push(footer, data);
-            close(&first, &mut wal, commit(3));
-            land(&first, segment).await;
-            let second = open(&bucket, 11).await;
-            let landed = wal.rebase(second.taken()).unwrap().landed;
-            let commits: Vec<_> = landed.iter().map(|(f, _)| f.contents.commits.clone()).collect();
-            assert_eq!(commits, [vec![1]]);
-            let forks: Vec<_> = wal.segments().map(|(f, _)| f.contents.forks.clone()).collect();
-            assert_eq!(forks, [vec![child(test_cell(2))], vec![]]);
         });
     }
 

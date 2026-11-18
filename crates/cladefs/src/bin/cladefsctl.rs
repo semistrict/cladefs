@@ -49,7 +49,7 @@
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
 //! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell.
-//! `take` makes an empty store at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL/ID`, each in base 32,
+//! `take` makes an empty store at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL`, each in base 32,
 //! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! cladefsd opens it,
 //! with `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there,

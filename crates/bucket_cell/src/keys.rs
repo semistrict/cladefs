@@ -1054,58 +1054,53 @@ pub async fn rotate(
     kms.made(cell, Some((object.epoch, object.holder)), &kek, Arc::new(secret));
     let keys = CellKeys::of(cell, &object, kms.clone());
     let new = keys.kek(generation).await?;
-    let mut rewrapped = 0;
-    for meta in bucket::list(bucket, &layout::record(cell)).await {
-        let Key::Record { cell } = layout::kind(&meta.key) else { continue };
-        let Some(found) = lifecycle::record(bucket, cell).await? else { continue };
-        let all_under = |record: &Record, generation: u32| {
-            let inherited = record.inherited.iter().map(|had| &had.dek);
-            record.deks.iter().chain(inherited).all(|dek| dek.kek == generation)
-        };
-        if all_under(&found, generation) {
-            continue;
-        }
-        // Every generation of the cell's KEK its DEKs may be under, unwrapped first: the update's
-        // step, which may run again on what it finds, unwraps nothing. Those it inherits are
-        // rewrapped too (TASK-411.4).
-        let inherited = found.inherited.iter().map(|had| &had.dek);
-        let keks = keys.keks(found.deks.iter().chain(inherited).map(|dek| dek.kek)).await?;
-        let kek = |dek: &Dek| {
-            keks.get(&dek.kek)
-                .ok_or_else(|| Error::Corrupt(format!("cell {cell}'s DEK under a KEK not read")))
-        };
-        let mut failed = None;
-        lifecycle::give_deks(bucket, cell, |found| {
-            if all_under(found, generation) {
-                return None;
-            }
-            let rewrap = |dek: &Dek| {
-                let secret = unwrap_dek(kek(dek)?, cell, dek)?;
-                Ok(wrap_dek((&new, generation), cell, dek.generation, &secret))
-            };
-            let rewrap_inherited = |had: &InheritedDek| {
-                let secret = unwrap_inherited(kek(&had.dek)?, cell, had)?;
-                let of = had.cell;
-                Ok(wrap_inherited((&new, generation), cell, of, had.dek.generation, &secret))
-            };
-            let deks = found.deks.iter().map(rewrap).collect::<Result<Vec<_>, Error>>();
-            let inherited =
-                found.inherited.iter().map(rewrap_inherited).collect::<Result<Vec<_>, Error>>();
-            match deks.and_then(|deks| Ok((deks, inherited?))) {
-                Ok(keys) => Some(keys),
-                Err(error) => {
-                    failed = Some(error);
-                    None
-                }
-            }
-        })
-        .await?;
-        if let Some(error) = failed {
-            return Err(error);
-        }
-        rewrapped += 1;
+    let Some(found) = lifecycle::record(bucket, cell).await? else { return Ok((generation, 0)) };
+    let all_under = |record: &Record, generation: u32| {
+        let inherited = record.inherited.iter().map(|had| &had.dek);
+        record.deks.iter().chain(inherited).all(|dek| dek.kek == generation)
+    };
+    if all_under(&found, generation) {
+        return Ok((generation, 0));
     }
-    Ok((generation, rewrapped))
+    // Every generation of the cell's KEK its DEKs may be under, unwrapped first: the update's
+    // step, which may run again on what it finds, unwraps nothing. Those it inherits are
+    // rewrapped too (TASK-411.4).
+    let inherited = found.inherited.iter().map(|had| &had.dek);
+    let keks = keys.keks(found.deks.iter().chain(inherited).map(|dek| dek.kek)).await?;
+    let kek = |dek: &Dek| {
+        keks.get(&dek.kek)
+            .ok_or_else(|| Error::Corrupt(format!("cell {cell}'s DEK under a KEK not read")))
+    };
+    let mut failed = None;
+    lifecycle::give_deks(bucket, cell, |found| {
+        if all_under(found, generation) {
+            return None;
+        }
+        let rewrap = |dek: &Dek| {
+            let secret = unwrap_dek(kek(dek)?, cell, dek)?;
+            Ok(wrap_dek((&new, generation), cell, dek.generation, &secret))
+        };
+        let rewrap_inherited = |had: &InheritedDek| {
+            let secret = unwrap_inherited(kek(&had.dek)?, cell, had)?;
+            let of = had.cell;
+            Ok(wrap_inherited((&new, generation), cell, of, had.dek.generation, &secret))
+        };
+        let deks = found.deks.iter().map(rewrap).collect::<Result<Vec<_>, Error>>();
+        let inherited =
+            found.inherited.iter().map(rewrap_inherited).collect::<Result<Vec<_>, Error>>();
+        match deks.and_then(|deks| Ok((deks, inherited?))) {
+            Ok(keys) => Some(keys),
+            Err(error) => {
+                failed = Some(error);
+                None
+            }
+        }
+    })
+    .await?;
+    if let Some(error) = failed {
+        return Err(error);
+    }
+    Ok((generation, 1))
 }
 
 /// The ring of a store of `cell`, whose record is `record`, of the cell `keys` are of: its
@@ -1470,7 +1465,7 @@ mod tests {
         };
         assert_eq!(
             refused(test_cell(8), &wrapped),
-            "corrupt: cell 1/1/8's DEK of generation 2: not authentic: a wrapped key, by its \
+            "corrupt: cell 1/8's DEK of generation 2: not authentic: a wrapped key, by its \
              integrity check"
         );
         let relabelled = Dek { generation: 3, ..wrapped.clone() };
@@ -1535,10 +1530,9 @@ mod tests {
     }
 
     /// A cell made with a KEK from the host's pool keeps it wrapped; a taking of it by another
-    /// host unwraps it once, however many of its cells it opens at once, and a taking after
-    /// that once more; a fork's child of the cell and a version there read their parent's DEK, of
-    /// the cell's; a writer of a cell with no object (no KEK) is refused its DEK, and
-    /// a writer's ring of a record with no DEK is refused (TASK-411.28: nothing in the clear).
+    /// host unwraps it once, however many rings of the cell it makes at once, and a taking after
+    /// that once more; a writer of a cell with no object (no KEK) is refused its DEK, and a
+    /// writer's ring of a record with no DEK is refused (TASK-411.28: nothing in the clear).
     #[test]
     fn cell_keys_unwrap_once_a_taking_and_rings_follow_origins() {
         let (_dir, counted, kms) = kms();
@@ -1553,58 +1547,47 @@ mod tests {
         let made = held(&kms, TEST_CELL, object.clone(), Some(kek.clone()));
         assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
 
-        // Cells: 7, a root; 8 its fork's child; with DEKs given by writers.
-        let origin = Origin { parent: test_cell(7), at: 3 };
-        block_on(lifecycle::create(&bucket, test_cell(7), 1)).unwrap();
-        let child = crate::layout::Child { cell: test_cell(8), owner: 2 };
-        block_on(lifecycle::record_fork(&bucket, child, origin, Parents::Kms(&kms, None))).unwrap();
-        let record = |id| block_on(lifecycle::record(&bucket, test_cell(id))).unwrap().unwrap();
-        for id in [7, 8] {
-            block_on(with_dek(&bucket, &made, test_cell(id), record(id))).unwrap();
-        }
-        let again = block_on(with_dek(&bucket, &made, test_cell(7), record(7))).unwrap();
-        assert_eq!(again, record(7));
+        // The cell, a root, its DEK given by its writer.
+        block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
+        let record = || block_on(lifecycle::record(&bucket, TEST_CELL)).unwrap().unwrap();
+        block_on(with_dek(&bucket, &made, TEST_CELL, record())).unwrap();
+        let again = block_on(with_dek(&bucket, &made, TEST_CELL, record())).unwrap();
+        assert_eq!(again, record());
         assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
 
-        // Another host takes the cell: one unwrap for the three rings, one of 7 that writes nothing.
+        // Another host takes the cell: one unwrap for its rings, a writer's and one that writes
+        // nothing.
         counted.reset();
         let (_, other) = kms_over(&counted);
         let (_, taken) = block_on(cell::hold(&bucket, TEST_CELL, (6, 6), None, None)).unwrap();
         let keys = CellKeys::of(TEST_CELL, &taken, other.clone());
-        let rings: Vec<_> = [(7, true), (8, true), (7, false)]
+        let rings: Vec<_> = [true, false]
             .into_iter()
-            .map(|(id, writes)| block_on(ring(&bucket, &keys, test_cell(id), &record(id), writes)))
+            .map(|writes| block_on(ring(&bucket, &keys, TEST_CELL, &record(), writes)))
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
-        assert_eq!(rings[0].cells(), BTreeSet::from([7]));
-        assert_eq!(rings[1].cells(), BTreeSet::from([7, 8]));
-        assert_eq!(rings[1].encrypting().1, KeyId { cell: 8, generation: 1 });
-        assert_eq!(rings[2].cells(), BTreeSet::from([7]));
-        assert!(!rings[2].encrypts());
-        let (dek, _) = rings[0].encrypting();
-        assert_eq!(
-            rings[1].of(7).dek(KeyId { cell: 7, generation: 1 }).unwrap().expose(),
-            dek.expose()
-        );
+        assert_eq!(rings[0].cells(), BTreeSet::from([TEST_CELL.id]));
+        assert_eq!(rings[1].cells(), BTreeSet::from([TEST_CELL.id]));
+        assert!(!rings[1].encrypts());
         // Read before it is held by placement 6 again, as a writer's recovery reads: the same
         // taking, no unwrap more; a taking by another, one more.
         let early = CellKeys::to_hold(TEST_CELL, &taken, other.clone(), 6);
-        block_on(ring(&bucket, &early, test_cell(7), &record(7), true)).unwrap();
+        block_on(ring(&bucket, &early, TEST_CELL, &record(), true)).unwrap();
         assert_eq!(counted.unwraps(), 1);
         let next = CellKeys::to_hold(TEST_CELL, &taken, other.clone(), 7);
-        block_on(ring(&bucket, &next, test_cell(7), &record(7), true)).unwrap();
+        block_on(ring(&bucket, &next, TEST_CELL, &record(), true)).unwrap();
         assert_eq!(counted.unwraps(), 2);
 
-        // A fork of 8 into another cell of the tenant's, which has no object: its writer is
-        // refused a DEK, no KEK to wrap it under, and a writer's ring of its record, which keeps
-        // none.
+        // A fork of the cell into another cell of the tenant's, which has no object: its writer
+        // is refused a DEK, no KEK to wrap it under, and a writer's ring of its record, which
+        // keeps none.
         let elsewhere = CellId { tenant: 1, id: 10 };
-        let origin = Origin { parent: test_cell(8), at: 1 };
-        let forked = Kind::Fork(origin).of(4);
+        let origin = Origin { parent: TEST_CELL, at: 1 };
+        let forked = Kind::Clone(origin).of(4);
         let objectless = CellKeys::objectless(elsewhere, other);
         let refused = block_on(ring(&bucket, &objectless, elsewhere, &forked, true));
-        let no_dek = "cell 1/2/a's record keeps no DEK, which its writer encrypts under";
+        let no_dek = "cell 1/a's record keeps no DEK, which its writer encrypts under";
         assert_eq!(refused.map(|_| ()), Err(Error::Corrupt(no_dek.into())));
         block_on(crate::bucket::create(
             &bucket,
@@ -1631,7 +1614,7 @@ mod tests {
         };
         assert_eq!(
             refused(CellId { id: 9, ..holder }, &wrapped),
-            "corrupt: cell 2/5/9's DEK of cell 1/1/7, generation 2: not authentic: a wrapped \
+            "corrupt: cell 2/9's DEK of cell 1/7, generation 2: not authentic: a wrapped \
              key, by its integrity check"
         );
         let other = InheritedDek { cell: test_cell(6), ..wrapped.clone() };
@@ -1653,8 +1636,8 @@ mod tests {
         let (_dir, counted, kms) = kms();
         counted.inner().create(2).unwrap();
         let bucket = Direct(SimBucket::new());
-        // The parent, 7, encrypted, in the test cell; a fork's child, 10, in a cell of tenant 2's.
-        let parent = test_cell(7);
+        // The parent, the test cell, encrypted; a fork's child, 10, in a cell of tenant 2's.
+        let parent = TEST_CELL;
         let parents = made_cell(&bucket, &kms, TEST_CELL, 5);
         block_on(lifecycle::create(&bucket, parent, 1)).unwrap();
         let record = |cell| block_on(lifecycle::record(&bucket, cell)).unwrap().unwrap();
@@ -1665,7 +1648,7 @@ mod tests {
         let origin = Origin { parent, at: 3 };
         // Its record as its parent's writers make it, of no state of the parent's here to
         // checkpoint.
-        let forked = crate::layout::encode(&Kind::Fork(origin).of(4));
+        let forked = crate::layout::encode(&Kind::Clone(origin).of(4));
         block_on(crate::bucket::create(&bucket, &layout::record(child), forked));
         let childs = made_cell(&bucket, &kms, child, 6);
 
@@ -1674,7 +1657,7 @@ mod tests {
         let (_, other) = kms_over(&counted);
         let other_childs = CellKeys::of(child, &read_cell(&bucket, child), other);
         let across = block_on(ring(&bucket, &other_childs, child, &record(child), false)).unwrap();
-        assert_eq!(across.cells(), BTreeSet::from([7]));
+        assert_eq!(across.cells(), BTreeSet::from([TEST_CELL.id]));
         // The parent's cell's KEK alone: the child's record keeps none to unwrap yet.
         assert_eq!(counted.unwraps(), 1);
         // Given by its first writer: its DEK and the parent's.
@@ -1691,7 +1674,7 @@ mod tests {
         let (_, fresh) = kms_over(&counted);
         let keys = CellKeys::of(child, &read_cell(&bucket, child), fresh.clone());
         let rung = block_on(ring(&bucket, &keys, child, &given, true)).unwrap();
-        assert_eq!(rung.cells(), BTreeSet::from([7, 10]));
+        assert_eq!(rung.cells(), BTreeSet::from([TEST_CELL.id, 10]));
         let id = KeyId { cell: 7, generation: 1 };
         assert_eq!(rung.of(7).dek(id).unwrap().expose(), dek.expose());
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
@@ -1749,10 +1732,6 @@ mod tests {
         assert_eq!(kms.refuses(tenant), None);
         runtime.block_on(kms.filled(tenant));
         assert_eq!(kms.in_pool(tenant), 3);
-        // A child of the parent's cell takes nothing.
-        let within = crate::layout::Child { cell: test_cell(8), ..child };
-        let none = runtime.block_on(inheriting(&kms, &source, test_cell(7), within));
-        assert!(none.unwrap().is_none());
         // Taken, then dropped unused: given back.
         let taken = runtime.block_on(inheriting(&kms, &source, test_cell(7), child));
         assert_eq!(kms.in_pool(2), 0);
@@ -1875,17 +1854,13 @@ mod tests {
         let fresh = CellKeys::of(TEST_CELL, &after, other.clone());
         assert!(fresh.encrypted());
         assert_eq!(opened(&fresh, ours), Err(refused.clone()));
-        let new = test_cell(8);
-        block_on(lifecycle::create(&bucket, new, 1)).unwrap();
-        assert_eq!(block_on(with_dek(&bucket, &fresh, new, record(new))), Err(refused.clone()));
-        assert_eq!(record(new).deks, Vec::new());
 
         // Told nothing, the host reads under what it unwrapped for its taking.
-        assert_eq!(opened(&our_keys, ours), Ok(BTreeSet::from([7])));
+        assert_eq!(opened(&our_keys, ours), Ok(BTreeSet::from([1])));
         assert_eq!(host.forget(Scope::Cell(TEST_CELL), "shredded"), 1);
         assert_eq!(opened(&our_keys, ours), Err(refused.clone()));
-        assert_eq!(host.ring.ring().cells(), BTreeSet::from([20]));
-        assert_eq!(opened(&their_keys, theirs), Ok(BTreeSet::from([20])));
+        assert_eq!(host.ring.ring().cells(), BTreeSet::from([2]));
+        assert_eq!(opened(&their_keys, theirs), Ok(BTreeSet::from([2])));
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 2));
 
         assert_eq!(host.forget(Scope::Tenant(TEST_CELL.tenant), "tenant 1: revoked"), 1);

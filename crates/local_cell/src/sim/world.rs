@@ -15,10 +15,9 @@ use crate::{Description, LocalCell, MemDir, Place, Recovering};
 use base32_id::Short;
 use bucket_cell::collector::{self, Options};
 use bucket_cell::fetch::{Budget, Limits};
-use bucket_cell::layout::{self, Child, Origin, epoch_of, writer_of};
-use bucket_cell::record::Kind;
+use bucket_cell::layout::{self, Origin, epoch_of, writer_of};
 use bucket_cell::testing::{Direct, Fault, SimBucket};
-use bucket_cell::{Error, Recovered, Writer, lifecycle, recovery, rules};
+use bucket_cell::{Error, Recovered, Writer, lifecycle, recovery};
 use extent_frame::spent::Spent;
 use futures::channel::oneshot;
 use futures::executor::{LocalPool, LocalSpawner, block_on};
@@ -47,7 +46,6 @@ pub struct Weights {
     /// its interval runs out: either closes the store's open segment.
     pub close: u32,
     pub checkpoint: u32,
-    pub fork: u32,
     /// A writer takes a cell that has none.
     pub open: u32,
     /// A writer takes a cell from the one it has.
@@ -64,18 +62,12 @@ pub struct Weights {
     pub reclaim: u32,
     /// A placement cut off deletes a cell, with the fencing token it had (TASK-45.1).
     pub stale_delete: u32,
-    /// A fork that failed is deleted, as its host's cleanup deletes it, or a crash's leftovers are
-    /// (TASK-79.82).
+    /// What a crash left of a fork of a version, or of a failed one's deletion, is gone on with:
+    /// finished, deleted as its host's cleanup deletes it, or forgotten (TASK-79.82).
     pub unfork: u32,
-    /// A fork whose segment never went is deleted as another cell takes its child's ID.
-    pub contest: u32,
-    /// Two forks, of other parents or on other hosts, name one child within a round trip, neither's
-    /// segment landing: each takes a record of its own for it, and the one that lost deletes its
-    /// fork (TASK-79.82).
+    /// Two hosts restore versions to one child within a round trip, as guests may name any ID:
+    /// whichever's record comes first takes it, the other refused (TASK-173).
     pub twins: u32,
-    /// A root takes the ID of a fork's child whose segment is not yet acknowledged, as a guest may
-    /// name any, and is deleted (TASK-174).
-    pub usurp: u32,
     /// A writer whose session stopped, a later one taking its cell or its host cut off, which
     /// runs on unaware, checkpoints: late, past where the next writer recovered from (TASK-175).
     pub stale_checkpoint: u32,
@@ -132,7 +124,6 @@ impl Default for Profile {
                 commit: 12,
                 close: 6,
                 checkpoint: 2,
-                fork: 1,
                 open: 3,
                 takeover: 1,
                 crash: 1,
@@ -143,13 +134,11 @@ impl Default for Profile {
                 reclaim: 0,
                 stale_delete: 0,
                 unfork: 0,
-                contest: 0,
                 twins: 0,
-                usurp: 0,
                 stale_checkpoint: 0,
-                version: 0,
+                version: 1,
                 drop_version: 0,
-                restore_version: 0,
+                restore_version: 1,
                 tick: 3,
             },
             options: Options { compact_below: 0.5, grace: 4 },
@@ -238,21 +227,20 @@ impl Intervals {
 
 struct CellId {
     origin: Option<Origin>,
-    /// The parent's commit the fork made, which the child's first follows.
+    /// The commit of its parent's that the version it was restored from is of, which its first
+    /// follows.
     base: Option<u64>,
     /// The commits its guests were told are durable.
     acked: BTreeSet<u64>,
     deleting: bool,
     /// The highest fencing token a writer took it with: its latest placement's.
     taken: u64,
-    /// Its owner, which its maker chose: its fork's, if it is a fork's child.
-    owner: u64,
 }
 
 impl CellId {
-    /// A cell forked from `origin`, its parent's fork commit `base`, of `owner`.
-    fn forked(origin: Option<Origin>, base: Option<u64>, owner: u64) -> Self {
-        Self { origin, base, acked: BTreeSet::new(), deleting: false, taken: 0, owner }
+    /// A cell forked from `origin`, of its parent's commit `base`.
+    fn forked(origin: Option<Origin>, base: Option<u64>) -> Self {
+        Self { origin, base, acked: BTreeSet::new(), deleting: false, taken: 0 }
     }
 }
 
@@ -351,41 +339,19 @@ enum Event {
         child: u64,
         result: Result<bool, Error>,
     },
-    /// What deleting a fork's child gave, as another cell, of `owner`, took its ID, and what
-    /// taking it gave.
-    Contested {
-        child: u64,
-        owner: u64,
-        deleted: Result<bool, Error>,
-        taken: Result<u64, Error>,
-    },
     Collected {
         id: u64,
         result: Result<collector::Report, Error>,
-    },
-    /// What two forks naming one child, neither's segment landing, gave as each took a record of
-    /// its own for it ([`lifecycle::create_forked`]), by their owners.
-    Twinned {
-        child: u64,
-        taken: [(u64, Result<(), Error>); 2],
-    },
-    /// What deleting the fork whose child the other of two forks took gave.
-    Untwinned {
-        child: u64,
-        result: Result<bool, Error>,
     },
     /// What a host's fork of a version gave.
     Restored {
         child: u64,
         result: Result<(), Error>,
     },
-    /// What a root of `owner` taking the ID of the child of a fork, whose segment was not yet
-    /// acknowledged ([`World::usurp`]), gave, and deleting it after.
-    Usurped {
+    /// What two hosts' forks of a version to one child gave ([`World::twins`]).
+    Twinned {
         child: u64,
-        owner: u64,
-        created: Result<(), Error>,
-        deleted: Option<Result<(), Error>>,
+        made: [(Restore, Result<(), Error>); 2],
     },
     /// cladefs: what a writer's dropping of a version gave.
     VersionDropped {
@@ -394,16 +360,11 @@ enum Event {
     },
 }
 
-/// A failed fork's deletion, until it is done: the record its fork gives its child, as its host
-/// knew, and the task, unless a crash stopped it, for its host's next start to go on with.
+/// A failed fork's deletion, until it is done: its child's owner, and the task, unless a crash
+/// stopped it, for its host's next start to go on with.
 struct Unfork {
-    forked: Kind,
-    /// Its child's owner.
     owner: u64,
     running: Option<AbortHandle>,
-    /// The fork whose child's ID its restore took ([`Restore::taken`]): the child's, if the fork's
-    /// record came first.
-    taken: Option<CellId>,
 }
 
 /// A fork of a version, until it is done: of which, naming what, on which host, and the task,
@@ -418,9 +379,6 @@ struct Restore {
     /// Its child's owner.
     owner: u64,
     running: Option<AbortHandle>,
-    /// The fork whose child's ID it took, a guest having named it, that fork's segment not yet
-    /// acknowledged: the child's, if that fork's record comes first (TASK-173).
-    taken: Option<CellId>,
 }
 
 /// cladefs: a version a guest cut (TASK-476): of which cell, as of which of its commits, whether
@@ -453,9 +411,6 @@ pub struct World {
     /// The history the commits each writer uploads are of, by its cell and epoch: a writer
     /// uploads one store's.
     stamps: HashMap<(u64, u64), u64>,
-    /// The forks the guests made, by their children: of which cell, as each guest named it. Its
-    /// origin is where the uploader that took its segment put it, again after a takeover.
-    forking: BTreeMap<u64, (u64, Child)>,
     collectors: BTreeMap<u64, AbortHandle>,
     /// The writers of the sessions stopped, the latest few, which may run on unaware
     /// ([`World::stale_checkpoint`]).
@@ -464,9 +419,6 @@ pub struct World {
     restores: BTreeMap<u64, Restore>,
     /// cladefs: the versions the guests cut, by their IDs (TASK-476).
     versions: BTreeMap<u64, Cut>,
-    /// The forks whose children's IDs a root is taking ([`World::usurp`]), until it is done: the
-    /// child's, if the fork's record comes first.
-    usurped: BTreeMap<u64, CellId>,
     /// What the footer of each segment the history check read says, by its cell, number and
     /// epoch, one writer stamping one footer at a place.
     footers: RefCell<HashMap<(u64, u64, u64), Applied>>,
@@ -514,13 +466,11 @@ impl World {
             minted: HashMap::new(),
             lineages: HashMap::new(),
             stamps: HashMap::new(),
-            forking: BTreeMap::new(),
             collectors: BTreeMap::new(),
             stale: Vec::new(),
             unforks: BTreeMap::new(),
             restores: BTreeMap::new(),
             versions: BTreeMap::new(),
-            usurped: BTreeMap::new(),
             footers: RefCell::default(),
             next_id: 1,
             faults: true,
@@ -531,7 +481,7 @@ impl World {
         };
         let (root, owner) = (world.id(), world.id());
         block_on(lifecycle::create(&Direct(world.bucket.clone()), sim_cell(root), owner)).unwrap();
-        world.cells.insert(root, CellId::forked(None, None, owner));
+        world.cells.insert(root, CellId::forked(None, None));
         world
     }
 
@@ -560,7 +510,6 @@ impl World {
             w.commit,
             w.close,
             w.checkpoint,
-            w.fork,
             w.open,
             w.takeover,
             w.crash,
@@ -571,9 +520,7 @@ impl World {
             w.reclaim,
             w.stale_delete,
             w.unfork,
-            w.contest,
             w.twins,
-            w.usurp,
             w.write,
             w.stale_checkpoint,
             w.version,
@@ -592,25 +539,22 @@ impl World {
             1 => self.commit(),
             2 => self.close(),
             3 => self.checkpoint(),
-            4 => self.fork(),
-            5 => self.open(false),
-            6 => self.open(true),
-            7 => self.crash(),
-            8 => self.delete(false),
-            9 => self.delete(true),
-            10 => self.collect(),
-            11 => self.stop_collector(),
-            12 => self.reclaim(),
-            13 => self.stale_delete(),
-            14 => self.unfork(),
-            15 => self.contest(),
-            16 => self.twins(),
-            17 => self.usurp(),
-            18 => self.write(),
-            19 => self.stale_checkpoint(),
-            20 => self.cut_version(),
-            21 => self.drop_version(),
-            22 => self.restore_version(),
+            4 => self.open(false),
+            5 => self.open(true),
+            6 => self.crash(),
+            7 => self.delete(false),
+            8 => self.delete(true),
+            9 => self.collect(),
+            10 => self.stop_collector(),
+            11 => self.reclaim(),
+            12 => self.stale_delete(),
+            13 => self.unfork(),
+            14 => self.twins(),
+            15 => self.write(),
+            16 => self.stale_checkpoint(),
+            17 => self.cut_version(),
+            18 => self.drop_version(),
+            19 => self.restore_version(),
             _ => {
                 let ticks = self.rng.random_range(1..=self.profile.options.grace);
                 self.bucket.advance(ticks);
@@ -678,64 +622,37 @@ impl World {
                     .violation(format!("cell {cell}'s stale delete: {error}", cell = Short(cell))),
             },
             Event::Unforked { child, result: Ok(true) } => drop(self.unforks.remove(&child)),
-            // A restore's that took a fork's child's ID, the fork's record coming first: the
-            // fork's child, as it was.
-            Event::Unforked { child, result: Ok(false) }
-                if self.unforks[&child].taken.is_some() =>
-            {
-                let taken = self.unforks.remove(&child).unwrap().taken.unwrap();
-                self.cells.insert(child, taken);
-            }
-            // A later placement took it as it was deleted, as a writer that went did: it lives on.
-            Event::Unforked { child, result: Err(Error::Stale) } => {
-                self.unforks.remove(&child);
-                self.cells.get_mut(&child).unwrap().deleting = false;
-            }
             Event::Unforked { child, result } => {
                 self.violation(format!(
                     "deleting the failed fork to {child}: {result:?}",
                     child = Short(child)
                 ));
             }
-            Event::Contested { child, owner, deleted, taken } => match (deleted, taken) {
-                // The fork's deletion took the ID first.
-                (Ok(true), Err(Error::Corrupt(_))) => {}
-                // The other cell did: it lives on.
-                (Ok(false), Ok(_)) => {
-                    self.cells.insert(child, CellId::forked(None, None, owner));
-                }
-                (deleted, taken) => self.violation(format!(
-                    "deleting the failed fork to {child} gave {deleted:?}, another cell taking \
-                     its ID {taken:?}",
-                    child = Short(child)
-                )),
-            },
             Event::Collected { id, result } => {
                 self.collectors.remove(&id);
                 if let Err(error) = result {
                     self.violation(format!("collector: {error}"));
                 }
             }
-            Event::Twinned { child, taken } => match taken {
-                [(owner, Ok(())), (lost, Err(Error::IdTaken(_)))]
-                | [(lost, Err(Error::IdTaken(_))), (owner, Ok(()))] => {
-                    // Its fork's VM manager told: a cell from now on. The other's host deletes
-                    // what it thinks its fork made.
-                    self.cells.insert(child, CellId::forked(None, None, owner));
-                    self.untwin(child, lost);
+            Event::Restored { child, result } => {
+                if let Some(restore) = self.restores.remove(&child) {
+                    self.restored(child, restore, result);
                 }
-                taken => self.violation(format!(
-                    "two forks naming cell {child} took records of their own for it: {taken:?}",
+            }
+            // Whichever's record came first took the ID; the other, refused, made nothing.
+            Event::Twinned {
+                child,
+                made:
+                    [(restore, result), (_, Err(Error::IdTaken(_)))]
+                    | [(_, Err(Error::IdTaken(_))), (restore, result)],
+            } => self.restored(child, restore, result),
+            Event::Twinned { child, made } => {
+                let results = made.map(|(_, result)| result);
+                self.violation(format!(
+                    "two forks of a version to cell {child} gave {results:?}",
                     child = Short(child)
-                )),
-            },
-            Event::Untwinned { result: Ok(false), .. } => {}
-            // The other fork's cell deleted meanwhile, as any cell may be: gone, whoever's.
-            Event::Untwinned { child, result: Ok(true) } if self.cells[&child].deleting => {}
-            Event::Untwinned { child, result } => self.violation(format!(
-                "deleting a fork to cell {child}, which another fork took, gave {result:?}",
-                child = Short(child)
-            )),
+                ));
+            }
             Event::VersionDropped { id, result } => {
                 let cut = self.versions.get_mut(&id).unwrap();
                 cut.dropping = false;
@@ -761,46 +678,22 @@ impl World {
                     }
                 }
             }
-            Event::Restored { child, result } => {
-                let Some(mut restore) = self.restores.remove(&child) else { return };
-                let (version, origin, owner) =
-                    (restore.version, Some(restore.origin), restore.owner);
-                let base = restore.base;
-                match result {
-                    // Told to its VM's manager: a cell from now on, whatever comes of the version.
-                    Ok(()) => {
-                        let found = CellId::forked(origin, base, owner);
-                        drop(self.cells.insert(child, found))
-                    }
-                    // The fork whose child's ID it took recorded it first: the fork's child, as it
-                    // was.
-                    Err(Error::IdTaken(_)) if restore.taken.is_some() => {
-                        drop(self.cells.insert(child, restore.taken.take().unwrap()))
-                    }
-                    // The version went, or the fork was given up on: its host deletes it.
-                    Err(Error::Deleted) => self.fail_restore(child, restore, base),
-                    Err(error) => self.violation(format!("forking version {version}: {error}")),
-                }
+        }
+    }
+
+    /// What `restore`, a fork of a version to `child`, gave.
+    fn restored(&mut self, child: u64, restore: Restore, result: Result<(), Error>) {
+        match result {
+            // Told to its VM's manager: a cell from now on, whatever comes of the version.
+            Ok(()) => {
+                let found = CellId::forked(Some(restore.origin), restore.base);
+                drop(self.cells.insert(child, found))
             }
-            Event::Usurped { child, owner, created, deleted } => match (created, deleted) {
-                // The root took the ID, and is gone.
-                (Ok(()), Some(Ok(()))) => {
-                    self.usurped.remove(&child);
-                    let mut found = CellId::forked(None, None, owner);
-                    found.deleting = true;
-                    drop(self.cells.insert(child, found))
-                }
-                // The fork's record came first: its child, as it was.
-                (Err(Error::Corrupt(_)), None) => {
-                    let fork = self.usurped.remove(&child).unwrap();
-                    drop(self.cells.insert(child, fork))
-                }
-                (created, deleted) => self.violation(format!(
-                    "a root taking the ID of the fork to {child} gave {created:?}, deleting it \
-                     {deleted:?}",
-                    child = Short(child)
-                )),
-            },
+            // The version went, or the fork was given up on: its host deletes it.
+            Err(Error::Deleted) => self.fail_restore(child, restore),
+            Err(error) => {
+                self.violation(format!("forking version {}: {error}", Short(restore.version)))
+            }
         }
     }
 
@@ -808,9 +701,9 @@ impl World {
 
     /// Takes in what each session's uploader did since: its store opened, or refused to; its
     /// uploader stopped; the epoch of its writer, which the tags of the commits it uploads
-    /// name; where it put the forks of the segments it took; and the commits it uploaded, which
-    /// their guests are told are durable. Returns whether a session opened, ended or started anew,
-    /// which the next run of the tasks may go on with.
+    /// name; and the commits it uploaded, which their guests are told are durable. Returns
+    /// whether a session opened, ended or started anew, which the next run of the tasks may go on
+    /// with.
     fn observe(&mut self) -> bool {
         let mut changed = false;
         for host in 0..self.hosts.len() {
@@ -849,7 +742,6 @@ impl World {
                 if let Some(writer) = uploader.writer() {
                     self.stamps.insert((cell, writer.epoch()), lineage);
                 }
-                self.forks_taken(cell, &uploader);
                 // Its guest is told of what was uploaded, its own commits.
                 let uploaded = uploader.last_uploaded();
                 let commits = &self.commits;
@@ -863,37 +755,6 @@ impl World {
             }
         }
         changed
-    }
-
-    /// Notes where `uploader`, of `cell`'s store, put the forks of the segments it took: their
-    /// children's origins, as the uploader would delete them by.
-    fn forks_taken(&mut self, cell: u64, uploader: &Uploader) {
-        let forks: Vec<(Child, Origin)> = (self.forking.values())
-            .filter(|(parent, _)| *parent == cell)
-            .filter_map(|(_, child)| Some((*child, uploader.fork_origin(child.cell)?)))
-            .collect();
-        for (child, origin) in forks {
-            let Some(found) = self.fork_child(&child) else { continue };
-            if found.origin == Some(origin) {
-                continue;
-            }
-            found.origin = Some(origin);
-            if !rules().records_after_ack {
-                let bucket = self.bucket.clone();
-                self.spawn(async move {
-                    let _ = lifecycle::record_fork(
-                        &*bucket,
-                        child,
-                        origin,
-                        bucket_cell::keys::Parents::Kms(
-                            &bucket_cell::keys::testing::host_kms(),
-                            None,
-                        ),
-                    )
-                    .await;
-                });
-            }
-        }
     }
 
     /// The directory of `cell`'s store on `host`, made if its disk has none.
@@ -1122,7 +983,6 @@ impl World {
     fn stop(&mut self, host: usize, cell: u64, session: Session) {
         trace!("host {host}: session {} of {cell} stops", session.id, cell = Short(cell));
         session.running.abort();
-        self.forks_taken(cell, &session.uploader);
         if let Some(writer) = session.uploader.writer() {
             self.stale.push(writer);
             if self.stale.len() > STALE_WRITERS {
@@ -1399,37 +1259,8 @@ impl World {
         });
     }
 
-    /// Forks a cell with a writer, as that writer's store's commit. Its uploader is asked for the
-    /// commit, as a fork waits for it to be uploaded.
-    fn fork(&mut self) {
-        let Some((host, cell)) = self.ready() else { return };
-        let (child, owner, tag) = (self.id(), self.id(), self.id());
-        let session = &self.hosts[host].sessions[&cell];
-        let (store, uploader, parent) =
-            (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
-        let forked = Child { cell: sim_cell(child), owner };
-        let before =
-            store.last_commit().and_then(|before| store.commit_fork(forked).map(|_| before));
-        let before = match before {
-            Ok(before) => before,
-            Err(err) => {
-                drop(uploader);
-                return self.store_failed(host, cell, store, err);
-            }
-        };
-        let Some(epoch) = self.committed(cell, &store, before) else { return };
-        let session = self.hosts[host].sessions.get_mut(&cell).unwrap();
-        let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
-        let made = Truth { cell, parent, extents, frees: Vec::new(), root: None, capacity: None };
-        self.made(host, cell, tag, epoch, made);
-        self.cells.insert(child, CellId::forked(None, Some(tag), owner));
-        self.forking.insert(child, (cell, forked));
-        let _ = uploader.ask(epoch, false);
-    }
-
     /// A writer takes a cell on a host: one with no writer, or, `takeover`, one with. Only a
-    /// cell with a record: as a host opens the stores of the cells it was told of, a fork's
-    /// child once its fork is made.
+    /// cell with a record: as a host opens the stores of the cells it was told of.
     fn open(&mut self, takeover: bool) {
         let direct = Direct(self.bucket.clone());
         let candidates: Vec<u64> = self
@@ -1522,43 +1353,14 @@ impl World {
         }
     }
 
-    /// The fork's child `child` as its making's guest knows it, wherever it is: a cell, or set
-    /// aside while a restore or a root takes its ID; none once one of those took it.
-    fn fork_child(&mut self, child: &Child) -> Option<&mut CellId> {
-        let id = child.cell.id;
-        let restore = self.restores.get_mut(&id).and_then(|restore| restore.taken.as_mut());
-        let unfork = self.unforks.get_mut(&id).and_then(|unfork| unfork.taken.as_mut());
-        [self.cells.get_mut(&id), restore, unfork, self.usurped.get_mut(&id)]
-            .into_iter()
-            .flatten()
-            .find(|found| found.owner == child.owner)
-    }
-
     /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup deletes
     /// it, or an operator does what no host held: which nothing relies on.
-    fn fail_restore(&mut self, child: u64, restore: Restore, base: Option<u64>) {
-        let Restore { version, origin, owner, taken, .. } = restore;
-        let mut found = CellId::forked(Some(origin), base, owner);
+    fn fail_restore(&mut self, child: u64, restore: Restore) {
+        let mut found = CellId::forked(Some(restore.origin), restore.base);
         found.deleting = true;
         self.cells.insert(child, found);
-        let forked = Kind::Forking { origin, version };
-        self.unforks.insert(child, Unfork { forked, owner, running: None, taken });
+        self.unforks.insert(child, Unfork { owner: restore.owner, running: None });
         self.spawn_unfork(child);
-    }
-
-    /// The children of forks at segments, made and not yet recorded, nor acknowledged, opened or
-    /// deleted.
-    fn pending_forks(&self) -> Vec<u64> {
-        let direct = Direct(self.bucket.clone());
-        let held = |cell| self.hosts.iter().any(|host| host.sessions.contains_key(cell));
-        (self.cells.iter())
-            .filter(|(_, found)| found.origin.is_some() && !found.deleting)
-            .filter(|(child, found)| found.acked.is_empty() && found.taken == 0 && !held(child))
-            .filter(|&(&child, _)| {
-                matches!(block_on(lifecycle::record(&direct, sim_cell(child))), Ok(None))
-            })
-            .map(|(&child, _)| child)
-            .collect()
     }
 
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
@@ -1594,7 +1396,7 @@ impl World {
             Err(err) => return self.store_failed(host, cell, store, err),
         };
         let cut = layout::NewVersion { id, keep_last: None };
-        if let Err(err) = store.commit_version(cut) {
+        if let Err(err) = store.commit_version(cut, true) {
             return self.store_failed(host, cell, store, err);
         }
         let Some(epoch) = self.committed(cell, &store, before) else { return };
@@ -1659,30 +1461,47 @@ impl World {
         named
     }
 
-    /// cladefs: a host restores a version a cell's head names: its child's record, its reference,
-    /// the head read again, the fork made (`lifecycle::fork_version`), as many hosts do at once. Or,
-    /// now and then, a child's ID a guest named that a fork's guest named too, its segment not yet
-    /// acknowledged: whichever's record comes first takes it (TASK-173).
-    fn restore_version(&mut self) {
+    /// cladefs: a restore of a version a cell's head names, on a random host, of an owner of its
+    /// own, not yet begun; none if no head names one.
+    fn new_restore(&mut self) -> Option<Restore> {
         let named = self.named_versions();
         if named.is_empty() {
-            return;
+            return None;
         }
-        let (id, cell, at, tag) = named[self.rng.random_range(0..named.len())];
-        let (child, owner) = (self.id(), self.id());
-        let (child, taken) = match self.pending_forks() {
-            pending if !pending.is_empty() && self.rng.random_bool(0.5) => {
-                let child = pending[self.rng.random_range(0..pending.len())];
-                (child, self.cells.remove(&child))
-            }
-            _ => (child, None),
-        };
-        let host = self.rng.random_range(0..self.hosts.len());
+        let (version, cell, at, tag) = named[self.rng.random_range(0..named.len())];
+        let (host, owner) = (self.rng.random_range(0..self.hosts.len()), self.id());
         let origin = Origin { parent: sim_cell(cell), at };
-        let restore =
-            Restore { version: id, origin, base: Some(tag), host, owner, running: None, taken };
+        Some(Restore { version, origin, base: Some(tag), host, owner, running: None })
+    }
+
+    /// cladefs: a host restores a version a cell's head names: its child's record, its reference,
+    /// the head read again, the fork made (`lifecycle::fork_version`), as many hosts do at once.
+    fn restore_version(&mut self) {
+        let Some(restore) = self.new_restore() else { return };
+        let child = self.id();
         self.restores.insert(child, restore);
         self.spawn_restore(child);
+    }
+
+    /// cladefs: two hosts restore one version to one child within a round trip, as guests may name
+    /// any ID, each of an owner of its own: whichever's record comes first takes the ID, the other
+    /// refused, finding another's (TASK-79.82, TASK-173). Crashes leave them be.
+    fn twins(&mut self) {
+        let Some(first) = self.new_restore() else { return };
+        let (child, owner) = (self.id(), self.id());
+        let second = Restore { owner, running: None, ..first };
+        let (bucket, events) = (self.bucket.clone(), self.events.clone());
+        self.spawn(async move {
+            let kms = bucket_cell::keys::testing::host_kms();
+            let fork = |restore: &Restore| {
+                let keys = bucket_cell::keys::Parents::Kms(&kms, None);
+                let Restore { version, origin, owner, .. } = *restore;
+                lifecycle::fork_version(&*bucket, sim_cell(child), version, origin, owner, keys)
+            };
+            let made = futures::join!(fork(&first), fork(&second));
+            let made = [(first, made.0), (second, made.1)];
+            events.borrow_mut().push(Event::Twinned { child, made });
+        });
     }
 
     /// A placement cut off takes a cell back, on a host that has no writer of it, with an earlier
@@ -1707,176 +1526,43 @@ impl World {
         self.start_session(host, cell, Some(token));
     }
 
-    /// Deletes a fork that failed, one no writer took, as its host's cleanup does, in object storage
-    /// ([`lifecycle::delete_fork`]): or goes on with one a crash stopped, as deleting its handle again
-    /// does.
+    /// Goes on with what a crash left, as its host's next start does: a failed fork's deletion
+    /// ([`lifecycle::delete_fork`]), or a fork of a version, finished, deleted or, as often as
+    /// [`Profile::forget`] says, forgotten.
     fn unfork(&mut self) {
         let stopped = self.unforks.iter().find(|(_, unfork)| unfork.running.is_none());
         if let Some((&child, _)) = stopped {
             return self.spawn_unfork(child);
         }
-        // What a crash left of a fork of a version: its handle opened, or deleted.
         let stopped = self.restores.iter().find(|(_, restore)| restore.running.is_none());
-        if let Some((&child, _)) = stopped {
-            // One that took a fork's child's ID is the fork's or the restore's by which record
-            // came first, which a guest of either is told: never forgotten.
-            let forget = self.profile.forget;
-            if forget > 0.0 && self.restores[&child].taken.is_none() && self.rng.random_bool(forget)
-            {
-                self.restores.remove(&child);
-                return;
-            }
-            return match self.rng.random_bool(0.5) {
-                true => self.spawn_restore(child),
-                false => self.give_up_restore(child),
-            };
-        }
-        let held = |cell| self.hosts.iter().any(|host| host.sessions.contains_key(cell));
-        let forked = |origin: Option<Origin>, parent| origin.is_some_and(|at| at.parent == parent);
-        let candidates: Vec<u64> = (self.cells.iter())
-            .filter(|(_, found)| found.origin.is_some() && found.acked.is_empty())
-            .filter(|(cell, found)| !found.deleting && found.taken == 0 && !held(cell))
-            .filter(|&(&cell, _)| {
-                !self.cells.values().any(|child| forked(child.origin, sim_cell(cell)))
-            })
-            .map(|(&cell, _)| cell)
-            .collect();
-        if candidates.is_empty() {
+        let Some((&child, _)) = stopped else { return };
+        let forget = self.profile.forget;
+        if forget > 0.0 && self.rng.random_bool(forget) {
+            self.restores.remove(&child);
             return;
         }
-        let child = candidates[self.rng.random_range(0..candidates.len())];
-        let found = self.cells.get_mut(&child).unwrap();
-        found.deleting = true;
-        let forked = match found.origin {
-            Some(origin) => Kind::Fork(origin),
-            None => Kind::Own,
-        };
-        let owner = found.owner;
-        self.unforks.insert(child, Unfork { forked, owner, running: None, taken: None });
-        self.spawn_unfork(child);
+        match self.rng.random_bool(0.5) {
+            true => self.spawn_restore(child),
+            false => self.give_up_restore(child),
+        }
     }
 
     /// Deletes what a crash left of the fork of a version to `child`.
     fn give_up_restore(&mut self, child: u64) {
         let restore = self.restores.remove(&child).unwrap();
-        let base = restore.base;
-        self.fail_restore(child, restore, base);
+        self.fail_restore(child, restore);
     }
 
     /// Deletes `child`, a failed fork's, as its host does.
     fn spawn_unfork(&mut self, child: u64) {
-        let Unfork { forked, owner, .. } = self.unforks[&child];
-        let holder = self.id();
+        let (owner, holder) = (self.unforks[&child].owner, self.id());
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
-            let result = lifecycle::delete_fork(
-                &*bucket,
-                sim_cell(child),
-                forked,
-                owner,
-                (holder, 0),
-                &bucket_cell::keys::testing::host_kms(),
-            )
-            .await;
+            let deleting = lifecycle::delete_fork(&*bucket, sim_cell(child), owner, (holder, 0));
+            let result = deleting.await;
             events.borrow_mut().push(Event::Unforked { child, result });
         });
         self.unforks.get_mut(&child).unwrap().running = Some(running);
-    }
-
-    /// Deletes a fork whose segment never went, which names no origin, as another cell takes its
-    /// child's ID, the guest having named one that was free when the fork looked: the same token
-    /// for both, as a host's stores' are.
-    fn contest(&mut self) {
-        let (child, holder, other) = (self.id(), self.id(), self.id());
-        let (forks, owner) = (self.id(), self.id());
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
-        self.spawn(async move {
-            let kms = bucket_cell::keys::testing::host_kms();
-            let deleting = lifecycle::delete_fork(
-                &*bucket,
-                sim_cell(child),
-                Kind::Own,
-                forks,
-                (holder, 0),
-                &kms,
-            );
-            let taking = async {
-                lifecycle::create(&*bucket, sim_cell(child), owner).await?;
-                let taking = bucket_cell::head::take(&*bucket, sim_cell(child), other, 0);
-                taking.await.map(|held| held.head.epoch)
-            };
-            let (deleted, taken) = futures::join!(deleting, taking);
-            events.borrow_mut().push(Event::Contested { child, owner, deleted, taken });
-        });
-    }
-
-    /// Two forks name one child, of other parents or on other hosts, within a round trip, neither's
-    /// segment landing, as guests may give any ID: each takes a record of its own for it, as the
-    /// child of a fork not made in object storage does ([`lifecycle::create_forked`]), of its owner.
-    /// One must take it, the other finding it another's (TASK-79.82).
-    fn twins(&mut self) {
-        let (child, first, second) = (self.id(), self.id(), self.id());
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
-        self.spawn(async move {
-            let (taken, also) = futures::join!(
-                lifecycle::create_forked(&*bucket, sim_cell(child), first),
-                lifecycle::create_forked(&*bucket, sim_cell(child), second)
-            );
-            events
-                .borrow_mut()
-                .push(Event::Twinned { child, taken: [(first, taken), (second, also)] });
-        });
-    }
-
-    /// A root takes the ID of a fork's child whose segment is not yet acknowledged, as a guest may
-    /// name any, and is deleted: the fork's parent's writer, slow to record the fork, finds the
-    /// root's record, deleted (TASK-174).
-    fn usurp(&mut self) {
-        let pending = self.pending_forks();
-        if pending.is_empty() {
-            return;
-        }
-        let child = pending[self.rng.random_range(0..pending.len())];
-        let fork = self.cells.remove(&child).unwrap();
-        self.usurped.insert(child, fork);
-        let (owner, holder) = (self.id(), self.id());
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
-        self.spawn(async move {
-            let created = lifecycle::create(&*bucket, sim_cell(child), owner).await;
-            let deleted = match created {
-                Ok(()) => Some(
-                    lifecycle::delete(
-                        &*bucket,
-                        sim_cell(child),
-                        holder,
-                        0,
-                        &bucket_cell::keys::testing::host_kms(),
-                    )
-                    .await,
-                ),
-                Err(_) => None,
-            };
-            events.borrow_mut().push(Event::Usurped { child, owner, created, deleted });
-        });
-    }
-
-    /// Deletes the fork of `owner` to `child`, whose segment never went, as its host's cleanup does
-    /// once its child found another fork's record: which must leave that be.
-    fn untwin(&mut self, child: u64, owner: u64) {
-        let holder = self.id();
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
-        self.spawn(async move {
-            let result = lifecycle::delete_fork(
-                &*bucket,
-                sim_cell(child),
-                Kind::Own,
-                owner,
-                (holder, 0),
-                &bucket_cell::keys::testing::host_kms(),
-            )
-            .await;
-            events.borrow_mut().push(Event::Untwinned { child, result });
-        });
     }
 
     /// Deletes a cell, if `bases`, one a fork of which lives.
@@ -1930,19 +1616,7 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let result = match lifecycle::delete(
-                &*bucket,
-                sim_cell(cell),
-                holder,
-                token,
-                &bucket_cell::keys::testing::host_kms(),
-            )
-            .await
-            {
-                // A fork whose segment never made it: no cell.
-                Err(Error::NoCell) => Ok(()),
-                result => result,
-            };
+            let result = lifecycle::delete(&*bucket, sim_cell(cell), holder, token).await;
             events.borrow_mut().push(Event::Deleted { cell, stale, result });
         });
     }
@@ -2185,13 +1859,12 @@ impl World {
                         .join(",")
                 };
                 text += &format!(
-                    "    epoch {} commits {:?} extents [{}] own [{}] frees [{}] forks {:?}\n",
+                    "    epoch {} commits {:?} extents [{}] own [{}] frees [{}]\n",
                     footer.epoch,
                     footer.contents.commits,
                     short(&mut footer.contents.extents.iter().map(|e| e.0)),
                     short(&mut footer.own().map(|e| e.0)),
                     short(&mut footer.contents.frees.iter().copied()),
-                    footer.contents.forks,
                 );
             }
         }
@@ -2709,23 +2382,17 @@ impl World {
             }
             self.settle();
             self.quiescing = true;
-            // Twice: opening a parent gives its forks' children their records.
-            for _ in 0..2 {
-                for cell in self.live() {
-                    let held = self.hosts.iter().any(|host| host.sessions.contains_key(&cell));
-                    if held {
-                        continue;
-                    }
-                    let host = self
-                        .hosts
-                        .iter()
-                        .position(|host| host.disks.contains_key(&cell))
-                        .unwrap_or(0);
-                    self.start_session(host, cell, None);
+            for cell in self.live() {
+                let held = self.hosts.iter().any(|host| host.sessions.contains_key(&cell));
+                if held {
+                    continue;
                 }
-                self.settle();
-                self.check_uploaded();
+                let host =
+                    self.hosts.iter().position(|host| host.disks.contains_key(&cell)).unwrap_or(0);
+                self.start_session(host, cell, None);
             }
+            self.settle();
+            self.check_uploaded();
         }
         for _ in 0..4 {
             let sessions: Vec<(usize, u64)> = self

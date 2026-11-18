@@ -4,10 +4,8 @@
 
 //! Cells' records: creating a cell, forking one, taking one over, deleting one.
 //!
-//! A fork of a cell with a writer is the writer's commit ([`record_fork`] gives its child its
-//! record once the commit is acknowledged). A fork of a version is its child's record alone, which
-//! writes nothing of the version's cell's, so that any number of hosts fork one at once
-//! ([`fork_version`]).
+//! A fork is of a version: its child's record alone, which writes nothing of the version's cell's,
+//! so that any number of hosts fork one at once ([`fork_version`]).
 //!
 //! cladefs: every change of a record, a cell's object or a collector lease is a [`transition`],
 //! one compare-and-swap loop, of what it found to what it writes (TASK-160.14).
@@ -15,13 +13,12 @@
 use crate::bucket::{self, Bucket, Created, Object, Updated};
 use crate::head;
 use crate::keys::Parents;
-use crate::layout::{self, CellId, Child, Head, Kind as Key, Origin};
+use crate::layout::{self, CellId, Head, Origin};
 use crate::record::{Kind, Record};
-use crate::recovery::{self, recover_from};
+use crate::recovery;
 use crate::{Error, rules};
 use futures::StreamExt as _;
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 /// What a [`transition`] makes of the object it found.
 pub(crate) enum Step<T, R> {
@@ -122,32 +119,13 @@ async fn change_leaving<R>(
     transition_leaving(bucket, &layout::record(cell), start, decode, step).await
 }
 
-/// The owner every record a writer makes names, its maker having chosen `owner`
-/// ([`Record::owner`]): unless the rule that they do is off, in a test that shows it needed.
-fn owner(owner: u64) -> u64 {
-    if rules().records_owned { owner } else { 0 }
-}
-
 /// Creates `cell`, of no parent, of `owner`, which its maker chose at random: a create of
 /// another's finds its record there.
 pub async fn create(bucket: &impl Bucket, cell: CellId, owner: u64) -> Result<(), Error> {
-    let record = Kind::Root.of(self::owner(owner));
+    let record = Kind::Root.of(owner);
     change(bucket, cell, Start::Create, |found| match found {
         None => Ok(Step::Write(record.clone(), ())),
         Some(_) => Err(Error::Corrupt(format!("cell {cell} exists"))),
-    })
-    .await
-}
-
-/// Creates `child`, a fork's child taking a cell of its own, of no parent, its fork not made in
-/// object storage, of the fork's `owner`. Its record says it is a fork's, of that owner, so that
-/// it takes no record of another cell's that took its ID for its own, another fork's to that ID
-/// among them, which a create of the same bytes would ([`Error::IdTaken`], TASK-79.82).
-pub async fn create_forked(bucket: &impl Bucket, child: CellId, owner: u64) -> Result<(), Error> {
-    let record = Kind::Own.of(self::owner(owner));
-    change(bucket, child, Start::Create, |found| match found {
-        None => Ok(Step::Write(record.clone(), ())),
-        Some(_) => Err(Error::IdTaken(child)),
     })
     .await
 }
@@ -205,20 +183,10 @@ pub async fn record(bucket: &impl Bucket, cell: CellId) -> Result<Option<Record>
     }
 }
 
-/// The cells of `cell` whose records say they are live, with their records: an operator's look,
-/// to compare with what hosts hold. A fork whose child has no record yet isn't among them. cladefs: a
-/// cell's, listing its records alone (`cladefs-gc --cells`, TASK-395.4).
-pub async fn live(bucket: &impl Bucket, cell: CellId) -> Result<BTreeMap<CellId, Record>, Error> {
-    let mut live = BTreeMap::new();
-    for meta in bucket::list(bucket, &layout::record(cell)).await {
-        if let Key::Record { cell } = layout::kind(&meta.key)
-            && let Some(record) = record(bucket, cell).await?
-            && !record.deleted
-        {
-            live.insert(cell, record);
-        }
-    }
-    Ok(live)
+/// `cell`'s record, if it says the cell is live: an operator's look, to compare with what hosts
+/// hold (`cladefs-gc --cells`, TASK-395.4). A fork whose child has no record yet isn't live.
+pub async fn live(bucket: &impl Bucket, cell: CellId) -> Result<Option<Record>, Error> {
+    Ok(record(bucket, cell).await?.filter(|record| !record.deleted))
 }
 
 /// cladefs: writes the reference of the fork of `origin` to `child`, whose owner is `owner`, under
@@ -228,14 +196,6 @@ pub async fn live(bucket: &impl Bucket, cell: CellId) -> Result<BTreeMap<CellId,
 async fn refer(bucket: &impl Bucket, origin: Origin, child: CellId, owner: u64) {
     let key = layout::reference(origin.parent, origin.at, child);
     bucket::create(bucket, &key, layout::encode(&layout::Reference::of(owner))).await;
-}
-
-/// cladefs: writes the reference of the writable fork of `origin` to `child`, if the child is of
-/// another cell than its parent's ([`record_fork`], TASK-395.3).
-pub(crate) async fn refer_fork(bucket: &impl Bucket, child: Child, origin: Origin) {
-    if rules().references && origin.parent != child.cell {
-        refer(bucket, origin, child.cell, owner(child.owner)).await;
-    }
 }
 
 /// cladefs: retires the references at `keys` ([`layout::reference`]), garbage for good, under any
@@ -275,130 +235,12 @@ async fn retire_one(bucket: &impl Bucket, key: &str) {
 }
 
 /// cladefs: retires the reference of the fork of `origin` to `child`, whose record, `found`, names
-/// another origin than the fork's, or none (TASK-395.10): the fork made no cell, and no record
-/// will name it, records being kept and their origins never changed, so that no pass would retire
-/// it ([`crate::collector`] retires a reference by the origin its child's deleted record names).
-/// Whoever finds it so takes it back: every writer of the child's record, and of a clone's; one
-/// dying first leaves it to the next, the parent's next writer or its deletion recording the fork
-/// again. One whose record names the fork's origin, another making's of the same fork, a clone of
-/// a version there, stays: its retirement is that record's. Marked ([`retire`]): a writer that read
-/// no record before the take-back writes it after, and may die before its own (TASK-395.13).
+/// another origin than the fork's, or none (TASK-395.10): the fork made no cell, and no record will
+/// name it, so that no pass would retire it ([`crate::collector`] retires a reference by the origin
+/// its child's deleted record names). Marked ([`retire`]).
 async fn take_back(bucket: &impl Bucket, origin: Origin, child: CellId, found: &Record) {
-    if rules().references && rules().references_taken_back && found.origin() != Some(origin) {
+    if rules().references && found.origin() != Some(origin) {
         retire_one(bucket, &layout::reference(origin.parent, origin.at, child)).await;
-    }
-}
-
-/// Gives `child`, a fork's, its record, forked from `origin`, of its owner, a version if it is one,
-/// unless it has one: the same, whoever gives it, as the fork's footer names it. A fork's child
-/// gets it once the fork is acknowledged, from the parent's writer, or the next one, or the
-/// parent's deletion. One of another owner is another cell's ([`Error::IdTaken`]).
-///
-/// cladefs: a child of another cell than its parent's gets its reference first, under the parent's
-/// cell, of the fork's owner (TASK-395.3): the pass over the parent's cell lists nothing of the
-/// child's, and keeps the parent's state at the origin by the reference, which a pass reading
-/// the parent deleted lists after its deletion marked it, after this. A child of the parent's own
-/// cell needs none: that cell's pass reads its record. Its record is read first, so that a child
-/// deleted, or another's, whose ID the fork's guest named, gets none: nothing inherits through
-/// either. A record found, or one that lands between the read and the create, naming another
-/// origin than the fork's, or none (a fork deleted before its host learned its origin,
-/// `Kind::Own`), has the reference taken back ([`take_back`], TASK-395.10), by this writer of the
-/// record or, it dying first, the next, which reads it so. The read costs a request a fork across
-/// cells, each of its writers. A child recorded already, ours, live, gets neither the checkpoint
-/// nor its reference again: whoever recorded it wrote both first (TASK-395.14), and the reference
-/// written again might land after the child's deletion and its cell's pass retiring it, which that
-/// cell's passes, skipping it, dead and unchanged, would never retire again. A writer that read no
-/// record still may, the fork recorded since by another, and the child deleted; or after another
-/// took it back, the child's ID taken (TASK-395.13): every retirement is marked, and the pass over
-/// the parent's cell, whose listing the write changes, deletes it ([`retire`]).
-///
-/// cladefs: before both, for a child of another cell, the parent's checkpoint at the origin
-/// ([`recovery::checkpoint_at`]): what the child's recovery reads of its parent by its key alone,
-/// so that a pass over the child's cell lists nothing of the parent's (TASK-395.4). A version's
-/// clones, of any cell, read the same, which its own recording wrote: a version in its origin's own
-/// cell, which no host makes, has none, and its clones into other cells recover not. The parent's
-/// state there is gone only once the child was deleted, since this read found it with no record
-/// (TASK-395.11): nothing else lets a pass go of it, the parent's state naming the fork until a
-/// checkpoint drops it, which only a child deleted is, and the parent's deletion recording the
-/// child before it marks the parent deleted. So the record is read again, and goes as any found;
-/// none there would break that, and fails with [`Error::Lost`].
-///
-/// Without the rule that it comes first, as a test shows it needed, the record's writers write it
-/// after: the writer once it recorded the fork, the deletion once it marked the parent deleted, as
-/// specs/bucket's NoReferencesFirst has it.
-///
-/// cladefs: the parent's checkpoint at the origin authenticated under the DEK `keys` give, the
-/// parent's: its writer's ring, or its deletion's ([`crate::keys::Parents`], TASK-411.4).
-pub async fn record_fork(
-    bucket: &impl Bucket,
-    child: Child,
-    origin: Origin,
-    keys: crate::keys::Parents<'_>,
-) -> Result<(), Error> {
-    failpoint!("lifecycle::record_fork");
-    let record = Kind::Fork(origin).of(owner(child.owner));
-    let across = origin.parent != child.cell;
-    let mut start = Start::Create;
-    if across {
-        let mut found = bucket::get(bucket, &layout::record(child.cell)).await;
-        if found.is_none() {
-            let checkpointed =
-                recovery::checkpoint_at(bucket, origin.parent, origin.at, keys).await;
-            // Read again, as the checkpoint may take long: a record made meanwhile, the child
-            // deleted or its ID taken, is taken back from now rather than after the reference
-            // (TASK-395.10; a writer dying between the reference and its create still leaves
-            // one written after another's take-back: TASK-395.13). The state at the origin
-            // gone, the child was deleted since the read, its fork dropped and its origin let
-            // go of (TASK-395.11): its record says so.
-            found = bucket::get(bucket, &layout::record(child.cell)).await;
-            match checkpointed {
-                Ok(()) => {}
-                Err(Error::Lost(lost)) if found.is_none() => return Err(Error::Lost(lost)),
-                Err(Error::Lost(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let read =
-            found.as_ref().map(|found| Record::decode(child.cell, &found.bytes)).transpose()?;
-        match read {
-            Some(found) if found.deleted || !found.is_child_of(record.owner) => {
-                take_back(bucket, origin, child.cell, &found).await;
-                return match found.deleted {
-                    true => Ok(()),
-                    false => Err(Error::IdTaken(child.cell)),
-                };
-            }
-            // Recorded: whoever did wrote the checkpoint first, and recovering the parent there
-            // again may find its segments gone, a checkpoint since covering them.
-            Some(_) | None => {}
-        }
-        // None read, the reference is written; one read, ours, live, its recorder wrote it.
-        if rules().references_first && found.is_none() {
-            refer_fork(bucket, child, origin).await;
-        }
-        failpoint!("lifecycle::referred");
-        start = Start::Found(found);
-    }
-    // A record there: the fork's, made since the read, or deleted, or another's.
-    let found = change(bucket, child.cell, start, |found| match found {
-        None => Ok(Step::Write(record.clone(), None)),
-        Some(found) => Ok(Step::Stop(Some(found))),
-    })
-    .await?;
-    let Some(found) = found else {
-        failpoint!("lifecycle::recorded_fork");
-        return Ok(());
-    };
-    if found.is_child_of(record.owner) && !found.deleted {
-        return Ok(());
-    }
-    if across {
-        take_back(bucket, origin, child.cell, &found).await;
-    }
-    match found.deleted {
-        // Deleted before it got its record, perhaps.
-        true => Ok(()),
-        false => Err(Error::IdTaken(child.cell)),
     }
 }
 
@@ -440,7 +282,6 @@ pub async fn fork_version_with<T>(
     alongside: impl Future<Output = T>,
 ) -> Result<(Option<Record>, Option<T>), Error> {
     failpoint!("version::record");
-    let owner = self::owner(owner);
     let refers = rules().references && rules().clones_refer_first;
     // Without the rule, as a test shows it needed: the reference before the record.
     let refers_first = refers && !rules().clones_record_first;
@@ -584,30 +425,6 @@ async fn finish_fork(
     Ok(made)
 }
 
-/// Whether no writer has `cell`: it has no head, or its deletion's.
-async fn unwritten(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
-    let epoch = head::epoch(bucket, cell).await?;
-    Ok(epoch == 0 || epoch == Head::FINAL)
-}
-
-/// Whether recovering `cell`, whose record is `record`, failing, what it names gone
-/// ([`Error::Lost`]), says nothing was lost: it is a failed fork's claim ([`Kind::Claim`]), which
-/// no writer has. What it names may have gone before it landed; nothing ever read it.
-pub(crate) async fn lost_is_ok(
-    bucket: &impl Bucket,
-    cell: CellId,
-    record: &Record,
-) -> Result<bool, Error> {
-    Ok(matches!(record.kind, Kind::Claim(_)) && unwritten(bucket, cell).await?)
-}
-
-/// Deletes `cell`, whose recovery failed though nothing was lost ([`lost_is_ok`]): unless it
-/// was given another record since. Nothing ever read it: no writer recovers what a record not
-/// there names.
-pub(crate) async fn abandon_claim(bucket: &impl Bucket, cell: CellId) -> Result<(), Error> {
-    mark_deleted(bucket, cell).await
-}
-
 /// Gives up on `child`, a fork being made of a version that was deleted ([`Kind::Forking`]), so
 /// that nothing keeps what it names, unless the fork was made first: returns its record as it then
 /// stands. Its fork, which fails then, wrote nothing: a cell that holds nothing and that nothing
@@ -630,71 +447,23 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: CellId) -> Result<Recor
 /// that since. Fails for a cell a later placement took, whose token is higher ([`Error::Stale`]),
 /// leaving it as it was: a placement cut off deletes no cell from under the one after it
 /// (TASK-45.1).
-///
-/// cladefs: by a host whose KMS is `kms`: the cell's forks to other cells it records get its
-/// checkpoint at their origins authenticated under its DEK, its cell's KEK unwrapped by `kms`
-/// ([`crate::keys::writing`], TASK-411.4), asked only then.
 pub async fn delete(
     bucket: &impl Bucket,
     cell: CellId,
     holder: u64,
     token: u64,
-    kms: &std::sync::Arc<crate::keys::CachingKms>,
 ) -> Result<(), Error> {
-    let ended = end_head(bucket, cell, holder, token).await?;
+    end_head(bucket, cell, holder, token).await?;
     failpoint!("lifecycle::head_ended");
     // A fork's child before its record, or no cell: either way none is, from now, unless its
     // record came meanwhile. Its owner the deletion's, which no other's is.
-    let deleted = Record { deleted: true, ..Kind::Own.of(owner(holder)) };
-    let found = change(bucket, cell, Start::Read, |found| match found {
-        None => Ok(Step::Write(deleted.clone(), None)),
-        Some(found) => Ok(Step::Stop(Some(found))),
+    let deleted = Record { deleted: true, ..Kind::Own.of(holder) };
+    change(bucket, cell, Start::Read, |found| match found {
+        None => Ok(Step::Write(deleted.clone(), ())),
+        Some(found) if found.deleted => Ok(Step::Stop(())),
+        Some(found) => Ok(Step::Write(Record { deleted: true, ..found }, ())),
     })
-    .await?;
-    // Deleted already: its children got their records before, and what recovering it read, no
-    // live cell needs, the collector may have deleted since (TASK-79.78).
-    let Some(record) = found.filter(|record| !record.deleted) else { return Ok(()) };
-    // Its children get their records, so that the collector finds them without its state. A fork
-    // of a version still being made has none, and may name what is gone; so may a claim, with
-    // neither a writer nor a child, if it does. Recovered from the head it ended, which nothing
-    // swaps after: every deletion of it finds the same forks (TASK-183).
-    if record.forking().is_none() {
-        let keyless = crate::keys::Ring::keyless();
-        let forks = match recover_from(bucket, cell, record.origin(), Some(ended), &keyless).await {
-            Ok(recovered) => recovered.state.forks,
-            // Deleted meanwhile, by another deletion, which gave its children their records: what
-            // recovering it needs, the collector may have reclaimed since (TASK-178).
-            Err(Error::Lost(_)) if self::record(bucket, cell).await?.is_none_or(|r| r.deleted) => {
-                return Ok(());
-            }
-            Err(Error::Lost(_)) if lost_is_ok(bucket, cell, &record).await? => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        // cladefs: under its keys, for its checkpoints at the origins of its forks to other
-        // cells, as they are written (TASK-411.4).
-        let keys = crate::keys::Parents::Kms(kms, Some(&record));
-        for fork in &forks {
-            let origin = Origin { parent: cell, at: fork.at };
-            let child = Child { cell: fork.child, owner: fork.owner };
-            match record_fork(bucket, child, origin, keys).await {
-                Ok(()) | Err(Error::IdTaken(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        failpoint!("lifecycle::children_recorded");
-        mark_deleted(bucket, cell).await?;
-        // Without the rule that they come first, as a test shows it needed: the references after.
-        if !rules().references_first {
-            for fork in &forks {
-                let origin = Origin { parent: cell, at: fork.at };
-                let child = Child { cell: fork.child, owner: fork.owner };
-                refer_fork(bucket, child, origin).await;
-            }
-        }
-        return Ok(());
-    }
-    failpoint!("lifecycle::children_recorded");
-    mark_deleted(bucket, cell).await
+    .await
 }
 
 /// Ends `cell`'s head, as [`delete`] does first: its final epoch, which no writer takes, as
@@ -737,103 +506,29 @@ async fn deleting_token(bucket: &impl Bucket, cell: CellId, token: u64) -> Resul
     })
 }
 
-/// Marks `cell`'s record deleted, as [`delete`] does last. A record's bytes repeat only for the
-/// same change, which is then made.
-async fn mark_deleted(bucket: &impl Bucket, cell: CellId) -> Result<(), Error> {
-    change(bucket, cell, Start::Read, |found| match found {
-        None => Err(Error::NoCell),
-        Some(found) if found.deleted => Ok(Step::Stop(())),
-        Some(found) => Ok(Step::Write(Record { deleted: true, ..found }, ())),
-    })
-    .await
-}
-
-/// Deletes `child`, the child of a fork, as [`delete`] does, but only if its cell is the one the
-/// fork made: its record names the fork's `owner`, whoever wrote it, the fork's host or its
-/// parent's writers, or it has no record yet, as a fork whose segment has not been acknowledged
-/// has not. `forked` is the kind of record the fork gives its child, as its host knows: a cell of
-/// its own ([`Kind::Own`]), its fork's segment never having gone to object storage; a fork at a
-/// segment, which may have landed, and whose cell's writers then give the child a record; a
-/// version, so, whatever record it gets saying so, whoever gives it; or a fork of a version, which
-/// nothing but the fork itself gives its child a record. A cell of another's, whose ID the
-/// fork's child was given, as a guest may give any, another fork's to the same ID among them, is
-/// left as it is (TASK-79.82); so is a cell deleted already, whoever's. Returns whether the
-/// fork's cell is gone, deleted now or before: `false` for another's.
-///
-/// A child with no record yet gets one first, before the deletion ends its head: created only if
-/// no record is there, which another cell taking the ID meanwhile has, whose head the deletion
-/// took otherwise (TASK-79.82). Its record taken, the ID is no other's, and a deletion that stops
-/// goes on as the fork's; it had no record before, nor children with none, as [`delete`] deletes
-/// such a cell. The record is the one its fork would give it ([`record_fork`]), live, so that a
-/// deletion a later placement refuses ([`Error::Stale`]) changes nothing, only if its parent's
-/// cell holds the fork's segment, as a live cell's record must say: a child naming a segment
-/// that is not there recovers from nothing, which fails its deletion, should one stopping go on,
-/// and every pass of the collector. It is a claim ([`Kind::Claim`]): that the parent's cell
-/// holds a segment of that number is no proof it is the fork's, and nothing keeps what it names
-/// until the record lands, a dead host's perhaps, long after. Otherwise it is deleted from the
-/// first, for good: no other placement took a cell nothing of which landed; and a segment
-/// landing after finds it so. So is a fork of a version with no record, which holds nothing, a
-/// create of its record, a dead host's landing late, finding it so too; and a version with none: no
-/// placement refuses a deletion of what has no head, and a stale copy finds no live record naming
-/// a segment that may not be its fork's.
-///
-/// cladefs: by a host whose KMS is `kms`: a claim of another cell than its parent's gets the
-/// parent's checkpoint at the origin authenticated under the parent's DEK, as
-/// [`record_fork`] writes it (TASK-411.4).
+/// Deletes `child`, the child of a fork of a version, as [`delete`] does, but only if its cell is
+/// the one the fork made: its record names the fork's `owner`, or it has none yet. A cell of
+/// another's, whose ID the child was given, is left as it is (TASK-79.82); so is a cell deleted
+/// already, whoever's. Returns whether the fork's cell is gone, deleted now or before: `false` for
+/// another's. A child with no record yet, its fork never made, holds nothing: it gets a record
+/// deleted from the first, for good, created only if none is there, so that a create of its record
+/// landing late, a dead host's, finds it so; then its head is ended.
 pub async fn delete_fork(
     bucket: &impl Bucket,
     child: CellId,
-    forked: Kind,
     owner: u64,
     (holder, token): (u64, u64),
-    kms: &std::sync::Arc<crate::keys::CachingKms>,
 ) -> Result<bool, Error> {
-    let owner = self::owner(owner);
     // What deleting the child, whose record is `record`, gives.
     let delete_found = async |record: Record| match record {
         Record { deleted: true, .. } => Ok(true),
         record if !record.is_child_of(owner) => Ok(false),
-        _ => delete(bucket, child, holder, token, kms).await.map(|()| true),
+        _ => delete(bucket, child, holder, token).await.map(|()| true),
     };
     if let Some(record) = record(bucket, child).await? {
         return delete_found(record).await;
     }
-    if forked.origin().is_none() && !rules().fork_claims_ids {
-        return delete(bucket, child, holder, token, kms).await.map(|()| true);
-    }
-    // The record it gets, and whether live, a claim, as its parent's cell holds its segment.
-    let (kind, live) = match forked {
-        Kind::Fork(origin) | Kind::Claim(origin) if !rules().fork_claims_landed => {
-            (Kind::Fork(origin), true)
-        }
-        Kind::Fork(origin) | Kind::Claim(origin) => {
-            // cladefs: a claim of another cell than its parent's lives only with the parent's
-            // checkpoint at the origin, which is what its recovery reads of the parent there
-            // (TASK-395.4), as [`record_fork`] writes it: what is going since the parent's cell
-            // was found holding the segment, as a pass takes it, reads as not held, as there.
-            let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
-                true if origin.parent != child => {
-                    // cladefs: under the parent's keys (TASK-411.4).
-                    let keys = crate::keys::Parents::Kms(kms, None);
-                    match recovery::checkpoint_at(bucket, origin.parent, origin.at, keys).await {
-                        Ok(()) => true,
-                        Err(Error::Lost(_)) => false,
-                        Err(error) => return Err(error),
-                    }
-                }
-                held => held,
-            };
-            match held {
-                true => (Kind::Claim(origin), true),
-                false => (Kind::Fork(origin), false),
-            }
-        }
-        // A clone made has its record: one of none, never made, stays deleted for good, as the
-        // collector removes no fork's (TASK-455).
-        Kind::Forking { origin, .. } | Kind::Clone(origin) => (Kind::Fork(origin), false),
-        Kind::Root | Kind::Own => (Kind::Own, false),
-    };
-    let record = Record { deleted: !live, ..kind.of(owner) };
+    let record = Record { deleted: true, ..Kind::Own.of(owner) };
     let taken = change(bucket, child, Start::Create, |taken| match taken {
         None => Ok(Step::Write(record.clone(), None)),
         Some(taken) => Ok(Step::Stop(Some(taken))),
@@ -845,164 +540,40 @@ pub async fn delete_fork(
     failpoint!("lifecycle::claimed");
     end_head(bucket, child, holder, token).await?;
     failpoint!("lifecycle::claim_head_ended");
-    if live {
-        mark_deleted(bucket, child).await?;
-    }
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::child;
     use crate::layout::test_cell;
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
 
-    /// TASK-79.82: a fork's child is deleted only if its cell is the fork's: one with no record,
-    /// or whose record names the fork's owner. One whose record names another owner, a cell of no
-    /// parent's, or another fork's, at another version of the fork's parent or whose segment never
-    /// went, is left as it is. One deleted is gone already.
+    /// TASK-79.82: a fork's child is deleted only if its cell is the fork's: one whose record names
+    /// the fork's owner, or one with none, which gets a record deleted from the first. One whose
+    /// record names another owner is left as it is. One deleted is gone already.
     #[test]
     fn forks_delete_only_their_own_cells() {
-        use crate::batch::{Commit, SegmentBuilder};
-        use crate::writer::Writer;
-        let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
-        let live = |child| {
-            let record = block_on(record(&*bucket, child)).unwrap();
-            record.map(|record| !record.deleted)
-        };
-        let owned = |cell, owner| Child { cell, owner };
-        // A fork of cell 1's to 3, made, its child given its record.
-        let origin = block_on(async {
-            create(&*bucket, test_cell(1), 0x11).await.unwrap();
-            let parent = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
-            let objects = forking
-                .fork(owned(test_cell(3), 0x33), &mut parent.chain())
-                .frame(parent.keys().encrypting());
-            let at = parent.add_segment(objects).unwrap();
-            parent.upload(at).await.unwrap();
-            parent.acknowledge().await.unwrap();
-            Origin { parent: test_cell(1), at }
-        });
-        assert_eq!(live(test_cell(3)), Some(true));
-        assert_eq!(
-            block_on(delete_fork(
-                &*bucket,
-                test_cell(3),
-                Kind::Fork(origin),
-                0x33,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(true)
-        );
-        assert_eq!(live(test_cell(3)), Some(false));
-        assert_eq!(
-            block_on(delete_fork(
-                &*bucket,
-                test_cell(3),
-                Kind::Own,
-                0x33,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(true)
-        );
-        // Forks whose children have no record yet, whose segments went or not.
-        assert_eq!(
-            block_on(delete_fork(
-                &*bucket,
-                test_cell(2),
-                Kind::Fork(origin),
-                0x22,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(true)
-        );
-        assert_eq!(
-            block_on(delete_fork(
-                &*bucket,
-                test_cell(4),
-                Kind::Own,
-                0x44,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(true)
-        );
-        assert_eq!((live(test_cell(2)), live(test_cell(4))), (Some(false), Some(false)));
-
-        block_on(create(&*bucket, test_cell(5), 0x55)).unwrap();
-        let other = Origin { at: origin.at + 1, ..origin };
-        block_on(record_fork(
-            &*bucket,
-            owned(test_cell(6), 0x66),
-            other,
-            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-        ))
-        .unwrap();
-        block_on(record_fork(
-            &*bucket,
-            owned(test_cell(7), 0x77),
-            origin,
-            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-        ))
-        .unwrap();
-        for (child, origin, owner) in
-            [(5, Kind::Fork(origin), 0x50), (6, Kind::Fork(origin), 0x60), (7, Kind::Own, 0x70)]
-        {
-            let deleted = block_on(delete_fork(
-                &*bucket,
-                test_cell(child),
-                origin,
-                owner,
-                (9, 0),
-                &crate::keys::testing::host_kms(),
-            ));
-            assert_eq!(deleted, Ok(false), "{child}");
-            assert_eq!(live(test_cell(child)), Some(true), "{child}");
-            let taken = block_on(head::take(&*bucket, test_cell(child), 10 + child, 0));
-            assert_eq!(taken.map(|held| held.head.epoch), Ok(1), "{child}");
-        }
-    }
-
-    /// A fork's child gets one record: given again by whoever gives it, of the same owner, it
-    /// stands; of another, the child is another cell's.
-    #[test]
-    fn a_child_gets_one_record() {
         let bucket = Direct(SimBucket::new());
+        let live = |cell| block_on(record(&bucket, cell)).unwrap().map(|record| !record.deleted);
+        let unfork = |cell, owner| block_on(delete_fork(&bucket, cell, owner, (9, 0)));
+        // A clone's, made.
         let origin = Origin { parent: test_cell(1), at: 7 };
-        let forked = Child { cell: test_cell(2), owner: 0x22 };
-        block_on(record_fork(
-            &bucket,
-            forked,
-            origin,
-            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-        ))
-        .unwrap();
-        block_on(record_fork(
-            &bucket,
-            forked,
-            origin,
-            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-        ))
-        .unwrap();
-        let other = Child { owner: 0x23, ..forked };
-        assert_eq!(
-            block_on(record_fork(
-                &bucket,
-                other,
-                origin,
-                crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None)
-            )),
-            Err(Error::IdTaken(test_cell(2)))
-        );
-        let record = block_on(record(&bucket, test_cell(2))).unwrap();
-        assert_eq!(record, Some(Kind::Fork(origin).of(0x22)));
+        let made = Kind::Clone(origin).of(0x33);
+        block_on(bucket::create(&bucket, &layout::record(test_cell(3)), layout::encode(&made)));
+        assert_eq!(unfork(test_cell(3), 0x33), Ok(true));
+        assert_eq!(live(test_cell(3)), Some(false));
+        assert_eq!(unfork(test_cell(3), 0x33), Ok(true), "gone already");
+        // One with no record yet.
+        assert_eq!(unfork(test_cell(4), 0x44), Ok(true));
+        assert_eq!(live(test_cell(4)), Some(false));
+        // Another's.
+        block_on(create(&bucket, test_cell(5), 0x55)).unwrap();
+        assert_eq!(unfork(test_cell(5), 0x50), Ok(false));
+        assert_eq!(live(test_cell(5)), Some(true));
+        let taken = block_on(head::take(&bucket, test_cell(5), 15, 0));
+        assert_eq!(taken.map(|held| held.head.epoch), Ok(1));
     }
 
     /// TASK-476: a restore of a version is made while its cell's head names it there, into a cell
@@ -1039,9 +610,6 @@ mod tests {
         let checkpoint = layout::checkpoint(cell, at, writer.epoch());
         let checkpointed = || block_on(bucket::get(&*bucket, &checkpoint)).is_some();
 
-        assert_eq!(restore(test_cell(2), 0xa), Ok(()));
-        assert_eq!(record(test_cell(2)), Some(Kind::Clone(origin).of(2)));
-        assert!(!checkpointed(), "a restore into the version's own cell writes no checkpoint");
         assert_eq!(restore(celled(1, 3), 0xb), Err(Error::Deleted), "no such version");
         assert_eq!(restore(celled(1, 4), 0xa), Ok(()));
         assert!(checkpointed(), "a restore into another cell writes the checkpoint at the version");
@@ -1060,114 +628,9 @@ mod tests {
         assert_eq!(record(celled(2, 6)), Some(Kind::Clone(origin).of(6)), "made, it stays");
     }
 
-    /// TASK-79.82's last case: two forks name one child within a round trip, neither's segment
-    /// landing, and each takes a record of its own for it. One takes it; the other finds another's,
-    /// though the bytes of what each wrote differ only by their owners, and deleting its fork
-    /// leaves the first's be.
-    #[test]
-    fn forks_to_one_child_take_one_record() {
-        let bucket = Direct(SimBucket::new());
-        assert_eq!(block_on(create_forked(&bucket, test_cell(2), 0x21)), Ok(()));
-        assert_eq!(block_on(create_forked(&bucket, test_cell(2), 0x21)), Ok(()), "its own, again");
-        assert_eq!(
-            block_on(create_forked(&bucket, test_cell(2), 0x22)),
-            Err(Error::IdTaken(test_cell(2)))
-        );
-        assert_eq!(
-            block_on(delete_fork(
-                &bucket,
-                test_cell(2),
-                Kind::Own,
-                0x22,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(false)
-        );
-        let taken = Kind::Own.of(0x21);
-        assert_eq!(block_on(record(&bucket, test_cell(2))), Ok(Some(taken.clone())));
-        assert_eq!(
-            block_on(delete_fork(
-                &bucket,
-                test_cell(2),
-                Kind::Own,
-                0x21,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(true)
-        );
-        assert_eq!(
-            block_on(record(&bucket, test_cell(2))),
-            Ok(Some(Record { deleted: true, ..taken }))
-        );
-    }
-
-    /// TASK-160.14: a fork of a cell at a segment and a restore of a version made at that
-    /// segment, given one child ID, as guests may give any: whichever record lands first, the other
-    /// finds it another's, though the two name one origin and one ID, and deleting that fork leaves
-    /// it be. So they were, until records named their owners (TASK-153.9): with the rule that they
-    /// do off, each takes the other's for its own.
-    #[test]
-    fn forks_and_restores_of_versions_at_one_segment_take_no_records_of_each_other() {
-        use crate::testing::{VERSION, fork_version, versioned};
-        use crate::{Rules, set_rules};
-        let (direct, restorer) = (0x21, 0x22);
-        // What each fork gave, the direct first or not, and whose the child's record is.
-        let race = |direct_first: bool| {
-            let bucket = std::sync::Arc::new(Direct(SimBucket::new()));
-            let (_writer, origin) = block_on(versioned(&bucket, test_cell(1), Vec::new()));
-            let direct = Child { cell: test_cell(2), owner: direct };
-            let fork = || {
-                block_on(record_fork(
-                    &*bucket,
-                    direct,
-                    origin,
-                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-                ))
-            };
-            let restore =
-                || block_on(fork_version(&*bucket, test_cell(2), VERSION, origin, restorer));
-            let (forked, restored, lost, at) = if direct_first {
-                let forked = fork();
-                (forked, restore(), restorer, Kind::Forking { origin, version: VERSION })
-            } else {
-                let restored = restore();
-                (fork(), restored, direct.owner, Kind::Fork(origin))
-            };
-            // The fork that lost is deleted, as its host's cleanup deletes it.
-            let deleted = block_on(delete_fork(
-                &*bucket,
-                test_cell(2),
-                at,
-                lost,
-                (9, 0),
-                &crate::keys::testing::host_kms(),
-            ));
-            let owner =
-                block_on(record(&*bucket, test_cell(2))).unwrap().map(|record| record.owner);
-            (forked, restored, deleted, owner)
-        };
-        let taken = Err(Error::IdTaken(test_cell(2)));
-        assert_eq!(race(true), (Ok(()), taken.clone(), Ok(false), Some(direct)));
-        assert_eq!(race(false), (taken, Ok(()), Ok(false), Some(restorer)));
-
-        set_rules(Rules { records_owned: false, ..Rules::ALL });
-        // The loser's deletion then deletes the winner's cell, of a parent not there.
-        let unowned = |direct_first| {
-            let (forked, restored, _, owner) = race(direct_first);
-            (forked, restored, owner)
-        };
-        let unowned = (unowned(true), unowned(false));
-        set_rules(Rules::ALL);
-        let both = (Ok(()), Ok(()), Some(0));
-        assert_eq!(unowned, (both.clone(), both), "each takes the other's record");
-    }
-
     /// TASK-160.14: whatever made a cell's record, whatever else makes one for its ID, of
-    /// another owner, as guests may give any ID, finds it another's, and changes nothing of it:
-    /// a create, a fork's child taking a cell of its own, a fork's writers recording its child,
-    /// a restore of a version, and deleting a fork, wherever it was made.
+    /// another owner, finds it another's, and changes nothing of it: a create, a restore of a
+    /// version, and deleting a fork.
     #[test]
     fn makers_of_one_id_take_nothing_of_each_others() {
         use crate::testing::{VERSION, fork_version, versioned};
@@ -1179,43 +642,17 @@ mod tests {
         };
         let (origin, child) = (bucket().1, 2);
         let said = |result: &dyn std::fmt::Debug| format!("{result:?}");
-        let fork = |owner| Child { cell: test_cell(child), owner };
-        let unfork = |bucket: &Direct, at, owner| {
-            block_on(delete_fork(
-                bucket,
-                test_cell(child),
-                at,
-                owner,
-                (9, 0),
-                &crate::keys::testing::host_kms(),
-            ))
-        };
+        let unfork =
+            |bucket: &Direct, owner| block_on(delete_fork(bucket, test_cell(child), owner, (9, 0)));
         // Each maker, of the owner it is given, and what it gives, in words, finding another's
-        // record, live. The first four make live records; deleting a fork leaves none.
+        // record, live. The first two make live records; deleting a fork leaves none.
         type Maker<'a> = (&'a str, &'a dyn Fn(&Direct, u64) -> String, &'a str);
         let taken = "Err(IdTaken(CellId { tenant: 1, id: 2 }))";
-        let makers: [Maker; 7] = [
+        let makers: [Maker; 3] = [
             (
                 "create",
                 &|bucket, owner| said(&block_on(create(bucket, test_cell(child), owner))),
-                "Err(Corrupt(\"cell 1/1/2 exists\"))",
-            ),
-            (
-                "create_forked",
-                &|bucket, owner| said(&block_on(create_forked(bucket, test_cell(child), owner))),
-                taken,
-            ),
-            (
-                "record_fork",
-                &|bucket, owner| {
-                    said(&block_on(record_fork(
-                        bucket,
-                        fork(owner),
-                        origin,
-                        crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
-                    )))
-                },
-                taken,
+                "Err(Corrupt(\"cell 1/2 exists\"))",
             ),
             (
                 "fork_version",
@@ -1224,25 +661,9 @@ mod tests {
                 },
                 taken,
             ),
-            (
-                "delete_fork, nowhere",
-                &|bucket, owner| said(&unfork(bucket, Kind::Own, owner)),
-                "Ok(false)",
-            ),
-            (
-                "delete_fork, at a segment",
-                &|bucket, owner| said(&unfork(bucket, Kind::Fork(origin), owner)),
-                "Ok(false)",
-            ),
-            (
-                "delete_fork, of a version",
-                &|bucket, owner| {
-                    said(&unfork(bucket, Kind::Forking { origin, version: VERSION }, owner))
-                },
-                "Ok(false)",
-            ),
+            ("delete_fork", &|bucket, owner| said(&unfork(bucket, owner)), "Ok(false)"),
         ];
-        for (first, make, _) in &makers[..4] {
+        for (first, make, _) in &makers[..2] {
             for (second, again, another) in &makers {
                 let (bucket, _) = bucket();
                 assert_eq!(make(&bucket, 0x11), "Ok(())", "{first}");
@@ -1257,279 +678,18 @@ mod tests {
         }
     }
 
-    /// TASK-79.82: a cell that takes a failed fork's child's ID after the fork's deletion found
-    /// it free, before the deletion takes the child's head, is left be: its record taken and its
-    /// head kept, not the deletion's.
-    #[test]
-    fn forks_deleted_leave_a_cell_taking_their_childs_id_meanwhile() {
-        use crate::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
-        use std::future::Future;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        /// A bucket in which cell `child` is created, its head taken, as its record is first
-        /// found missing.
-        struct Racing {
-            bucket: Direct,
-            child: CellId,
-            raced: AtomicBool,
-        }
-
-        impl Bucket for Racing {
-            fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
-                let key = key.to_owned();
-                async move {
-                    let got = self.bucket.get(&key).await;
-                    if key == layout::record(self.child)
-                        && matches!(got, Err(BucketError::NotFound))
-                        && !self.raced.swap(true, Ordering::SeqCst)
-                    {
-                        create(&self.bucket, self.child, 0).await.unwrap();
-                        head::take(&self.bucket, self.child, 7, 0).await.unwrap();
-                    }
-                    got
-                }
-            }
-
-            fn get_range(
-                &self,
-                key: &str,
-                range: ByteRange,
-            ) -> impl Future<Output = Result<Vec<u8>, BucketError>> + Send {
-                self.bucket.get_range(key, range)
-            }
-
-            fn head(&self, key: &str) -> impl Future<Output = Result<Meta, BucketError>> + Send {
-                self.bucket.head(key)
-            }
-
-            fn list(
-                &self,
-                prefix: &str,
-            ) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-                self.bucket.list(prefix)
-            }
-
-            fn list_delimited(
-                &self,
-                prefix: &str,
-                page: crate::bucket::Page<'_>,
-            ) -> impl Future<Output = Result<crate::bucket::Listing, crate::bucket::Error>> + Send
-            {
-                self.bucket.list_delimited(prefix, page)
-            }
-
-            fn put(
-                &self,
-                key: &str,
-                bytes: bytes::Bytes,
-                mode: PutMode,
-            ) -> impl Future<Output = Result<Version, BucketError>> + Send {
-                self.bucket.put(key, bytes, mode)
-            }
-
-            fn delete(&self, key: &str) -> impl Future<Output = Result<(), BucketError>> + Send {
-                self.bucket.delete(key)
-            }
-
-            fn now(&self) -> u64 {
-                self.bucket.now()
-            }
-        }
-
-        let racing = Racing {
-            bucket: Direct(SimBucket::new()),
-            child: test_cell(3),
-            raced: AtomicBool::new(false),
-        };
-        let origin = Origin { parent: test_cell(1), at: 7 };
-        assert_eq!(
-            block_on(delete_fork(
-                &racing,
-                test_cell(3),
-                Kind::Fork(origin),
-                0,
-                (9, 0),
-                &crate::keys::testing::host_kms()
-            )),
-            Ok(false)
-        );
-        let record = block_on(record(&racing.bucket, test_cell(3))).unwrap();
-        assert_eq!(record, Some(Kind::Root.of(0)));
-        let head = block_on(head::get(&racing.bucket, test_cell(3))).unwrap().unwrap();
-        assert_eq!((head.epoch, head.holder), (1, 7), "the other cell's head");
-    }
-
-    /// TASK-79.82: a parent whose state names a fork to an ID another cell took is deleted all
-    /// the same, the other cell left as it is.
-    #[test]
-    fn parents_are_deleted_though_another_cell_took_their_forks_id() {
-        use crate::batch::{Commit, SegmentBuilder};
-        use crate::writer::Writer;
-        let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
-        block_on(async {
-            create(&*bucket, test_cell(1), 0).await.unwrap();
-            create(&*bucket, test_cell(2), 0).await.unwrap();
-            let parent = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
-            let at = parent
-                .add_segment(
-                    forking
-                        .fork(child(test_cell(2)), &mut parent.chain())
-                        .frame(parent.keys().encrypting()),
-                )
-                .unwrap();
-            parent.upload(at).await.unwrap();
-            assert_eq!(parent.acknowledge().await, Ok(Some(at)));
-            assert!(parent.refused(test_cell(2)));
-            assert_eq!(
-                delete(&*bucket, test_cell(1), 20, 0, &crate::keys::testing::host_kms()).await,
-                Ok(())
-            );
-            assert_eq!(record(&*bucket, test_cell(2)).await, Ok(Some(Kind::Root.of(0))));
-        });
-    }
-
-    /// A failed fork's claim landing, as a dead host's write may, once a pass of the collector
-    /// took what it names, nothing having kept that: at 2 of the parent's, in fact the fence of its
-    /// next writer, its fork's segment void. It holds up no pass, and its deletion finishes. Found
-    /// by the simulation, seed 3184 of its `restores`.
-    #[test]
-    fn claims_landing_after_what_they_name_went_hold_up_nothing() {
-        use crate::batch::{Commit, SegmentBuilder};
-        use crate::collector::{Options, collect};
-        use crate::writer::Writer;
-        let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
-        const NOW: Options = Options { compact_below: 0.0, grace: 0 };
-        block_on(async {
-            create(&*bucket, test_cell(1), 0).await.unwrap();
-            let parent = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            for tag in 1..=3 {
-                let commit = SegmentBuilder::from(Commit { tag, ..Commit::default() });
-                let segment = parent
-                    .add_segment(
-                        commit.close(&mut parent.chain()).frame(parent.keys().encrypting()),
-                    )
-                    .unwrap();
-                parent.upload(segment).await.unwrap();
-                parent.acknowledge().await.unwrap();
-            }
-            parent.checkpoint().await.unwrap();
-            collect(&*bucket, 1, &NOW).await.unwrap();
-            let origin = Origin { parent: test_cell(1), at: 1 };
-            let lost = "cell 1/1/3: what its recovery starts from keeps going".to_owned();
-            assert_eq!(
-                crate::recovery::recover(&*bucket, test_cell(3), Some(origin)).await.map(drop),
-                Err(Error::Lost(lost))
-            );
-
-            let claim = Kind::Claim(origin).of(0);
-            let (key, bytes) = (layout::record(test_cell(3)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
-            collect(&*bucket, 2, &NOW).await.unwrap();
-            let deleted = Record { deleted: true, ..claim };
-            assert_eq!(record(&*bucket, test_cell(3)).await, Ok(Some(deleted)));
-
-            // Its deletion, which stopped, finds it so; or, the pass not there first, finishes it.
-            let claim = Kind::Claim(origin).of(0);
-            let (key, bytes) = (layout::record(test_cell(4)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
-            assert_eq!(
-                delete_fork(
-                    &*bucket,
-                    test_cell(4),
-                    Kind::Fork(origin),
-                    0,
-                    (9, 0),
-                    &crate::keys::testing::host_kms()
-                )
-                .await,
-                Ok(true)
-            );
-            assert_eq!(
-                record(&*bucket, test_cell(4)).await,
-                Ok(Some(Record { deleted: true, ..claim }))
-            );
-
-            // But one a writer has lost something: it stops the pass, as any cell's.
-            let claim = Kind::Claim(origin).of(0);
-            let (key, bytes) = (layout::record(test_cell(5)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
-            head::take(&*bucket, test_cell(5), 11, 0).await.unwrap();
-            let lost = "cell 1/1/5: what its recovery starts from keeps going".to_owned();
-            assert_eq!(collect(&*bucket, 3, &NOW).await, Err(Error::Lost(lost)));
-            assert_eq!(record(&*bucket, test_cell(5)).await, Ok(Some(claim)));
-        });
-    }
-
     /// A cell deleted, before it had a record, has a deleted one, and its head is taken no more.
     #[test]
     fn deleted_cells_take_no_head() {
         let bucket = Direct(SimBucket::new());
         let taken = block_on(head::take(&bucket, test_cell(3), 1, 0)).unwrap();
         assert_eq!(taken.head.epoch, 1);
-        block_on(delete(&bucket, test_cell(3), 2, 0, &crate::keys::testing::host_kms())).unwrap();
+        block_on(delete(&bucket, test_cell(3), 2, 0)).unwrap();
         let record = block_on(record(&bucket, test_cell(3))).unwrap();
         // Of the deletion's owner, its holder's, which no other's is.
         let deleted = Record { deleted: true, ..Kind::Own.of(2) };
         assert_eq!(record, Some(deleted));
         let taken = block_on(head::take(&bucket, test_cell(3), 3, 0));
         assert!(matches!(taken, Err(Error::Deleted)), "{taken:?}");
-    }
-
-    /// TASK-79.78: a fork deleted is deleted again, which does nothing, though a pass of the
-    /// collector deleted what recovering it read, its parent's state where it was forked, which no
-    /// live cell needs: so a deletion that stopped once the cell was deleted here, its host
-    /// crashing before what else keeps the cell went, finishes, deleted again. Here the parent
-    /// frees what the fork inherited, and checkpoints past it.
-    #[test]
-    fn forks_deleted_are_deleted_again_once_what_they_inherited_went() {
-        use crate::batch::{Commit, SegmentBuilder};
-        use crate::writer::Writer;
-        use storage_device::ExtentId;
-        let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
-        block_on(async {
-            create(&*bucket, test_cell(1), 0).await.unwrap();
-            let parent = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
-            let extent = ExtentId::new(1, parent.chain().next_sequence());
-            let extents = vec![(extent, b"inherited".to_vec())];
-            let forking = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
-            let at = parent
-                .add_segment(
-                    forking
-                        .fork(child(test_cell(2)), &mut parent.chain())
-                        .frame(parent.keys().encrypting()),
-                )
-                .unwrap();
-            parent.upload(at).await.unwrap();
-            parent.acknowledge().await.unwrap();
-            let freeing =
-                SegmentBuilder::from(Commit { tag: 2, frees: vec![extent], ..Commit::default() });
-            let segment = parent
-                .add_segment(freeing.close(&mut parent.chain()).frame(parent.keys().encrypting()))
-                .unwrap();
-            parent.upload(segment).await.unwrap();
-            parent.acknowledge().await.unwrap();
-            parent.checkpoint().await.unwrap();
-            delete(&*bucket, test_cell(2), 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
-            let now = crate::collector::Options { compact_below: 0.0, grace: 0 };
-            crate::collector::collect(&*bucket, 1, &now).await.unwrap();
-            // What recovering the fork reads went with the pass.
-            let origin = Origin { parent: test_cell(1), at };
-            let lost = "cell 1/1/2: what its recovery starts from keeps going".to_owned();
-            assert_eq!(
-                crate::recovery::recover(&*bucket, test_cell(2), Some(origin)).await.map(drop),
-                Err(Error::Lost(lost))
-            );
-
-            assert_eq!(
-                delete(&*bucket, test_cell(2), 21, 0, &crate::keys::testing::host_kms()).await,
-                Ok(())
-            );
-            let deleted = Record { deleted: true, ..Kind::Fork(origin).of(0) };
-            assert_eq!(record(&*bucket, test_cell(2)).await, Ok(Some(deleted)));
-        });
     }
 }

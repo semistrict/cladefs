@@ -260,12 +260,6 @@ impl Extents {
     pub fn shares_bucket_with(&self, other: &Self) -> bool {
         self.bucket.ptr_eq(&other.bucket)
     }
-
-    /// cladefs: the decoded state its bucket's layer shares, if any.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn layer(&self) -> Option<&Arc<bucket_cell::State>> {
-        self.layer.as_ref()
-    }
 }
 
 /// An extent's entry, as the layer of [`Extents`] that holds it has it, borrowed: the store's own,

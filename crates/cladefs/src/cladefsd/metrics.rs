@@ -48,7 +48,7 @@
 //! - `cladefsd_upload_pending_bytes{cell}`, `cladefsd_upload_oldest_pending_seconds
 //!   {cell}` and `cladefsd_upload_stalls_total{cell}`: for each open store whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
-//!   many commits waited for the lag to shrink (TASK-91.3); its cell as `TENANT/CELL/ID`, in
+//!   many commits waited for the lag to shrink (TASK-91.3); its cell as `TENANT/CELL`, in
 //!   base 32 (TASK-364).
 //! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
 //!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,

@@ -86,7 +86,7 @@ fn refuses_to_collect_without_a_kms() {
     for args in [
         &["memory:///"][..],
         &["memory:///", "--mark-only"],
-        &["memory:///", "--delete-cell", "1/1/1"],
+        &["memory:///", "--delete-cell", "1/1"],
     ] {
         let out = keyless(args);
         assert_eq!(String::from_utf8_lossy(&out.stderr), refused, "{args:?}");
@@ -131,7 +131,7 @@ fn lists_and_deletes_cells() {
     let out = gc(&["memory:///", "--cells"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert!(out.status.success());
-    let out = gc(&["memory:///", "--delete-cell", "1/1/ff"]);
+    let out = gc(&["memory:///", "--delete-cell", "1/ff"]);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(out.status.success());
 }
@@ -170,10 +170,7 @@ fn collects_a_file_bucket() {
     // The two segments a pass deletes, and their bytes.
     let at = "tenants/0000000000001/cells/0000000000001";
     let doomed = [0, 1].map(|segment| {
-        format!(
-            "{at}/segments/0000000000001/0000000000001.{segment}",
-            segment = base32_id::Padded(segment)
-        )
+        format!("{at}/segments/0000000000001.{segment}", segment = base32_id::Padded(segment))
     });
     let bytes: u64 = futures::executor::block_on(async {
         use bucket_cell::Bucket as _;
@@ -218,9 +215,9 @@ fn collects_a_file_bucket() {
     ];
     assert_eq!(left, kept);
     let out = gc(&[&url, "--cells"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1/1\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1\n");
     let out = gc(&[&url, "--cells", "--cell", "1/1"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1/1\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1\n");
     let out = gc(&[&url, "--cells", "--cell", "1/2"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
 }
@@ -526,106 +523,6 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(after, listed);
 }
 
-/// TASK-411.14: `--delete-cell` of an encrypted cell whose fork into another cell has no record
-/// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
-/// checkpoint at the origin authenticated under the cell's DEK, its cell's KEK unwrapped by
-/// the KMS `CLADEFS_KMS` names. TASK-411.28: without a KMS, it refuses to start, naming
-/// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the cell as it was; run again with one, it deletes it.
-#[test]
-fn deletes_encrypted_cells_recording_their_forks_into_other_cells_under_the_kms() {
-    use bucket_cell::batch::{Commit, SegmentBuilder};
-    use bucket_cell::layout::{self, CellId, Child, Origin};
-    use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Bucket as _, Writer, cell, keys, lifecycle};
-    use extent_frame::{Encryption, Frame, KeyId};
-    use extent_keys::kms::LocalKms;
-    use futures::executor::block_on;
-    use std::sync::Arc;
-    use storage_device::ExtentId;
-
-    let dir = tempfile::tempdir().unwrap();
-    let files = dir.path().join("bucket");
-    std::fs::create_dir(&files).unwrap();
-    let url = url::Url::from_directory_path(&files).unwrap().to_string();
-    let kms_dir = dir.path().join("kms");
-    let local = Arc::new(LocalKms::open(&kms_dir).unwrap());
-    local.create(1).unwrap();
-    let parent = test_cell(1);
-    let child = CellId { tenant: 1, id: 9 };
-    let at = block_on(async {
-        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-        let shared: extent_keys::kms::Shared = local.clone();
-        let host = keys::CachingKms::new(shared);
-        let kek = keys::new_cell_kek(&host, 1).await.unwrap();
-        let making = Some(&kek.1);
-        let (_, object) = cell::hold(&*bucket, parent, (5, 5), making, None).await.unwrap();
-        let cell_keys = keys::held(&host, parent, object, Some(kek));
-        lifecycle::create(&*bucket, parent, 0).await.unwrap();
-        let record = lifecycle::record(&*bucket, parent).await.unwrap().unwrap();
-        let record = keys::with_dek(&*bucket, &cell_keys, parent, record).await.unwrap();
-        let ring = keys::ring(&*bucket, &cell_keys, parent, &record, true).await.unwrap();
-        let writer = Writer::open_keyed(bucket.clone(), parent, (10, 1), ring.clone());
-        let writer = writer.await.unwrap();
-        let extent = ExtentId::new(1, writer.chain().next_sequence());
-        let written =
-            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
-        let written = SegmentBuilder::from(written).close(&mut writer.chain());
-        let segment = writer.add_segment(written.frame(ring.encrypting())).unwrap();
-        writer.upload(segment).await.unwrap();
-        writer.acknowledge().await.unwrap();
-        // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
-        // swaps it (TASK-407); its writer dies before it records the child.
-        let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let forked = Child { cell: child, owner: 0x109 };
-        let forking = forking.fork(forked, &mut writer.chain());
-        let at = writer.add_segment(forking.frame(ring.encrypting())).unwrap();
-        writer.upload(at).await.unwrap();
-        let head = bucket_cell::head::get(&*bucket, parent).await.unwrap().unwrap();
-        let named = layout::encode(&head.holding(writer.epoch(), at + 1));
-        let overwrite = bucket_cell::bucket::PutMode::Overwrite;
-        bucket.put(&layout::head(parent), named.into(), overwrite).await.unwrap();
-        at
-    });
-    let bucket = ObjectBucket::from_url(&url).unwrap();
-    let record = |cell| block_on(lifecycle::record(&bucket, cell)).unwrap();
-    let checkpoints = || {
-        let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.prefix())));
-        listed.unwrap().into_iter().map(|meta| meta.key).collect::<Vec<_>>()
-    };
-    assert_eq!(record(child), None);
-    let delete = |kms: Option<&std::path::Path>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
-        command.args([url.as_str(), "--delete-cell", "1/1/1"]).env_remove("CLADEFS_KMS");
-        command.env_remove("CLADEFS_MASTER_KEY").env_remove("CLADEFS_MASTER_KEY_FILE");
-        if let Some(kms) = kms {
-            command.env("CLADEFS_KMS", format!("local://{}", kms.display()));
-        }
-        command.output().unwrap()
-    };
-
-    let out = delete(None);
-    let refused = bucket_cell::bucket_kms::no_kms();
-    assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(record(parent).map(|record| record.deleted), Some(false));
-    assert_eq!(record(child), None);
-    assert_eq!(checkpoints(), Vec::<String>::new());
-
-    let out = delete(Some(&kms_dir));
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
-    assert!(out.status.success());
-    assert_eq!(record(parent).map(|record| record.deleted), Some(true));
-    assert_eq!(record(child).and_then(|record| record.origin()), Some(Origin { parent, at }));
-    let checkpoint = layout::checkpoint(parent, at, 1);
-    assert_eq!(checkpoints(), std::slice::from_ref(&checkpoint));
-    let bytes = block_on(bucket.get(&checkpoint)).unwrap().bytes;
-    let encryption = Frame::of(&bytes).unwrap().encryption;
-    let Encryption::Authenticated { key, .. } = encryption else {
-        panic!("{checkpoint}: {encryption:?}")
-    };
-    assert_eq!(key, KeyId { cell: 1, generation: keys::FIRST });
-}
-
 /// TASK-411.27: `--rotate-master-key` rewraps every tenant's KEK object under the newest master
 /// key `CLADEFS_MASTER_KEY` gives, the first, saying what it did; a host given the newest alone then
 /// unwraps what was wrapped before. Done again, it rewraps nothing. Given keys none of which opens
@@ -726,7 +623,7 @@ fn without_a_bucket_prints_its_usage() {
                  [--metrics FILE] | cladefs-gc URL [--cell TENANT/CELL] \
                  --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc URL --cells \
                  [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell \
-                 TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
+                 TENANT/CELL | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
                  --rotate-master-key (every cell, or the one --cell names; \
                  --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the bucket \
                  grows; --dry-run writes nothing, and finds less than a pass deletes)";

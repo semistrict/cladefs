@@ -1009,11 +1009,7 @@ impl OpenCell {
     pub(crate) fn fork_to(&self, path: impl AsRef<Path>, cell: CellId) -> Result<(), Error> {
         self.fork_span(cell).run(|| {
             self.access().may_manage()?;
-            self.make_uploaded()?;
-            failpoint!("fork::uploaded");
-            // None comes between the look and the fork's commit.
-            let opening = self.opening.write(&self.halt)?;
-            self.fork_uploaded(path.as_ref(), cell, Some(opening))
+            self.fork_at_version(path.as_ref(), cell, false)
         })
     }
 
@@ -1025,15 +1021,13 @@ impl OpenCell {
         span
     }
 
-    /// cladefs: forks the store, as [`OpenCell::fork`] says, its commits made uploaded:
-    /// `opening`, if given, held until the fork's commit is made, and not as the fork's upload
-    /// goes. The child is a version if `version`.
-    fn fork_uploaded(
-        &self,
-        path: &Path,
-        cell: CellId,
-        opening: Option<CellGuard<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
-    ) -> Result<(), Error> {
+    /// cladefs: forks the store, as [`OpenCell::fork`] says, to `cell` at `path`: a store at a
+    /// version forks itself; any other, a version of its last commit, made (of it quiescent, if
+    /// `quiescent`) and uploaded, a store at which, beside `path`, forks, then dropped, its child
+    /// keeping what it inherits by its reference. Forks are of versions alone (TASK-508.3).
+    fn fork_at_version(&self, path: &Path, cell: CellId, quiescent: bool) -> Result<(), Error> {
+        // A follower's uploader is its writer's, which forks nothing of it.
+        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
@@ -1043,9 +1037,13 @@ impl OpenCell {
         let inherited = |to: &Path| -> anyhow::Result<()> {
             Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
         };
-        // A follower's uploader is its writer's, which forks nothing of it.
-        let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
-        host_cell::fork(&self.store, uploader, path, child, inherited, opening)
+        if uploader.is_at_version() {
+            return host_cell::fork(&self.store, uploader, path, child, inherited);
+        }
+        let id = self.commit_version(None, quiescent)?;
+        self.make_uploaded()?;
+        failpoint!("fork::uploaded");
+        host_cell::fork_through(&self.store, uploader, id, path, child, inherited)
     }
 
     /// cladefs: takes `cell` into the store at `path`, of `capacity` bytes until a commit of the
@@ -1907,16 +1905,22 @@ impl OpenCell {
     /// the newest `keep_last` are kept then, if given, the rest dropped. Returns its ID.
     /// `ENOTSUP` without an uploader, which names versions.
     pub fn make_version(&self, keep_last: Option<u32>) -> Result<u64, Error> {
+        self.at_rest(|| self.commit_version(keep_last, true))
+    }
+
+    /// cladefs: commits a version as [`OpenCell::make_version`] does, of the store quiescent if
+    /// `quiescent` (`LocalCell::commit_version`), and returns its ID.
+    fn commit_version(&self, keep_last: Option<u32>, quiescent: bool) -> Result<u64, Error> {
         self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
-        self.at_rest(|| {
-            let id = rand::random::<u64>().max(1);
-            let version = bucket_cell::layout::NewVersion { id, keep_last };
-            self.store.commit_version(version).map_err(|err| match err.is::<NotQuiescent>() {
+        let id = rand::random::<u64>().max(1);
+        let version = bucket_cell::layout::NewVersion { id, keep_last };
+        self.store.commit_version(version, quiescent).map_err(|err| {
+            match err.is::<NotQuiescent>() {
                 true => Error::new(anyhow::Error::new(Errno::EBUSY).context(err)),
                 false => Error::new(err),
-            })?;
-            Ok(id)
-        })
+            }
+        })?;
+        Ok(id)
     }
 
     /// cladefs: the versions of the store's cell, oldest first: those its head names, uploaded,
@@ -2035,11 +2039,7 @@ impl OpenCell {
 
     /// cladefs: forks the store, as [`OpenCell::fork_at_rest`] says, in its span.
     fn fork_at_rest_now(&self, path: &Path, cell: CellId) -> Result<(), Error> {
-        self.at_rest(|| {
-            self.make_uploaded()?;
-            failpoint!("fork::uploaded");
-            self.fork_uploaded(path, cell, None)
-        })
+        self.at_rest(|| self.fork_at_version(path, cell, true))
     }
 
     /// cladefs: whether the store holds what `other` does, as of their last commits: the same root,

@@ -8,7 +8,7 @@ mod common;
 
 use base32_id::Padded;
 use common::noise;
-use extent_frame::segment::{Chain, Child, Contents, Location};
+use extent_frame::segment::{Chain, Contents, Location, NewVersion};
 use local_cell::{
     BucketData, Closed, Description, Dir, File as _, HostDir, LocalCell, Located, MemDir, MemFile,
     NoSpace, Opening, Options, Place, SpentExtent, TooLong, TooSmall, Unsectored,
@@ -590,7 +590,7 @@ fn sealed_extents_are_one_run_each() {
     check(&LocalCell::open(dir, OPTIONS).unwrap());
 }
 
-/// Segments close when full, when old, when asked to, and at a fork, their footers after their
+/// Segments close when full, when old, when asked to, and at a version, their footers after their
 /// data; and the cell's state is the replay of its write-ahead log's footers, which the store
 /// opened again holds (TASK-165.9), and which its audit checks at each closing.
 #[test]
@@ -644,11 +644,9 @@ fn closed_segments_hold_the_cells_history() {
     settled(&store);
     assert_eq!(segments(&store), before + 1);
 
-    // At a fork.
+    // At a version.
     store.write(extent(51), 0, &pattern(51, 0, BLOCK)).unwrap();
-    store
-        .commit_fork(Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 })
-        .unwrap();
+    store.commit_version(NewVersion { id: 1, keep_last: None }, false).unwrap();
     let places = store.places().unwrap();
     let (reopened, _) = reopened_state(store, &dir);
     assert_eq!(reopened.3, places);
@@ -985,7 +983,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     let opening = Opening::new(bucket_cell::layout::test_cell(CELL.id + 1));
     let refused =
         LocalCell::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
-    assert_eq!(refused.err().unwrap().to_string(), "cell 1/1/7 opened as 1/1/8");
+    assert_eq!(refused.err().unwrap().to_string(), "cell 1/7 opened as 1/8");
     let store = opened_on(dir.clone(), bucket_cell::State::new(CELL), Chain::new(CELL, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
@@ -1013,7 +1011,6 @@ fn segments_close_for_the_writer_of_their_chain() {
                 frees: vec![],
                 root: Some(b"one".to_vec()),
                 next_sequence: 100,
-                forks: vec![],
                 // Its first commit sets its capacity, which the bucket said none of.
                 capacity: Some(1 << 20),
                 continued: None,
@@ -1041,20 +1038,16 @@ fn segments_close_for_the_writer_of_their_chain() {
         (&own.key, pattern(2, 0, 32 << 10))
     );
 
-    // The next follows it; a fork's names the fork.
+    // The next follows it; a version's names the version.
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
-    store
-        .commit_fork(Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 })
-        .unwrap();
+    let version = NewVersion { id: 1, keep_last: None };
+    store.commit_version(version, false).unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     assert_eq!((second.footer.segment, second.footer.epoch), (6, 3));
     assert_eq!(
-        (second.footer.contents.commits.clone(), second.footer.contents.forks.clone()),
-        (
-            vec![tag(3, 2)],
-            vec![Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 }]
-        )
+        (second.footer.contents.commits.clone(), second.footer.contents.versions.clone()),
+        (vec![tag(3, 2)], vec![version])
     );
 
     // Freed, its extents' data goes once released, but the segment stays until uploaded.
@@ -3300,37 +3293,6 @@ fn commits_list_each_extent_written_once() {
         written.iter().map(|&(extent, _, len)| (extent, len)).collect::<Vec<_>>(),
         [(extent(1), 2 * BLOCK as u64)]
     );
-}
-
-/// A fork's commit ends the segment that names the fork, and the fork gives its epoch.
-#[test]
-fn forks_give_their_commits_epoch() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).unwrap();
-    store.commit(None).unwrap();
-    let forked = Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 };
-    assert_eq!(store.commit_fork(forked).unwrap(), 2);
-    assert_eq!(store.last_commit().unwrap(), 2);
-    let forking = closed_one(&store);
-    assert_eq!((forking.last(), forking.footer.contents.forks.clone()), (2, vec![forked]));
-}
-
-/// cladefs: a fork's child in another cell takes no ID of a cell its parent holds extents of, its
-/// parent's own among them: an extent's ID names its cell by the ID alone (TASK-364). It is
-/// refused before anything is committed.
-#[test]
-fn forks_take_no_id_of_their_lineage() {
-    let store = create(MemDir::new(), 1 << 20);
-    store.write(extent(1), 0, &[1; BLOCK]).unwrap();
-    store.commit(None).unwrap();
-    let elsewhere = bucket_cell::layout::CellId { tenant: 9, id: 9 };
-    let child = bucket_cell::layout::CellId { tenant: elsewhere.tenant, id: CELL.id };
-    let forked = Child { cell: child, owner: 0 };
-    let refused = store.commit_fork(forked).unwrap_err();
-    assert_eq!(refused.downcast_ref(), Some(&local_cell::InheritedId(child)));
-    assert_eq!(store.last_commit().unwrap(), 1);
-    let other = Child { cell: bucket_cell::layout::CellId { id: CELL.id + 1, ..child }, ..forked };
-    assert_eq!(store.commit_fork(other).unwrap(), 2);
 }
 
 /// With segments closing as soon as they are old, an empty one closes not: a commit that wrote

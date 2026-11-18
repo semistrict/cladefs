@@ -11,9 +11,9 @@
 #   zeros, a store's page private on the host, written back and rebound (guest/linux/fs/cladefs/dax.c,
 #   doc-13, TASK-164.4). Writable DAX's specs (dax, dax-region, extent-open) went with it
 #   (dead-ends/writable-dax.md);
-# - specs/bucket: branches in object storage with the host's WAL (doc-7, doc-14, TASK-165.2): its
-#   mutations, one per rule of bucket_cell's Rules (two of newest_checkpoint), of branch::delete
-#   and of the WAL;
+# - specs/bucket: cells in object storage with the host's WAL (doc-7, doc-14, TASK-165.2), each
+#   one log, forked only from its versions, into new cells: its mutations, one per rule of
+#   bucket_cell's Rules (two of newest_checkpoint) and of the WAL;
 # - specs/journal: Fxfs's journal, objects' flushes, device flushes and the super-block
 #   (crates/fxfs's write_super_block, TASK-149.11): a super-block claims only what its journal
 #   flushed, which the objects' offsets read after the device's flush broke (TASK-149.5);
