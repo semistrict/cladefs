@@ -128,7 +128,7 @@ async fn within(work: impl std::future::Future<Output = ()>) {
 /// in `dir` (doc-21), or none: its address, and the directory.
 fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<HostDir>>>) {
     let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
-    let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX, 0).unwrap());
+    let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX).unwrap());
     let replicas = with.then(|| super::replicas(&dir.join("replicas")).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
