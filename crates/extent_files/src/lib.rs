@@ -21,6 +21,8 @@
 mod file_set;
 mod format;
 mod pages;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod window;
 
 pub use file_set::{Failed, FileSet, NotFound, Options};

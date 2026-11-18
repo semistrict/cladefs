@@ -21,6 +21,7 @@ workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+extent_files = { workspace = true, features = ["testing"] }
 extent_keys.workspace = true
 local_cell.workspace = true
 rand.workspace = true

@@ -15,8 +15,13 @@ log.workspace = true
 storage_device.workspace = true
 thiserror.workspace = true
 
+[features]
+# A window of memory of its own for tests, here and in sqlite_extents' (`testing`).
+testing = []
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+extent_files = { path = ".", features = ["testing"] }
 rand.workspace = true

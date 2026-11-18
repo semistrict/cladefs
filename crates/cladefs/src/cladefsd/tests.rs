@@ -2558,6 +2558,41 @@ fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
     child.close().unwrap();
 }
 
+/// TASK-540: a memory cell whose last commit left more extents dying than its root holds, listed
+/// in an extent its root names, closes and opens again, as often as it is closed, holding what
+/// that commit made.
+#[test]
+fn a_memory_cell_opens_again_after_a_commit_freeing_many_extents() {
+    use crate::memory_cell::MemoryCell;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    const PAGES: u64 = 128;
+    let path = dir.path().join("memory");
+    let memory = MemoryCell::open(&socket, &path, PAGES * 4096).unwrap();
+    let page = memory.page_size();
+    // An extent a commit, each holding a page the later ones leave live.
+    for n in 0..80 {
+        memory.write(n * page, &vec![n as u8 + 1; page as usize]).unwrap();
+        memory.commit().unwrap();
+    }
+    let extents = memory.extents().unwrap().len();
+    assert!(extents > 64, "{extents} extents, too few to list");
+    memory.punch(0, PAGES * page).unwrap();
+    memory.commit().unwrap();
+    memory.close().unwrap();
+
+    for opening in 0..2 {
+        let reopened = MemoryCell::open(&socket, &path, PAGES * 4096).unwrap();
+        let mut image = vec![0xee; (PAGES * page) as usize];
+        reopened.read(0, &mut image).unwrap();
+        assert!(image.iter().all(|&byte| byte == 0), "opening {opening}: the memory punched");
+        reopened.close().unwrap();
+    }
+}
+
 /// TASK-456.3: a memory cell's window, a VM's memory restored from it, maps nothing until faults
 /// reach it: then the runs of the tree node around each page, data and holes, as the cell's last
 /// commit has them. Two forks' windows map the daemon's one page of each extent's block, shared;
