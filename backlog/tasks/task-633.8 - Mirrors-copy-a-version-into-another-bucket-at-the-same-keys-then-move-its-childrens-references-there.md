@@ -1,11 +1,12 @@
 ---
 id: TASK-633.8
 title: >-
-  Mirrors: copy a version into another bucket at the same keys, then move its
-  children's references there
+  Mirrors: a version forked into another bucket is copied there in the
+  background, its children switched once the copy is whole
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:04'
+updated_date: '2026-11-18 20:48'
 labels:
   - bucket
   - multi-region
@@ -24,14 +25,14 @@ ordinal: 939000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Until its version is copied into its own bucket, a child across buckets reads its parent's bucket cold and pays egress, and new forks need that bucket up. The user accepted a same-key, byte-for-byte mirror (not a flattened copy) made in the background (doc-23, Mirrors). Copies are authentic where they land, keys are written once.
+Until its version is in its own bucket, a child across buckets reads its parent's bucket cold, pays egress, and needs that bucket up for those reads. The user decided (2026-11-18): the first fork of a version into another bucket starts copying it there in the background, byte for byte at the same keys (not a flattened copy), one mirror per version and bucket, shared by its children there; children read the parent's bucket lazily until the mirror's create-only marker lands, then their own (doc-23, Mirrors).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A control call mirrors a version into a bucket: every object of its checkpoint and their moves copied (server-side where the clouds allow: S3 CopyObject, GCS rewrite, Azure Put Blob From URL; GET and PUT otherwise), then the marker
+- [ ] #1 The first fork of a version into another bucket starts its mirror there: every object of its checkpoint and their moves copied (server-side where the clouds allow, GET and PUT otherwise), then the marker; later forks find it under way or done
 - [ ] #2 Children's references move to the mirror's bucket in the order the spec checks; reads of the version come from the mirror once its marker exists
-- [ ] #3 New forks of a mirrored version into its bucket reference the mirror alone; the mirror goes when no reference to it stands
+- [ ] #3 A mirror interrupted by a crash or a bucket down resumes; the mirror goes when no reference to it stands
 - [ ] #4 Tests: a child reads cold and forks with its parent's bucket failing after its mirror; a crash at each step of a mirror leaves nothing needed gone
 <!-- AC:END -->
 

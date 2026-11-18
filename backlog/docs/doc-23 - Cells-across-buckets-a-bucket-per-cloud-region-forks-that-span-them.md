@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 20:23'
+updated_date: '2026-11-18 20:48'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -21,7 +21,7 @@ OPEN_QUESTIONS.md had planned for more than one cloud region before this.
 | What multi-region means | **A bucket per cloud region.** Each cell has one **home bucket**, which holds its head, its segments and its versions. Hosts in a cloud region use its bucket. |
 | Clouds | **All three:** S3, GCS and Azure Blob Storage, each bucket on any of them. |
 | Forks across buckets | **Required.** A child in bucket B is forked from a version of a parent in bucket A, and keeps its origin and lineage. A one-way flattened copy into B, a new cell with new IDs, was rejected. |
-| Copies | **Allowed as a mirror.** The parent version's objects are copied byte for byte into B at the same keys, in the background, so that B's children stop depending on A. This is not a flattened copy: no ID, key or record changes. |
+| Copies | **Allowed as a mirror.** The parent version's objects are copied byte for byte into B at the same keys, in the background, so that B's children stop depending on A. This is not a flattened copy: no ID, key or record changes. **Automatic** (the user, 2026-11-18): the first fork of a version into another bucket starts its mirror there; children read A lazily until the mirror's marker lands, then B. |
 | Cell IDs | Unique across every bucket: a **16-bit bucket number** in a cell ID's high bits. This is a format bump. |
 | Bucket numbers | **Sequential**, from the **root bucket**, number 1. Adding a bucket gives it the next number by a conditional write (CAS) of the root's record of every bucket, which serializes additions. Each number is kept in a create-only identity object in its bucket. (Superseded the same day: random numbers, an explicit one as an option, and a registry in each host's configuration.) |
 | Record of buckets | **In the root of every bucket**: each bucket's number, provider, cloud region, URL, endpoint, KMS and master key's ID; never a key or a credential. The root's copy is the authority; every other bucket holds a copy no older than the one before it. |
@@ -143,7 +143,7 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 - **Reads:** the resolver serves P's keys at `at` from B once the marker is there, and from A before it.
 - **One mirror serves every child in B of that version,** and later forks of it in B are made against the mirror: their references are B's alone.
 - **B's collector** keeps a mirror while a reference to it stands, and removes it whole when none does. A mirror has no head, no writer and no KEK of P's, so no compactor ever touches it.
-- **What hydrates, and when:** an explicit control call, as warming a version is (TASK-406.3). Policy, such as hydrating at once across clouds and lazily within one, is the VM manager's, until measurements say otherwise.
+- **What hydrates, and when:** every version forked into another bucket, at once (the user, 2026-11-18). The first such fork starts the mirror in the background; later forks of the version into that bucket find it under way or done. The mirror's create-only marker is the switch: before it, reads go to A; once it exists, every host reads B.
 - **Prior art:** Fly volumes fork across regions and hydrate behind, usable meanwhile (https://fly.io/docs/volumes/volume-states/). EBS loads a volume lazily from its snapshot. Cloudflare R2's Sippy migrates lazily.
 
 ### What the parent's bucket being out of reach costs
@@ -198,14 +198,15 @@ Each model runs in under 10 minutes, split by the steps it takes, as Replication
 
 ## Order of the work
 
-1. **Measure.** How much of a base a child reads (bytes read over the version's object bytes), on real container-image bases. A version's dead-byte share, which a mirror copies. A cold inherited read under injected latency (`CLADEFS_BUCKET_LATENCY_MS`, about 70 ms) on ubu1. The real latency of each cloud pair needs real buckets, which the no-GCP rule forbids without the user's word.
-2. **The spec** (above).
-3. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).
-4. **Routing:** options per bucket, the resolver, fetchers, budgets and peers per bucket, and per-bucket stats.
-5. **A take that asks only its own bucket,** and a checkpoint's moves read in their own bucket.
-6. **KMS per bucket,** and the Azure Key Vault backend.
-7. **Forks across buckets** (`ForkCell` names the child's bucket), and collection across buckets.
-8. **Mirrors:** a copy for each pair of clouds, the marker, the switch, and their collection.
+Nothing here waits for a measurement (TASK-633.1, archived 2026-11-18): a mirror is asked for by a control call, its policy the VM manager's, and a cold read across buckets costs what Costs says.
+
+1. **The spec** (above).
+2. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).
+3. **Routing:** options per bucket, the resolver, fetchers, budgets and peers per bucket, and per-bucket stats.
+4. **A take that asks only its own bucket,** and a checkpoint's moves read in their own bucket.
+5. **KMS per bucket,** and the Azure Key Vault backend.
+6. **Forks across buckets** (`ForkCell` names the child's bucket), and collection across buckets.
+7. **Mirrors:** a copy for each pair of clouds, the marker, the switch, and their collection.
 
 ## Where this meets other work
 
