@@ -1,9 +1,10 @@
 ---
 id: TASK-517
 title: A persistent write-back error can stall every store sharing the page cache
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18 12:23'
+updated_date: '2026-11-18 17:01'
 labels: []
 dependencies: []
 priority: high
@@ -32,3 +33,9 @@ Isolated arm64 macOS validation. Use the cache's real flusher with a failing in-
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Fixed by TASK-539.12: a writer held at the page cache's hard bound gets the write-back's failure once one fails and nothing drains, rather than wait for as long as the disk refuses; its audit test passes.
+<!-- SECTION:FINAL_SUMMARY:END -->
