@@ -483,12 +483,11 @@ fn one_mount_attaches_and_detaches_many_stores() {
     listed.sort();
     listed.push(format!("{two} {b}"));
     assert_eq!(cladefsctl_mount(socket, &["list"]), listed.join("\n") + "\n");
-    // The cells' objects are under their tenants' prefixes: each cell's object and its record.
+    // The cells' objects are under their tenants' prefixes: each cell's head.
     let bucket = dir.path().join("bucket");
     let cell_a = bucket.join(format!("tenants/{one}/cells/{a}"));
-    assert!(cell_a.join("cell").exists(), "no cell object at {}", cell_a.display());
-    assert!(cell_a.join("record").exists(), "no record at {}", cell_a.display());
-    assert!(bucket.join(format!("tenants/{two}/cells/{b}/record")).exists());
+    assert!(cell_a.join("head").exists(), "no head at {}", cell_a.display());
+    assert!(bucket.join(format!("tenants/{two}/cells/{b}/head")).exists());
 
     // Detached, and attached again from its store; another cell detached, its store gone, then
     // attached again from the bucket.

@@ -851,12 +851,14 @@ async fn fork_kept(
     };
     // A new cell of `tenant`'s, or of the kept store's tenant's (TASK-364).
     let tenant = tenant.unwrap_or(kept.store.cell().tenant);
-    let forked = kept.store.fork(path, tenant);
-    let forked = forked.map(drop).map_err(|err| {
-        errno_of(format_args!("forking {} to {}", from.display(), path.display()), err)
-    });
     let failed = Arc::downgrade(&kept);
-    drop(kept);
+    // On a thread of its own: a fork blocks, on the bucket's requests.
+    let (to, at) = (path.to_owned(), from.display().to_string());
+    let forked = blocking(move || {
+        let forked = kept.store.fork(&to, tenant).map(drop);
+        forked.map_err(|err| errno_of(format_args!("forking {at} to {}", to.display()), err))
+    })
+    .await;
     if forked.is_err_and(store_at_fault) {
         let_go_failed(&store_key(from), failed).await;
     }
