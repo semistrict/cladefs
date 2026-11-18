@@ -189,9 +189,10 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     assert_eq!((refused, more), (Errno::ENOSPC, 16 * open_share / ADMITTED));
 
     // What it wrote, freed and uploaded, leaves the disk: it writes again.
+    let connected = vms.len();
     for (index, vm) in vms.iter().enumerate() {
         let freeing = |first: u64, count: u64| {
-            (0..count).filter(move |n| *n as usize % vms.len() == index).map(move |n| first + n)
+            (0..count).filter(move |n| *n as usize % connected == index).map(move |n| first + n)
         };
         for sequence in freeing(100, written).chain(freeing(200, more)) {
             vm.free(ExtentId { cell: vm.cell(), sequence }).unwrap();

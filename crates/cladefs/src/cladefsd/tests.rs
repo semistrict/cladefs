@@ -599,7 +599,7 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let (store, served) = connect(&path, 1 << 24);
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
 
     // The daemon holds the read, saying it has it, until let go: at its failpoint, named as the
@@ -6418,10 +6418,13 @@ fn failed_writeback_preserves_disk_admission() {
     let dir = local_cell::HostDir::new(&store).unwrap();
     let file = dir.create("data", true).unwrap();
     let page = local_cell::pages::PAGE;
-    let limit = disk.used() + page;
+    // Room for one page admitted: it, and what its store's own work may add for it (doc-22).
+    let admitted = (1 + bucket_cell::host_disk::RESERVE_FACTOR) * page;
+    let footprint = dir.footprint();
+    let limit = disk.used() + footprint.reserved() + admitted;
     super::disk::set_limit(Some(tenant), Some(limit)).unwrap();
     refuse_system_call(libc::SYS_pwrite64, &[(0, file.as_raw_fd() as u32)], libc::EIO as u16);
-    let writing = disk.admit(page).unwrap();
+    let writing = footprint.admit(page, 0).unwrap();
     file.write_at(&vec![0x5a; page as usize], 0).unwrap();
     drop(writing);
     // Its write-back failing changes nothing of what is counted (TASK-539.5: nothing recounts).
@@ -6429,7 +6432,7 @@ fn failed_writeback_preserves_disk_admission() {
         dir.cache().write_back_all().map_err(|err| err.raw_os_error()),
         Err(Some(libc::EIO))
     );
-    assert_eq!(disk.admit(page).map(drop), Err(Errno::ENOSPC));
+    assert!(footprint.admit(page, 0).is_err(), "admitted past the page written");
 }
 
 /// TASK-529: compare the cost of the same unmatched lookups as the number of

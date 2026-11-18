@@ -458,29 +458,33 @@ fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
 #[cfg(test)]
 mod tests {
     use super::{Disk, set_limit};
-    use crate::Errno;
     use local_cell::{Dir as _, File as _, HostDir};
 
     const MIB: u64 = 1 << 20;
 
-    /// A write admitted holds its bytes until it lands, and is counted as its store's file grows,
-    /// whether or not the stores' page cache wrote it back: nothing counts the tenant anew between.
+    /// A write admitted holds its bytes, and what its store's own work may add for them, until it
+    /// lands, and is counted as its store's file grows, whether or not the stores' page cache wrote
+    /// it back: nothing counts the tenant anew between (doc-22).
     #[test]
     fn writes_are_held_until_they_land_and_counted_as_they_do() {
+        use local_cell::footprint::DiskFull;
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         std::fs::create_dir(&store).unwrap();
         let disk = Disk::new(0xace, dir.path()).unwrap();
+        let opened = HostDir::new(&store).unwrap();
+        let footprint = opened.footprint().clone();
         let empty = disk.used();
-        set_limit(Some(0xace), Some(empty + 2 * MIB)).unwrap();
-        let writing = disk.admit(MIB).unwrap();
-        assert_eq!(disk.admit(2 * MIB).map(drop), Err(Errno::ENOSPC));
-        let file = HostDir::new(&store).unwrap().create("written", true).unwrap();
-        file.write_at(&vec![1; MIB as usize], 0).unwrap();
+        // A MiB written to no file the store frames is admitted as four: it, and its reserve.
+        let admitted = (1 + bucket_cell::host_disk::RESERVE_FACTOR) * MIB;
+        set_limit(Some(0xace), Some(empty + footprint.reserved() + 2 * admitted)).unwrap();
+        let writing = footprint.admit(MIB, 0).unwrap();
+        assert_eq!(footprint.admit(2 * MIB, 0).map(drop), Err(DiskFull::Allotment));
+        opened.create("written", true).unwrap().write_at(&vec![1; MIB as usize], 0).unwrap();
         drop(writing);
         assert_eq!(disk.used(), empty + MIB);
-        assert_eq!(disk.admit(2 * MIB).map(drop), Err(Errno::ENOSPC));
-        assert_eq!(disk.admit(MIB).map(drop), Ok(()));
+        assert_eq!(footprint.admit(2 * MIB, 0).map(drop), Err(DiskFull::Allotment));
+        assert_eq!(footprint.admit(MIB, 0).map(drop), Ok(()));
     }
 
     /// TASK-538: counting one tenant, every tenant, and rendering their metrics write back no
