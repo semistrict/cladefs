@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 16:45'
-updated_date: '2026-11-18 20:21'
+updated_date: '2026-11-18 20:55'
 labels:
   - testing
 dependencies: []
@@ -50,4 +50,6 @@ crates/cladefs/mutants.sh --check, which scripts/test.sh's scripts part runs (CI
 2026-11-18, origin/main 03b655f63: a seventh, tenants-name-any-store (cladefsd/server.rs, since ab5226324's grant serialization), also no longer applies. TASK-539's branch retargets walks-forget-writes-in-flight (as a-stores-reserve-forgotten) and the other disk mutants.
 
 2026-11-18, branch t3/retarget-broken-mutants (149954227): drift retargeted: a-second-open-holds-its-path, tenants-name-any-store (prose: TASK-364's reaches now refuses another tenant's closed store; the kill is its creates in alice's directory), copies-of-whole-requests (PIECE is OpenCell's, open_cell.rs, since 8e9f18a42), framed-in-copies and large-extents-framed-in-copies (seal_own's in-place skip, local_cell/src/cell.rs). Subjects gone, replaced: tenants-name-branches -> restores-make-others-cells (Policy::names_branches and ForkFrom's branch gone in 9a65b3838; a restore's child now takes the restoring tenant, self.tenant.granted(), which the mutant drops so the version's tenant, named by the VM process, gets the cell); forks-take-branches-claimed -> forks-take-cells-claimed (record_fork, child_free and the look gone in d0bc6fd47; lifecycle::fork_version_keyed's IdTaken arm is now the one refusal). scripts/rust-rules/unruled kept in step. large-extents-framed-in-copies' killer, bucket::write_budgets::a_hosts_store_writes_what_its_design_says, had written no extent of large_extent or more since 89f518bc0, so seal_own never ran and the mutant went unkilled: the test gains a large-extents workload (4 x 8 MiB, own files' writes bounded by their tails: 1,716 bytes of 149,304 allowed). Kills on ubu1 (fxjob, crates/cladefs/mutants.sh): a-second-open-holds-its-path 40s ('a connection opened 2 stores'), tenants-name-any-store 39s (alice's listing changed), restores-make-others-cells 28s (reopen of the restored store refused), copies-of-whole-requests 42s (MiB held past the credit's 272 MiB), forks-take-cells-claimed 36s, large-extents-framed-in-copies 66s ('large extents' own files written 33556148 bytes: 149304 at most'). Unmutated write_budgets passes on Linux (io check) and macOS.
+
+Pushed to main as b454b96f6 (merged origin/main 6b7b54e24; every mutants.sh --check 0 broken after it). Linux workspace on ubu1 (fxjob, scripts/test.sh workspace, --no-fail-fast): 2962/2962 passed; a first run's one failure, cladefsd::tests::hostile::page_ins_in_flight_are_bounded (EBUSY reopening the restored store after its fork's connection dropped), passed 20 of 20 alone and is TASK-648's race. macOS: test.sh clippy + workspace 2641/2641. framed-in-copies' killer, scripts/sandboxes.sh short, can't build inside fxjob --bench since TASK-368 (measurement_refuses): its kill runs as build-then-measure, artifacts built as work (CLADEFS_E2E_BUILD_ONLY, the mutant's through patch_run), then sandboxes.sh under --bench with CLADEFS_E2E_PREBUILT.
 <!-- SECTION:NOTES:END -->
