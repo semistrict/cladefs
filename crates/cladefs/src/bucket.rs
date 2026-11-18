@@ -61,8 +61,7 @@ pub struct Host {
 impl Host {
     /// The host the environment names, or why it names none.
     pub fn from_env() -> Result<Self, String> {
-        let bucket = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
-        let bucket = bucket.ok_or_else(|| {
+        let bucket = crate::host_store::host_bucket_url().ok_or_else(|| {
             "CLADEFSD_BUCKET names no bucket: a host of cladefs's multi-node system keeps its \
              stores' branches in one (tests and development: memory:///NAME)"
                 .to_owned()
@@ -194,8 +193,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
 
 /// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
 fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
-    let url = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
-    let url = url.ok_or("CLADEFSD_BUCKET names none")?;
+    let url = crate::host_store::host_bucket_url().ok_or("CLADEFSD_BUCKET names none")?;
     crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 

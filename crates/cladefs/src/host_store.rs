@@ -170,12 +170,33 @@ pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
     assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
 }
 
+/// cladefs: the URL of this host's bucket, if it is a host of cladefs's system: what a test made
+/// it ([`use_host_bucket`]), or `CLADEFSD_BUCKET`.
+pub(crate) fn host_bucket_url() -> Option<String> {
+    #[cfg(test)]
+    if let Some(url) = HOST_BUCKET.lock().unwrap().clone() {
+        return Some(url);
+    }
+    std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty())
+}
+
+/// cladefs: the host's bucket's URL as a test made it ([`use_host_bucket`]).
+#[cfg(test)]
+static HOST_BUCKET: Mutex<Option<String>> = Mutex::new(None);
+
+/// cladefs: makes `url` this host's bucket's, before `CLADEFSD_BUCKET`: as a test whose threads
+/// may read the environment already makes it, where setting the variable would race their reads
+/// (`std::env::set_var`'s safety, TASK-444.16).
+#[cfg(test)]
+pub(crate) fn use_host_bucket(url: String) {
+    *HOST_BUCKET.lock().unwrap() = Some(url);
+}
+
 /// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
-/// if it is a host of cladefs's system (`CLADEFSD_BUCKET`, as [`crate::bucket::Host`] has
+/// if it is a host of cladefs's system ([`host_bucket_url`], as [`crate::bucket::Host`] has
 /// it); else a file bucket of the store's own ([`bucket_named`]).
 fn bucket_for(path: &Path) -> anyhow::Result<String> {
-    let host = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
-    bucket_named(host, path)
+    bucket_named(host_bucket_url(), path)
 }
 
 /// The URL of the bucket a store made at `path`, a directory, keeps its branch in, on the host
