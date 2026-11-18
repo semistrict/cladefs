@@ -298,3 +298,45 @@ fn sweeps_drop_what_heads_name_no_more() {
         ]
     );
 }
+
+/// cladefs: a writer's link to a member over gRPC (TASK-537.3.3): its appends land in the member's
+/// replica directory, each answered with the log's end; once a take fences the cell, the writer's
+/// next append is answered Fenced, which fences the writer; a link naming another incarnation is
+/// refused for good.
+#[test]
+fn writers_append_to_members_through_their_links() {
+    use local_cell::replicate::{LinkError, log_of};
+    use local_cell::upload::Members as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (address, replicas) = member(dir.path(), true);
+    let replicas = replicas.unwrap();
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let members = ReplicaMembers {
+        bucket: URL.to_owned(),
+        me: "127.0.0.1:1".to_owned(),
+        incarnation: 1,
+        runtime: runtime.clone(),
+    };
+    let cell = crate::CellId { tenant: 3, id: 9 };
+    let configuration =
+        bucket_cell::layout::Configuration { number: 1, epoch: 4, f: 1, members: Vec::new() };
+    let ours = bucket_cell::layout::Member {
+        address: address.clone(),
+        incarnation: replicas.incarnation(),
+    };
+    let link = members.link(cell, &configuration, &ours);
+    assert_eq!(link.append(log_of(1), 0, b"abc"), Ok(3));
+    assert_eq!(link.append(log_of(1), 3, b"def"), Ok(6));
+    assert_eq!(link.append(log_of(1), 9, b"gap"), Ok(6), "past the end: the end");
+    let of = (cell, Key { number: 1, epoch: 4 }, replicas.incarnation());
+    assert_eq!(replicas.read(of, log_of(1), 0, 100).unwrap(), b"abcdef");
+    assert_eq!(link.drop_through(0), Ok(()));
+
+    replicas.fence(of, 5).unwrap();
+    let fenced = link.append(log_of(1), 6, b"late");
+    assert!(matches!(fenced, Err(LinkError::Fenced(_))), "{fenced:?}");
+
+    let wrong = bucket_cell::layout::Member { address, incarnation: ours.incarnation ^ 1 };
+    let refused = members.link(cell, &configuration, &wrong).append(log_of(1), 0, b"x");
+    assert!(matches!(refused, Err(LinkError::Refused(_))), "{refused:?}");
+}

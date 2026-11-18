@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18T17:02:00Z'
-updated_date: '2026-11-18T17:02:00Z'
+updated_date: '2026-11-18T19:48:00Z'
 labels:
   - durability
   - peers
@@ -40,3 +40,9 @@ doc-21 step 2. A daemon must hold other hosts cells logs as a member of their co
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reviews (2026-11-18): verifying-reviewer found 7, Codex 4 (3 overlapping, plus empty appends). All fixed in the review commit with tests: framed logs (crash padding), sweeps only of gone/deleted heads whole and of configured heads before their configuration, bound per configuration, logs held from their making, directories with only lost+found or incarnation.new opened, gaps answered with the end, 64 MiB messages, record.rs format test. Blind spots: MemDir's crash model never pads files (the padding test writes zeros itself); the sweep tests used a fixed head (now unconfigured and unreplicated heads too); the bound test used one configuration. Red: reviewers' reproducers ran red for the padding, bound, stuck log, refused directory and format test; sweep race and message limit traced. Also found: an Append deadlock (answered only once the first append came), now bounded at 30 s in tests. Structure: the member's state is one Log per (configuration, log) under the cell lock; no class-level problem seen beyond these. Full ubu1 suite: needs sudo (OPEN_QUESTIONS.md).
+<!-- SECTION:NOTES:END -->

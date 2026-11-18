@@ -226,6 +226,19 @@ pub fn owner_of<'a>(
     addresses.into_iter().max_by_key(|address| (score(address, key, part), *address))
 }
 
+/// cladefs: the hosts at `addresses` ranked for `part` of `key` as [`owner_of`] ranks them, the
+/// owner first: what a replicated cell's members are picked by, `key` the cell and `part` its
+/// configuration's number (doc-21, TASK-537.3.3), so that hosts given the same list pick alike.
+pub fn ranked<'a>(
+    addresses: impl IntoIterator<Item = &'a str>,
+    key: &str,
+    part: u64,
+) -> Vec<&'a str> {
+    let mut ranked: Vec<&str> = addresses.into_iter().collect();
+    ranked.sort_by_key(|address| std::cmp::Reverse((score(address, key, part), *address)));
+    ranked
+}
+
 /// The score of the host at `address` for part `part` of the object at `key`: SipHash-1-3, of fixed
 /// keys, which hosts of any build compute alike, of the three, each length-prefixed.
 fn score(address: &str, key: &str, part: u64) -> u64 {

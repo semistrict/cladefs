@@ -174,6 +174,7 @@ mod on_disk;
 pub mod pages;
 mod raw;
 pub mod replica;
+pub mod replicate;
 mod seals;
 mod segments;
 pub mod shared;

@@ -528,9 +528,10 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     assert_eq!(failure(daemon.stat(&ours)), (Code::PermissionDenied, Errno::EACCES));
 }
 
-/// TASK-537.3.1 (doc-21): CreateCell makes a cell replicated, its f and what its fsync waits for
-/// in its head, which StatCell reports of the store open; a taking that asks for nothing, on any
-/// host, keeps them, and one that asks for another changes them. Asks no f can satisfy are refused.
+/// TASK-537.3.1 (doc-21): CreateCell gives a cell its replication, its f and what its fsync waits
+/// for, in its head, which StatCell reports of the store open; a taking that asks for nothing, on
+/// any host, keeps them, and one that asks for another changes them. Asks no f can satisfy are
+/// refused, and an f of 1 or more by a daemon with no peers (TASK-537.3.3).
 #[test]
 fn cells_are_made_replicated_through_the_control_api() {
     // SAFETY: as in stores_through_the_control_api.
@@ -559,18 +560,24 @@ fn cells_are_made_replicated_through_the_control_api() {
         (stat.replicas, stat.fsync(), stat.configuration)
     };
 
+    // This daemon has no peers, nor a replica directory: an f of 1 or more is refused before
+    // anything is made (TASK-537.3.3's fail-hard rule), and the head keeps what an f of 0 asks.
     let first = dir.path().join("first");
-    let made = create(&mut daemon, request(&first, 0, Some(1), FsyncLevel::Replicated)).unwrap();
-    assert_eq!(replicated(&mut daemon, &first), (1, FsyncLevel::Replicated, 0));
+    let refused = create(&mut daemon, request(&first, 0, Some(1), FsyncLevel::Replicated));
+    assert_eq!(failure(refused).1, Errno::ENOTSUP);
+    assert!(!first.exists());
+    let made = create(&mut daemon, request(&first, 0, Some(0), FsyncLevel::Local)).unwrap();
+    assert_eq!(replicated(&mut daemon, &first), (0, FsyncLevel::Local, 0));
     daemon.sync(&first).unwrap();
 
     // Taken into another store, asking for nothing: kept. Then asking for another: changed.
     let second = dir.path().join("second");
     create(&mut daemon, request(&second, made.cell, None, FsyncLevel::Ordered)).unwrap();
-    assert_eq!(replicated(&mut daemon, &second), (1, FsyncLevel::Replicated, 0));
+    assert_eq!(replicated(&mut daemon, &second), (0, FsyncLevel::Local, 0));
+    daemon.sync(&second).unwrap();
     let third = dir.path().join("third");
-    create(&mut daemon, request(&third, made.cell, Some(2), FsyncLevel::Local)).unwrap();
-    assert_eq!(replicated(&mut daemon, &third), (2, FsyncLevel::Local, 0));
+    create(&mut daemon, request(&third, made.cell, Some(0), FsyncLevel::Ordered)).unwrap();
+    assert_eq!(replicated(&mut daemon, &third), (0, FsyncLevel::Ordered, 0));
 
     // A cell made asking for nothing is not replicated.
     let plain = dir.path().join("plain");

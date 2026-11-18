@@ -1571,15 +1571,34 @@ impl OpenCell {
     /// Commits, and waits as `commit` says: for the uploader's lag, the host's disk, or object
     /// storage; the commit's phases, each counted ([`stats::Stats::commits`]).
     fn commit_and_wait(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
+        /// What a commit waits for: a level of [`Commit`]'s, or replicated (doc-21).
+        enum Waiting {
+            Commit(Commit),
+            Replicated,
+        }
         let committing = std::time::Instant::now();
         self.store.commit_ordered(root).map_err(errno)?;
         self.committed.notify(usize::MAX);
         stats::add_since(Counter::CommitStoreNs, committing);
         let waiting = std::time::Instant::now();
+        // cladefs: in a replicated cell (doc-21, TASK-537.3.3), the guest's fsync waits for the
+        // level its head asks for, and its sync family for its commits replicated, rather than
+        // uploaded: on f+1 hosts' disks, or in the bucket.
+        let replication = self.uploader.as_ref().and_then(|uploader| uploader.replication());
+        let commit = match (commit, replication) {
+            (Commit::Uploaded, Some(replicated)) if replicated.f >= 1 => Waiting::Replicated,
+            (Commit::Ordered, Some(replicated)) => match replicated.fsync {
+                bucket_cell::layout::Fsync::Ordered => Waiting::Commit(Commit::Ordered),
+                bucket_cell::layout::Fsync::Local => Waiting::Commit(Commit::Local),
+                bucket_cell::layout::Fsync::Replicated => Waiting::Replicated,
+            },
+            (commit, _) => Waiting::Commit(commit),
+        };
         let waited = match commit {
-            Commit::Uploaded => self.make_uploaded(),
-            Commit::Local => self.flush().and_then(|()| self.uploading()),
-            Commit::Ordered => match self.uploader.as_ref() {
+            Waiting::Replicated => self.make_replicated(),
+            Waiting::Commit(Commit::Uploaded) => self.make_uploaded(),
+            Waiting::Commit(Commit::Local) => self.flush().and_then(|()| self.uploading()),
+            Waiting::Commit(Commit::Ordered) => match self.uploader.as_ref() {
                 // Within the lag the uploader allows.
                 Some(uploader) => {
                     let epoch = self.store.last_commit().map_err(errno)?;
@@ -1590,6 +1609,18 @@ impl OpenCell {
         };
         stats::add_since(Counter::CommitWaitNs, waiting);
         waited
+    }
+
+    /// cladefs: makes the store's commits so far replicated (doc-21): local, then on f members
+    /// besides this host, or in the bucket, and within the lag the uploader allows.
+    fn make_replicated(&self) -> Result<()> {
+        let epoch = self.make_local()?;
+        let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
+        upload_wait(epoch).run(|| {
+            (uploader.wait_replicated(epoch))
+                .and_then(|()| uploader.wait_lag(epoch))
+                .map_err(upload_errno)
+        })
     }
 
     /// The root as of the last commit, empty if none set one (`ROOT`).

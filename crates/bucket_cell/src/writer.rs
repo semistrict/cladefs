@@ -397,6 +397,34 @@ impl<B: Bucket> Writer<B> {
         Ok(bucket::create(&*self.bucket, key, bytes).await)
     }
 
+    /// cladefs: activates `configuration` as the cell's replicated configuration (doc-21,
+    /// TASK-537.3.3): a swap of the head it holds naming it, conditional as every swap is, so that a
+    /// writer fenced since fails it, and stops. Refused for a cell its head says is not replicated
+    /// ([`Error::Corrupt`]): its taking asked for no replication.
+    pub async fn configure(&self, configuration: layout::Configuration) -> Result<(), Error> {
+        if let Some(error) = &self.inner().stopped {
+            return Err(error.clone());
+        }
+        let mut held = self.held.lock().await;
+        let mut next = held.head.clone();
+        let Some(replication) = next.replication.as_mut() else {
+            return Err(Error::Corrupt(format!("{:?}: not replicated, configured", self.cell)));
+        };
+        replication.configuration = Some(configuration);
+        match head::swap(&*self.bucket, self.cell, &held, next).await {
+            Ok(swapped) => {
+                *held = swapped;
+                Ok(())
+            }
+            Err(error) => Err(self.stop(error)),
+        }
+    }
+
+    /// cladefs: the head as it last swapped it, or took it.
+    pub async fn head(&self) -> layout::Head {
+        self.held.lock().await.head.clone()
+    }
+
     /// Acknowledges the segments uploaded with every one before them, by swapping the cell's
     /// head to name them, with the condition that it is the one this writer last wrote ([`head`],
     /// doc-7, The head; TASK-407): a writer taken over, or a deleted cell's, fails, and stops.

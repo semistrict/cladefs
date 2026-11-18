@@ -279,6 +279,41 @@ pub struct Options {
     /// a store made, or taken, by the control API, as its call asked; none keeps what the cell's
     /// head says.
     pub replication: Option<bucket_cell::layout::Wish>,
+    /// cladefs: the hosts a replicated cell's configurations are made of, and how they are reached
+    /// (doc-21, TASK-537.3.3): the daemon's peers, if it has them and a replica directory.
+    pub members: Option<MembersOf>,
+}
+
+/// cladefs: what a host knows of the hosts its replicated cells' configurations are made of
+/// (doc-21, TASK-537.3.3), which the daemon's peer network is.
+pub trait Members: Send + Sync + 'static {
+    /// This host as a member: its peer address, and its replica directory's incarnation.
+    fn me(&self) -> Result<bucket_cell::layout::Member, String>;
+    /// 2f members for configuration `number` of `cell`, this host aside, each that answered its
+    /// incarnation. Blocks.
+    fn pick(
+        &self,
+        cell: CellId,
+        number: u64,
+        f: u8,
+    ) -> Result<Vec<bucket_cell::layout::Member>, String>;
+    /// A link to `member` of `cell`'s configuration `configuration`.
+    fn link(
+        &self,
+        cell: CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn crate::replicate::MemberLink>;
+}
+
+/// cladefs: a host's [`Members`], as [`Options`] holds it.
+#[derive(Clone)]
+pub struct MembersOf(pub Arc<dyn Members>);
+
+impl std::fmt::Debug for MembersOf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Members")
+    }
 }
 
 impl Default for Options {
@@ -293,6 +328,7 @@ impl Default for Options {
             checkpoint_every: CHECKPOINT_EVERY,
             filling_wait: Duration::from_secs(30),
             replication: None,
+            members: None,
         }
     }
 }
@@ -374,7 +410,7 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     progress: Mutex<Progress>,
     /// Notified as the progress changes: what waits for uploads listens to it, blocking or not
     /// (TASK-43.6).
-    changed: Event,
+    changed: Arc<Event>,
     /// Wakes the uploader: a commit waits, or it is to stop.
     wake: tokio::sync::Notify,
     options: Options,
@@ -577,6 +613,45 @@ impl<D: Dir> Uploader<D> {
                 changed.await;
             }
         }
+    }
+
+    /// cladefs: the replication of the store's cell, as its writer's taking found its head
+    /// (doc-21): none for a cell durable off its host once uploaded alone, or not taken yet.
+    pub fn replication(&self) -> Option<Replicated> {
+        self.shared.progress.lock().unwrap().taking.and_then(|taking| taking.replication)
+    }
+
+    /// cladefs: what wakes those waiting on the uploader, for a replicator to call as more is
+    /// replicated (TASK-537.3.3).
+    pub fn waker(&self) -> impl Fn() + Send + Sync + 'static + use<D> {
+        let changed = self.shared.changed.clone();
+        move || {
+            changed.notify(usize::MAX);
+        }
+    }
+
+    /// cladefs: waits until the commits up to `epoch` are replicated or uploaded (doc-21's
+    /// disjunction): replicated as the store's replicator says, counting once the bucket holds what
+    /// no member does ([`crate::replicate::Replicator::told`]); with no replicator, or its writer
+    /// fenced, uploaded. A cell whose members hold no quorum has its upload asked for at once.
+    pub fn wait_replicated(&self, epoch: u64) -> Result<(), Failure> {
+        let shared = &self.shared;
+        let Some(replicator) = self.store().replicator() else {
+            return self.wait_uploaded(epoch);
+        };
+        if replicator.degraded() {
+            if shared.ask(epoch, false)? {
+                return Ok(());
+            }
+        } else {
+            shared.observe()?;
+        }
+        shared.wait(|progress| {
+            if replicator.told(progress.uploaded) >= epoch {
+                return Some(Ok(()));
+            }
+            progress.failed.clone().map(Err)
+        })
     }
 
     /// The epoch of the store's latest commit uploaded and acknowledged, as the uploader says,
@@ -796,7 +871,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             token: Default::default(),
             at_version: Default::default(),
             progress: Mutex::new(Progress::default()),
-            changed: Event::new(),
+            changed: Arc::new(Event::new()),
             wake: tokio::sync::Notify::new(),
             options,
             uploads,
@@ -1146,7 +1221,81 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.hold_ring(&keys);
         let _ = self.token.set(placement);
         self.took(&writer, placement);
+        // cladefs: a replicated cell's commits replicated from now on (doc-21, TASK-537.3.3).
+        if let Some(replication) = writer.taken().head.replication.clone()
+            && replication.wish.f >= 1
+        {
+            self.replicate(&writer, replication).await?;
+        }
         Ok(Some(writer))
+    }
+
+    /// cladefs: `writer`, having taken a replicated cell asking for `replication`, has its commits
+    /// replicated from now on (doc-21, TASK-537.3.3): a configuration of this host and 2f members
+    /// picked from its peers, activated by a swap of the head before the store serves, and the
+    /// store's replicator started, of the commits after those it opened with, on no member. A
+    /// cell whose head names a configuration already is refused: its take must fence that one's
+    /// members and recover what they hold, which TASK-537.3.4 builds; until then, a take would lose
+    /// its commits told replicated.
+    async fn replicate(
+        &self,
+        writer: &Arc<Writer<B>>,
+        replication: bucket_cell::layout::Replication,
+    ) -> Result<(), Failure> {
+        let bucket_cell::layout::Replication { wish, configuration } = replication;
+        let members = self.options.members.clone().ok_or_else(|| {
+            Failure::msg(
+                "a replicated cell needs the daemon's peers and replica directory \
+                 (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS)",
+            )
+        })?;
+        if configuration.as_ref().is_some_and(|configuration| configuration.f >= 1) {
+            return Err(Failure::msg(
+                "taking a replicated cell whose head names a configuration: recovering what its \
+                 members hold is TASK-537.3.4's; refused rather than losing it",
+            ));
+        }
+        let store = self.store().clone();
+        let cell = store.description().cell;
+        let number = configuration.map_or(1, |configuration| configuration.number + 1);
+        let picking = members.0.clone();
+        let picked = blocking(move || -> Result<_, Failure> {
+            Ok((
+                picking.me().map_err(Failure::msg)?,
+                picking.pick(cell, number, wish.f).map_err(Failure::msg)?,
+            ))
+        })?;
+        let (me, others) = picked;
+        let mut all = vec![me];
+        all.extend(others.iter().cloned());
+        let configuration = bucket_cell::layout::Configuration {
+            number,
+            epoch: writer.epoch(),
+            f: wish.f,
+            members: all,
+        };
+        writer.configure(configuration.clone()).await?;
+        let links =
+            others.iter().map(|member| members.0.link(cell, &configuration, member)).collect();
+        let base = store.last_commit()?;
+        let changed = self.changed.clone();
+        let waker = move || {
+            changed.notify(usize::MAX);
+        };
+        let spool = blocking(|| store.spool())?;
+        let replicator =
+            crate::replicate::Replicator::start(usize::from(wish.f), base, spool, links, waker);
+        store.replicate_to(replicator);
+        let mut progress = self.progress.lock().unwrap();
+        if let Some(Taking { replication: Some(replicated), .. }) = progress.taking.as_mut() {
+            replicated.configuration = Some(number);
+        }
+        drop(progress);
+        log::info!(
+            "cladefs: {cell:?} replicated in configuration {number} with {:?}",
+            configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>()
+        );
+        Ok(())
     }
 
     /// `writer` took the cell, with the fencing token `token`: the store names what it reads in
