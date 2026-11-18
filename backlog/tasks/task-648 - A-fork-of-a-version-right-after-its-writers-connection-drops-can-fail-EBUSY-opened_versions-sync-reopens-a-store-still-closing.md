@@ -3,11 +3,10 @@ id: TASK-648
 title: >-
   A fork of a version right after its writer's connection drops can fail EBUSY:
   opened_version's sync reopens a store still closing
-status: In Progress
-assignee:
-  - '@claude'
+status: To Do
+assignee: []
 created_date: '2026-11-18 20:38'
-updated_date: '2026-11-18 20:38'
+updated_date: '2026-11-18 20:46'
 labels:
   - cladefsd
   - fork
@@ -36,3 +35,9 @@ Seen on ubu1 (2026-11-18, TASK-633.9's runs) under full-suite load, never alone:
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Paused 2026-11-18 for TASK-633.2, at the user's word; nothing changed yet.
+<!-- SECTION:NOTES:END -->
