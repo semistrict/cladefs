@@ -3,9 +3,11 @@ id: TASK-648
 title: >-
   A fork of a version right after its writer's connection drops can fail EBUSY:
   opened_version's sync reopens a store still closing
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 20:38'
+updated_date: '2026-11-18 20:38'
 labels:
   - cladefsd
   - fork

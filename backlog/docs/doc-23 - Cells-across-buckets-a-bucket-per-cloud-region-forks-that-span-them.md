@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 20:23'
+updated_date: '2026-11-18 20:39'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -198,14 +198,15 @@ Each model runs in under 10 minutes, split by the steps it takes, as Replication
 
 ## Order of the work
 
-1. **Measure.** How much of a base a child reads (bytes read over the version's object bytes), on real container-image bases. A version's dead-byte share, which a mirror copies. A cold inherited read under injected latency (`CLADEFS_BUCKET_LATENCY_MS`, about 70 ms) on ubu1. The real latency of each cloud pair needs real buckets, which the no-GCP rule forbids without the user's word.
-2. **The spec** (above).
-3. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).
-4. **Routing:** options per bucket, the resolver, fetchers, budgets and peers per bucket, and per-bucket stats.
-5. **A take that asks only its own bucket,** and a checkpoint's moves read in their own bucket.
-6. **KMS per bucket,** and the Azure Key Vault backend.
-7. **Forks across buckets** (`ForkCell` names the child's bucket), and collection across buckets.
-8. **Mirrors:** a copy for each pair of clouds, the marker, the switch, and their collection.
+Nothing here waits for a measurement (TASK-633.1, archived 2026-11-18): a mirror is asked for by a control call, its policy the VM manager's, and a cold read across buckets costs what Costs says.
+
+1. **The spec** (above).
+2. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).
+3. **Routing:** options per bucket, the resolver, fetchers, budgets and peers per bucket, and per-bucket stats.
+4. **A take that asks only its own bucket,** and a checkpoint's moves read in their own bucket.
+5. **KMS per bucket,** and the Azure Key Vault backend.
+6. **Forks across buckets** (`ForkCell` names the child's bucket), and collection across buckets.
+7. **Mirrors:** a copy for each pair of clouds, the marker, the switch, and their collection.
 
 ## Where this meets other work
 
