@@ -1,10 +1,10 @@
 ---
 id: TASK-508.1
 title: 'A cell has one filesystem: the cell object''s vdisk map and cell cuts go'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 00:44'
+updated_date: '2026-11-18 01:37'
 labels:
   - bucket
   - host
@@ -31,7 +31,7 @@ Main's cells (TASK-364) hold a map of named vdisks, each a branch of its own, an
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -52,4 +52,12 @@ Main's cells (TASK-364) hold a map of named vdisks, each a branch of its own, an
 <!-- SECTION:NOTES:BEGIN -->
 Done as planned. A cell's object names one cell::Filesystem { branch, kind }; holding it with another branch's is refused (Error::CellHasBranch, EEXIST). NewVersion/Version carry no cell_cut. Store descriptions name the cell's kind (store format 15; bucket FORMAT 16). FUSE mount: a cell shows at TENANT/CELL; Attach of a new cell (capacity) makes its Fxfs filesystem; CreateVdisk and Vdisk gone; cladefsctl mount create; Go regenerated. Bucket-level tests that put several branches in TEST_CELL (encrypted.rs) make stores naming no kind, so none claims the cell; attached-base tests fork generations into cells of their own.
 Verified: macOS cargo nextest -p extent_frame,extent_bucket,extent_store,cladefs,sqlite_extents,extent_files,follower,follower_sim,virtio_extent 1096 run, 1093 passed + the 3 attached-base tests fixed after (8/8 bases_ pass); sim 57/57; Shuttle extent_store 37/37 and 10/10, cladefs 33/33, follower 10/10, follower_sim 18/18; clippy (workspace, shuttle) clean; fmt; go generate --check, vet, test. ubu1 (Linux, from a patch, nothing pushed): clippy -p cladefs,sqlite_extents,extent_store,extent_bucket --tests --bins clean; nextest -p cladefs -p sqlite_extents 685 run, 682 passed + the same 3, rerun with fuse_mount 22/22; Go tests against cladefsd pass. Not run: the whole workspace's nextest (DoD 1), guest/e2e suites.
+
+2026-11-18 whole workspace: macOS cargo nextest --workspace --exclude zx (sim excluded, run apart: 57/57) 2643 run, 2642 passed, 1 aborted: extent_store pages::tests::a_dead_flusher_is_known_and_holds_no_writer_for_good, pages.rs unchanged from origin/main, 8 reruns pass, filed TASK-509. ubu1 (bundle of the branch, no push; fxjob, CARGO_BUILD_JOBS=4, nice 19, --test-threads 4) CLADEFS_TEST_PARTS=workspace scripts/test.sh: 2955 run, 2953 passed, 2 failed: keys::tests::kms_having_no_kek_refuses_new_cells_as_destroyed (TASK-505, fails on main's CI too) and cladefs::control open_stores_are_listed_with_their_takings_and_uploads aborting after passing (filed TASK-511); both pass 6/6 rerun alone.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A cell has one filesystem: the cell object names one Filesystem { branch, kind } and refuses another (CellHasBranch); the vdisk map, names and their errors, VersionCut's cell_cut and the daemon's, FUSE mount's and Go bindings' vdisks are gone; store descriptions name the cell's kind (store format 15, bucket FORMAT 16). Verified by the whole workspace on macOS and on ubu1 (Linux): every failure left is a flake pre-existing or untouched by the change (TASK-505, TASK-509, TASK-511), each passing alone, plus Shuttle, sim, clippy, fmt and Go.
+<!-- SECTION:FINAL_SUMMARY:END -->

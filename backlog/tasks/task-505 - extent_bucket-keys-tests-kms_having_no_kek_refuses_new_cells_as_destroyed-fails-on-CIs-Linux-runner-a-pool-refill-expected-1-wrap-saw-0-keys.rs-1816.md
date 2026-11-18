@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-17 02:10'
+updated_date: '2026-11-18 01:37'
 labels:
   - bug
   - test
@@ -31,3 +32,9 @@ Fails on CI's test (workspace) job on main (run of 001032beb, job 133692118967) 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: seen on ubu1 too, once in a whole-workspace nextest under load (branch t3/cell-is-one-filesystem); 6 reruns alone passed.
+<!-- SECTION:NOTES:END -->

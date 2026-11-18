@@ -4,11 +4,12 @@ title: Versions are the only named past states
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 00:24'
+updated_date: '2026-11-18 01:01'
 labels:
   - bucket
   - host
-dependencies: []
+dependencies:
+  - TASK-476
 documentation:
   - doc-20
 parent_task_id: TASK-508
@@ -34,3 +35,24 @@ Two mechanisms name a past state today: a version, kept inside its cell (doc-18)
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Research 2026-11-18 (what the cut touches):
+1. Points are a whole mechanism, not a flag: a point is a frozen branch of its own with a record (record::Kind::Point, Record::point), its own DEK (keys::Ring::for_point), forks of it (branch::fork_point*, resume_point_fork, finish_point_fork, Child.point), sharing (branch::share, Error::Point/NotPoint/NotShared), the collector's point-clone references (TASK-395), the store's point role (State.point, Uploader::is_point, StoreRole::Point), the daemon's kept-open points for zygote restores (cladefsd/stores.rs Point, keep, LINGER, fork_from, at_point), ForkStore's point/shared flags, SharePoint, cladefsctl, and specs/bucket (BucketCellsPoints and the restores of points).
+2. Versions already do the bucket's half: branch::fork_version shares fork_with with points (record, reference, check, fork), Head::versions, Writer::share_version, drop_versions, the collector's versions pass, and a store opened as a version's copy (StoreFile.version, Recovering::version). The daemon has no version API at all.
+3. A VM snapshot's point crosses into the vendored Firecracker fork: vmm/src/lib.rs calls take_snapshot(point path), and the VMM's persisted device state carries point and point_branch (vendor/firecracker, devices/virtio/extent/persist.rs). Replacing it needs a Firecracker-fork change, a release tag and a submodule bump, not this repo alone.
+4. TASK-476 (In Progress, another session, branch t3/fast-cheap-volume-snapshots) is building exactly the daemon half: local-first versions in the source cell for VM snapshots, restores from them, a rolling window of them. Doing it here too would duplicate and conflict.
+Order, once TASK-476's daemon versions land:
+a. Daemon API: MakeVersion, DropVersions, ShareVersion, ForkStore from a version (ForkStore's point and shared flags go); cladefsctl and Go to match.
+b. VM snapshots (with the Firecracker fork): take_snapshot makes a local version of each of the VM's cells; the persisted state names (cell, version); a restore forks the version, a zygote keeping the version's copy open as it keeps a point open today; holds_what checks against the version.
+c. Delete the point mechanism: record kind, fork_point*, point DEKs, Child.point, share, the errors, StoreRole::Point and State.point, the kept-open points, the collector's point-only paths, the specs' point configs; tests rewritten to versions.
+d. Measure net lines; docs (doc-7 Points, doc-10's generations as shared versions).
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: not started in code. Blocked by TASK-476's daemon versions (another session, same ground) and by the Firecracker fork's snapshot contract (point path and branch in the VMM's persisted state). Plan recorded.
+<!-- SECTION:NOTES:END -->
