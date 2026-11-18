@@ -18,6 +18,8 @@ use storage_device::DeviceHolder;
 use storage_device::fake_device::{Crashes, FakeDevice, Op};
 
 const BLOCK: u32 = 4096;
+/// A window's bytes: four regions of 16 MiB, as the default options cut it.
+const WINDOW: u64 = 64 << 20;
 
 /// A device of 1 GiB at most, as awkward as a store.
 fn device() -> FakeDevice {
@@ -54,7 +56,7 @@ impl Mounted {
         let file_set = match mode {
             Mode::Device => FileSet::open(device, options),
             Mode::Window => {
-                FileSet::open_mapped(device, Box::new(CopyingWindow::new(BLOCK)), options)
+                FileSet::open_mapped(device, Box::new(CopyingWindow::new(WINDOW, BLOCK)), options)
             }
         };
         let file_set = file_set.expect("opening the file set");
@@ -572,7 +574,7 @@ fn a_connection_outlives_its_registration() {
 fn closing_an_uncommitted_file_returns_its_mapping_region() {
     let files = FileSet::open_mapped(
         DeviceHolder::new(device()),
-        Box::new(CopyingWindow::new(BLOCK)),
+        Box::new(CopyingWindow::new(WINDOW, BLOCK)),
         Options { window_regions: 1, ..Options::default() },
     )
     .unwrap();

@@ -28,6 +28,8 @@ const MAX_PAGES: usize = 160;
 /// More files than a window has regions, so that some read from the device.
 const FILES: usize = 3;
 const OPTIONS: Options = Options { max_extent_blocks: 2, window_regions: 2 };
+/// A region a file of the largest, and no more: a window is made, and filled, at each opening.
+const WINDOW: u64 = (OPTIONS.window_regions as usize * MAX_PAGES * PAGE) as u64;
 
 /// How the file set reads: from its device, or from a window it maps its files into.
 #[derive(Clone, Copy, Debug)]
@@ -172,7 +174,7 @@ impl Run {
         match mode {
             Mode::Device => FileSet::open(device, OPTIONS),
             Mode::Window => {
-                let window = Box::new(CopyingWindow::new(PAGE as u32));
+                let window = Box::new(CopyingWindow::new(WINDOW, PAGE as u32));
                 FileSet::open_mapped(device, window, OPTIONS)
             }
         }
