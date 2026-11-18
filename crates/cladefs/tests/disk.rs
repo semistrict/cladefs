@@ -174,7 +174,9 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     write(&ours, 1, 2000).unwrap();
     ours.commit(None).unwrap();
     // And acme's VMs commit, refused as they write: their commits, sealing their extents, free the
-    // room their extents open held, 16 times what a commit may copy of each, for six more.
+    // room their extents open held, 16 times what a commit may copy of each, for six more at
+    // least; and what follows them, framing and uploading what they wrote, frees the rest, as fast
+    // as it goes, for all 16 at most.
     for vm in &vms {
         vm.commit(None).unwrap();
     }
@@ -187,7 +189,8 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
             Err(errno) => break errno,
         }
     };
-    assert_eq!((refused, more), (Errno::ENOSPC, 16 * open_share / ADMITTED));
+    assert_eq!(refused, Errno::ENOSPC);
+    assert!((16 * open_share / ADMITTED..=16).contains(&more), "{more} more admitted");
 
     // What it wrote, freed and uploaded, leaves the disk: it writes again.
     let connected = vms.len();
