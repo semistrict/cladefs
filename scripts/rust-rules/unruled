@@ -10,15 +10,15 @@ a-tenant-shares-no-room: one call for another (add for take().await): which is r
 arenas-shrink: a seal of a memfd not made (F_SEAL_SHRINK): one call's effect, a value left in its place
 bucket-failures-dropped: the counting of a failure taken out whole
 copies-of-whole-requests: a constant's value (PIECE)
-forks-take-branches-claimed: a check's result discarded and two conditions narrowed: which branches a fork may take is the protocol's
+forks-take-cells-claimed: a check taken out whole (another cell's head refusing a fork's create): which cells a fork may take is the protocol's
 framed-in-copies: a condition forced false and a fast path taken out: a performance choice of the segments'
 large-extents-framed-in-copies: a fast path taken out whole
 no-room-checked: a condition narrowed (the peer's room)
+restores-make-others-cells: a value (no tenant for the fork's child, the version's taken): whose a fork is is the server's
 roots-of-any-size: a bound replaced by a looser one (MAX_ROOT by MAX_PAYLOAD): which bound is the codec's
 tenants-disks-unlimited: a limit replaced by none: a value
 tenants-given-the-default-memory: the tenant's budget replaced by the default's: which budget is the server's
 tenants-name-any-store: a check replaced by true
-tenants-name-branches: a policy's flag replaced by false
 windows-of-any-size: a bound's check and an assertion taken out whole
 writes-admitted-as-nothing: a value (the bytes admitted)
 writes-retried-at-once: a wait for its turn taken out whole
@@ -42,7 +42,7 @@ a-sync-holding-commits-records-reaches: a condition narrowed
 a-tombstone-leaves-a-trims-entry: a graveyard's removal taken out whole
 a-transaction-never-fills: a bound replaced by a huge value
 a-trim-goes-past-the-room: a bound replaced by a count
-a-volume-frees-what-its-snapshot-shares: a condition narrowed (frozen owners)
+a-volume-frees-what-its-snapshot-shares: a condition narrowed and a check taken out whole (frozen owners)
 allocate-ignores-the-room: a condition widened
 allocate-preallocates: one implementation for another: what fallocate does is the protocol's
 allocate-shrinks-to-its-end: a comparison changed

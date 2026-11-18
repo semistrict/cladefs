@@ -1,0 +1,17 @@
+# A tenant's VM process restoring a version gets a new cell of the tenant it names, the version's,
+# not of its own: another tenant's cell made in its directory, which its own opens then refuse
+# (TASK-364). Before TASK-508's no copies (9a65b3838) it named the branch its restore's copy took,
+# another tenant's (TASK-150.4).
+# Kind: another tenant's
+# Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
+--- a/crates/cladefs/src/cladefsd/server.rs
++++ b/crates/cladefs/src/cladefsd/server.rs
+@@ -1642,7 +1642,7 @@
+             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
+                 cells::removed_if_unmade(path)?;
+                 let forked = (crate::CellId { tenant, id: cell }, version);
+-                cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
++                cells::fork_version(forked, capacity, (path, None)).await?;
+                 Arc::new(open_store(path, None, Some(arena))?)
+             }
+             (None, codec::Opening::Create(capacity, kind)) => {

@@ -19,7 +19,7 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -1397,7 +1397,6 @@
+@@ -1552,7 +1552,6 @@
  	unsigned long from, to;
  	int err = 0;
  
@@ -27,8 +27,8 @@
  	from = region->mapped;
  	if (end <= from)
  		goto out;
-@@ -1432,7 +1431,6 @@
- 			from, to, region->branch, region->sequence, region->pages,
+@@ -1590,7 +1589,6 @@
+ 			from, to, region->cell, region->sequence, region->pages,
  			region->window_offset, err);
  out:
 -	mutex_unlock(&region->lock);
