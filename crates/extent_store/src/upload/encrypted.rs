@@ -287,13 +287,13 @@ fn segment_key(key: &str, bytes: &[u8]) -> KeyId {
 fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let world = World::new();
     let first = world.host(5);
-    let vdisks = [(test_branch(7), "a"), (test_branch(8), "b"), (test_branch(9), "c")];
-    let dirs: Vec<MemDir> = vdisks.iter().map(|&(branch, _)| made(branch)).collect();
+    let cells = [(test_branch(7), "a"), (test_branch(8), "b"), (test_branch(9), "c")];
+    let dirs: Vec<MemDir> = cells.iter().map(|&(branch, _)| made(branch)).collect();
     let mut deks = Vec::new();
     let mut data = Vec::new();
     for (at, dir) in dirs.iter().enumerate() {
         let (store, uploader) = open_on(&world, &first, dir).unwrap();
-        let branch = vdisks[at].0;
+        let branch = cells[at].0;
         let written_data = noise(at as u64 + 1, 4 * 4096);
         written(&store, &uploader, ExtentId::new(branch.id, 1), &written_data);
         let (dek, id) = store.keys().encrypting();
@@ -311,7 +311,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let unwrapped = futures::executor::block_on(world.kms.inner().unwrap(TENANT, &kek.wrapped));
     let kek_bytes = *unwrapped.unwrap().expose();
     let objects = world.objects();
-    for ((branch, _), dek) in vdisks.iter().zip(&deks) {
+    for ((branch, _), dek) in cells.iter().zip(&deks) {
         let record = world.record(*branch);
         let [wrapped] = &record.deks[..] else { panic!("{:?}", record.deks) };
         assert_eq!((wrapped.generation, wrapped.kek), (1, 1));
@@ -322,7 +322,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
         }
     }
     for ((key, bytes), (at, (branch, _))) in
-        objects.iter().flat_map(|object| vdisks.iter().enumerate().map(move |v| (object, v)))
+        objects.iter().flat_map(|object| cells.iter().enumerate().map(move |v| (object, v)))
     {
         assert!(!holds(bytes, &kek_bytes), "{key} holds the cell's KEK");
         assert!(!holds(bytes, &data[at][..64]), "{key} holds {branch}'s data");
@@ -358,7 +358,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     assert_eq!(world.calls(), (0, 1));
     assert_eq!(world.cell().epoch, 2);
     for (at, (store, _)) in opened.iter().enumerate() {
-        let extent = ExtentId::new(vdisks[at].0.id, 1);
+        let extent = ExtentId::new(cells[at].0.id, 1);
         assert_eq!(read(&world, &second, store, extent, 4 * 4096), Ok(data[at].clone()));
     }
     assert_eq!(world.calls(), (0, 1));
@@ -1428,7 +1428,7 @@ fn files_under(dir: &std::path::Path) -> usize {
 }
 
 /// TASK-411.7, AC #1 (and TASK-411's AC #1): a tenant shredded, its KEK destroyed in the KMS, and
-/// the hosts told so: none of its vdisks is readable on any host. Host 5 holds its store open, its
+/// the hosts told so: none of its cells is readable on any host. Host 5 holds its store open, its
 /// data in the bucket, in its write-ahead log's closed segment and in its open segment, a commit
 /// durable there (its closed segment, acknowledged, left the log: a closing's own test is
 /// `segments_closed_again_are_never_in_the_clear`); host 6 read it into its part cache on disk, holding the store's keys as a host
@@ -1440,7 +1440,7 @@ fn files_under(dir: &std::path::Path) -> usize {
 /// rewrapped under its own cell's KEK, keeps it in host 5's memory and reads on, there and on a
 /// host opening it afresh: shredding a parent leaves its children what they inherited.
 #[test]
-fn shredded_tenants_leave_none_of_their_vdisks_readable_on_any_host() {
+fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let (writer, reader) = (world.host(5), world.host(6));
@@ -1514,7 +1514,7 @@ fn shredded_tenants_leave_none_of_their_vdisks_readable_on_any_host() {
     drop((store, uploader));
 }
 
-/// TASK-411.7, AC #2: a cell shredded, its wrapped KEK taken out of its object, leaves its vdisks
+/// TASK-411.7, AC #2: a cell shredded, its wrapped KEK taken out of its object, leaves its cells
 /// unreadable, and the tenant's other cell readable. A host told nothing opens no store of it
 /// afresh, the cell taken by no one, the error naming the cell; hosts told forget its KEK and their
 /// fetchers its store's ring, opening nothing more of what they cached of it, and the other cell's
@@ -1523,7 +1523,7 @@ fn shredded_tenants_leave_none_of_their_vdisks_readable_on_any_host() {
 /// keeping non-current versions would let someone do, opens the store again: why a cell's
 /// shredding needs non-current versions of its object expired, or versioning off.
 #[test]
-fn shredded_cells_leave_their_vdisks_unreadable_and_the_tenants_others_readable() {
+fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable() {
     let world = World::new();
     let (writer, reader) = (world.host(5), world.host(6));
     let ours = test_branch(7);

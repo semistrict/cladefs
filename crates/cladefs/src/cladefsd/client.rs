@@ -620,7 +620,7 @@ impl DaemonExtentStore {
     /// cladefs: creates the store's window as [`Self::create_dax_window_in_host_memory`] does, a
     /// writer's, copying on write, of as many private pages as it has, over a VM's memory, whose
     /// faults on a page the daemon may not have mapped yet have `unmapped` map it first: a memory
-    /// vdisk's (TASK-456.3), whose window nothing else maps.
+    /// cell's (TASK-456.3), whose window nothing else maps.
     ///
     /// # Safety
     ///
@@ -746,7 +746,7 @@ impl DaemonConnection {
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a SQLite vdisk of its new cell, which the sqlite_extents VFS alone opens, rather
+    /// exist, a SQLite cell, which the sqlite_extents VFS alone opens, rather
     /// than an Fxfs one (TASK-364).
     pub fn open_sqlite(
         self,
@@ -757,7 +757,7 @@ impl DaemonConnection {
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a memory vdisk of its new cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
+    /// exist, a memory cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
     pub fn open_memory(
         self,
         store: impl AsRef<Path>,
@@ -1445,7 +1445,7 @@ struct DaemonFaults {
 }
 
 /// cladefs: what maps a window's pages as faults first reach them, the daemon told nothing of
-/// them before: a VM's memory vdisk's (TASK-456.3), whose window maps what its tree names of a
+/// them before: a VM's memory cell's (TASK-456.3), whose window maps what its tree names of a
 /// page only once the guest touches it.
 pub trait Unmapped: Send + Sync {
     /// Maps, if it hasn't, what the window has at `offset`, a fault's page, resolving once the

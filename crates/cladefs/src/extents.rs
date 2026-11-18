@@ -555,7 +555,7 @@ impl ExtentStore {
         Self::create_kind_with(path, capacity, (of, Kind::Fxfs), opening)
     }
 
-    /// cladefs: a new store at `path`, as [`ExtentStore::create_with`] makes, a vdisk of `kind` of
+    /// cladefs: a new store at `path`, as [`ExtentStore::create_with`] makes, a cell of `kind`,
     /// its branch's cell (TASK-364): a SQLite one, which the sqlite_extents VFS alone opens, as a
     /// store a database is made in through the daemon is.
     pub fn create_kind_with(
@@ -1074,7 +1074,7 @@ impl ExtentStore {
     }
 
     /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the branch
-    /// `of` says, a vdisk of `kind` of its branch's cell (TASK-364), its uploader as `keeping`
+    /// `of` says, a cell of `kind` (TASK-364), its uploader as `keeping`
     /// says, placed at `token`'s placement if given, closes it, and returns its branch: what
     /// [`ExtentStore::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its
     /// cell, and so its head, is taken as it is made with the token of the placement it is given,

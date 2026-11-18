@@ -1142,7 +1142,7 @@ enum KeptBy {
 /// recovered once, however many forks name it, several at once ([`Live::keep_origin`]): the
 /// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
 /// other cells are read there. A branch's are recovered in one walk where they share a checkpoint,
-/// each footer read once for them all (`recovery::recover_ats`, TASK-476): a vdisk's versions are
+/// each footer read once for them all (`recovery::recover_ats`, TASK-476): a cell's versions are
 /// up to 256 states of one history. A walk finding one lost, each is recovered alone, to tell
 /// which.
 async fn keep_origins(
@@ -5299,29 +5299,29 @@ mod tests {
         crate::testing::read(&reader, extent, &location).await
     }
 
-    /// TASK-476: a pass over a vdisk of many versions reads each segment's footer twice at most,
-    /// once for the vdisk's state and once for all its versions' states, walked to at once
+    /// TASK-476: a pass over a cell of many versions reads each segment's footer twice at most,
+    /// once for the cell's state and once for all its versions' states, walked to at once
     /// (`recovery::recover_ats`), not once a version; and each version's checkpoint at its key,
     /// which none has. 16 versions cut after a commit each, no checkpoint: 33 segments, whose
     /// footers a pass recovering each version alone read 321 times, in 52 GETs besides
     /// (`versions-pass-bench` shows how that grew).
     #[test]
-    fn passes_read_a_vdisks_footers_once_for_all_its_versions() {
+    fn passes_read_a_cells_footers_once_for_all_its_versions() {
         let (segments, ranged, gets) = block_on(pass_over_versions(16));
         assert_eq!(segments, 33);
         assert_eq!((ranged, gets), (2 * segments, 16 + 6));
     }
 
-    /// A pass over the cell of a vdisk with `versions` versions, each cut after a commit of an
+    /// A pass over a cell with `versions` versions, each cut after a commit of an
     /// extent: how many segments it has, and the ranged GETs, which read footers, and the GETs the
     /// pass made.
     async fn pass_over_versions(versions: u64) -> (u64, u64, u64) {
         let bucket = store();
-        let vdisk = test_branch(1);
-        branch::create(&*bucket, vdisk, 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), vdisk, 10, 0).await.unwrap();
+        let branch = test_branch(1);
+        branch::create(&*bucket, branch, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
         let first = writer.chain().next_sequence();
-        let extent = |n| ExtentId::new(vdisk.id, first + n);
+        let extent = |n| ExtentId::new(branch.id, first + n);
         commit(
             &writer,
             Commit { tag: 1, extents: vec![(extent(0), vec![1])], ..Commit::default() },
@@ -5342,7 +5342,7 @@ mod tests {
         assert_eq!(writer.versions().await.len() as u64, versions);
         let segments = writer.chain().next_segment();
         let before = bucket.stats().requests;
-        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, vdisk.cell).await.unwrap();
+        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, branch.cell).await.unwrap();
         assert!(!dry.fenced);
         let after = bucket.stats().requests;
         let made = |request: Request| after[request as usize] - before[request as usize];

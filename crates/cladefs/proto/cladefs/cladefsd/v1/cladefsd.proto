@@ -265,7 +265,7 @@ message CreateStoreRequest {
   // named: its own (INVALID_ARGUMENT, EINVAL, otherwise).
   uint64 cell = 6;
   // The cell's kind, which says what opens it.
-  VdiskKind kind = 7;
+  CellKind kind = 7;
   // If not 0, the store is a copy of this version of `branch`, which must be named: the cell's
   // state at the version, which nothing writes, and which ForkStore forks, on as many hosts at
   // once as wanted. Its first fork waits for the cell's head to name the version.
@@ -274,13 +274,13 @@ message CreateStoreRequest {
 
 // What a cell holds, which says what opens it (the type's name is renamed with the rest,
 // TASK-508.4).
-enum VdiskKind {
+enum CellKind {
   // An Fxfs filesystem: a VM's disk, or a host's mount's.
-  VDISK_KIND_FXFS = 0;
+  CELL_KIND_FXFS = 0;
   // A database of sqlite_extents, which its VFS alone opens.
-  VDISK_KIND_SQLITE = 1;
+  CELL_KIND_SQLITE = 1;
   // A VM's memory: an extent_files file set of one file, its image (TASK-456).
-  VDISK_KIND_MEMORY = 2;
+  CELL_KIND_MEMORY = 2;
 }
 
 // The store made.

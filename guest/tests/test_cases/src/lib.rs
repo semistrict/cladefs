@@ -609,14 +609,14 @@ pub fn test_cases() -> Vec<TestCase> {
             }),
         ),
         TestCase::new(
-            "fxfs-guest-snapshot-memory-vdisk-dax",
+            "fxfs-guest-snapshot-memory-cell-dax",
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestFxfsGuestSnapshot {
                 dax: true,
                 mode: SnapshotMode::Zygote,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
-                memory: SnapshotMemory::Vdisk,
+                memory: SnapshotMemory::Cell,
             }),
         ),
         TestCase::new(

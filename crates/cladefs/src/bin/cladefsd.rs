@@ -4,7 +4,7 @@
 
 //! cladefsd, cladefs's daemon, one a host (TASK-475): serves the extent stores of the VMs on this
 //! host, from one memory, to VM processes that connect to its socket (`cladefs::cladefsd`); and, if
-//! told to, mounts tenants' cells with FUSE (`cladefs::cladefsd::mount`). A cell's vdisks are held
+//! told to, mounts tenants' cells with FUSE (`cladefs::cladefsd::mount`). A cell is held
 //! by this one process, whichever serves them.
 //!
 //! ```sh

@@ -3,15 +3,15 @@
 // found in the LICENSE file.
 
 //! cladefs: the daemon's FUSE mount of tenants' cells (TASK-475.2), which `cladefs-mount
-//! --control` served from a process of its own before: one directory of cells, each Fxfs vdisk
-//! of a cell attached shown at `TENANT/CELL/VDISK` (`crate::fuse::control`), its Mount service
+//! --control` served from a process of its own before: one directory of cells, each Fxfs cell
+//! attached shown at `TENANT/CELL` (`crate::fuse::control`), its Mount service
 //! served on the daemon's control socket beside Cladefsd ([`super::control`]). In the daemon, a
-//! cell's vdisks are held by one process, whichever serves them, VMs or the mount, with one
+//! cell is held by one process, whichever serves it, VMs or the mount, with one
 //! bucket client, part cache, upload budget and drain.
 //!
 //! The mount is made as the daemon starts, if `CLADEFSD_MOUNT` names a mount point
 //! ([`Config::from_env`]), and closed as it drains ([`close`]): unmounted lazily, its cells'
-//! vdisks written back and their stores closed once nothing uses them, within the drain's
+//! cells written back and their stores closed once nothing uses them, within the drain's
 //! bound. Unmounted otherwise meanwhile (`umount`), it serves no more, and the daemon goes on
 //! serving VMs; its stores close as it drains.
 
@@ -22,12 +22,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Where the daemon mounts its cells, and keeps their vdisks' stores.
+/// Where the daemon mounts its cells, and keeps their cells' stores.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The mount point, a directory: `CLADEFSD_MOUNT`.
     pub mountpoint: PathBuf,
-    /// The directory the attached vdisks' stores are in, each at `TENANT/CELL/VDISK`:
+    /// The directory the attached cells' stores are in, each at `TENANT/CELL`:
     /// `CLADEFSD_MOUNT_STORES`.
     pub stores: PathBuf,
     /// Whether users other than the daemon's may use the mount, as its files' permissions say
@@ -53,7 +53,7 @@ impl Config {
         };
         let stores = var("CLADEFSD_MOUNT_STORES").ok_or_else(|| {
             "CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
-             vdisks' stores"
+             cells' stores"
                 .to_owned()
         })?;
         let allow_other = match var("CLADEFSD_MOUNT_ALLOW_OTHER").as_deref() {
@@ -73,7 +73,7 @@ static MOUNT: Mutex<Option<(StoresMount, Stores)>> = Mutex::new(None);
 /// Whether the daemon mounted its cells ([`start`]).
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 
-/// Whether [`close`] closed the mount, its vdisks written back.
+/// Whether [`close`] closed the mount, its cells written back.
 static CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// Mounts the daemon's directory of cells as `config` says, its cells taken from the bucket at
@@ -115,7 +115,7 @@ pub(super) fn left() -> bool {
 }
 
 /// Closes the daemon's mount, if it has one, as it drains: unmounted lazily, so at once from its
-/// mount point, and once nothing uses it, its vdisks written back and their stores closed. Holds
+/// mount point, and once nothing uses it, its cells written back and their stores closed. Holds
 /// no thread of the runtime while it waits.
 pub(super) async fn close() -> Result<(), Error> {
     let Some((mount, _)) = MOUNT.lock().unwrap().take() else { return Ok(()) };
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(
             config(&[("CLADEFSD_MOUNT", "/m")]),
             Err("CLADEFSD_MOUNT is set, but CLADEFSD_MOUNT_STORES names no directory for its \
-                 vdisks' stores"
+                 cells' stores"
                 .to_owned())
         );
         assert_eq!(

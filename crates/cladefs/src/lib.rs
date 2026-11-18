@@ -144,7 +144,7 @@ mod image;
 pub mod import;
 mod memory;
 #[cfg(target_os = "linux")]
-pub mod memory_vdisk;
+pub mod memory_cell;
 mod node;
 pub mod pages;
 mod profile;

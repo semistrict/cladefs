@@ -55,8 +55,8 @@
 (* placements (the head swapped to the final epoch, then the record, the   *)
 (* children recorded), failed forks by their hosts (delete_fork), versions   *)
 (* forked by restores (the child's record, the head naming the version read, the record      *)
-(* made); other branches take forks' children's IDs. Every branch is a     *)
-(* vdisk of a cell (CellOf), whose prefix holds its objects. The           *)
+(* made); other branches take forks' children's IDs. Every branch is in   *)
+(* a cell (CellOf), whose prefix holds its objects. The                   *)
 (* collector runs passes per cell (TASK-395), each under its cell's        *)
 (* collector lease, at once with other cells' and with writers: the cell's *)
 (* listing and records, its live branches recovered from their heads, the  *)
@@ -271,7 +271,7 @@
 (* drops it by a swap; a deletion's final head names none. A restore of   *)
 (* one is a version's fork's steps, the branch's head read in place of the  *)
 (* version's head. A version's cut is of a quiescent store, and seals     *)
-(* nothing. Cells' cuts, versions of several vdisks cut at one moment,    *)
+(* nothing. Cells' cuts, versions of several cells cut at one moment,    *)
 (* are a host's work alone (doc-18): not modelled.                        *)
 (*                                                                         *)
 (* Gone with the head (TASK-407), with what they guarded: a create where   *)
@@ -338,7 +338,7 @@ CONSTANTS
     Can,            \* the kinds of step the model takes
     None,           \* a model value: nothing
     Rules,          \* the protocol's rules in force (all, but in a mutation)
-    CellOf,         \* CellOf[b]: the cell b is a vdisk of, whose prefix holds its objects
+    CellOf,         \* CellOf[b]: the cell b is a cell of, whose prefix holds its objects
     Given           \* the IDs the bucket's allocators give (objectid), each to one making alone:
                     \* the root's, if given, and those of restores that take one (idsGivenOnce)
 
@@ -368,7 +368,7 @@ ASSUME Given \subseteq Branches
 
 \* The maps of branches to cells a model's CellOf may be: one cell, which is the whole-bucket
 \* collector before TASK-395; a cell each, as hosts make them (a store, a fork, a version and a
-\* restore each the one vdisk of a new cell); and the root sharing its cell with branch 2, the
+\* restore each a new cell); and the root sharing its cell with branch 2, the
 \* others a cell each, for forks within a cell and across cells in one model.
 OneCell == [b \in Branches |-> 1]
 CellEach == [b \in Branches |-> b]

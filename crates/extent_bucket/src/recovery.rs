@@ -1159,7 +1159,7 @@ fn state_at<'a, B: Bucket>(
 /// is as [`state_at`] has it: its checkpoint at its key, if `kept` or of another cell than `from`;
 /// else its newest checkpoint up to there, or its origin's state, then its segments up to there.
 /// Those sharing their newest checkpoint up to them are walked to from it at once, each footer read
-/// once for them all, not once a state: a pass over a vdisk of 256 versions read 16 footers a
+/// once for them all, not once a state: a pass over a cell of 256 versions read 16 footers a
 /// segment (`versions-pass-bench`). The first state of a walk is whole; the next, what changed of
 /// it, the extents the footers since named where it names them, which is what a pass keeps of them
 /// all ([`Walked`]).

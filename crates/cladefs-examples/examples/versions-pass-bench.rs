@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a collector's pass over a cell costs as its vdisk keeps more versions
-//! (TASK-476, doc-18 Collection). A vdisk of EXTENTS extents, checkpointed every CHECKPOINT_EVERY
+//! cladefs's own: what a collector's pass over a cell costs as its cell keeps more versions
+//! (TASK-476, doc-18 Collection). A cell of EXTENTS extents, checkpointed every CHECKPOINT_EVERY
 //! segments, as a writer does, takes N versions, each after a commit rewriting CHANGED extents: two
 //! segments a version, the commit's and the cut's. A dry run over its cell, which keeps each
 //! version's state as a pass does, is timed, and its requests of the bucket counted by kind. The
@@ -41,7 +41,7 @@ fn main() {
         false => args,
     };
     println!(
-        "a dry run over a cell whose vdisk of {EXTENTS} extents keeps N versions, each after a \
+        "a dry run over a cell whose cell of {EXTENTS} extents keeps N versions, each after a \
          commit of {CHANGED} extents, checkpointed every {CHECKPOINT_EVERY} segments; median of \
          {PASSES} passes"
     );
@@ -54,7 +54,7 @@ fn main() {
     }
 }
 
-/// Makes the vdisk with `versions` versions and prints what a pass over its cell costs.
+/// Makes the cell with `versions` versions and prints what a pass over its cell costs.
 fn bench(versions: usize) {
     let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
     let segments = block_on(fill(&bucket, versions));
@@ -83,18 +83,18 @@ fn bench(versions: usize) {
     );
 }
 
-/// Writes the vdisk, branch 1 of `CELL`: its extents, then `versions` versions, each after a commit
+/// Writes the branch, branch 1 of `CELL`: its extents, then `versions` versions, each after a commit
 /// rewriting `CHANGED` of them. Returns how many segments it wrote.
 async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
-    let vdisk = Branch { cell: CELL, id: 1 };
-    branch::create(&**bucket, vdisk, 0).await.unwrap();
-    // The tests' KMS: every vdisk is encrypted, and so read by the pass.
+    let branch = Branch { cell: CELL, id: 1 };
+    branch::create(&**bucket, branch, 0).await.unwrap();
+    // The tests' KMS: every branch is encrypted, and so read by the pass.
     let kms = CachingKms::new(Arc::new(extent_keys::testing::MemoryKms::new()));
-    let writer = Writer::open_under(bucket.clone(), vdisk, (10, 0), &kms).await.unwrap();
+    let writer = Writer::open_under(bucket.clone(), branch, (10, 0), &kms).await.unwrap();
     let data = vec![0x5a; EXTENT];
     let first = writer.chain().next_sequence();
     let mut live: Vec<ExtentId> =
-        (0..EXTENTS).map(|n| ExtentId::new(vdisk.id, first + n)).collect();
+        (0..EXTENTS).map(|n| ExtentId::new(branch.id, first + n)).collect();
     let extents = live.iter().map(|&extent| (extent, data.clone())).collect();
     let mut segments = 0;
     let mut add = async |segment: SegmentBuilder, cut: Option<NewVersion>| {
@@ -117,7 +117,7 @@ async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
         // A rolling change: the oldest CHANGED extents rewritten as new ones.
         let frees: Vec<ExtentId> = live.drain(..CHANGED as usize).collect();
         let written: Vec<ExtentId> =
-            (0..CHANGED).map(|n| ExtentId::new(vdisk.id, next + n)).collect();
+            (0..CHANGED).map(|n| ExtentId::new(branch.id, next + n)).collect();
         next += CHANGED;
         live.extend(&written);
         let extents = written.iter().map(|&extent| (extent, data.clone())).collect();

@@ -335,10 +335,10 @@ impl Cladefsd for Control {
             version,
         } = request.into_inner();
         let store = path(store)?;
-        let kind = match VdiskKind::try_from(kind) {
-            Ok(VdiskKind::Fxfs) => Kind::Fxfs,
-            Ok(VdiskKind::Sqlite) => Kind::Sqlite,
-            Ok(VdiskKind::Memory) => Kind::Memory,
+        let kind = match CellKind::try_from(kind) {
+            Ok(CellKind::Fxfs) => Kind::Fxfs,
+            Ok(CellKind::Sqlite) => Kind::Sqlite,
+            Ok(CellKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {
@@ -798,7 +798,7 @@ impl Client {
         Ok(Self { runtime, client })
     }
 
-    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs vdisk of its cell:
+    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs cell:
     /// of a new cell if its cell's ID is 0, and a new branch there if its ID is; placed at `token`
     /// if given; and returns its branch (`CreateStore`, TASK-364).
     pub fn create_store(
@@ -815,7 +815,7 @@ impl Client {
             token,
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
-            kind: VdiskKind::Fxfs.into(),
+            kind: CellKind::Fxfs.into(),
             version: 0,
         };
         let response = self
@@ -841,7 +841,7 @@ impl Client {
             token: None,
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
-            kind: VdiskKind::Fxfs.into(),
+            kind: CellKind::Fxfs.into(),
             version,
         };
         let what = format!("copying version {version} to {}", path.display());
@@ -850,7 +850,7 @@ impl Client {
     }
 
     /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
-    /// `reference` names in it if given, the one vdisk of a new cell of the default tenant's, and
+    /// `reference` names in it if given, a new cell of the default tenant's, and
     /// returns its branch (`ImportImage`).
     pub fn import_image(
         &self,

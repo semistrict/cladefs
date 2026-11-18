@@ -2,23 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A VM's memory as a vdisk of its cell (TASK-456.2): a store the host's extent daemon makes as
-//! a memory vdisk (`OPEN_MEMORY`), kept as an `extent_files` file set of one file, [`IMAGE`], the
+//! A VM's memory as a cell of its own (TASK-456.2): a store the host's extent daemon makes as
+//! a memory cell (`OPEN_MEMORY`), kept as an `extent_files` file set of one file, [`IMAGE`], the
 //! image of the guest's memory, a page a block. A snapshot writes the pages its guest wrote and
-//! makes the zero ones holes, which store nothing, and commits them at once ([`MemoryVdisk`]); a
-//! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryVdisk::fork`]),
+//! makes the zero ones holes, which store nothing, and commits them at once ([`MemoryCell`]); a
+//! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryCell::fork`]),
 //! which reads the parent's pages and stores only its own.
 //!
 //! Its device is the daemon's store ([`DaemonDevice`]): its reads of sealed extents are the
 //! daemon's cache's, which every store and VM it serves shares.
 //!
-//! **Restored** (TASK-456.3), a VM's memory is the vdisk's window ([`MemoryVdisk::window`]): the
+//! **Restored** (TASK-456.3), a VM's memory is the cell's window ([`MemoryCell::window`]): the
 //! daemon's pages of its extents, shared with every VM restored from the same snapshot on the host,
 //! mapped read-only, a page the guest stores to made a private copy of its own, as a DAX window
 //! copies on write (backlog doc-13). The window maps nothing at first: a fault on a page of a tree
-//! node not mapped yet maps that node's runs first ([`Unmapped`]), on a thread of the vdisk's own,
+//! node not mapped yet maps that node's runs first ([`Unmapped`]), on a thread of the cell's own,
 //! as reading the tree blocks, every fault on the node waiting for that one mapping; so a restore
-//! reads the vdisk's root alone, and what of its tree the guest's touches reach. The node's pages
+//! reads the cell's root alone, and what of its tree the guest's touches reach. The node's pages
 //! are installed with it, ahead of the guest's touches: KVM resolves a load of a page installed on
 //! the vCPU, with no fault here, where a page not installed it hands to x86's asynchronous page
 //! fault worker, whose fault is a write, a load's too, which the window can only take for a store,
@@ -41,7 +41,7 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use storage_device::DeviceHolder;
 
-/// The file of a memory vdisk that is the guest's memory.
+/// The file of a memory cell that is the guest's memory.
 pub const IMAGE: &str = "memory";
 
 /// The store capacity a memory of `size` bytes takes at most: its pages, the tree naming them (a
@@ -51,22 +51,22 @@ pub fn capacity(size: u64) -> u64 {
     size + size / 128 + size / 512 + (64 << 20)
 }
 
-/// A VM's memory, a vdisk of its cell. See the module docs.
-pub struct MemoryVdisk {
+/// A VM's memory, a cell of its own. See the module docs.
+pub struct MemoryCell {
     store: Arc<DaemonExtentStore>,
     files: Arc<FileSet>,
     size: u64,
 }
 
-impl MemoryVdisk {
-    /// The memory vdisk at `store`, which the daemon listening at `socket` serves, made, a
+impl MemoryCell {
+    /// The memory cell at `store`, which the daemon listening at `socket` serves, made, a
     /// memory of `size` bytes of zeros, if it doesn't exist: `EINVAL` for one of another size.
     pub fn open(socket: &Path, store: &Path, size: u64) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
         Self::over(daemon.open_memory(store, capacity(size))?, size)
     }
 
-    /// The memory vdisk at `store`, forked from the memory vdisk at `version` if it doesn't
+    /// The memory cell at `store`, forked from the memory cell at `version` if it doesn't
     /// exist: a VM's memory restored from a snapshot, whose memory `version` is, which must exist
     /// (`ENOENT` otherwise): its VM manager makes it on a host that restores the snapshot, as a
     /// disk's version (docs/integrator-guide.md). `EINVAL` for a memory of another size.
@@ -80,7 +80,7 @@ impl MemoryVdisk {
         Self::over(daemon.open_forked(store, version, 0, capacity(size))?, size)
     }
 
-    /// The memory vdisk `opened` is, of a memory of `size` bytes, made one of zeros if new.
+    /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
     fn over(opened: DaemonExtentStore, size: u64) -> Result<Self, Error> {
         let store = Arc::new(opened);
         let device = DeviceHolder::new(DaemonDevice::new(store.clone()).map_err(Error::new)?);
@@ -110,12 +110,12 @@ impl MemoryVdisk {
         self.files.device().block_size() as u64
     }
 
-    /// The branch of the vdisk's store.
+    /// The branch of the cell's store.
     pub fn branch(&self) -> u64 {
         self.store.branch()
     }
 
-    /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryVdisk::commit`].
+    /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryCell::commit`].
     pub fn write(&self, offset: u64, pages: &[u8]) -> Result<(), Error> {
         self.whole(offset, pages.len() as u64)?;
         self.files.write(IMAGE, offset, pages).map_err(Error::new)
@@ -182,7 +182,7 @@ impl MemoryVdisk {
         self.store.version_copy(path).map_err(Error::new)
     }
 
-    /// Forks the vdisk, as of its last commit, to a new store at `path`, a memory vdisk of a
+    /// Forks the cell, as of its last commit, to a new store at `path`, a memory cell of a
     /// new cell, which reads its pages until it writes its own: its branch.
     pub fn fork(&self, path: &Path) -> Result<u64, Error> {
         self.store.fork(path).map_err(Error::new)
@@ -200,26 +200,26 @@ impl MemoryVdisk {
         Ok(runs.iter().map(|run| (run.end - run.start) / self.page_size()).sum())
     }
 
-    /// The extents the vdisk holds, read whole: those its image's last commit names, and those
+    /// The extents the cell holds, read whole: those its image's last commit names, and those
     /// it has yet to free.
     pub fn extents(&self) -> Result<Vec<storage_device::ExtentId>, Error> {
         self.files.extents().map_err(Error::new)
     }
 
-    /// Closes the vdisk, every commit durable already.
+    /// Closes the cell, every commit durable already.
     pub fn close(self) -> Result<(), Error> {
         self.files.close_file(IMAGE);
         self.files.close().map_err(Error::new)
     }
 
-    /// Makes the `size` bytes at `base`, the memory's own size, the vdisk's window: a VM's memory
+    /// Makes the `size` bytes at `base`, the memory's own size, the cell's window: a VM's memory
     /// restored from it. See the module docs. `prefault`, if any, is told of the pages mapped for
     /// the guest ahead of its accesses.
     ///
     /// # Safety
     ///
     /// The memory must be a page-aligned mapping that nothing else in the process uses, and that
-    /// outlives the vdisk.
+    /// outlives the cell.
     pub unsafe fn window(
         &self,
         base: NonNull<u8>,
@@ -269,7 +269,7 @@ impl MemoryVdisk {
     }
 }
 
-/// The bytes [`MemoryVdisk::import`] reads of a file at once.
+/// The bytes [`MemoryCell::import`] reads of a file at once.
 const IMPORT_BYTES: usize = 16 << 20;
 
 /// A run of pages of a buffer: all zeros, so many bytes of them, or not, these bytes.
@@ -333,7 +333,7 @@ impl Unmapped for Reach {
         let waiting = state.waiting.entry(node).or_default();
         waiting.push(sender);
         if waiting.len() == 1 && self.asks.lock().unwrap().send(node).is_err() {
-            // The mapper went with the vdisk: nothing maps the node.
+            // The mapper went with the cell: nothing maps the node.
             state.waiting.remove(&node);
             return Box::pin(std::future::ready(Err(Errno::EIO)));
         }
@@ -342,7 +342,7 @@ impl Unmapped for Reach {
     }
 }
 
-/// Maps the nodes faults ask for, on a thread of its own, as reading the vdisk's tree blocks:
+/// Maps the nodes faults ask for, on a thread of its own, as reading the cell's tree blocks:
 /// until the window's faults, and with them the [`Reach`], go.
 struct Mapper {
     nodes: Arc<Nodes>,
@@ -370,11 +370,11 @@ impl Mapper {
     }
 
     /// Maps the runs of node `node` of the image, as its last commit has them, and installs its
-    /// pages ahead of the guest's touches: its data read through the vdisk first, so that the
+    /// pages ahead of the guest's touches: its data read through the cell first, so that the
     /// daemon holds its pages, which only then the mapping names, and the window installs. A page
     /// installed takes a load of the guest's no fault here (see the module docs).
     fn map(&self, node: u64) -> Result<(), Error> {
-        let gone = || Error::new(Errno::EIO).context("the memory vdisk went");
+        let gone = || Error::new(Errno::EIO).context("the memory cell went");
         let (files, store) =
             (self.files.upgrade().ok_or_else(gone)?, self.store.upgrade().ok_or_else(gone)?);
         let start = node * self.nodes.node_bytes;

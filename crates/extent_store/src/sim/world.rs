@@ -157,7 +157,7 @@ impl Default for Profile {
     }
 }
 
-/// cladefs: the simulation's branch `id`: the one vdisk of a cell of its own, as a store made
+/// cladefs: the simulation's branch `id`: a cell of its own, as a store made
 /// alone, or a fork, is (TASK-364).
 fn sim_branch(id: u64) -> extent_bucket::layout::Branch {
     let cell = extent_bucket::layout::Cell { tenant: 1, id };

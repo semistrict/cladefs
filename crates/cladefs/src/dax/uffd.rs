@@ -1216,8 +1216,8 @@ impl<H: HostMemory> UffdSecondStage<H> {
 
     /// cladefs: makes every write a store, whoever's: a VM's memory's window (TASK-456.3), which the
     /// VMM's threads write too, restoring devices and emulating them, and whose pages its memory
-    /// vdisk installs ahead of the guest's touches, a tree node of them as its first page faults
-    /// (`memory_vdisk`): a load of a page installed takes no fault here, KVM finding it present,
+    /// cell installs ahead of the guest's touches, a tree node of them as its first page faults
+    /// (`memory_cell`): a load of a page installed takes no fault here, KVM finding it present,
     /// so a write that faults is a store but on that first page, which KVM may hand to x86's
     /// asynchronous page fault worker, whose fault is a write whatever the vCPU's access, a load's
     /// too (docs/research/kvm-async-pf-and-shared-guest-memory.md). That page is made private, at

@@ -4,7 +4,7 @@
 
 //! cladefs's own: named files kept straight on an extent device, with no filesystem between: a
 //! [`FileSet`] on a `storage_device::Device`, the interface Fxfs keeps itself on. sqlite_extents
-//! keeps SQLite's databases in one (TASK-296), and a cell's memory vdisk a VM's memory
+//! keeps SQLite's databases in one (TASK-296), and a cell's memory cell a VM's memory
 //! (TASK-456).
 //!
 //! A file is pages in write-once extents, which a tree in the same extents names (`pages`), read

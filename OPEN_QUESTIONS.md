@@ -108,7 +108,7 @@ You chose, grilled: the choices bind identifiers too; **seal** is extents' (encr
 *encrypted*); **remote** retired (bucket, daemon client); commit levels **Ordered / Local /
 Uploaded**; `Store` the extent store's alone; **snapshot** VMs' and Fxfs's (versions, stats);
 **epoch** a taking's number, a commit's is a **commit number**; a cell's named branch is a
-**vdisk**, **volume** Fxfs's; **collector**, gc its short name; **fork**, not clone or restore;
+**cell**, **volume** Fxfs's; **collector**, gc its short name; **fork**, not clone or restore;
 **placement** a cell's holding (open extents' `Packing`, the cache's arena); **prefault**;
 **tenant ID** only; segment **phase**, **stage** only the second stage; one `ExtentId`,
 **sequence** vs **segment** number; **test host** (`CLADEFS_TEST_HOST*`); **taking** for what

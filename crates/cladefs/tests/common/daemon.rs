@@ -42,7 +42,7 @@ impl Daemon {
         DaemonExtentStore::connect(&self.vms, path, capacity).unwrap()
     }
 
-    /// Makes a store at `path` of `branch`, an Fxfs vdisk of its cell: a new cell if its cell's
+    /// Makes a store at `path` of `branch`, an Fxfs cell: a new cell if its cell's
     /// ID is 0, a new branch there if its ID is (TASK-364).
     pub fn create(
         &mut self,

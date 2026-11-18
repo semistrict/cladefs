@@ -106,7 +106,7 @@ impl KeptImage {
         Ok(self.uploader.wait_uploaded(self.store.last_commit()?)?)
     }
 
-    /// Forks the store's branch, as of its last commit, to a new branch, the one vdisk of a new
+    /// Forks the store's branch, as of its last commit, to a new branch, the one cell of a new
     /// cell of its tenant's (TASK-364), whose handle is a new directory at `path`, in its bucket
     /// too ([`host_store::fork`]): `held` is let go of once the fork's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {

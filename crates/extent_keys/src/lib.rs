@@ -4,7 +4,7 @@
 
 //! cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
-//! each of which wraps its vdisks' DEKs ([`Secret::wrap`]); an object's data is encrypted
+//! each of which wraps its cells' DEKs ([`Secret::wrap`]); an object's data is encrypted
 //! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
 //! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]); raw files on local disk are
 //! encrypted a sector at a time ([`xts::Xts`]). Every primitive the workspace encrypts with is

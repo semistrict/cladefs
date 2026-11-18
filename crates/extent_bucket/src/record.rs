@@ -314,7 +314,7 @@ mod tests {
         // 12's, whose forks of versions say nothing of being resumed (TASK-455's review); and 13's,
         // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
         // 14's, whose keys' numbers are in hexadecimal (TASK-504); 15's, whose cells name maps
-        // of vdisks (TASK-508.1); and 16's, whose records name versions (TASK-508.2).
+        // of cells (TASK-508.1); and 16's, whose records name versions (TASK-508.2).
         assert_eq!(FORMAT, 17);
         for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             let mut older = bytes.clone();

@@ -44,7 +44,7 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     reads_in_place_and_survives_reopening("plain");
 }
 
-/// TASK-411.7 (TASK-411's AC #3, SQLite vdisks, Linux): a database on a store of an encrypted cell
+/// TASK-411.7 (TASK-411's AC #3, SQLite cells, Linux): a database on a store of an encrypted cell
 /// the daemon serves, its tenant's KEK in the host's KMS (the default tenant's, whose cells the
 /// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
 /// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
@@ -200,8 +200,8 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
     }
 }
 
-/// TASK-364: a SQLite vdisk is a vdisk of its cell, fenced with it. Another host, of a later
-/// placement, takes the cell, and the vdisk's branch with it: the first host's commit, durable on
+/// TASK-364: a SQLite cell is fenced as any cell is. Another host, of a later
+/// placement, takes the cell, and the cell's branch with it: the first host's commit, durable on
 /// its disk alone, is not in the bucket, its wait for it failing; its commits after it fail.
 #[test]
 fn a_database_is_fenced_with_its_cell() {

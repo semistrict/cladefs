@@ -89,7 +89,7 @@ impl Storage {
     }
 
     /// cladefs: the image at `path` of the branch `of` says, kept in the bucket at `bucket`
-    /// (TASK-302), an Fxfs vdisk of its branch's cell named as its directory is (TASK-364). If no
+    /// (TASK-302), an Fxfs cell named as its directory is (TASK-364). If no
     /// image is at `path`, or what an image's making left unmade, a new one of `capacity` bytes:
     /// of a branch the bucket has, holding what it holds there, its head taken, as `cladefsctl
     /// take` takes a branch; or of a new branch of a cell, its ID the bucket's to give, which holds
@@ -145,7 +145,7 @@ impl Storage {
         Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), false, Self::keeping()?)
     }
 
-    /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one vdisk of a
+    /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
     /// new cell of `tenant`'s (TASK-364), its branch kept as `keeping` says: as the extent daemon's
     /// stores keep theirs, with the host's cache of the bucket's objects, for an import the daemon
     /// makes (TASK-237).
@@ -174,7 +174,7 @@ impl Storage {
         host_store::unmade(path.as_ref())
     }
 
-    /// A new image at `path`, as [`Storage::create`] makes it, the one vdisk of a new cell of
+    /// A new image at `path`, as [`Storage::create`] makes it, a new cell of
     /// `tenant`'s, whole if `whole`, its branch kept as `keeping` says.
     fn make(
         path: &Path,
@@ -281,7 +281,7 @@ impl Storage {
     }
 
     /// cladefs: the storage's device, for what keeps itself on a device in place of Fxfs, as a
-    /// SQLite vdisk does (crates/sqlite_extents, TASK-296). Its user closes it: an image's
+    /// SQLite cell does (crates/sqlite_extents, TASK-296). Its user closes it: an image's
     /// close waits for its commits to be uploaded.
     pub fn into_device(self) -> DeviceHolder {
         self.device

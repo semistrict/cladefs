@@ -97,7 +97,7 @@ pub(crate) enum Opening {
     /// To write, if it exists (no flags).
     Existing,
     /// To write, created with this many bytes of capacity if it doesn't exist ([`OPEN_CREATE`]),
-    /// a vdisk of this kind of its new cell ([`OPEN_SQLITE`], TASK-364).
+    /// a new cell of this kind ([`OPEN_SQLITE`], TASK-364).
     Create(u64, Kind),
     /// To write, forked from the store at `from` if it doesn't exist, of branch `branch` and
     /// `capacity` bytes, which the daemon takes from its bucket if it doesn't exist either

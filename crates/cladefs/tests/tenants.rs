@@ -80,7 +80,7 @@ fn public_bases_are_shared_read_only() {
     // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the branch with.
     let base = ExtentStore::open(&base_path).unwrap();
     for (fork, tenant) in forks.iter().zip(1..) {
-        // Each the one vdisk of a cell of its tenant's (TASK-364).
+        // Each a cell of its tenant's (TASK-364).
         base.fork(fork, tenant).unwrap();
     }
     drop(base);

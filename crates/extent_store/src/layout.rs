@@ -24,12 +24,12 @@ use storage_device::ExtentId;
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
-/// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the vdisk of its cell it is as
-/// `vdisk NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
+/// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the cell it is as
+/// `cell NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
 /// cut at their ends, and its description may name a version of its branch it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
-/// cell has one kind, of no vdisk's name (doc-20, TASK-508.1). A store of another format is
+/// cell has one kind, of no cell's name (doc-20, TASK-508.1). A store of another format is
 /// refused ([`Format`]): nothing reads, converts or upgrades it.
 pub(crate) const FORMAT: &str = "cladefs extent store 15";
 

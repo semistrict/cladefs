@@ -681,7 +681,7 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
 
 /// TASK-449's review: a host's fork remembers the clone's cell as it held it, which the clone's
 /// first open here starts its holding from, a read less. Another host placed later, its token
-/// higher, holding the cell meanwhile (for another of its vdisks, the clone's head not taken),
+/// higher, holding the cell meanwhile (for another of its cells, the clone's head not taken),
 /// the open is refused (`ESTALE`), as it was when the open read the cell: the cell's holding found
 /// from memory, not from a read, unchanged, writes nothing, so a read once the clone's head is
 /// taken finds it still held, or the open fails. Opened anyway, this host would write the clone

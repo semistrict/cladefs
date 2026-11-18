@@ -9,7 +9,7 @@
 //! ([`Server::stores`], [`Server::attach`], [`Server::detach`]): one mount, however many stores.
 //! cladefs: a store's path is names, its last its own and those before it directories of the
 //! server's, made as a store is attached under them and gone once none is: a host's mount of
-//! cells' vdisks attaches each at `TENANT/CELL/VDISK` (TASK-364).
+//! cells attaches each at `TENANT/CELL` (TASK-364).
 //!
 //! Node IDs and inode numbers say whose node is whose:
 //!
@@ -114,7 +114,7 @@ struct Slot {
 }
 
 /// cladefs: a directory of the server's own, of many stores': the root of stores, or one a path a
-/// store is attached at goes through, as `TENANT/CELL/VDISK` goes through `TENANT` and
+/// store is attached at goes through, as `TENANT/CELL` goes through `TENANT` and
 /// `TENANT/CELL` (TASK-364).
 struct Dir {
     /// Its parent's node ID: the root's is its own.

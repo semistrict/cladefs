@@ -77,8 +77,8 @@ impl Host {
 /// one a later placement holds, which a placement cut off takes back no more, or one another
 /// writer moved on from this host's write-ahead log, which the store opens no more until
 /// `cladefsctl take` drops it, `ESTALE`; a branch, or a version, gone, `ENOENT`; a fork's child's ID
-/// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell, or a vdisk of one,
-/// gone, `ENOENT`; a vdisk's name taken, `EEXIST`, or no vdisk's, `EINVAL` (TASK-364); a fork of
+/// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell
+/// gone, `ENOENT`; a cell's name taken, `EEXIST`, or no cell's, `EINVAL` (TASK-364); a fork of
 /// another tenant's version not shared, `EACCES`, and sharing what is no version, `EINVAL`
 /// (TASK-395.7). None for
 /// what the store failed to read or write, here or in object storage, which is the caller's `EIO`,

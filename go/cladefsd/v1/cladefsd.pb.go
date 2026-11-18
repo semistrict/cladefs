@@ -109,55 +109,55 @@ const (
 
 // What a cell holds, which says what opens it (the type's name is renamed with the rest,
 // TASK-508.4).
-type VdiskKind int32
+type CellKind int32
 
 const (
 	// An Fxfs filesystem: a VM's disk, or a host's mount's.
-	VdiskKind_VDISK_KIND_FXFS VdiskKind = 0
+	CellKind_CELL_KIND_FXFS CellKind = 0
 	// A database of sqlite_extents, which its VFS alone opens.
-	VdiskKind_VDISK_KIND_SQLITE VdiskKind = 1
+	CellKind_CELL_KIND_SQLITE CellKind = 1
 	// A VM's memory: an extent_files file set of one file, its image (TASK-456).
-	VdiskKind_VDISK_KIND_MEMORY VdiskKind = 2
+	CellKind_CELL_KIND_MEMORY CellKind = 2
 )
 
-// Enum value maps for VdiskKind.
+// Enum value maps for CellKind.
 var (
-	VdiskKind_name = map[int32]string{
-		0: "VDISK_KIND_FXFS",
-		1: "VDISK_KIND_SQLITE",
-		2: "VDISK_KIND_MEMORY",
+	CellKind_name = map[int32]string{
+		0: "CELL_KIND_FXFS",
+		1: "CELL_KIND_SQLITE",
+		2: "CELL_KIND_MEMORY",
 	}
-	VdiskKind_value = map[string]int32{
-		"VDISK_KIND_FXFS":   0,
-		"VDISK_KIND_SQLITE": 1,
-		"VDISK_KIND_MEMORY": 2,
+	CellKind_value = map[string]int32{
+		"CELL_KIND_FXFS":   0,
+		"CELL_KIND_SQLITE": 1,
+		"CELL_KIND_MEMORY": 2,
 	}
 )
 
-func (x VdiskKind) Enum() *VdiskKind {
-	p := new(VdiskKind)
+func (x CellKind) Enum() *CellKind {
+	p := new(CellKind)
 	*p = x
 	return p
 }
 
-func (x VdiskKind) String() string {
+func (x CellKind) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (VdiskKind) Descriptor() protoreflect.EnumDescriptor {
+func (CellKind) Descriptor() protoreflect.EnumDescriptor {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0].Descriptor()
 }
 
-func (VdiskKind) Type() protoreflect.EnumType {
+func (CellKind) Type() protoreflect.EnumType {
 	return &file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0]
 }
 
-func (x VdiskKind) Number() protoreflect.EnumNumber {
+func (x CellKind) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use VdiskKind.Descriptor instead.
-func (VdiskKind) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use CellKind.Descriptor instead.
+func (CellKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{0}
 }
 
@@ -187,7 +187,7 @@ type CreateStoreRequest struct {
 	// named: its own (INVALID_ARGUMENT, EINVAL, otherwise).
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The cell's kind, which says what opens it.
-	Kind VdiskKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.VdiskKind" json:"kind,omitempty"`
+	Kind CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
 	// If not 0, the store is a copy of this version of `branch`, which must be named: the cell's
 	// state at the version, which nothing writes, and which ForkStore forks, on as many hosts at
 	// once as wanted. Its first fork waits for the cell's head to name the version.
@@ -268,11 +268,11 @@ func (x *CreateStoreRequest) GetCell() uint64 {
 	return 0
 }
 
-func (x *CreateStoreRequest) GetKind() VdiskKind {
+func (x *CreateStoreRequest) GetKind() CellKind {
 	if x != nil {
 		return x.Kind
 	}
-	return VdiskKind_VDISK_KIND_FXFS
+	return CellKind_CELL_KIND_FXFS
 }
 
 func (x *CreateStoreRequest) GetVersion() uint64 {
@@ -4093,15 +4093,15 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xfb\x01\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xfa\x01\n" +
 	"\x12CreateStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x06 \x01(\x04R\x04cell\x122\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1e.cladefs.cladefsd.v1.VdiskKindR\x04kind\x12\x18\n" +
+	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x12\x18\n" +
 	"\aversion\x18\b \x01(\x04R\aversionB\b\n" +
 	"\x06_token\"Y\n" +
 	"\x13CreateStoreResponse\x12\x16\n" +
@@ -4374,11 +4374,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*N\n" +
-	"\tVdiskKind\x12\x13\n" +
-	"\x0fVDISK_KIND_FXFS\x10\x00\x12\x15\n" +
-	"\x11VDISK_KIND_SQLITE\x10\x01\x12\x15\n" +
-	"\x11VDISK_KIND_MEMORY\x10\x022\xf4\x16\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*J\n" +
+	"\bCellKind\x12\x12\n" +
+	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
+	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
+	"\x10CELL_KIND_MEMORY\x10\x022\xf4\x16\n" +
 	"\bCladefsd\x12`\n" +
 	"\vCreateStore\x12'.cladefs.cladefsd.v1.CreateStoreRequest\x1a(.cladefs.cladefsd.v1.CreateStoreResponse\x12`\n" +
 	"\vImportImage\x12'.cladefs.cladefsd.v1.ImportImageRequest\x1a(.cladefs.cladefsd.v1.ImportImageResponse\x12Z\n" +
@@ -4430,7 +4430,7 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP() []byte {
 var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 77)
 var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
-	(VdiskKind)(0),                    // 0: cladefs.cladefsd.v1.VdiskKind
+	(CellKind)(0),                     // 0: cladefs.cladefsd.v1.CellKind
 	(*CreateStoreRequest)(nil),        // 1: cladefs.cladefsd.v1.CreateStoreRequest
 	(*CreateStoreResponse)(nil),       // 2: cladefs.cladefsd.v1.CreateStoreResponse
 	(*ImportImageRequest)(nil),        // 3: cladefs.cladefsd.v1.ImportImageRequest
@@ -4510,7 +4510,7 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
 	nil,                               // 77: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
-	0,  // 0: cladefs.cladefsd.v1.CreateStoreRequest.kind:type_name -> cladefs.cladefsd.v1.VdiskKind
+	0,  // 0: cladefs.cladefsd.v1.CreateStoreRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
 	18, // 1: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
 	34, // 2: cladefs.cladefsd.v1.ListStoresResponse.stores:type_name -> cladefs.cladefsd.v1.ListedStore
 	31, // 3: cladefs.cladefsd.v1.ListedStore.stat:type_name -> cladefs.cladefsd.v1.StatStoreResponse

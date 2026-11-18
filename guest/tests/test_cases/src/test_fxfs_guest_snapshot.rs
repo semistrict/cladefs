@@ -49,8 +49,8 @@
 //! superblock without a call to its filesystem, which waited for it, and the device refused the
 //! snapshot (TASK-202).
 //!
-//! fxfs-guest-snapshot-memory-vdisk-dax: as fxfs-guest-snapshot-dax, the snapshot's memory then
-//! imported into a memory vdisk of a cell (`Memory::Vdisk`, TASK-456.3), its zero pages holes, a
+//! fxfs-guest-snapshot-memory-cell-dax: as fxfs-guest-snapshot-dax, the snapshot's memory then
+//! imported into a memory cell (`Memory::Cell`, TASK-456.3), its zero pages holes, a
 //! version made of it; the two VMs restored from the version, each its memory a fork of it, as a
 //! copy-on-write window the extent daemon serves, their pages shared but those each writes.
 //!
@@ -81,8 +81,8 @@ pub struct TestFxfsGuestSnapshot {
 pub enum Memory {
     /// The snapshot's memory file, mapped privately.
     File,
-    /// A fork of a memory vdisk the memory file was imported into, each restore's.
-    Vdisk,
+    /// A fork of a memory cell the memory file was imported into, each restore's.
+    Cell,
 }
 
 /// What of the guest's is read-only as it freezes (TASK-202).
@@ -214,7 +214,7 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
-    use cladefs::memory_vdisk::MemoryVdisk;
+    use cladefs::memory_cell::MemoryCell;
     use cladefs::{Filesystem, Image, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
@@ -387,16 +387,16 @@ mod host {
                 )?;
                 source.kill()?;
             }
-            // The snapshot's memory as a memory vdisk's version, its file imported into it.
+            // The snapshot's memory as a memory memory_cell's version, its file imported into it.
             let memory_point = dir.join("memory-version");
-            if self.memory == Memory::Vdisk {
+            if self.memory == Memory::Cell {
                 let size = std::fs::metadata(&memory)?.len();
-                let vdisk = MemoryVdisk::open(&cladefsd, &dir.join("memory-vdisk"), size)?;
+                let memory_cell = MemoryCell::open(&cladefsd, &dir.join("memory-memory_cell"), size)?;
                 let start = std::time::Instant::now();
-                vdisk.import(&memory)?;
+                memory_cell.import(&memory)?;
                 eprintln!("memory: imported in {:?}", start.elapsed());
-                vdisk.version_copy(&memory_point)?;
-                vdisk.close()?;
+                memory_cell.version_copy(&memory_point)?;
+                memory_cell.close()?;
                 // The import left the memory's pages in the daemon's memory: evicted, so that the
                 // restores page in what they read, the first of them at least.
                 crate::common::control(&cladefsd)?.shrink_memory(None, 0)?;
@@ -462,12 +462,12 @@ mod host {
                     "vsock_override": { "uds_path": uds },
                     "cladefs_overrides": overrides,
                 });
-                if self.memory == Memory::Vdisk {
+                if self.memory == Memory::Cell {
                     load["mem_backend"] = serde_json::json!({
-                        "backend_type": "Vdisk",
+                        "backend_type": "Cell",
                         "backend_path": dir.join(format!("memory-{name}")),
                     });
-                    load["memory_vdisk"] = serde_json::json!({
+                    load["memory_cell"] = serde_json::json!({
                         "copy_on_host": memory_point,
                         "cladefsd_socket": cladefsd,
                     });
@@ -482,11 +482,11 @@ mod host {
                 });
                 restored.push(firecracker);
             }
-            // From a memory vdisk, one after the other, each run to its end: the second takes
+            // From a memory cell, one after the other, each run to its end: the second takes
             // almost none of the daemon's memory the first did not, the daemon's pages of the
             // snapshot's memory shared, the second's memory the first's but what each wrote
             // (TASK-456.3). What the daemon holds, a shrink to no less than it says (`u64::MAX`).
-            if self.memory == Memory::Vdisk {
+            if self.memory == Memory::Cell {
                 let control = crate::common::control(&cladefsd)?;
                 let held = || control.shrink_memory(None, u64::MAX);
                 let mut grew = Vec::new();
@@ -990,11 +990,11 @@ mod guest {
             }
             unmount_volumes(volumes);
             unmount();
-            // Restored from a memory vdisk, the second restore's guest writes all the memory it
+            // Restored from a memory cell, the second restore's guest writes all the memory it
             // has free, each of its pages a private copy of its window's: it holds as many as the
             // guest has pages (TASK-456.3). The first's reads and writes no more than the case's,
             // whose pages its window shares.
-            if self.memory == Memory::Vdisk && name == "b" {
+            if self.memory == Memory::Cell && name == "b" {
                 write_free_memory(&name);
             }
             println!("OK {name}");

@@ -152,7 +152,7 @@ enum Entry<C, S, P> {
     Daemon(Open<S, P>),
     /// None holds it: what is open of it, never [`Open::Nothing`].
     Unheld(Open<S, P>),
-    /// cladefs: the daemon's FUSE mount has it attached, a vdisk of a cell it shows (TASK-475.3):
+    /// cladefs: the daemon's FUSE mount has it attached, a cell it shows (TASK-475.3):
     /// nothing else holds it, nor waits for it, until the mount lets it go, as it detaches the
     /// cell. Nothing else is open of it.
     Mounted,

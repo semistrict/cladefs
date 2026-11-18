@@ -29,7 +29,7 @@ pub fn open(
     window: u64,
     options: Options,
 ) -> Result<Arc<FileSet>, Error> {
-    // A SQLite vdisk of its cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
+    // A SQLite cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
     // cell leave be, as no filesystem's.
     let opened = cladefs::DaemonConnection::connect(socket)
         .and_then(|daemon| daemon.open_sqlite(store, capacity));

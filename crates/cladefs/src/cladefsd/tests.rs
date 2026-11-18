@@ -1759,7 +1759,7 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        // A vdisk of a cell of the tenant's (TASK-364).
+        // A cell of the tenant's (TASK-364).
         let store = ExtentStore::create_in(&parent, 1 << 24, tenant.id()).unwrap();
         let extent = ExtentId { branch: store.branch().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
@@ -2498,12 +2498,12 @@ fn stores_made_are_cells_of_their_kinds() {
     });
 }
 
-/// TASK-456.2: a memory vdisk's pages and holes, committed at once, read back once it is opened
+/// TASK-456.2: a memory cell's pages and holes, committed at once, read back once it is opened
 /// again; a fork of it reads its pages and stores only those it writes, each page of the parent
 /// it leaves as it was, and its holes nothing.
 #[test]
-fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
-    use crate::memory_vdisk::MemoryVdisk;
+fn memory_cells_commit_pages_and_holes_and_forks_store_only_their_own() {
+    use crate::memory_cell::MemoryCell;
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2511,7 +2511,7 @@ fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
     std::thread::spawn(move || serve(listener));
     const PAGES: u64 = 256;
     let path = dir.path().join("memory");
-    let memory = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
+    let memory = MemoryCell::open(&socket, &path, PAGES * 4096).unwrap();
     let page = memory.page_size();
     assert_eq!(page, 4096);
     let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
@@ -2525,13 +2525,13 @@ fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
 
     let mut expected = filled(1, PAGES);
     expected[(100 * page) as usize..(120 * page) as usize].fill(0);
-    let reopened = MemoryVdisk::open(&socket, &path, PAGES * 4096).unwrap();
+    let reopened = MemoryCell::open(&socket, &path, PAGES * 4096).unwrap();
     let mut image = filled(0xee, PAGES);
     reopened.read(0, &mut image).unwrap();
     assert!(image == expected, "the image committed");
     reopened.close().unwrap();
 
-    let child = MemoryVdisk::open(&socket, &fork, PAGES * 4096).unwrap();
+    let child = MemoryCell::open(&socket, &fork, PAGES * 4096).unwrap();
     assert_eq!(child.branch(), forked);
     let mut image = filled(0xee, PAGES);
     child.read(0, &mut image).unwrap();
@@ -2553,14 +2553,14 @@ fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
     child.close().unwrap();
 }
 
-/// TASK-456.3: a memory vdisk's window, a VM's memory restored from it, maps nothing until faults
-/// reach it: then the runs of the tree node around each page, data and holes, as the vdisk's last
+/// TASK-456.3: a memory cell's window, a VM's memory restored from it, maps nothing until faults
+/// reach it: then the runs of the tree node around each page, data and holes, as the cell's last
 /// commit has them. Two forks' windows map the daemon's one page of each extent's block, shared;
 /// a store of the guest's makes a page private in its window alone, the other's still the shared
 /// page; the windows' private pages reserve nothing in the daemon.
 #[test]
 fn memory_windows_map_what_faults_reach_and_share_their_pages() {
-    use crate::memory_vdisk::MemoryVdisk;
+    use crate::memory_cell::MemoryCell;
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2570,7 +2570,7 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     // Three nodes of the tree's, the last part of one.
     const PAGES: u64 = 400;
     let size = PAGES * ps;
-    let memory = MemoryVdisk::open(&socket, &dir.path().join("memory"), size).unwrap();
+    let memory = MemoryCell::open(&socket, &dir.path().join("memory"), size).unwrap();
     let mut image = Vec::with_capacity(size as usize);
     for page in 0..PAGES {
         image.extend(pattern(page as u8, ps as usize));
@@ -2585,16 +2585,16 @@ fn memory_windows_map_what_faults_reach_and_share_their_pages() {
     memory.close().unwrap();
 
     let restore = |path: &Path| {
-        let vdisk = MemoryVdisk::open(&socket, path, size).unwrap();
+        let memory_cell = MemoryCell::open(&socket, path, size).unwrap();
         let base = memory_noreserve(PAGES as usize);
-        // SAFETY: The memory is the test's, and outlives the vdisk (unmapped once it goes).
-        unsafe { vdisk.window(base, size, None) }.unwrap();
-        (vdisk, base)
+        // SAFETY: The memory is the test's, and outlives the memory_cell (unmapped once it goes).
+        unsafe { memory_cell.window(base, size, None) }.unwrap();
+        (memory_cell, base)
     };
     let ((first, a), (second, b)) = (restore(&one), restore(&two));
     // The window's bytes from `at` to `end`, as the guest reads them.
     let read = |base: NonNull<u8>, at: u64, end: u64| -> Vec<u8> {
-        // SAFETY: The window's memory, whose faults its vdisk serves.
+        // SAFETY: The window's memory, whose faults its memory_cell serves.
         (at..end).map(|at| unsafe { base.as_ptr().add(at as usize).read_volatile() }).collect()
     };
     assert!(read(a, 0, size) == image, "the first window holds the image");

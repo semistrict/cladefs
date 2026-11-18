@@ -52,8 +52,8 @@ pub use extent_frame::segment::{
 /// doc-18, TASK-476); a fork being made says whether it is of a version or a version; nothing reads
 /// 13's. 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`Branch`] is
 /// displayed in its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one
-/// kind (doc-20, TASK-508.1): its object names its one branch and kind, not a map of vdisks,
-/// and a version names no cut of a cell's vdisks; nothing reads 15's. 17: forks are of versions
+/// kind (doc-20, TASK-508.1): its object names its one branch and kind, not a map of cells,
+/// and a version names no cut of a cell's cells; nothing reads 15's. 17: forks are of versions
 /// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
 /// 16's.
 pub const FORMAT: u32 = 17;

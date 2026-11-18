@@ -725,7 +725,7 @@ async fn end_head(
 /// writers take it with their cell's epoch (TASK-364): the cell's epoch now, which takes the head
 /// from its holder's writer, and from none a later taking of the cell made; refused if a later
 /// placement holds the cell ([`Error::Stale`]). The deletion takes nothing of the cell, its other
-/// vdisks' writers going on. `token` itself where the cell has no object, or was deleted, as then
+/// cells' writers going on. `token` itself where the cell has no object, or was deleted, as then
 /// no writer took the branch's head by its cell; and the highest token there is, an operator's,
 /// whichever placement took the branch last.
 async fn deleting_token(bucket: &impl Bucket, branch: Branch, token: u64) -> Result<u64, Error> {

@@ -483,7 +483,7 @@ pub(super) struct New {
     pub capacity: u64,
     /// What it holds.
     pub kind: Kind,
-    /// The tenant whose new cell it is the one vdisk of (TASK-364): the connection's.
+    /// The tenant whose new cell it is the one cell of (TASK-364): the connection's.
     pub tenant: u64,
 }
 
@@ -678,7 +678,7 @@ pub(super) async fn create(
 }
 
 /// Makes a store at `path`, which must not exist (`EEXIST`), of `capacity` bytes, holding a
-/// filesystem of the container image at `image` (`cladefs::import::store`), the one vdisk of a new
+/// filesystem of the container image at `image` (`cladefs::import::store`), the one cell of a new
 /// cell of `tenant`'s (TASK-364), and returns its branch.
 pub(super) async fn import(
     path: PathBuf,
