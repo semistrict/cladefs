@@ -3,7 +3,7 @@ id: doc-2
 title: 'Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store'
 type: specification
 created_date: '2026-10-13 19:53'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-16 04:08'
 ---
 # Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store
 
@@ -16,7 +16,7 @@ are provisional, and milestone 1 settles them (see Open decisions).
 DAX (doc-13). Milestone 1's open question, the write path, was decided on 2026-11-04 from the
 first-principles review's measurements (docs/reviews/2026-11-04-first-principles.md, section 1):
 sealed extents alone on DAX, a store's page copied on write, data written by `WRITE` requests at
-writeback (doc-13, TASK-164). The host's page cache is cladefs's own extent cache
+writeback (doc-13, TASK-164). The host's shared pages are cladefs's own extent cache
 (`crates/cladefs/src/cache.rs`); the in-process Zircon kernel was deleted (TASK-96.1). The plan below
 is kept as written, with revisions marked.
 
@@ -59,7 +59,7 @@ Settled in a design review on 2026-10-13.
 2. **Durability is POSIX with ordering preserved.** A crash may lose a suffix of recent history, but the
    filesystem always recovers to a prefix of it. fsync keeps its ordering guarantees, but need not wait
    for the change to be durable.
-   *Revised 2026-11-06 (TASK-221):* how recent: durable locally within 50 ms at the median, and a
+   *Revised 2026-11-06 (TASK-221):* how recent: local within 50 ms at the median, and a
    daemon or host crash loses at most what was ordered within doc-12's crash bound (1 s, measured on main,
    2026-11-08).
 3. **Size is unbounded.** Metadata is cached in guest memory and can be evicted and read back. It is not
@@ -96,6 +96,8 @@ Settled in a design review on 2026-10-13.
     reclaim freed extents.
 13. **Fork lineage and free lists live in object storage,** with no extra service. Each branch (VM) has one
     writer, fenced by a lease taken with conditional writes.
+    *Revised 2026-11-15 (TASK-407, doc-7, The head):* branches have no lease: a writer takes the
+    branch's head, swapping it with a condition to its next epoch, which fences the writer before.
 14. **Each host caches in two tiers:** memory, as the shared pages mapped into VMs, and local NVMe. Both
     tiers are disposable.
 15. **cladefs evolves into this design** rather than being kept alongside it.
@@ -134,7 +136,7 @@ In the guest these run as upstream wrote them, with three changes:
 - **Data path.** File pages are not in the guest's page cache. A read maps the extent's range from the DAX
   window, which is one copy on the host shared by every VM. A write copies on write (doc-13, settled
   below): the page becomes the VM's own private copy, at the same window address, until writeback
-  `WRITE`s it to a new extent and maps the page back to it once a commit seals it. Files a mount
+  `WRITE`s it to a new extent and rebinds the page to it once a commit seals it. Files a mount
   creates go through the guest's page cache, as without DAX, until their inodes are next read in.
 - **Runtime.** Fxfs's async code, its allocations and its Fuchsia-specific dependencies are adapted to
   the kernel (Rust for Linux). How is the first spike.
@@ -208,8 +210,9 @@ local NVMe, and behind that, ranged reads from object storage with read-ahead.
 - `leases/<branch>`: the epoch, held with conditional writes (S3 `If-Match`; GCS generation
   preconditions).
 
-*Revised (doc-7, Layout):* the bucket keeps `checkpoints/<branch>/<seq>`, and no `index/` or `frees/`:
-a segment's footer is its index delta and its frees (`extent_remote::layout`).
+*Revised (doc-7, Layout):* the bucket keeps a cell's `checkpoints/<branch>/<epoch>.<segment>` and
+`heads/<branch>`, and no `index/`, `frees/` or `leases/`: a segment's footer is its index delta and
+its frees (`extent_bucket::layout`).
 
 **Garbage collection** reads branches, indexes and frees to find extents that no live branch can still
 reach. It compacts segments that are mostly garbage and records its progress with conditional writes. It
@@ -228,7 +231,7 @@ Provisional choices, which milestone 1 or the fork milestone settles:
    and are allocated at writeback. A store makes its window page a private page of the VM's, at the
    same address; writeback (fsync, msync, sync, the flusher) sends the dirty pages' bytes as `WRITE`
    requests to extents Fxfs allocates then, and commits after them, as the page cache's path does;
-   once sealed, the pages are mapped back to those extents, shared again.
+   once sealed, the pages are rebound to those extents, shared again.
    - The provisional choice, DAX writes with barriers on commit (the window page the open extent's
      block, sealed by the next barrier), was built and given up: every fsync sealed, so the next
      store to any page moved its block, racing the next seal, and DAX ran at 0.51-0.61x no-DAX's

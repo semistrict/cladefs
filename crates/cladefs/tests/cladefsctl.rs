@@ -14,10 +14,10 @@ const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
 /// The environment of a host of the multi-node system, as tests have it: a bucket in each
 /// process's memory, and placement 1.
 const HOST: [(&str, &str); 2] =
-    [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")];
+    [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")];
 
 /// cladefsctl, acting on stores itself, with `env` in its environment, or through a daemon,
-/// `cladefs-extentd`, of its own.
+/// `cladefsd`, of its own.
 struct Cladefsctl {
     /// The daemon's control socket, and the daemon, which goes with this.
     daemon: Option<(PathBuf, KillOnDrop)>,
@@ -49,11 +49,11 @@ impl Cladefsctl {
     fn run(&self, args: &[&Path]) -> Result<String, String> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsctl"));
         command.args(args);
-        for name in ["CLADEFS_EXTENTD_GRPC", "CLADEFS_EXTENTD_REMOTE", "CLADEFS_EXTENTD_TOKEN"] {
+        for name in ["CLADEFSD_GRPC", "CLADEFSD_BUCKET", "CLADEFSD_TOKEN"] {
             command.env_remove(name);
         }
         if let Some((control, _)) = &self.daemon {
-            command.env("CLADEFS_EXTENTD_GRPC", control);
+            command.env("CLADEFSD_GRPC", control);
         }
         command.envs(self.env.iter().map(|(name, value)| (name, value)));
         let output = command.output().expect("running cladefsctl failed");
@@ -71,8 +71,8 @@ impl Cladefsctl {
 fn daemon(dir: &Path, env: &[(&str, &str)], stderr: std::process::Stdio) -> (PathBuf, KillOnDrop) {
     use std::time::{Duration, Instant};
     let control = dir.join("control.sock");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
-    command.arg(dir.join("vms.sock")).env("CLADEFS_EXTENTD_GRPC", &control).stderr(stderr);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
+    command.arg(dir.join("vms.sock")).env("CLADEFSD_GRPC", &control).stderr(stderr);
     let child = command.envs(HOST).envs(env.iter().copied()).spawn().unwrap();
     let child = KillOnDrop(child);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -154,7 +154,7 @@ fn copies_are_dropped_locally() {
     // A host's bucket, which the copy takes the branch from.
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    copies_are_dropped(Cladefsctl::with_env(&[("CLADEFS_EXTENTD_REMOTE", &bucket)]), dir.path());
+    copies_are_dropped(Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket)]), dir.path());
 }
 
 #[cfg(target_os = "linux")]
@@ -171,10 +171,7 @@ fn points_are_shared_and_unshared_locally() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    let cladefsctl = Cladefsctl::with_env(&[
-        ("CLADEFS_EXTENTD_REMOTE", &bucket),
-        ("CLADEFS_EXTENTD_TOKEN", "1"),
-    ]);
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
     let (base, point) = (dir.path().join("base"), dir.path().join("point"));
     cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
     let printed =
@@ -182,7 +179,7 @@ fn points_are_shared_and_unshared_locally() {
     let branch: cladefs::Branch = printed.trim().parse().unwrap();
     let bucket = ExtentStore::bucket_at(&point).unwrap().unwrap();
     let shared = || {
-        let record = extent_remote::branch::record(&*bucket, branch);
+        let record = extent_bucket::branch::record(&*bucket, branch);
         futures::executor::block_on(record).unwrap().unwrap().shared
     };
     assert!(shared(), "made a point not shared");
@@ -314,10 +311,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
     use futures::executor::block_on;
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let cladefsctl = Cladefsctl::with_env(&[
-        ("CLADEFS_EXTENTD_REMOTE", &bucket),
-        ("CLADEFS_EXTENTD_TOKEN", "1"),
-    ]);
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
@@ -356,7 +350,7 @@ fn commands_through_the_daemon() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let env = [("CLADEFS_EXTENTD_REMOTE", bucket.as_str()), ("CLADEFS_EXTENTD_TOKEN", "1")];
+    let env = [("CLADEFSD_BUCKET", bucket.as_str()), ("CLADEFSD_TOKEN", "1")];
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &env);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
@@ -383,22 +377,23 @@ fn commands_through_the_daemon() {
     assert_eq!(base.info().unwrap().capacity, 134217728);
     assert!(base.is_public());
     // The fork's store names its branch, which deleting the store that took it deleted in the
-    // bucket: it opens no more (TASK-165.9: opening takes the branch's lease).
+    // bucket: it opens no more (TASK-165.9: opening takes the branch's head).
     assert_eq!(extent_store::host_branch(&fork).unwrap().to_string(), branch);
     let refused = ExtentStore::open(&fork).err().and_then(|err| err.errno());
     assert_eq!(refused, Some(cladefs::Errno::EROFS));
 }
 
-/// cladefs TASK-111.4: `stats --json` prints one snapshot through the daemon: its build and
-/// counters, and its VM process's, as its guest answered, with the guest's counters, histograms and
-/// build; without `--json`, the same as lines of a path and a value. Without the daemon, refused.
+/// cladefs TASK-111.4: `stats --json` prints the stats of one moment through the daemon: its build
+/// and counters, and its VM process's, as its guest answered, with the guest's counters, histograms
+/// and build; without `--json`, the same as lines of a path and a value. Without the daemon,
+/// refused.
 #[cfg(target_os = "linux")]
 #[test]
-fn stats_are_one_snapshot_of_the_daemon_and_its_vms() {
+fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
     let path = dir.path().join("store");
-    let store = cladefs::RemoteExtentStore::connect(dir.path().join("vms.sock"), &path, 1 << 24);
+    let store = cladefs::DaemonExtentStore::connect(dir.path().join("vms.sock"), &path, 1 << 24);
     let store = std::sync::Arc::new(store.unwrap());
     // Its guest answers each ask, off the thread the ask comes on.
     let answering = std::sync::Arc::downgrade(&store);
@@ -418,12 +413,12 @@ fn stats_are_one_snapshot_of_the_daemon_and_its_vms() {
     };
 
     let json: serde_json::Value = serde_json::from_str(&run(&["stats", "--json"])).unwrap();
-    assert_eq!(json["extentd"]["build"], cladefs::BUILD_COMMIT);
-    assert_eq!(json["extentd"]["gauges"]["connections"], 1);
+    assert_eq!(json["cladefsd"]["build"], cladefs::BUILD_COMMIT);
+    assert_eq!(json["cladefsd"]["gauges"]["connections"], 1);
     assert!(json["taken_unix_ns"].as_u64() > Some(0), "{json}");
     let vm = &json["vms"][0];
     assert_eq!(vm["path"], path.canonicalize().unwrap().to_str().unwrap());
-    assert_eq!(vm["branch"], format!("{:x}", store.branch()));
+    assert_eq!(vm["branch"], base32_id::Short(store.branch()).to_string());
     assert_eq!((&vm["follower"], &vm["answered"]), (&false.into(), &true.into()));
     assert_eq!(vm["vmm"]["build"], cladefs::BUILD_COMMIT);
     assert_eq!(vm["vmm"]["counters"]["stage_ops"], 0);
@@ -437,11 +432,11 @@ fn stats_are_one_snapshot_of_the_daemon_and_its_vms() {
     let line = |at: &str| lines.lines().find_map(|line| line.strip_prefix(&format!("{at} ")));
     assert_eq!(line("vms.0.guest.counters.seals"), Some("3"), "{lines}");
     assert_eq!(line("vms.0.guest.histograms.seals.1"), Some("2"), "{lines}");
-    assert_eq!(line("extentd.build"), Some(cladefs::BUILD_COMMIT), "{lines}");
+    assert_eq!(line("cladefsd.build"), Some(cladefs::BUILD_COMMIT), "{lines}");
 
     drop(store);
     let refused = Cladefsctl::local().run(&[Path::new("stats"), Path::new("--json")]);
-    assert!(refused.unwrap_err().contains("CLADEFS_EXTENTD_GRPC"));
+    assert!(refused.unwrap_err().contains("CLADEFSD_GRPC"));
 }
 
 /// What `child`, whose standard error is piped, writes there once sent SIGQUIT (TASK-44.13): its
@@ -510,7 +505,7 @@ fn cladefsctl_writes_its_stacks_on_sigquit() {
     listener.set_nonblocking(true).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args([Path::new("stat"), &dir.path().join("store")])
-        .env("CLADEFS_EXTENTD_GRPC", &control)
+        .env("CLADEFSD_GRPC", &control)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -543,7 +538,7 @@ fn cladefsctl_writes_its_stacks_on_sigquit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn tenants_are_granted_and_revoked() {
-    use cladefs::{Errno, RemoteExtentStore};
+    use cladefs::{DaemonExtentStore, Errno};
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
     let (acme, other) = (dir.path().join("acme"), dir.path().join("other"));
@@ -552,22 +547,22 @@ fn tenants_are_granted_and_revoked() {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let (uid, gid) = (uid.to_string(), gid.to_string());
     let (uid, gid) = (Path::new(&uid), Path::new(&gid));
-    let grant = [Path::new("grant"), Path::new("acme"), Path::new("a"), &acme, uid, gid];
-    let socket = dir.path().join("tenants/acme.sock");
+    let grant = [Path::new("grant"), Path::new("a"), &acme, uid, gid];
+    let socket = dir.path().join("tenants/a.sock");
     assert_eq!(cladefsctl.run(&grant).unwrap(), format!("{}\n", socket.display()));
-    assert_eq!(cladefsctl.run(&grant[..4]).unwrap(), format!("{}\n", socket.display()));
-    let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), 1 << 24).unwrap();
-    let refused = RemoteExtentStore::connect(&socket, other.join("vm"), 1 << 24);
+    assert_eq!(cladefsctl.run(&grant[..3]).unwrap(), format!("{}\n", socket.display()));
+    let vm = DaemonExtentStore::connect(&socket, acme.join("vm"), 1 << 24).unwrap();
+    let refused = DaemonExtentStore::connect(&socket, other.join("vm"), 1 << 24);
     assert_eq!(refused.err().and_then(|err| err.errno()), Some(Errno::EACCES));
 
-    let revoke = [Path::new("revoke"), Path::new("acme")];
+    let revoke = [Path::new("revoke"), Path::new("a")];
     assert_eq!(cladefsctl.run(&revoke).unwrap(), "");
     assert!(!socket.exists(), "the revoked tenant's socket stayed");
-    assert!(RemoteExtentStore::connect(&socket, acme.join("new"), 1 << 24).is_err());
+    assert!(DaemonExtentStore::connect(&socket, acme.join("new"), 1 << 24).is_err());
     assert_eq!(vm.info().unwrap().capacity, 1 << 24);
     drop(vm);
     let error = cladefsctl.run(&revoke).expect_err("revoked a tenant not granted");
-    assert!(error.contains("revoking acme"), "{error}");
+    assert!(error.contains("revoking tenant a"), "{error}");
 }
 
 /// TASK-71: tenants' grants are the daemon's: without one, `grant` and `revoke` are refused,
@@ -577,8 +572,8 @@ fn grants_need_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::local();
     for args in [
-        [Path::new("grant"), Path::new("acme"), Path::new("a"), dir.path()].as_slice(),
-        &[Path::new("revoke"), Path::new("acme")],
+        [Path::new("grant"), Path::new("a"), dir.path()].as_slice(),
+        &[Path::new("revoke"), Path::new("a")],
     ] {
         let error = cladefsctl.run(args).expect_err("granted without a daemon");
         assert!(error.contains("tenants' grants are the extent daemon's"), "{error}");
@@ -609,13 +604,13 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
     let delete = [Path::new("delete"), &path];
 
     let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
-    assert!(error.contains("CLADEFS_EXTENTD_REMOTE names no bucket"), "{error}");
-    let bucket = [("CLADEFS_EXTENTD_REMOTE", "memory:///branches")];
+    assert!(error.contains("CLADEFSD_BUCKET names no bucket"), "{error}");
+    let bucket = [("CLADEFSD_BUCKET", "memory:///branches")];
     let error = Cladefsctl::with_env(&bucket).run(&delete).expect_err("deleted with no token");
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
-    let zero = [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "0")];
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
+    let zero = [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "0")];
     let error = Cladefsctl::with_env(&zero).run(&delete).expect_err("deleted with token 0");
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(path.exists());
 
     // New stores, made where no bucket is.
@@ -690,9 +685,9 @@ fn stores_grow_here_and_shrink_only_through_the_daemon() {
 fn the_daemon_needs_a_bucket_and_a_token() {
     let dir = tempfile::tempdir().unwrap();
     let start = |env: &[(&str, &str)]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
         command.arg(dir.path().join("vms.sock"));
-        for name in ["CLADEFS_EXTENTD_REMOTE", "CLADEFS_EXTENTD_TOKEN"] {
+        for name in ["CLADEFSD_BUCKET", "CLADEFSD_TOKEN"] {
             command.env_remove(name);
         }
         let output = command.envs(env.iter().copied()).output().unwrap();
@@ -700,10 +695,10 @@ fn the_daemon_needs_a_bucket_and_a_token() {
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
     let error = start(&[]);
-    assert!(error.contains("CLADEFS_EXTENTD_REMOTE names no bucket"), "{error}");
-    let error = start(&[("CLADEFS_EXTENTD_REMOTE", "memory:///branches")]);
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
-    let error = start(&[("CLADEFS_EXTENTD_REMOTE", "memory:///b"), ("CLADEFS_EXTENTD_TOKEN", "0")]);
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
+    assert!(error.contains("CLADEFSD_BUCKET names no bucket"), "{error}");
+    let error = start(&[("CLADEFSD_BUCKET", "memory:///branches")]);
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
+    let error = start(&[("CLADEFSD_BUCKET", "memory:///b"), ("CLADEFSD_TOKEN", "0")]);
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(!dir.path().join("vms.sock").exists(), "it listened");
 }

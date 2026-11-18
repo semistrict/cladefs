@@ -1,10 +1,10 @@
 ---
 id: TASK-43.8
-title: 'extentd: the cross-process store lock waited for without a thread'
+title: 'cladefsd: the cross-process store lock waited for without a thread'
 status: To Do
 assignee: []
 created_date: '2026-10-18 15:22'
-updated_date: '2026-11-15 11:36'
+updated_date: '2026-11-16 22:53'
 labels: []
 dependencies:
   - TASK-43.6

@@ -14,7 +14,7 @@
 # fork, stat), RESULTS/LABEL-stat.txt what each fork's stat said, and RESULTS/LABEL-stats.txt the
 # daemon's counters, where its tree keeps them.
 #
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds each
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds each
 # tree's binaries and makes the image, as work; `measure` times them, building nothing; unset,
 # both (scripts/fork-time-host.sh runs the two as jobs of their own, TASK-368).
 #
@@ -27,6 +27,10 @@ results=${2:?results directory required}
 shift 2
 (( $# > 0 )) || { echo "Name a LABEL=TREE to time" >&2; exit 2; }
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
+# cladefs: the daemon's stores encrypted under the bucket KMS of a test master key, unless the environment
+# names a KMS (TASK-411.28).
+source "$(dirname "${BASH_SOURCE[0]}")/test-kms.sh"
+test_master_key
 host_setup
 host_record > "$results/host.txt"
 
@@ -63,34 +67,34 @@ if [[ $host_phase != measure ]]; then
         tree=$(cd "${pair#*=}" && pwd)
         echo "== $label: building $tree" >&2
         (cd "$tree" && CARGO_TARGET_DIR=$scratch/target-$label host_cargo build --release -q \
-            -p cladefs --bin cladefs-extentd --bin cladefsctl)
+            -p cladefs --bin cladefsd --bin cladefsctl)
     done
     if [[ $host_phase == build ]]; then exit 0; fi
 fi
-[[ -f $layer ]] || { echo "$layer: no image: CLADEFS_HOST_PHASE=build makes it" >&2; exit 2; }
+[[ -f $layer ]] || { echo "$layer: no image: CLADEFS_TEST_HOST_PHASE=build makes it" >&2; exit 2; }
 
 for pair in "$@"; do
     label=${pair%%=*}
     bin=$scratch/target-$label/release
-    [[ -x $bin/cladefs-extentd && -x $bin/cladefsctl ]] ||
-        { echo "$label: not built in $bin: CLADEFS_HOST_PHASE=build builds it" >&2; exit 2; }
+    [[ -x $bin/cladefsd && -x $bin/cladefsctl ]] ||
+        { echo "$label: not built in $bin: CLADEFS_TEST_HOST_PHASE=build builds it" >&2; exit 2; }
     dir=$scratch/$label
     if [[ -e $dir ]]; then rm -r -- "$dir"; fi
     mkdir -p "$dir/stores" "$dir/bucket" "$dir/cache"
     out=$results/$label.tsv
     : > "$out"
     echo "== $label: timing" >&2
-    CLADEFS_EXTENTD_REMOTE="file://$dir/bucket/" CLADEFS_EXTENTD_TOKEN=1 \
-        CLADEFS_EXTENTD_CACHE="$dir/cache" CLADEFS_EXTENTD_GRPC="$dir/extentd.control" \
-        CLADEFS_EXTENTD_STATS="$results/$label-stats.txt" \
-        "$bin/cladefs-extentd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
+    CLADEFSD_BUCKET="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
+        CLADEFSD_PART_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/cladefsd.control" \
+        CLADEFSD_STATS="$results/$label-stats.txt" \
+        "$bin/cladefsd" "$dir/cladefsd.sock" $(( 8 << 30 )) > "$results/$label-cladefsd.log" 2>&1 &
     daemon=$!
     for _ in {1..600}; do
-        [[ -S $dir/extentd.control ]] && break
+        [[ -S $dir/cladefsd.control ]] && break
         kill -0 "$daemon" || { echo "$label: the daemon exited" >&2; exit 1; }
         sleep 0.1
     done
-    export CLADEFS_EXTENTD_GRPC=$dir/extentd.control
+    export CLADEFSD_GRPC=$dir/cladefsd.control
     # timed STEP ITERATION COMMAND... runs COMMAND and records how long it took.
     timed() {
         local step=$1 iteration=$2 start end

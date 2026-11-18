@@ -375,7 +375,7 @@ const MOST_TURNS: u32 = 16;
 ///   jumps as another writer takes them over: at a crash, or a remount, of those a lease moved.
 /// - Reads, writes, frees and barriers take turns of the executor to answer, at random, so that
 ///   those in flight together finish in any order. As a guest's driver holds them (`Seal` in
-///   guest/rust/fxfs-linux/src/device.rs), a barrier waits for writes in flight and keeps others
+///   guest/rust/cladefs-linux/src/device.rs), a barrier waits for writes in flight and keeps others
 ///   out until it answers, and no one is told an extent is open from when it starts: the store
 ///   would have those fall on either side of it, a write's requests on both.
 struct Awkward {
@@ -470,7 +470,7 @@ impl Drop for Passage<'_> {
     }
 }
 
-/// cladefs: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/extent_remote).
+/// cladefs: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/extent_bucket).
 const EPOCH_SHIFT: u32 = 40;
 
 /// cladefs: the seed of the next device that isn't given one: CLADEFS_DEVICE_SEED, or 0, then the next

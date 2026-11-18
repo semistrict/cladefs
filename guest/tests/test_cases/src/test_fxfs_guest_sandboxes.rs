@@ -11,12 +11,12 @@
 //! all the while.
 //!
 //! scripts/sandboxes.sh runs it: it starts the S3 server with its data on the disk the case's
-//! directory is on, names its bucket (CLADEFS_EXTENTD_REMOTE, an `s3://` URL, and the server's
+//! directory is on, names its bucket (CLADEFSD_BUCKET, an `s3://` URL, and the server's
 //! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
 //! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
 //! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on ubu1 before
-//! each pin handed to LangSmith (scripts/qualify.sh, TASK-330.5).
+//! each candidate handed to LangSmith (scripts/qualify.sh, TASK-330.5).
 //!
 //! Each host imports the sandboxes' image once, as a base: an Alpine root with PostgreSQL and git,
 //! Docker's static binaries and its buildx plugin, and a BusyBox image to build from; each VM
@@ -121,7 +121,7 @@ mod host {
     use super::*;
 
     use crate::common::{
-        Measured, ProcessCosts, cgroup_memory, control, cladefs_guest_should_run, resident,
+        Measured, ProcessCosts, cgroup_memory, cladefs_guest_should_run, control, resident,
         setup_rootfs,
     };
     use crate::test_fxfs_guest_docker::host::{DockerFiles, buildx};
@@ -179,7 +179,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 ("CLADEFS_PGBENCH_RUNS", 1),
                 ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 1000), ("CLADEFS_SANDBOX_GIT_COMMITS", 30)],
+            Role::Git => {
+                &[("CLADEFS_SANDBOX_GIT_FILES", 1000), ("CLADEFS_SANDBOX_GIT_COMMITS", 30)]
+            }
             Role::Writer => {
                 &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
@@ -214,8 +216,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         }
     }
 
-    /// The long mode: before a pin, LangSmith's writers, three builds a builder, pgbench on 5 M
-    /// accounts, the sandbox team's, three times.
+    /// The long mode: before a candidate goes to LangSmith, LangSmith's writers, three builds a
+    /// builder, pgbench on 5 M accounts, the sandbox team's, three times.
     fn long(role: Role) -> Vec<(&'static str, String)> {
         let settings: &[(&str, u64)] = match role {
             Role::Builder => &[("CLADEFS_DOCKER_BUILDS", 3), ("CLADEFS_DOCKER_BUILD_MIB", 512)],
@@ -224,7 +226,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 ("CLADEFS_PGBENCH_RUNS", 3),
                 ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 3000), ("CLADEFS_SANDBOX_GIT_COMMITS", 100)],
+            Role::Git => {
+                &[("CLADEFS_SANDBOX_GIT_FILES", 3000), ("CLADEFS_SANDBOX_GIT_COMMITS", 100)]
+            }
             Role::Writer => {
                 &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
@@ -245,7 +249,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 timeout_secs: 1200,
             }),
             // LangSmith's controlled load's shape (TASK-310): 16 VMs, 8 at a time, each doing more
-            // than a short run's; on ubu1 by hand before each pin (TASK-330.5).
+            // than a short run's; on ubu1 by hand before each candidate (TASK-330.5).
             Ok("long") => Ok(Mode {
                 name: "long",
                 at_once: 8,
@@ -365,7 +369,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             .collect()
     }
 
-    /// A framing past extentd's turn, as its daemon's log warns of it: its milliseconds, and its
+    /// A framing past cladefsd's turn, as its daemon's log warns of it: its milliseconds, and its
     /// phases', by name, as extent_store's timings say them, its threads' waits to run among them,
     /// `runnable` (TASK-336).
     #[derive(Debug, PartialEq)]
@@ -374,7 +378,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         phases: Vec<(String, f64)>,
     }
 
-    /// The framings of the daemon whose log is `log` past extentd's turn, as it warns of them.
+    /// The framings of the daemon whose log is `log` past cladefsd's turn, as it warns of them.
     fn slow_framings(log: &str) -> Vec<SlowFraming> {
         log.lines()
             .filter_map(|line| {
@@ -542,10 +546,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let dir = &test_setup.tmp_dir;
             let mut tally = Tally::default();
             // The topology: the bucket an S3 server's, its data on the case's disk.
-            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap_or_default();
             ensure!(
-                remote.starts_with("s3://"),
-                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
+                bucket_url.starts_with("s3://"),
+                "CLADEFSD_BUCKET is {bucket_url:?}, not an S3 server's bucket: scripts/sandboxes.sh \
                  starts one"
             );
             let bucket_dir = std::env::var_os("CLADEFS_SANDBOX_BUCKET_DIR")
@@ -572,7 +576,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 let socket = sockets.path().join(format!("{name}.sock"));
                 // Each host's own placement.
                 let token = (at + 1).to_string();
-                let env = [("CLADEFS_EXTENTD_TOKEN", std::ffi::OsStr::new(&token))];
+                let env = [("CLADEFSD_TOKEN", std::ffi::OsStr::new(&token))];
                 let daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,
@@ -700,7 +704,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                     }
                 }
                 crate::common::say_daemon_stats(test_setup, host.name);
-                // What its kernel counted of it, as any pin's daemon is counted (TASK-330.4).
+                // What its kernel counted of it, as either side's daemon is counted (TASK-330.4).
                 let cost = ProcessCosts::of(host.daemon.id())?;
                 eprintln!("sandboxes: {}: {cost:?}", host.name);
                 costs.push(cost);
@@ -755,8 +759,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
 
     impl Test for TestFxfsGuestSandboxes {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFSD_BIN").is_none() {
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");
             }
             cladefs_guest_should_run()
         }
@@ -989,7 +993,7 @@ mod guest {
     /// Mounts the VM's own store's Fxfs at [`MNT`], made as it mounts.
     fn mount_data() {
         fs::create_dir_all(MNT).unwrap();
-        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"fxfs");
+        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"cladefs");
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

@@ -11,7 +11,7 @@
 # copy with no .git (host_tree, scripts/lib/linux-host-setup.sh), has the key of what it holds. A
 # kernel built from one tree serves another of the same key: CI's sandboxes job keeps one so
 # (TASK-330.1), and a host's runs (host_kernel). The kernel says the commit it was built from
-# (/proc/fs/fxfs/build), not the one it serves.
+# (/proc/fs/cladefs/build), not the one it serves.
 #
 #   guest-kernel-key.sh [ROOT]
 set -euo pipefail

@@ -5,7 +5,7 @@
 
 # The quick check of a batch of the guest's changes, between builds: matches the guest's C against
 # the semantic patches of scripts/cocci (scripts/cocci-guest.py), type-checks the guest
-# filesystem's Rust (cargo check, no code), and compiles guest/linux's C, fs/fxfs and
+# filesystem's Rust (cargo check, no code), and compiles guest/linux's C, fs/cladefs and
 # drivers/virtio_extent, object by object, in the kernel tree build-guest-kernel.sh configured
 # before, building and linking no kernel. A kernel built from the tree after puts its own series
 # back (build-guest-kernel.sh resets it). It runs on Linux; on macOS, run it in Lima:
@@ -39,13 +39,13 @@ python3 "$root/scripts/cocci-guest.py"
 # The Rust, against the sysroot a build uses, its target directory too: no code.
 rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
 (cd "$root/guest/rust" && RUSTFLAGS="$rustflags" CARGO_TARGET_DIR="$work/rust-$arch/target" \
-    cargo check --release -p fxfs-linux --target "$target")
+    cargo check --release -p cladefs-linux --target "$target")
 
 # guest/linux's files over the tree's, as the series adds them (build-guest-kernel.sh), and their
 # objects compiled.
 objects=()
-for path in include/linux/fxfs_tls.h include/linux/virtio_extent.h drivers/virtio_extent \
-    fs/fxfs; do
+for path in include/linux/cladefs_tls.h include/linux/virtio_extent.h drivers/virtio_extent \
+    fs/cladefs; do
     while read -r file; do
         mkdir -p "$src/$(dirname "$file")"
         cp "$root/guest/linux/$file" "$src/$file"

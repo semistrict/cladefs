@@ -25,7 +25,7 @@
 //! it then, under the lock the window's changes take. So a change of a page never touched takes
 //! nothing away, and flushes nothing; a page the guest stores to first, made private, has its
 //! private copy put in place of nothing (TASK-276.6). Only what the guest asks for to read next
-//! (doc-4's `MAP_AHEAD`, [`UffdSecondStage::map_ahead`]) is installed ahead of its accesses.
+//! (doc-4's `MAP_PREFAULT`, [`UffdSecondStage::prefault`]) is installed ahead of its accesses.
 //!
 //! A fault thread passes the faults to the window, which maps the page (and so maps it here), and
 //! wakes the faulting thread. It resolves faults concurrently, as futures it polls as they make
@@ -1548,7 +1548,7 @@ impl<H: HostMemory> UffdSecondStage<H> {
             resolved => resolved,
         };
         // cladefs: failed as what resolves the window's faults went, the daemon: the VM process is
-        // stopping, ExtentdLost, as its device was told, and its faulting thread waits for that,
+        // stopping, CladefsdLost, as its device was told, and its faulting thread waits for that,
         // which aborting would beat, the VM dying of SIGABRT, where a VM whose daemon goes exits
         // 158 (doc-12; fxfs-guest-soak, GCE r830 round 27; TASK-231).
         if resolved.is_err() && window.lost() {
@@ -1566,18 +1566,17 @@ impl<H: HostMemory> UffdSecondStage<H> {
         }
     }
 
-    /// cladefs: maps the pages of the `len` bytes at `offset` for the guest ahead of its accesses, as
-    /// the guest asks for the pages it maps to read (doc-4's `MAP_AHEAD`): those the window names
-    /// and none installed yet are installed now, as their first faults would install them
-    /// ([`Self::reinstall`]), in runs of memory following on; then each page installed, or
-    /// private, is mapped for the guest (`Prefault`): each one's first access otherwise takes the
-    /// hypervisor a fault, which nested virtualization makes dear (TASK-112.1), and a page not
-    /// installed, a userfaultfd fault besides (backlog doc-13: a `MAP` names pages, their first
-    /// touch installs them, TASK-276.6). Pages the window hasn't named are left to the guest's
-    /// faults, which this mustn't wait for: what waits for the daemon's replies may be holding
-    /// them up. Nothing outside the second stage is mapped, nor for the guest without a
-    /// `Prefault`.
-    pub(crate) fn map_ahead(&self, offset: u64, len: u64) {
+    /// cladefs: maps the pages of the `len` bytes at `offset` for the guest ahead of its accesses,
+    /// as the guest asks for the pages it maps to read (doc-4's `MAP_PREFAULT`): those the window
+    /// names and none installed yet are installed now, as their first faults would install them
+    /// ([`Self::reinstall`]), in runs of memory following on; then each page installed, or private,
+    /// is mapped for the guest (`Prefault`): each one's first access otherwise takes the hypervisor
+    /// a fault, which nested virtualization makes dear (TASK-112.1), and a page not installed, a
+    /// userfaultfd fault besides (backlog doc-13: a `MAP` names pages, their first touch installs
+    /// them, TASK-276.6). Pages the window hasn't named are left to the guest's faults, which this
+    /// mustn't wait for: what waits for the daemon's replies may be holding them up. Nothing
+    /// outside the second stage is mapped, nor for the guest without a `Prefault`.
+    pub(crate) fn prefault(&self, offset: u64, len: u64) {
         let page_size = page_size() as usize;
         let end = offset.saturating_add(len).min(self.size as u64);
         if offset >= end {
@@ -1665,7 +1664,7 @@ impl<H: HostMemory> SecondStage for UffdSecondStage<H> {
     /// touch installs them, TASK-276.6): what was there is taken away ([`Self::take_away`]),
     /// and each page left out, as the window names it, for its first fault to install
     /// ([`Self::reinstall`]), or a `PRIVATE` to fill in place, or the guest's asking to read it
-    /// next to install ahead ([`Self::map_ahead`]). Installed as it was mapped, every page mapped
+    /// next to install ahead ([`Self::prefault`]). Installed as it was mapped, every page mapped
     /// took an `mmap` there, and a page the guest then stored to without reading it, a write's,
     /// took another over it, its TLB flushed on every CPU of the process's and the guest's.
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
@@ -1902,7 +1901,7 @@ fn read_at(fd: RawFd, bytes: &mut [u8], offset: u64) {
 
 impl<H: HostMemory> UffdSecondStage<H> {
     /// The memory of the page at `phys`, which the window maps read-only. Not mapped for the guest
-    /// ahead of its accesses (`Prefault`) but those it asks for ([`Self::map_ahead`]):
+    /// ahead of its accesses (`Prefault`) but those it asks for ([`Self::prefault`]):
     /// mapped for it, the hypervisor's pre-fault took a fifth of the VM process's time changing the
     /// window, and its pages, in the host's page tables, made each later unmap of them flush the
     /// host's and the hypervisor's TLBs on every CPU (TASK-109).
@@ -2452,7 +2451,7 @@ mod tests {
     }
 
     /// cladefs TASK-231: a fault its window fails as its daemon goes waits for the VM process to
-    /// stop, as it does then, ExtentdLost, rather than abort it: aborted, the VM died of SIGABRT,
+    /// stop, as it does then, CladefsdLost, rather than abort it: aborted, the VM died of SIGABRT,
     /// a VM of fxfs-guest-soak's (GCE r830 round 27), where a VM whose daemon goes exits 158.
     #[test]
     fn faults_failed_as_their_daemon_goes_wait() {
@@ -2564,12 +2563,12 @@ mod tests {
         assert_eq!(*told.0.lock().unwrap(), []);
         assert_eq!(stage.installed(), 0, "the window's maps installed pages");
 
-        stage.map_ahead(0, 4 * ps);
+        stage.prefault(0, 4 * ps);
         assert_eq!(std::mem::take(&mut *told.0.lock().unwrap()), [(0, 2 * ps), (3 * ps, ps)]);
         assert_eq!(stage.installed(), 2, "the runs asked for ahead aren't installed");
-        stage.map_ahead(2 * ps, 8 * ps);
+        stage.prefault(2 * ps, 8 * ps);
         assert_eq!(std::mem::take(&mut *told.0.lock().unwrap()), [(3 * ps, ps)]);
-        stage.map_ahead(4 * ps, ps);
+        stage.prefault(4 * ps, ps);
         assert_eq!(*told.0.lock().unwrap(), []);
         // SAFETY: The window's memory, installed, which nothing else accesses.
         let read = |page: u64| unsafe {
@@ -2858,7 +2857,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::reserve(crate::pages::ArenaId::DEFAULT, 1).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(1);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         // Not in memory as it is mapped, and zeros as it is brought in: not here until a fault.
         let file = TestSource::anonymous(1);
@@ -2934,7 +2933,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::reserve(crate::pages::ArenaId::DEFAULT, 1).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(1);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         // In memory as it is mapped, installed here as a load first touches it.
         let file = TestSource::filled(1, 9);
@@ -3004,8 +3003,7 @@ mod tests {
         let base = window_memory(3);
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, (3 * ps) as u64, None) }.unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, 3).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(3);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let file = TestSource::filled(3, 9).source();
         dax.map(0, &file, 0, (3 * ps) as u64);
@@ -3154,8 +3152,7 @@ mod tests {
         let size = (PAGES * ps) as u64;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, size, None) }.unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, PAGES as u64).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(PAGES as u64);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
@@ -3204,8 +3201,7 @@ mod tests {
         let stage =
             unsafe { UffdSecondStage::with_budget(base, size, Memories::InProcess, None, BUDGET) }
                 .unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, PAGES as u64).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(PAGES as u64);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
@@ -3264,7 +3260,7 @@ mod tests {
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, (2 * ps) as u64, None) }.unwrap();
         let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, 2).unwrap();
+        let copying = crate::dax::CopyOnWrite::at_most(2);
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let file = TestSource::filled(2, 7).source();
         dax.map(0, &file, 0, (2 * ps) as u64);

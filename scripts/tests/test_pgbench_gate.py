@@ -54,14 +54,14 @@ def density_log(per_vm_mib, tps=(100, 80, 80)):
     """A density case's log of a VM a run of each of `tps`: its console (log.txt), where the host
     says its memory before the first VM and after each VM's runs, each VM costing it `per_vm_mib`,
     and its guest's output (stdout.txt)."""
-    console = [f"memory: vm=0 phase=base host_used={1000 * MIB} extentd_pss={10 * MIB}"]
+    console = [f"memory: vm=0 phase=base host_used={1000 * MIB} cladefsd_pss={10 * MIB}"]
     stdout = ["OK load 5000000", "OK base"]
     for vm, each in enumerate(tps, 1):
         console += [
             f"tps = {each} (without initial connection time)",
             f"memory: vm={vm} phase=ran host_used={(1000 + vm * per_vm_mib) * MIB} "
             f"vmm_pss={per_vm_mib * MIB} vmm_anon={(per_vm_mib - 50) * MIB} vmm_shmem={50 * MIB} "
-            f"extentd_memory_bytes={vm * 100 * MIB} extentd_private_pages={vm * 10} "
+            f"cladefsd_memory_bytes={vm * 100 * MIB} cladefsd_private_pages={vm * 10} "
             f"guest_total={1024 * MIB} guest_available={512 * MIB} guest_cached={256 * MIB}",
         ]
         stdout += ["OK runs 1", "OK checked"]
@@ -86,19 +86,19 @@ def bigmap_log(read, cached, written_mib=200):
         vm = ("vm=0" if phase == "base"
               else f"vm=1 vmm_pss={50 * MIB} guest_fxfs_window_privates={privates}")
         console.append(f"memory: {vm} phase={phase} host_used={used * MIB} "
-                       f"extentd_memory_bytes={used * MIB // 2} guest_cached={guest * MIB}")
+                       f"cladefsd_memory_bytes={used * MIB // 2} guest_cached={guest * MIB}")
     return "\n".join(console) + "\n", "OK base\nOK checked\n"
 
 
 class PgbenchGate(unittest.TestCase):
-    def results(self, cases, rounds=False):
+    def results(self, cases, repeats=False):
         """A results directory of `cases`, each case's log by its name: in e2e/CASE/CASE, or, if
-        `rounds`, each of a list of logs in e2e/CASE/round-K/CASE."""
+        `repeats`, each of a list of logs in e2e/CASE/repeat-K/CASE."""
         root = Path(tempfile.mkdtemp())
         for case, logged in cases.items():
-            for at, (console, stdout) in enumerate(logged if rounds else [logged], 1):
-                place = root / "e2e" / case / (f"round-{at}" if rounds else case)
-                if rounds:
+            for at, (console, stdout) in enumerate(logged if repeats else [logged], 1):
+                place = root / "e2e" / case / (f"repeat-{at}" if repeats else case)
+                if repeats:
                     place = place / case
                 place.mkdir(parents=True)
                 (place / "log.txt").write_text(console)
@@ -118,9 +118,9 @@ class PgbenchGate(unittest.TestCase):
         log_txt.with_name("stdout.txt").unlink()
         self.assertEqual(gate.runs(gate.said(log_txt)), [[1.0, 2.0, 3.0, 4.0]])
 
-    def test_each_rounds_runs_are_measured_in_order(self):
+    def test_each_repeats_runs_are_measured_in_order(self):
         results = self.results({"fxfs-guest-pgbench-dax": [log([1, 2]), log([3, 4])] * 5},
-                               rounds=True)
+                               repeats=True)
         self.assertEqual(gate.measure(results)["dax"][::5], [[[1.0, 2.0]], [[3.0, 4.0]]])
         self.assertEqual(len(gate.measure(results)["dax"]), 10)
 
@@ -188,7 +188,7 @@ class PgbenchGate(unittest.TestCase):
             least("writeback-dax", "dax", 1.5, 0.0, True),
         ])
 
-    def test_density_is_of_the_first_round_of_many_vms_in_any_results(self):
+    def test_density_is_of_the_first_repeat_of_many_vms_in_any_results(self):
         single = self.results({
             "fxfs-guest-pgbench": log([1000, 1000]),
             "fxfs-guest-pgbench-dax": log([900, 900]),
@@ -231,13 +231,13 @@ class PgbenchGate(unittest.TestCase):
                          (1, "failed: decay of dax: 0.8 under 0.9\n"))
         self.assertEqual(json.loads(failed.stdout)["host"], "bare-metal")
 
-    def test_rounds_that_passed_are_read_from_their_whole_logs(self):
+    def test_repeats_that_passed_are_read_from_their_whole_logs(self):
         root = Path(tempfile.mkdtemp())
         case = root / "e2e" / "fxfs-guest-pgbench-dax"
         case.mkdir(parents=True)
         for at, runs in [(1, [10, 9]), (2, [8, 7])]:
             console, stdout = log(runs)
-            (case / f"round-{at}.log").write_text(console + stdout)
+            (case / f"repeat-{at}.log").write_text(console + stdout)
         self.assertEqual(gate.measure(root)["dax"], [[[10.0, 9.0]], [[8.0, 7.0]]])
 
     def test_a_run_without_pgbench_fails(self):
@@ -265,11 +265,11 @@ class PgbenchGate(unittest.TestCase):
 
     def test_the_host_s_memory_is_read_as_said(self):
         self.assertEqual(gate.samples([
-            "memory: vm=0 phase=base host_used=100 extentd_pss=7",
+            "memory: vm=0 phase=base host_used=100 cladefsd_pss=7",
             "tps = 1.0 (without initial connection time)",
             "  memory: vm=1 phase=ran host_used=300 vmm_pss=150 guest_cached=20  ",
         ]), [
-            {"vm": 0, "phase": "base", "host_used": 100, "extentd_pss": 7},
+            {"vm": 0, "phase": "base", "host_used": 100, "cladefsd_pss": 7},
             {"vm": 1, "phase": "ran", "host_used": 300, "vmm_pss": 150, "guest_cached": 20},
         ])
 
@@ -283,10 +283,10 @@ class PgbenchGate(unittest.TestCase):
             "vmm_pss_mib": [300.0, 300.0, 300.0],
             "vmm_anon_mib": [250.0, 250.0, 250.0],
             "vmm_shmem_mib": [50.0, 50.0, 50.0],
-            "extentd_memory_mib": [100.0, 200.0, 300.0],
+            "cladefsd_memory_mib": [100.0, 200.0, 300.0],
             "guest_used_mib": [512.0, 512.0, 512.0],
             "guest_cached_mib": [256.0, 256.0, 256.0],
-            "extentd_private_pages": [10, 20, 30],
+            "cladefsd_private_pages": [10, 20, 30],
         })
         one_vm = [f"memory: vm=0 phase=base host_used={MIB}",
                   f"memory: vm=1 phase=ran host_used={3 * MIB}"]
@@ -333,7 +333,7 @@ class PgbenchGate(unittest.TestCase):
                               "written": 300.0, "synced": 300.0, "end": 300.0},
             "vmm_pss_mib": {"mounted": 50.0, "read-cold": 50.0, "read-warm": 50.0,
                             "written": 50.0, "synced": 50.0, "end": 50.0},
-            "extentd_memory_mib": {"base": 500.0, "mounted": 500.0, "read-cold": 550.0,
+            "cladefsd_memory_mib": {"base": 500.0, "mounted": 500.0, "read-cold": 550.0,
                                    "read-warm": 550.0, "written": 650.0, "synced": 650.0,
                                    "end": 650.0},
             "guest_fxfs_window_privates": {"base": None, "mounted": 0, "read-cold": 0,

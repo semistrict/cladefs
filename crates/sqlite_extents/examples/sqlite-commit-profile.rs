@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Where a SQLite transaction of one row's time goes on a volume (TASK-301): the device's
-//! requests and the window's, each timed as the volume makes them; the store's flushes, phase by
+//! Where a SQLite transaction of one row's time goes on a file set (TASK-301): the device's
+//! requests and the window's, each timed as the file set makes them; the store's flushes, phase by
 //! phase (`extent_store::timings`); and, for scale, what an fsync of a block appended to a file
 //! takes on the same disk, and a commit of SQLite's own WAL with `synchronous=FULL`.
 //!
-//! Configurations: `image`, the volume on an in-process image (`cladefs::Storage`); on Linux,
+//! Configurations: `image`, the file set on an in-process image (`cladefs::Storage`); on Linux,
 //! `daemon`, on a store an extent daemon on a thread of this process serves, its files mapped
 //! into its window.
 //!
@@ -17,7 +17,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Options, Volume, register};
+use sqlite_extents::{FileSet, Options, register};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -122,7 +122,7 @@ impl Device for Timing {
 struct TimingWindow(sqlite_extents::daemon::DaemonWindow);
 
 #[cfg(target_os = "linux")]
-impl sqlite_extents::Window for TimingWindow {
+impl sqlite_extents::FileSetWindow for TimingWindow {
     fn memory(&self) -> (std::ptr::NonNull<u8>, u64) {
         self.0.memory()
     }
@@ -211,8 +211,8 @@ fn summary(config: &str, times: &mut [Duration]) {
     );
 }
 
-fn on_volume(config: &str, volume: Arc<Volume>, count: usize) {
-    let registration = register(config, volume.clone()).unwrap();
+fn on_file_set(config: &str, file_set: Arc<FileSet>, count: usize) {
+    let registration = register(config, file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("p.db", OpenFlags::default(), config).unwrap();
     println!("{config}:");
@@ -220,7 +220,7 @@ fn on_volume(config: &str, volume: Arc<Volume>, count: usize) {
     summary(config, &mut times);
     drop(connection);
     drop(registration);
-    volume.close().unwrap();
+    file_set.close().unwrap();
 }
 
 /// What appending `blocks` blocks to a file and syncing them takes on the disk under `dir`.
@@ -269,11 +269,8 @@ fn main() {
     // here, placement 1.
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var(
-            "CLADEFS_EXTENTD_REMOTE",
-            format!("file://{}/", root.join("bucket").display()),
-        );
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_BUCKET", format!("file://{}/", root.join("bucket").display()));
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     println!("Under {}.", root.display());
     for blocks in [1, 5] {
@@ -290,24 +287,25 @@ fn main() {
     }
     {
         let device = Storage::create(root.join("image"), 64 << 30).unwrap().into_device();
-        let volume = Volume::open(DeviceHolder::new(Timing(device)), Options::default()).unwrap();
-        on_volume("image", volume, count);
+        let file_set =
+            FileSet::open(DeviceHolder::new(Timing(device)), Options::default()).unwrap();
+        on_file_set("image", file_set, count);
     }
     #[cfg(target_os = "linux")]
     {
-        let socket = root.join("extentd.sock");
+        let socket = root.join("cladefsd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::thread::spawn(move || cladefs::extentd::serve(listener));
+        std::thread::spawn(move || cladefs::cladefsd::serve(listener));
         let store =
-            cladefs::RemoteExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
+            cladefs::DaemonExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);
         let window = sqlite_extents::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
         let device = DeviceHolder::new(Timing(DeviceHolder::new(
-            cladefs::RemoteDevice::new(store).unwrap(),
+            cladefs::DaemonDevice::new(store).unwrap(),
         )));
-        let volume =
-            Volume::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
+        let file_set =
+            FileSet::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
                 .unwrap();
-        on_volume("daemon", volume, count);
+        on_file_set("daemon", file_set, count);
     }
 }

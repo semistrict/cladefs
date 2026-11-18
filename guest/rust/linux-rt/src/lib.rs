@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! A runtime for Rust in the Linux kernel, without std, over the C functions of
-//! guest/linux/fs/fxfs/rt.h:
+//! guest/linux/fs/cladefs/rt.h:
 //!
 //! - the global allocator, over kvmalloc;
 //! - a logger for the `log` crate, over printk;

@@ -30,7 +30,7 @@
 //! ([`Failed`]), until the follower is remounted, on a new view of its store. (TASK-79.23)
 //!
 //! The protocol is generic over [`Kernel`], the kernel's operations: thin C shims in the guest
-//! (guest/linux/fs/fxfs), Shuttle's primitives in tests, so that Shuttle runs the protocol itself
+//! (guest/linux/fs/cladefs), Shuttle's primitives in tests, so that Shuttle runs the protocol itself
 //! (tests/shuttle.rs). It has no lock-free code of its own, whose relaxed orderings Shuttle, which
 //! makes every atomic SeqCst, couldn't check.
 //!
@@ -128,13 +128,13 @@ pub struct Rules {
     /// Readers hold the fill barrier shared as they read and fill the kernel's caches.
     pub barrier: bool,
     /// A batch drops what the kernel caches of what it changes, and settles its inodes.
-    pub invalidate: bool,
+    pub drop: bool,
     /// Once a batch failed, readers read no more.
     pub fail: bool,
 }
 
 impl Rules {
-    pub const ALL: Self = Self { barrier: true, invalidate: true, fail: true };
+    pub const ALL: Self = Self { barrier: true, drop: true, fail: true };
 }
 
 /// The rules in force: all of them, but in a Shuttle test that turned one off.
@@ -198,7 +198,7 @@ impl<K: Kernel> Protocol<K> {
         if self.kernel.failed() {
             return Err(Failed.into());
         }
-        let invalidate = rules().invalidate;
+        let drops = rules().drop;
         let (batch, changes) = match follow.fetch().await {
             Ok(fetched) => fetched,
             Err(error) => {
@@ -209,7 +209,7 @@ impl<K: Kernel> Protocol<K> {
         };
         let previous = {
             let _barrier = Barrier::new(&self.kernel);
-            if invalidate {
+            if drops {
                 self.kernel.drop_cached(&changes);
             }
             let previous = match follow.apply(batch).await {
@@ -219,7 +219,7 @@ impl<K: Kernel> Protocol<K> {
                     return Err(error);
                 }
             };
-            if invalidate {
+            if drops {
                 self.kernel.settle(&changes);
             }
             previous

@@ -19,9 +19,9 @@
 //!   take against the host's vm.max_map_count (TASK-227);
 //! - `host_kvm_page_tables`: KVM's page tables for its guests, the host's (/proc/meminfo's
 //!   SecPageTables), which a DAX window's pages mapped take (TASK-227);
-//! - `extentd_pss`: the daemon process's share of its own;
-//! - `extentd_*`: some of the daemon's metrics (cladefs::extentd::metrics): the bytes its arenas
-//!   hold, every tenant's extents' pages (`extentd_memory_bytes`), the pages the windows map, its
+//! - `cladefsd_pss`: the daemon process's share of its own;
+//! - `cladefsd_*`: some of the daemon's metrics (cladefs::cladefsd::metrics): the bytes its arenas
+//!   hold, every tenant's extents' pages (`cladefsd_memory_bytes`), the pages the windows map, its
 //!   faults, and any gauge of private pages it keeps (copy-on-write DAX's, TASK-164.1);
 //! - `guest_*`: what the guest said of itself: its memory (/proc/meminfo), faults (/proc/vmstat),
 //!   and its Fxfs's counts of copy-on-write DAX's private pages (`guest_fxfs_*`); cladefs: how long
@@ -67,7 +67,7 @@ mod host {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    /// The daemon's metrics reported, by their names less `cladefs_extentd_`: besides them, any gauge
+    /// The daemon's metrics reported, by their names less `cladefsd_`: besides them, any gauge
     /// of private pages.
     const REPORTED: [&str; 6] = [
         "memory_bytes",
@@ -78,7 +78,7 @@ mod host {
         "page_ins_total",
     ];
 
-    /// An address on the loopback for an extent daemon's metrics (CLADEFS_EXTENTD_METRICS), free as
+    /// An address on the loopback for an extent daemon's metrics (CLADEFSD_METRICS), free as
     /// this returns.
     pub fn metrics_address() -> anyhow::Result<SocketAddr> {
         Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
@@ -128,7 +128,7 @@ mod host {
                 write!(line, " vmm_maps={}", maps.lines().count())?;
             }
             let daemon = rollup(self.daemon).context("the daemon's memory")?;
-            write!(line, " extentd_pss={}", daemon.get("Pss").context("no Pss in smaps_rollup")?)?;
+            write!(line, " cladefsd_pss={}", daemon.get("Pss").context("no Pss in smaps_rollup")?)?;
             for (name, value) in gauges(self.metrics)? {
                 write!(line, " {name}={value}")?;
             }
@@ -159,7 +159,7 @@ mod host {
     }
 
     /// The daemon's metrics at `address` that are [`REPORTED`], or are of private pages, each as
-    /// `extentd_NAME`: its unlabelled ones.
+    /// `cladefsd_NAME`: its unlabelled ones.
     fn gauges(address: SocketAddr) -> anyhow::Result<Vec<(String, u64)>> {
         let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
             .with_context(|| format!("connecting to the daemon's metrics at {address}"))?;
@@ -173,12 +173,12 @@ mod host {
         Ok((body.lines())
             .filter_map(|line| {
                 let (name, value) = line.split_once(' ')?;
-                let name = name.strip_prefix("cladefs_extentd_")?;
+                let name = name.strip_prefix("cladefsd_")?;
                 let reported = REPORTED.contains(&name) || name.contains("private");
                 if name.contains('{') || !reported {
                     return None;
                 }
-                Some((format!("extentd_{name}"), value.trim().parse().ok()?))
+                Some((format!("cladefsd_{name}"), value.trim().parse().ok()?))
             })
             .collect())
     }
@@ -348,8 +348,8 @@ mod guest {
             said.push(format!("guest_{name}={value}"));
         }
         // cladefs: what its Fxfs counts of copy-on-write DAX's private pages, if it is mounted
-        // (/proc/fs/fxfs/<tag>, the first's).
-        let stats = fs::read_dir("/proc/fs/fxfs").ok().and_then(|mut dir| dir.find_map(Result::ok));
+        // (/proc/fs/cladefs/<tag>, the first's).
+        let stats = fs::read_dir("/proc/fs/cladefs").ok().and_then(|mut dir| dir.find_map(Result::ok));
         let stats = stats.and_then(|stats| fs::read_to_string(stats.path()).ok());
         for line in stats.as_deref().unwrap_or_default().lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };

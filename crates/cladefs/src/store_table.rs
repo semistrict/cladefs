@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The extent daemon's stores (`crate::extentd`), by the keys that name them
-//! (`extentd::stores::store_key`): one table, whose entry for a key says all there is of its store
+//! The extent daemon's stores (`crate::cladefsd`), by the keys that name them
+//! (`cladefsd::stores::store_key`): one table, whose entry for a key says all there is of its store
 //! (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what is
 //! open of it for others: the store its writer's connection, or its followers', have open, or a
 //! point the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
@@ -152,6 +152,10 @@ enum Entry<C, S, P> {
     Daemon(Open<S, P>),
     /// None holds it: what is open of it, never [`Open::Nothing`].
     Unheld(Open<S, P>),
+    /// cladefs: the daemon's FUSE mount has it attached, a vdisk of a cell it shows (TASK-475.3):
+    /// nothing else holds it, nor waits for it, until the mount lets it go, as it detaches the
+    /// cell. Nothing else is open of it.
+    Mounted,
 }
 
 /// What is open of a store, for others than its holder.
@@ -183,6 +187,8 @@ enum Claim<C> {
     DaemonOrWriter,
     /// A connection, to write it.
     Writer(Weak<C>),
+    /// cladefs: the daemon's FUSE mount, to attach it (TASK-475.3).
+    Mount,
 }
 
 /// What a claim got: the store held, with the point kept open of it that a writer's claim took
@@ -201,6 +207,9 @@ enum Refused<C> {
     /// A connection going holds it, or the daemon, which lets it go soon; and what a going
     /// connection has called as a writer waits for it, if anything.
     Wait(Option<Arc<C>>, Option<Wanted>),
+    /// cladefs: the mount has it attached, which it lets go only as asked to; or, to the mount,
+    /// followers have it open: `EBUSY`, at once (TASK-475.3).
+    Now,
 }
 
 /// A store held, by a connection writing it or by the daemon working on it, which nothing else
@@ -212,6 +221,10 @@ pub(crate) struct Hold<'t, C, S, P> {
     table: &'t StoreTable<C, S, P>,
     key: PathBuf,
 }
+
+/// A store held, with the point kept open of it that the claim took out, to close, if one was:
+/// what a writer's claim, and the mount's, get.
+pub(crate) type HeldTaking<'t, C, S, P> = (Hold<'t, C, S, P>, Option<P>);
 
 /// A store a connection writes, or held by the daemon ([`StoreTable::writer_or_hold`]).
 pub(crate) enum Holding<'t, C, S, P> {
@@ -265,6 +278,7 @@ impl<C: Writer, S, P> Entry<C, S, P> {
             }),
             Entry::Daemon(_) => Some(Refused::Wait(None, None)),
             Entry::Unheld(_) => None,
+            Entry::Mounted => Some(Refused::Now),
         }
     }
 }
@@ -275,6 +289,7 @@ impl<C, S, P> Entry<C, S, P> {
         match self {
             Entry::Writer { store, .. } => Open::Followed(store).live(),
             Entry::Daemon(open) | Entry::Unheld(open) => open.live(),
+            Entry::Mounted => Open::Nothing,
         }
     }
 
@@ -316,6 +331,16 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             (Some(refused), _) => return Err(refused),
             (None, _) => None,
         };
+        // cladefs: the mount opens a store of its own, where followers have none open.
+        let followed = |entry: &Entry<C, S, P>| match entry {
+            Entry::Daemon(open) | Entry::Unheld(open) => {
+                matches!(open, Open::Followed(_)) && !open.is_closed()
+            }
+            _ => false,
+        };
+        if matches!(claim, Claim::Mount) && self.entries.get(key).is_some_and(followed) {
+            return Err(Refused::Now);
+        }
         let open = self.entries.remove(key).map_or(Open::Nothing, Entry::into_open);
         let (entry, evicted) = match claim {
             Claim::Writer(connection) => {
@@ -335,6 +360,10 @@ impl<C: Writer, S, P> Inner<C, S, P> {
                 }
             }
             Claim::Daemon | Claim::DaemonOrWriter => (Entry::Daemon(open), None),
+            Claim::Mount => match open {
+                Open::Point(point) => (Entry::Mounted, Some(point)),
+                Open::Nothing | Open::Followed(_) => (Entry::Mounted, None),
+            },
         };
         self.entries.insert(key.to_owned(), entry);
         Ok(Claimed::Held { point: evicted, _passed: passed })
@@ -476,7 +505,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
         key: &Path,
         connection: Weak<C>,
         wait: Duration,
-    ) -> Result<(Hold<'_, C, S, P>, Option<P>), Errno> {
+    ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
         match self.claim_async(key, Claim::Writer(connection), wait).await? {
             Claimed::Held { point, .. } => Ok((self.held(key), point)),
             Claimed::Writer(_) => unreachable!("a writer's claim got a writer"),
@@ -503,6 +532,24 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
     ) -> Result<Holding<'_, C, S, P>, Errno> {
         let claimed = self.claim_async(key, Claim::DaemonOrWriter, wait).await?;
         Ok(self.holding(key, claimed))
+    }
+
+    /// cladefs: holds the store `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
+    /// as [`StoreTable::hold`] holds it for the daemon, waiting at most `wait`: `EBUSY` at once if a
+    /// connection not going writes it, followers have it open, or the mount has it already. With
+    /// the point kept open of it, if one was, to close. Until the hold is dropped, every claim of
+    /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
+    /// detaches its cell. It blocks.
+    pub fn hold_mounted(
+        &self,
+        key: &Path,
+        wait: Duration,
+    ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
+        let deadline = Instant::now().checked_add(wait);
+        match self.claim_blocking(key, &Claim::Mount, deadline)? {
+            Claimed::Held { point, .. } => Ok((self.held(key), point)),
+            Claimed::Writer(_) => unreachable!("the mount's claim got a writer"),
+        }
     }
 
     fn held(&self, key: &Path) -> Hold<'_, C, S, P> {
@@ -536,6 +583,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
             }
             Err(Refused::Wait(going, _)) => (Err(Errno::EBUSY), going, None),
             Err(Refused::Busy(writer)) => (Err(Errno::EBUSY), Some(writer), None),
+            Err(Refused::Now) => (Err(Errno::EBUSY), None, None),
         };
         drop(inner);
         drop(refused);
@@ -718,7 +766,7 @@ mod shuttle_tests {
 
     /// A connection: going once its VM process is; and, if it writes the store, the store and its
     /// hold of it, let go as the last of the connection is dropped, the store first, as
-    /// `extentd::server::Connection`'s are: wherever that is, but under the table's lock, which
+    /// `cladefsd::server::Connection`'s are: wherever that is, but under the table's lock, which
     /// letting the hold go takes.
     struct Conn {
         going: AtomicBool,
@@ -795,7 +843,7 @@ mod shuttle_tests {
         }
     }
 
-    /// A point kept open, as `extentd::stores::Point` is: the store opened, which each fork of it
+    /// A point kept open, as `cladefsd::stores::Point` is: the store opened, which each fork of it
     /// holds while it forks it, and what says it is closed, once the last lets it go.
     struct Point {
         store: Arc<Store>,
@@ -810,7 +858,7 @@ mod shuttle_tests {
     }
 
     /// Closes `point`, if given, and returns once it is closed: once the forks forking it are
-    /// done, as `extentd::stores::close_point` does.
+    /// done, as `cladefsd::stores::close_point` does.
     fn close(point: Option<Point>) {
         let Some(Point { store, closed }) = point else { return };
         drop(store);
@@ -885,7 +933,7 @@ mod shuttle_tests {
         hold: Counted<'static>,
     }
 
-    /// Opens the store for `conn` to write, as a connection does (`extentd::server`): holding it,
+    /// Opens the store for `conn` to write, as a connection does (`cladefsd::server`): holding it,
     /// closing the point kept of it, taking over the store followers have open, unless it is
     /// retired, or not quiescent, its writer gone with writes uncommitted (`ExtentStore::take_over`);
     /// or opening it. The connection has it from then on.
@@ -940,7 +988,7 @@ mod shuttle_tests {
         }
     }
 
-    /// Follows the store, as a follower does (`extentd::stores::followed`): the store connections
+    /// Follows the store, as a follower does (`cladefsd::stores::followed`): the store connections
     /// have open, unless retired ([`StoreTable::follow`]); or, held by the daemon, which no writer
     /// retires a store under, its point closed, the store opened.
     fn follow(table: &Table, counts: &Arc<Counts>) -> Result<Follower, Errno> {
@@ -965,7 +1013,7 @@ mod shuttle_tests {
         Ok(Follower::of(store))
     }
 
-    /// Forks the store, as the daemon does (`extentd::stores::fork`): through its writer, or the
+    /// Forks the store, as the daemon does (`cladefsd::stores::fork`): through its writer, or the
     /// store followers have open, live; or the point kept, or else the store opened, kept open as
     /// a point, which it holds while it forks it, as a restore's fork does, its hold let go.
     fn fork(table: &Table, counts: &Arc<Counts>) -> Result<(), Errno> {
@@ -1205,7 +1253,7 @@ mod shuttle_tests {
     }
 
     /// TASK-160.8: a store's followers cut off before it is marked retired, a follower finding it
-    /// unmarked between the two is followed on, uncut (`extentd::stores::retire` did so).
+    /// unmarked between the two is followed on, uncut (`cladefsd::stores::retire` did so).
     #[test]
     fn needs_retirement_to_mark_before_cutting() {
         let rules = Rules { marks_before_cutting: false, ..Rules::ALL };
@@ -1247,8 +1295,7 @@ mod tests {
         table: &'t Table,
         key: &Path,
         connection: &Arc<Connection>,
-    ) -> Result<(Hold<'t, Connection, &'static str, &'static str>, Option<&'static str>), Errno>
-    {
+    ) -> Result<HeldTaking<'t, Connection, &'static str, &'static str>, Errno> {
         block_on(table.hold_to_write(key, Arc::downgrade(connection), Duration::ZERO))
     }
 
@@ -1454,5 +1501,51 @@ mod tests {
         let (held, _) = write(&table, key, &connection(false)).unwrap();
         assert_eq!(held.keep("second"), Err("second"));
         assert_eq!(table.point(key, |point| *point), None);
+    }
+
+    /// TASK-475.3: a store the mount has attached is its alone: a writer, the daemon, and the
+    /// daemon working through a writer each fail at once with `EBUSY`, however long they would
+    /// wait; let go, a writer holds it.
+    #[test]
+    fn stores_mounted_are_the_mounts_alone() {
+        let table = Table::new();
+        let key = Path::new("store");
+        let (held, point) = table.hold_mounted(key, Duration::ZERO).unwrap();
+        assert_eq!(point, None);
+        let writer = connection(false);
+        let wait = Duration::from_secs(60);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let started = Instant::now();
+        let written = runtime.block_on(table.hold_to_write(key, Arc::downgrade(&writer), wait));
+        assert_eq!(written.err(), Some(Errno::EBUSY));
+        assert_eq!(table.hold(key, Some(wait)).err(), Some(Errno::EBUSY));
+        assert_eq!(table.writer_or_hold(key).err(), Some(Errno::EBUSY));
+        assert_eq!(table.hold_mounted(key, wait).err(), Some(Errno::EBUSY));
+        assert!(started.elapsed() < Duration::from_secs(5), "waited {:?}", started.elapsed());
+        drop(held);
+        assert!(write(&table, key, &writer).is_ok());
+    }
+
+    /// TASK-475.3: the mount attaches no store a writer writes, nor one followers have open; it
+    /// takes the point kept open of a store, to close, as a writer does.
+    #[test]
+    fn the_mount_attaches_stores_nothing_else_has() {
+        let table = Table::new();
+        let key = Path::new("store");
+        let writer = connection(false);
+        let written = write(&table, key, &writer).unwrap().0;
+        assert_eq!(table.hold_mounted(key, Duration::ZERO).err(), Some(Errno::EBUSY));
+        let store = Arc::new("store");
+        written.open(&store).unwrap();
+        drop(written);
+        assert_eq!(table.hold_mounted(key, Duration::ZERO).err(), Some(Errno::EBUSY));
+        drop(store);
+        let other = Path::new("other");
+        let held = table.hold(other, None).unwrap();
+        held.keep("point").unwrap();
+        drop(held);
+        let (_mounted, point) = table.hold_mounted(other, Duration::ZERO).unwrap();
+        assert_eq!(point, Some("point"));
+        assert!(table.hold_mounted(key, Duration::ZERO).is_ok());
     }
 }

@@ -14,10 +14,8 @@ pub mod daemon;
 /// branches in a bucket in its memory, as of placement 1, unless the test named others.
 pub fn host() {
     // The daemon's log, and the VM processes', on standard error, which a test that fails shows.
-    let _ = cladefs::extentd::logging::to_stderr();
-    for (name, value) in
-        [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")]
-    {
+    let _ = cladefs::cladefsd::logging::to_stderr();
+    for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.
@@ -26,7 +24,7 @@ pub fn host() {
     }
 }
 
-use cladefs::{ExtentId, RemoteExtentStore, VolatileSlice};
+use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice};
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 /// An extent's bytes: 64 KiB unlike any other `seed`'s.
@@ -98,7 +96,7 @@ pub fn read_window(at: *const u8, len: usize) -> Vec<u8> {
 
 /// Writes `bytes` as an extent of `store`, commits, and reads it through a window, which caches
 /// its pages in the daemon's memory.
-pub fn cache(store: &RemoteExtentStore, bytes: &[u8]) {
+pub fn cache(store: &DaemonExtentStore, bytes: &[u8]) {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(None).unwrap();

@@ -30,7 +30,7 @@ A round others wrote beside (its contamination.json, scripts/contamination.py, T
 the comparison, said before the tables and in each cell they are missing from, as a load beside a
 round skews them; its counts and sizes (bytes written for each guest byte, peak memory, requests)
 stay, as it doesn't skew those. A metric with no clean round on a side is NO RESULT, never a ratio
-nor "within drift": said first, and it exits 1. The rounds that were not checked (no record, or a
+nor "within drift": said first, and it exits 1. The unchecked rounds (no record, or a
 host where others' I/O can't be told from the round's own) are listed, their timings kept.
 
 Usage: scripts/bench-ab.py [--control CASE] A_NAME A_DIR... -- B_NAME B_DIR...
@@ -228,7 +228,7 @@ def others_beside(a_name, a_dirs, b_name, b_dirs, sides):
     for verdict_, heading in (
             ("contaminated", "## CONTAMINATED: others wrote beside these rounds; their timings "
                              "are left out, their counts and sizes kept"),
-            ("unchecked", "## NOT CHECKED: whether others wrote beside these rounds is not "
+            ("unchecked", "## UNCHECKED: whether others wrote beside these rounds is not "
                           "known; their timings are kept")):
         if verdict_ in by:
             sections.append(heading + "\n\n" + "\n".join(

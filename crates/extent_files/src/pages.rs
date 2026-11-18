@@ -1038,7 +1038,7 @@ mod tests {
 
     const BLOCK: usize = 512;
 
-    /// A file of pages on a device, committed as a volume would, and a model of its bytes.
+    /// A file of pages on a device, committed as a file set would, and a model of its bytes.
     struct Model {
         device: FakeDevice,
         pages: Pages,
@@ -1101,7 +1101,7 @@ mod tests {
             assert!(!self.pages.changed());
         }
 
-        /// The file opened again from its last commit's root, as a volume's next opening opens
+        /// The file opened again from its last commit's root, as a file set's next opening opens
         /// it: what it wrote since is lost.
         fn reopen(&mut self) {
             self.pages = Pages::open(BLOCK, &self.pages.root()).unwrap();

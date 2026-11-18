@@ -13,8 +13,8 @@
 //! store information, layer files, the allocator's, file data, and anywhere at all.
 //!
 //! The super-blocks and the journal are checksummed, and a change to them would never get past
-//! the first block read. So half of the cases that aim at them seal what they changed, as anyone
-//! who wrote the image would, and what reads them meets it: a `sealed` case.
+//! the first block read. So half of the cases that aim at them checksum what they changed again, as anyone
+//! who wrote the image would, and what reads them meets it: a `checksummed` case.
 //!
 //! Each case is what a seed makes it (CLADEFS_CORRUPT_SEED, the first). CLADEFS_CORRUPT_CASES asks for
 //! more of them, to hunt. Every panic is counted by where it was, and the test fails saying each,
@@ -23,7 +23,7 @@
 //!
 //! What it proves, printed for each part as it ends: a case is `refused` by the mount, `caught` by
 //! fsck, `failed` a read, was `same` as it was, or read back `different` with no one saying so. No
-//! panic is the assertion, and one more: a flip in the journal, unsealed, is never `different`, as
+//! panic is the assertion, and one more: a flip in the journal, not checksummed again, is never `different`, as
 //! the journal's checksums find it, and a replay that it ends short of where a sync wrote the
 //! journal refuses it (TASK-153.13). Otherwise, nothing here asks that a flip be found, as only the
 //! super-blocks', the journal's and the data being written's checksums can find one, which tests of
@@ -68,9 +68,9 @@ const DIR: u32 = S_IFDIR | 0o755;
 const PAGE: u64 = 4096;
 /// The filesystem's blocks, which its layer files are written in.
 const LAYER_BLOCK: BlockSize = BlockSize::SIZE_4KIB;
-/// The journal's and the super-blocks' blocks, each sealed by a checksum in its last bytes.
-const SEALED_BLOCK: usize = PAGE as usize;
-const SEAL: usize = std::mem::size_of::<u64>();
+/// The journal's and the super-blocks' blocks, each checksummed in its last bytes.
+const CHECKSUMMED_BLOCK: usize = PAGE as usize;
+const CHECKSUM_LEN: usize = std::mem::size_of::<u64>();
 /// Cases an image gets, unless CLADEFS_CORRUPT_CASES says otherwise.
 const CASES: u64 = 120;
 /// How long a case may take: one that takes longer hangs.
@@ -171,7 +171,7 @@ impl Part {
     ];
 
     /// Whether checksums stand in the way of what aims here.
-    fn sealed(self) -> bool {
+    fn checksummed(self) -> bool {
         matches!(self, Part::SuperBlock | Part::Journal)
     }
 }
@@ -184,16 +184,16 @@ struct Region {
     bytes: std::ops::Range<usize>,
 }
 
-/// A run of sealed blocks, each one's checksum seeded by the last: a super-block, or the journal
+/// A run of checksummed blocks, each one's checksum seeded by the last: a super-block, or the journal
 /// from its checkpoint to its end.
 #[derive(Clone, Debug)]
 struct Chain {
     seed: u64,
-    blocks: Vec<SealedBlock>,
+    blocks: Vec<ChecksummedBlock>,
 }
 
 #[derive(Clone, Debug)]
-struct SealedBlock {
+struct ChecksummedBlock {
     extent: ExtentId,
     at: usize,
     /// Whether the journal was reset here, which changes its seed.
@@ -201,38 +201,38 @@ struct SealedBlock {
 }
 
 impl Chain {
-    /// What of `blocks`, in order, is sealed from `seed` on.
+    /// What of `blocks`, in order, is checksummed from `seed` on.
     fn of(device: &FakeDevice, seed: u64, blocks: Vec<(ExtentId, usize)>) -> Self {
         let mut chain = Self { seed, blocks: Vec::new() };
         let mut last = seed;
         for (extent, at) in blocks {
             // A journal's end may have extents never written.
             let Some(held) = device.held(extent) else { break };
-            let Some(block) = held.get(at..at + SEALED_BLOCK) else { break };
-            let (contents, seal) = block.split_at(SEALED_BLOCK - SEAL);
-            let seal = u64::from_le_bytes(seal.try_into().unwrap());
-            let reset = if seal == fletcher64(contents, last) {
+            let Some(block) = held.get(at..at + CHECKSUMMED_BLOCK) else { break };
+            let (contents, sum) = block.split_at(CHECKSUMMED_BLOCK - CHECKSUM_LEN);
+            let sum = u64::from_le_bytes(sum.try_into().unwrap());
+            let reset = if sum == fletcher64(contents, last) {
                 false
-            } else if seal == fletcher64(contents, last ^ RESET_XOR) {
+            } else if sum == fletcher64(contents, last ^ RESET_XOR) {
                 true
             } else {
                 break;
             };
-            chain.blocks.push(SealedBlock { extent, at, reset });
-            last = seal;
+            chain.blocks.push(ChecksummedBlock { extent, at, reset });
+            last = sum;
         }
         chain
     }
 
-    /// Seals what the blocks hold, whatever was changed in them.
-    fn reseal(&self, extents: &mut HashMap<ExtentId, Vec<u8>>) {
+    /// Checksums what the blocks hold again, whatever was changed in them.
+    fn rechecksum(&self, extents: &mut HashMap<ExtentId, Vec<u8>>) {
         let mut last = self.seed;
-        for SealedBlock { extent, at, reset } in &self.blocks {
+        for ChecksummedBlock { extent, at, reset } in &self.blocks {
             let Some(held) = extents.get_mut(extent) else { return };
-            let Some(block) = held.get_mut(*at..*at + SEALED_BLOCK) else { return };
-            let (contents, seal) = block.split_at_mut(SEALED_BLOCK - SEAL);
+            let Some(block) = held.get_mut(*at..*at + CHECKSUMMED_BLOCK) else { return };
+            let (contents, sum) = block.split_at_mut(CHECKSUMMED_BLOCK - CHECKSUM_LEN);
             last = fletcher64(contents, if *reset { last ^ RESET_XOR } else { last });
-            seal.copy_from_slice(&last.to_le_bytes());
+            sum.copy_from_slice(&last.to_le_bytes());
         }
     }
 }
@@ -281,8 +281,8 @@ struct Image {
 struct Case {
     seed: u64,
     part: Part,
-    /// Whether the changes are sealed (`Chain::reseal`).
-    sealed: bool,
+    /// Whether the changes are checksummed (`Chain::rechecksum`).
+    checksummed: bool,
 }
 
 /// What came of a case.
@@ -528,7 +528,7 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     let mut regions = Vec::new();
     let mut in_journal = Vec::new();
     let mut in_super_blocks = BTreeMap::<u64, Vec<(ExtentId, usize)>>::new();
-    let blocks = |bytes: &std::ops::Range<usize>| bytes.clone().step_by(SEALED_BLOCK);
+    let blocks = |bytes: &std::ops::Range<usize>| bytes.clone().step_by(CHECKSUMMED_BLOCK);
 
     let checkpoint = header.journal_checkpoint.clone();
     let root_parent = filesystem.root_parent_store();
@@ -536,7 +536,7 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     extents_of(&root_parent, |object, range, extent, bytes| {
         let part = if object == header.journal_object_id {
             let first = PAGE * (checkpoint.file_offset / PAGE);
-            let live = (range.start..range.end).step_by(SEALED_BLOCK).zip(blocks(&bytes));
+            let live = (range.start..range.end).step_by(CHECKSUMMED_BLOCK).zip(blocks(&bytes));
             let live = live.filter(|(offset, _)| *offset >= first);
             in_journal.extend(live.map(|(_, at)| (extent, at)));
             Part::Journal
@@ -585,7 +585,7 @@ async fn map(device: &FakeDevice, barriers: bool) -> (Vec<Region>, Vec<Chain>, L
     let mut chains = vec![Chain::of(device, checkpoint.checksum, in_journal)];
     chains.extend(in_super_blocks.into_values().map(|blocks| Chain::of(device, 0, blocks)));
     for chain in &chains {
-        assert!(!chain.blocks.is_empty(), "{chain:?} holds nothing sealed");
+        assert!(!chain.blocks.is_empty(), "{chain:?} holds nothing checksummed");
     }
     drop((test, snapshot, volumes, root_parent, root_store, allocator));
     unmount(None, filesystem).await;
@@ -689,8 +689,8 @@ impl Image {
                     }
                 }
             }
-            if case.sealed {
-                self.chains.iter().for_each(|chain| chain.reseal(extents));
+            if case.checksummed {
+                self.chains.iter().for_each(|chain| chain.rechecksum(extents));
             }
         });
         device
@@ -959,7 +959,7 @@ fn damage_bytes(rng: &mut StdRng, bytes: &mut [u8]) {
         }
         // One of Fxfs's own: a block where another should be.
         _ => {
-            let block = SEALED_BLOCK.min(len);
+            let block = CHECKSUMMED_BLOCK.min(len);
             let from = rng.random_range(0..=(len - block));
             let to = at.min(len - block);
             bytes.copy_within(from..from + block, to);
@@ -977,7 +977,7 @@ fn damage_extent(
     let Some(held) = extents.get_mut(&extent) else { return };
     match rng.random_range(0..32) {
         0 => drop(extents.remove(&extent)),
-        1 => held.truncate(held.len() / SEALED_BLOCK / 2 * SEALED_BLOCK),
+        1 => held.truncate(held.len() / CHECKSUMMED_BLOCK / 2 * CHECKSUMMED_BLOCK),
         _ => {
             let end = bytes.end.min(held.len());
             let mut part = held[bytes.start.min(end)..end].to_vec();
@@ -1117,20 +1117,20 @@ fn flips_never_panic(barriers: bool, ending: Ending) {
     for seed in first..first + cases {
         let index = seed as usize;
         let part = Part::ALL[index % Part::ALL.len()];
-        let sealed = part.sealed() && (index / Part::ALL.len()).is_multiple_of(2);
-        let case = Case { seed, part, sealed };
+        let checksummed = part.checksummed() && (index / Part::ALL.len()).is_multiple_of(2);
+        let case = Case { seed, part, checksummed };
         let said = format!("{case:?} of barriers {barriers}, {ending:?}");
         watched.send(said.clone()).expect("the watchdog stopped");
         *CASE.lock().unwrap() = Some(said);
         let outcome = run_case(try_case(&image, case)).unwrap_or_default();
-        let (count, outcomes) = tally.entry((part, sealed)).or_default();
+        let (count, outcomes) = tally.entry((part, checksummed)).or_default();
         *count += 1;
         outcomes.add(&outcome);
     }
     LIMIT.store(0, Ordering::Relaxed);
     let mut all = Outcome::default();
-    for ((part, sealed), (count, outcome)) in &tally {
-        println!("{part:?}, sealed {sealed}: {count} cases: {outcome:?}");
+    for ((part, checksummed), (count, outcome)) in &tally {
+        println!("{part:?}, checksummed {checksummed}: {count} cases: {outcome:?}");
         all.add(outcome);
     }
     println!("all: {all:?}");
@@ -1141,7 +1141,7 @@ fn flips_never_panic(barriers: bool, ending: Ending) {
     }
     panics.retain(|place, _| known_panic(place).is_none());
     assert_eq!(panics.len(), 0, "{panics:#?}");
-    // The journal's checksums find an unsealed flip, which ends a replay short of what was synced.
+    // The journal's checksums find an not checksummed again flip, which ends a replay short of what was synced.
     if let Some((_, journal)) = tally.get(&(Part::Journal, false)) {
         assert_eq!(journal.different, 0, "a flip in the journal unsaid: {journal:?}");
     }
@@ -1239,8 +1239,9 @@ fn a_flip_in_both_super_blocks_is_refused() {
             let device = image.device.recovered(0);
             device.corrupt(|extents, _| {
                 for chain in &super_blocks {
-                    let SealedBlock { extent, at, .. } = &chain.blocks[block % chain.blocks.len()];
-                    let at = at + rng.random_range(0..SEALED_BLOCK - SEAL);
+                    let ChecksummedBlock { extent, at, .. } =
+                        &chain.blocks[block % chain.blocks.len()];
+                    let at = at + rng.random_range(0..CHECKSUMMED_BLOCK - CHECKSUM_LEN);
                     extents.get_mut(extent).expect("a super-block")[at] ^= 1;
                 }
             });

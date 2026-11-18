@@ -6,16 +6,15 @@
 //! runtime through the control API, a tenant's and every tenant's together. Past a limit the
 //! tenant's writes fail with ENOSPC, and the stores its VMs make; the daemon goes on, and other
 //! tenants' writes do; what leaves the disk lets the tenant write again. Its metrics show each
-//! tenant's disk by a hash of its name.
+//! tenant's disk by its ID.
 
 #![cfg(target_os = "linux")]
 
 mod common;
 
-use cladefs::extentd::disk::STORE_MADE;
-use cladefs::extentd::memory::label;
-use cladefs::extentd::metrics::render;
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use cladefs::cladefsd::disk::STORE_MADE;
+use cladefs::cladefsd::metrics::render;
+use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::pattern;
 use std::path::Path;
@@ -32,7 +31,7 @@ fn contents(seed: u64) -> Vec<u8> {
 }
 
 /// Writes extent `sequence` of `store`, `seed`'s bytes.
-fn write(store: &RemoteExtentStore, sequence: u64, seed: u64) -> Result<(), Errno> {
+fn write(store: &DaemonExtentStore, sequence: u64, seed: u64) -> Result<(), Errno> {
     let extent = ExtentId { branch: store.branch(), sequence };
     store.write(extent, 0, &[VolatileSlice::from(&contents(seed)[..])])
 }
@@ -77,12 +76,12 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let acme_socket = daemon.grant("acme", 1, &acme, None).unwrap();
-    let globex_socket = daemon.grant("globex", 2, &globex, None).unwrap();
+    let acme_socket = daemon.grant(1, &acme, None).unwrap();
+    let globex_socket = daemon.grant(2, &globex, None).unwrap();
 
     // Acme's base, which its VMs' stores are forks of, uploaded, as its VM manager makes them.
     let base = acme.join("base");
-    let vm = RemoteExtentStore::connect(&acme_socket, &base, CAPACITY).unwrap();
+    let vm = DaemonExtentStore::connect(&acme_socket, &base, CAPACITY).unwrap();
     for sequence in 1..=8 {
         write(&vm, sequence, sequence).unwrap();
     }
@@ -94,7 +93,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
         daemon.fork(&base, fork).unwrap();
     }
     // What it takes is what is in its directory.
-    let (taken, limit) = daemon.tenant_disk(Some("acme")).unwrap();
+    let (taken, limit) = daemon.tenant_disk(Some(1)).unwrap();
     assert_eq!((taken, limit), (du(&acme), None));
     // Each fork takes little of its own, the base's data in the bucket: no more than a store made
     // is admitted as.
@@ -104,10 +103,10 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
 
     // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads.
     let limit = taken + 16 * EXTENT;
-    daemon.set_disk_limit(Some("acme"), Some(limit)).unwrap();
-    assert_eq!(daemon.tenant_disk(Some("acme")).unwrap(), (taken, Some(limit)));
+    daemon.set_disk_limit(Some(1), Some(limit)).unwrap();
+    assert_eq!(daemon.tenant_disk(Some(1)).unwrap(), (taken, Some(limit)));
     let vms: Vec<_> = (forks.iter())
-        .map(|fork| RemoteExtentStore::connect(&acme_socket, fork, CAPACITY).unwrap())
+        .map(|fork| DaemonExtentStore::connect(&acme_socket, fork, CAPACITY).unwrap())
         .collect();
     let mut written = 0;
     let refused = loop {
@@ -120,22 +119,21 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     assert_eq!((refused, written), (Errno::ENOSPC, 16));
     // What it takes, counted again, is what it wrote, and the base of each fork's write-ahead
     // log, which its store makes as it opens to write (backlog doc-14, `wal`), and the header of
-    // its open segment's log (TASK-301): its metrics name it by a hash, with its limit.
-    let (full, _) = daemon.tenant_disk(Some("acme")).unwrap();
+    // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
+    let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
     let wals: u64 = forks.iter().map(|fork| du(&fork.join("wal"))).sum();
     let opened = wals + forks.len() as u64 * LOG_HEADER;
     assert_eq!((full, du(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
-    let tenant = format!("{{tenant=\"{}\"}}", label("acme"));
-    assert!(!render().contains("acme"), "the metrics name the tenant");
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_disk_limit_bytes{tenant}")), limit);
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_disk_bytes{tenant}")), full);
+    let tenant = "{tenant=\"1\"}";
+    assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
+    assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
     // A store its VM makes is refused too.
-    let made = RemoteExtentStore::connect(&acme_socket, acme.join("more"), CAPACITY);
+    let made = DaemonExtentStore::connect(&acme_socket, acme.join("more"), CAPACITY);
     assert_eq!(made.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOSPC)));
     assert!(!acme.join("more").exists());
 
     // Globex writes, past what acme's limit would allow, as the daemon's own VMs do.
-    let theirs = RemoteExtentStore::connect(&globex_socket, globex.join("vm"), CAPACITY).unwrap();
+    let theirs = DaemonExtentStore::connect(&globex_socket, globex.join("vm"), CAPACITY).unwrap();
     for sequence in 1..=24 {
         write(&theirs, sequence, 1000 + sequence).unwrap();
     }
@@ -158,23 +156,23 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
         vm.commit(None).unwrap();
     }
     until("acme's writes leaving its disk", || {
-        daemon.tenant_disk(Some("acme")).unwrap().0 <= taken + 4 * EXTENT
+        daemon.tenant_disk(Some(1)).unwrap().0 <= taken + 4 * EXTENT
     });
     write(&vms[0], 1, 3000).unwrap();
     vms[0].commit(None).unwrap();
 
     // Lifted, it writes on; every tenant's limit, reached, refuses any.
-    daemon.set_disk_limit(Some("acme"), None).unwrap();
+    daemon.set_disk_limit(Some(1), None).unwrap();
     let (every, none) = daemon.tenant_disk(None).unwrap();
     assert_eq!(none, None);
     daemon.set_disk_limit(None, Some(every + 2 * EXTENT)).unwrap();
-    assert_eq!(metric("cladefs_extentd_disk_limit_bytes"), every + 2 * EXTENT);
+    assert_eq!(metric("cladefsd_disk_limit_bytes"), every + 2 * EXTENT);
     write(&vms[1], 1, 3001).unwrap();
     write(&theirs, 100, 3002).unwrap();
     assert_eq!(write(&vms[2], 1, 3003), Err(Errno::ENOSPC));
     assert_eq!(write(&theirs, 101, 3004), Err(Errno::ENOSPC));
-    // The daemon's own VMs, of no tenant, aren't counted.
+    // The daemon's own VMs, of the default tenant, aren't counted.
     write(&ours, 2, 3005).unwrap();
 
-    assert_eq!(failure(daemon.tenant_disk(Some("initech"))), (Code::NotFound, Errno::ENOENT));
+    assert_eq!(failure(daemon.tenant_disk(Some(3))), (Code::NotFound, Errno::ENOENT));
 }

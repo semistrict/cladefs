@@ -12,9 +12,11 @@
 
 use crate::layout::{Piece, SegmentId};
 
-/// Where a segment is in its life, as a commit seals the extents in it.
+/// Where a segment stands for a commit sealing the extents in it: its [`Phase`](crate::segments),
+/// as the sealing sees it, of no data; a failed framing's as framing, and every segment neither
+/// open, full nor framing as closed (`Segments::standing`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub(crate) enum Standing {
     /// The open segment.
     Open,
     /// Filled since the last commit, waiting for the next, which seals in it (TASK-92.41).
@@ -85,24 +87,24 @@ impl Why {
     }
 
     /// Why an extent of `len` bytes, whose data is in `pieces`, is copied as it is sealed, or
-    /// not, each segment where `stage` says; `large` if `large_extent` or more.
+    /// not, each segment where `standing` says; `large` if `large_extent` or more.
     pub fn of_pieces(
         pieces: &[Piece],
         len: u64,
-        stage: impl Fn(SegmentId) -> Stage,
+        standing: impl Fn(SegmentId) -> Standing,
         large: bool,
     ) -> Self {
         if large {
             return Why::Large;
         }
-        let stages: Vec<Stage> = pieces.iter().map(|piece| stage(piece.segment)).collect();
-        if stages.contains(&Stage::Closed) {
-            let new = (pieces.iter().zip(&stages))
-                .filter(|(_, stage)| **stage == Stage::Open)
+        let standings: Vec<Standing> = pieces.iter().map(|piece| standing(piece.segment)).collect();
+        if standings.contains(&Standing::Closed) {
+            let new = (pieces.iter().zip(&standings))
+                .filter(|(_, standing)| **standing == Standing::Open)
                 .map(|(piece, _)| piece.len);
             return Why::Committed { new: new.sum() };
         }
-        if stages.contains(&Stage::Framing) {
+        if standings.contains(&Standing::Framing) {
             return Why::Framing;
         }
         if pieces.iter().any(|piece| piece.segment != pieces[0].segment) {
@@ -176,8 +178,9 @@ impl Sealing {
             .map(|(why, name)| format!("{name} {} {} KiB", self.count[why], self.bytes[why] >> 10))
             .collect();
         log::info!(
-            "extent store: seal stats: branch {branch:#x} commit {epoch}: copied {} KiB; {}; \
+            "extent store: seal stats: branch {} commit {epoch}: copied {} KiB; {}; \
              committed new {} KiB; most pieces {}",
+            base32_id::Short(branch),
             copied >> 10,
             whys.join(", "),
             self.committed_new >> 10,
@@ -198,25 +201,25 @@ mod tests {
     }
 
     /// Each why, from the pieces that make it.
-    fn stage(segment: SegmentId) -> Stage {
+    fn standing(segment: SegmentId) -> Standing {
         match segment.number {
-            5 => Stage::Open,
-            3 => Stage::Full,
-            2 => Stage::Framing,
-            _ => Stage::Closed,
+            5 => Standing::Open,
+            3 => Standing::Full,
+            2 => Standing::Framing,
+            _ => Standing::Closed,
         }
     }
 
     #[test]
     fn pieces_say_why() {
-        let why = |pieces: &[Piece], len| Why::of_pieces(pieces, len, stage, false);
+        let why = |pieces: &[Piece], len| Why::of_pieces(pieces, len, standing, false);
         assert_eq!(why(&[piece(OPEN, 0, 0, 8)], 8), Why::OneRun);
         assert_eq!(why(&[piece(OLD, 0, 0, 4), piece(OPEN, 0, 4, 4)], 8), Why::Committed { new: 4 });
         assert_eq!(why(&[piece(OPEN, 0, 4, 4)], 8), Why::Holes);
         assert_eq!(why(&[piece(OPEN, 0, 0, 4), piece(OPEN, 9, 4, 4)], 8), Why::Interleaved);
         assert_eq!(why(&[piece(OPEN, 9, 0, 4), piece(OPEN, 0, 4, 4)], 8), Why::Rewritten);
         assert_eq!(why(&[piece(OPEN, 0, 0, 4), piece(OPEN, 4, 4, 4)], 8), Why::Adjacent);
-        assert_eq!(Why::of_pieces(&[piece(OPEN, 0, 0, 8)], 8, stage, true), Why::Large);
+        assert_eq!(Why::of_pieces(&[piece(OPEN, 0, 0, 8)], 8, standing, true), Why::Large);
         let full = SegmentId { branch: 1, number: 3 };
         let framing = SegmentId { branch: 1, number: 2 };
         assert_eq!(why(&[piece(full, 0, 0, 4), piece(OPEN, 0, 4, 4)], 8), Why::Spanning);

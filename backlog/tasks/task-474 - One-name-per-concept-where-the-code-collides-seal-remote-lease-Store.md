@@ -1,10 +1,11 @@
 ---
 id: TASK-474
 title: 'One name per concept, in code too: the renames CONTEXT.md decided'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-16 02:13'
-updated_date: '2026-11-16 02:48'
+updated_date: '2026-11-16 13:33'
 labels:
   - naming
 dependencies: []
@@ -50,3 +51,9 @@ Round 6: round = A/B only; a case's repeats → repeats (CLADEFS_E2E_REPEATS, re
 
 Decided without the user (OPEN_QUESTIONS.md): wal::BASE → START; MakePublic generation → attach_only; NO_TENANT → DEFAULT_TENANT; window changes confirmed, not acknowledged; extentd wire uses virtio's flag bits; Bucket.tla ck → ckpt; super-block (Fxfs on-disk) vs superblock (VFS), upstream untouched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Landed on main 29dec3ee1 (CONTEXT.md, the grilled word choices; renames across code, protos, wire, specs, scripts, docs). macOS: clippy, 2547 workspace tests, 516 script tests, mutants, TLC bucket and follower models and mutations. Linux (ubu1 t474d): 2824 workspace tests passed; guest cases passed but the pgbench pair, which fails main alike (TASK-492). The final merges were checked on macOS and with Linux clippy; ubu1 run t474e was still running at landing.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,7 +3,7 @@ id: doc-9
 title: 'Why every guest fsync seals, and what of a DAX seal is on the commit path'
 type: other
 created_date: '2026-10-28 03:23'
-updated_date: '2026-11-06 06:43'
+updated_date: '2026-11-17 01:09'
 ---
 # Why every guest fsync seals, and what of a DAX seal is on the commit path
 
@@ -31,11 +31,11 @@ extents were rejected. What depends on it:
 
 - **Durability is of whole extents.** A commit writes its open extents' data to the store, and the
   host packs sealed extents, in commit order, into segments it uploads and indexes by extent ID
-  (doc-4, The host's storage; doc-7). An extent still open after a durable commit would have bytes
-  in one segment and later bytes in another, and the index, cleaning and object storage would have
+  (doc-4, The host's storage; doc-7). An extent still open after a local commit would have bytes
+  in one segment and later bytes in another, and the index, the collector and the bucket would have
   to version extents.
 - **Sharing is by ID.** Forks, snapshots and followers name the extents they share; the host's
-  page cache maps one copy of an extent into every VM that reads it. Both are safe only because an
+  extent cache maps one copy of an extent into every VM that reads it. Both are safe only because an
   extent never changes once a commit has named it. An extent left open past a commit is one the
   writer can still change under whoever shares it.
 - **Immutability has to be enforced, not trusted.** After the barrier the host makes the window's
@@ -44,7 +44,7 @@ extents were rejected. What depends on it:
   prefix of an open extent would need the same protection, against the same guest, before anything
   else could map it.
 
-Fxfs never rewrites a committed block in place, so a *durable-but-open* staging extent is
+Fxfs never rewrites a committed block in place, so a *committed-but-open* staging extent is
 conceivable: commit its written prefix, keep the rest writable, seal on fork, snapshot, reclaim or
 when it is full. It would save the restage (a new staging extent and its MAP) and the evacuation
 after each fsync. It costs a store format whose extents grow across commits, prefix-level
@@ -63,10 +63,10 @@ What a DAX commit itself costs, against no DAX:
 | Per commit | DAX | No DAX |
 |---|---|---|
 | The guest's `COMMIT` round trip (`device_commits_ns`) | ~430 us | ~263 us |
-| extentd's commit | 126 us: writing open extents 44, store commit 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
+| cladefsd's commit | 126 us: writing open extents 44, store commit 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
 | The rest: transport, and the VM process's window changes before the reply | ~304 us | ~238 us |
 
-So on the commit path DAX adds ~100 us in extentd, of which writing the data the guest stored
+So on the commit path DAX adds ~100 us in cladefsd, of which writing the data the guest stored
 through the window (44 us) replaces the `WRITE`s a commit without DAX follows, and ~66 us of window
 changes the reply waits for: its own write-protects, and whatever else the VM process's one
 thread had queued ahead of it. Sealing is ~0.43 ms against ~0.26 ms, but both spend ~19 s of a
@@ -89,14 +89,14 @@ So the levers, cheapest first:
      1513 tps against 1364, above ext4 dax=always on virtio-pmem's 1496), but 667 -> 210 tps at
      2 GiB once it fills: a staging region holds pages of many files, so letting go of ranges
      frees few regions;
-   - evacuations batched (16 seals / 20 ms): +3-6%, but data lost under fxfs.dax_delay_us
+   - evacuations batched (16 seals / 20 ms): +3-6%, but data lost under cladefs.dax_delay_us
      (TASK-112.6);
    - the semaphore held for reading through the MAP: writers, the WAL's, still wait;
    - evacuating by dropping the pages instead of mapping them: a range's `mapped` bit means the
      file has data there, so they read as holes.
 2. **Order only what must be ordered** in the VM process's window changes: a commit's reply needs
    its own write-protects, not other requests' changes (~66 us at most).
-3. **Cheaper seals in extentd**: 58 us a commit, of which finding or making the cached extents
+3. **Cheaper seals in cladefsd**: 58 us a commit, of which finding or making the cached extents
    11.3, the read-only remap 20.3, handing the pages over 8.7, mapping them again 6.4 (stats
    commit-seal-*-ns, 7ac00fa2a). Its write phase went 44 -> 36 us (9048fe2a8).
 4. **Cheaper window changes** (TASK-91.16, TASK-109): ~25 us a stage operation nested.
@@ -105,8 +105,8 @@ So the levers, cheapest first:
 
 ## 3. What sets the no-DAX ceiling?
 
-Not extentd: its commit is ~25 us of the ~263 us the guest waits. The rest is the round trip under
-nested virtualization: the guest's notification exit, the VMM's worker, its socket to extentd and
+Not cladefsd: its commit is ~25 us of the ~263 us the guest waits. The rest is the round trip under
+nested virtualization: the guest's notification exit, the VMM's worker, its socket to cladefsd and
 back, and the interrupt injected. TASK-91.13 (spinning for completions), TASK-91.15 (MMIO exits
 per completion) and TASK-91.17 (segment closes inside commits) work on it. Once DAX's extra
 ~170 us is gone, that round trip is DAX's limit too.

@@ -99,8 +99,8 @@ class Ci(unittest.TestCase):
         body = re.search(r"^if part firecracker; then\n(.*?)^fi$", script,
                          re.MULTILINE | re.DOTALL).group(1)
         self.assertIn('"$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib', body)
-        self.assertIn("CLADEFS_EXTENTD_REMOTE=memory:///", body)
-        self.assertIn("CLADEFS_EXTENTD_TOKEN=1", body)
+        self.assertIn("CLADEFSD_BUCKET=memory:///", body)
+        self.assertIn("CLADEFSD_TOKEN=1", body)
         self.assertIn("--features cladefs", body)
         self.assertIn("test(/extent::/)", body)
         self.assertIn("            target\n", job())
@@ -173,7 +173,7 @@ class Ci(unittest.TestCase):
     def test_macos_runs_what_compiles_for_macos(self):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
         macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
-        physical map, extent_store's syncs, extent_remote's cache, cladefs's storage I/O) ran on
+        physical map, extent_store's syncs, extent_bucket's cache, cladefs's storage I/O) ran on
         laptops alone."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)
@@ -248,7 +248,7 @@ class Nightly(unittest.TestCase):
 
     def test_the_bucket_is_rustfs_on_the_runner(self):
         script = (ROOT / "scripts" / "test-e2e-rustfs.sh").read_text()
-        self.assertIn('CLADEFS_EXTENTD_REMOTE=s3://cladefs/e2e "$root/scripts/test-e2e.sh" "$@"',
+        self.assertIn('CLADEFSD_BUCKET=s3://cladefs/e2e "$root/scripts/test-e2e.sh" "$@"',
                       script)
         self.assertIn("rustfs_start", script)
 

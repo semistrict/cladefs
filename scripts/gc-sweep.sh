@@ -5,7 +5,7 @@
 
 # Measure cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5): how long a sweep
 # takes, and the most memory it holds, by how many passes it runs at once. It builds cladefs-gc and
-# cladefs-gc-fill (release, extent_remote alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
+# cladefs-gc-fill (release, extent_bucket alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
 # tenants (100) of CLADEFS_GC_CELLS cells (100) of a branch of CLADEFS_GC_SEGMENTS segments (95), the
 # largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
 # files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
@@ -33,7 +33,7 @@
 # passes over CLADEFS_GC_CELL to RESULTS/cell-SIDE-COUNT-rROUND-{unchanged,full}.{prom,log}, the
 # cell's objects by kind as they found it to RESULTS/cell-SIDE-COUNT-rROUND-objects.txt, and a
 # table of them to RESULTS/gc-sweep-cell.md: the cell's objects, the pages a store of 1,000 keys a
-# page lists them in (cladefs-gc counts a listing as one request, however many pages), the requests,
+# page lists them in (which cladefs-gc counts as requests, a page each, since TASK-455), the requests,
 # the seconds and the most memory of each. On ubu1, scripts/gc-sweep-host.sh runs it, as a
 # measurement.
 #
@@ -44,6 +44,10 @@
 #
 #   scripts/gc-sweep.sh [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]
 set -euo pipefail
+# cladefs: cladefs-gc-fill encrypts the cells it fills, which cladefs-gc compacts, under the bucket KMS of a
+# test master key, unless the environment names a KMS (TASK-411.28).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/test-kms.sh"
+test_master_key
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/measurement.sh"
 usage="Usage: $0 [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]"
@@ -69,12 +73,19 @@ cell=${CLADEFS_GC_CELL:-}
 for count in "$tenants" "$cells" "$segments" "$largest" "$rounds" "$sweeps" $at_once; do
     [[ $count =~ ^[1-9][0-9]*$ ]] || { echo "$count: not a count" >&2; exit 2; }
 done
-[[ -z $cell || $cell =~ ^[0-9a-f]+/[0-9a-f]+$ ]] ||
-    { echo "CLADEFS_GC_CELL: $cell: TENANT/CELL, in hexadecimal" >&2; exit 2; }
+# An ID as cladefs writes it, in base 32 (crates/base32_id), and padded, as keys hold it: 13 digits.
+id='[0123456789abcdefghjkmnpqrstvwxyz]{1,13}'
+padded() {
+    local id=$1
+    while ((${#id} < 13)); do id=0$id; done
+    printf %s "$id"
+}
+[[ -z $cell || $cell =~ ^$id/$id$ ]] ||
+    { echo "CLADEFS_GC_CELL: $cell: TENANT/CELL, in base 32" >&2; exit 2; }
 # Where a bucket of files keeps the cell's objects, under its directory.
 cell_dir=
 if [[ -n $cell ]]; then
-    printf -v cell_dir 'tenants/%016x/cells/%016x' "0x${cell%/*}" "0x${cell#*/}"
+    cell_dir="tenants/$(padded "${cell%/*}")/cells/$(padded "${cell#*/}")"
 fi
 case $(uname) in
     Linux) copy=(cp -al) ;;
@@ -88,7 +99,7 @@ build() {
     [[ $phase != prepared ]] || return 0
     measurement_refuses "Building cladefs-gc"
     echo "== building cladefs-gc and cladefs-gc-fill of $1" >&2
-    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p extent_remote \
+    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p extent_bucket \
         --bin cladefs-gc --bin cladefs-gc-fill
 }
 

@@ -49,7 +49,7 @@ class PrePushTest(unittest.TestCase):
         return ran.returncode, ran.stderr
 
     def test_dax_change_without_a_pass_is_refused(self):
-        sha = self.commit("guest/linux/fs/fxfs/dax.c", "changed\n")
+        sha = self.commit("guest/linux/fs/cladefs/dax.c", "changed\n")
         status, said = self.push(sha, self.main)
         self.assertEqual(status, 1)
         self.assertIn(f"{sha[:12]} has not passed scripts/dax-gate.sh", said)
@@ -59,12 +59,12 @@ class PrePushTest(unittest.TestCase):
         self.assertEqual(self.push(sha, self.main)[0], 1)
 
     def test_dax_change_that_passed_the_gate_is_pushed(self):
-        sha = self.commit("guest/linux/fs/fxfs/dax.c", "changed\n")
+        sha = self.commit("guest/linux/fs/cladefs/dax.c", "changed\n")
         git(self.repo, "notes", "--ref=dax-gate", "add", "-m", "passed", sha)
         self.assertEqual(self.push(sha, self.main), (0, ""))
 
     def test_dax_change_under_a_later_commit_is_refused(self):
-        self.commit("guest/linux/fs/fxfs/dax.c", "changed\n")
+        self.commit("guest/linux/fs/cladefs/dax.c", "changed\n")
         sha = self.commit("README", "cladefs, again\n")
         self.assertEqual(self.push(sha, self.main)[0], 1)
 
@@ -73,7 +73,7 @@ class PrePushTest(unittest.TestCase):
         self.assertEqual(self.push(sha, self.main), (0, ""))
 
     def test_new_branch_is_compared_with_origin_main(self):
-        sha = self.commit("guest/linux/fs/fxfs/dax.c", "changed\n")
+        sha = self.commit("guest/linux/fs/cladefs/dax.c", "changed\n")
         self.assertEqual(self.push(sha, ZERO)[0], 1)
 
     def test_deletion_is_pushed(self):

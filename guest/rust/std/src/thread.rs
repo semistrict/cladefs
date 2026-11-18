@@ -70,7 +70,7 @@ impl Thread {
 /// The current thread. Interrupts, which have no thread of their own, share one identity.
 pub fn current() -> Thread {
     // SAFETY: Returns the current task's slot for thread-local values, which is the task's own.
-    let slot = unsafe { crate::sys::fxfs_rt_tls() } as u64;
+    let slot = unsafe { crate::sys::cladefs_rt_tls() } as u64;
     Thread(ThreadId(core::num::NonZeroU64::new(slot).unwrap_or(core::num::NonZeroU64::MIN)))
 }
 
@@ -123,7 +123,7 @@ impl Builder {
 }
 
 mod local {
-    //! Thread-local values: a thread's are in a block its kernel task points to (`fxfs_tls`, a
+    //! Thread-local values: a thread's are in a block its kernel task points to (`cladefs_tls`, a
     //! field cladefs's guest kernel adds to `task_struct`), made as the thread first uses one, and
     //! dropped when the task exits. Interrupts have no thread of their own, so a value used there
     //! panics.
@@ -156,7 +156,7 @@ mod local {
     /// The calling thread's block.
     fn block() -> *mut Block {
         // SAFETY: Returns the current task's slot, which only it uses, or null in an interrupt.
-        let slot = unsafe { crate::sys::fxfs_rt_tls() };
+        let slot = unsafe { crate::sys::cladefs_rt_tls() };
         assert!(!slot.is_null(), "thread-local values are not for interrupts");
         // SAFETY: The slot holds null, or a block this module made.
         unsafe {
@@ -169,7 +169,7 @@ mod local {
 
     /// Drops a task's block, as the task exits.
     #[unsafe(no_mangle)]
-    pub extern "C" fn fxfs_rust_tls_free(block: *mut c_void) {
+    pub extern "C" fn cladefs_rust_tls_free(block: *mut c_void) {
         // SAFETY: The kernel passes the block `block` made, once, as its task exits.
         drop(unsafe { Box::from_raw(block.cast::<Block>()) });
     }

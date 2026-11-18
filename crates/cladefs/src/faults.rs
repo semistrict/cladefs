@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: the failpoints of a fork's protocol (TASK-44.10), here and in `extent_store` and
-//! `extent_remote`: a step failing, as what its function returns, partway through a fork or the
+//! `extent_bucket`: a step failing, as what its function returns, partway through a fork or the
 //! cleanup of one that failed. The `fail` crate's: nothing without the `failpoints` feature, which
 //! this crate's tests have. Tests set them one by one, or as a seed says ([`plan`]); a daemon built
 //! with them, as FAILPOINTS or CLADEFS_FAULT_SEED say ([`from_seed`]).
@@ -31,12 +31,12 @@ pub(crate) use failpoint;
 /// and its record, and the checkpoint that makes it; then
 /// the child's store made, taking its state from the bucket (TASK-165.7).
 pub const FORK_STEPS: [&str; 20] = [
-    "fork::durable",
-    "remote::child_free",
+    "fork::uploaded",
+    "upload::child_free",
     "fork::committed",
     "fork::flushed",
-    "remote::forked",
-    "remote::gather",
+    "upload::forked",
+    "upload::gather",
     "writer::upload",
     "writer::uploaded",
     "writer::acknowledge",
@@ -44,23 +44,23 @@ pub const FORK_STEPS: [&str; 20] = [
     "branch::record_fork",
     "branch::referred",
     "branch::recorded_fork",
-    "remote::acknowledged",
-    "remote::released",
+    "upload::acknowledged",
+    "upload::released",
     "writer::checkpoint",
     "writer::checkpointed",
-    "remote::checkpointed",
+    "upload::checkpointed",
     "fork::recorded",
     "fork::made",
 ];
 
 /// The steps of a restore: a fork of a point, in the order it takes them, on any host holding a
-/// copy of it (doc-7, Points): its child's ID found free, its child's record, its reference under
-/// the point's origin's cell (TASK-395.3, after the record since TASK-395.10), a read of the
-/// point's, and the record made; then the child's store. No upload, as it commits nothing.
-pub const RESTORE_STEPS: [&str; 10] = [
-    "fork::durable",
-    "remote::child_free",
-    "remote::forked",
+/// copy of it (doc-7, Points): its child's record, its reference under the point's origin's cell
+/// (TASK-395.3, after the record since TASK-395.10), a read of the point's, and the record made;
+/// then the child's store. No upload, as it commits nothing; and no look for its child's ID first,
+/// its record's create refusing one taken alike (TASK-449).
+pub const RESTORE_STEPS: [&str; 9] = [
+    "fork::uploaded",
+    "upload::forked",
     "point::record",
     "point::recorded",
     "point::referred",
@@ -72,14 +72,15 @@ pub const RESTORE_STEPS: [&str; 10] = [
 
 /// The steps of the daemon's around a fork: a guest's request, and a fork the control API asked
 /// for once its store's commits are uploaded; and the fork made, the answer to its guest lost.
-pub const DAEMON_STEPS: [&str; 3] = ["extentd::fork", "extentd::fork_uploaded", "extentd::forked"];
+pub const DAEMON_STEPS: [&str; 3] =
+    ["cladefsd::fork", "cladefsd::fork_uploaded", "cladefsd::forked"];
 
 /// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone, in
 /// order: the first two, or the next two, by whether the child has a record.
 pub const CLEANUP_STEPS: [&str; 4] = [
     "branch::claimed",
-    "branch::claim_lease_ended",
-    "branch::lease_ended",
+    "branch::claim_head_ended",
+    "branch::head_ended",
     "branch::children_recorded",
 ];
 

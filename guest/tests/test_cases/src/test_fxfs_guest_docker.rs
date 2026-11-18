@@ -17,7 +17,7 @@
 //! builds oopsed there, then locked up. CLADEFS_DOCKER_BUILD_CPUS, a host CPU list such as `0-3`,
 //! runs the VM on those CPUs alone: its vCPUs then preempt each other, as on a host with no CPU
 //! to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on ubu1):
-//! past the default, put the bucket on disk (CLADEFS_EXTENTD_REMOTE=file://DIR/), as the default
+//! past the default, put the bucket on disk (CLADEFSD_BUCKET=file://DIR/), as the default
 //! bucket, on /dev/shm, fills at 1024 MiB a build (TASK-314).
 
 use macros::{guest, host};
@@ -221,8 +221,8 @@ pub(crate) mod host {
             // takes minutes over Docker's binaries.
             let store = dir.join("root");
             let capacity = if self.build { BUILD_CAPACITY } else { CAPACITY };
-            let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
-            control(Path::new(&extentd))?.import_image(&store, capacity, &layout, None)?;
+            let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+            control(Path::new(&cladefsd))?.import_image(&store, capacity, &layout, None)?;
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
             vm.guest_kernel()?;
@@ -401,7 +401,7 @@ mod guest {
             // The root is Fxfs, and the daemons keep their state on it.
             let mounts = std::fs::read_to_string("/proc/mounts").unwrap();
             let root = mounts.lines().find(|line| line.split(' ').nth(1) == Some("/")).unwrap();
-            assert_eq!(root.split(' ').nth(2), Some("fxfs"), "{root}");
+            assert_eq!(root.split(' ').nth(2), Some("cladefs"), "{root}");
             mount_run();
 
             let containerd_log = "/tmp/containerd.log";

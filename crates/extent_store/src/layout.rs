@@ -6,11 +6,12 @@
 
 use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use base32_id::Padded;
+use extent_bucket::cell::Kind;
 use extent_frame::segment::Branch;
 #[cfg(test)]
 use extent_frame::segment::Contents;
 use extent_frame::segment::Location;
-use extent_remote::cell::Kind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;
@@ -23,9 +24,13 @@ use storage_device::ExtentId;
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
-/// with its tenant's cell, `TENANT/CELL/ID` in hexadecimal (TASK-364). A store of another format is
-/// refused ([`Format`]): nothing reads, converts or upgrades it.
-pub(crate) const FORMAT: &str = "cladefs extent store 11";
+/// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the vdisk of its cell it is as
+/// `vdisk NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
+/// cut at their ends, and its description may name a version of its branch it is a copy of
+/// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
+/// were in hexadecimal (`base32_id`, TASK-504). A store of another format is refused ([`Format`]):
+/// nothing reads, converts or upgrades it.
+pub(crate) const FORMAT: &str = "cladefs extent store 14";
 
 /// cladefs: the error of a store whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
@@ -49,8 +54,8 @@ pub struct Description {
 /// URL of the bucket its branch is kept in, which every store in a host's directory names
 /// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its branch has
 /// until a commit sets one, as a branch made for it, or taken into it, says none; and the fencing
-/// token of its placement, if it was placed (TASK-39.7), which takes the branch's lease
-/// (TASK-165.9).
+/// token of its placement, if it was placed (TASK-39.7), which takes the branch's cell,
+/// and so its head (TASK-165.9, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoreFile {
     pub block_size: u32,
@@ -58,15 +63,18 @@ pub(crate) struct StoreFile {
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
-    /// cladefs: the volume of its branch's cell it is, if it is kept in a bucket: its name there,
+    /// cladefs: the vdisk of its branch's cell it is, if it is kept in a bucket: its name there,
     /// and its kind (TASK-364).
-    pub volume: Option<Volume>,
+    pub vdisk: Option<Vdisk>,
+    /// cladefs: the version of its branch it is a copy of, if it is one: its branch's state at the
+    /// version, which nothing writes, as a point's copy (doc-18, TASK-476).
+    pub version: Option<u64>,
 }
 
-/// cladefs: what a store kept in a bucket is of its branch's cell: a volume, of a name and a kind
-/// (`extent_remote::cell`, TASK-364).
+/// cladefs: what a store kept in a bucket is of its branch's cell: a vdisk, of a name and a kind
+/// (`extent_bucket::cell`, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Volume {
+pub struct Vdisk {
     pub name: String,
     pub kind: Kind,
 }
@@ -96,14 +104,17 @@ impl StoreFile {
         }
         let fields = fields(text, FORMAT)?;
         let token = fields.contains_key("token").then(|| number(&fields, "token")).transpose()?;
-        let volume = match (fields.get("volume"), fields.get("kind")) {
+        let version = (fields.get("version"))
+            .map(|id| base32_id::parse_padded(id).ok_or_else(|| anyhow!("bad version {id:?}")))
+            .transpose()?;
+        let vdisk = match (fields.get("vdisk"), fields.get("kind")) {
             (None, None) => None,
             (Some(name), Some(kind)) => {
-                ensure!(extent_remote::cell::valid_name(name), "bad volume {name:?}");
+                ensure!(extent_bucket::cell::valid_name(name), "bad vdisk {name:?}");
                 let kind = Kind::named(kind).ok_or_else(|| anyhow!("bad kind {kind:?}"))?;
-                Some(Volume { name: name.clone(), kind })
+                Some(Vdisk { name: name.clone(), kind })
             }
-            _ => bail!("a volume needs a name and a kind"),
+            _ => bail!("a vdisk needs a name and a kind"),
         };
         Ok(Self {
             block_size: number(&fields, "block_size")?.try_into().context("bad block_size")?,
@@ -113,12 +124,13 @@ impl StoreFile {
             bucket: fields.get("bucket").cloned(),
             capacity: number(&fields, "capacity")?,
             token,
-            volume,
+            vdisk,
+            version,
         })
     }
 
     pub(crate) fn text(&self) -> String {
-        let Self { block_size, branch, bucket, capacity, token, volume } = self;
+        let Self { block_size, branch, bucket, capacity, token, vdisk, version } = self;
         let mut text = format!("{FORMAT}\nblock_size {block_size}\nbranch {branch}\n");
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
@@ -127,8 +139,11 @@ impl StoreFile {
         if let Some(token) = token {
             text += &format!("token {token}\n");
         }
-        if let Some(Volume { name, kind }) = volume {
-            text += &format!("volume {name}\nkind {}\n", kind.name());
+        if let Some(Vdisk { name, kind }) = vdisk {
+            text += &format!("vdisk {name}\nkind {}\n", kind.name());
+        }
+        if let Some(id) = version {
+            text += &format!("version {}\n", Padded(*id));
         }
         text
     }
@@ -151,7 +166,12 @@ pub(crate) const OPEN_EXTENTS: &str = "open-extents";
 
 /// The directory of `branch`'s files of `kind` (`SEGMENTS`, `EXTENTS`, `LOGS`, ...).
 pub(crate) fn branch_dir(kind: &'static str, branch: u64) -> String {
-    format!("{kind}/{branch:016x}")
+    format!("{kind}/{}", Padded(branch))
+}
+
+/// The path of file `number` of `branch`'s of `kind`: a segment's, a log's, an extent's.
+pub(crate) fn numbered_path(kind: &'static str, branch: u64, number: u64) -> String {
+    format!("{}/{}", branch_dir(kind, branch), Padded(number))
 }
 
 /// A segment: the branch that wrote it, and its number among the branch's.
@@ -163,33 +183,33 @@ pub(crate) struct SegmentId {
 
 /// The path of a segment.
 pub(crate) fn segment_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(SEGMENTS, segment.branch), segment.number)
+    numbered_path(SEGMENTS, segment.branch, segment.number)
 }
 
 /// The path of the raw file of a segment while it is open.
 pub(crate) fn open_segment_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(OPEN_SEGMENTS, segment.branch), segment.number)
+    numbered_path(OPEN_SEGMENTS, segment.branch, segment.number)
 }
 
 /// The path of the raw file of `extent`, stored on its own, while it is open.
 pub(crate) fn open_extent_path(extent: ExtentId) -> String {
-    format!("{}/{:016x}", branch_dir(OPEN_EXTENTS, extent.branch), extent.sequence)
+    numbered_path(OPEN_EXTENTS, extent.branch, extent.sequence)
 }
 
 /// The path of the file of `extent`, stored on its own, in its branch's directory.
 pub(crate) fn extent_path(extent: ExtentId) -> String {
-    format!("{}/{:016x}", branch_dir(EXTENTS, extent.branch), extent.sequence)
+    numbered_path(EXTENTS, extent.branch, extent.sequence)
 }
 
 /// cladefs: the path of the log of the commits of a segment, while it is open (TASK-165.9).
 pub(crate) fn log_path(segment: SegmentId) -> String {
-    format!("{}/{:016x}", branch_dir(LOGS, segment.branch), segment.number)
+    numbered_path(LOGS, segment.branch, segment.number)
 }
 
 /// The number in a file's name: a segment's, a log's, an extent's sequence number, or a branch's
 /// directory's.
 pub(crate) fn parse_number(name: &str) -> Option<u64> {
-    (name.len() == 16).then(|| u64::from_str_radix(name, 16).ok()).flatten()
+    base32_id::parse_padded(name)
 }
 
 /// cladefs: the prefix of the names of spare logs, in a branch's directory of logs: logs of segments
@@ -198,7 +218,7 @@ pub(crate) const SPARE: &str = "spare-";
 
 /// cladefs: the path of the spare log that was the log of `segment`.
 pub(crate) fn spare_path(segment: SegmentId) -> String {
-    format!("{}/{SPARE}{:016x}", branch_dir(LOGS, segment.branch), segment.number)
+    format!("{}/{SPARE}{}", branch_dir(LOGS, segment.branch), Padded(segment.number))
 }
 
 /// cladefs: the prefix of the names of segments' framed files being made durable, in a branch's
@@ -209,7 +229,7 @@ pub(crate) const FRAMING: &str = "framing-";
 
 /// cladefs: the path of `segment`'s framed file being made durable ([`FRAMING`]).
 pub(crate) fn framing_path(segment: SegmentId) -> String {
-    format!("{}/{FRAMING}{:016x}", branch_dir(SEGMENTS, segment.branch), segment.number)
+    format!("{}/{FRAMING}{}", branch_dir(SEGMENTS, segment.branch), Padded(segment.number))
 }
 
 /// The numbers of the files in `path`, in order; cladefs: but spare logs, which hold none, and
@@ -282,15 +302,15 @@ pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
 pub(crate) enum Data {
     Pieces(Vec<Piece>),
     Own,
-    Remote(Location),
+    Bucket(Location),
 }
 
 impl Data {
     /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on its
-    /// way there (`extent_remote::layout::further`, TASK-195).
+    /// way there (`extent_bucket::layout::further`, TASK-195).
     pub fn follow(&mut self, to: &Location) {
-        if let Data::Remote(at) = self
-            && extent_remote::layout::further(&at.key, &to.key)
+        if let Data::Bucket(at) = self
+            && extent_bucket::layout::further(&at.key, &to.key)
         {
             *at = to.clone();
         }
@@ -303,9 +323,6 @@ pub(crate) struct Extent {
     pub len: u64,
     pub data: Data,
 }
-
-/// A branch's extents, by their IDs.
-pub(crate) type Extents = HashMap<ExtentId, Extent>;
 
 /// A file of extents' data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -324,7 +341,8 @@ impl FileKey {
     }
 }
 
-/// The files `extents`' data is in.
+/// The files `extents`' data is in: of a branch's, those of its own layer
+/// ([`Extents::own`](crate::extents::Extents::own)), the bucket's in the bucket.
 pub(crate) fn files_of<'a>(
     extents: impl IntoIterator<Item = (&'a ExtentId, &'a Extent)>,
 ) -> BTreeSet<FileKey> {
@@ -337,7 +355,7 @@ pub(crate) fn files_of<'a>(
             Data::Own => {
                 files.insert(FileKey::Own(*extent));
             }
-            Data::Remote(_) => {}
+            Data::Bucket(_) => {}
         }
     }
     files
@@ -388,7 +406,7 @@ pub enum Place {
     /// Its own file.
     Own,
     /// cladefs: in the bucket, at its location there.
-    Remote(Location),
+    Bucket(Location),
     /// Pieces, as it was written: the extent is open.
     Pieces,
 }
@@ -540,7 +558,8 @@ mod tests {
             bucket: None,
             capacity: 1,
             token: None,
-            volume: None,
+            vdisk: None,
+            version: None,
         };
         assert_eq!(StoreFile::parse(&file.text()).unwrap(), file);
         // cladefs: a host's store names its bucket (TASK-165.6), and a placed one its placement's
@@ -550,8 +569,13 @@ mod tests {
         assert_eq!(StoreFile::parse(&kept.text()).unwrap(), kept);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
-        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 10"]
-        {
+        for older in [
+            "cladefs extent store 2",
+            "cladefs extent store 7",
+            "cladefs extent store 11",
+            "cladefs extent store 12",
+            "cladefs extent store 13",
+        ] {
             let refused = StoreFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
             assert_eq!(found, older);
@@ -561,19 +585,28 @@ mod tests {
         assert!(StoreFile::parse(&format!("{FORMAT}\nblock_size 4096\nbranch 1\n")).is_err());
         // cladefs: its branch is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
-        assert!(text.contains("\nbranch a/ffffffffffffffff/ffffffffffffffff\n"), "{text}");
+        assert!(text.contains("\nbranch a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
         let bare = format!("{FORMAT}\nblock_size 4096\nbranch 1\n{capacity}");
         let refused = StoreFile::parse(&bare).unwrap_err().to_string();
-        assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in hexadecimal: 1");
-        // cladefs: a store kept in a bucket names the volume of its cell it is, by name and kind.
-        let volume = Some(Volume { name: "db".into(), kind: Kind::Sqlite });
-        let named = StoreFile { volume, ..kept.clone() };
-        assert!(named.text().ends_with("volume db\nkind sqlite\n"));
+        assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in base 32: 1");
+        // cladefs: a store kept in a bucket names the vdisk of its cell it is, by name and kind.
+        let vdisk = Some(Vdisk { name: "db".into(), kind: Kind::Sqlite });
+        let named = StoreFile { vdisk, ..kept.clone() };
+        assert!(named.text().ends_with("vdisk db\nkind sqlite\n"));
         assert_eq!(StoreFile::parse(&named.text()).unwrap(), named);
+        // cladefs: a version's copy names the version (TASK-476).
+        let copy = StoreFile { version: Some(190), ..kept.clone() };
+        assert!(copy.text().ends_with("version 000000000005y\n"));
+        assert_eq!(StoreFile::parse(&copy.text()).unwrap(), copy);
+        let hex = format!("{}version 00000000000000be\n", kept.text());
+        assert_eq!(
+            StoreFile::parse(&hex).unwrap_err().to_string(),
+            "bad version \"00000000000000be\""
+        );
         for (wrong, refused) in [
-            ("volume db\n", "a volume needs a name and a kind"),
-            ("volume db\nkind ext4\n", "bad kind \"ext4\""),
-            ("volume a/b\nkind fxfs\n", "bad volume \"a/b\""),
+            ("vdisk db\n", "a vdisk needs a name and a kind"),
+            ("vdisk db\nkind ext4\n", "bad kind \"ext4\""),
+            ("vdisk a/b\nkind fxfs\n", "bad vdisk \"a/b\""),
         ] {
             let text = format!("{}{wrong}", kept.text());
             assert_eq!(StoreFile::parse(&text).unwrap_err().to_string(), refused, "{wrong}");
@@ -582,12 +615,13 @@ mod tests {
 
     #[test]
     fn names() {
-        let extent = ExtentId::new(0xb, 0x5a);
-        assert_eq!(extent_path(extent), "extents/000000000000000b/000000000000005a");
-        let segment = SegmentId { branch: 0xb, number: 77 };
-        assert_eq!(segment_path(segment), "segments/000000000000000b/000000000000004d");
-        assert_eq!(log_path(segment), "logs/000000000000000b/000000000000004d");
-        assert_eq!(parse_number("000000000000004d"), Some(77));
-        assert_eq!(parse_number("77"), None);
+        let extent = ExtentId::new(11, 90);
+        assert_eq!(extent_path(extent), "extents/000000000000b/000000000002t");
+        let segment = SegmentId { branch: 11, number: 77 };
+        assert_eq!(segment_path(segment), "segments/000000000000b/000000000002d");
+        assert_eq!(log_path(segment), "logs/000000000000b/000000000002d");
+        assert_eq!(parse_number("000000000002d"), Some(77));
+        assert_eq!(parse_number("2d"), None);
+        assert_eq!(parse_number("000000000000004d"), None);
     }
 }

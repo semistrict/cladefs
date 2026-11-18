@@ -30,13 +30,13 @@ class Rounds(unittest.TestCase):
 
     def test_a_phase_is_the_build_or_the_rounds(self):
         """The driver builds the sides as work, then runs the rounds as a measurement, each a phase
-        of the host script (CLADEFS_HOST_PHASE, scripts/lib/host.sh's host_job, TASK-368); another
-        phase is refused before anything runs."""
+        of the host script (CLADEFS_TEST_HOST_PHASE, scripts/lib/host.sh's host_job, TASK-368);
+        another phase is refused before anything runs."""
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"
         status, _, err = bash(f"{host} {SCRIPTS.parent} {tempfile.mkdtemp()} a b 2 a b",
-                              {"CLADEFS_HOST_PHASE": "rounds"})
+                              {"CLADEFS_TEST_HOST_PHASE": "rounds"})
         self.assertEqual((status, err),
-                         (2, "CLADEFS_HOST_PHASE is build or measure, or unset for both\n"))
+                         (2, "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both\n"))
 
     def test_sourced_it_does_nothing_but_define(self):
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"
@@ -161,6 +161,29 @@ class Kept(unittest.TestCase):
         status, out, _ = bash(f"source {SCRIPTS / 'lib' / 'bench-ab-linux-host.sh'}\n"
                               f"kernel_build=release; ab_key {tree}; echo end")
         self.assertEqual((status, out), (0, "end\n"))
+
+
+class Tidy(unittest.TestCase):
+    def test_the_rounds_size_is_kept_and_their_stores_removed(self):
+        """TASK-489: what the rounds wrote, before what is not results goes, tells the nightly
+        what room a measurement needs (scripts/nightly.py's room)."""
+        directory = Path(tempfile.mkdtemp())
+        results = directory / "results"
+        for path in ("head-r1/extents/0", "head-r1/rootfs/sh", "head-r1/rootfs.ext4",
+                     "head-r1/fxfs.img", "head-r1/results.json"):
+            (results / path).parent.mkdir(parents=True, exist_ok=True)
+            (results / path).write_text("x\n")
+        bin_ = directory / "bin"
+        bin_.mkdir()
+        (bin_ / "du").write_text('#!/bin/sh\n[ "$1 $2" = "-sk $RESULTS" ] && printf \'7\\t%s\\n\' "$2"\n')
+        (bin_ / "du").chmod(0o755)
+        status, out, err = bash(f"source {SCRIPTS / 'lib' / 'bench-ab-linux-host.sh'}\n"
+                                f"results={results} ab_tidy",
+                                {"PATH": f"{bin_}:/usr/bin:/bin", "RESULTS": str(results)})
+        self.assertEqual((status, out, err), (0, "", ""))
+        self.assertEqual(sorted(str(path.relative_to(results)) for path in results.rglob("*")),
+                         ["head-r1", "head-r1/results.json", "rounds-size.txt"])
+        self.assertEqual((results / "rounds-size.txt").read_text(), "7168\n")
 
 
 class Sides(unittest.TestCase):

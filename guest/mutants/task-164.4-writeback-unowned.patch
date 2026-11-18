@@ -8,29 +8,29 @@
 # them before their stores: their window pages map the old blocks, which die as the writeback moves
 # them, and read zeros once Fxfs frees them, which the store copies. cow_writeback_before_store;
 # interleave's seed 2802 at 1,000 operations. Since TASK-164.9 the iomap that dirties a page makes
-# it private (fxfs_dax_dirty), and writeback has nothing of it to forget: this has the iomap
+# it private (cladefs_dax_dirty), and writeback has nothing of it to forget: this has the iomap
 # leave it to the store, as the host would copy at it, which guest/sim's host refuses, the oracle of
 # dirty implies private, at the first store of any cow_ scenario.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2708,18 +2708,8 @@
  		err = -ENOBUFS;
  		goto unreserve;
  	}
 -	if (newly) {
 -		/* The pages private already, those others' iomaps made so meanwhile too, stay so. */
--		err = fxfs_device_private(dax->dev, fxfs_dax_page_offset(range, first),
+-		err = cladefs_device_private(dax->dev, cladefs_dax_page_offset(range, first),
 -					  (u64)(pages + ahead) << PAGE_SHIFT);
 -		atomic64_inc(&dax->privates);
 -		if (err) {
--			err = fxfs_dax_private_failed(dax, fxfs_dax_page_offset(range, first),
+-			err = cladefs_dax_private_failed(dax, cladefs_dax_page_offset(range, first),
 -						      pages + ahead, newly + beyond, err);
 -			goto unreserve;
 -		}
 +	if (newly)
  		WRITE_ONCE(range->file->dirtied, jiffies);
 -	}
- 	made = fxfs_dax_pages_dirty(range->state, first, pages);
+ 	made = cladefs_dax_pages_dirty(range->state, first, pages);
  	if (ahead) {
- 		ahead_made = fxfs_dax_pages_private_ahead(range->state, first + pages, ahead);
+ 		ahead_made = cladefs_dax_pages_private_ahead(range->state, first + pages, ahead);

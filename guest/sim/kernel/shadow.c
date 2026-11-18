@@ -457,7 +457,7 @@ void sim_shadow_sync_begin(struct sim_shadow_call *call, struct file *file)
  * That Fxfs's extents hold every byte the file knows, and its size, but where a call changed them
  * since `call` began: an fsync's, or the end of a run's sync's, that returned 0.
  */
-static void check_durable(const struct sim_shadow_call *call, struct fxfs *fs, const char *what)
+static void check_durable(const struct sim_shadow_call *call, struct cladefs *fs, const char *what)
 {
 	struct sim_shadow *shadow = call->shadow;
 	loff_t size = shadow->size_known && !shadow->size_busy &&
@@ -466,15 +466,15 @@ static void check_durable(const struct sim_shadow_call *call, struct fxfs *fs, c
 	pgoff_t index;
 	size_t i;
 
-	if (size >= 0 && fxfs_sim_size(fs, shadow->ino) != size)
+	if (size >= 0 && cladefs_sim_size(fs, shadow->ino) != size)
 		sim_panic("the file model: after %s, Fxfs has ino %llu %llu bytes long, where it was told %lld",
-			  what, shadow->ino, fxfs_sim_size(fs, shadow->ino), size);
+			  what, shadow->ino, cladefs_sim_size(fs, shadow->ino), size);
 	for (index = 0; index < shadow->nr_pages; index++) {
 		const struct shadow_page *page = shadow->pages[index];
 
 		if (!page || !stable(call, page))
 			continue;
-		fxfs_sim_read(fs, shadow->ino, (loff_t)index << PAGE_SHIFT, held, PAGE_SIZE);
+		cladefs_sim_read(fs, shadow->ino, (loff_t)index << PAGE_SHIFT, held, PAGE_SIZE);
 		if (all_known(page) && !memcmp(held, page->bytes, PAGE_SIZE))
 			continue;
 		for (i = 0; i < PAGE_SIZE; i++) {
@@ -529,7 +529,7 @@ bool sim_shadow_failed(struct sim_mount *mount, u64 ino)
 	return shadow && shadow->failed;
 }
 
-void sim_shadow_sync_end(struct sim_shadow_call *call, struct fxfs *fs, int err)
+void sim_shadow_sync_end(struct sim_shadow_call *call, struct cladefs *fs, int err)
 {
 	if (err) {
 		lost(call->shadow);

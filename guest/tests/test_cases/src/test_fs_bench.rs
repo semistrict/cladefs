@@ -29,7 +29,7 @@
 // group skips scans; CLADEFS_BENCH_SQLITE_WORKLOAD selects one transaction workload by its result
 // name (such as sqlite-wal-normal-batch100), keeping the recovery and snapshot checks.
 // cladefs: the working-set group, run only when named, reads 4 KiB at random from files of half,
-// one, two and four times the extent daemon's memory (CLADEFS_EXTENTD_MEMORY, as test-e2e.sh gives
+// one, two and four times the extent daemon's memory (CLADEFSD_MEMORY, as test-e2e.sh gives
 // it), IOPS and latencies once the caches settle (TASK-350.2); the sync group, also only when
 // named, writes 4 KiB and then syncs, syncfs's or freezes and thaws the filesystem,
 // CLADEFS_BENCH_SYNCS times each (50) (TASK-350.5).
@@ -53,7 +53,7 @@
 // and boots a VM on the fork, which mounts it, reads the tree whole, and starts PostgreSQL on the
 // database and runs pgbench's read-only transactions. The fork is served by the daemon that served
 // the base, whose extent cache holds the base's data (warm), or by a daemon of its own, started
-// for it, whose cache holds nothing (cold): CLADEFS_EXTENTD_BIN names the daemon's binary; or by a
+// for it, whose cache holds nothing (cold): CLADEFSD_BIN names the daemon's binary; or by a
 // daemon of its own that reads the base's boot profile, which a fork before the iterations
 // recorded, into its cache as the fork boots (profiled). The host reports the daemon's counters of
 // what serving the fork cost, as observations. cladefs: so too a fork without a DAX window, its
@@ -334,22 +334,22 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if backend.forks_image() {
                 return run_images(test_setup);
             }
-            let extentd =
-                PathBuf::from(std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD")?);
+            let cladefsd =
+                PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
             // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
             let stores = test_setup.tmp_dir.join("extents");
             std::fs::create_dir_all(&stores)?;
             let base = stores.join("base");
-            role(test_setup, "base", &base, &extentd, None)?;
-            let branch = opened(&extentd, &base)?.branch();
+            role(test_setup, "base", &base, &cladefsd, None)?;
+            let branch = opened(&cladefsd, &base)?.branch();
             // The base's boot profile, which a fork records (cladefs's `profile`).
-            let profile = base.join("profiles").join(format!("{branch:016x}"));
+            let profile = base.join("profiles").join(base32_id::Padded(branch).to_string());
             let iterations = iterations().unwrap_or(1);
             if backend == Backend::FxfsGuestDaxForkProfiled {
                 // A fork, before the iterations, which records the profile: its output is not
                 // the case's.
                 let fork = stores.join("fork-profile");
-                opened(&extentd, &base)?
+                opened(&cladefsd, &base)?
                     .fork(&fork)
                     .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
                 let sockets = tempdir::TempDir::new("cladefs-fork")?;
@@ -368,7 +368,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             for i in 0..iterations {
                 let fork = stores.join(format!("fork-{i}"));
                 {
-                    let store = opened(&extentd, &base)?;
+                    let store = opened(&cladefsd, &base)?;
                     store
                         .fork(&fork)
                         .map_err(|errno| anyhow::anyhow!("forking the base: {errno}"))?;
@@ -380,14 +380,14 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                         let (socket, daemon) = daemon(test_setup, sockets.path(), i)?;
                         (socket, Some(daemon))
                     }
-                    _ => (extentd.clone(), None),
+                    _ => (cladefsd.clone(), None),
                 };
                 let daemon_stats = crate::common::control(&socket)?;
-                let before = daemon_stats.stats()?;
+                let before = daemon_stats.counters()?;
                 role(test_setup, "fork", &fork, &socket, None)?;
-                let counted = daemon_stats.stats()?.since(&before);
+                let counted = daemon_stats.counters()?.since(&before);
                 for (name, value) in counted.named() {
-                    println!("OBSERVED extentd-{name} {value}");
+                    println!("OBSERVED cladefsd-{name} {value}");
                 }
                 if let Some(mut daemon) = daemon {
                     daemon.kill()?;
@@ -424,12 +424,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         }
 
         /// Runs this program again, as `role`'s VM, on the store at `store`, which the daemon at
-        /// `extentd` serves, and waits for it: its output is this one's, or goes to `output`.
+        /// `cladefsd` serves, and waits for it: its output is this one's, or goes to `output`.
         fn role(
             test_setup: &TestSetup,
             role: &str,
             store: &Path,
-            extentd: &Path,
+            cladefsd: &Path,
             output: Option<std::fs::File>,
         ) -> anyhow::Result<()> {
             let mut command = Command::new(std::env::current_exe()?);
@@ -437,7 +437,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 .args(std::env::args_os().skip(1))
                 .env(ROLE, role)
                 .env(STORE, store)
-                .env("CLADEFS_EXTENTD", extentd);
+                .env("CLADEFSD", cladefsd);
             if let Some(output) = output {
                 command.stdout(output);
             }
@@ -454,12 +454,12 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             Ok(())
         }
 
-        /// The store at `store`, which the daemon at `extentd` serves: once the daemon has seen the
+        /// The store at `store`, which the daemon at `cladefsd` serves: once the daemon has seen the
         /// VM that had it open go.
-        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::RemoteExtentStore> {
+        fn opened(cladefsd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::RemoteExtentStore::connect(extentd, store, IMAGE_SIZE) {
+                match cladefs::DaemonExtentStore::connect(cladefsd, store, IMAGE_SIZE) {
                     Ok(store) => return Ok(store),
                     Err(err)
                         if Instant::now() < deadline
@@ -475,11 +475,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         /// A daemon of its own for iteration `i`'s fork, and its socket in `dir`, once it serves
         /// there.
         fn daemon(test_setup: &TestSetup, dir: &Path, i: u32) -> anyhow::Result<(PathBuf, Child)> {
-            let socket = dir.join("extentd.sock");
+            let socket = dir.join("cladefsd.sock");
             let daemon = crate::common::spawn_daemon(
                 test_setup,
                 &socket,
-                &format!("extentd-{i}"),
+                &format!("cladefsd-{i}"),
                 &[],
                 None,
             )?;
@@ -517,11 +517,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             }
         }
         // cladefs: what the working-set workloads size their files by (TASK-350.2): the extent
-        // daemon's fixed memory, CLADEFS_EXTENTD_MEMORY, if it has one, or 1 GiB, its old default,
+        // daemon's fixed memory, CLADEFSD_MEMORY, if it has one, or 1 GiB, its old default,
         // a daemon whose memory is a page cache having no size of its own (TASK-358). Every case
         // gets it, the baselines too, so that each reads files of the same sizes.
         let daemon_memory =
-            std::env::var("CLADEFS_EXTENTD_MEMORY").unwrap_or_else(|_| (1u64 << 30).to_string());
+            std::env::var("CLADEFSD_MEMORY").unwrap_or_else(|_| (1u64 << 30).to_string());
         vm.env(&CString::new(format!("CLADEFS_BENCH_DAEMON_MEMORY={daemon_memory}"))?);
         // The compiler finds the assembler and linker through PATH.
         vm.env(c"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
@@ -711,9 +711,11 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if matches!(
                 self.backend,
                 Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
-            ) && std::env::var_os("CLADEFS_EXTENTD_BIN").is_none()
+            ) && std::env::var_os("CLADEFSD_BIN").is_none()
             {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon's binary");
+                return ShouldRun::No(
+                    "CLADEFSD_BIN does not name the extent daemon's binary",
+                );
             }
             match self.backend {
                 Backend::FxfsGuest
@@ -1442,15 +1444,15 @@ mod guest {
     /// device's requests per operation logged.
     fn observed<T>(workload: &str, count: usize, f: impl FnOnce() -> T) -> T {
         let requests = device_requests().zip(device_request_ns());
-        let waited = fxfs_stats();
+        let waited = cladefs_stats();
         let profiler = Profiler::start();
         let value = f();
         if let Some(profiler) = profiler {
             profiler.report(workload);
         }
         // cladefs: what the guest's Fxfs waited on and did meanwhile, those that changed
-        // (/proc/fs/fxfs/<tag>, TASK-91.7).
-        if let (Some(before), Some(after)) = (waited, fxfs_stats()) {
+        // (/proc/fs/cladefs/<tag>, TASK-91.7).
+        if let (Some(before), Some(after)) = (waited, cladefs_stats()) {
             let changed: Vec<String> = (after.iter())
                 .filter_map(|(name, after)| {
                     let delta = after.checked_sub(*before.get(name)?)?;
@@ -1481,10 +1483,10 @@ mod guest {
         value
     }
 
-    /// cladefs: what the guest's Fxfs counts (/proc/fs/fxfs/<tag>, TASK-91.7), by name, if a
+    /// cladefs: what the guest's Fxfs counts (/proc/fs/cladefs/<tag>, TASK-91.7), by name, if a
     /// filesystem of it is mounted: the first's.
-    fn fxfs_stats() -> Option<std::collections::BTreeMap<String, u64>> {
-        let stats = fs::read_dir("/proc/fs/fxfs").ok()?.find_map(|entry| entry.ok())?.path();
+    fn cladefs_stats() -> Option<std::collections::BTreeMap<String, u64>> {
+        let stats = fs::read_dir("/proc/fs/cladefs").ok()?.find_map(|entry| entry.ok())?.path();
         let text = fs::read_to_string(stats).ok()?;
         Some(
             (text.lines())
@@ -2369,7 +2371,7 @@ mod guest {
                 let dax = if backend == Backend::Ext4DaxPmemFork { "always" } else { "never" };
                 mount(&device, "ext4", &format!("dax={dax}"));
             }
-            _ => mount("bench", "fxfs", ""),
+            _ => mount("bench", "cladefs", ""),
         };
         if role == "base" {
             mount_bench(true);
@@ -2452,12 +2454,12 @@ mod guest {
                     mount(&device, "ext4", "");
                 }
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
-                    mount("bench", "fxfs", "")
+                    mount("bench", "cladefs", "")
                 }
                 // cladefs: the writer runs the workloads once its followers have started; they read,
                 // or only follow.
                 Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle => {
-                    mount("bench", "fxfs", "");
+                    mount("bench", "cladefs", "");
                     if std::env::var(ROLE).unwrap() != "writer" {
                         follow_reads(self.backend == Backend::FxfsGuestDaxFollowed);
                     }

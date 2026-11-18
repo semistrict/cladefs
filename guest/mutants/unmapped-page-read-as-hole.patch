@@ -11,25 +11,25 @@
 # stays mapped: a load reads zeros where read(2) reads the write's bytes, and a write from the
 # mapping copies them. hole_mapped_then_written: a load of page 2 reads 0 where read(2) reads 'b'.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1817,19 +1817,6 @@
  		up_read(&file->sem);
- 		fxfs_dax_put_range(dax, range);
+ 		cladefs_dax_put_range(dax, range);
  		return -EIO;
 -	}
 -	/* cladefs: a page of the file with no window page is no hole: mapped first. */
--	if (!dax->read_only && !fxfs_dax_pages_mapped(range->state, page)) {
+-	if (!dax->read_only && !cladefs_dax_pages_mapped(range->state, page)) {
 -		up_read(&file->sem);
--		err = fxfs_dax_map_missing(inode, range, page,
+-		err = cladefs_dax_map_missing(inode, range, page,
 -					   min_t(u64, range->pages,
 -						 page + DIV_ROUND_UP(offset_in_page(pos) + length,
 -								     PAGE_SIZE)),
 -					   true);
 -		if (err) {
--			fxfs_dax_put_range(dax, range);
+-			cladefs_dax_put_range(dax, range);
 -			return err;
 -		}
  	}
- 	mapped = fxfs_dax_pages_mapped(range->state, page);
- 	end_page = fxfs_dax_pages_mapped_run(range->state, page, range->pages);
+ 	mapped = cladefs_dax_pages_mapped(range->state, page);
+ 	end_page = cladefs_dax_pages_mapped_run(range->state, page, range->pages);

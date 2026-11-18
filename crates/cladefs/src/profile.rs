@@ -12,6 +12,7 @@
 //! find them in memory, as a fork of a base another VM read already does.
 
 use crate::ExtentId;
+use base32_id::Short;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -25,8 +26,10 @@ pub(crate) const WINDOW: Duration = Duration::from_secs(60);
 /// The most bytes of units a profile holds.
 pub(crate) const MOST: u64 = 1 << 30;
 
-/// The first line of a profile.
-const HEADER: &str = "cladefs boot profile 1";
+/// The first line of a profile; then a line a unit, `BRANCH SEQUENCE OFFSET LEN`: its extent's ID
+/// in base 32 (`base32_id`), as IDs are written, and the range in hexadecimal. 2: IDs in base 32,
+/// which 1 wrote in hexadecimal (TASK-504); 1 is refused.
+const HEADER: &str = "cladefs boot profile 2";
 
 /// A unit of an extent a page-in read: its extent, and its offset and length in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -38,7 +41,7 @@ pub(crate) struct Unit {
 
 /// The path of the profile of the base `branch` of the store whose directory is `dir`.
 pub(crate) fn path(dir: &Path, branch: u64) -> PathBuf {
-    dir.join("profiles").join(format!("{branch:016x}"))
+    dir.join("profiles").join(base32_id::Padded(branch).to_string())
 }
 
 /// The units of the profile at `path`, in the order they were first read.
@@ -50,16 +53,20 @@ pub(crate) fn read(path: &Path) -> io::Result<Vec<Unit>> {
         return Err(invalid("not a boot profile"));
     }
     let mut units = Vec::new();
+    let range = |field: &str| u64::from_str_radix(field, 16).ok();
+    let unit = |line: &str| match line.split(' ').collect::<Vec<_>>()[..] {
+        [branch, sequence, offset, len] => Some(Unit {
+            extent: ExtentId {
+                branch: base32_id::parse(branch)?,
+                sequence: base32_id::parse(sequence)?,
+            },
+            offset: range(offset)?,
+            len: range(len)?,
+        }),
+        _ => None,
+    };
     for line in lines {
-        let fields: Vec<u64> = line
-            .split(' ')
-            .map(|field| u64::from_str_radix(field, 16))
-            .collect::<Result<_, _>>()
-            .map_err(|_| invalid("a bad line"))?;
-        let [branch, sequence, offset, len] = fields[..] else {
-            return Err(invalid("a bad line"));
-        };
-        units.push(Unit { extent: ExtentId { branch, sequence }, offset, len });
+        units.push(unit(line).ok_or_else(|| invalid("a bad line"))?);
     }
     Ok(units)
 }
@@ -124,10 +131,8 @@ impl Recorder {
         let mut text = format!("{HEADER}\n");
         for unit in &recorded.units {
             let Unit { extent, offset, len } = unit;
-            text.push_str(&format!(
-                "{:x} {:x} {offset:x} {len:x}\n",
-                extent.branch, extent.sequence
-            ));
+            let (branch, sequence) = (Short(extent.branch), Short(extent.sequence));
+            text.push_str(&format!("{branch} {sequence} {offset:x} {len:x}\n"));
         }
         // cladefs: in the base's directory, which it makes nothing of if it went: a fork's directory
         // is its own, and outlives its base's (TASK-165.7).
@@ -139,5 +144,35 @@ impl Recorder {
         // Whole or not at all, and durably, as every record beside a store (TASK-160.13).
         let name = self.path.file_name().and_then(|name| name.to_str());
         crate::store_dir::write(dir, name.expect("a profile is named by its branch"), &text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A profile reads back as recorded, its IDs in base 32 and its ranges in hexadecimal, under
+    /// the base's branch padded; a fork's own extents are left out; a line of another format, as
+    /// profile 1's hexadecimal IDs, is refused.
+    #[test]
+    fn profiles_read_back_as_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = path(dir.path(), 42);
+        assert_eq!(profile, dir.path().join("profiles/000000000001a"));
+        let recorder = Recorder::new(profile.clone(), 9);
+        let inherited = ExtentId { branch: 42, sequence: u64::MAX };
+        recorder.record(inherited, 0x3000, 0x1000);
+        recorder.record(ExtentId { branch: 9, sequence: 1 }, 0, 0x1000);
+        recorder.write().unwrap();
+        let text = std::fs::read_to_string(&profile).unwrap();
+        assert_eq!(text, "cladefs boot profile 2\n1a fzzzzzzzzzzzz 3000 1000\n");
+        let expected = vec![Unit { extent: inherited, offset: 0x3000, len: 0x1000 }];
+        assert_eq!(read(&profile).unwrap(), expected);
+        for wrong in
+            ["cladefs boot profile 1\n2a 1 3000 1000\n", "cladefs boot profile 2\n2A 1 0 1\n"]
+        {
+            std::fs::write(&profile, wrong).unwrap();
+            assert_eq!(read(&profile).unwrap_err().kind(), io::ErrorKind::InvalidData, "{wrong}");
+        }
     }
 }

@@ -33,23 +33,23 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN = ROOT / "scripts" / "lib" / "pjdfstest.sh"
+PINNED = ROOT / "scripts" / "lib" / "pjdfstest.sh"
 KNOWN = ROOT / "scripts" / "pjdfstest-fuse-known"
 # The stores' size: room for what pjdfstest makes, which is little.
 CAPACITY = 1 << 30
 
 
-def pin():
+def pinned_version():
     """The repository and commit scripts/lib/pjdfstest.sh pins, unless the environment says."""
-    text = PIN.read_text()
+    text = PINNED.read_text()
     found = {name: re.search(rf"{name}=\$\{{{name}:-([^}}]+)\}}", text).group(1)
              for name in ("PJDFSTEST_REPO", "PJDFSTEST_COMMIT")}
     return tuple(os.environ.get(name, value) for name, value in found.items())
 
 
 def build(work):
-    """pjdfstest built at the pin in `work`, unless it is already: its directory."""
-    repo, commit = pin()
+    """pjdfstest built at its pinned version in `work`, unless it is already: its directory."""
+    repo, commit = pinned_version()
     source = work / "pjdfstest"
     built = work / "pjdfstest.commit"
     if built.exists() and built.read_text() == commit and (source / "pjdfstest").exists():
@@ -135,6 +135,25 @@ def unexpected(found, listed, dirs):
     return unlisted, gone
 
 
+# cladefs: the master key the mounts' stores are encrypted under, the tests', known to all
+# (scripts/lib/test-kms.sh), unless the environment names a KMS (TASK-411.28).
+TEST_MASTER_KEY = "7e" * 32
+
+
+def encrypted_env(dir):
+    """The environment of a mount of a new store in `dir`: every store is encrypted, and cladefs-mount
+    refuses to start with no KMS (TASK-411.28). Unless the environment names one, a host's: its
+    bucket a directory in `dir`, placement 1, and the bucket KMS of the tests' master key."""
+    env = dict(os.environ)
+    if not any(env.get(name) for name in ("CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE")):
+        bucket = Path(dir) / "bucket"
+        bucket.mkdir(exist_ok=True)
+        env.setdefault("CLADEFSD_BUCKET", f"file://{bucket}/")
+        env.setdefault("CLADEFSD_TOKEN", "1")
+        env["CLADEFS_MASTER_KEY"] = TEST_MASTER_KEY
+    return env
+
+
 def mounted(cladefs_mount, dir):
     """cladefs-mount of a new store in `dir`, once it says it is mounted: the process, the mount
     point and its log."""
@@ -144,7 +163,7 @@ def mounted(cladefs_mount, dir):
     # Other users' too, which pjdfstest's tests become (`-u`, `-g`): a FUSE mount is its mounting
     # user's alone otherwise.
     command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(store), str(mountpoint)]
-    process = subprocess.Popen(command,
+    process = subprocess.Popen(command, env=encrypted_env(dir),
                                stdout=subprocess.PIPE, stderr=log, text=True)
     said = process.stdout.readline().strip()
     if said != str(mountpoint):

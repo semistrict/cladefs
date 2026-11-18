@@ -282,8 +282,8 @@ static void hold(struct vm_area_struct *vma, unsigned long addr)
  * own page unmapped, from every mapping, as a read fault replaces its entry (dax_insert_entry,
  * which patch 0010 stops for a page the entry names), which holds what it unmaps still. A fault's
  * other unmappings are as anything else's: of other ranges, as one evicts a range to make room in
- * the window (fxfs_dax_release), and a store's of its own, as it drops the slice it can't store to
- * (fxfs_dax_fault_drop_slice), an UNMAP of the range.
+ * the window (cladefs_dax_release), and a store's of its own, as it drops the slice it can't store to
+ * (cladefs_dax_fault_drop_slice), an UNMAP of the range.
  */
 static bool faults_on(struct address_space *mapping, pgoff_t start, pgoff_t nr)
 {

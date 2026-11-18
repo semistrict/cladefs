@@ -113,7 +113,7 @@ jobs:
       # scripts/lima-setup.sh gives it to the kvm group.
       - name: Let the tests use userfaultfd
         run: sudo setfacl -m "u:$USER:rw" /dev/userfaultfd
-      # The tests' stores on the root disk, which has room: in /tmp, three extentd tests ran out of
+      # The tests' stores on the root disk, which has room: in /tmp, three cladefsd tests ran out of
       # it (ENOSPC).
       - name: Give the tests' files room
         run: |
@@ -139,7 +139,7 @@ jobs:
   # The workspace's suite and the Shuttle suites on macOS, scripts/test.sh's parts as a Mac runs
   # them: what cladefs compiles for macOS alone, and its tests, ran on laptops alone, so a regression
   # there landed green (TASK-149.20.2): physmem's physical map, extent_store's syncs (F_FULLFSYNC),
-  # extent_remote's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
+  # extent_bucket's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     runs-on: macos-15
@@ -168,7 +168,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.parts }}-
       # Every failure, not the first alone. Within macOS's 256 open files a process, as the
-      # stores', the remotes' and physmem's tests were run within, all passing (TASK-149.20.2).
+      # stores', the bucket's and physmem's tests were run within, all passing (TASK-149.20.2).
       - name: scripts/test.sh
         run: scripts/test.sh --no-fail-fast
 
@@ -212,6 +212,11 @@ jobs:
   # (MIT), in a container, as
   # scripts/test-rustfs.sh and scripts/test-azurite.sh start them. Nothing ran them until
   # TASK-149.20, which found `cladefsctl take` of a new copy at a later placement refused there.
+  # cladefs: and the AWS KMS backend's, against local-kms (MIT), its emulator, which
+  # scripts/test-local-kms.sh installs with Go and each test starts (TASK-411.17): no AWS account,
+  # nor credentials but dummy ones; and the OpenBao Transit backend's, against OpenBao's release
+  # binary (MPL-2.0), which scripts/test-openbao.sh fetches, checked by its digest, each test
+  # starting a dev server of its own (TASK-411.16): no secrets.
   object-stores:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -241,9 +246,17 @@ jobs:
         run: scripts/test-rustfs.sh --no-fail-fast
       - name: The Azure tests, against Azurite
         run: scripts/test-azurite.sh --no-fail-fast
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: The AWS KMS tests, against local-kms
+        run: scripts/test-local-kms.sh --no-fail-fast
+      - name: The OpenBao KMS tests, against a bao dev server
+        run: scripts/test-openbao.sh --no-fail-fast
 
   # TASK-330.3: the extent daemon against a degraded bucket, five minutes of it, its VM processes
-  # writing all the while (extentd::tests::soak): its memory within its budget, the bucket's
+  # writing all the while (cladefsd::tests::soak): its memory within its budget, the bucket's
   # failures said, commits waiting at the lag bound and none failing, everything uploaded once the
   # bucket answers, no VM process let go. The workspace's suite leaves it out, as it would outlast
   # it; Hunt runs it for half an hour each night. On the root disk, which has room for what it
@@ -285,7 +298,7 @@ jobs:
       - name: The daemon against a degraded bucket, five minutes
         run: >-
           cargo nextest run -p cladefs --lib --run-ignored all --no-capture
-          -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
+          -E 'test(=cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
   # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
   # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the

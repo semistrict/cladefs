@@ -1,6 +1,6 @@
 # guest/sim: dax.c in a process of its own
 
-`guest/linux/fs/fxfs/dax.c` runs here unmodified, with no VM, over a fake kernel, as OpenZFS's
+`guest/linux/fs/cladefs/dax.c` runs here unmodified, with no VM, over a fake kernel, as OpenZFS's
 libzpool runs its kernel code under ztest. A seed drives a scheduler whose scheduling points are the
 kernel's locks, so a failure replays exactly, in milliseconds, under ASan and UBSan.
 
@@ -36,7 +36,7 @@ runs as it is added.
 patch stops applying, which fails `zloop.sh` until the patch is removed. An open bug's failure,
 as `known-failures` matches it, is counted apart and doesn't fail it, so that one bug doesn't fail
 every run: its line goes with its fix. CI's `guest-sim` job runs seeds 1 to 3,000 when what it tests
-changed since its base (dax.c and the kernel's fxfs, the kernel's patches and build, this directory:
+changed since its base (dax.c and the kernel's cladefs, the kernel's patches and build, this directory:
 `scripts/guest-sim-scope.py`), else 1 to 200; the nightly workflow runs 3,000 every day; the nightly hunt
 (`.github/workflows/hunt.yml`) 20,000 more each night, from a first seed that moves, and keeps what
 failed, with `replay`, how to run each again.
@@ -47,8 +47,8 @@ Compiled as they are, from the tree or the repo:
 
 | Real | From |
 | --- | --- |
-| `dax.c`, `pages.c`, `device.c`, `hist.h`, `vfs.h`, `fxfs.h`, `device.h` | fs/fxfs: all of the window's protocol |
-| `data.c` | fs/fxfs: a file's changes as a whole, resize, punch (fallocate) and clone, with dax.c's operations (TASK-160.2) |
+| `dax.c`, `pages.c`, `device.c`, `hist.h`, `vfs.h`, `cladefs.h`, `device.h` | fs/cladefs: all of the window's protocol |
+| `data.c` | fs/cladefs: a file's changes as a whole, resize, punch (fallocate) and clone, with dax.c's operations (TASK-160.2) |
 | `fs/dax.c` | with guest/linux/patches/0007 and 0010-0012: DAX entries, their locks, shared folios |
 | `fs/iomap/iter.c`, `lib/xarray.c`, `lib/genalloc.c` | the kernel's |
 | `linux/{list,rculist,hash,hashtable,xarray,iomap,dax,genalloc,wait,wait_bit}.h` | the kernel's headers |
@@ -61,7 +61,7 @@ Written here (see each file's head for what it leaves out):
 | Page tables and faults | `kernel/mm.c` | Two flat arrays per VMA, with `mm/memory.c`'s insert and fault rules rewritten, and `mmap_lock`. A pin, as `get_user_pages` takes one (`sim_pin_user_page`), is the page's reference alone, faulted in as the kernel faults. No TLB, no MMU, no private mappings |
 | VFS and page cache | `kernel/vfs.c`, `mount.c` | What dax.c and data.c call; the VFS's checks before a clone, and its writing both back, as `generic_remap_file_range_prep`. `super.c` is not built: its fsync, and its writing of an inode's attributes, its size alone here, are rewritten, so that a bug in them shows on a real kernel alone |
 | Host device | `kernel/device.c`, `host.c` | The window copies on write (doc-13): real memory, a memfd mapped page by page, read-only, so that a store the host refuses is a SIGSEGV. A MAP maps sealed extents alone (EPERM for an open one, which tests count) and zeros past what was written; `MAP_ZEROS` maps zeros; `PRIVATE` copies pages to private memory at the same addresses, ENOMEM past `private_max` (a quarter of the window, or what a test sets); a MAP or UNMAP frees private pages, as doc-13's host. A store to a sealed or zero page, which the host's userfaultfd write-protect would copy at, fails the run: the guest makes each page it dirties private first (TASK-164.9), so such a store is to a page no iomap made private. Requests complete at once, or fail with EIO as a test asks, or a MAP waits on its way as a test holds it: no virtqueue, no second stage, no async page faults, whose writes the host takes as reads |
-| Fxfs | `fxfs/fxfs.c` | A model of what the protocol assumes: blocks, open extents that go one way, shared blocks, the staging extent `zero_tail` moves a last block to, `FreeAfter::Flush`, one seal in four a flush, reservations that fail. Writeback (`fxfs_write_many`) allocating then: its copy of the pages, a page at a time, blocks of the staging extent for 256 KiB at most, as Fxfs packs small files, else a new extent, written, then the commit, which a test may hold to look at what a crash would leave, or fail; reservations of dirty pages, given back once. No seal comes between taking blocks and writing them, so the packed write a seal refuses, which Fxfs tries again in an extent of its own, has no counterpart. No journal, tree or crash consistency |
+| Fxfs | `cladefs/cladefs.c` | A model of what the protocol assumes: blocks, open extents that go one way, shared blocks, the staging extent `zero_tail` moves a last block to, `FreeAfter::Flush`, one seal in four a flush, reservations that fail. Writeback (`cladefs_write_many`) allocating then: its copy of the pages, a page at a time, blocks of the staging extent for 256 KiB at most, as Fxfs packs small files, else a new extent, written, then the commit, which a test may hold to look at what a crash would leave, or fail; reservations of dirty pages, given back once. No seal comes between taking blocks and writing them, so the packed write a seal refuses, which Fxfs tries again in an extent of its own, has no counterpart. No journal, tree or crash consistency |
 
 So a run tests dax.c against a second writing of its assumptions. Where the model differs from
 Fxfs, or `kernel/mm.c` from `mm/memory.c`, a run proves nothing. Five of the first failures here
@@ -72,14 +72,14 @@ A seed replays exactly, down to its trace hash: the process runs itself again wi
 (dax.c's trace, which reads the seal count under a spinlock) can make a failing seed pass. `-v`,
 `-w`, `-W` and `-a` take none.
 
-Linking the real Fxfs takes a userspace build of `guest/rust/fxfs-linux`'s `fxfs_*` over a fake
-`fxfs_device_submit`. `crates/fxfs-posix` already runs on Linux, so the work is its C ABI and running
+Linking the real Fxfs takes a userspace build of `guest/rust/cladefs-linux`'s `cladefs_*` over a fake
+`cladefs_device_submit`. `crates/fxfs-posix` already runs on Linux, so the work is its C ABI and running
 its executor on the scheduler's tasks, so that its awaits are scheduling points. Without that, its
 sleeps happen off the seed, and a run stops replaying.
 
 ## What it can and can't find
 
-It finds, by construction: orderings of tasks at lock points, device requests, `fxfs_dax_delay()`
+It finds, by construction: orderings of tasks at lock points, device requests, `cladefs_dax_delay()`
 and the sim's splits of non-atomic bitmap writes and kernel copies; deadlocks, with who holds what;
 livelocks, and faults that go round 256 times; use after free (ASan); stores to unmapped window
 pages, and to pages no `PRIVATE` made the VM's (dirty without private) (SIGSEGV); a MAP or UNMAP
@@ -112,7 +112,7 @@ It can't find:
 - **Real page tables.** TLB shootdowns, PTE races with hardware, `get_user_pages`' own races
   (its fast walk, a pin taken as a mapping goes), KVM's stage 2, async page faults, userfaultfd:
   all outside it. A pin is a reference a test takes and drops.
-- **The host.** extentd, uffd and the VMM are fakes here.
+- **The host.** cladefsd, uffd and the VMM are fakes here.
 - **Fxfs.** Journal, compaction, crash recovery, and whatever the model gets wrong that
   `crates/fxfs-sim-diff`, which runs the model beside Fxfs, doesn't find ("The model against Fxfs").
 - **Lock order inversions that no seed plays out:** there is no lockdep graph.
@@ -124,7 +124,7 @@ It can't find:
 ## The sweep, and the end of a run (TASK-149.15, TASK-149.18)
 
 `tests/failures` fails calls at random, one in so many; the sweep enumerates. Every call of the code
-under test that a real kernel may see fail asks `kernel/sweep.c` first: allocations by fs/fxfs,
+under test that a real kernel may see fail asks `kernel/sweep.c` first: allocations by fs/cladefs,
 fs/dax.c and the XArrays and pool they use; the device's MAPs, UNMAPs and PRIVATEs; and the model of
 Fxfs's room for dirty pages, growths, writeback's commits, clones (part way, as Fxfs's transactions
 of one), seals and lookups. `SIM_SWEEP=N` fails the Nth, once; up to it the run is the run without
@@ -165,11 +165,11 @@ In dax.c, found by the sweep and the file model, each fixed:
    the batch made larger if need be. `cow_writeback_counts_again` (pause point 10, `COUNTED`),
    `task-149.15-writeback-batch-short`.
 2. **A sync without the memory for its list of files returned 0**, having written none back
-   (`fxfs_dax_busy_files`): -ENOMEM now. The sweep of `short_copy`, the end's sync, the file model.
+   (`cladefs_dax_busy_files`): -ENOMEM now. The sweep of `short_copy`, the end's sync, the file model.
    `task-149.15-sync-without-memory`.
 3. **A write that could never have room in the window waited for ever.** Each round of the budget's
    worker, which each wait for room asked for, counted as a range let go of, and reset the wait's count
-   toward giving up (`FXFS_DAX_NO_ROOM_WAITS`). read_pressure's window, its aligned room taken by a
+   toward giving up (`CLADEFS_DAX_NO_ROOM_WAITS`). read_pressure's window, its aligned room taken by a
    failed UNMAP: livelock. The worker's writeback lets go of its ranges as it ends, which says so.
    `unmaps_failed_take_the_window`, `task-149.15-round-releases`.
 4. **A chunk's range had no room once failed UNMAPs took a piece of every aligned slot** (TASK-149.33),
@@ -229,7 +229,7 @@ In dax.c as it stood at TASK-149.14, first found here, the first since fixed:
    `tests/pmd_over_stale_index`, a guest check's steps,
    `fixes/shared-pmd.patch`, a line in `fs/dax.c`. Unconfirmed.
 4. **A writable MAP outside the gate.** A reflink has part of an open extent read as sealed, so a
-   reader outside the gate holds a sealed piece of a writable region: `fxfs_dax_new_slice` reaches for
+   reader outside the gate holds a sealed piece of a writable region: `cladefs_dax_new_slice` reaches for
    it with no look at the region.
    `tests/sealed_piece_reach`, one task, whose guest check needs a lockdep kernel; seed 13464 at 1,000
    operations without the fix. `fixes/sealed-reach-locked.patch`. Unconfirmed.
@@ -271,10 +271,10 @@ every run copying on write, 2,000 seeds):
 | --- | --- | --- |
 | TASK-147, a write's own source shrinks its range | seed 32; copying on write, seed 10 | short write |
 | TASK-153.1, a fault with no limit on its range's drops | with TASK-140's bug, gone with writable DAX, a livelock; copying on write, no | equivalent: nothing else drops a fault's slice for ever |
-| TASK-44.19, `fxfs_dax_region_map` without the region's lock | `reaches_at_once`, which wrote through slices, gone; no, in 3,000; copying on write, no | bytes wrong then: two slices reach at once, and the region says it maps less than it does. Copying on write, only reads take slices, and each range MAPs every page it uses: what is left is the region's put UNMAPping less than the host maps, which no oracle here checks |
+| TASK-44.19, `cladefs_dax_region_map` without the region's lock | `reaches_at_once`, which wrote through slices, gone; no, in 3,000; copying on write, no | bytes wrong then: two slices reach at once, and the region says it maps less than it does. Copying on write, only reads take slices, and each range MAPs every page it uses: what is left is the region's put UNMAPping less than the host maps, which no oracle here checks |
 | patch 0010, a read fault of a page others map, its blocks shared, replaces its entry (TASK-152) | `interleave` seed 197, each worker mapping the shared files itself | a load faults again, its mapping holding the page, a fault having unmapped it (`patch-0010-reads-replace-their-entries`) |
 | patch 0012, an invalidation puts a folio mapped still | `pmd_entry_invalidated_mapped`, gone; copying on write, no | `fs/dax.c:416`'s WARN. Equivalent copying on write: no write says its pages are new, which invalidates, and a range's release unmaps (`dax_layout_busy_page_range`) under the invalidate lock before it invalidates |
-| TASK-79.28, a range remapped too small | no | equivalent since TASK-147: a fault sizing a range from the old end holds the invalidate lock `fxfs_dax_fit` waits for, and one after sees `growing`. `task-79.28-before-147`, with that gone too, showed at seed 31 |
+| TASK-79.28, a range remapped too small | no | equivalent since TASK-147: a fault sizing a range from the old end holds the invalidate lock `cladefs_dax_fit` waits for, and one after sees `growing`. `task-79.28-before-147`, with that gone too, showed at seed 31 |
 
 And by `tests/scenarios`, each at once, with how many seeds of `tests/failures` found it alone,
 before copying on write:
@@ -309,7 +309,7 @@ a quarter of the window, the other tests' a quarter; and these scenarios, at 64 
 | `cow_fsync_during_writeback` | a writeback paused after its swap: a second fsync, and then a sync of the filesystem, nothing dirty, wait for it, and find every store before them in Fxfs as they return |
 | `cow_truncate_held` | a truncate's MAP of zeros over 48 dirty private pages held on its way: a second file's write waits for the budget until it ends, the host never holding more than `private_max` |
 | `cow_writeback_before_store` | a store's fault paused past its iomap_end, its page dirty, its store not come: an fsync writes it back, and the seals after free its old extent; the store, let go, keeps the rest of the page as it was, not the zeros the freed extent reads, as its iomap made it private (TASK-164.9) |
-| `cow_map_during_seal` | an fsync's seal held after it began (`fxfs_sim_hold_seals`), Fxfs taking its writeback's extent for sealed already, the device not: a read's slice, a write's range, a load's fault and a store's, of the chunk, wait for the seal to map it, the faults holding their DAX entries, and ask no MAP the host refuses |
+| `cow_map_during_seal` | an fsync's seal held after it began (`cladefs_sim_hold_seals`), Fxfs taking its writeback's extent for sealed already, the device not: a read's slice, a write's range, a load's fault and a store's, of the chunk, wait for the seal to map it, the faults holding their DAX entries, and ask no MAP the host refuses |
 | `cow_reclaim_after_writeback_met_a_fault` | an fsync writes back a page whose DAX entry a load's fault, paused, holds, which stays tagged dirty: once other files' chunks fill the window, reclaim has taken the range all the same |
 | `cow_private_failed` | the device failing the `PRIVATE` of a write(2)'s iomap, and of a store's fault's: the write fails EIO, the store SIGBUS, nothing dirty nor reserved; again, both succeed |
 | `cow_rebind_seals_open_extents` | a truncate's writeback, which seals nothing after it, leaves clean pages private in an open extent, nothing dirty: a rebind (`dax_rebind_now`) seals, and rebinds every one (TASK-283) |
@@ -328,10 +328,10 @@ reserved, and no MAP of an open extent asked. The rules' mutants:
 | `task-164.4-sync-skips-writeback` | `cow_fsync_during_writeback`: the sync returns so |
 | `task-164.4-forget-before-free` | `cow_truncate_held`: the second file's write fails, its `PRIVATE` refused past `private_max` |
 | `task-164.4-writeback-unowned` | the first store of any `cow_` scenario, `cow_rebind_against_stores`'s: to a page no `PRIVATE` made the VM's. Before the host refused it, `cow_writeback_before_store`: the rest of page 3 read zeros |
-| `task-164.4-extents-during-seal` | `cow_map_during_seal`: a MAP of an extent the host has open (`fxfs_dax_sealed_extents`, which ranges and slices both look extents up by) |
+| `task-164.4-extents-during-seal` | `cow_map_during_seal`: a MAP of an extent the host has open (`cladefs_dax_sealed_extents`, which ranges and slices both look extents up by) |
 | `task-164.4-slice-during-seal` | `cow_map_during_seal`'s read: the same, of a slice's region |
 | `task-164.4-release-stale-entries` | `cow_reclaim_after_writeback_met_a_fault`: the range is never reclaimed |
-| `task-164.4-rebind-shared` | `fxfs_dax_map_pages`' lockdep assertion, in any rebind; `cow_rebind_against_write` |
+| `task-164.4-rebind-shared` | `cladefs_dax_map_pages`' lockdep assertion, in any rebind; `cow_rebind_against_write` |
 | `task-164.4-rebind-dirty` | `cow_rebind_against_stores`: `pages.c`'s WARN of a rebind's MAP over dirty pages; before TASK-160.4, a rebind's read-only MAP under a dirty page's writable PTE; `cow_rebind_skips_dirty` |
 | `task-164.4-commit-failure-dropped` | `cow_commit_failed` |
 | `task-164.4-private-uncounted` | `cow_rebind_against_stores`: a write fails, its `PRIVATE` refused past `private_max` |
@@ -343,7 +343,7 @@ reserved, and no MAP of an open extent asked. The rules' mutants:
 | `unmapped-page-read-as-hole` | `hole_mapped_then_written`: a load of page 2, which a truncate's failed MAP of zeros left with no window page, reads the kernel's zero page where read(2) reads a write's bytes |
 
 In dax.c's copying on write as it stood at batch 2026-11-04c (CI run 41823852629), behind
-`fxfs.dax_cow` then, which 612 of `interleave`'s 750 copy-on-write seeds failed, first found here,
+`cladefs.dax_cow` then, which 612 of `interleave`'s 750 copy-on-write seeds failed, first found here,
 all six since fixed (the functions as dax.c names them since writable DAX went):
 
 1. **Writeback left a fault's PTE writable.** It write-protected the pages it took by
@@ -353,20 +353,20 @@ all six since fixed (the functions as dax.c names them since writable DAX went):
    then mapped the page read-only under the writable PTE, which the host refuses a store through
    (`a read-only MAP ... maps writably`, 15 seeds); without a rebind, a store through it after the
    writeback's copy is in no set. Fixed by write-protecting the set's pages by the page tables, as
-   the sealer does (`fxfs_dax_protect`). `cow_writeback_during_fault`, seed 22.
-2. **An fsync returned before a writeback under way committed.** `fxfs_dax_write_back` returned
+   the sealer does (`cladefs_dax_protect`). `cow_writeback_during_fault`, seed 22.
+2. **An fsync returned before a writeback under way committed.** `cladefs_dax_write_back` returned
    at once if nothing was dirty, without the writeback lock: the budget's writeback had swapped the
    pages out, and had yet to write and commit them. Fixed by looking under the lock. A sync's
-   `fxfs_dax_settle` passed such a file by, as it had nothing dirty, the same way: it writes back
+   `cladefs_dax_settle` passed such a file by, as it had nothing dirty, the same way: it writes back
    every file with private pages now. `cow_fsync_during_writeback`, seed 962.
-3. **Private pages counted free before the host freed them.** `fxfs_dax_forget` ran before the
+3. **Private pages counted free before the host freed them.** `cladefs_dax_forget` ran before the
    UNMAP of a range, or a truncate's MAP of zeros, past which the budget gave their room to another
    store, refused past `private_max` (`the window refused an access`). Fixed by counting them free
    once the request ends, and never if it failed: the host holds them for good then.
    `cow_truncate_held`, seed 90.
 4. **A range a writeback cleaned could never be reclaimed.** 1's other half: the DAX entry a fault
    held through the writeback stays tagged dirty, and with no page dirty no writeback cleans it
-   again; `fxfs_dax_release`'s invalidation then failed for ever, so that reclaim passed the range
+   again; `cladefs_dax_release`'s invalidation then failed for ever, so that reclaim passed the range
    by, and a fault short of window reclaimed it again and again (`livelock: a fault had its range
    dropped 257 times`; a drop, which deletes entries whatever their tags, got by). Fixed by cleaning
    a clean range's entries as it is released. `cow_reclaim_after_writeback_met_a_fault`, seed 3390
@@ -377,19 +377,19 @@ all six since fixed (the functions as dax.c names them since writable DAX went):
    the old block, moved the block, and Fxfs freed the old extent at the flush after: the store then
    made its page private from the zeros the window reads there, and the next writeback wrote them
    (`a zero read` of another worker's slot). Fixed by making the dirty set private (PRIVATE) before
-   it is swapped out (`fxfs_dax_cow_own`). `cow_writeback_before_store`, seed 2802 at 1,000
+   it is swapped out (`cladefs_dax_cow_own`). `cow_writeback_before_store`, seed 2802 at 1,000
    operations.
 6. **A range or a slice asked to MAP an extent a seal in progress had yet to seal.** Fxfs says an
-   extent minted before a seal is sealed from the seal's beginning (fxfs-linux's `Seal::begin_with`
+   extent minted before a seal is sealed from the seal's beginning (cladefs-linux's `Seal::begin_with`
    calls `OpenExtents::seal` before the COMMIT), which the host refuses to map (-EPERM): dax.c
    recovered, sealing and trying again or dropping the slice, but asked, against doc-13's
    invariant 1. No seed of `interleave` checks for it; mutants that moved `cow_punch_dirty`'s
    schedule met it there. Fixed by looking the extents up again once the seal has ended
-   (`fxfs_dax_sealed_extents`, and in `fxfs_dax_new_slice`, -EBUSY for a fault). `cow_map_during_seal`.
+   (`cladefs_dax_sealed_extents`, and in `cladefs_dax_new_slice`, -EBUSY for a fault). `cow_map_during_seal`.
 
 And five of this simulator's own: the syncer checked, after an fsync of one file, every file's
 slots in Fxfs, which copying on write holds only once each is written back (516 of the 612, the
-"zero reads", and 64 "stale reads"); `fxfs.dax_fail_maps` fails a read's range's MAP too, copying on
+"zero reads", and 64 "stale reads"); `cladefs.dax_fail_maps` fails a read's range's MAP too, copying on
 write, which `interleave` took for a bug (`read_file` and `user_load` try again as it runs out); a
 failed write's resync compared read(2), which sees the dirty pages, with Fxfs before writing them
 back; the model of Fxfs sealed an extent minted during a seal at its COMMIT, but called it open
@@ -410,7 +410,7 @@ an fsync or a sync seals it. With nothing dirty, the worker wrote nothing, seale
 rebound none: `interleave` seed 215500, Fxfs failing, a 4 MiB write stopped short at ENOSPC, its
 growth's writeback leaving all 256 of `private_max` private, every one of 3,000 rounds rebound none,
 and a punch's partial page, waiting for room, failed ENOMEM. The worker's rebind seals now when it
-leaves pages private for open extents and needs the room (`fxfs_dax_rebind`).
+leaves pages private for open extents and needs the room (`cladefs_dax_rebind`).
 `cow_rebind_seals_open_extents`, `task-283-rebind-leaves-open`.
 
 ### One owner of a page's state (TASK-164.9)
@@ -419,14 +419,14 @@ leaves pages private for open extents and needs the room (`fxfs_dax_rebind`).
 dax.c's dirty and private bits, the kernel's DAX entry (its dirty tag and lock), and the host's
 private page, and each bug was code trusting one to say what another held. Since TASK-164.9 the
 bits are the state, each changed by one function, one transition each: clean to dirty and private
-by the iomap that dirties a page (`fxfs_dax_dirty`), whose `PRIVATE` has the host make it the
+by the iomap that dirties a page (`cladefs_dax_dirty`), whose `PRIVATE` has the host make it the
 VM's own before any store can land, so that dirty implies private by construction; dirty to written
-back by writeback alone (`fxfs_dax_write_back`), from dax.c's dirty set, write-protecting by the
-page tables; written back and sealed to rebound by a rebind's MAP (`fxfs_dax_rebind`); and gone
-by an UNMAP or a truncate's MAP of zeros (`fxfs_dax_forget`, `fxfs_dax_dropped` since).
-`fxfs_dax_cow_own`, and `fxfs.dax_private_ahead`, went: every iomap that makes a page private sends
+back by writeback alone (`cladefs_dax_write_back`), from dax.c's dirty set, write-protecting by the
+page tables; written back and sealed to rebound by a rebind's MAP (`cladefs_dax_rebind`); and gone
+by an UNMAP or a truncate's MAP of zeros (`cladefs_dax_forget`, `cladefs_dax_dropped` since).
+`cladefs_dax_cow_own`, and `cladefs.dax_private_ahead`, went: every iomap that makes a page private sends
 its `PRIVATE`. The kernel's dirty tags are cleaned for the kernel's sake alone
-(`fxfs_dax_clean_entries`), by writepages, so that the inode is clean to it, and by a range's
+(`cladefs_dax_clean_entries`), by writepages, so that the inode is clean to it, and by a range's
 release, under the invalidate_lock, so that invalidation takes its entries; no transition reads
 them, nor waits on an entry's lock. A swap WARNs on a dirty page not private, and a rebind's MAP on
 a dirty page.
@@ -459,13 +459,13 @@ tests too, which never had. CI's first run of it (41876989384, batch 2026-11-04e
 `failures`' 3,000 seeds, one bug of dax.c and one of this simulator's:
 
 1. **A page of the file with no window page was read as a hole.** A truncate whose MAP of zeros
-   past the new end fails leaves those pages unmapped (`fxfs_dax_resize_end`), for a write to map
+   past the new end fails leaves those pages unmapped (`cladefs_dax_resize_end`), for a write to map
    again; a write past them grows the file over them. A load of one then had its read's iomap say
    a hole, so that the fault mapped the kernel's zero page, and the write(2) after mapped the page
    and copied into it, with no iomap new (`IOMAP_F_NEW`) to take the zero page away: the load's PTE
    read zeros where read(2) read the write's bytes, and a write from the mapping copied them (seed
    1669, `reading it all ... byte 20480 is 0, not 0xa1`). Fixed by mapping such a page before any
-   iomap of it, a read's as a write's (`fxfs_dax_map_missing`): a writable window's file has no
+   iomap of it, a read's as a write's (`cladefs_dax_map_missing`): a writable window's file has no
    holes the kernel sees. `hole_mapped_then_written`'s second half, `unmapped-page-read-as-hole`.
 2. The syncer of `failures` took any fsync failing for a bug (645 seeds, `PANIC in syncer: fsync`):
    copying on write, an fsync writes back first, whose batch allocation fails ENOMEM as allocations
@@ -480,19 +480,19 @@ which no oracle here can see copying on write.
 
 Doc-13's "a rebind before the seal" and "writeback forgetting its set before the barrier" have no
 code to mutate: a rebind maps only what Fxfs says is sealed, and leaves a page private if the host
-says EPERM (`fxfs_dax_map_pages`). `specs/dax-cow` models them.
+says EPERM (`cladefs_dax_map_pages`). `specs/dax-cow` models them.
 
 ## A file's changes as a whole (TASK-160.2)
 
 Resize, punch and clone were super.c's, which isn't built here, and were written again in
 `kernel/mount.c`, where they drifted from it: no size rolled back when Fxfs refused a growth, the
-size of the file after it passed to `fxfs_dax_resize_end` as asked rather than as it was, no
+size of the file after it passed to `cladefs_dax_resize_end` as asked rather than as it was, no
 rounding of a clone to blocks, no recovery of what a failed clone reached (TASK-150.9, 153.4 and
-79.53 were bugs of the same seam). They are `data.c`'s now, over each file's `fxfs_data_ops`, the
+79.53 were bugs of the same seam). They are `data.c`'s now, over each file's `cladefs_data_ops`, the
 page cache's (super.c) or the window's (dax.c), and this builds `data.c` as it is: a truncate is
-`fxfs_data_resize`, a punch the file's `fallocate`, a clone its `remap_file_range`, as the VFS calls
+`cladefs_data_resize`, a punch the file's `fallocate`, a clone its `remap_file_range`, as the VFS calls
 them. The model of Fxfs takes `write_inode`, and fails a growth as `interleave`'s failing seeds ask
-(`fxfs_sim_fail`), as it fails room for dirty pages; a cut never fails, Fxfs's borrowing the room.
+(`cladefs_sim_fail`), as it fails room for dirty pages; a cut never fails, Fxfs's borrowing the room.
 
 | Mutant | Caught by |
 | --- | --- |
@@ -500,7 +500,7 @@ them. The model of Fxfs takes `write_inode`, and fails a growth as `interleave`'
 
 ## The model's growths, as Fxfs's (TASK-149.14.2)
 
-A DAX file's truncate keeps its last block (`FXFS_SET_KEEP_TAIL`), the window zeroing past the end
+A DAX file's truncate keeps its last block (`CLADEFS_SET_KEEP_TAIL`), the window zeroing past the end
 in its own page. Fxfs zeroes what a cut left there as the file grows, every way it grows, unless the
 growth writes that block anew (`txn_grow_size`, `zero_tail_before_growth`), and a write of part of a
 block keeps of the rest what the file held up to its end, zeros past it (`read_unaligned_ends`):
@@ -514,16 +514,16 @@ through one function now (`grow`, `zero_before_growth`), as Fxfs's do.
 
 | Mutant | Caught by |
 | --- | --- |
-| `task-149.14.2-growth-keeps-tail` | `fxfs_growths_zero_past_a_cut`: a write past it |
-| `task-149.14.2-partial-write-keeps-past-end` | `fxfs_growths_zero_past_a_cut`: a write in the block |
+| `task-149.14.2-growth-keeps-tail` | `cladefs_growths_zero_past_a_cut`: a write past it |
+| `task-149.14.2-partial-write-keeps-past-end` | `cladefs_growths_zero_past_a_cut`: a write in the block |
 
 ## The model against Fxfs (TASK-149.29)
 
-`crates/fxfs-sim-diff` builds `fxfs/fxfs.c` as it is, over a shim of this kernel of its own (no
+`crates/fxfs-sim-diff` builds `cladefs/cladefs.c` as it is, over a shim of this kernel of its own (no
 kernel tree, so on macOS too), and runs it beside Fxfs, fxfs-posix over its fake device, on random
 sequences of what dax.c and data.c call of it: writebacks of whole pages and of parts, up to the
 file's size, paid with dirty pages' room or not, and failing between their bytes and their commits;
-truncates' sizes, cuts with `FXFS_SET_KEEP_TAIL` and without, and growths; clones, of blocks and to
+truncates' sizes, cuts with `CLADEFS_SET_KEEP_TAIL` and without, and growths; clones, of blocks and to
 the source's end; punches; seals; and remounts of Fxfs. After each, every file's size and bytes
 agree, and its blocks, whole, through the extents, past the end too, as the window maps them; holes
 and shared blocks are alike; and no extent Fxfs says open does the model say sealed, which would
@@ -543,15 +543,15 @@ First found by it, both fixed:
    Fxfs's stays sealed and shared: dax.c here never met a growth that leaves its last block mapped.
    `task-149.29-tail-moved-though-zero`.
 2. **Fxfs's: a writeback paid with its dirty pages' room failed NoSpace** on a filesystem all but
-   empty, growing a file past an end within a block a cut had kept (`FXFS_SET_KEEP_TAIL`, a DAX
+   empty, growing a file past an end within a block a cut had kept (`CLADEFS_SET_KEEP_TAIL`, a DAX
    file's): the growth writes that block again, zeroed past the end, which the room reserved for
    the pages didn't count. fxfs-posix's
    `a_writeback_paid_with_dirty_room_has_room_for_the_tail_its_growth_zeroes`.
 
 | Mutant | Caught by fxfs-sim-diff | By this simulator (`mutants.sh`, 2,000 seeds) |
 | --- | --- | --- |
-| `task-149.14.2-growth-keeps-tail` | a write past a kept tail: bytes from the old end read back the cut's | `fxfs_growths_zero_past_a_cut` |
-| `task-149.14.2-partial-write-keeps-past-end` | a write in a kept tail's block, past the end: the same | `fxfs_growths_zero_past_a_cut` |
+| `task-149.14.2-growth-keeps-tail` | a write past a kept tail: bytes from the old end read back the cut's | `cladefs_growths_zero_past_a_cut` |
+| `task-149.14.2-partial-write-keeps-past-end` | a write in a kept tail's block, past the end: the same | `cladefs_growths_zero_past_a_cut` |
 | `task-164.4-model-seal-forgets-late` | a cut at a seal's end (`sim_point`): its block in an extent the model says sealed, Fxfs's open, where dax.c here would MAP it | no: `interleave -C` seed 32826 found it once |
 | `task-149.29-tail-moved-though-zero` | a growth past a tail of zeros, its block shared by a clone: the model's no longer shared | no: dax.c is right either way |
 
@@ -564,7 +564,7 @@ end, and an operation at a seal's points at a cut near the end, which 64 didn't 
 - `shim/`: the kernel's headers, as `ALIASES` maps them to `shim/sim/*.h`, `-nostdinc`. Dax.c sees
   nothing else but `REAL_HEADERS`.
 - `kernel/`: the fake kernel. `kernel/host.c` alone sees libc.
-- `fxfs/`: the model of Fxfs.
+- `cladefs/`: the model of Fxfs.
 - `kernel/sweep.c`: what fails, and when (the sweep); `kernel/shadow.c`: the file model.
 - `tests/`: what runs: `interleave`'s seeds, and scenarios, one run each. A test fails by panicking,
   the seed named.

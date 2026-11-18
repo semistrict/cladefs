@@ -3,7 +3,7 @@ id: doc-10
 title: 'Shared volumes: Fxfs volumes over read-only bases'
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-17 01:09'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
@@ -32,7 +32,7 @@ Ramon's, 2026-10-30 and 2026-10-31:
 | Scope | Any repo, attached at runtime | Repos known at sandbox start, on a second boot device: no runtime attach, no mixing of generations |
 | Reading a base outside the branch's lineage | A device read-through to a pinned fork of the base: one device, one DAX window | A second read-only device, which needs per-extent routing in `dax.c` and is fixed at boot; a multi-parent graft, which changes the lineage, the bucket layout and collection |
 | Tenancy | Public repos in public bases; each tenant's private repos in its own bases; no sharing across tenants otherwise | Public repos only at first |
-| Attach authorization | The sandbox manager alone, through the host control API. The guest cannot ask | The guest asking through the device, with extentd checking grants |
+| Attach authorization | The sandbox manager alone, through the host control API. The guest cannot ask | The guest asking through the device, with cladefsd checking grants |
 | Repos mounted at once | Hundreds per sandbox: opening volumes on first use, expiring idle mounts and constant-cost reads are required | Tens, which would leave those as follow-ups; thousands, which would budget per-volume memory and flush loops too |
 | Moving to a newer generation | Git level first: `git fetch` reaches a new generation's objects through alternates, and `git pull` writes what changed into the writable layers | An in-place swap of base layers now, which stays possible later if measurements justify it |
 | What the feature is | Generic shared volumes, which Git happens to use | A feature that knows of Git |
@@ -75,7 +75,7 @@ guest needs this model however the extents are read. The store question is only 
 
 ### Guest VFS (TASK-136.2)
 
-Built: `mount -t fxfs -o volume=NAME tag path`. One Fxfs on the device, one superblock per mounted
+Built: `mount -t cladefs -o volume=NAME tag path`. One Fxfs on the device, one superblock per mounted
 volume, so each repo has a native `st_dev` and `EXDEV`, and attaching needs no new device.
 
 - `struct fxfs_vfs_filesystem` holds what a device's superblocks share, and in Rust `Filesystem`,
@@ -137,7 +137,7 @@ The sandbox's allocator and root store never learn of the base. Limits:
 Built. A sandbox keeps the volume current with ordinary commands, and the host forks its store and
 keeps the manifest, so that no guest replays its journal. The fork is the generation: it holds every
 extent as of the fork (doc-4), so the sandbox moves on with no `snapshot_volume`. The three ioctls
-are in `guest/linux/fs/fxfs/vfs.h`. In order:
+are in `guest/linux/fs/cladefs/vfs.h`. In order:
 
 1. `syncfs`, once the commands are done.
 2. `FIFREEZE` on the volume, which stops its writers.
@@ -233,7 +233,7 @@ volume imported already, by an earlier lookup or before a reboot, mounts with no
 stays attached (TASK-136.5's record).
 
 - **The kernel's side is Linux's autofs**, protocol 5, an indirect map on ROOT, not a
-  `d_automount` of fs/fxfs's own: autofs is `d_automount`'s client already. It holds every lookup
+  `d_automount` of fs/cladefs's own: autofs is `d_automount`'s client already. It holds every lookup
   of a name on one wait while the daemon mounts it, so that concurrent lookups of a repo attach it
   once; it lets the daemon's process group alone through the directory unmounted (the daemon makes
   a group of its own); and it finds the mounts idle for the timeout, which the daemon unmounts as
@@ -255,7 +255,7 @@ stays attached (TASK-136.5's record).
   journal holds of it is flushed into its layers first, which then hold all it has. A volume in use
   stays open, as does one a read-only filesystem can't flush. A replay opens it again while the
   journal still names it, as it opens any volume written to lately. The guest's
-  `/proc/fs/fxfs/TAG` says `volumes_open`.
+  `/proc/fs/cladefs/TAG` says `volumes_open`.
 
 ### Hundreds mounted at once
 
@@ -383,7 +383,7 @@ What the numbers ask of the design:
   `LayerObject::as_slice` allows, if layers' block sizes permit.
 - **Pinned generations.** How long they stay while a sandbox store outlives its use of them, and
   who keeps a stopped store's from going.
-- **Attachments across hosts.** The record is local, and a generation's branch has one writer's
-  lease at a time.
+- **Attachments across hosts.** The record is local, and a generation's branch has one writer
+  at a time.
 - **Whether an in-place swap is worth building**, once the writable layers' growth under
   long-lived sandboxes is measured.

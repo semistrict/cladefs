@@ -8,7 +8,7 @@
 #include <sim/fs.h>
 #include <sim/time.h>
 
-#include "../../../linux/fs/fxfs/vfs.h"
+#include "../../../linux/fs/cladefs/vfs.h"
 
 /* Starts the simulator, whose scheduler `seed` drives: the same seed, the same run. */
 void sim_init(u64 seed);
@@ -59,7 +59,7 @@ __printf(1, 2) void sim_unexpected(const char *format, ...);
 } while (0)
 
 /*
- * Has `count` allocations by fs/fxfs's own sources fail, after `skip` more of them; or one in `odds`
+ * Has `count` allocations by fs/cladefs's own sources fail, after `skip` more of them; or one in `odds`
  * of them, from the seed, until told 0: how many have.
  */
 void sim_alloc_fail(u64 skip, u64 count);
@@ -128,13 +128,13 @@ unsigned long sim_mm_writable_mapping(u64 page, u64 pages);
 void sim_mm_watch(unsigned long addr);
 
 /*
- * A mount, as fs/fxfs/super.c's, of the sim's Fxfs (fxfs/fxfs.c): its files, opened, and the model
+ * A mount, as fs/cladefs/super.c's, of the sim's Fxfs (cladefs/cladefs.c): its files, opened, and the model
  * of what each holds (kernel/shadow.c). Freed, it syncs, unmaps what maps its files, and evicts
  * those it hasn't, as an unmount does.
  */
 struct sim_mount {
 	struct super_block sb;
-	struct fxfs_vfs_info *info;
+	struct cladefs_vfs_info *info;
 	struct list_head files, shadows;
 };
 struct sim_mount *sim_mount_new(void);
@@ -153,7 +153,7 @@ enum sim_end_files {
 void sim_end(enum sim_end_files files);
 /* A run ended where it is, void, as a sweep's failure left it (sim_sweep_watch): nothing checked. */
 void sim_end_void(void);
-/* One of the counts dax.c shows of the mount (fxfs_dax_show_stats), by name, as /proc/fs/fxfs. */
+/* One of the counts dax.c shows of the mount (cladefs_dax_show_stats), by name, as /proc/fs/cladefs. */
 u64 sim_dax_stat(struct sim_mount *mount, const char *name);
 struct file *sim_file_new(struct sim_mount *mount);
 void sim_file_evict(struct file *file);
@@ -190,47 +190,47 @@ struct page *sim_pin_user_page(unsigned long addr);
 void sim_unpin_page(struct page *page);
 
 /* The sim's Fxfs: reads the file as it would, from its extents, for the tests to check. */
-void fxfs_sim_read(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len);
-u64 fxfs_sim_size(struct fxfs *fs, u64 ino);
-u64 fxfs_sim_new_file(struct fxfs *fs);
+void cladefs_sim_read(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len);
+u64 cladefs_sim_size(struct cladefs *fs, u64 ino);
+u64 cladefs_sim_new_file(struct cladefs *fs);
 /* NULL if the device isn't found, as a sweep's failure has it. */
-struct fxfs *fxfs_sim_new(void);
-void fxfs_sim_free(struct fxfs *fs);
+struct cladefs *cladefs_sim_new(void);
+void cladefs_sim_free(struct cladefs *fs);
 /* How many blocks writeback wrote, extents were freed, transactions failed. */
-void fxfs_sim_stats(u64 *written, u64 *frees, u64 *failed);
+void cladefs_sim_stats(u64 *written, u64 *frees, u64 *failed);
 /* Has one transaction in `odds` fail with -ENOSPC, or none if 0. */
-void fxfs_sim_fail(unsigned int odds);
+void cladefs_sim_fail(unsigned int odds);
 /*
- * Has fxfs_write_many, writeback's, wait between its bytes and its commit while `hold`: a crash
- * then leaves the file as fxfs_sim_read reads it, and the commit would as fxfs_sim_read_pending
+ * Has cladefs_write_many, writeback's, wait between its bytes and its commit while `hold`: a crash
+ * then leaves the file as cladefs_sim_read reads it, and the commit would as cladefs_sim_read_pending
  * does. Whether a write waits so now.
  */
-void fxfs_sim_hold_commits(bool hold);
+void cladefs_sim_hold_commits(bool hold);
 /*
- * cladefs: as fxfs_set_fail_commits (fxfs.dax_fail_commits), the next `count` writebacks failing
+ * cladefs: as cladefs_set_fail_commits (cladefs.dax_fail_commits), the next `count` writebacks failing
  * before their commits with `err`, a -errno: ENOMEM, Fxfs finding no memory (TASK-207).
  */
-void fxfs_sim_fail_commits_with(u64 count, int err);
-bool fxfs_sim_commit_held(void);
+void cladefs_sim_fail_commits_with(u64 count, int err);
+bool cladefs_sim_commit_held(void);
 /*
  * Has a seal wait while `hold` between its beginning, when Fxfs takes no extent minted before it for
  * open (OpenExtents::seal), and its COMMIT, which seals them on the device. Whether one waits so.
  */
-void fxfs_sim_hold_seals(bool hold);
-bool fxfs_sim_seal_held(void);
-void fxfs_sim_read_pending(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len);
-/* The bytes of file `ino`'s dirty pages Fxfs holds room for (fxfs_reserve_dirty). */
-u64 fxfs_sim_reserved(struct fxfs *fs, u64 ino);
+void cladefs_sim_hold_seals(bool hold);
+bool cladefs_sim_seal_held(void);
+void cladefs_sim_read_pending(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len);
+/* The bytes of file `ino`'s dirty pages Fxfs holds room for (cladefs_reserve_dirty). */
+u64 cladefs_sim_reserved(struct cladefs *fs, u64 ino);
 /* How many seals have ended. */
-u64 fxfs_sim_seals(struct fxfs *fs);
+u64 cladefs_sim_seals(struct cladefs *fs);
 /* Whether a seal has begun and not ended. */
-bool fxfs_sim_sealing(struct fxfs *fs);
+bool cladefs_sim_sealing(struct cladefs *fs);
 /*
- * Has Fxfs count no extent's size while `unknown` (fxfs_dax_extents' extent_size 0), as a volume
+ * Has Fxfs count no extent's size while `unknown` (cladefs_dax_extents' extent_size 0), as a volume
  * over a base counts none of the base's, whose filesystem's allocator counts them (TASK-229).
  */
-void fxfs_sim_extent_sizes_unknown(bool unknown);
+void cladefs_sim_extent_sizes_unknown(bool unknown);
 /* Logs what happens to the block of `page` of file `ino`. */
-void fxfs_sim_watch(u64 ino, u64 page);
+void cladefs_sim_watch(u64 ino, u64 page);
 
 #endif

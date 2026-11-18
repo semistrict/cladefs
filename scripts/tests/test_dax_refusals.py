@@ -10,7 +10,7 @@ import script
 
 dax_refusals = script.load("dax-refusals")
 
-PREFIX = "WARN cladefs::extentd::server: extentd: a store at DAX window offset 0x10fab000 refused "
+PREFIX = "WARN cladefs::cladefsd::server: cladefsd: a store at DAX window offset 0x10fab000 refused "
 # As ExtentStore::refused says what the window maps at the page.
 SEALED = (PREFIX + '(1 so far): ExtentId { branch: 1, sequence: 2 } from 0x0, 0x10000 bytes from '
           '0x10fa3000; in the store: Ok(Some("0xa000 bytes, sealed")); '
@@ -19,7 +19,7 @@ FREED = (PREFIX + '(4 so far): ExtentId { branch: 1, sequence: 5 } from 0x0, 0x1
          '0x21b000; in the store: Ok(None); the page\'s latest MAPs and UNMAPs: [\n')
 NOTHING = PREFIX + "(2 so far): nothing mapped; the page's latest MAPs and UNMAPs: [\n"
 HISTORY = '    "MAP of ExtentId { branch: 1, sequence: 2 } from 0x0, writably, Ok(()), 0x10000 bytes",\n'
-MET = ("WARN cladefs::extents: extentd: a store refused at DAX window offset 0x1f7000, 2.7ms ago, "
+MET = ("WARN cladefs::extents: cladefsd: a store refused at DAX window offset 0x1f7000, 2.7ms ago, "
        'mapping ExtentId { branch: 1, sequence: 5 } from 0x0, read-only; in the store: '
        'Ok(Some("0x1000 bytes, open")), met: UNMAP, 0x1000 bytes from 0x1f7000\n')
 REFUSED = ("2026-11-01T18:20:09.277538431 [anonymous-instance:dax faults] cladefs: the DAX window "

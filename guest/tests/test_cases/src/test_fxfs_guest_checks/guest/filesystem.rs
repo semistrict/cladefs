@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// cladefs: /proc/fs/fxfs/<tag> says what the filesystem waited on and its device's requests
+/// cladefs: /proc/fs/cladefs/<tag> says what the filesystem waited on and its device's requests
 /// took, which the guest counts as idle (TASK-91.7): an fsync's commit and its seal among them.
 pub(super) fn test_stats() {
     let before = stats();
@@ -59,7 +59,7 @@ fn writer_waits(name: &str, data: &'static [u8], what: &str) -> std::thread::Joi
 
 /// cladefs: a thaw that fails leaves the filesystem frozen, as the VFS leaves the superblock, and
 /// the next goes on from the step it stopped at, never taking one twice (TASK-200): failing
-/// before it tells the device it thaws (fxfs.fail_thaw_at 1), and before it renews the journal's
+/// before it tells the device it thaws (cladefs.fail_thaw_at 1), and before it renews the journal's
 /// tail, the device told, and open again (2). Writers wait meanwhile, and write once it thaws,
 /// durably. The device is told of the freeze, and of the thaw, once each. Fxfs took a thaw that
 /// failed for done: the next let every writer in, to wait for ever at the device it held closed.
@@ -186,8 +186,8 @@ pub(super) fn test_show_options(dax: bool) {
     assert!(options.contains(&"rw") && !options.contains(&"follow"), "{line}");
 }
 
-/// TASK-26.19: what programs see of what Fxfs does not do (README, "Guest Fxfs: what it does
-/// not do"): FIDEDUPERANGE's status is EOPNOTSUPP, and a MAP_SYNC mapping fails with it.
+/// TASK-26.19: what programs see of what Fxfs does not do (docs/code.md, "Guest Fxfs: what it
+/// does not do"): FIDEDUPERANGE's status is EOPNOTSUPP, and a MAP_SYNC mapping fails with it.
 pub(super) fn test_unsupported() {
     /// `_IOWR(0x94, 54, struct file_dedupe_range)`.
     const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;
@@ -350,7 +350,7 @@ pub(super) fn test_enospc() {
     }
     drop(read);
     // Full, a directory doesn't fit either. (Nor is fallocate checked: it reserves no space,
-    // which an extent store can't, fxfs_data_fallocate.)
+    // which an extent store can't, cladefs_data_fallocate.)
     enospc(fill(IMAGE_MIB * 1024, &mut |n| fs::create_dir(format!("{dir}/d{n}"))), "directories");
     file.set_len(0).unwrap();
     drop(file);

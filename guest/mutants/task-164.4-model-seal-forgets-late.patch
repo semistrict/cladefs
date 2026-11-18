@@ -11,8 +11,8 @@
 # an extent the model says sealed, Fxfs's open. guest/sim's mutants.sh found it in none of 2,000
 # seeds.
 
---- a/guest/sim/fxfs/fxfs.c
-+++ b/guest/sim/fxfs/fxfs.c
+--- a/guest/sim/cladefs/cladefs.c
++++ b/guest/sim/cladefs/cladefs.c
 @@ -404,12 +404,12 @@
  	 * step: between the two, a truncate's move_tail, which takes no `writes`, found the staging
  	 * extent open still, and wrote it, sealed (interleave -C, seed 32826).
@@ -25,6 +25,6 @@
  		extent->open = false;
  	mutex_unlock(&fs->lock);
 -	sim_point("a seal's end");
- 	fxfs_device_seal_end(fs->dev);
+ 	cladefs_device_seal_end(fs->dev);
  	up_write(&fs->writes);
  	mutex_lock(&fs->lock);

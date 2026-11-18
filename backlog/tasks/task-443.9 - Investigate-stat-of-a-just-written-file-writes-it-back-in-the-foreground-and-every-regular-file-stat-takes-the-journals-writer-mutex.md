@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
+updated_date: '2026-11-17 01:10'
 labels:
   - perf
   - review-2026-11-15
@@ -20,7 +21,7 @@ ordinal: 843000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-guest/linux/fs/fxfs/super.c fxfs_vfs_getattr calls filemap_write_and_wait when inode_get_bytes(inode) < i_size_read(inode) with dirty pages (TASK-138, xfstests generic/422 and 615); fxfs_vfs_refresh_blocks reads Journal::file_offset, which locks writer_mutex, held across every commit's apply. git checkout and make stat what they write: one device round trip a file, and stats queue behind commits. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+guest/linux/fs/cladefs/super.c fxfs_vfs_getattr calls filemap_write_and_wait when inode_get_bytes(inode) < i_size_read(inode) with dirty pages (TASK-138, xfstests generic/422 and 615); fxfs_vfs_refresh_blocks reads Journal::file_offset, which locks writer_mutex, held across every commit's apply. git checkout and make stat what they write: one device round trip a file, and stats queue behind commits. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

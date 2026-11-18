@@ -2,7 +2,7 @@
 # many as the connection serves at once: 1 GiB held of a connection's writes from its transfer
 # area, against a room of 272 MiB (TASK-149.17).
 # Kind: memory
-# Killer: extentd::tests::hostile::what_requests_hold_is_within_the_room
+# Killer: cladefsd::tests::hostile::what_requests_hold_is_within_the_credit
 --- a/crates/cladefs/src/extents.rs
 +++ b/crates/cladefs/src/extents.rs
 @@ -454,7 +454,7 @@

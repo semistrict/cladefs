@@ -8,6 +8,7 @@
 //! store's and a writer's alike, and admits those another closed for it.
 
 use crate::Corrupt;
+use base32_id::{Padded, Short};
 use serde::{Deserialize, Serialize};
 use storage_device::ExtentId;
 
@@ -20,8 +21,8 @@ pub struct Location {
 }
 
 /// cladefs: a tenant's cell, its unit of placement: one host at a time writes all the branches in it,
-/// under its one lease, and keeps them under its prefix in the bucket (TASK-364). Tenants and cells
-/// are IDs alone; what they stand for, their callers keep.
+/// under its one taking, and keeps them under its prefix in the bucket (TASK-364). Tenants and
+/// cells are IDs alone; what they stand for, their callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cell {
     pub tenant: u64,
@@ -31,30 +32,29 @@ pub struct Cell {
 impl Cell {
     /// The prefix of the keys of the cell's objects: `tenants/<tenant>/cells/<id>/`.
     pub fn prefix(self) -> String {
-        format!("tenants/{:016x}/cells/{:016x}/", self.tenant, self.id)
+        format!("tenants/{}/cells/{}/", Padded(self.tenant), Padded(self.id))
     }
 }
 
-/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in hexadecimal, as a branch's
+/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in base 32, as a branch's
 /// first two parts (`cladefs-gc --cell`, TASK-395.4).
 impl std::fmt::Display for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}/{:x}", self.tenant, self.id)
+        write!(f, "{}/{}", Short(self.tenant), Short(self.id))
     }
 }
 
 impl std::str::FromStr for Cell {
     type Err = String;
 
-    /// The cell `TENANT/CELL` names, each in hexadecimal, as it is displayed.
+    /// The cell `TENANT/CELL` names, each in base 32, as it is displayed.
     fn from_str(text: &str) -> Result<Self, String> {
-        let hex = |word: &str| u64::from_str_radix(word, 16).ok();
         let parsed = match text.split('/').collect::<Vec<_>>()[..] {
-            [tenant, id] => hex(tenant).zip(hex(id)),
+            [tenant, id] => base32_id::parse(tenant).zip(base32_id::parse(id)),
             _ => None,
         };
         let parsed = parsed.map(|(tenant, id)| Self { tenant, id });
-        parsed.ok_or_else(|| format!("no cell, TENANT/CELL in hexadecimal: {text}"))
+        parsed.ok_or_else(|| format!("no cell, TENANT/CELL in base 32: {text}"))
     }
 }
 
@@ -74,28 +74,28 @@ impl Branch {
     }
 }
 
-/// A branch as operators read and write it: `TENANT/CELL/ID`, each in hexadecimal.
+/// A branch as operators read and write it: `TENANT/CELL/ID`, each in base 32.
 impl std::fmt::Display for Branch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:x}/{:x}/{:x}", self.cell.tenant, self.cell.id, self.id)
+        write!(f, "{}/{}", self.cell, Short(self.id))
     }
 }
 
 impl std::str::FromStr for Branch {
     type Err = String;
 
-    /// The branch `TENANT/CELL/ID` names, each in hexadecimal, as it is displayed.
+    /// The branch `TENANT/CELL/ID` names, each in base 32, as it is displayed.
     fn from_str(text: &str) -> Result<Self, String> {
-        let hex = |word: &str| u64::from_str_radix(word, 16).ok();
+        let id = base32_id::parse;
         let parsed = match text.split('/').collect::<Vec<_>>()[..] {
-            [tenant, cell, id] => (hex(tenant), hex(cell), hex(id)),
+            [tenant, cell, branch] => (id(tenant), id(cell), id(branch)),
             _ => (None, None, None),
         };
         match parsed {
             (Some(tenant), Some(cell), Some(id)) => {
                 Ok(Self { cell: Cell { tenant, id: cell }, id })
             }
-            _ => Err(format!("no branch, TENANT/CELL/ID in hexadecimal: {text}")),
+            _ => Err(format!("no branch, TENANT/CELL/ID in base 32: {text}")),
         }
     }
 }
@@ -116,8 +116,8 @@ pub struct Child {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footer {
     pub branch: Branch,
-    pub seq: u64,
-    /// The epoch of its writer's lease, which its key names too: a segment is the branch's only
+    pub segment: u64,
+    /// The epoch of its writer's taking, which its key names too: a segment is the branch's only
     /// once the branch's head names it, by its number and epoch (doc-7, The head; TASK-407).
     pub epoch: u64,
     /// What its commits made.
@@ -137,7 +137,7 @@ impl Footer {
     /// is: the object its writer uploaded before it, at the key naming the writer's epoch and it
     /// ([`extent_key`]), which tells the collector whose it is.
     pub fn own(&self) -> impl Iterator<Item = (ExtentId, Location)> + '_ {
-        self.contents.own_at(self.branch, self.epoch, self.seq)
+        self.contents.own_at(self.branch, self.epoch, self.segment)
     }
 }
 
@@ -164,6 +164,26 @@ pub struct Contents {
     pub forks: Vec<Child>,
     pub capacity: Option<u64>,
     pub continued: Option<Continued>,
+    /// cladefs: the versions cut at its end, which the acknowledgement naming it names in the
+    /// branch's head ([`VersionCut`], TASK-476).
+    pub versions: Vec<VersionCut>,
+}
+
+/// cladefs: a version cut at a segment's end (doc-18, TASK-476): a name for its branch's state as of
+/// the segment, of no record, kept for as long as the branch's head names it, which the
+/// acknowledgement naming the segment does, in the same swap. Its ID is random, unique to its
+/// making, as an owner is: the segment's number may change, as a WAL is put after the branch's end
+/// (a store's `Wal::rebase`), its ID never. The commit cutting it seals nothing, its store
+/// quiescent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VersionCut {
+    pub id: u64,
+    /// The ID of the cut of its cell's vdisks it is part of, if any: cut at one moment with the
+    /// versions of the cut's other vdisks, which its cell's object names once all are uploaded.
+    pub cell_cut: Option<u64>,
+    /// The versions of its branch its snapshot asked to keep, itself among them, the newest: once
+    /// the head names it, the others are dropped, in the same swap. None, all.
+    pub keep_last: Option<u32>,
 }
 
 /// cladefs: the runs a commit sealed in a segment's data, past the commits the segment ends, which
@@ -209,23 +229,26 @@ impl Contents {
             && self.continued.as_ref().is_some_and(|continued| continued.commit == commit)
     }
 
-    /// The extents sealed on their own, `branch`'s, and where each is, in segment `seq` of the
-    /// writer of lease epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
+    /// The extents sealed on their own, `branch`'s, and where each is, in segment `segment` of the
+    /// writer of epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
     pub fn own_at(
         &self,
         branch: Branch,
         epoch: u64,
-        seq: u64,
+        segment: u64,
     ) -> impl Iterator<Item = (ExtentId, Location)> + '_ {
         self.own.iter().map(move |&(sequence, len)| {
             let extent = ExtentId { branch: branch.id, sequence };
-            (extent, Location { key: extent_key(branch.cell, epoch, seq, extent), offset: 0, len })
+            (
+                extent,
+                Location { key: extent_key(branch.cell, epoch, segment, extent), offset: 0, len },
+            )
         })
     }
 }
 
 /// One writer's footers, in the order its segments close (doc-7, The head): numbered on without
-/// gaps from the branch's end as its head named it; all of the writer's lease epoch, their extents
+/// gaps from the branch's end as its head named it; all of the writer's epoch, their extents
 /// of their own at its keys; the next sequence number each names never below its floor nor the one
 /// before's. Whatever closes a writer's segments, a store
 /// or the writer, stamps their footers with the writer's chain, and the writer admits each footer
@@ -235,31 +258,31 @@ pub struct Chain {
     branch: Branch,
     epoch: u64,
     /// The number of the next segment.
-    next_seq: u64,
+    next_segment: u64,
     /// The next sequence number the next footer names, at least.
     next_sequence: u64,
 }
 
 impl Chain {
-    /// The chain of the writer of lease epoch `epoch` of `branch`, whose next segment is numbered
-    /// `next_seq`; the footers it stamps name `next_sequence`, the writer's floor, as the branch's
-    /// next sequence number at least.
-    pub const fn new(branch: Branch, epoch: u64, next_seq: u64, next_sequence: u64) -> Self {
-        Self { branch, epoch, next_seq, next_sequence }
+    /// The chain of the writer of epoch `epoch` of `branch`, whose next segment is numbered
+    /// `next_segment`; the footers it stamps name `next_sequence`, the writer's floor, as the
+    /// branch's next sequence number at least.
+    pub const fn new(branch: Branch, epoch: u64, next_segment: u64, next_sequence: u64) -> Self {
+        Self { branch, epoch, next_segment, next_sequence }
     }
 
     pub fn branch(&self) -> Branch {
         self.branch
     }
 
-    /// The epoch of its writer's lease.
+    /// The epoch of its writer's taking.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
 
     /// The number of the next segment.
-    pub fn next_seq(&self) -> u64 {
-        self.next_seq
+    pub fn next_segment(&self) -> u64 {
+        self.next_segment
     }
 
     /// The branch's next sequence number, as of the last footer: what the writer's guest mints
@@ -279,7 +302,7 @@ impl Chain {
         let next_sequence = contents.next_sequence.max(self.next_sequence);
         let footer = Footer {
             branch: self.branch,
-            seq: self.next_seq,
+            segment: self.next_segment,
             epoch: self.epoch,
             contents: Contents { next_sequence, ..contents },
         };
@@ -290,11 +313,11 @@ impl Chain {
     /// The chain after `footer`, which another closed for it, if it is the next footer it would
     /// have stamped: of its branch, number and epoch.
     pub fn admit(&self, footer: &Footer) -> Result<Self, Corrupt> {
-        let wanted = (self.branch, self.next_seq, self.epoch);
-        if (footer.branch, footer.seq, footer.epoch) != wanted {
+        let wanted = (self.branch, self.next_segment, self.epoch);
+        if (footer.branch, footer.segment, footer.epoch) != wanted {
             return Err(Corrupt(format!(
                 "a segment of branch {}, number {}, epoch {}, not {wanted:?}",
-                footer.branch, footer.seq, footer.epoch
+                footer.branch, footer.segment, footer.epoch
             )));
         }
         let mut chain = *self;
@@ -304,7 +327,7 @@ impl Chain {
 
     /// Goes on after `footer`, its next segment's.
     fn follow(&mut self, footer: &Footer) {
-        self.next_seq = footer.seq + 1;
+        self.next_segment = footer.segment + 1;
         self.next_sequence = self.next_sequence.max(footer.contents.next_sequence);
     }
 }
@@ -313,7 +336,7 @@ impl Chain {
 /// writers' commits share one.
 pub const TAG_SHIFT: u32 = 40;
 
-/// The tag of the store's commit `epoch` that the writer of lease epoch `writer` uploads.
+/// The tag of the store's commit `epoch` that the writer of epoch `writer` uploads.
 pub fn tag(writer: u64, epoch: u64) -> u64 {
     (writer << TAG_SHIFT) | epoch
 }
@@ -323,23 +346,25 @@ pub fn epoch_of(tag: u64) -> u64 {
     tag & ((1 << TAG_SHIFT) - 1)
 }
 
-/// The lease epoch of the writer that uploads the commit a tag names.
+/// The epoch of the writer that uploads the commit a tag names.
 pub fn writer_of(tag: u64) -> u64 {
     tag >> TAG_SHIFT
 }
 
-/// The key of the object of an extent stored on its own, uploaded by the writer of lease epoch
-/// `epoch` before its segment `seq`, whose footer names it. cladefs: the segment's number tells the
-/// collector whether the object is ahead of its segment, which may yet land, or a landed one's,
+/// The key of the object of an extent stored on its own, uploaded by the writer of epoch
+/// `epoch` before its segment `segment`, whose footer names it. cladefs: the segment's number tells
+/// the collector whether the object is ahead of its segment, which may yet land, or a landed one's,
 /// which no state naming it frees it: what the branch's next sequence number can't tell, as its
 /// extents are committed in no order of their sequence numbers (TASK-79.3). Under the prefix of
 /// `cell`, its branch's (TASK-364).
-pub fn extent_key(cell: Cell, epoch: u64, seq: u64, extent: ExtentId) -> String {
+pub fn extent_key(cell: Cell, epoch: u64, segment: u64, extent: ExtentId) -> String {
     format!(
-        "{}extents/{:016x}/{epoch:016x}.{seq:016x}.{:016x}",
+        "{}extents/{}/{}.{}.{}",
         cell.prefix(),
-        extent.branch,
-        extent.sequence
+        Padded(extent.branch),
+        Padded(epoch),
+        Padded(segment),
+        Padded(extent.sequence)
     )
 }
 
@@ -360,7 +385,7 @@ mod tests {
     fn footers_decode_as_encoded() {
         let footer = Footer {
             branch: branch(2),
-            seq: 9,
+            segment: 9,
             epoch: 4,
             contents: Contents {
                 commits: vec![tag(4, 11), tag(4, 12)],
@@ -382,6 +407,7 @@ mod tests {
                     commit: tag(4, 13),
                     extents: vec![(ExtentId { branch: 2, sequence: 14 }, 4096, 8192)],
                 }),
+                versions: vec![VersionCut { id: 0xbe, cell_cut: Some(0xce), keep_last: Some(3) }],
             },
         };
         let bytes = footer.encode();
@@ -415,15 +441,16 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in hexadecimal; anything else is no
+    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in base 32; anything else is no
     /// branch.
     #[test]
     fn branches_parse_as_they_display() {
-        let branch = Branch { cell: Cell { tenant: 0xa, id: 0xbc }, id: 0x123 };
-        assert_eq!(branch.to_string(), "a/bc/123");
-        assert_eq!("a/bc/123".parse(), Ok(branch));
-        for wrong in ["123", "a/bc", "a/bc/123/4", "a/bc/xyz", ""] {
-            let refused = format!("no branch, TENANT/CELL/ID in hexadecimal: {wrong}");
+        let branch = Branch { cell: Cell { tenant: 10, id: 32 * 11 + 22 }, id: 33 };
+        assert_eq!(branch.to_string(), "a/bp/11");
+        assert_eq!("a/bp/11".parse(), Ok(branch));
+        assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(branch));
+        for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
+            let refused = format!("no branch, TENANT/CELL/ID in base 32: {wrong}");
             assert_eq!(wrong.parse::<Branch>(), Err(refused));
         }
     }
@@ -457,7 +484,7 @@ mod tests {
             chain.close(contents),
             Footer {
                 branch: branch(2),
-                seq: 9,
+                segment: 9,
                 epoch: 4,
                 contents: Contents {
                     commits: vec![tag(4, 1)],
@@ -469,11 +496,11 @@ mod tests {
             }
         );
         let second = chain.close(Contents { next_sequence: 200, ..Contents::default() });
-        let place = |footer: &Footer| (footer.seq, footer.contents.next_sequence);
+        let place = |footer: &Footer| (footer.segment, footer.contents.next_sequence);
         assert_eq!(place(&second), (10, 200));
         let third = chain.close(Contents { next_sequence: 150, ..Contents::default() });
         assert_eq!(place(&third), (11, 200));
-        let place = (chain.branch(), chain.epoch(), chain.next_seq());
+        let place = (chain.branch(), chain.epoch(), chain.next_segment());
         assert_eq!((place, chain.next_sequence()), ((branch(2), 4, 12), 200));
         assert_eq!(chain.tag(5), tag(4, 5));
     }
@@ -498,7 +525,7 @@ mod tests {
                 },
                 misplaced("1/3/2, number 9, epoch 4"),
             ),
-            (Footer { seq: 10, ..footer.clone() }, misplaced("1/2/2, number 10, epoch 4")),
+            (Footer { segment: 10, ..footer.clone() }, misplaced("1/2/2, number 10, epoch 4")),
             (Footer { epoch: 5, ..footer }, misplaced("1/2/2, number 9, epoch 5")),
         ] {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
@@ -525,13 +552,13 @@ mod tests {
 
     /// The keys of extents stored on their own: under their cell's prefix, by tenant and cell; then
     /// by branch, the writer's epoch, the segment that names them, and sequence, in fixed-width
-    /// hex, so that a listing is in that order.
+    /// base 32, so that a listing is in that order.
     #[test]
     fn extent_keys_order_by_cell_branch_epoch_segment_and_sequence() {
-        let cell = Cell { tenant: 0xa, id: 0xc };
-        let key = extent_key(cell, 7, 0x2a, ExtentId { branch: 2, sequence: 0x1f });
-        let expected = "tenants/000000000000000a/cells/000000000000000c/extents/\
-                        0000000000000002/0000000000000007.000000000000002a.000000000000001f";
+        let cell = Cell { tenant: 10, id: 12 };
+        let key = extent_key(cell, 7, 42, ExtentId { branch: 2, sequence: 31 });
+        let expected = "tenants/000000000000a/cells/000000000000c/extents/\
+                        0000000000002/0000000000007.000000000001a.000000000000z";
         assert_eq!(key, expected);
     }
 }

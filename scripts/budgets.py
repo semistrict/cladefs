@@ -8,13 +8,13 @@ budgets a run of guest tests fails on, as scripts/test-e2e.sh runs this over its
 scripts/bench.sh's runs with it, so that a change that trades one cost for another fails here,
 not at a customer (LangSmith's sandboxes found TASK-310's doubled writes and TASK-317's memory).
 
-Of each daemon's stats file (CLADEFS_EXTENTD_STATS: the run's extentd-stats.txt, a case's daemon's
+Of each daemon's stats file (CLADEFSD_STATS: the run's cladefsd-stats.txt, a case's daemon's
 NAME-stats.txt), its last lines:
 
 - **memory**: no sample of the daemon's anonymous memory past its budget, which the daemon weighs
-  each against as it takes it (`process:`'s `over-budget`, cladefs::extentd::process): the sum of
+  each against as it takes it (`process:`'s `over-budget`, cladefs::cladefsd::process): the sum of
   what its design bounds, its uploads' memory, a framing for each store written at once, its
-  fetches', its tenants' rooms' and its own;
+  fetches', its tenants' bytes in flight and its own;
 - **uploads**: what they held at once within their budget, the host's upload memory
   (`uploads:`, TASK-317);
 - **disk**: what the daemon's process had its kernel write to its disk (`io_write_bytes`, every
@@ -28,7 +28,7 @@ NAME-stats.txt), its last lines:
 
 And says, of each, what it wrote by kind for each byte its guests wrote (`written_raw_bytes`, every
 guest byte once), and its CPU time a request, which a workload's own case holds to its design
-(`cladefs::remote::write_budgets`, of a host's store; the guest cases' own).
+(`cladefs::bucket::write_budgets`, of a host's store; the guest cases' own).
 
     budgets.py [--bucket-in-memory STATS]... RESULTS    each daemon's under RESULTS; exits 1 past one
 
@@ -57,7 +57,7 @@ def fields(path):
 
 def log_of(stats):
     """The log of the daemon whose stats file is `stats`: NAME.log beside NAME-stats.txt, a case's
-    daemon's, or extentd.log beside extentd-stats.txt, the run's."""
+    daemon's, or cladefsd.log beside cladefsd-stats.txt, the run's."""
     return stats.with_name(stats.name.removesuffix("-stats.txt") + ".log")
 
 

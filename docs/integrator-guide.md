@@ -1,10 +1,10 @@
-# Integrator guide: running tenants' VMs on extentd
+# Integrator guide: running tenants' VMs on cladefsd
 
-For whoever writes the VM manager, the trusted service on each host that talks to the extentd
-daemon and starts Firecracker. `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto` is the reference
+For whoever writes the VM manager, the trusted service on each host that talks to the cladefsd
+daemon and starts Firecracker. `crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto` is the reference
 for every call named here.
 
-A VM manager in Go uses the Go package cladefs generates from it, `go/extentd/v1` (TASK-219): its
+A VM manager in Go uses the Go package cladefs generates from it, `go/cladefsd/v1` (TASK-219): its
 messages and stubs, and `NewClient`, which connects to the control socket and has a failed call's
 error carry the daemon's errno (`errors.Is(err, syscall.ENOENT)`). Take it from the commit the
 daemon is built from, so that the two agree:
@@ -18,10 +18,10 @@ follows from that.
 
 ## Per-host setup
 
-1. Start `cladefs-extentd` with `CLADEFS_EXTENTD_GRPC` naming its control socket. Keep that socket away
+1. Start `cladefsd` with `CLADEFSD_GRPC` naming its control socket. Keep that socket away
    from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
    (TASK-159): run the VM manager as that user, or as root.
-2. For each tenant, call `Grant` with the tenant's name, the directory of its stores, and its jails'
+2. For each tenant, call `Grant` with the tenant's ID, the directory of its stores, and its jails'
    uid and gid. It returns the path of a socket.
 3. Bind-mount **that socket alone** into the tenant's jails. Never mount the daemon's default VM
    socket into a jail: it can take any branch by its ID.
@@ -34,6 +34,12 @@ follows from that.
 Grants don't survive a restart of the daemon. After one, call `Grant` again, and bind-mount the new
 socket.
 
+To show tenants' cells on the host as files, start `cladefsd` with `CLADEFSD_MOUNT` naming a mount
+point and `CLADEFSD_MOUNT_STORES` a directory for their stores: it mounts them with FUSE and serves
+the Mount service (`proto/cladefs/mount/v1/mount.proto`, Go `go/mount/v1`) on the same control
+socket. One daemon then holds every cell of the host, whether VMs or the mount serve its vdisks
+(TASK-475.2).
+
 ## Upgrading the daemon
 
 Upgrade a host's daemon and Firecracker by draining the host: move its VMs off, then SIGTERM the
@@ -42,11 +48,11 @@ says what a format change refuses.
 
 ## Restoring a snapshot, on any number of hosts at once
 
-A snapshot's point is immutable. Any number of hosts read it, and none writes it: it has no lease, a
+A VM snapshot's point is immutable. Any number of hosts read it, and none writes it: a
 restore on one host changes nothing another host sees, and no copy of it goes stale. Each restore
 is a fork of the point into a new branch of the VM's own.
 
-A VM process can't name a branch: extentd ignores what it says, or any stolen ID would take another
+A VM process can't name a branch: cladefsd ignores what it says, or any stolen ID would take another
 tenant's data. The VM manager puts the snapshot's branch in the tenant's directory instead, and that
 is the grant.
 
@@ -81,13 +87,13 @@ They can't write it: opening a point to write fails with `EROFS`.
 
 ### 3. Load the snapshot
 
-In `extent_overrides`:
+In `cladefs_overrides`:
 
 | Field | Value |
 |---|---|
 | `point_on_host` | The path from step 2 |
 | `path_on_host` | The VM's store, in the tenant's directory |
-| `extentd_socket` | The tenant's socket, as the jail sees it |
+| `cladefsd_socket` | The tenant's socket, as the jail sees it |
 
 Do this as often as you like, on any host, at the same time. Each restore makes a new branch for
 the VM.
@@ -100,7 +106,7 @@ of, if its VM wrote nothing after the snapshot, or the fork an earlier restore o
 made there, if that VM wrote nothing. Any other store there, such as the snapshotted VM's own
 store once it resumed and wrote on, fails the restore with `EEXIST` and is left as it is: its
 guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
-`extent_overrides`, `path_on_host` is the snapshotted VM's own store.
+`cladefs_overrides`, `path_on_host` is the snapshotted VM's own store.
 
 ### 4. When this host won't restore that snapshot any more
 
@@ -177,11 +183,23 @@ commit on that store's branch, so its host needs to be the branch's writer. Fork
 at a time, or make a point first (above).
 
 **Memory.** The pages a guest writes through its DAX window are its own, private copies, in its VM
-process's memory (backlog doc-13): at most the device's `dax_private_max` (a quarter of the window's
-pages by default), reserved against the store's tenant as the guest activates the device, so that a
-store never waits for memory. The guest writes them back and lets them go below that bound; a store
-past it stops that VM (exit 159). Everything else the window maps is sealed extents' pages, shared
-and evictable.
+process's memory (backlog doc-13), until the guest writes them back to the store, as a page cache
+writes back dirty pages, and the window shares them again. They are charged to the VM process, as
+its guest memory is, not to the daemon or the store's tenant: the daemon reserves none of it, so its
+memory sizes its cache alone (TASK-501). Bound the VM process's memory, its cgroup, for guest memory
+and private pages together. Everything else the window maps is sealed extents' pages, shared and
+evictable.
+
+**Sizing a VM's private pages.** The extent device's `dax_private_max_bytes` caps how many bytes of
+them a VM holds at once (`PUT /cladefs/{id}`, in Firecracker's swagger spec): a multiple of the page
+size, a page at least, the window's size at most; 1 GiB unless set, or the window's size if less.
+The guest keeps under it, writing back as it nears it, so a smaller cap means earlier writeback.
+The host refuses what would go past it: a `write(2)` fails `EIO`, and a store through a mapping
+stops that VM (exit 159). The VM manager sizes it per VM (TASK-502): the cap bounds a burst of
+writes between writebacks, which grows with how fast the guest writes (its vCPUs) and is memory the
+VM process holds (weigh it against its guest memory). Forked pgbench at 2 vCPUs needed 1 GiB
+(TASK-227); measure your workloads. The cap was a page count, `dax_private_max`, before TASK-502: a
+device naming that field is refused.
 
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
@@ -189,5 +207,5 @@ whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it
 how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
 open, StatStore reads the count kept as it changes, at no cost; of one none has, it opens the store
-as a VM's would (its state read, its branch's lease taken, the map of its extents built: time and,
+as a VM's would (its state read, its branch's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.

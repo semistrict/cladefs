@@ -104,7 +104,7 @@ impl Vm {
             },
             "drives": [],
             "pmem": [],
-            "extent": [],
+            "cladefs": [],
         });
         Ok(Self {
             config,
@@ -132,7 +132,7 @@ impl Vm {
 
     /// Adds an extent-store device tagged `tag`, on the store at `path`, which it makes, holding
     /// at most `capacity` bytes, if it doesn't exist; with a DAX window of `window` bytes if not
-    /// 0. The extent daemon at CLADEFS_EXTENTD serves the store.
+    /// 0. The extent daemon at CLADEFSD serves the store.
     pub fn extent_store(
         &mut self,
         tag: &str,
@@ -140,75 +140,81 @@ impl Vm {
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
-        self.extent_store_served(tag, path, capacity, window, Path::new(&extentd));
+        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+        self.extent_store_served(tag, path, capacity, window, Path::new(&cladefsd));
         Ok(())
     }
 
     /// cladefs: adds an extent-store device tagged `tag` that follows the store at `path`, which
     /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
-    /// The extent daemon at CLADEFS_EXTENTD serves the store.
+    /// The extent daemon at CLADEFSD serves the store.
     pub fn extent_store_following(
         &mut self,
         tag: &str,
         path: &Path,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
-        self.extent_store_following_served(tag, path, window, Path::new(&extentd));
+        let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
+        self.extent_store_following_served(tag, path, window, Path::new(&cladefsd));
         Ok(())
     }
 
     /// Adds a device as [`Vm::extent_store_following`] does, served by the extent daemon at
-    /// `extentd`.
+    /// `cladefsd`.
     pub fn extent_store_following_served(
         &mut self,
         tag: &str,
         path: &Path,
         window: u64,
-        extentd: &Path,
+        cladefsd: &Path,
     ) {
-        self.extent_store_served(tag, path, 0, window, extentd);
-        let devices = self.config["extent"].as_array_mut().expect("an array");
+        self.extent_store_served(tag, path, 0, window, cladefsd);
+        let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("the device added")["read_only"] = true.into();
     }
 
     /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
     pub fn extent_store_unsafe(&mut self) {
-        let devices = self.config["extent"].as_array_mut().expect("an array");
+        let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("a device added")["cache_type"] = "Unsafe".into();
     }
 
     /// Adds an extent-store device as [`Vm::extent_store`] does, served by the extent daemon at
-    /// `extentd`.
+    /// `cladefsd`.
     pub fn extent_store_served(
         &mut self,
         tag: &str,
         path: &Path,
         capacity: u64,
         window: u64,
-        extentd: &Path,
+        cladefsd: &Path,
     ) {
         let mut device = serde_json::json!({
             "id": tag,
             "tag": tag,
             "path_on_host": path,
             "capacity": capacity,
-            "extentd_socket": extentd,
+            "cladefsd_socket": cladefsd,
         });
         if window != 0 {
             device["dax_window_size"] = window.into();
-            // cladefs: the window's private pages at most, CLADEFS_DAX_PRIVATE_MAX if set; the
-            // device's default otherwise, half its pages (TASK-164.11).
+            // cladefs: the window's private pages' bytes at most, CLADEFS_DAX_PRIVATE_MAX_BYTES if
+            // set, as the device takes them (TASK-502); the device's default otherwise, 1 GiB
+            // (TASK-227). The page count it was, CLADEFS_DAX_PRIVATE_MAX, refused, not read as
+            // bytes.
+            assert!(
+                std::env::var_os("CLADEFS_DAX_PRIVATE_MAX").is_none(),
+                "CLADEFS_DAX_PRIVATE_MAX, a page count, is CLADEFS_DAX_PRIVATE_MAX_BYTES now"
+            );
             if let Some(most) =
-                std::env::var("CLADEFS_DAX_PRIVATE_MAX").ok().filter(|m| !m.is_empty())
+                std::env::var("CLADEFS_DAX_PRIVATE_MAX_BYTES").ok().filter(|m| !m.is_empty())
             {
-                let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX is a count of pages");
-                device["dax_private_max"] = most.into();
+                let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX_BYTES is a count");
+                device["dax_private_max_bytes"] = most.into();
             }
         }
-        push(&mut self.config["extent"], device);
+        push(&mut self.config["cladefs"], device);
     }
 
     /// Adds a writable virtio-pmem device on `image`, and returns its device in the guest.
@@ -403,7 +409,7 @@ impl Vm {
         );
         let mut boot_args = match &self.fxfs_root {
             // Not a block device's: the kernel mounts it by its source, the device's tag.
-            Some(tag) => format!("root={tag} rootfstype=fxfs rw {CMDLINE}"),
+            Some(tag) => format!("root={tag} rootfstype=cladefs rw {CMDLINE}"),
             None => {
                 self.add_root_image(root)?;
                 CMDLINE.to_owned()
@@ -670,7 +676,7 @@ fn kill_on_line(
             // SAFETY: A plain system call, of a process of this test's.
             anyhow::ensure!(unsafe { nix::libc::kill(daemon as i32, nix::libc::SIGKILL) } == 0);
             let status = child.wait()?;
-            anyhow::ensure!(status.code() == Some(158), "the VM exited {status}, not ExtentdLost");
+            anyhow::ensure!(status.code() == Some(158), "the VM exited {status}, not CladefsdLost");
             return Ok(None);
         }
     }
@@ -776,7 +782,7 @@ impl Jail {
         let name = Path::new(firecracker).file_name().context("Firecracker has no file name")?;
         let root = base.join(name).join(&id).join("root");
         let mut dirs = vec![dir.to_owned(), std::env::temp_dir()];
-        for var in ["CLADEFS_GUEST_KERNEL", "CLADEFS_EXTENTD", "CLADEFS_FIRECRACKER_SECCOMP_FILTER"] {
+        for var in ["CLADEFS_GUEST_KERNEL", "CLADEFSD", "CLADEFS_FIRECRACKER_SECCOMP_FILTER"] {
             if let Some(path) = std::env::var_os(var) {
                 dirs.extend(Path::new(&path).parent().map(Path::to_owned));
             }
@@ -1076,8 +1082,8 @@ mod tests {
     /// whole again around them; brackets of the output's own stay.
     #[test]
     fn output_loses_the_kernels_lines_in_its_midst() {
-        let output = "resized 904 27009\nresized 905 240[    3.814723] fxfs: Terminating journal\r\n08\n\
-                      resizing 906 [    3.816289] fxfs: flush failed\r\n[    3.816289] \r\n21007\n\
+        let output = "resized 904 27009\nresized 905 240[    3.814723] cladefs: Terminating journal\r\n08\n\
+                      resizing 906 [    3.816289] cladefs: flush failed\r\n[    3.816289] \r\n21007\n\
                       [not the kernel's]\n[1.5] neither\r\n";
         assert_eq!(
             without_kernel_lines(output),
@@ -1168,7 +1174,7 @@ mod tests {
         };
         let kcsan = |functions: &str, change: &str| kcsan_of(functions, &[], change);
         assert_eq!(checked("quiet.console.txt", "[ 0.1] Linux version 6.18\n"), Ok(()));
-        let warned = "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/fxfs/dax.c:120 fxfs_dax_seal+0x1/0x2\n";
+        let warned = "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/cladefs/dax.c:120 cladefs_dax_seal+0x1/0x2\n";
         assert_eq!(
             checked("warned.console.txt", warned),
             Err(format!("a kernel complained: {:#?}", vec![warned.trim_end()]))
@@ -1183,7 +1189,7 @@ mod tests {
                           vulnerable to RETBleed attacks, data leaks possible!\n";
         assert_eq!(checked("advisories.console.txt", advisories), Ok(()));
         let caller =
-            "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/fxfs/super.c:9 fxfs_fill+0x1/0x2\n";
+            "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/cladefs/super.c:9 cladefs_fill+0x1/0x2\n";
         assert_eq!(
             checked("caller.console.txt", caller),
             Err(format!("a kernel complained: {:#?}", vec![caller.trim_end()]))
@@ -1195,40 +1201,40 @@ mod tests {
         );
         let theirs = kcsan("alloc_pid / copy_process", "0x1 -> 0x2");
         assert_eq!(checked("theirs.console.txt", &theirs), Ok(()));
-        let reviewed = kcsan("fxfs_dax_seal+0x10/0x20 / kthread_is_per_cpu", "0x40000 -> 0x0");
+        let reviewed = kcsan("cladefs_dax_seal+0x10/0x20 / kthread_is_per_cpu", "0x40000 -> 0x0");
         assert_eq!(checked("reviewed.console.txt", &reviewed), Ok(()));
         // A folio's flags, which a reviewed peer reads plainly as cladefs's code changes them,
         // marked: its reads finishing (r565, r611), or a page_mkwrite's lock as writeback holds it
         // (r611), each changing the bits its peer's review allows.
         let peer = kcsan_of(
-            "folio_batch_move_lru / fxfs_vfs_read_folios+0x1b3/0x1f0",
-            &[("write (marked)", "fxfs_vfs_read_folios"), ("read", "folio_batch_move_lru")],
+            "folio_batch_move_lru / cladefs_vfs_read_folios+0x1b3/0x1f0",
+            &[("write (marked)", "cladefs_vfs_read_folios"), ("read", "folio_batch_move_lru")],
             "0x1 -> 0x8",
         );
         assert_eq!(checked("peer.console.txt", &peer), Ok(()));
         // The same race, as KCSAN named it for lru_add inlined into folio_batch_move_lru (r565).
         let inlined = kcsan_of(
-            "fxfs_vfs_read_folios / lru_add",
-            &[("write (marked)", "fxfs_vfs_read_folios"), ("read", "lru_add")],
+            "cladefs_vfs_read_folios / lru_add",
+            &[("write (marked)", "cladefs_vfs_read_folios"), ("read", "lru_add")],
             "0x000fffe000000001 -> 0x000fffe000000008",
         );
         assert_eq!(checked("inlined-peer.console.txt", &inlined), Ok(()));
         let generations = kcsan_of(
-            "fxfs_vfs_read_folios / lru_gen_add_folio",
-            &[("write (marked)", "fxfs_vfs_read_folios"), ("read", "lru_gen_add_folio")],
+            "cladefs_vfs_read_folios / lru_gen_add_folio",
+            &[("write (marked)", "cladefs_vfs_read_folios"), ("read", "lru_gen_add_folio")],
             "0x000fffe000000001 -> 0x000fffe000000008",
         );
         assert_eq!(checked("generations-peer.console.txt", &generations), Ok(()));
         let put = kcsan_of(
-            "folios_put_refs / fxfs_vfs_read_folios",
-            &[("write (marked)", "fxfs_vfs_read_folios"), ("read", "folios_put_refs")],
+            "folios_put_refs / cladefs_vfs_read_folios",
+            &[("write (marked)", "cladefs_vfs_read_folios"), ("read", "folios_put_refs")],
             "0x000fffe000000021 -> 0x000fffe000000028",
         );
         assert_eq!(checked("put-peer.console.txt", &put), Ok(()));
         let mkwrite = kcsan_of(
-            "__lruvec_stat_mod_folio / fxfs_vfs_page_mkwrite",
+            "__lruvec_stat_mod_folio / cladefs_vfs_page_mkwrite",
             &[
-                ("read-write (marked)", "fxfs_vfs_page_mkwrite"),
+                ("read-write (marked)", "cladefs_vfs_page_mkwrite"),
                 ("read", "__lruvec_stat_mod_folio"),
             ],
             "0x000fffe00000412d -> 0x000fffe0000041ad",
@@ -1237,9 +1243,9 @@ mod tests {
         // The same, KCSAN naming zone_stat_mod_folio's read, inlined (TASK-286).
         let writeback = |change: &str| {
             kcsan_of(
-                "folio_clear_dirty_for_io / fxfs_vfs_page_mkwrite",
+                "folio_clear_dirty_for_io / cladefs_vfs_page_mkwrite",
                 &[
-                    ("read-write (marked)", "fxfs_vfs_page_mkwrite"),
+                    ("read-write (marked)", "cladefs_vfs_page_mkwrite"),
                     ("read", "folio_clear_dirty_for_io"),
                 ],
                 change,
@@ -1255,36 +1261,36 @@ mod tests {
             Err(format!(
                 "a kernel complained: {:#?}",
                 vec![
-                    "[ 1.0] BUG: KCSAN: data-race in folio_clear_dirty_for_io / fxfs_vfs_page_mkwrite"
+                    "[ 1.0] BUG: KCSAN: data-race in folio_clear_dirty_for_io / cladefs_vfs_page_mkwrite"
                 ]
             ))
         );
         // cladefs's side plain, or not in the report: a race of its own, whatever its peer.
         let plain = kcsan_of(
-            "fxfs_vfs_read_folios / lru_gen_add_folio",
-            &[("write", "fxfs_vfs_read_folios"), ("read", "lru_gen_add_folio")],
+            "cladefs_vfs_read_folios / lru_gen_add_folio",
+            &[("write", "cladefs_vfs_read_folios"), ("read", "lru_gen_add_folio")],
             "0x1 -> 0x8",
         );
-        let unsaid = kcsan("fxfs_vfs_read_folios / lru_gen_add_folio", "0x1 -> 0x8");
+        let unsaid = kcsan("cladefs_vfs_read_folios / lru_gen_add_folio", "0x1 -> 0x8");
         for (name, console) in [("plain-peer.console.txt", plain), ("unsaid.console.txt", unsaid)] {
             assert_eq!(
                 checked(name, &console),
                 Err(format!(
                     "a kernel complained: {:#?}",
                     vec![
-                        "[ 1.0] BUG: KCSAN: data-race in fxfs_vfs_read_folios / lru_gen_add_folio"
+                        "[ 1.0] BUG: KCSAN: data-race in cladefs_vfs_read_folios / lru_gen_add_folio"
                     ]
                 ))
             );
         }
         let ours =
-            kcsan("fxfs_dax_region_open+0x10/0x20 / fxfs_dax_map_to+0x30/0x40", "0x0 -> 0x1");
+            kcsan("cladefs_dax_region_open+0x10/0x20 / cladefs_dax_map_to+0x30/0x40", "0x0 -> 0x1");
         assert_eq!(
             checked("ours.console.txt", &ours),
             Err(format!(
                 "a kernel complained: {:#?}",
                 vec![
-                    "[ 1.0] BUG: KCSAN: data-race in fxfs_dax_region_open+0x10/0x20 / fxfs_dax_map_to+0x30/0x40"
+                    "[ 1.0] BUG: KCSAN: data-race in cladefs_dax_region_open+0x10/0x20 / cladefs_dax_map_to+0x30/0x40"
                 ]
             ))
         );
@@ -1294,7 +1300,7 @@ mod tests {
 // cladefs: what a guest's kernel says of itself on its console (TASK-44.8).
 
 /// The change of a word in a race of cladefs's code that KCSAN reports, looked into: a task's
-/// flags, its PF_MEMALLOC_NOFS set or cleared, as fs/fxfs's NOFS scopes around its calls into its
+/// flags, its PF_MEMALLOC_NOFS set or cleared, as fs/cladefs's NOFS scopes around its calls into its
 /// Rust do (memalloc_nofs_save and restore, inlined), which other tasks read for other bits of the
 /// word, read whole (the scheduler's kthread_is_per_cpu, for PF_KTHREAD; mem_cgroup_from_task).
 const KCSAN_REVIEWED_CHANGE: u64 = 0x0004_0000;
@@ -1313,7 +1319,7 @@ const PG_WAITERS: u64 = 1 << 7;
 /// filesystem's does.
 ///
 /// folio_batch_move_lru reads a folio new to the LRU as the worker that read it
-/// (fxfs_vfs_read_folios) marks it uptodate and unlocks it, waking its waiters, as the reads of
+/// (cladefs_vfs_read_folios) marks it uptodate and unlocks it, waking its waiters, as the reads of
 /// any filesystem finishing on another thread race it; KCSAN names lru_add for the same race where
 /// it's inlined into folio_batch_move_lru (GCE r565, TASK-168), and lru_gen_add_folio, the
 /// multi-gen LRU's, for its folio_zonenum (r611, r613), and folios_put_refs, where
@@ -1322,7 +1328,7 @@ const PG_WAITERS: u64 = 1 << 7;
 /// Writeback cleans a folio holding its lock (writeback_get_folio; folio_clear_dirty_for_io
 /// asserts it) and, the folio clean, counts it so: __lruvec_stat_mod_folio reads its node
 /// (folio_pgdat, r611), and zone_stat_mod_folio, inlined into folio_clear_dirty_for_io, its zone
-/// (folio_zone, TASK-286). A store's page_mkwrite (fxfs_vfs_page_mkwrite) meanwhile takes the lock,
+/// (folio_zone, TASK-286). A store's page_mkwrite (cladefs_vfs_page_mkwrite) meanwhile takes the lock,
 /// as filemap_page_mkwrite does, to dirty the folio under it (the exclusion
 /// folio_clear_dirty_for_io's comment asks of a fault handler): its folio_trylock fails, marked,
 /// and it waits, setting PG_waiters. Only the lock's bits change: a dirtying, or any change of the
@@ -1339,25 +1345,26 @@ const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
     ("folio_clear_dirty_for_io", PG_LOCKED | PG_WAITERS),
 ];
 
-/// Whether the kernel's function `function` is cladefs's code's: fs/fxfs's, its Rust's
-/// (whose mangled names name its crates, fxfs and fxfs_linux), or virtio_extent's.
+/// Whether the kernel's function `function` is cladefs's code's: fs/cladefs's, its Rust's
+/// (whose mangled names name its crates, fxfs and cladefs_linux), or virtio_extent's.
 ///
 /// A debug kernel's KCSAN reports races in all of the kernel; a test fails on those of cladefs's
-/// code: a report naming a function of fs/fxfs's, virtio_extent's or their Rust's,
+/// code: a report naming a function of fs/cladefs's, virtio_extent's or their Rust's,
 /// whether both of its accesses are, or one is at unknown origin (one KCSAN doesn't
 /// see: uninstrumented, as the Rust and the scheduler are, or the host's, writing shared memory).
 /// But for its races whose change is KCSAN_REVIEWED_CHANGE's, looked into. The others are the
 /// kernel's, which the tests leave to it. Those seen, each looked into: two of
 /// the kernel's accesses, alloc_pid / copy_process (a PID namespace's flags), _find_next_bit /
-/// gen_pool_alloc_algo_owner (genalloc's lockless bitmap, of fs/fxfs's DAX window),
+/// gen_pool_alloc_algo_owner (genalloc's lockless bitmap, of fs/cladefs's DAX window),
 /// folio_batch_move_lru / folios_put_refs (a folio's flags); at unknown origin,
 /// kthread_is_per_cpu, wq_worker_running and kick_pool (a task's flags, CPU time and wake CPU,
-/// which the scheduler writes), process_one_work (a work item of fs/fxfs's Rust runtime, rt.c, as
+/// which the scheduler writes), process_one_work (a work item of fs/cladefs's Rust runtime, rt.c, as
 /// the Rust writes it: looked into apart from the followers' torture test), virtqueue_enable_cb,
 /// virtqueue_get_buf_ctx_split and vring_interrupt (the used ring's index, which the device, the
 /// host, writes as virtio has it).
 fn ours(function: &str) -> bool {
-    function.contains("fxfs")
+    function.contains("cladefs")
+        || function.contains("cladefs")
         || function.starts_with("vext_")
         || function.starts_with("virtio_extent")
 }
@@ -1428,7 +1435,7 @@ fn message(line: &str) -> &str {
 
 /// Fails with the lines of the console at `console` in which its kernel complains, but for
 /// KCSAN's reports of races that aren't cladefs's code's, or were reviewed (see [`ours`]). The
-/// runner checks every test's consoles so (TASK-44.8): a release kernel's WARN_ON in fs/fxfs, which
+/// runner checks every test's consoles so (TASK-44.8): a release kernel's WARN_ON in fs/cladefs, which
 /// once hid a bug a stress test alone found (TASK-44.2), fails its test as a debug kernel's
 /// lockdep, KCSAN and atomic-sleep reports do.
 pub fn complaints(console: &Path) -> anyhow::Result<()> {

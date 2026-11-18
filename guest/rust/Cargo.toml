@@ -4,7 +4,7 @@
 # builds the filesystem, Fxfs with it, and links it into the kernel.
 [workspace]
 resolver = "3"
-members = ["fxfs-linux", "linux-rt", "std"]
+members = ["cladefs-linux", "linux-rt", "std"]
 
 [workspace.package]
 edition = "2024"

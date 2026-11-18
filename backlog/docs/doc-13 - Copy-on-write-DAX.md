@@ -3,7 +3,7 @@ id: doc-13
 title: Copy-on-write DAX
 type: specification
 created_date: '2026-11-04 07:55'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-17 02:11'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -55,7 +55,7 @@ is ever an extent, and nothing mapped is ever open: a seal (`COMMIT`) changes no
 1 and 2 are the host's to enforce; 3 is the guest's one locking rule, replacing the gate; 4 bounds
 memory without asking other VMs anything. *TASK-276.6:* a `MAP` names pages, their first touch
 installs them (The host, below): what the VM process installs is the window's page as the window
-names it then, so 1 and 2 are kept by the stage's one lock, which a fault's install and the
+names it then, so 1 and 2 are kept by the second stage's one lock, which a fault's install and the
 window's changes take; 3 and 4 are the guest's, unchanged.
 
 ## Linux facts that decide it
@@ -126,25 +126,27 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   the device a private page holding what the page held, mapped writable at the same address, until
   a `MAP` or `UNMAP` replaces it. Not with `READ_ONLY`: a follower's stores stay refused.
 - **`private_max`** (configuration, with `DAX`): the most private pages the device holds at
-  once. A store past it is refused, and the VM stops (159). The host sets it as it opens the device,
-  and counts it against the tenant's memory then, not as pages come: a store never waits for memory.
-  *TASK-227:* 1 GiB unless configured (`dax_private_max`), or the window's pages if fewer, whatever
+  once. A store past it is refused, and the VM stops (159). The host sets it as it opens the device.
+  *TASK-501:* nothing is reserved for it: the pages are the VM process's memory, which the bound and
+  the VM process's cgroup limit, not the daemon's or the tenant's.
+  *TASK-227:* 1 GiB unless configured (`dax_private_max_bytes`, in bytes since TASK-502, the VM
+  manager's to size per VM), or the window's pages if fewer, whatever
   the window's size: the window is address space, as large as the data, its private pages memory
   (half a window's, TASK-164.11's default, would have reserved 32 GiB of a 64 GiB window's).
 - **`MAP_ZEROS`** (a `MAP` flag): maps zeros, `id` ignored: holes and past-the-end pages of a range,
   so that a store to one is a private page of zeros (no copy).
 - **`PRIVATE`** (request): makes `len` bytes at `window_offset` private now, as stores would, and
-  maps them for the guest ahead of its accesses, as `MAP_AHEAD` does; `ENOMEM` past `private_max`.
+  prefaults them, as `MAP_PREFAULT` does; `ENOMEM` past `private_max`.
   For a `write(2)` of many pages not yet private: one round trip, rather than a host fault each.
 - **`MAP`** of an open extent fails `EPERM`, read-only or not (`MAP_WRITE` goes). Every `MAP` is
   read-only; `ENOMEM` goes from it. *TASK-276.6:* a `MAP` names the pages, which the host installs
-  as the guest first touches them; `MAP_AHEAD` installs them, and maps them for the guest, at once,
-  for the guest to read next. The guest sends `MAP_AHEAD` for its reads' ranges alone, a write's
+  as the guest first touches them; `MAP_PREFAULT` installs them, and prefaults them, at once,
+  for the guest to read next. The guest sends `MAP_PREFAULT` for its reads' ranges alone, a write's
   pages named, so that a write's `PRIVATE` puts its copy in place of nothing.
 - **Sealing** (`F_SEAL`, `seal_asked`, `SEALED`) goes: nothing a guest holds pins what another
   needs.
 - **`COMMIT`** seals as before; it changes nothing in any window.
-- `WRITE`, `READ`, `FREE`, `MAP_MANY`, `MAP_AHEAD`, `UNMAP`, followers, snapshots unchanged, but
+- `WRITE`, `READ`, `FREE`, `MAP_MANY`, `MAP_PREFAULT`, `UNMAP`, followers, snapshots unchanged, but
   for: a snapshot is refused while the device has a private page (the guest's freeze rebinds them
   all, below), so a snapshot's window still maps only extents and zeros. *As built:* the store
   refuses a snapshot's point (`EBUSY`, saying how many), and the window's mappings, while its window
@@ -162,17 +164,17 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   the source's. KVM's worker's writes are resolved as reads, as now, and the vCPU's own access
   decides. On arm64, the write-protect fault reports the address, as now. *Done differently
   (TASK-164.1):* a private page is the VM process's own memory, a memfd laid out as the window
-  (`dax::uffd::PrivateMemory`, `STAGE_PRIVATE`), not a page of the tenant's arena; `private_max`
-  is reserved against the tenant's arena as the window is made (OPEN_QUESTIONS.md).
+  (`dax::uffd::PrivateMemory`), not a page of the tenant's arena; nothing is reserved for
+  `private_max` (TASK-501, OPEN_QUESTIONS.md).
 - **Private pages** are the device's: a source evicting its page skips them; a `MAP` or `UNMAP`
-  over one frees it; the device's count and the tenant's are kept with them.
+  over one frees it; the device's count is kept with them.
 - **A `MAP` names pages; their first touch installs them** (TASK-276.6, `dax::uffd`). A page the
   window maps is left out of the VM process's memory, as one past the budget of runs is, until the
   guest touches it: a load's fault installs it, with the pages around it of memory following on, as
   the window names them then; a `PRIVATE` of a page never installed, or a store's first touch
   (its fault goes to the window as a store), fills the private page in place of nothing, no `mmap`
   and no TLB shootdown, where replacing a page installed costs one of each, every vCPU's and the
-  host's CPUs'. `MAP_AHEAD` installs what it names at once and pre-faults it, as before. Rules
+  host's CPUs'. `MAP_PREFAULT` installs what it names at once and prefaults it, as before. Rules
   (each turned off fails a Shuttle test, and specs/dax-cow has both): a change of pages installed
   takes their memory away, left out, for the next touch to install as named
   (`changes_take_away_installed`, the spec's `changesTakeAway`); and a fault installs its page
@@ -187,20 +189,20 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   before the `mmap`, a private page that went cost two flushes besides the `mmap`'s: the
   `fallocate`s, 13% of the VM process's receiving thread under GCE's DAX random writes, were these
   punches, not allocation.
-- **What goes:** open extents' sources in windows (`Source::is_open`, the open extent's memory in
-  `crate::cache`), the commit's sealing of windows' mappings (`commit_seal_ns`, `make_read_only`),
-  the open-page pin budget and its `ENOMEM` (`extentd/memory.rs`, `physmem::pin` for open extents;
-  both stay, the tenants' limits and the reservation of `private_max`),
-  asking guests to seal (`extentd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
+- **What went** (stage 4): open extents' sources in windows (`Source::is_open`, the open extent's
+  memory in `crate::cache`), the commit's sealing of windows' mappings (`commit_seal_ns`, `make_read_only`),
+  the open-page pin budget and its `ENOMEM` (`cladefsd/memory.rs`, `physmem::pin` for open extents;
+  the tenants' limits stay; the reservation of `private_max`, the last pin, went with TASK-501),
+  asking guests to seal (`cladefsd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
   half (an extent open in memory, a VMO the window maps).
-- **What stays:** the window, its second stage and the VMM's userfaultfd stage, `MAP_MANY`,
-  `MAP_AHEAD`, sealed extents' shared pages, the pool, relief of clean pages, 159 for stores the
+- **What stays:** the window, its second stage (the VM process's, userfaultfd), `MAP_MANY`,
+  `MAP_PREFAULT`, sealed extents' shared pages, the pool, relief of clean pages, 159 for stores the
   window refuses.
 
 ## The guest
 
 **Mapping (unchanged but for holes).** A file's chunk is a range of the window, page by page from
-the sealed extents holding its data, by `MAP_MANY` and `MAP_AHEAD`; small files' chunks may be
+the sealed extents holding its data, by `MAP_MANY` and `MAP_PREFAULT`; small files' chunks may be
 slices of a sealed extent's region, read-only, as today. A range maps holes and the pages past the
 file's end with `MAP_ZEROS`, so that every page of a range has a window page, and no write is new.
 Reads, PMD read faults and readahead are as today.
@@ -268,7 +270,7 @@ as today. **Clone** (`remap_file_range`) writes back the source's range and seal
 as XFS writes back both files first; the destination's pages in the range are dropped as by a punch,
 and mapped again from the clone's extents.
 
-**Freeze** writes everything back, commits durably (sealing), and rebinds every private page: the
+**Freeze** writes everything back, syncs (sealing), and rebinds every private page: the
 snapshot's window holds extents and zeros only, and with a private page left the store refuses the
 snapshot's point (above). Thaw changes nothing.
 
@@ -302,16 +304,16 @@ Nothing new: the page cache's path already allocates at writeback (TASK-80).
   `ExtentAccess` (and `fxfs_dax_access`: every mapped piece is sealed), `Allocator::restage` and the
   staging extent's restaging (packing small files' blocks into shared extents at writeback is
   unchanged), `set_check_kept`, fxfs-posix's `dax_map_write`, `dax_begin_write`/`DaxWrite`,
-  `retrying_sealed`, fxfs-linux's `restage`. `extents_in` returns extents only. *As built:*
+  `retrying_sealed`, cladefs-linux's `restage`. `extents_in` returns extents only. *As built:*
   `ExtentAccess` and `enum fxfs_dax_access` stay, `Sealed` and `Open` alone: `extents_in` returns
   each extent with whether it is still open, which the window may not map yet
   (crates/fxfs/src/object_store/data_object_handle/dax.rs).
 
 ## Crash consistency and the fsync contract (doc-12 changes)
 
-Unchanged in substance: an acknowledged fsync is *ordered*: its pages' bytes `WRITE`n, then the
+Unchanged in substance: an fsync that returned is *ordered*: its pages' bytes `WRITE`n, then the
 transaction, then its barrier. What changes: dirty data lives in private host pages, as the page
-cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or extentd:
+cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or cladefsd:
 the private pages go with the device). The window plays no part in recovery. doc-12's "a store
 through a mapping ... may reach the store before that, whole page by whole page" becomes: reaches
 the store only by writeback (fsync, msync, sync, the flusher at ~30 s, the budget), each page as
@@ -348,8 +350,8 @@ written file's unchanged pages. **Recommended: per page.**
 *Done at stage 4, 2026-11-04 (batch 2026-11-04e, TASK-164.7 and 164.8), split four ways: the guest
 kernel's dax.c, Fxfs, the host, and the tests, simulator, specs, scripts and docs.*
 
-- **Guest, dax.c** (4,983 lines, an estimated half): the gate (`fxfs_dax_store_begin`, device.c's),
-  seals' write-protects and forgetting writable pages (`fxfs_dax_seal`, `fxfs_dax_sealed`,
+- **Guest, dax.c** (4,983 lines, an estimated half), all gone: the gate (`fxfs_dax_store_begin`,
+  device.c's), seals' write-protects and forgetting writable pages (`fxfs_dax_seal`, `fxfs_dax_sealed`,
   `fxfs_dax_clear_writable`, `fxfs_dax_writable_pte`), moves (`fxfs_dax_map_moved`,
   `fxfs_dax_iomap_write`'s moves, `fxfs_dax_cow`), restaging and staging regions
   (`fxfs_dax_restage_work`, `fxfs_dax_region_open`, `fxfs_dax_grow*`, writable regions), write(2)
@@ -386,9 +388,9 @@ kernel's dax.c, Fxfs, the host, and the tests, simulator, specs, scripts and doc
 
 ## What stays, and why
 
-The read path whole: `MAP_MANY` (a chunk's pieces in one round trip), `MAP_AHEAD` (pages mapped
-ahead of first accesses), PMD read faults, slices of sealed extents for small files, ranges
-outliving inodes, LRU reclaim of ranges, the window pool, followers. They are why DAX reads are
+The read path whole: `MAP_MANY` (a chunk's pieces in one round trip), `MAP_PREFAULT` (pages
+prefaulted ahead of first accesses), PMD read faults, slices of sealed extents for small files,
+ranges outliving inodes, LRU reclaim of ranges, the window pool, followers. They are why DAX reads are
 3.8x faster than no-DAX's first reads and cost the guest no memory.
 
 ## A spec: `specs/dax-cow`
@@ -406,7 +408,7 @@ private.
 - **Writes:** created files are exactly the no-DAX path: pgbench on a database made in the run
   should match `fxfs-guest-pgbench` (1,736 tps against DAX's 1,012). Files read in pay a host fault
   for each page's first store (~54-110 µs nested) and nothing after; fsync is the no-DAX path's,
-  with no write-protect at the seal (58 µs of extentd's 126 a commit today) and no evacuation.
+  with no write-protect at the seal (58 µs of cladefsd's 126 a commit today) and no evacuation.
 - **Measured, and accepted (the user, 2026-11-06):** pgbench on a fork of a base's database runs at
   0.836 and 0.854 of no DAX (GCE r650, TASK-164.10), not the 0.9-1.0 expected here: each page's first
   store in the fork is a `PRIVATE`, ~486 µs nested a request (the daemon 83 µs, the VM process's run
@@ -446,7 +448,7 @@ batch.*
    slices read-only, truncate/punch/clone/freeze. Tests: the DAX suites and the crash suites
    (`-crash-dax`, `-killed`, `-daemon-killed`) with it on; new guest checks: stores through a
    mapping during fsyncs (data and journal replay), a rebind forced each second under stores
-   (`fxfs.dax_rebind_every`), truncate/punch/clone of dirty pages, the budget reached (throttling,
+   (`cladefs.dax_rebind_every`), truncate/punch/clone of dirty pages, the budget reached (throttling,
    no 159), `MAP_PRIVATE` stores, a freeze with private pages; guest/sim with the host's copy on
    write, new scenarios and the mutants above; `specs/dax-cow`. The perf gate with the new cases,
    judged by TASK-164's AC #2.
@@ -501,7 +503,9 @@ batch.*
   a page written before it is read is made private in place of nothing, with no TLB shootdown, as
   a cold database's pages are. A page read, then written, still takes one: its private copy
   replaces the shared page the guest's reads installed. Undoing it: `UffdSecondStage::map` and
-  `remap` installing, as `map_ahead` does, and the guest's writes mapping ahead.
+  `remap` installing, as `prefault` does, and the guest's writes prefaulting.
 - `private_max` reserved against the tenant at open, not charged as pages come, so that a store
   never waits for memory and no VM asks another to seal. Its default (a quarter of the window is
-  the proposal) waits on the density target, the review's open decision 5.
+  the proposal) waits on the density target, the review's open decision 5. Undone by TASK-501:
+  nothing is reserved, the pages charged to the VM process; the default 1 GiB (TASK-227), sized
+  per VM in bytes by the VM manager (TASK-502).

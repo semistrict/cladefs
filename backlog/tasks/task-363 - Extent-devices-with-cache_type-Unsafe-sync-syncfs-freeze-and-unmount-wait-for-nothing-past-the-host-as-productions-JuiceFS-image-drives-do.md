@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-11 16:29'
-updated_date: '2026-11-15 11:35'
+updated_date: '2026-11-16 22:52'
 labels: []
 dependencies: []
 priority: high
@@ -22,7 +22,7 @@ User, 2026-11-11: production's sandboxes run their JuiceFS image drives with Fir
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ExtentDeviceConfig.cache_type (Writeback default, Unsafe) parsed, documented in resources/cladefs/swagger.yaml, kept in snapshots; unit tests
+- [ ] #1 CladefsDeviceConfig.cache_type (Writeback default, Unsafe) parsed, documented in resources/cladefs/swagger.yaml, kept in snapshots; unit tests
 - [ ] #2 An Unsafe device's COMMIT_DURABLE and WRITE_DURABLE complete as ordered; unit test
 - [ ] #3 bench-fs-fxfs-guest-dax-unsafe measured on ubu1 against bench-fs-ext4-loop-unsafe: sync/syncfs/freeze loops within the same order as the baseline
 <!-- AC:END -->

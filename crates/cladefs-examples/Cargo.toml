@@ -3,7 +3,7 @@
 # dev-dependencies, and cladefs's own tests' turn on its failpoints and extent_store's lock
 # instrumentation, which a release build refuses (TASK-320): none here does. cladefs's `testing`
 # alone, for the images import-bench imports (`cladefs::import::testing`), which is code beside the
-# importer, not in it. Say `cargo run --release -p cladefs-examples --example NAME`.
+# importer, not in it, and the tests' KMS the benches encrypt under (`cladefs::remote::testing`). Say `cargo run --release -p cladefs-examples --example NAME`.
 [package]
 name = "cladefs-examples"
 version = "0.1.0"
@@ -13,11 +13,13 @@ publish = false
 
 [dev-dependencies]
 anyhow.workspace = true
+base32_id.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
-# store-bench's stores opened as a host with a KMS opens them, sealed or not (TASK-411.5).
-extent_remote.workspace = true
-extent_store.workspace = true
+# store-bench's stores opened as a host with a KMS opens them (TASK-411.5).
+extent_bucket.workspace = true
+# store-bench's stores kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
+extent_store = { workspace = true, features = ["unkept"] }
 # fxfs-metabench's attributes, as Fxfs's API takes them.
 fidl-fuchsia-io.workspace = true
 fuchsia-async.workspace = true

@@ -149,8 +149,9 @@ impl Drop for HostMemory {
     }
 }
 
-/// The DAX window: its guest physical addresses, and the host memory the hypervisor maps there.
-pub(crate) struct DaxWindow {
+/// The DAX window's memory: its guest physical addresses, and the host memory the hypervisor
+/// maps there.
+pub(crate) struct WindowMemory {
     // In the order they are dropped in: the hypervisor lets go of the host memory before it is
     // unmapped, and the guest addresses are released last.
     _slot: Slot,
@@ -158,16 +159,16 @@ pub(crate) struct DaxWindow {
     guest: Reservation,
 }
 
-impl std::fmt::Debug for DaxWindow {
+impl std::fmt::Debug for WindowMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DaxWindow")
+        f.debug_struct("WindowMemory")
             .field("guest_addr", &self.guest.start)
             .field("len", &self.guest.len)
             .finish_non_exhaustive()
     }
 }
 
-impl DaxWindow {
+impl WindowMemory {
     /// A window of `len` bytes, a multiple of [`DAX_WINDOW_ALIGNMENT`], mapped into `vm`'s guest:
     /// at `at`, where a snapshot the VM is restored from had it, if given.
     pub(crate) fn new(
@@ -211,7 +212,7 @@ impl DaxWindow {
     /// memory: the store is dropped first.
     pub(crate) unsafe fn create(
         &self,
-        store: &cladefs::RemoteExtentStore,
+        store: &cladefs::DaemonExtentStore,
         prefault: Option<Arc<dyn PrefaultGuestMemory>>,
         private_max: u64,
     ) -> Result<(), cladefs::Error> {
@@ -231,7 +232,7 @@ impl DaxWindow {
     }
 }
 
-impl Drop for DaxWindow {
+impl Drop for WindowMemory {
     fn drop(&mut self) {
         let mut windows = WINDOWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let this = (self.guest.start, self.guest.len, self.host.base.as_ptr() as usize);
@@ -314,7 +315,7 @@ pub(crate) mod tests {
     fn windows_are_reserved_mapped_and_released_in_order() {
         let vm = Arc::new(FakeVm::default());
         let len = 4 << 20;
-        let window = DaxWindow::new(vm.clone(), len, Some(0x7_0000_0000)).unwrap();
+        let window = WindowMemory::new(vm.clone(), len, Some(0x7_0000_0000)).unwrap();
         assert_eq!((window.guest_addr(), window.len()), (0x7_0000_0000, len));
         let (offset, host) = dax_window_at(0x7_0000_1000).unwrap();
         assert_eq!((offset, host), (0x1000, window.host.base.as_ptr() as usize + 0x1000));
@@ -337,14 +338,14 @@ pub(crate) mod tests {
     #[test]
     fn windows_that_cant_be_made_leave_nothing() {
         let vm = Arc::new(FakeVm::default());
-        let refused = DaxWindow::new(vm.clone(), 3 << 20, None).unwrap_err();
+        let refused = WindowMemory::new(vm.clone(), 3 << 20, None).unwrap_err();
         assert_eq!(
             refused.to_string(),
             "The DAX window's size, 0x300000 bytes, is not a nonzero multiple of 2 MiB"
         );
         assert!(vm.calls.lock().unwrap().is_empty());
         let vm = Arc::new(FakeVm { refuse_slots: true, ..FakeVm::default() });
-        let refused = DaxWindow::new(vm.clone(), 2 << 20, None).unwrap_err();
+        let refused = WindowMemory::new(vm.clone(), 2 << 20, None).unwrap_err();
         assert_eq!(refused.to_string(), "Cannot map the DAX window into the guest: no slot");
         assert_eq!(
             *vm.calls.lock().unwrap(),

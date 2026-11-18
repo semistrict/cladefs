@@ -18,10 +18,10 @@
 
 use super::gate::WriteGate;
 use super::io::{Done, Io, IoFile, Op};
-use super::kept::Kept;
+use super::kept::KeptImage;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
-use extent_store::{Aligned, Description, HostDir, HostFile, Part, SECTOR, Store};
+use extent_store::{Aligned, Description, HostDir, HostFile, Located, SECTOR, Store};
 use std::path::Path;
 use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
@@ -43,7 +43,7 @@ async fn unblock<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R
 
 /// An Fxfs device on an image. See the module docs.
 pub(crate) struct ImageDevice {
-    image: Arc<Kept>,
+    image: Arc<KeptImage>,
     /// The image's store, the one `image` keeps.
     store: Arc<Store<HostDir>>,
     description: Description,
@@ -55,30 +55,30 @@ pub(crate) struct ImageDevice {
 
 impl ImageDevice {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of
-    /// `branch`, whole if `whole`, its branch kept as `keeping` says ([`Kept::create`]), and its
-    /// device, whose writes, frees and commits go through `writes`.
+    /// `branch`, whole if `whole`, its branch kept as `keeping` says ([`KeptImage::create`]), and
+    /// its device, whose writes, frees and commits go through `writes`.
     pub fn create(
         dir: &Path,
         made: (u64, crate::host_store::BranchOf, bool),
         keeping: extent_store::upload::Options,
         writes: Arc<WriteGate>,
     ) -> Result<Self, Error> {
-        Self::new(Kept::create(dir, made, keeping)?, writes)
+        Self::new(KeptImage::create(dir, made, keeping)?, writes)
     }
 
-    /// The device of the image at `dir`, an image's or a clone's, whose writes, frees and commits
+    /// The device of the image at `dir`, an image's or a fork's, whose writes, frees and commits
     /// go through `writes`.
     pub fn open(dir: &Path, writes: Arc<WriteGate>) -> Result<Self, Error> {
-        let image = Kept::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+        let image = KeptImage::open(dir).with_context(|| format!("opening {}", dir.display()))?;
         Self::new(image, writes)
     }
 
     /// The image's store, kept in its bucket.
-    pub fn image(&self) -> Arc<Kept> {
+    pub fn image(&self) -> Arc<KeptImage> {
         self.image.clone()
     }
 
-    fn new(image: Kept, writes: Arc<WriteGate>) -> Result<Self, Error> {
+    fn new(image: KeptImage, writes: Arc<WriteGate>) -> Result<Self, Error> {
         let store = image.store().clone();
         let description = store.description();
         Ok(Self {
@@ -130,7 +130,7 @@ impl ImageDevice {
     }
 
     /// Writes `data`, the bytes of `write`, to its file, from a buffer of the I/O's own, as
-    /// `read_file` reads. cladefs: as the file stores them, encrypted once if the store is sealed
+    /// `read_file` reads. cladefs: as the file stores them, encrypted once if the store is
     /// (`Write::stored`, TASK-411.5); a write stopping short is written again from the last whole
     /// sector it wrote, so that what is written again is whole sectors of the same bytes.
     async fn write_file(
@@ -167,7 +167,7 @@ impl ImageDevice {
     }
 
     /// Commits the store, setting its root to `root` if given, and does what follows a commit
-    /// ([`Kept::committed`]): collects its bucket if that is due; off the executor's threads.
+    /// ([`KeptImage::committed`]): collects its bucket if that is due; off the executor's threads.
     async fn commit(&self, root: Option<Vec<u8>>) -> Result<(), Error> {
         let _writing = self.writes.write().await;
         let image = self.image.clone();
@@ -202,11 +202,11 @@ impl Device for ImageDevice {
         _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let parts = match self.store.locate(extent, offset, buffer.len() as u64) {
-            // cladefs: in the image's bucket, as a clone holds what it inherited (TASK-165.7).
+            // cladefs: in the image's bucket, as a fork holds what it inherited (TASK-165.7).
             Err(ref error)
-                if let Some(remote) = error.downcast_ref::<extent_store::RemoteData>() =>
+                if let Some(in_bucket) = error.downcast_ref::<extent_store::BucketData>() =>
             {
-                let location = remote.location.clone();
+                let location = in_bucket.location.clone();
                 let fetcher = self.image.fetcher();
                 let fetched = fetcher.read(extent, location, offset, buffer.len() as u64).await?;
                 let (len, end) = (fetched.len(), buffer.len());
@@ -224,9 +224,9 @@ impl Device for ImageDevice {
                 // (`File::read_cached`, TASK-91.17): such a read writes back first what it reads
                 // that is dirty yet, which is slower, not other bytes. This device is an
                 // in-process image's, which imports, host tools and tests use; guests' reads are
-                // extentd's, through the store's. cladefs: the sectors they are in, decrypted, if the
-                // store is sealed (TASK-411.5).
-                Part::Data { file, offset, len, .. } => {
+                // cladefsd's, through the store's. cladefs: the sectors they are in, decrypted, if the
+                // store is encrypted (TASK-411.5).
+                Located::Data { file, offset, len, .. } => {
                     let range = file.read_range(offset, len);
                     let read_len = (range.end - range.start) as usize;
                     let mut read =
@@ -238,7 +238,7 @@ impl Device for ImageDevice {
                     at += len;
                 }
                 // Its stored bytes, in whole blocks, to check and unpack.
-                Part::Packed { part, skip, len } => {
+                Located::Packed { part, skip, len } => {
                     let range = part.read_range();
                     let read_len = (range.end - range.start) as usize;
                     let needed = part.stored().len as usize;
@@ -249,13 +249,13 @@ impl Device for ImageDevice {
                     part.copy_from_slice(&bytes[skip..skip + len]);
                     at += len;
                 }
-                Part::Unpacked { bytes, skip, len } => {
+                Located::Unpacked { bytes, skip, len } => {
                     let (skip, len) = (skip as usize, len as usize);
                     let mut part = buffer.reborrow().subslice_mut(at..at + len);
                     part.copy_from_slice(&bytes[skip..skip + len]);
                     at += len;
                 }
-                Part::Zeros(len) => {
+                Located::Zeros(len) => {
                     buffer.reborrow().subslice_mut(at..at + len as usize).fill(0);
                     at += len as usize;
                 }
@@ -343,7 +343,7 @@ mod tests {
 
     const BLOCK: u32 = crate::host_store::BLOCK_SIZE;
     const MIB: usize = 1 << 20;
-    const BRANCH: crate::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: crate::Branch = extent_bucket::layout::test_branch(7);
 
     /// A new directory, a device on a new image in it holding `capacity` bytes, and the image: in
     /// that order, so that a test's bindings of them drop the device before the directory, as a
@@ -440,8 +440,11 @@ mod tests {
             device.flush().await.unwrap();
             for (extent, data, encoding) in &contents {
                 // The middle of its fourth part's stored bytes: of its data at 3.5 MiB, if raw.
-                let path =
-                    image.join(format!("extents/{:016x}/{:016x}", BRANCH.id, extent.sequence));
+                let path = image.join(format!(
+                    "extents/{}/{}",
+                    base32_id::Padded(BRANCH.id),
+                    base32_id::Padded(extent.sequence)
+                ));
                 let mut bytes = std::fs::read(&path).unwrap();
                 let stored =
                     extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[3];
@@ -581,24 +584,24 @@ mod tests {
         assert_eq!(device.store.info().unwrap().used, (MIB + 2 * BLOCK as usize) as u64);
     }
 
-    /// cladefs: an image of a sealed cell (TASK-411.5): its device writes extents' data, in its open
-    /// segment's raw file and a large extent's own, by I/O of its own, encrypted
+    /// cladefs: an image of an encrypted cell (TASK-411.5): its device writes extents' data, in its
+    /// open segment's raw file and a large extent's own, by I/O of its own, encrypted
     /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
     /// of the image holds them in the clear at any of those points, each once the image does
     /// nothing behind its device's callers ([`quiesced`]).
     #[test]
-    fn sealed_images_hold_no_plaintext() {
+    fn encrypted_images_hold_no_plaintext() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
-        crate::remote::set_kms(Arc::new(kms)).unwrap();
+        crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
         let cell = crate::host_store::new_cell(5);
         let made = (64 * MIB as u64, crate::host_store::BranchOf::New(cell), true);
         let keeping = crate::host_store::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
-        assert!(device.store.keys().sealing().is_some());
+        assert!(device.store.keys().encrypts());
         let branch = device.branch();
         let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);

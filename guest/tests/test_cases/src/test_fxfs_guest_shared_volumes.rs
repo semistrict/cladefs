@@ -48,12 +48,12 @@ mod host {
     impl TestFxfsGuestSharedVolumes {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
-            let extentd: PathBuf =
-                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
-            let control = control(&extentd)?;
+            let cladefsd: PathBuf =
+                std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
+            let control = control(&cladefsd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
-            let vms = Vms::new(test_setup, root, extentd, CAPACITY, window);
+            let vms = Vms::new(test_setup, root, cladefsd, CAPACITY, window);
             let publisher = dir.join("publisher");
             let consumer = dir.join("consumer");
             format(&publisher, CAPACITY)?;

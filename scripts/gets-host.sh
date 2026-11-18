@@ -3,23 +3,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Measure ranged GETs from object storage on an x86-64 Linux host of one's own, over ssh
-# (CLADEFS_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement, alone there and on CPUs of
-# its own (fxjob --bench) (TASK-28.11; doc-7, decision 9): cladefs-gets puts an object in the
-# bucket, GETs parts of it by part size and GETs in flight, and deletes it
-# (scripts/lib/gets-linux-host.sh). The table, the host and the source measured go to
-# docs/measurements/HOST-gets-<time>-<mark>, the run's mark, unless named, with what the run was
-# for (note.md).
+# Measure ranged GETs from object storage on the test host, an x86-64 Linux machine of one's own,
+# over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement, alone there
+# and on CPUs of its own (fxjob --bench) (TASK-28.11; doc-7, decision 9): cladefs-gets puts an
+# object in the bucket, GETs parts of it by part size and GETs in flight, and deletes it
+# (scripts/lib/gets-linux-host.sh). The table, the test host and the source measured go to
+# docs/measurements/HOST-gets-<time>-<mark>, the run's mark, unless named, with what the run was for
+# (note.md).
 #
 #   scripts/gets-host.sh [RESULTS]
 #   scripts/gets-host.sh resume RUN RESULTS | cancel RUN
 #
 # CLADEFS_GETS_URL names the bucket and prefix the run puts its object under, as an object store's
-# URL the host reaches (s3://bucket/prefix, with CLADEFS_S3_* for an S3 server's address and keys;
-# or file:///path/, a directory there, which measures that disk); CLADEFS_GETS_MIB is the object's
-# size (default 512) and CLADEFS_GETS_SECS the seconds each measurement takes (default 10).
-# CLADEFS_BENCH_NOTE says what the run is for. Every other CLADEFS_* and PJDFSTEST_* variable set here
-# reaches the host too (scripts/lib/host.sh).
+# URL the test host reaches (s3://bucket/prefix, with CLADEFS_S3_* for an S3 server's address and
+# keys; or file:///path/, a directory there, which measures that disk); CLADEFS_GETS_MIB is the
+# object's size (default 512) and CLADEFS_GETS_SECS the seconds each measurement takes (default 10).
+# CLADEFS_BENCH_NOTE says what the run is for. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_*
+# variable set here reaches the test host too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

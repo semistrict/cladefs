@@ -52,12 +52,24 @@ pub struct TestFxfsGuest {
 impl TestFxfsGuest {
     /// fxfs-guest.
     pub fn host_formats() -> Self {
-        Self { mode: Mode::HostFormats, dax: false, killed: false, daemon_killed: false, stray: false }
+        Self {
+            mode: Mode::HostFormats,
+            dax: false,
+            killed: false,
+            daemon_killed: false,
+            stray: false,
+        }
     }
 
     /// fxfs-guest-format.
     pub fn guest_formats() -> Self {
-        Self { mode: Mode::GuestFormats, dax: false, killed: false, daemon_killed: false, stray: false }
+        Self {
+            mode: Mode::GuestFormats,
+            dax: false,
+            killed: false,
+            daemon_killed: false,
+            stray: false,
+        }
     }
 
     /// fxfs-guest-crash.
@@ -100,7 +112,6 @@ impl TestFxfsGuest {
         Self { dax: true, ..self }
     }
 }
-
 
 /// cladefs: the window of a test that strays out of what it was given, and how much of its start the
 /// test's writers reach: its first half is files' ranges, and regions fill the second from its
@@ -230,9 +241,10 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 }
 
 /// What the guest writes, which the host reads back: more than one of the kernel's
-/// chunks of writes, and not a whole number of blocks, then an append.
+/// chunks of writes, and not a whole number of blocks, then an append. cladefs: the guest tests'
+/// known plaintext (`crate::canary`), which no file of an encrypted run's stores holds (TASK-411.15).
 fn written() -> Vec<u8> {
-    let mut data = pattern((3 << 20) + 777, 0x5a);
+    let mut data = crate::canary::stream((3 << 20) + 777);
     data.extend_from_slice(b"appended\n");
     data
 }
@@ -244,8 +256,8 @@ mod host {
     use crate::common::{cladefs_guest_should_run, setup_rootfs, spawn_daemon};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Owner, Storage};
+    use futures::executor::block_on;
 
     /// The store's capacity: room for the crash test's unnamed file too.
     const CAPACITY: u64 = 128 << 20;
@@ -310,7 +322,10 @@ mod host {
             };
             let earlier_lost = synced.iter().any(lost_before);
             if stayed(writer, index) {
-                assert!(!earlier_lost, "writer {writer}'s file {index} stayed, an earlier one lost");
+                assert!(
+                    !earlier_lost,
+                    "writer {writer}'s file {index} stayed, an earlier one lost"
+                );
             } else {
                 lost += 1;
             }
@@ -414,9 +429,9 @@ mod host {
             };
             // cladefs: on a daemon of its own, which goes on running till its test's end otherwise.
             let daemon = if self.daemon_killed {
-                let socket = std::env::temp_dir()
-                    .join(format!("cladefs-crash-{}.sock", std::process::id()));
-                let daemon = spawn_daemon(&test_setup, &socket, "extentd", &[], None)?;
+                let socket =
+                    std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
+                let daemon = spawn_daemon(&test_setup, &socket, "cladefsd", &[], None)?;
                 vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
             } else {
@@ -428,7 +443,8 @@ mod host {
                 // a run, or else a time of the run's own, before the writers fill the store, and
                 // with DAX after its store through a mapping (TASK-119.6).
                 let first = if self.dax { 1100 } else { 300 };
-                let crash_ms = std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
+                let crash_ms =
+                    std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
                 let crash_ms: u64 = crash_ms.unwrap_or_else(|| {
                     let now =
                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
@@ -486,12 +502,12 @@ mod host {
                         return TestOutcome::Fail(format!("no stray access: {output:?}"));
                     };
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
-                    let socket = std::env::var_os("CLADEFS_EXTENTD").unwrap();
+                    let socket = std::env::var_os("CLADEFSD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::extentd::RemoteExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::cladefsd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
-                    crate::common::say_daemon_stats(&test_setup, "extentd");
+                    crate::common::say_daemon_stats(&test_setup, "cladefsd");
                 }
                 // The store as the crash left it, for a failure to be looked into: checking it
                 // recovers it, and mounting it replays its journal.
@@ -510,7 +526,8 @@ mod host {
                 // cladefs: what the directory's default ACL handed down came with the creations a
                 // journal flush made durable, their inodes never written back (TASK-79.29).
                 {
-                    let acl = |node: &cladefs::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
+                    let acl =
+                        |node: &cladefs::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
                     let (dir, _) = block_on(fs.root().lookup(INHERITS.as_bytes())).unwrap();
                     assert_eq!(acl(&dir, b"system.posix_acl_default"), default_acl());
                     let (file, attr) = block_on(dir.lookup(INHERITS_FILE.as_bytes())).unwrap();
@@ -721,7 +738,7 @@ mod guest {
     fn mount_at(source: &str, target: &str) -> std::io::Result<()> {
         let source = CString::new(source).unwrap();
         let target = CString::new(target).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };
@@ -1101,7 +1118,7 @@ mod guest {
         }
         // No window space lost to an UNMAP that failed: its request's allocation can't
         // (TASK-44.22).
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap();
         assert!(stats.lines().any(|line| line == "window_lost_bytes 0"), "{stats}");
         // The DAX window's latency histograms, each 24 buckets' counts (TASK-111.6).
         for name in ["window_map_requests", "window_unmaps", "dax_faults"] {
@@ -1385,7 +1402,7 @@ mod guest {
                 if let Some(access) = access {
                     // As long as the console's drained, the line reaches the host before the VM stops.
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                    fs::write("/sys/module/fxfs/parameters/dax_stray", access).unwrap();
+                    fs::write("/sys/module/cladefs/parameters/dax_stray", access).unwrap();
                     println!("the stray access returned");
                 }
                 loop {
@@ -1395,7 +1412,7 @@ mod guest {
         }
     }
 
-    /// cladefs: a load or store (fxfs.dax_stray) of the window where nothing is mapped, past what the
+    /// cladefs: a load or store (cladefs.dax_stray) of the window where nothing is mapped, past what the
     /// writers reach, within a page or across two, as `crash_ms` picks.
     fn stray_access(crash_ms: u64) -> String {
         let op = if crash_ms & 1 == 0 { "load" } else { "store" };
@@ -1631,15 +1648,15 @@ mod guest {
         }
     }
 
-    /// TASK-111.7: the filesystem says the commit it was built of, in /proc/fs/fxfs/build, as
+    /// TASK-111.7: the filesystem says the commit it was built of, in /proc/fs/cladefs/build, as
     /// scripts/build-commit.sh said for the tree the kernel was built from: a commit, `-dirty` if
     /// a tracked file differed from it.
     fn build_commit_shown() {
-        let build = fs::read_to_string("/proc/fs/fxfs/build").unwrap();
+        let build = fs::read_to_string("/proc/fs/cladefs/build").unwrap();
         let commit = (build.strip_prefix("commit ").and_then(|line| line.strip_suffix('\n')))
-            .unwrap_or_else(|| panic!("/proc/fs/fxfs/build: {build:?}"));
+            .unwrap_or_else(|| panic!("/proc/fs/cladefs/build: {build:?}"));
         let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
-        assert_eq!(commit.len(), 40, "/proc/fs/fxfs/build: {build:?}");
+        assert_eq!(commit.len(), 40, "/proc/fs/cladefs/build: {build:?}");
         assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()), "{build:?}");
     }
 

@@ -1,12 +1,12 @@
 ---
 id: TASK-444.3
 title: >-
-  Kernel review agents on guest/linux/fs/fxfs and the fs/dax.c patches, gated on
-  reproducers
+  Kernel review agents on guest/linux/fs/cladefs and the fs/dax.c patches, gated
+  on reproducers
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:33'
-updated_date: '2026-11-15 13:31'
+updated_date: '2026-11-17 01:09'
 labels: []
 dependencies: []
 references:
@@ -28,7 +28,7 @@ Linux kernel AI review has standardised on Chris Mason review-prompts (MIT) and 
 <!-- AC:BEGIN -->
 - [ ] #1 An fxfs/DAX context file states cladefs invariants (doc-4, doc-9, doc-13, specs/dax-cow, dead-ends) in the review-prompts subsystem format
 - [ ] #2 A known-issues file lists accepted risks so they stop being reported
-- [ ] #3 A sweep of guest/linux/fs/fxfs and the fs/dax.c patches for pre-existing bugs ran 3-5 times; findings recurring or confirmed by a verifier agent are recorded
+- [ ] #3 A sweep of guest/linux/fs/cladefs and the fs/dax.c patches for pre-existing bugs ran 3-5 times; findings recurring or confirmed by a verifier agent are recorded
 - [ ] #4 A finding enters the backlog only with a guest/sim seed, a scenario or a guest case that fails
 - [ ] #5 A script runs the review on a commit range, documented for use on every change
 <!-- AC:END -->

@@ -5,7 +5,7 @@
 (* found in the LICENSE file.                                              *)
 (*                                                                         *)
 (* Live read-only followers of a mounted Fxfs (backlog doc-8, TASK-42.8):  *)
-(* the protocol between a writer VM, the store extentd serves it from, a   *)
+(* the protocol between a writer VM, the store cladefsd serves it from, a   *)
 (* follower VM's Fxfs and the readers in that VM, at the level of the      *)
 (* protocol: what each step reads and writes, and in what order.           *)
 (*                                                                         *)
@@ -16,10 +16,11 @@
 (* seals what it wrote (doc-4), so the store as of a commit is immutable; *)
 (* its frees are kept while a follower's view may still read them.        *)
 (*                                                                         *)
-(* The follower fetches batches of commits, then, holding its fill barrier *)
-(* exclusively (TASK-42.10), drops the DAX mappings of each file they      *)
-(* change and applies them, mutation by mutation; lets the barrier go; and *)
-(* advances its view, which lets the store release what the batch freed.  *)
+(* The follower fetches batches of commits, advancing its device to the   *)
+(* latest; then, holding its fill barrier exclusively (TASK-42.10), drops  *)
+(* the DAX mappings of each file they change and applies them, mutation   *)
+(* by mutation; lets the barrier go; and lets go of the commit it was as  *)
+(* of, which lets the store release what the batch freed.                 *)
 (* It pins the extents of files deleted while a reader has them open (its *)
 (* graveyard).                                                            *)
 (*                                                                         *)
@@ -45,7 +46,7 @@ CONSTANTS
     Limit,      \* the frees a follower may hold kept before it is cut off
     Rules       \* the protocol's rules in force (all, but in a mutation)
 
-AllRules == {"barrier", "invalidate", "keepFrees", "graveyard", "cutOff"}
+AllRules == {"barrier", "drop", "keepFrees", "graveyard", "cutOff"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Limit >= 1 /\ MaxCommits >= 1 /\ MaxOps >= 1
@@ -76,8 +77,8 @@ VARIABLES
     \* The follower.
     ftree,      \* its tree
     applied,    \* the last commit it has applied
-    view,       \* its view's commit: the store keeps frees after it
-    fphase,     \* "idle", "fetched", "waiting", "dropping", "applying", "advance"
+    view,       \* the commit it last let go up to: the store keeps frees after it
+    fphase,     \* "idle", "fetched", "waiting", "dropping", "applying", "lettingGo"
     pending,    \* the batch's mutations not yet applied
     target,     \* the commit the batch ends at
     changed,    \* the batch's files whose mappings are not yet dropped
@@ -153,7 +154,7 @@ WriterNext ==
        \/ \E f \in Files : Write(f) \/ Delete(f)
 
 -----------------------------------------------------------------------------
-(* The store (extentd). *)
+(* The store (cladefsd). *)
 
 \* A kept free goes once the follower's view is past it, unless the graveyard pins it.
 ReleaseOf(kf) ==
@@ -167,7 +168,7 @@ ReleaseOf(kf) ==
 Release == \E kf \in kept : ReleaseOf(kf)
 
 \* A follower holding too much kept is cut off: its view goes, and what it kept; its reads
-\* fail from here on (extentd refuses them), so nothing it does matters any more.
+\* fail from here on (cladefsd refuses them), so nothing it does matters any more.
 CutOff ==
     /\ "cutOff" \in Rules
     /\ ~cutOff
@@ -183,7 +184,9 @@ StoreNext == Release \/ CutOff
 
 \* A batch is fetched: the commits made since the last, read before the follower takes its
 \* barrier, as the implementation reads them (crates/follower's Follow::fetch); the writer may
-\* commit more meanwhile, which the next batch takes.
+\* commit more meanwhile, which the next batch takes. The code's ADVANCE is part of it: the fetch
+\* moves the follower's device to the writer's latest commit, which keeps the commit the follower
+\* was as of, and what the batch frees, until LetGo.
 Fetch ==
     /\ ~cutOff
     /\ fphase = "idle"
@@ -216,11 +219,11 @@ StartBatch ==
                    readerVars, errors>>
 
 \* A file the batch changes has its DAX mappings dropped, before the batch applies.
-Invalidate(f) ==
+Drop(f) ==
     /\ ~cutOff
     /\ fphase = "dropping"
     /\ f \in changed
-    /\ mappings' = IF "invalidate" \in Rules THEN {m \in mappings : m.f # f} ELSE mappings
+    /\ mappings' = IF "drop" \in Rules THEN {m \in mappings : m.f # f} ELSE mappings
     /\ changed' = changed \ {f}
     /\ UNCHANGED <<ftree, applied, view, fphase, pending, target, writerVars, storeVars,
                    handles, graves, pc, op, opFile, vals, lo, lastObs, copyExt, ops, errors>>
@@ -261,22 +264,23 @@ EndBatch ==
     /\ fphase = "applying"
     /\ pending = <<>>
     /\ applied' = target
-    /\ fphase' = "advance"
+    /\ fphase' = "lettingGo"
     /\ UNCHANGED <<ftree, view, pending, target, changed, writerVars, storeVars, readerVars,
                    errors>>
 
-\* The view moves to the batch's commit: what the batch freed may go.
-Advance ==
+\* The batch lets go of the commit the follower was as of (the code's LET_GO): the view moves to
+\* the batch's commit, and what the batch freed may go.
+LetGo ==
     /\ ~cutOff
-    /\ fphase = "advance"
+    /\ fphase = "lettingGo"
     /\ view' = applied
     /\ fphase' = "idle"
     /\ UNCHANGED <<ftree, applied, pending, target, changed, writerVars, storeVars, readerVars,
                    errors>>
 
 FollowerNext ==
-    Fetch \/ Wait \/ StartBatch \/ (\E f \in Files : Invalidate(f)) \/ Dropped \/ ApplyOne \/ EndBatch
-    \/ Advance
+    Fetch \/ Wait \/ StartBatch \/ (\E f \in Files : Drop(f)) \/ Dropped \/ ApplyOne \/ EndBatch
+    \/ LetGo
 
 -----------------------------------------------------------------------------
 (* The readers. *)
@@ -500,7 +504,7 @@ TypeOK ==
     /\ pinned \subseteq Extents
     /\ cutOff \in BOOLEAN
     /\ applied \in 0..MaxCommits /\ view \in 0..applied
-    /\ fphase \in {"idle", "fetched", "waiting", "dropping", "applying", "advance"}
+    /\ fphase \in {"idle", "fetched", "waiting", "dropping", "applying", "lettingGo"}
     /\ changed \subseteq Files
     /\ pc \in [Readers -> {"idle", "read", "map", "copy"}]
     /\ \A r \in Readers : handles[r] \subseteq Files
@@ -526,7 +530,7 @@ GravesLive == ~cutOff => \A r \in Readers, f \in Files : graves[r][f] \notin rel
 \* Outside a batch holding the barrier, every mapping maps what the follower's tree says the file
 \* holds, or, deleted, what the graveyard keeps for the reader.
 NoStaleMappings ==
-    (~cutOff /\ fphase \in {"idle", "fetched", "waiting", "advance"}) =>
+    (~cutOff /\ fphase \in {"idle", "fetched", "waiting", "lettingGo"}) =>
         \A m \in mappings : \/ m.e = ftree[m.f]
                             \/ ftree[m.f] = NoExtent /\ m.e = graves[m.r][m.f]
 

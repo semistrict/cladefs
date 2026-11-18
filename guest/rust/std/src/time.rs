@@ -16,7 +16,7 @@ pub struct Instant(Duration);
 impl Instant {
     pub fn now() -> Self {
         // SAFETY: Reads the clock.
-        Self(Duration::from_nanos(unsafe { sys::fxfs_rt_monotonic_ns() }))
+        Self(Duration::from_nanos(unsafe { sys::cladefs_rt_monotonic_ns() }))
     }
 
     pub fn duration_since(&self, earlier: Instant) -> Duration {
@@ -106,7 +106,7 @@ impl SystemTime {
 
     pub fn now() -> Self {
         // SAFETY: Reads the clock.
-        Self(Duration::from_nanos(unsafe { sys::fxfs_rt_realtime_ns() }))
+        Self(Duration::from_nanos(unsafe { sys::cladefs_rt_realtime_ns() }))
     }
 
     pub fn duration_since(&self, earlier: SystemTime) -> Result<Duration, SystemTimeError> {

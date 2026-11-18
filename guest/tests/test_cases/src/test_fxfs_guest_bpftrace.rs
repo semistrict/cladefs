@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: the guest Fxfs's tracepoints under bpftrace (TASK-44.16, docs/guest-tracepoints.md):
-//! scripts/bpftrace/fxfs-latency.bt, run in a guest with a DAX window, attaches to fs/fxfs's events,
+//! scripts/bpftrace/cladefs-latency.bt, run in a guest with a DAX window, attaches to fs/cladefs's events,
 //! and while files are written, fsynced, read in sealed, loaded and stored to through a mapping and
 //! fsynced again, measures the seals and the window's MAPs: it ends with a histogram of each, and
 //! of the MAPs' bytes, and the bytes the seals sealed. fxfs-guest-checks' tracepoints check
@@ -16,7 +16,7 @@ pub struct TestFxfsGuestBpftrace;
 
 /// The script, as the docs give it.
 #[cfg_attr(feature = "host", allow(dead_code))]
-const SCRIPT: &str = include_str!("../../../../scripts/bpftrace/fxfs-latency.bt");
+const SCRIPT: &str = include_str!("../../../../scripts/bpftrace/cladefs-latency.bt");
 
 #[host]
 mod host {
@@ -71,7 +71,7 @@ mod guest {
     const TRACING: &str = "/sys/kernel/tracing";
     const PAGE: usize = 4096;
     /// What the script says once it has attached (its BEGIN).
-    const READY: &str = "Tracing fxfs seals and window MAPs; Ctrl-C to end.";
+    const READY: &str = "Tracing cladefs seals and window MAPs; Ctrl-C to end.";
 
     fn mount(source: &str, target: &str, fstype: &str) {
         fs::create_dir_all(target).unwrap();
@@ -121,10 +121,10 @@ mod guest {
             if !std::path::Path::new(&format!("{TRACING}/events")).exists() {
                 mount("tracefs", TRACING, "tracefs");
             }
-            mount("extents", MNT, "fxfs");
-            fs::write("/fxfs-latency.bt", SCRIPT).unwrap();
+            mount("extents", MNT, "cladefs");
+            fs::write("/cladefs-latency.bt", SCRIPT).unwrap();
             let mut bpftrace = Command::new("/usr/bin/bpftrace")
-                .arg("/fxfs-latency.bt")
+                .arg("/cladefs-latency.bt")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()

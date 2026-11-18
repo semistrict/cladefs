@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: locks shared beyond one store, whose poison no fence contains (TASK-149.24). A store's
-//! own locks fence the store a panic holding one went through (cladefs's `fence`): it fails each
+//! cladefs: locks shared beyond one store, whose poison no halt contains (TASK-149.24). A store's
+//! own locks halt the store a panic holding one went through (cladefs's `halt`): it fails each
 //! request after with `EIO`, the others serve on. A lock shared beyond it, as the process's cache
 //! of extents, a store's state, which its followers share with its writer, or a window's, which its
 //! connection and the guest's faults share, would be found poisoned by every user after, one panic
@@ -13,8 +13,11 @@
 //! after a crash, once systemd has it running again.
 //!
 //! Such a lock is a [`SharedLock`], locked only through it ([`SharedLock::with`]), which has its
-//! guard a [`Shared`]: the thread's locks held are what the panic hook looks at. Elsewhere, as in
-//! tests, a panic holding one unwinds as any panic does.
+//! guard a [`Shared`]: the thread's locks held are what the panic hook looks at. A thread whose
+//! work is the process's, as the page cache's flusher, which every store's files wait on, holds
+//! that work as it would such a lock, for as long as it does it ([`Holding::work`]): its death too
+//! no halt contains (TASK-493). Elsewhere, as in tests, a panic holding one unwinds as any panic
+//! does.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -64,7 +67,7 @@ pub fn abort_on_panics() {
             if !held.is_empty() {
                 let locks = held.join(", ");
                 log::error!(
-                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no fence \
+                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no halt \
                      contains it (TASK-149.24)"
                 );
                 // As the log may not reach stderr, nor be flushed before the abort.
@@ -104,28 +107,59 @@ impl<L> SharedLock<L> {
     }
 }
 
-/// The guard of a [`SharedLock`], `G`, held by the thread that locked it: not sent to another.
-pub struct Shared<G> {
-    /// None only as it is let go of ([`Shared::unlocked`]).
-    guard: Option<G>,
+/// The calling thread's holding of a shared lock, or of the process's work, by name: what the
+/// panic hook sees it hold, from its making to its drop, on the thread that made it alone.
+pub struct Holding {
     name: &'static str,
     _thread: PhantomData<*const ()>,
 }
 
-impl<G> Shared<G> {
-    fn new(name: &'static str, guard: G) -> Self {
+impl Holding {
+    fn new(name: &'static str) -> Self {
         HELD.with(|held| held.borrow_mut().push(name));
-        let shared = Self { guard: Some(guard), name, _thread: PhantomData };
+        let holding = Self { name, _thread: PhantomData };
         #[cfg(any(test, feature = "testing"))]
         testing::panic_if_asked(name);
-        shared
+        holding
+    }
+
+    /// The calling thread doing the process's work called `name`, until this drops: work every
+    /// store waits on, as the page cache's flusher's, whose death no store's halt contains, so
+    /// that a panic doing it aborts the process as one holding a [`SharedLock`] does.
+    pub fn work(name: &'static str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(at) = held.iter().rposition(|name| *name == self.name) {
+                held.remove(at);
+            }
+        });
+    }
+}
+
+/// The guard of a [`SharedLock`], `G`, held by the thread that locked it: not sent to another.
+pub struct Shared<G> {
+    /// None only as it is let go of ([`Shared::unlocked`]).
+    guard: Option<G>,
+    /// Dropped after the guard: the lock is let go of before the thread says it holds it no more.
+    holding: Holding,
+}
+
+impl<G> Shared<G> {
+    fn new(name: &'static str, guard: G) -> Self {
+        Self { guard: Some(guard), holding: Holding::new(name) }
     }
 
     /// Lets the lock go while `unlocked` runs with its guard, as a condition variable's wait does,
     /// returning it, and holds it again.
     pub fn unlocked(mut self, unlocked: impl FnOnce(G) -> G) -> Self {
         let guard = self.guard.take().expect("the lock is held");
-        let name = self.name;
+        let name = self.holding.name;
         drop(self);
         Self::new(name, unlocked(guard))
     }
@@ -148,14 +182,8 @@ impl<G: DerefMut> DerefMut for Shared<G> {
 
 impl<G> Drop for Shared<G> {
     fn drop(&mut self) {
-        // The guard first: the lock is let go of before the thread says it holds it no more.
+        // The guard first, then its holding, a field, as this returns.
         drop(self.guard.take());
-        HELD.with(|held| {
-            let mut held = held.borrow_mut();
-            if let Some(at) = held.iter().rposition(|name| *name == self.name) {
-                held.remove(at);
-            }
-        });
     }
 }
 

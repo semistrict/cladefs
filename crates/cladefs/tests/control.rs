@@ -13,7 +13,7 @@
 mod common;
 
 use cladefs::Errno;
-use cladefs::extentd::control::proto::*;
+use cladefs::cladefsd::control::proto::*;
 use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
 use common::pattern;
 use std::path::Path;
@@ -26,8 +26,8 @@ fn stores_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///branches");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
@@ -57,12 +57,12 @@ fn stores_through_the_control_api() {
             own_extents: 1,
             inherited_extents: 0,
             committed: 1,
-            // Closed, the stat opens it, as the daemon opens any store, taking its branch's lease
+            // Closed, the stat opens it, as the daemon opens any store, taking its branch's head
             // after its making's and its VM's (TASK-165.9): what it committed, uploaded.
             uploading: true,
-            lease_token: 1,
-            lease_epoch: 3,
-            lease_taken_unix_ms: stat.lease_taken_unix_ms,
+            taken_token: 1,
+            taken_epoch: 3,
+            taken_unix_ms: stat.taken_unix_ms,
             uploaded: 1,
             pending_upload_bytes: 0,
             oldest_pending_ms: 0,
@@ -97,16 +97,16 @@ fn stores_through_the_control_api() {
     daemon.delete(&taken).unwrap();
     assert_eq!(failure(daemon.stat(&taken)), (Code::NotFound, Errno::ENOENT));
 
-    let stats = daemon.stats();
-    let object_storage = stats.object_storage.expect("the daemon has a bucket");
+    let counters = daemon.counters();
+    let object_storage = counters.object_storage.expect("the daemon has a bucket");
     assert!(object_storage.requests["create"] > 0, "{object_storage:?}");
     assert!(object_storage.uploaded_bytes.values().sum::<u64>() >= 64 << 10, "{object_storage:?}");
 }
 
-/// TASK-50.5: the stores VM processes have open are listed, with their branches' leases, as this
-/// host's placement took them, and their uploads: synced, nothing waits.
+/// TASK-50.5: the stores VM processes have open are listed, with their writers' takings of their
+/// branches' heads, as this host's placement took them, and their uploads: synced, nothing waits.
 #[test]
-fn open_stores_are_listed_with_their_leases_and_uploads() {
+fn open_stores_are_listed_with_their_takings_and_uploads() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (first, second) = (dir.path().join("first"), dir.path().join("second"));
@@ -131,8 +131,8 @@ fn open_stores_are_listed_with_their_leases_and_uploads() {
         assert_eq!((stat.branch, stat.open, stat.uploading), (branch, true, true));
         // TASK-454: the extent the first wrote; none, the second.
         assert_eq!((stat.own_extents, stat.inherited_extents), (extents, 0));
-        assert_eq!((stat.lease_token, stat.lease_epoch), (1, 1));
-        assert!((millis(before)..=millis(after)).contains(&stat.lease_taken_unix_ms), "{stat:?}");
+        assert_eq!((stat.taken_token, stat.taken_epoch), (1, 1));
+        assert!((millis(before)..=millis(after)).contains(&stat.taken_unix_ms), "{stat:?}");
         assert_eq!(stat.uploaded, stat.committed, "{stat:?}");
         assert_eq!((stat.pending_upload_bytes, stat.oldest_pending_ms), (0, 0));
     }
@@ -147,7 +147,7 @@ fn extents_are_counted_through_the_control_api() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let write = |vm: &cladefs::RemoteExtentStore, sequence: u64| {
+    let write = |vm: &cladefs::DaemonExtentStore, sequence: u64| {
         let extent = cladefs::ExtentId { branch: vm.branch(), sequence };
         vm.write(extent, 0, &[cladefs::VolatileSlice::from(&pattern(sequence)[..4096])]).unwrap();
         extent
@@ -275,8 +275,8 @@ fn imports_that_fail_leave_no_store() {
 fn forks_of_branches_never_had_here() {
     // SAFETY: as in stores_through_the_control_api.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///elsewhere");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///elsewhere");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
@@ -313,7 +313,7 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
     let mut daemon = Daemon::new(dir.path());
     let idle = dir.path().join("idle");
     daemon.create(&idle, NEW, None).unwrap();
-    let count = cladefs::extentd::control::BLOCKING_THREADS + 16;
+    let count = cladefs::cladefsd::control::BLOCKING_THREADS + 16;
     let asked = Arc::new(AtomicUsize::new(0));
     let (vms, paths): (Vec<_>, Vec<_>) = (0..count)
         .map(|vm| {
@@ -365,17 +365,17 @@ fn health_follows_whether_the_daemon_serves() {
     use tonic_health::pb::health_client::HealthClient;
     // SAFETY: As above.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///branches");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
     let control = dir.path().join("control.sock");
     let listener = std::os::unix::net::UnixListener::bind(&control).unwrap();
     let tenants = dir.path().join("tenants");
-    std::thread::spawn(move || cladefs::extentd::serve_control(listener, tenants));
+    std::thread::spawn(move || cladefs::cladefsd::serve_control(listener, tenants));
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        let channel = cladefs::extentd::control::channel(&control).await.unwrap();
+        let channel = cladefs::cladefsd::control::channel(&control).await.unwrap();
         let health = HealthClient::new(channel);
         let mut watcher = health.clone();
         let status = |service: &str| {
@@ -383,7 +383,7 @@ fn health_follows_whether_the_daemon_serves() {
             let request = HealthCheckRequest { service: service.to_owned() };
             async move { health.check(request).await.unwrap().into_inner().status() }
         };
-        let api = "cladefs.extentd.v1.Extentd";
+        let api = "cladefs.cladefsd.v1.Cladefsd";
         assert_eq!(status("").await, ServingStatus::NotServing);
         assert_eq!(status(api).await, ServingStatus::NotServing);
         let request = HealthCheckRequest { service: String::new() };
@@ -392,25 +392,25 @@ fn health_follows_whether_the_daemon_serves() {
         assert_eq!(next().await, ServingStatus::NotServing);
 
         let vms = std::os::unix::net::UnixListener::bind(dir.path().join("vms.sock")).unwrap();
-        std::thread::spawn(move || cladefs::extentd::serve(vms));
+        std::thread::spawn(move || cladefs::cladefsd::serve(vms));
         assert_eq!(next().await, ServingStatus::Serving);
         assert_eq!(status(api).await, ServingStatus::Serving);
 
-        tokio::task::spawn_blocking(cladefs::extentd::stop_serving).await.unwrap();
+        tokio::task::spawn_blocking(cladefs::cladefsd::stop_serving).await.unwrap();
         assert_eq!(next().await, ServingStatus::NotServing);
         assert_eq!(status(api).await, ServingStatus::NotServing);
     });
 }
 
-/// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of a sealed cell through its
+/// TASK-411.7, and TASK-411's AC #3 (cladefsd serving a VM's store of an encrypted cell through its
 /// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
 /// written by its VM, read back, no file of their directories holding what they wrote in the
-/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and fences its store,
+/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and halts its store,
 /// its VM's reads failing with EACCES, the other's reading on; called again, it finds the cell
-/// shredded and fences nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
-/// KMS, fences the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
+/// shredded and halts nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
+/// KMS, halts the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
 #[test]
-fn sealed_stores_served_and_shredded_through_the_control_api() {
+fn encrypted_stores_served_and_shredded_through_the_control_api() {
     let keys = tempfile::tempdir().unwrap();
     let kms_dir = keys.path().join("kms");
     let kms = extent_keys::kms::LocalKms::open(&kms_dir).unwrap();
@@ -427,9 +427,9 @@ fn sealed_stores_served_and_shredded_through_the_control_api() {
     assert_ne!(branch.cell, other.cell);
     let vms = [daemon.open(&ours, CAPACITY), daemon.open(&sibling, CAPACITY)];
     for (seed, vm) in (1..).zip(&vms) {
-        write(vm, &pattern(seed), b"sealed");
+        write(vm, &pattern(seed), b"encrypted");
     }
-    let read = |vm: &cladefs::RemoteExtentStore, seed: u64| {
+    let read = |vm: &cladefs::DaemonExtentStore, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { branch: vm.branch(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
@@ -464,4 +464,65 @@ fn sealed_stores_served_and_shredded_through_the_control_api() {
     let denied = (Code::PermissionDenied, Errno::EACCES);
     assert_eq!(failure(daemon.stat(&ours)), denied);
     assert_eq!(failure(daemon.stat(&sibling)), denied);
+}
+
+/// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts its
+/// tenants' stores under the bucket KMS, each tenant's KEK made in its bucket on first use; what
+/// VMs wrote is in no file of the stores' directories in the clear. `ShredTenant` replaces the
+/// first tenant's KEK object by a tombstone and halts its store, its VM's reads failing with
+/// EACCES, the other tenant's reading on; called again, it finds the tenant shredded and halts
+/// nothing more. Closed, the store opens no more (PERMISSION_DENIED, EACCES).
+#[test]
+fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api() {
+    let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe {
+        std::env::remove_var("CLADEFS_KMS");
+        std::env::set_var("CLADEFS_MASTER_KEY", &master);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
+    let of = |tenant| cladefs::Branch { cell: cladefs::Cell { tenant, id: 0 }, id: 0 };
+    daemon.create(&ours, of(1), None).unwrap();
+    daemon.create(&theirs, of(2), None).unwrap();
+    let vms = [daemon.open(&ours, CAPACITY), daemon.open(&theirs, CAPACITY)];
+    for (seed, vm) in (1..).zip(&vms) {
+        write(vm, &pattern(seed), b"encrypted");
+    }
+    let read = |vm: &cladefs::DaemonExtentStore, seed: u64| {
+        let mut data = vec![0; 64 << 10];
+        let extent = cladefs::ExtentId { branch: vm.branch(), sequence: 1 };
+        let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
+        done.map(|()| data == pattern(seed))
+    };
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
+    daemon.sync(&ours).unwrap();
+    daemon.sync(&theirs).unwrap();
+    for (seed, path) in (1..).zip([&ours, &theirs]) {
+        let mut paths = vec![path.to_path_buf()];
+        while let Some(at) = paths.pop() {
+            if at.is_dir() {
+                paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+                continue;
+            }
+            let bytes = std::fs::read(&at).unwrap();
+            let held = bytes.windows(64).any(|window| window == &pattern(seed)[..64]);
+            assert!(!held, "{} holds what its VM wrote", at.display());
+        }
+    }
+
+    let shred = |daemon: &mut Daemon| {
+        let request = ShredTenantRequest { tenant: 1 };
+        let shredded = daemon.runtime.block_on(daemon.client.shred_tenant(request)).unwrap();
+        let ShredTenantResponse { shredded_now, forgotten } = shredded.into_inner();
+        (shredded_now, forgotten.unwrap().stores)
+    };
+    assert_eq!(shred(&mut daemon), (true, 1));
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Ok(true)));
+    assert_eq!(shred(&mut daemon), (false, 0));
+
+    drop(vms);
+    assert_eq!(failure(daemon.stat(&ours)), (Code::PermissionDenied, Errno::EACCES));
 }

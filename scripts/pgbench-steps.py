@@ -185,7 +185,7 @@ def markdown(found):
             said = ", ".join(f"{name} {seconds:.2f} s" for name, seconds in load["phases"].items())
             out += [f"Load (pgbench -i): {load['seconds']:.2f} s: {said}.", ""]
         out += ["| Run | tps | Latency | Guest user | System | Idle | Steal | "
-                "extentd requests/s (mean us) | Commits/s (mean wait) |",
+                "cladefsd requests/s (mean us) | Commits/s (mean wait) |",
                 "|---|---|---|---|---|---|---|---|---|"]
         for n, run in enumerate(steps_["runs"], 1):
             cpu = run.get("cpu") or {}

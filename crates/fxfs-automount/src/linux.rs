@@ -68,7 +68,7 @@ pub struct Fxfs {
     pub filesystem: PathBuf,
 }
 
-/// fs/fxfs's `struct fxfs_import`.
+/// fs/cladefs's `struct cladefs_import`.
 #[repr(C)]
 struct Import {
     name: u64,
@@ -77,8 +77,8 @@ struct Import {
     manifest_size: u64,
 }
 
-/// `FXFS_IOC_IMPORT`: `_IOW('x', 0x47, struct fxfs_import)`. Passed `as _`, as autofs's are.
-const FXFS_IOC_IMPORT: u32 =
+/// `CLADEFS_IOC_IMPORT`: `_IOW('x', 0x47, struct cladefs_import)`. Passed `as _`, as autofs's are.
+const CLADEFS_IOC_IMPORT: u32 =
     (1 << 30) | ((std::mem::size_of::<Import>() as u32) << 16) | (0x78 << 8) | 0x47;
 
 fn path(path: &Path) -> io::Result<CString> {
@@ -87,7 +87,7 @@ fn path(path: &Path) -> io::Result<CString> {
 
 impl Volumes for Fxfs {
     fn mount(&self, name: &str, target: &Path) -> io::Result<bool> {
-        let (source, fstype) = (CString::new(self.tag.as_str())?, c"fxfs");
+        let (source, fstype) = (CString::new(self.tag.as_str())?, c"cladefs");
         let options = CString::new(format!("volume={name}"))?;
         let target = path(target)?;
         // SAFETY: The strings outlive the call.
@@ -118,7 +118,7 @@ impl Volumes for Fxfs {
             manifest_size: manifest.len() as u64,
         };
         // SAFETY: `request` says what `name` and `manifest` hold, which outlive the call.
-        match unsafe { libc::ioctl(filesystem.as_raw_fd(), FXFS_IOC_IMPORT as _, &request) } {
+        match unsafe { libc::ioctl(filesystem.as_raw_fd(), CLADEFS_IOC_IMPORT as _, &request) } {
             0 => Ok(()),
             _ => Err(io::Error::last_os_error()),
         }

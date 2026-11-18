@@ -9,14 +9,14 @@
 # pages). writeback_out_of_memory: the debug kernel's fault injection fails each of an fsync's
 # allocations in turn, and the file's clean pages dropped differ.
 
---- a/guest/linux/fs/fxfs/super.c
-+++ b/guest/linux/fs/fxfs/super.c
+--- a/guest/linux/fs/cladefs/super.c
++++ b/guest/linux/fs/cladefs/super.c
 @@ -1813,9 +1813,7 @@
- 		fxfs_dax_written(run->inode);
+ 		cladefs_dax_written(run->inode);
  	} else if (run->reserved)
- 		fxfs_release_dirty(fs, run->inode->i_ino, run->reserved);
+ 		cladefs_release_dirty(fs, run->inode->i_ino, run->reserved);
 -	if (err == -ENOMEM)
--		fxfs_vfs_keep(run);
+-		cladefs_vfs_keep(run);
 -	else if (err)
 +	if (err)
  		mapping_set_error(run->inode->i_mapping, err);

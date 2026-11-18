@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 20:03'
+updated_date: '2026-11-17 01:10'
 labels: []
 dependencies: []
 priority: low
@@ -16,7 +17,7 @@ ordinal: 805000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Building the arm64 guest kernel in Lima (scripts/lib/lima.sh build-guest-kernel.sh arm64, 2026-11-14) warns four times 'Symbol _RINv...fxfs_linux too long for kallsyms (513-537 >= 512)': v0-mangled names of fxfs's compaction drop glue (lsm_tree::compact_with_iterator ... CompactionYielder) and a bincode deserialize seed. kallsyms leaves them out, so an oops or a stack dump inside them names a neighbouring symbol instead. The build still succeeds. Not checked whether x86-64 warns too.
+Building the arm64 guest kernel in Lima (scripts/lib/lima.sh build-guest-kernel.sh arm64, 2026-11-14) warns four times 'Symbol _RINv...cladefs_linux too long for kallsyms (513-537 >= 512)': v0-mangled names of fxfs's compaction drop glue (lsm_tree::compact_with_iterator ... CompactionYielder) and a bincode deserialize seed. kallsyms leaves them out, so an oops or a stack dump inside them names a neighbouring symbol instead. The build still succeeds. Not checked whether x86-64 warns too.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

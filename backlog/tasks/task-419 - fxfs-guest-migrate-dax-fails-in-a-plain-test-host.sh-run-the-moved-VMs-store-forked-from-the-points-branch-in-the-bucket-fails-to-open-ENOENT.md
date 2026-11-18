@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 00:49'
-updated_date: '2026-11-15 11:35'
+updated_date: '2026-11-16 22:52'
 labels:
   - bug
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 809000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by TASK-417's ubu1 run t417c (cladefs 51966aa12, fork e7c0a413e): CLADEFS_E2E_TEST=fxfs-guest-migrate-dax under scripts/test-host.sh, one host, no CLADEFS_MIGRATE_PHASE. The source VM snapshots and the restore (PUT /snapshot/load with extent_overrides naming elsewhere-moved/store-moved, a point_on_host that does not exist here, and the test daemon's socket) fails: "Cannot open the extent store .../elsewhere-moved/store-moved: ... ENOENT". unexplained-refusals.txt lists 8 refused stores to sealed pages of the source VM's window. The case usually runs under scripts/migrate-host.sh. Whether main fails too: baseline run t417d (main df59917ba) pending.
+Found by TASK-417's ubu1 run t417c (cladefs 51966aa12, fork e7c0a413e): CLADEFS_E2E_TEST=fxfs-guest-migrate-dax under scripts/test-host.sh, one host, no CLADEFS_MIGRATE_PHASE. The source VM snapshots and the restore (PUT /snapshot/load with cladefs_overrides naming elsewhere-moved/store-moved, a point_on_host that does not exist here, and the test daemon's socket) fails: "Cannot open the extent store .../elsewhere-moved/store-moved: ... ENOENT". unexplained-refusals.txt lists 8 refused stores to sealed pages of the source VM's window. The case usually runs under scripts/migrate-host.sh. Whether main fails too: baseline run t417d (main df59917ba) pending.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

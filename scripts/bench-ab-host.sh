@@ -3,13 +3,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# An A/B of the fs bench on an x86-64 Linux host of one's own, over ssh (CLADEFS_HOST, ubu1 by
-# default; scripts/lib/host.sh; scripts/lib/bench-ab-linux-host.sh, TASK-276): each side's commit
-# built there once, in a worktree of its own, into artifacts of its own, as ordinary work (fxjob),
-# then, as a measurement, alone and on CPUs of its own (fxjob --bench), which no build takes
-# (scripts/lib/host.sh's host_job, TASK-368), ROUNDS
-# rounds of both sides interleaved, A B, then B A, against those artifacts, so that what drifts on
-# the host over the hours moves both alike and no round rebuilds anything; then scripts/bench-ab.py's
+# An A/B of the fs bench on the test host, an x86-64 Linux machine of one's own, over ssh
+# (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh; scripts/lib/bench-ab-linux-host.sh,
+# TASK-276): each side's commit built there once, in a worktree of its own, into artifacts of its
+# own, as ordinary work (fxjob), then, as a measurement, alone and on CPUs of its own (fxjob
+# --bench), which no build takes (scripts/lib/host.sh's host_job, TASK-368), ROUNDS rounds of both
+# sides interleaved, A B, then B A, against those artifacts, so that what drifts on the test host
+# over the hours moves both alike and no round rebuilds anything; then scripts/bench-ab.py's
 # comparison, the ext4 case the control, into RESULTS/ab.md; the build's log in
 # RESULTS/remote-build.log. A driver stopped while the sides build leaves a `resume` the build's
 # results alone: run it again.
@@ -22,22 +22,23 @@
 # NAME=VALUE words each side's rounds run with (such as
 # CLADEFS_GUEST_CMDLINE=virtio_extent.affine=0). CLADEFS_AB_ROUNDS is the rounds (default 3),
 # CLADEFS_BENCH_ITERATIONS each round's iterations (default 2), CLADEFS_AB_CONTROL the control's case
-# (default ext4-guest-kernel; empty: none). The sides build at CLADEFS_HOST_NICE (default 19), as
-# any host run's work does (scripts/lib/host.sh). The cases, groups and vCPUs are bench-host.sh's
-# (CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS, CLADEFS_BENCH_VCPUS), the same for both sides. The scripts that run are those of
-# the commit this tree's scripts run (scripts/lib/host.sh's CLADEFS_HOST_COMMIT), the sides' commits'
-# code what they build and boot. The results go to docs/measurements/HOST-fs-bench-ab-<time>-<mark>
-# unless named; each side's record in RESULTS/NAME/source.txt. The nightly's knobs, artifacts kept
-# between runs (CLADEFS_AB_KEEP), each side's exact counts (CLADEFS_AB_COUNTS) and rounds left out
-# rerun once (CLADEFS_AB_RERUN), scripts/lib/bench-ab-linux-host.sh's header says (TASK-441.1).
+# (default ext4-guest-kernel; empty: none). The sides build at CLADEFS_TEST_HOST_NICE (default 19),
+# as any test host run's work does (scripts/lib/host.sh). The cases, groups and vCPUs are
+# bench-host.sh's (CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS, CLADEFS_BENCH_VCPUS), the same for
+# both sides. The scripts that run are those of the commit this tree's scripts run
+# (scripts/lib/host.sh's CLADEFS_TEST_HOST_COMMIT), the sides' commits' code what they build and
+# boot. The results go to docs/measurements/HOST-fs-bench-ab-<time>-<mark> unless named; each side's
+# record in RESULTS/NAME/source.txt. The nightly's knobs, artifacts kept between runs
+# (CLADEFS_AB_KEEP), each side's exact counts (CLADEFS_AB_COUNTS) and rounds left out rerun once
+# (CLADEFS_AB_RERUN), scripts/lib/bench-ab-linux-host.sh's header says (TASK-441.1).
 #
 # CLADEFS_AB_SUITE=qualify runs the qualification in place of the fs bench (scripts/qualify.sh,
 # TASK-330.4): LangSmith's pin as side A, the candidate as B, before the candidate is handed to
-# them, ab.md each metric that moved and each side's failed checks (README's testing section says
+# them, ab.md each metric that moved and each side's failed checks (docs/testing.md says
 # how). Its harness this tree's, the same for both sides (scripts/lib/bench-ab-linux-host.sh);
 # CLADEFS_QUALIFY_SANDBOXES and CLADEFS_QUALIFY_SOAK_SECS size each round; its results go to
 # docs/measurements/HOST-qualify-ab-<time>-<mark>, and its job may take 12 h in a cgroup of 16 GiB,
-# the most a measurement has on ubu1 (CLADEFS_HOST_LIMIT, CLADEFS_HOST_MEM).
+# the most a measurement has on ubu1 (CLADEFS_TEST_HOST_LIMIT, CLADEFS_TEST_HOST_MEM).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"
@@ -46,7 +47,10 @@ case $suite in
     fs) limit=8h kind=fs-bench-ab ;;
     # The sandboxes' long mode, a quarter hour a round, and the soak's half hour, in the memory the
     # long mode is sized for (TASK-330.5).
-    qualify) limit=12h kind=qualify-ab; export CLADEFS_HOST_MEM=${CLADEFS_HOST_MEM:-16G} ;;
+    qualify)
+        limit=12h kind=qualify-ab
+        export CLADEFS_TEST_HOST_MEM=${CLADEFS_TEST_HOST_MEM:-16G}
+        ;;
     *) echo "CLADEFS_AB_SUITE is fs or qualify" >&2; exit 2 ;;
 esac
 host_bench=1

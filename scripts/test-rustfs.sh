@@ -11,10 +11,14 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/lib/rustfs.sh"
+# cladefs: cladefs-gc refuses to collect with no KMS (TASK-411.28): the bucket KMS of a test master key,
+# unless the environment names one.
+source "$root/scripts/lib/test-kms.sh"
+test_master_key
 rustfs_start
 trap rustfs_stop EXIT
 CLADEFS_S3_URL=s3://cladefs/test cargo nextest run --manifest-path "$root/Cargo.toml" \
-    -p extent_remote -p cladefs --run-ignored only -E 'test(/rustfs/)' "$@"
+    -p extent_bucket -p cladefs --run-ignored only -E 'test(/rustfs/)' "$@"
 # The collector, over what the tests left.
-cargo run --quiet --manifest-path "$root/Cargo.toml" -p extent_remote --bin cladefs-gc -- \
+cargo run --quiet --manifest-path "$root/Cargo.toml" -p extent_bucket --bin cladefs-gc -- \
     s3://cladefs/test --grace 0

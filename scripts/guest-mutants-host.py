@@ -14,17 +14,18 @@ case, and the check of it that fails if the case is a checks suite:
     scripts/guest-mutants-host.py RESULTS [MUTANT...]
     scripts/guest-mutants-host.py --check
 
-runs each (or those named) as a run of scripts/test-host.sh on its host (CLADEFS_HOST, ubu1 by
-default): in a worktree there of HEAD, which origin has, with the mutant's patch in
-(CLADEFS_HOST_PATCH, scripts/lib/host.sh), its killer's case alone, of its checks the killer's alone
-(CLADEFS_CHECKS), CLADEFS_E2E_ROUNDS times, on a guest kernel of its kind built from the worktree; the
-host keeps its kernels' builds (host_kernel, scripts/lib/linux-host-setup.sh), so each mutant
-recompiles fs/fxfs alone. It writes each run's results under RESULTS, prints each mutant's fate,
-and exits 1 unless each was killed. A mutant is killed only if its killer failed, as the run's
-summary says (scripts/guest_results.py); MISSED if not; BROKEN if the run failed otherwise, as a
-build that doesn't compile or a host lost, which says nothing of the killer. One whose killer is
-`none` isn't run. CLADEFS_MUTANT_KERNEL is the kernel of every mutant, in place of each's own; the
-other CLADEFS_* settings reach the host as scripts/test-host.sh says.
+runs each (or those named) as a run of scripts/test-host.sh on the test host (CLADEFS_TEST_HOST,
+ubu1 by default): in a worktree there of HEAD, which origin has, with the mutant's patch in
+(CLADEFS_TEST_HOST_PATCH, scripts/lib/host.sh), its killer's case alone, of its checks the
+killer's alone (CLADEFS_CHECKS), CLADEFS_E2E_REPEATS times, on a guest kernel of its kind built
+from the worktree; the test host keeps its kernels' builds (host_kernel,
+scripts/lib/linux-host-setup.sh), so each mutant recompiles fs/cladefs alone. It writes each run's
+results under RESULTS, prints each mutant's fate, and exits 1 unless each was killed. A mutant is
+killed only if its killer failed, as the run's summary says (scripts/guest_results.py); MISSED if
+not; BROKEN if the run failed otherwise, as a build that doesn't compile or a test host lost,
+which says nothing of the killer. One whose killer is `none` isn't run. CLADEFS_MUTANT_KERNEL is
+the kernel of every mutant, in place of each's own; the other CLADEFS_* and CLADEFSD_* settings
+reach the test host as scripts/test-host.sh says.
 
 --check runs nothing: every mutant's header names a kernel and a killer there is, and each of these
 patches applies to the sources as they are, as CI checks, and those of guest/sim's model of Fxfs
@@ -150,8 +151,8 @@ def check():
 def fate(status, summary, killer):
     """A mutant's fate, and what its run said, from the run's exit status and its guest tests'
     summary (scripts/guest_results.py), None if they never started, given its killer, a case and
-    the check of it to fail, if any: killed only if the killer failed, the case failing a round, or
-    running out of time in one, with its check among those failed (TASK-160.31)."""
+    the check of it to fail, if any: killed only if the killer failed, the case failing a repeat,
+    or running out of time in one, with its check among those failed (TASK-160.31)."""
     case, *check = killer
     ran = next((each for each in summary["cases"] if each["case"] == case), None) if summary else None
     failed = ran is not None and ran["outcome"] in guest_results.FAILED
@@ -166,10 +167,10 @@ def fate(status, summary, killer):
 
 
 def run(commit, results, each, kernel):
-    """Runs the mutant `each`, its patch applied to `commit`, on the host: its fate, and what its
-    run said."""
+    """Runs the mutant `each`, its patch applied to `commit`, on the test host: its fate, and what
+    its run said."""
     case, *check = each.killer
-    env = dict(os.environ, CLADEFS_HOST_COMMIT=commit, CLADEFS_HOST_PATCH=str(each.path),
+    env = dict(os.environ, CLADEFS_TEST_HOST_COMMIT=commit, CLADEFS_TEST_HOST_PATCH=str(each.path),
                CLADEFS_WORKSPACE_TESTS="0", CLADEFS_GUEST_KERNEL_BUILD=kernel, CLADEFS_E2E_TEST=case)
     env.pop("CLADEFS_CHECKS", None)
     env.update({"CLADEFS_CHECKS": check[0]} if check else {})

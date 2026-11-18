@@ -1,9 +1,9 @@
 # A COMMIT's root as large as a payload is taken, which each ROOT then copies into its reply,
 # uncounted by the connection's room: 768 MiB held of 16 (TASK-149.17).
 # Kind: memory
-# Killer: extentd::tests::hostile::what_requests_hold_is_within_the_room
---- a/crates/cladefs/src/extentd/codec.rs
-+++ b/crates/cladefs/src/extentd/codec.rs
+# Killer: cladefsd::tests::hostile::what_requests_hold_is_within_the_credit
+--- a/crates/cladefs/src/cladefsd/codec.rs
++++ b/crates/cladefs/src/cladefsd/codec.rs
 @@ -471,7 +471,7 @@ impl<'a> Request<'a> {
                      nothing()?;
                  }
@@ -12,4 +12,4 @@
 +                if root.is_some_and(|root| root.len() > MAX_PAYLOAD as usize) {
                      return Err(Errno::EINVAL);
                  }
-                 let commit = match (has(COMMIT_DURABLE), has(COMMIT_LOCAL)) {
+                 let commit = match (has(COMMIT_UPLOADED), has(COMMIT_LOCAL)) {

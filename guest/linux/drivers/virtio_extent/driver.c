@@ -9,7 +9,7 @@
  * one's `done`. A submitter waits for room when
  * the queue is full. The DAX window, if the device has one, is memremapped, so that the guest's
  * Fxfs reads extents mapped into it in place: as pages of a dax_device, with FS_DAX, as
- * virtio_fs_setup_dax makes its cache window, which files map (fs/fxfs/dax.c). cladefs: without
+ * virtio_fs_setup_dax makes its cache window, which files map (fs/cladefs/dax.c). cladefs: without
  * FS_DAX, the driver takes no window: nothing would map it.
  */
 
@@ -71,12 +71,12 @@ struct vext_queue {
 
 /*
  * cladefs: the device's DAX window, its shared memory region, as the pages of a dax_device, which
- * mappings of files map (fs/fxfs/dax.c).
+ * mappings of files map (fs/cladefs/dax.c).
  *
  * Its struct pages are made a part at a time, as dax_direct_access first reaches a part
  * (TASK-92.8). Made whole as the device was probed, a 2 GiB window's took a third of the guest's
  * boot, and 32 MiB of its memory (64 bytes a page), most of which a guest never maps: Fxfs hands
- * the window's space out first fit, from its start and from its middle (fs/fxfs/dax.c). A part is
+ * the window's space out first fit, from its start and from its middle (fs/cladefs/dax.c). A part is
  * a memory section of the window, or what of one it covers: hotplug maps a whole section's struct
  * pages on huge pages, and each making waits for an RCU grace period (mem_hotplug_begin).
  * Nothing reaches the window's memory but through dax_direct_access, so no page is used before it
@@ -249,11 +249,11 @@ bool virtio_extent_map_many(struct virtio_extent *vext)
 }
 EXPORT_SYMBOL_GPL(virtio_extent_map_many);
 
-bool virtio_extent_map_ahead(struct virtio_extent *vext)
+bool virtio_extent_map_prefault(struct virtio_extent *vext)
 {
-	return virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_MAP_AHEAD);
+	return virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_MAP_PREFAULT);
 }
-EXPORT_SYMBOL_GPL(virtio_extent_map_ahead);
+EXPORT_SYMBOL_GPL(virtio_extent_map_prefault);
 
 bool virtio_extent_read_only(struct virtio_extent *vext)
 {
@@ -365,10 +365,11 @@ static u32 vext_args_resized(struct vext_request *req, u32 data_len, u32 root_le
 	return sizeof(req->args.resized);
 }
 
-static u32 vext_args_epoch(struct vext_request *req, u32 data_len, u32 root_len)
+static u32 vext_args_commit_number(struct vext_request *req, u32 data_len, u32 root_len)
 {
-	req->args.epoch = (struct virtio_extent_epoch) { .epoch = cpu_to_le64(req->offset) };
-	return sizeof(req->args.epoch);
+	req->args.commit_number =
+		(struct virtio_extent_commit_number) { .commit = cpu_to_le64(req->offset) };
+	return sizeof(req->args.commit_number);
 }
 
 /* cladefs: a STATS names the ask it answers (TASK-111.4). */
@@ -411,7 +412,7 @@ static const struct vext_type {
 	[VIRTIO_EXTENT_T_RESIZED] = { "resized", vext_args_resized, .writes = true },
 	[VIRTIO_EXTENT_T_FREEZE] = { "freeze" },
 	[VIRTIO_EXTENT_T_ADVANCE] = { "advance", NULL, VEXT_IN },
-	[VIRTIO_EXTENT_T_LET_GO] = { "let_go", vext_args_epoch },
+	[VIRTIO_EXTENT_T_LET_GO] = { "let_go", vext_args_commit_number },
 	[VIRTIO_EXTENT_T_PIN] = { "pin", vext_args_id },
 	[VIRTIO_EXTENT_T_UNPIN] = { "unpin", vext_args_id },
 	/* 15 was writable DAX's SEALED: no type. */
@@ -1476,7 +1477,7 @@ static const unsigned int vext_features[] = {
 	VIRTIO_EXTENT_F_READ_ONLY,
 	VIRTIO_EXTENT_F_FREE_MANY,
 	VIRTIO_EXTENT_F_MAP_MANY,
-	VIRTIO_EXTENT_F_MAP_AHEAD,
+	VIRTIO_EXTENT_F_MAP_PREFAULT,
 	VIRTIO_EXTENT_F_STATS,
 };
 

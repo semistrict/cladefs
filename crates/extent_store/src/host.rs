@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Stores in directories of the host's, as cladefs's images and extentd's stores are: a directory
+//! Stores in directories of the host's, as cladefs's images and cladefsd's stores are: a directory
 //! holds one store, of one branch (TASK-165.7). Forks, points and deletions are the bucket's,
 //! which the store's description names: the store makes nothing of them but the commit that names
 //! a fork ([`Store::commit_fork`]).
 
 use crate::dir::{Dir as _, HostDir};
-use crate::layout::{DESCRIPTION, Description, StoreFile, Volume};
+use crate::layout::{DESCRIPTION, Description, StoreFile, Vdisk};
 use crate::store::{Store, UNMADE};
 use anyhow::{Context as _, Error};
 use extent_frame::segment::Branch;
@@ -19,15 +19,15 @@ use std::path::Path;
 /// as every host's store's does (TASK-165.6); it is unmade until its maker says it is whole
 /// ([`Store::made`], TASK-196). Its description is made last: until it is durable, the directory
 /// is no store, whatever else is in it. Opening it takes its branch in the bucket
-/// ([`Store::recover`], `crate::upload`), and its branch's cell, of which it is `volume`
+/// ([`Store::recover`], `crate::upload`), and its branch's cell, of which it is `vdisk`
 /// (TASK-364).
 pub fn create_host(
     path: &Path,
     description: Description,
     bucket: &str,
-    volume: Volume,
+    vdisk: Vdisk,
 ) -> Result<(), Error> {
-    Store::make(&HostDir::new(path)?, description, Some(bucket), Some(volume))
+    Store::make(&HostDir::new(path)?, description, Some(bucket), Some(vdisk))
 }
 
 /// cladefs: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
@@ -51,9 +51,10 @@ pub fn unmade_host(path: &Path) -> bool {
 }
 
 /// cladefs: places the store at `path` (TASK-39.7): records, durably, in its description, the
-/// fencing token its writer takes its branch's lease with from then on, the boot ID of the
-/// placement it is, which a later placement's exceeds. A writer takes the lease only with a token
-/// as high as the last writer's: a placement cut off takes no branch back from the one after it.
+/// fencing token its host takes its cell with from then on, the boot ID of the placement it
+/// is, which a later placement's exceeds; its writer takes its branch's head with the epoch of
+/// that taking of the cell. A placement takes the cell only with a token as high as the last
+/// one's: a placement cut off takes no branch back from the one after it.
 /// A store never placed takes it with its host's (TASK-165.9: the token is the description's).
 pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     let mut file = store_file(path)?;
@@ -300,18 +301,18 @@ mod tests {
         let description = Description {
             block_size: BLOCK as u32,
             capacity: 1 << 20,
-            branch: extent_remote::layout::test_branch(3),
+            branch: extent_bucket::layout::test_branch(3),
         };
         create_host(
             &path,
             description,
             BUCKET,
-            crate::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+            crate::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
         )
         .unwrap();
         let store = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
         let store = store
-            .open(Options::default(), crate::Opening::new(extent_remote::layout::test_branch(3)))
+            .open(Options::default(), crate::Opening::new(extent_bucket::layout::test_branch(3)))
             .unwrap();
         store.made().unwrap();
         store.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).unwrap();
@@ -356,7 +357,7 @@ mod tests {
         delete_host(&path, |branch| Ok(called.set(Some(branch)))).unwrap();
         assert_eq!(
             (called.get(), path.exists()),
-            (Some(extent_remote::layout::test_branch(3)), false)
+            (Some(extent_bucket::layout::test_branch(3)), false)
         );
     }
 

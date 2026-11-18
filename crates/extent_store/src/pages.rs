@@ -4,7 +4,7 @@
 
 //! cladefs: the store's page cache (TASK-433): what holds the bytes its data files are written with
 //! until they are on the host's disk, and for as long after as memory allows, in memory of the
-//! process's own, which the extent daemon governs with the rest (`cladefs::extentd::memory`). Its
+//! process's own, which the extent daemon governs with the rest (`cladefs::cladefsd::memory`). Its
 //! files bypass the host's page cache (`O_DIRECT`), so that no byte a store holds is held twice,
 //! in two memories each budgeted as if the other weren't there. It does what the host's did for
 //! them, as Linux's does (mm/filemap.c, mm/page-writeback.c, fs/fs-writeback.c):
@@ -18,9 +18,10 @@
 //!   file at a time (`I_SYNC`): a sync, the flusher and a writer writing back take turns, each
 //!   waiting for the last to end, which carries what it covers ([`Shared::writeback`]). A page
 //!   written while its write-back is in flight is dirty again, and written again after: writers
-//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back what has been
-//!   dirty longer than [`Options::expire`], and the oldest first while more than
-//!   [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
+//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back
+//!   first what a writer asked it to begin ([`Cached::write_behind`], as `sync_file_range`'s
+//!   `SYNC_FILE_RANGE_WRITE` begins it), then what has been dirty longer than
+//!   [`Options::expire`], and the oldest first while more than [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
 //!   as a directory whose I/O is all its callers' has ([`crate::Dir::concurrent`]), has the writer
 //!   that takes it past [`Options::background`] write back itself, as Linux's writers did before
 //!   per-device flushers: what it writes, and when, is then a function of the writes alone.
@@ -32,6 +33,14 @@
 //!   failed fails the sync after it, once ([`Pages::failed`], errseq's semantics for one opener).
 //! - **Eviction** takes clean pages alone, of the files used least recently first
 //!   ([`PageCache::evict_to`]), never writing any: what is dirty is the flusher's to write.
+//! - **Files are ordered by their keys as they were once** ([`PageCache::files_by`]): when they
+//!   were used, when they were dirtied, which other threads change as the cache goes through them,
+//!   so that no comparison sees another's file changed since (TASK-493).
+//! - **The flusher's work is the process's** ([`FLUSHER`]): every store's files wait on it, so a
+//!   panic on it, which no store's halt contains, aborts the extent daemon as one holding a lock
+//!   shared beyond one store does ([`crate::shared`], TASK-149.24). Elsewhere, as in tests, its
+//!   death is said ([`PageCache::flusher_died`]), and a writer it would have let go panics rather
+//!   than wait for good.
 //! - **A file removed** keeps its pages while it is open, as an unlinked inode does, and drops
 //!   them with its last opening, the dirty ones unwritten (`truncate_inode_pages` at the last
 //!   `iput`): a segment's raw file, framed and gone, never reaches the disk but what its syncs
@@ -43,8 +52,9 @@
 //! Shuttle schedules among them, run through it as the store does on a host.
 
 use crate::dir::File;
+use crate::shared::Holding;
 use crate::sync::{Condvar, Mutex, MutexGuard};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -57,6 +67,10 @@ pub const PAGE: u64 = 4096;
 
 /// The most a write-back writes at once: contiguous dirty pages, one write.
 pub const CHUNK: u64 = 1 << 20;
+
+/// What a [`PageCache`]'s flusher holds for its life, as a lock shared beyond one store
+/// ([`Holding::work`]): what the extent daemon's log names as it aborts for a panic on it.
+pub const FLUSHER: &str = "page cache flusher";
 
 /// When a [`PageCache`] writes back, and when it holds writers back.
 #[derive(Clone, Copy, Debug)]
@@ -73,7 +87,8 @@ pub struct Options {
 }
 
 /// Bounds that hold the cache to what a process holds whatever its bucket's backlog (TASK-317):
-/// the backlog is on the disk, what the cache holds a bounded window of it, the latest.
+/// the backlog is on the disk, what the cache holds a bounded window of it, the latest. What a
+/// process with no governor goes by, and the least a governed one does ([`PageCache::size_to`]).
 impl Default for Options {
     fn default() -> Self {
         Self {
@@ -104,9 +119,17 @@ pub struct Usage {
 /// thread, or by its writers if it has none, evicted together. One for the process ([`shared`]),
 /// which the extent daemon governs.
 pub struct PageCache {
+    /// What it was made with: its expiry, and the least of its bounds ([`PageCache::size_to`]).
     options: Options,
+    /// Its bounds as they are: [`Options::background`], [`Options::hard`] and [`Options::most`],
+    /// raised from `options`' by a governor as memory allows ([`PageCache::size_to`]).
+    background: AtomicU64,
+    hard: AtomicU64,
+    most: AtomicU64,
     /// Whether a flusher thread writes back for it; if not, its writers do.
     flusher: bool,
+    /// Whether its flusher died, a panic unwinding it: nothing writes back for it since.
+    flusher_died: AtomicBool,
     held: AtomicU64,
     peak: AtomicU64,
     dirty: AtomicU64,
@@ -117,6 +140,9 @@ pub struct PageCache {
     /// Each use's number, which says which files were used least recently.
     uses: AtomicU64,
     files: Mutex<Vec<Weak<dyn Paged>>>,
+    /// The ranges of files writers asked to be written back, waiting for none of it, in the order
+    /// asked: the flusher's to begin before anything else ([`Cached::write_behind`]).
+    begun: Mutex<VecDeque<(Weak<dyn Paged>, Range<u64>)>>,
     /// Wakes the flusher.
     flush: Condvar,
     flushing: Mutex<bool>,
@@ -155,7 +181,11 @@ impl PageCache {
     fn made(options: Options, flusher: bool) -> Arc<Self> {
         Arc::new(Self {
             options,
+            background: AtomicU64::new(options.background),
+            hard: AtomicU64::new(options.hard),
+            most: AtomicU64::new(options.most),
             flusher,
+            flusher_died: AtomicBool::new(false),
             held: AtomicU64::new(0),
             peak: AtomicU64::new(0),
             dirty: AtomicU64::new(0),
@@ -164,6 +194,7 @@ impl PageCache {
             writes: AtomicU64::new(0),
             uses: AtomicU64::new(0),
             files: Mutex::default(),
+            begun: Mutex::default(),
             flush: Condvar::new(),
             flushing: Mutex::new(false),
             drained: Condvar::new(),
@@ -182,9 +213,49 @@ impl PageCache {
         }
     }
 
-    /// What it goes by.
+    /// Whether its flusher died, a panic unwinding it, as one can only where a panic on it does not
+    /// abort the process ([`FLUSHER`]): nothing writes back what its writers leave dirty since.
+    pub fn flusher_died(&self) -> bool {
+        self.flusher_died.load(Ordering::Relaxed)
+    }
+
+    /// What it goes by now: its bounds as a governor sized them, if one did.
     pub fn options(&self) -> Options {
-        self.options
+        Options {
+            background: self.background(),
+            hard: self.hard(),
+            most: self.most(),
+            expire: self.options.expire,
+        }
+    }
+
+    /// cladefs: sizes the cache to `room`, the bytes the process's governor leaves it, as Linux
+    /// sizes its page cache to the memory free (TASK-433.8): it holds as much as `room`, the
+    /// flusher writes back past a tenth of it dirty, and writers wait past a fifth
+    /// (`vm.dirty_background_ratio` and `vm.dirty_ratio`'s defaults), none less than what it was
+    /// made with ([`Options`]). The governor evicts it to `room` as well ([`PageCache::evict_to`]),
+    /// so that what this allows past `room` under pressure is dirty pages alone, to be written.
+    /// With the fixed bounds alone, a burst of 256 MiB, as store-bench's, was evicted as it was
+    /// written, and read back from the disk to be framed: the commit after it 2-4x slower on
+    /// ubu1 than through the host's page cache.
+    pub fn size_to(&self, room: u64) {
+        let floors = self.options;
+        self.background.store((room / 10).max(floors.background), Ordering::Relaxed);
+        self.hard.store((room / 5).max(floors.hard), Ordering::Relaxed);
+        self.most.store(room.max(floors.most), Ordering::Relaxed);
+        self.drained();
+    }
+
+    fn background(&self) -> u64 {
+        self.background.load(Ordering::Relaxed)
+    }
+
+    fn hard(&self) -> u64 {
+        self.hard.load(Ordering::Relaxed)
+    }
+
+    fn most(&self) -> u64 {
+        self.most.load(Ordering::Relaxed)
     }
 
     /// The bytes it holds: what the extent daemon's governor counts as the process's.
@@ -199,9 +270,7 @@ impl PageCache {
         if self.bytes() <= target {
             return self.bytes();
         }
-        let mut files = self.files();
-        files.sort_by_key(|file| file.used());
-        for file in files {
+        for file in self.files_by(|file| file.used()) {
             if self.bytes() <= target {
                 break;
             }
@@ -234,6 +303,16 @@ impl PageCache {
         files.iter().filter_map(Weak::upgrade).collect()
     }
 
+    /// The files it holds pages of, ordered by `key`, each file's taken once, before any is
+    /// compared: keys other threads change as it goes, its files' uses and writes, ordered as each
+    /// comparison finds them, are no order, which a sort panics on (TASK-493).
+    fn files_by<K: Ord>(&self, key: impl Fn(&dyn Paged) -> K) -> Vec<Arc<dyn Paged>> {
+        let mut keyed: Vec<(K, Arc<dyn Paged>)> =
+            self.files().into_iter().map(|file| (key(&*file), file)).collect();
+        keyed.sort_by(|(one, _), (other, _)| one.cmp(other));
+        keyed.into_iter().map(|(_, file)| file).collect()
+    }
+
     /// A use's number.
     fn used(&self) -> u64 {
         self.uses.fetch_add(1, Ordering::Relaxed)
@@ -248,13 +327,21 @@ impl PageCache {
         self.flush.notify_one();
     }
 
+    /// Has the flusher begin writing back `range` of `file`, before anything else it writes back,
+    /// if it has one; with none, nothing: its writers write back past [`Options::background`].
+    fn begin(&self, file: Weak<dyn Paged>, range: Range<u64>) {
+        if !self.flusher {
+            return;
+        }
+        self.begun.lock().unwrap().push_back((file, range));
+        self.wake();
+    }
+
     /// Writes back, on the caller's thread, the files dirty the longest, a few chunks of each in
     /// turn, until no more than `dirty` bytes are dirty, or a write-back fails, which the file's
     /// next sync reports.
     fn write_back_to(&self, dirty: u64) {
-        let mut files = self.files();
-        files.sort_by_key(|file| file.dirtied());
-        for file in files {
+        for file in self.files_by(|file| file.dirtied()) {
             if self.dirty.load(Ordering::Relaxed) <= dirty {
                 return;
             }
@@ -270,14 +357,18 @@ impl PageCache {
     /// Holds a writer about to dirty pages back while more than [`Options::hard`] is dirty, until
     /// write-back brings it under, the flusher woken. With no flusher, its writers keep it under
     /// [`Options::background`] as they go ([`PageCache::dirtied`]); what failed to be written
-    /// stays dirty, which none waits for.
+    /// stays dirty, which none waits for. Its flusher dead, it panics, as none would let it go.
     fn throttle(&self) {
-        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.options.hard {
+        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.hard() {
             return;
         }
         self.wake();
         let mut holding = self.holding.lock().unwrap();
-        while self.dirty.load(Ordering::Relaxed) > self.options.hard {
+        while self.dirty.load(Ordering::Relaxed) > self.hard() {
+            assert!(
+                !self.flusher_died(),
+                "the page cache's flusher died: nothing writes back for a writer held at its bound"
+            );
             holding = self.drained.wait_timeout(holding, Duration::from_millis(10)).unwrap().0;
             self.wake();
         }
@@ -293,23 +384,51 @@ impl PageCache {
     /// dirty, or the writer, with none; and clean ones are evicted once more than
     /// [`Options::most`] is held.
     fn dirtied(&self) {
-        if self.dirty.load(Ordering::Relaxed) > self.options.background {
+        if self.dirty.load(Ordering::Relaxed) > self.background() {
             if self.flusher {
                 self.wake();
             } else {
-                self.write_back_to(self.options.background);
+                self.write_back_to(self.background());
             }
         }
-        if self.bytes() > self.options.most {
-            self.evict_to(self.options.most);
+        if self.bytes() > self.most() {
+            self.evict_to(self.most());
         }
     }
 }
 
-/// The flusher: while the cache is there, it writes back what has been dirty longer than
-/// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files dirty
-/// the longest, a [`CHUNK`]'s worth of writes each in turn.
+impl PageCache {
+    /// A pass of the flusher's, as of `now`: it writes back the ranges writers asked it to begin
+    /// ([`PageCache::begin`]), in the order asked; then what has been dirty longer than
+    /// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files
+    /// dirty the longest, 16 [`CHUNK`]s' worth of writes each in turn.
+    fn flush_pass(&self, now: Instant) {
+        loop {
+            let Some((file, range)) = self.begun.lock().unwrap().pop_front() else { break };
+            let Some(file) = file.upgrade() else { continue };
+            if let Err(err) = file.write_range(range) {
+                log::warn!("extent store: writing back a range of a file's pages: {err}");
+            }
+        }
+        for file in self.files_by(|file| file.dirtied()) {
+            let Some(dirtied) = file.dirtied() else { continue };
+            let over = self.dirty.load(Ordering::Relaxed) > self.background();
+            if !over && now.duration_since(dirtied) < self.options.expire {
+                break;
+            }
+            if let Err(err) = file.write_back(16 * CHUNK) {
+                log::warn!("extent store: writing back a file's pages: {err}");
+            }
+        }
+    }
+}
+
+/// The flusher: while the cache is there, a pass ([`PageCache::flush_pass`]) each time it is
+/// woken, or a quarter of [`Options::expire`] after the last. The process's work for its life
+/// ([`FLUSHER`]); unwound by a panic, it says so ([`Dying`]).
 fn flush_while(cache: Weak<PageCache>) {
+    let _work = Holding::work(FLUSHER);
+    let _dying = Dying { cache: cache.clone() };
     loop {
         let Some(cache) = cache.upgrade() else { return };
         {
@@ -319,19 +438,26 @@ fn flush_while(cache: Weak<PageCache>) {
                 cache.flush.wait_timeout_while(woken, interval, |woken| !*woken).unwrap();
             *woken = false;
         }
-        let now = Instant::now();
-        let mut files = cache.files();
-        files.sort_by_key(|file| file.dirtied());
-        for file in files {
-            let Some(dirtied) = file.dirtied() else { continue };
-            let over = cache.dirty.load(Ordering::Relaxed) > cache.options.background;
-            if !over && now.duration_since(dirtied) < cache.options.expire {
-                break;
-            }
-            if let Err(err) = file.write_back(16 * CHUNK) {
-                log::warn!("extent store: writing back a file's pages: {err}");
-            }
+        cache.flush_pass(Instant::now());
+    }
+}
+
+/// A flusher's death, said as a panic unwinds it, where the panic did not abort the process: the
+/// cache knows it ([`PageCache::flusher_died`]), the log says it, and writers held back, woken,
+/// find it out ([`PageCache::throttle`]).
+struct Dying {
+    cache: Weak<PageCache>,
+}
+
+impl Drop for Dying {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
         }
+        let Some(cache) = self.cache.upgrade() else { return };
+        cache.flusher_died.store(true, Ordering::Relaxed);
+        log::error!("extent store: the page cache's flusher died, a panic unwinding it (TASK-493)");
+        cache.drained();
     }
 }
 
@@ -343,6 +469,8 @@ trait Paged: Send + Sync {
     fn dirtied(&self) -> Option<Instant>;
     /// Writes back up to `most` bytes of its dirty pages, in its order.
     fn write_back(&self, most: u64) -> io::Result<()>;
+    /// Writes back its dirty pages in `range`.
+    fn write_range(&self, range: Range<u64>) -> io::Result<()>;
     /// Drops its clean pages.
     fn evict_clean(&self);
     /// Writes back all its dirty pages, waiting for every write-back of it in flight.
@@ -489,9 +617,15 @@ impl<F: File> Shared<F> {
         self.writeback.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Its pages, locked; as a panic left them, if one did ([`InFlight`]).
+    /// Its pages, locked, a use of it; as a panic left them, if one did ([`InFlight`]).
     fn lock(&self) -> MutexGuard<'_, Pages> {
         self.used.store(self.cache.used(), Ordering::Relaxed);
+        self.pages()
+    }
+
+    /// Its pages, locked, as the cache's eviction and flusher look at them, no use of it; as a
+    /// panic left them, if one did: a lock a writer's panic poisoned panics no flusher after it.
+    fn pages(&self) -> MutexGuard<'_, Pages> {
         self.pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
@@ -556,20 +690,23 @@ impl<F: File> Shared<F> {
             }
             let start = run[0] * PAGE;
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
-            let mut bytes = Vec::with_capacity((end - start) as usize);
+            // Assembled in memory aligned to blocks, which direct I/O writes as it is: whole
+            // pages, but at the file's end (TASK-433.8).
+            let mut buffer = extent_bucket::direct::Buffer::new(run.len() * PAGE as usize);
             let mut written = Vec::with_capacity(run.len());
-            for &index in &run {
+            for (&index, into) in run.iter().zip(buffer.bytes_mut().chunks_exact_mut(PAGE as usize))
+            {
                 let page = pages.pages.get_mut(&index).unwrap();
                 page.writing = true;
                 written.push((index, page.last));
-                bytes.extend_from_slice(&page.bytes);
+                into.copy_from_slice(&page.bytes);
             }
-            bytes.truncate((end - start) as usize);
+            let bytes = &buffer.bytes()[..(end - start) as usize];
             let len = run.len() as u64 * PAGE;
             self.cache.writing.fetch_add(len, Ordering::Relaxed);
             drop(pages);
             let in_flight = InFlight { shared: self, run: &written, len, ended: false };
-            let wrote = self.file.write_at(&bytes, start);
+            let wrote = self.file.write_at(bytes, start);
             pages = in_flight.end();
             for &(index, last) in &written {
                 let Some(page) = pages.pages.get_mut(&index) else { continue };
@@ -668,11 +805,15 @@ impl<F: File> Paged for Shared<F> {
     }
 
     fn dirtied(&self) -> Option<Instant> {
-        self.pages.lock().unwrap().dirtied
+        self.pages().dirtied
     }
 
     fn write_back(&self, most: u64) -> io::Result<()> {
         self.write_runs(0..u64::MAX, None, Some(most))
+    }
+
+    fn write_range(&self, range: Range<u64>) -> io::Result<()> {
+        self.flush(range, None)
     }
 
     fn write_back_all(&self) -> io::Result<()> {
@@ -680,7 +821,7 @@ impl<F: File> Paged for Shared<F> {
     }
 
     fn evict_clean(&self) {
-        let mut pages = self.pages.lock().unwrap();
+        let mut pages = self.pages();
         let before = pages.pages.len();
         pages.pages.retain(|_, page| page.dirty.is_some() || page.writing);
         let evicted = (before - pages.pages.len()) as u64 * PAGE;
@@ -782,8 +923,17 @@ impl<F: File> File for Cached<F> {
         self.shared.file.write_back(offset, len)
     }
 
-    fn write_behind(&self, _offset: u64, _len: u64) -> io::Result<()> {
-        self.shared.cache.wake();
+    /// Has the flusher begin writing back the pages in the range, waiting for none of it, before
+    /// anything else it writes back, as `sync_file_range`'s `SYNC_FILE_RANGE_WRITE` has the host's
+    /// begin it: so that the writer's [`File::write_back`] of the range after, which waits, finds
+    /// it written, or in flight, rather than write it all itself then (TASK-433.8). Until then
+    /// this woke the flusher alone, which wrote nothing under [`Options::background`]: the writer
+    /// then wrote back every range it waited for, a MiB at a time, store-bench `burst`'s writes
+    /// 2.3x slower and its commit 5x on ubu1 against the host's page cache. A failure is the
+    /// file's next sync's. With no flusher, nothing: its writers write back as they go.
+    fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
+        let paged: Arc<dyn Paged> = self.shared.clone();
+        self.shared.cache.begin(Arc::downgrade(&paged), offset..offset + len);
         Ok(())
     }
 
@@ -920,6 +1070,47 @@ mod tests {
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
     }
 
+    /// Sized to a governor's room, the cache's bounds are a tenth, a fifth and all of it, none
+    /// below what it was made with; sized down again, they go back to those (TASK-433.8).
+    #[test]
+    fn caches_size_to_the_room_a_governor_leaves() {
+        let cache = PageCache::without_flusher(Options::default());
+        let made = Options::default();
+        cache.size_to(4 << 30);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most, sized.expire),
+            ((4 << 30) / 10, (4 << 30) / 5, 4 << 30, made.expire)
+        );
+        cache.size_to(64 << 20);
+        let sized = cache.options();
+        assert_eq!(
+            (sized.background, sized.hard, sized.most),
+            (made.background, made.hard, made.most)
+        );
+    }
+
+    /// A range written behind is written back by the flusher, ahead of any threshold or expiry,
+    /// waiting for none of it: the rest of the file stays dirty (TASK-433.8).
+    #[test]
+    fn ranges_written_behind_are_written_back_by_the_flusher() {
+        let dir = MemDisk::new();
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
+        let data = pattern(9, 2 * PAGE as usize);
+        file.write_at(&data, 0).unwrap();
+        file.write_behind(0, PAGE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cache.usage().dirty > PAGE && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.usage().dirty, PAGE);
+        let mut under = vec![1; 2 * PAGE as usize];
+        file.file().read_at(&mut under, 0).unwrap();
+        assert_eq!(&under[..PAGE as usize], &data[..PAGE as usize]);
+        assert_eq!(&under[PAGE as usize..], &vec![0; PAGE as usize][..], "the rest unwritten");
+    }
+
     /// A file's pages dropped, the dirty ones unwritten, as a removed file's are.
     #[test]
     fn cancelled_pages_are_never_written() {
@@ -968,5 +1159,199 @@ mod tests {
             }
         }
         assert_eq!(cache.usage().dirty, 0);
+    }
+
+    /// A file whose keys change as they are read, as a file other threads use and write does
+    /// while the cache orders its files: each read of either key, its own or another file's,
+    /// changes every file's, to one that orders the files anew, as no file's use or write since
+    /// can be ruled out (TASK-493). Counts what the cache asks of it.
+    struct Shifting {
+        reads: Arc<AtomicU64>,
+        since: Instant,
+        asked: AtomicU64,
+    }
+
+    impl Paged for Shifting {
+        fn used(&self) -> u64 {
+            self.read()
+        }
+
+        fn dirtied(&self) -> Option<Instant> {
+            Some(self.since + Duration::from_nanos(self.read() >> 4))
+        }
+
+        fn write_back(&self, _most: u64) -> io::Result<()> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn write_range(&self, _range: Range<u64>) -> io::Result<()> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn evict_clean(&self) {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn write_back_all(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shifting {
+        /// A key as of this read: the read's number, scrambled (splitmix64's finish).
+        fn read(&self) -> u64 {
+            let mut key = self.reads.fetch_add(1, Ordering::Relaxed);
+            key = (key ^ (key >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            key = (key ^ (key >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            key ^ (key >> 31)
+        }
+    }
+
+    /// `count` [`Shifting`] files, held by the caller, in `cache`.
+    fn shifting(cache: &PageCache, count: usize) -> Vec<Arc<Shifting>> {
+        let (reads, since) = (Arc::new(AtomicU64::new(0)), Instant::now());
+        let files: Vec<Arc<Shifting>> = (0..count)
+            .map(|_| {
+                let file = Shifting { reads: reads.clone(), since, asked: AtomicU64::new(0) };
+                Arc::new(file)
+            })
+            .collect();
+        for file in &files {
+            let paged: Arc<dyn Paged> = file.clone();
+            cache.files.lock().unwrap().push(Arc::downgrade(&paged));
+        }
+        files
+    }
+
+    /// Each file asked once, as many times as the cache went through them.
+    fn asked_each(files: &[Arc<Shifting>], times: u64) {
+        for (at, file) in files.iter().enumerate() {
+            assert_eq!(file.asked.load(Ordering::Relaxed), times, "file {at}");
+        }
+    }
+
+    /// Eviction, writers' write-back and the flusher order the files by keys other threads change
+    /// as they go: each by its key as it was once, not as each comparison finds it, which is no
+    /// order at all, and a sort given none panics (Rust's "user-provided comparison function does
+    /// not correctly implement a total order"), as the flusher did on ubu1, dying (TASK-493).
+    #[test]
+    fn files_ordered_by_keys_changing_as_they_are_read() {
+        for count in 0..=256 {
+            let cache = PageCache::without_flusher(Options::default());
+            let files = shifting(&cache, count);
+            cache.held.store(u64::MAX / 2, Ordering::Relaxed);
+            cache.evict_to(0);
+            asked_each(&files, 1);
+            cache.dirty.store(u64::MAX / 2, Ordering::Relaxed);
+            cache.write_back_to(0);
+            asked_each(&files, 2);
+            cache.flush_pass(Instant::now());
+            asked_each(&files, 3);
+        }
+    }
+
+    /// A file whose pages panic the cache as it looks at them: a bug the flusher's pass runs into.
+    struct Panicking;
+
+    impl Paged for Panicking {
+        fn used(&self) -> u64 {
+            0
+        }
+
+        fn dirtied(&self) -> Option<Instant> {
+            panic!("a bug in a file's pages, as a test's");
+        }
+
+        fn write_back(&self, _most: u64) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write_range(&self, _range: Range<u64>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn evict_clean(&self) {}
+
+        fn write_back_all(&self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A cache whose flusher was woken to a [`Panicking`] file, and the file, which the caller holds.
+    fn flusher_panicking() -> (Arc<PageCache>, Arc<dyn Paged>) {
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let file: Arc<dyn Paged> = Arc::new(Panicking);
+        cache.files.lock().unwrap().push(Arc::downgrade(&file));
+        cache.wake();
+        (cache, file)
+    }
+
+    /// Whether `cache`'s flusher died within 10 s.
+    fn died_within(cache: &PageCache) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !cache.flusher_died() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        cache.flusher_died()
+    }
+
+    /// A flusher a panic unwinds says it died, where nothing aborts the process: the cache knows it,
+    /// and a writer held back at its bound panics, as nothing would write back for it, rather than
+    /// wait for good, as it did, the flusher dead and none knowing (TASK-493).
+    #[test]
+    fn a_dead_flusher_is_known_and_holds_no_writer_for_good() {
+        let (cache, _file) = flusher_panicking();
+        assert!(died_within(&cache), "the flusher died unsaid");
+        cache.dirty.store(cache.hard() + 1, Ordering::Relaxed);
+        let held = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cache.throttle()))
+            .unwrap_err();
+        let said = (held.downcast_ref::<&str>().copied())
+            .or_else(|| held.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(
+            said,
+            Some(
+                "the page cache's flusher died: nothing writes back for a writer held at its bound"
+            )
+        );
+        cache.dirty.store(0, Ordering::Relaxed);
+    }
+
+    /// What [`child_flusher_panics`] does, if its parent sets it.
+    const CHILD: &str = "EXTENT_STORE_PAGES_CHILD";
+
+    /// Run by [`a_panic_on_the_flusher_aborts_the_daemon`], in a process of its own: aborting on
+    /// panics holding what is shared beyond one store, as the extent daemon does, its cache's
+    /// flusher panicking; it says if the process lived on.
+    #[test]
+    #[ignore = "run by a_panic_on_the_flusher_aborts_the_daemon, in a process of its own"]
+    fn child_flusher_panics() {
+        if std::env::var(CHILD).is_err() {
+            return;
+        }
+        crate::shared::abort_on_panics();
+        let (cache, _file) = flusher_panicking();
+        let died = died_within(&cache);
+        println!("LIVED ON, the flusher dead: {died}");
+    }
+
+    /// A panic on the flusher aborts the extent daemon, which a panic holding a lock shared beyond
+    /// one store does (TASK-149.24), its log naming the flusher: every store's files wait on it, and
+    /// no store's halt contains its death, which left the daemon going on with nothing writing back
+    /// what was dirty but writers held at the bound (TASK-493).
+    #[test]
+    fn a_panic_on_the_flusher_aborts_the_daemon() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "pages::tests::child_flusher_panics", "--ignored", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let said =
+            String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{said}");
+        assert!(crate::shared::aborted_holding(&said, FLUSHER), "{said}");
+        assert!(!said.contains("LIVED ON"), "{said}");
     }
 }

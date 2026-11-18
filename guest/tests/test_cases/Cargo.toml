@@ -4,9 +4,12 @@ edition = "2024"
 
 [features]
 host = [
+    "base32_id",
     "bytes",
     "cladefs",
-    "extent_remote",
+    "extent_frame",
+    "extent_keys",
+    "extent_bucket",
     "extent_store",
     "follower_history",
     "futures",
@@ -37,8 +40,14 @@ cladefs = { path = "../../../crates/cladefs", optional = true, features = ["test
 futures = { version = "0.3.34", optional = true }
 # cladefs's extent store, whose directory the crash test takes before it copies it (TASK-129).
 extent_store = { path = "../../../crates/extent_store", optional = true }
+# How cladefs writes IDs, as the stores' files are named (TASK-504).
+base32_id = { path = "../../../crates/base32_id", optional = true }
+# cladefs's frames, whose trailers say whether a run's objects are encrypted (TASK-411.15).
+extent_frame = { path = "../../../crates/extent_frame", optional = true }
+# cladefs's KMS, the local one a run's stores are encrypted under (TASK-411.15).
+extent_keys = { path = "../../../crates/extent_keys", optional = true }
 # cladefs's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
-extent_remote = { path = "../../../crates/extent_remote", optional = true }
+extent_bucket = { path = "../../../crates/extent_bucket", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "time", "net", "sync", "macros"] }
 # cladefs's history checker of followers (TASK-42.1), which the followers' torture test's host runs.
 follower_history = { path = "../../../crates/follower_history", optional = true }

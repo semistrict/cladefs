@@ -25,7 +25,7 @@ def git(repo, *args):
 class ScopeTest(unittest.TestCase):
     def test_what_guest_sim_tests_runs_it_whole(self):
         for path in (
-            "guest/linux/fs/fxfs/dax.c",
+            "guest/linux/fs/cladefs/dax.c",
             "guest/linux/patches/0010-fs-dax-insert-entry.patch",
             "guest/sim/kernel/mm.c",
             "guest/sim/zloop.sh",
@@ -85,7 +85,7 @@ class BaseTest(unittest.TestCase):
         self.commit("crates/a.rs")
         self.assertEqual(self.run_scope(), "smoke")
         self.assertEqual(self.run_scope("0" * 40, "HEAD"), "smoke")
-        self.commit("guest/linux/fs/fxfs/dax.c")
+        self.commit("guest/linux/fs/cladefs/dax.c")
         self.assertEqual(self.run_scope(""), "full")
 
     def test_a_dispatch_may_ask_for_either(self):

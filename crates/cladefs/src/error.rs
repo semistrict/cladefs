@@ -64,7 +64,7 @@ impl Error {
 }
 
 /// cladefs: an uploader's failure, or an opening's (`extent_store::upload`): its errno, as cladefs's
-/// `remote` maps it, as context; this host's own as the error it is, whose causes say its errno.
+/// `bucket` maps it, as context; this host's own as the error it is, whose causes say its errno.
 impl From<extent_store::upload::Failure> for Error {
     fn from(failure: extent_store::upload::Failure) -> Self {
         use extent_store::upload::Failure;
@@ -74,7 +74,7 @@ impl From<extent_store::upload::Failure> for Error {
                     .unwrap_or_else(|error| anyhow::anyhow!("{error:#}")),
             ),
             failure => {
-                let errno = crate::remote::errno(&failure);
+                let errno = crate::bucket::errno(&failure);
                 let error = anyhow::Error::new(failure);
                 Self(match errno {
                     Some(errno) => error.context(errno),
@@ -128,7 +128,7 @@ mod tests {
     use fxfs::errors::FxfsError;
 
     /// Fxfs's errors are the errnos Linux's filesystems give them, the guest's among them
-    /// (guest/rust/fxfs-linux), as the one table has them (`fxfs_posix::errno`), and an errno an
+    /// (guest/rust/cladefs-linux), as the one table has them (`fxfs_posix::errno`), and an errno an
     /// error carries is its own.
     #[test]
     fn fxfs_errors_are_linuxs_errnos() {

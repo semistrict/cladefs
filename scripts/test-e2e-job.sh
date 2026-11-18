@@ -20,8 +20,8 @@
 #   scripts/test-e2e-job.sh RESULTS [ARG...]
 #
 # ARGs are test-e2e.sh's, and so is the environment, but for CLADEFS_E2E_RESULTS, which this sets:
-# the bucket is CLADEFS_EXTENTD_REMOTE's, or test-e2e.sh's own, a file bucket in memory, on tmpfs,
-# whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for. Its status is test-e2e.sh's, 1 if copying
+# the bucket is CLADEFSD_BUCKET's, or test-e2e.sh's own, a file bucket in memory, on tmpfs,
+# whose distance CLADEFS_BUCKET_LATENCY_MS stands for. Its status is test-e2e.sh's, 1 if copying
 # the results failed.
 #
 # A TMPDIR unset, or on another filesystem than ext4, is refused (2) before anything runs, as
@@ -57,7 +57,7 @@ CLADEFS_E2E_RESULTS="$work" "$root/scripts/contamination.py" run \
 # What a case leaves of its stores, buckets, caches, images and roots: not results
 # (scripts/qualify.sh's, and a jailed VM's jail).
 find "$work" -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' -o -name '*-cache' \
-    -o -name '.extentd-cache.*' -o -name '*.bucket' -o -name 'store-*' -o -name sandbox-image \
+    -o -name '.cladefsd-cache.*' -o -name '*.bucket' -o -name 'store-*' -o -name sandbox-image \
     -o -name rootfs -o -name extents -o -name jail \) -prune -exec rm -r {} +
 find "$work" -type f \( -name '*.ext4' -o -name '*.img' \) -delete
 cp -R "$work/." "$results/" || status=$(( status ? status : 1 ))

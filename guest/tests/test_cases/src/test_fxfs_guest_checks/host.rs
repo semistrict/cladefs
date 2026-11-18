@@ -13,8 +13,8 @@ use crate::script_vm::{self, Replays};
 use crate::vm::{Vm, without_kernel_lines};
 use crate::{ShouldRun, Test, TestOutcome, TestSetup};
 use anyhow::Context;
-use futures::executor::block_on;
 use cladefs::{Attr, Filesystem, Node, Owner, Storage};
+use futures::executor::block_on;
 use std::path::Path;
 use std::time::Duration;
 
@@ -53,7 +53,7 @@ fn read_path(fs: &Filesystem, path: &str) -> Vec<u8> {
     buf
 }
 
-/// cladefs: the seed of a run's random choices (random_ops's operations, fxfs.dax_delay_us's
+/// cladefs: the seed of a run's random choices (random_ops's operations, cladefs.dax_delay_us's
 /// delays): CLADEFS_SEED's, to replay a run, or else a new one each run, which the run says
 /// (TASK-119.2).
 pub(crate) fn seed() -> u64 {
@@ -68,9 +68,9 @@ pub(crate) fn seed() -> u64 {
 const SETUP: Duration = Duration::from_secs(30);
 
 /// cladefs: what the checks' budgets are scaled by where the daemon keeps their stores in a real
-/// bucket (`CLADEFS_EXTENTD_REMOTE`): the most a check took of its budget on GCS, 3.3 times (GCE
+/// bucket (`CLADEFSD_BUCKET`): the most a check took of its budget on GCS, 3.3 times (GCE
 /// r980), and half that again (TASK-165.11).
-const REMOTE_SCALE: f64 = 5.0;
+const REAL_BUCKET_SCALE: f64 = 5.0;
 
 impl TestFxfsGuestChecks {
     /// cladefs: the checks a run is of, CLADEFS_CHECKS's, as [`TestFxfsGuestChecks::checks`] has
@@ -81,15 +81,15 @@ impl TestFxfsGuestChecks {
 
     /// cladefs: the run's checks, and what their budgets are scaled by: the guest kernel's
     /// slowness, its storage's, and CLADEFS_CHECKS_SCALE's, for a slower host (TASK-168). A real
-    /// bucket's, [`REMOTE_SCALE`], is measured: on GCS a check took at most 3.3 times its budget
-    /// on a file bucket (GCE r980, TASK-165.11: append_writeback's 64 fdatasyncs, each a durable
-    /// commit's create and lease read, 10.0 s of 3.0 s; torture 79 s of 38 s), against r353's
-    /// twice, which four of them overran on GCS (r740).
+    /// bucket's, [`REAL_BUCKET_SCALE`], is measured: on GCS a check took at most 3.3 times its
+    /// budget on a file bucket (GCE r980, TASK-165.11: append_writeback's 64 fdatasyncs, each a
+    /// durable commit's create and lease read, 10.0 s of 3.0 s; torture 79 s of 38 s), against
+    /// r353's twice, which four of them overran on GCS (r740).
     fn run(&self) -> anyhow::Result<(Vec<(usize, &'static Check)>, f64)> {
         let checks = self.checks(&self.only()).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!checks.is_empty(), "CLADEFS_CHECKS names none of this suite's checks");
-        let remote = std::env::var_os("CLADEFS_EXTENTD_REMOTE").is_some_and(|r| !r.is_empty());
-        let storage = if remote { REMOTE_SCALE } else { 1.0 };
+        let real_bucket = std::env::var_os("CLADEFSD_BUCKET").is_some_and(|r| !r.is_empty());
+        let storage = if real_bucket { REAL_BUCKET_SCALE } else { 1.0 };
         let given = match std::env::var(SCALE) {
             Ok(given) => given.parse().with_context(|| format!("{SCALE} is {given:?}"))?,
             Err(_) => 1.0,
@@ -133,7 +133,7 @@ impl TestFxfsGuestChecks {
             match check.name {
                 "crashes" => {
                     ended("crashes", Ended::Signalled(nix::libc::SIGBUS))?;
-                    said("crashes: left fxfs.dax_fail_maps at 1000, set back to 0".to_owned())?;
+                    said("crashes: left cladefs.dax_fail_maps at 1000, set back to 0".to_owned())?;
                 }
                 "hangs" => {
                     ended("hangs", Ended::Overran)?;
@@ -219,8 +219,8 @@ impl Test for TestFxfsGuestChecks {
         std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
         script_vm::pass_script(&mut vm, seed)?;
         if self.delay {
-            vm.module_param(c"fxfs.dax_delay_us=200");
-            vm.module_param(&std::ffi::CString::new(format!("fxfs.dax_delay_seed={seed}"))?);
+            vm.module_param(c"cladefs.dax_delay_us=200");
+            vm.module_param(&std::ffi::CString::new(format!("cladefs.dax_delay_seed={seed}"))?);
         }
         vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
     }

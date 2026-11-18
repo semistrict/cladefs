@@ -38,7 +38,7 @@ REBOOTED = ["default-mount", "mount", "status-cold", "status-warm", "mount-other
             "mount-others-max", "unmount-all"]
 # What the host's disk holds that the checkout puts there: stores, buckets and the daemon's part
 # cache, not logs nor the root filesystem.
-DISK = re.compile(r"^(bucket|extentd-cache|generation|publisher|publisher\.bucket|sandbox-\d+|"
+DISK = re.compile(r"^(bucket|cladefsd-cache|generation|publisher|publisher\.bucket|sandbox-\d+|"
                   r"hundreds|ext4\.img)$")
 
 
@@ -156,10 +156,10 @@ def memory(case, lines):
             continue
         guest = fields["guest_total"] - fields["guest_available"]
         rows.append([phase] + [f"{value / MIB:,.0f}" for value in (
-            guest, fields["vmm_rss"], fields["vmm_anon"], fields["vmm_shmem"], fields["extentd_pss"],
-            fields.get("extentd_memory_bytes", 0))])
-    header = [f"{case}: phase", "guest used", "VM RSS", "VM anon", "VM shmem", "extentd PSS",
-              "extentd arenas"]
+            guest, fields["vmm_rss"], fields["vmm_anon"], fields["vmm_shmem"], fields["cladefsd_pss"],
+            fields.get("cladefsd_memory_bytes", 0))])
+    header = [f"{case}: phase", "guest used", "VM RSS", "VM anon", "VM shmem", "cladefsd PSS",
+              "cladefsd arenas"]
     return table(header, rows)
 
 

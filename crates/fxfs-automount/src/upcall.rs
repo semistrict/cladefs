@@ -21,7 +21,7 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
-/// The largest manifest a guest takes: fs/fxfs's `FXFS_MANIFEST_MAX`.
+/// The largest manifest a guest takes: fs/cladefs's `CLADEFS_MANIFEST_MAX`.
 pub const MAX_MANIFEST: usize = 65536;
 
 /// What the sandbox manager answers an attach with.

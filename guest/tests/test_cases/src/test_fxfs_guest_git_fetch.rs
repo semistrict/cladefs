@@ -46,11 +46,11 @@ mod host {
     impl TestFxfsGuestGitFetch {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
-            let extentd: PathBuf =
-                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
-            let control = control(&extentd)?;
+            let cladefsd: PathBuf =
+                std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
+            let control = control(&cladefsd)?;
             let root = setup_rootfs(test_setup)?;
-            let vms = Vms::new(test_setup, root, extentd.clone(), CAPACITY, 0);
+            let vms = Vms::new(test_setup, root, cladefsd.clone(), CAPACITY, 0);
             let (publisher, consumer) = (dir.join("publisher"), dir.join("consumer"));
             format_with(&publisher, CAPACITY, &["repo", "upstream"])?;
 
@@ -65,7 +65,7 @@ mod host {
 
             let names = generations.into_iter().map(|(name, generation)| (name.into(), generation));
             let newest = BTreeMap::from([("/repos/upstream".to_owned(), "repo-g1".to_owned())]);
-            let manager = Manager::new(extentd, names.collect(), newest);
+            let manager = Manager::new(cladefsd, names.collect(), newest);
 
             // The consumer, until it is frozen, snapshotted, and restored.
             manager.serve("consumer", &consumer)?;
@@ -434,7 +434,7 @@ mod guest {
         let _automounter = automounter();
         check_upstream_reached();
         check_the_checkout();
-        assert_eq!(mounted("/repos/repo-g1").as_deref(), Some("fxfs"));
+        assert_eq!(mounted("/repos/repo-g1").as_deref(), Some("cladefs"));
     }
 
     impl Test for TestFxfsGuestGitFetch {

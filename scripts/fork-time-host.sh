@@ -3,20 +3,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# How long a fork of a 10 GiB base takes, at commits of cladefs's, on an x86-64 Linux host of one's
-# own, over ssh (CLADEFS_HOST, ubu1 by default; scripts/lib/host.sh), as one measurement there, alone
-# and on CPUs of its own (fxjob --bench) (TASK-165.7): a worktree of each COMMIT there, whose
-# extent daemon and cladefsctl this tree's host script (scripts/lib/fork-time-linux-host.sh) builds;
-# it imports the base and times its forks and their first opens, for every commit on the one host.
-# The results come back to RESULTS, each commit's record in RESULTS/LABEL/source.txt. A COMMIT
-# need not have this script: an older commit measures as main's does.
+# How long a fork of a 10 GiB base takes, at commits of cladefs's, on the test host, an x86-64 Linux
+# machine of one's own, over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), as one
+# measurement there, alone and on CPUs of its own (fxjob --bench) (TASK-165.7): a worktree of each
+# COMMIT there, whose extent daemon and cladefsctl this tree's host script
+# (scripts/lib/fork-time-linux-host.sh) builds; it imports the base and times its forks and their
+# first opens, for every commit on the one test host. The results come back to RESULTS, each
+# commit's record in RESULTS/LABEL/source.txt. A COMMIT need not have this script: an older commit
+# measures as main's does.
 #
 #   scripts/fork-time-host.sh RESULTS LABEL=COMMIT...
 #   scripts/fork-time-host.sh resume RUN RESULTS | cancel RUN
 #
 # Each COMMIT is one origin has. CLADEFS_FORK_TIME_FILES, CLADEFS_FORK_TIME_FILE_MIB and
-# CLADEFS_FORK_TIME_FORKS size the base and the forks (the host script), and reach the host, as
-# every other CLADEFS_* does (scripts/lib/host.sh). CLADEFS_HOST_LIMIT caps the run (default 4h).
+# CLADEFS_FORK_TIME_FORKS size the base and the forks (the host script), and reach the test host, as
+# every other CLADEFS_* and CLADEFSD_* does (scripts/lib/host.sh). CLADEFS_TEST_HOST_LIMIT caps the
+# run (default 4h).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

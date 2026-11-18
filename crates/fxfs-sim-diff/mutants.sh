@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
-# Puts each mutant of guest/mutants that changes guest/sim's model of Fxfs (guest/sim/fxfs/fxfs.c)
+# Puts each mutant of guest/mutants that changes guest/sim's model of Fxfs (guest/sim/cladefs/cladefs.c)
 # into a copy of the model, runs the model's comparison with Fxfs against it (CLADEFS_SIM_MODEL), and
 # says its fate (guest/mutants/README.md). One whose header names the model as its kernel
 # (`Kernel: model`) is run against its killer alone (`Killer: fxfs-sim-diff TEST`): killed if that
@@ -34,7 +34,7 @@ while getopts c: opt; do
 done
 shift $((OPTIND - 1))
 
-model=guest/sim/fxfs/fxfs.c
+model=guest/sim/cladefs/cladefs.c
 mutants=guest/mutants
 
 # A field of a mutant's header: `# FIELD: value`.

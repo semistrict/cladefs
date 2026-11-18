@@ -19,7 +19,7 @@ export const REPO = resolve(
 export const GUIDE = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * Where code comes from, as README's "Where the code comes from" sorts it:
+ * Where code comes from, as docs/code.md sorts it:
  * - `cladefs`: cladefs's own;
  * - `ported`: cladefs's own code citing a Fuchsia source it ports or excerpts;
  * - `fuchsia`: copied from Fuchsia, as upstream wrote it;
@@ -39,13 +39,13 @@ export const ORIGINS: readonly Origin[] = [
 /** A Fuchsia source cited, as scripts/upstream-changes.py's CITATION reads them. */
 export const CITATION = /`((?:zircon|src|sdk|third_party|prebuilt)\/[^`\s]+)`/;
 
-/** The stand-in crates of README's table "`crates/`: stand-ins for Fuchsia-only pieces". */
+/** The stand-in crates of docs/code.md's table "`crates/`: stand-ins for Fuchsia-only pieces". */
 export function standIns(repo = REPO): Set<string> {
-  const readme = readFileSync(join(repo, "README.md"), "utf8");
-  const section = readme.split("### `crates/`: stand-ins for Fuchsia-only pieces")[1];
-  if (section === undefined) throw new Error("README has no stand-ins section");
+  const doc = readFileSync(join(repo, "docs", "code.md"), "utf8");
+  const section = doc.split("## `crates/`: stand-ins for Fuchsia-only pieces")[1];
+  if (section === undefined) throw new Error("docs/code.md has no stand-ins section");
   const table = section.split("\n\n").find((part) => part.trimStart().startsWith("|"));
-  if (table === undefined) throw new Error("README's stand-ins section has no table");
+  if (table === undefined) throw new Error("docs/code.md's stand-ins section has no table");
   const names = new Set<string>();
   for (const row of table.split("\n").slice(2)) {
     const cell = row.split("|")[1] ?? "";

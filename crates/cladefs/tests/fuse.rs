@@ -891,16 +891,16 @@ fn noise(len: usize) -> Vec<u8> {
 }
 
 /// TASK-411.7 (TASK-411's AC #3, FUSE mounts): the server a FUSE mount runs, serving a store of a
-/// sealed cell, its tenant's KEK in the host's KMS (the common tenant's, whose cells `Storage`
+/// encrypted cell, its tenant's KEK in the host's KMS (the default tenant's, whose cells `Storage`
 /// makes): a file written through it reads back, before and after the store is closed and served
 /// again; no file of the store's directory, nor of its bucket's, holds the file's data in the
 /// clear. Its kernel mount is `fuse_mount.rs`'s, Linux's.
 #[test]
-fn a_sealed_store_served_reads_back_and_holds_nothing_in_the_clear() {
+fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();
-    cladefs::remote::set_kms(std::sync::Arc::new(kms)).unwrap();
+    cladefs::bucket::set_kms(std::sync::Arc::new(kms)).unwrap();
     // Under the build's temporary directory, where direct I/O works.
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("store");

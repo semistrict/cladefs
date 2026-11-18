@@ -6,18 +6,18 @@
 #
 # TASK-79.28, 97e9fa8ee: a write whose range a fault mapped again too small drops it and maps it
 # again. It was a WARN and EIO. Equivalent since TASK-147: a fault that sizes its range from the old
-# end holds the invalidate lock the write's fxfs_dax_fit waits for, and one after it sees `growing`;
+# end holds the invalidate lock the write's cladefs_dax_fit waits for, and one after it sees `growing`;
 # task-79.28-before-147, with that gone too, shows what this was.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2460,8 +2460,10 @@
  		return PTR_ERR(range);
- 	start = fxfs_dax_chunk_start(range);
+ 	start = cladefs_dax_chunk_start(range);
  	if (range->region || start + ((loff_t)range->pages << PAGE_SHIFT) <= pos) {
 +		bool short_of_pos = !range->region;
 +
- 		fxfs_dax_put_range(dax, range);
+ 		cladefs_dax_put_range(dax, range);
 -		return -EXDEV;
 +		return WARN_ON_ONCE(short_of_pos) ? -EIO : -EXDEV;
  	}

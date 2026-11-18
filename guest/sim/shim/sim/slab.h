@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /* Copyright 2026 The cladefs Authors. */
 /*
- * The kernel's allocators, the host's malloc, which ASan watches. fs/fxfs's own sources' may fail
+ * The kernel's allocators, the host's malloc, which ASan watches. fs/cladefs's own sources' may fail
  * as a test asks (sim_alloc_fail); the code under test's, theirs, fs/dax.c's and the XArrays', as a
  * sweep does (kernel/sweep.c): nothing here but they knows what to do about it.
  */

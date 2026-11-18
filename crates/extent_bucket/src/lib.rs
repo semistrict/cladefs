@@ -1,0 +1,522 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
+//!
+//! A branch is a VM's filesystem: extents its guest wrote, in segments whose footers say what
+//! each commit did, with checkpoints of its index. A writer holds the branch's head; its segments,
+//! created only where none is, are numbered without gaps, and each names the one it follows, so a
+//! writer taken over can add nothing to the branch once the next one's first segment, its fence,
+//! is in it. Forks
+//! record where they were made, and inherit the parent's extents without copying them. The
+//! collector, alone, deletes: what no live branch can reach, and objects it compacts.
+//!
+//! The object store is anything with conditional writes ([`Bucket`]): S3 and GCS through the
+//! `object_store` crate ([`object_bucket::ObjectBucket`]) over cladefs's HTTP client ([`client`]),
+//! a directory of the host's ([`local`]), and in tests a simulation that delays, reorders and fails
+//! requests.
+
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+/// cladefs: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
+/// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
+/// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
+/// on.
+macro_rules! failpoint {
+    ($name:literal) => {
+        fail::fail_point!($name, |_| Err($crate::Error::Read(format!("failpoint {}", $name))))
+    };
+}
+
+// cladefs: tests' features, which a measurement must not have: the fail crate's failpoints, whoever
+// turned them on (`cladefs/failpoints`, or a dev-dependency's), each `fail_point!` of this crate's,
+// extent_store's and cladefs's then looking its name up in the fail crate's registry, under its lock;
+// and this crate's `testing`, whose protocol rules are a thread's, looked up at each step. A build
+// without debug assertions is the release profile's, which measurements are made with; tests'
+// are not (the dev and sim profiles have them). Here, as this is the lowest of the crates with
+// failpoints, which every other with them depends on. A package's examples build with its
+// dev-dependencies, and cladefs's own turn its failpoints on: cladefs's examples were measured with
+// them, until they were cladefs-examples' (TASK-320; extent_store's audit is TASK-303).
+const _: () = assert!(
+    cfg!(debug_assertions) || !fail::has_failpoints(),
+    "the fail crate's failpoints in a release build, which measures with them: build cladefs's \
+     examples as cladefs-examples' (`-p cladefs-examples`), a package alone (`-p PACKAGE`), not across \
+     the workspace, and a daemon with failpoints in the sim profile (`--profile sim`) (TASK-320)"
+);
+#[cfg(all(feature = "testing", not(debug_assertions)))]
+compile_error!(
+    "extent_bucket's `testing` in a release build, which measures with it: build the package alone \
+     (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn it on (TASK-320)"
+);
+
+pub mod batch;
+pub mod branch;
+pub mod bucket;
+pub mod bucket_kms;
+pub mod cache;
+pub mod cell;
+pub mod checkpoint;
+pub mod client;
+pub mod collector;
+pub mod direct;
+pub mod faults;
+pub mod fetch;
+pub mod head;
+#[cfg(test)]
+mod heap;
+pub mod keys;
+pub mod known;
+pub mod layout;
+pub mod local;
+pub mod marks;
+mod moves;
+pub mod object;
+pub mod object_bucket;
+pub mod objectid;
+pub mod passed;
+pub mod peer;
+pub mod record;
+pub mod recovery;
+#[cfg(any(test, feature = "testing"))]
+pub mod s3_server;
+pub mod sweep;
+pub mod trace;
+pub mod wal;
+pub mod writer;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
+pub use batch::{Commit, SegmentBuilder};
+pub use bucket::Bucket;
+/// The bytes a [`Bucket`] writes: shared, so that a write tried again holds them once.
+pub use bytes::Bytes;
+pub use fetch::read;
+pub use layout::Location;
+pub use recovery::{Recovered, State, recover};
+pub use wal::{Rebased, TakenBranch, Wal};
+pub use writer::{Body, Objects, Taker, Writer};
+
+/// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,
+/// so that a writer never mints an ID one before it minted, even one whose upload landed after it
+/// took over.
+pub const EPOCH_SHIFT: u32 = 40;
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    /// Another writer took the branch over.
+    #[error("another writer took the branch")]
+    Fenced,
+    #[error("the branch was deleted")]
+    Deleted,
+    /// A later placement, whose fencing token is higher, holds the branch's head: this one, cut off
+    /// from it, takes it back no more (TASK-39.7).
+    #[error("a later placement holds the branch")]
+    Stale,
+    #[error("no such branch")]
+    NoBranch,
+    /// The branch is a point, which no writer takes: a point's state never changes
+    /// ([`record::Kind::Point`]).
+    #[error("the branch is a point, which nothing writes")]
+    Point,
+    /// A fork's child has a record naming another origin: another branch has the ID the fork's
+    /// guest gave it, which that branch took while the fork was made (TASK-79.82). The fork failed;
+    /// its parent's branch is as sound as before.
+    #[error("branch {0} has another origin")]
+    IdTaken(layout::Branch),
+    /// Something a branch needs is gone.
+    #[error("lost: {0}")]
+    Lost(String),
+    #[error("corrupt: {0}")]
+    Corrupt(String),
+    /// cladefs: an object's data, encrypted under a DEK its reader doesn't hold (TASK-411.2): its
+    /// key unwrapped by none, or revoked; or the collector's marking, which reads none of the data
+    /// of objects encrypted, its compaction reading them under their keys (TASK-411.6).
+    #[error("{}", extent_frame::Error::NoKey(*.0))]
+    NoKey(extent_frame::KeyId),
+    /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
+    /// revoked or destroyed, none there, or the KMS failed.
+    #[error("{0}")]
+    Kms(String),
+    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are encrypted, and its
+    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them. A fork so
+    /// is refused before anything of it is made (`keys::inheriting`).
+    #[error(
+        "branch {branch} inherits from branch {from}, of another cell, whose objects are \
+         encrypted, and its record holds not their keys"
+    )]
+    Inherited { branch: layout::Branch, from: layout::Branch },
+    /// The branch's record says its objects are of another format than this one's, newer or
+    /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
+    #[error(
+        "branch {branch} is of format {format}, which this reader, of format {ours}, doesn't read",
+        ours = layout::FORMAT
+    )]
+    Format { branch: layout::Branch, format: u32 },
+    /// What a writer was to upload, it could not read where it is kept: a store's file.
+    #[error("reading {0}")]
+    Read(String),
+    /// Another writer's commits moved the branch on from the host's write-ahead log's: the branch's
+    /// last commit is neither one of the log's nor the one the log started from. Its commits were
+    /// never acknowledged, and no writer puts them after another's: the store opens only once
+    /// `cladefsctl take` drops the log (doc-14, Opening a store).
+    #[error("another writer's commits moved the branch on from the write-ahead log's")]
+    Diverged,
+    /// cladefs: the cell has no object: no such cell (TASK-364).
+    #[error("no such cell")]
+    NoCell,
+    /// cladefs: the cell has a vdisk of that name already.
+    #[error("the cell has a vdisk {0} already")]
+    VdiskExists(String),
+    /// cladefs: no vdisk may have that name ([`cell::valid_name`]).
+    #[error(
+        "{0:?} names no vdisk: 1 to 64 letters, digits, '.', '_' or '-', not starting with '.'"
+    )]
+    VdiskName(String),
+    /// cladefs: the cell has no vdisk of that name.
+    #[error("the cell has no vdisk {0}")]
+    NoVdisk(String),
+    /// cladefs: a fork of the point to a branch of another tenant's cell than the point's, which the
+    /// point's record doesn't say is shared ([`record::Record::shared`], TASK-395.7).
+    #[error("branch {0} is a point of another tenant's, not shared")]
+    NotShared(layout::Branch),
+    /// cladefs: what only a point is, shared, asked of a branch that is none ([`branch::share`]).
+    #[error("branch {0} is no point")]
+    NotPoint(layout::Branch),
+    /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
+    /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
+    #[error("the cell is left to another pass of the collector, which {0}")]
+    Left(Left),
+}
+
+/// cladefs: why a pass of the collector left its cell to another ([`Error::Left`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Left {
+    /// Another pass holds the cell's lease, unexpired.
+    #[error("holds it")]
+    Held,
+    /// Another pass over the cell ended since the pass's sweep began.
+    #[error("went over it since this sweep began")]
+    Swept,
+}
+
+impl From<extent_frame::Corrupt> for Error {
+    fn from(corrupt: extent_frame::Corrupt) -> Self {
+        Self::Corrupt(corrupt.0)
+    }
+}
+
+impl From<extent_frame::Error> for Error {
+    fn from(error: extent_frame::Error) -> Self {
+        match error {
+            extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
+            extent_frame::Error::NoKey(key) => Self::NoKey(key),
+        }
+    }
+}
+
+/// The rules doc-7's protocol relies on, each of which the simulation shows to be needed by
+/// turning it off, and specs/bucket's TLA+ by its mutation removing it (doc-7, Testing).
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    /// A writer acknowledges what it uploaded only by swapping the branch's head to name it, with
+    /// the condition that the head is its own taking still ([`head::swap`]): written whatever is
+    /// there, a writer taken over writes the head over its successor's, whose acknowledged commits
+    /// it then names not (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoHeadSwap.cfg`.
+    pub head_swap: bool,
+    /// A segment's and a checkpoint's key names its writer's epoch ([`layout::segment`],
+    /// [`layout::checkpoint`]): without it, two writers' segments of one number land at one key,
+    /// the later over the earlier, which a head may name (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoEpochKeys.cfg`.
+    pub epoch_keys: bool,
+    /// The collector keeps, of a live branch's objects its head does not name, those of the head's
+    /// epoch it may yet name: segments and extents of their own at or past its end, checkpoints
+    /// newer than its own; it deletes the rest, of epochs no swap of whose can succeed (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoCollectorEpochs.cfg`.
+    pub collector_epochs: bool,
+    /// The key of the moves a pass of the collector makes names the pass, its cell's collector
+    /// epoch, so that two passes' moves of one object never share a key, and readers find them by
+    /// listing the object's moves: keyed by the object alone, a pass slow to create them, after
+    /// later passes made and deleted them, makes them again at their key, of other bytes
+    /// (TASK-407.1).
+    /// TLA+: `specs/bucket/mutations/NoMovesByPass.cfg`.
+    pub moves_by_pass: bool,
+    /// A writer mints extents from its epoch's range of sequence numbers, having checked, after
+    /// recovering the branch, that the head is still its taking.
+    /// TLA+: `specs/bucket/mutations/NoEpochSequences.cfg`.
+    pub epoch_sequences: bool,
+    /// A fork's child gets its record once the segment holding the fork is acknowledged.
+    /// TLA+: `specs/bucket/mutations/NoRecordsAfterAck.cfg`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub records_after_ack: bool,
+    /// The collector lists objects before it reads what branches need.
+    /// TLA+: `specs/bucket/mutations/NoCandidatesFirst.cfg`.
+    pub candidates_first: bool,
+    /// The collector finds forks in their parents' states, not only by their records.
+    /// TLA+: `specs/bucket/mutations/NoForksFromStates.cfg`.
+    pub forks_from_states: bool,
+    /// A writer takes a branch's head only with a fencing token as high as the head's.
+    /// TLA+: `specs/bucket/mutations/NoTokens.cfg`.
+    pub tokens: bool,
+    /// A branch is deleted only with a fencing token as high as its head's (TASK-45.1).
+    /// TLA+: `specs/bucket/mutations/NoDeleteTokens.cfg`.
+    pub delete_tokens: bool,
+    /// The deletion of a failed fork takes its child's ID with a record, before it ends the child's
+    /// head, though its fork's segment never went (TASK-79.82).
+    /// TLA+: `specs/bucket/mutations/NoForkClaimsIds.cfg`.
+    pub fork_claims_ids: bool,
+    /// That record says the child lives only if the branch it was forked from holds the fork's
+    /// segment, which reading it needs; and that it is a claim, which that proves no more than.
+    /// TLA+: `specs/bucket/mutations/NoForkClaimsLanded.cfg`.
+    pub fork_claims_landed: bool,
+    /// No writer takes a point (doc-7, Points).
+    /// TLA+: `specs/bucket/mutations/NoPointsTakeNoWriter.cfg`.
+    pub points_take_no_writer: bool,
+    /// A fork of a point reads the point's record after it creates its own: a point deleted before
+    /// that fails it, its pass of the collector not having seen the child.
+    /// TLA+: `specs/bucket/mutations/NoForksCheckPoints.cfg`.
+    pub forks_check_points: bool,
+    /// A fork of a point's record says it is being made until that read found the point live, so
+    /// that what never was made holds up no pass of the collector, whatever it names.
+    /// TLA+: `specs/bucket/mutations/NoForksPending.cfg`.
+    pub forks_pending: bool,
+    /// The collector gives up on the forks being made of points deleted.
+    /// TLA+: `specs/bucket/mutations/NoCollectorAbandons.cfg`.
+    pub collector_abandons: bool,
+    /// The collector lists the records again after it read the branches' states: a state it read
+    /// names no fork deleted since, nor that fork's children, whose records came after its listing.
+    /// TLA+: `specs/bucket/mutations/NoRecordsRelisted.cfg`.
+    pub records_relisted: bool,
+    /// Every record names its branch's owner, chosen by its maker, unique to that making: two
+    /// makers of one branch ID, two forks naming one child, never write the same bytes, which a
+    /// create reading back what it finds would take for its own (TASK-79.82, TASK-153.9).
+    /// TLA+: `specs/bucket/mutations/NoRecordsOwned.cfg`.
+    pub records_owned: bool,
+    /// The collector keeps every moves on the way to an extent from where it was sealed, not only
+    /// from where the branch's state says it is, unless that state's checkpoint is by the writer
+    /// holding the branch's head, read after the checkpoint was: a checkpoint of another writer's,
+    /// landing after the writer recovered the branch, or an inherited state, may name the extent
+    /// further along its moves than the writer does (TASK-175).
+    /// TLA+: `specs/bucket/mutations/NoWaysFromSeals.cfg`.
+    pub ways_from_seals: bool,
+    /// A writer names the extents its checkpoint records as moved where they went before it
+    /// creates the checkpoint, not once it is created: the collector trusts a checkpoint of the
+    /// writer holding the head to name nothing further along its way than the writer does
+    /// (TASK-175).
+    /// TLA+: `specs/bucket/mutations/NoMovesTakenFirst.cfg`.
+    pub moves_taken_first: bool,
+    /// A host's store reading the extents its writer's checkpoints record as moved names them
+    /// where they went, as the writer does, before the checkpoint lands
+    /// ([`Writer::following`](crate::Writer::following)): it names none further back along its
+    /// way than the writer's newest checkpoint, from which the collector keeps the moves (TASK-195).
+    /// Simulation only (`sim::stores_need_to_follow_moves`): specs/bucket models the writer's
+    /// state, not a store's names.
+    pub stores_follow_moves: bool,
+    /// A pass of the collector that finds what a live branch needs lost stops, without failing, if
+    /// a later pass took the collector's lease from it: what it read before may be older than what
+    /// that pass, deleting since, read (TASK-180).
+    /// TLA+: `specs/bucket/mutations/NoPassesFencedStop.cfg`.
+    pub passes_fenced_stop: bool,
+    /// The collector recovers a branch by every origin it finds it named by, its record's and the
+    /// parent's states naming a fork to it, not by the first alone: a child it recovered by its
+    /// parent's state, that fork refused, may have a record of another origin, a restore's that
+    /// took the ID, which listing the records again finds (TASK-173).
+    /// TLA+: `specs/bucket/mutations/NoRecoveriesByOrigins.cfg`.
+    pub recoveries_by_origins: bool,
+    /// The collector removes a record only with its cell, dead, and only a deleted root's or
+    /// clone's made, of an ID an allocator gave, which no recorder makes again
+    /// ([`record::Record::removable`], TASK-455): a writer of a parent slow to record a fork whose
+    /// child was deleted, or whose child's ID a root took, and was deleted, would make the record
+    /// again, naming what the collector reclaimed (TASK-174). Without it, a dead cell goes whole
+    /// whatever its records.
+    /// TLA+: `specs/bucket/mutations/NoRecordsKept.cfg`.
+    pub records_kept: bool,
+    /// A host's write-ahead log is put after the branch's end only if the branch's last commit is
+    /// one of the log's or the one it started from: otherwise another writer's commits came after
+    /// what the log holds, and it diverged (doc-14, Opening a store).
+    /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
+    pub wal_follows: bool,
+    /// cladefs: a fork of a branch to a child in another cell, a writable fork or a point's clone,
+    /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
+    /// keep the parent's state at the fork point: a pass lists nothing of the child's cell, and,
+    /// the parent deleted, would delete what the child inherits (TASK-395.3).
+    /// TLA+: `specs/bucket/mutations/NoReferences.cfg`.
+    pub references: bool,
+    /// A writable fork's reference is written before its child's record, by whoever writes the
+    /// record: the fork's host, the parent's writers, the parent's deletion, before that marks the
+    /// parent deleted ([`branch::record_fork`]). After it, a pass reading the parent deleted finds
+    /// no reference.
+    /// TLA+: `specs/bucket/mutations/NoReferencesFirst.cfg`.
+    pub references_first: bool,
+    /// A point's clone writes its reference before it reads the point's record (and after its own,
+    /// [`Rules::clones_record_first`]), whatever its cell, its origin's own too
+    /// ([`branch::fork_point`]): one that read the
+    /// point live then wrote it before the point's deletion, which a pass reading the point
+    /// deleted, or finding its reference retired, read after.
+    /// TLA+: `specs/bucket/mutations/NoForksReferFirst.cfg`.
+    pub clones_refer_first: bool,
+    /// A reference is retired, by a pass over its child's cell, only once that cell holds no live
+    /// branch and no reference of its own: the child's forks inherit what it inherited, kept by its
+    /// reference (TASK-395.4).
+    /// TLA+: `specs/bucket/mutations/NoReferencesHeld.cfg`.
+    pub references_held: bool,
+    /// A pass lists its cell's references after it read the states, as it lists the records
+    /// again, not with its candidates: listed then, it misses a clone's of a point a checkpoint
+    /// of the point's origin dropped since (TASK-395.4).
+    /// TLA+: `specs/bucket/mutations/NoReferencesRelisted.cfg`.
+    pub references_relisted: bool,
+    /// A pass keeps, of the parent's state at a referenced fork point, what recovering it reads,
+    /// not only the objects holding its extents: a child with no checkpoint of its own recovers
+    /// through it (TASK-395.4).
+    /// TLA+: `specs/bucket/mutations/NoForkPointsKept.cfg`.
+    pub fork_points_kept: bool,
+    /// A point's clone creates its record, saying it is being made, before its reference
+    /// ([`branch::fork_point`]): a reference then always has a record naming its origin, by which
+    /// its child's cell's pass retires it, the clone's host dying or not; and a clone refused by a
+    /// record there writes none. The other way round, a host dying between the two leaves a
+    /// reference no record names, which no pass retires (TASK-395.10).
+    /// TLA+: `specs/bucket/mutations/NoForksRecordFirst.cfg`.
+    pub clones_record_first: bool,
+    /// Whoever finds the record of a fork's child naming another origin than the fork's, or none,
+    /// deletes the fork's reference: the fork made no branch, and no record will name it. Every
+    /// writer of the child's record looks, the parent's next writer and its deletion among them,
+    /// so that one dying first leaves it to the next (TASK-395.10).
+    /// TLA+: `specs/bucket/mutations/NoReferencesTakenBack.cfg`.
+    pub references_taken_back: bool,
+    /// A reference retired, or taken back, is marked first ([`layout::retired`]), the mark kept for
+    /// good under the parent's cell, and a pass over that cell deletes the references it lists
+    /// marked: a writer whose read of the child's record came before, finding none, writes it
+    /// after, which no record names and no recorder looks at again (TASK-395.13), or which the
+    /// child's cell's passes, skipping that cell, dead and unchanged, never retire again
+    /// (TASK-395.14). Its write changes the parent's cell's listing, whose next pass finds it.
+    /// TLA+: `specs/bucket/mutations/NoRetirementsMarked.cfg`.
+    pub retirements_marked: bool,
+    /// cladefs: the collector removes a dead cell's root's or clone's record only if its ID is one
+    /// an allocator gave ([`objectid::given`]), which no fork names: one a guest named, a fork may
+    /// name too, its slow writer recording the child after the cell went (TASK-455). Without it,
+    /// whatever the ID.
+    /// TLA+: `specs/bucket/mutations/NoIdsGivenOnce.cfg` (the model's forks naming given IDs,
+    /// as the code's collector taking named ones for given).
+    pub ids_given: bool,
+    /// cladefs: a reference is retired unmarked only if its child is a clone made of an ID an
+    /// allocator gave: its host, its one writer, wrote it before it made it
+    /// ([`record::Record::retires_unmarked`], TASK-455), so that a base's cell keeps no mark of a
+    /// clone made and gone. Without it, any clone's, one being made among them, whose host, slow,
+    /// writes it after its retirement, unmarked, for good.
+    /// TLA+: `specs/bucket/mutations/NoForksMadeUnmarked.cfg`.
+    pub clones_made_unmarked: bool,
+    /// cladefs: a head of a branch whose record the pass did not list goes only if it is not
+    /// final, and no record of the branch is there to read: a stale taker's, of a branch removed
+    /// with its cell. A final one is a deletion's fence, of a fork's child whose record is yet to
+    /// come, the deletion's own or its parent's slow writer's (TASK-79.78): it stays, and keeps its
+    /// cell from removal ([`collector`], TASK-455's review). Without it, as a test shows it needed,
+    /// a pass over a cell of no record deletes it, a writer takes the child once its parent's
+    /// writer records it, and the deletion, going on, marks it deleted under that writer.
+    /// TLA+: `specs/bucket/mutations/NoFencesKept.cfg`.
+    pub fences_kept: bool,
+    /// cladefs: a fork of a point resumed by another than its host, a store opening its child,
+    /// writes its reference before it makes it, as its host does ([`branch::resume_point_fork`]).
+    /// Without it, as a test shows it needed, a host dying between the fork's record and its
+    /// reference leaves a clone made of no reference, whose origin's state at the fork point no
+    /// pass keeps once the point is gone.
+    /// TLA+: `specs/bucket/mutations/NoResumesRefer.cfg`.
+    pub resumes_refer: bool,
+    /// cladefs: a fork of a point resumed says so in its record ([`record::Record::resumed`]), with
+    /// a condition, before its reference is written again, and a clone made so retires its
+    /// reference marked: its host, slow, may write it after the clone was made, deleted and its
+    /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference
+    /// stands for good, keeping its base's state at the fork point (TASK-455's review).
+    /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
+    pub resumes_marked: bool,
+    /// cladefs: a pass keeps, for each version a live branch's head names, the branch's whole state
+    /// at it and what recovering it reads, as for a fork point (doc-18, TASK-476). Without it, as a
+    /// test shows it needed, a checkpoint since covers the version's segments, which the pass
+    /// deletes, and the version recovers not.
+    /// TLA+: `specs/bucket/mutations/NoVersionsKept.cfg`.
+    pub versions_kept: bool,
+    /// cladefs: a takeover's swap of a branch's head names the versions it named
+    /// ([`head::take_from`]), as it names its segments. Without it, as a test shows it needed, they
+    /// are gone though no writer dropped them.
+    /// TLA+: `specs/bucket/mutations/NoVersionsCarried.cfg`.
+    pub versions_carried: bool,
+    /// cladefs: a writer's head names a version only with the segment cutting it, as its
+    /// acknowledgement names that segment ([`writer::Writer::acknowledge`]). Without it, as a test
+    /// shows it needed, an acknowledgement names every version taken, those of segments it doesn't
+    /// name among them, at a segment the head does not hold.
+    /// TLA+: `specs/bucket/mutations/NoVersionsAcked.cfg`.
+    pub versions_acked: bool,
+}
+
+impl Rules {
+    pub const ALL: Self = Self {
+        head_swap: true,
+        epoch_keys: true,
+        collector_epochs: true,
+        moves_by_pass: true,
+        epoch_sequences: true,
+        records_after_ack: true,
+        candidates_first: true,
+        forks_from_states: true,
+        tokens: true,
+        delete_tokens: true,
+        fork_claims_ids: true,
+        fork_claims_landed: true,
+        points_take_no_writer: true,
+        forks_check_points: true,
+        forks_pending: true,
+        collector_abandons: true,
+        records_relisted: true,
+        records_owned: true,
+        ways_from_seals: true,
+        moves_taken_first: true,
+        stores_follow_moves: true,
+        passes_fenced_stop: true,
+        recoveries_by_origins: true,
+        records_kept: true,
+        wal_follows: true,
+        references: true,
+        references_first: true,
+        clones_refer_first: true,
+        references_held: true,
+        references_relisted: true,
+        fork_points_kept: true,
+        clones_record_first: true,
+        references_taken_back: true,
+        retirements_marked: true,
+        ids_given: true,
+        clones_made_unmarked: true,
+        fences_kept: true,
+        resumes_refer: true,
+        resumes_marked: true,
+        versions_kept: true,
+        versions_carried: true,
+        versions_acked: true,
+    };
+}
+
+#[cfg(not(any(test, feature = "testing")))]
+pub(crate) fn rules() -> Rules {
+    Rules::ALL
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static RULES: std::cell::Cell<Rules> = const { std::cell::Cell::new(Rules::ALL) };
+}
+
+/// The rules this thread's protocol keeps: all of them, but in tests that turn some off
+/// ([`set_rules`]).
+#[cfg(any(test, feature = "testing"))]
+pub fn rules() -> Rules {
+    RULES.with(|rules| rules.get())
+}
+
+/// Has this thread's protocol keep `rules` alone, as tests that see a rule needed do: extent_bucket's
+/// own, and extent_store's simulation of the protocol (the `testing` feature).
+#[cfg(any(test, feature = "testing"))]
+pub fn set_rules(rules: Rules) {
+    RULES.with(|cell| cell.set(rules));
+}

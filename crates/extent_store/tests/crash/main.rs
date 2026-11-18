@@ -78,6 +78,6 @@ fn recovers_from_its_bucket_with_and_without_its_disk() {
 #[test]
 fn openings_cut_at_each_write_open_again() {
     let writes: u64 = (0..CUT_ROUNDS).map(cut).sum();
-    // The openings write: a segment closed again, the WAL's base, a restated capacity.
+    // The openings write: a segment closed again, the WAL's start, a restated capacity.
     assert!(writes > CUT_ROUNDS, "{writes} writes in {CUT_ROUNDS} openings");
 }

@@ -1,5 +1,5 @@
 # TASK-444.2.1 put back: an occurrence told by a store and a load on each side, the daemon-lost
-# handoff as extentd's client had it (lost stored, then on_lost loaded; on_lost set, then lost
+# handoff as cladefsd's client had it (lost stored, then on_lost loaded; on_lost set, then lost
 # loaded): store buffering, each side's load missing the other's store, the listener untold.
 # Killer: cladefs hearing::loom::occurrences_are_told_once
 --- a/crates/cladefs/src/hearing.rs

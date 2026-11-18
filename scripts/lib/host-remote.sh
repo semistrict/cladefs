@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The host's half of scripts/lib/host.sh: what a run does on the Linux host it runs on, sent there
-# over ssh on bash's standard input (host_side) and run as the user ssh logs in as, who may sudo
-# without a password:
+# The test host's half of scripts/lib/host.sh: what a run does on the test host it runs on, sent
+# there over ssh on bash's standard input (host_side) and run as the user ssh logs in as, who may
+# sudo without a password:
 #
 #   bash -s -- prepare DIR REPO COMMIT [LABEL=COMMIT...]
 #   bash -s -- launch DIR NAME BENCH MEMORY
@@ -15,13 +15,16 @@
 #   bash -s -- cancel DIR
 #   bash -s -- reap NAME
 #   bash -s -- clean DIR REPO
+#   bash -s -- sweep SCRATCH REPO NAME
+#   bash -s -- room SCRATCH
+#   bash -s -- size DIR
 #
 # A run's directory DIR, named for the run (run-..., host_run_name), holds tree, a worktree of
-# COMMIT of the host's clone REPO (a path in the home, or absolute), and trees/LABEL, one of each
-# other COMMIT, which the host script builds in, each its target directories its own; results, the
-# host script's results, and work, its work directory (CLADEFS_HOST_WORK); what the driver copied there (patch,
-# guest-kernel); and job, the job's command, which the driver copied there too, its log, its pid,
-# its exit status and its lock, which the job holds as long as it runs.
+# COMMIT of the test host's clone REPO (a path in the home, or absolute), and trees/LABEL, one of
+# each other COMMIT, which the host script builds in, each its target directories its own; results,
+# the host script's results, and work, its work directory (CLADEFS_TEST_HOST_WORK); what the driver
+# copied there (patch, guest-kernel); and job, the job's command, which the driver copied there
+# too, its log, its pid, its exit status and its lock, which the job holds as long as it runs.
 #
 # prepare makes the worktrees, fetching REPO's origin if a commit is not there yet, with
 # vendor/firecracker checked out in each and the patch, if any, applied to tree; the commit each
@@ -34,11 +37,20 @@
 # machine sleeping ends nothing, under fxjob (system-setup.d/146-fxdax_cgroups.sh), with --bench if
 # BENCH is 1, with --mem MEMORY if one is given; it returns once the job holds its lock. wait waits
 # for the lock, saying `waiting` once it has a connection, then `status N`, or `lost` if the job
-# ended without its status, as with the host's restart, or `none` if no job was launched. fetch
+# ended without its status, as with the test host's restart, or `lost unreadable` if its status file
+# holds no number, as a full disk leaves it (made, nothing written in it: TASK-489), or `none` if
+# no job was launched. fetch
 # writes a gzipped tar of the results to its standard output: but for the guests' root filesystems
 # (rootfs, their images, and jails), which aren't results, and some of whose files (setuid
 # binaries) no one may read, and parts caches. cancel ends the job, and clean removes the run's
 # directory, its worktrees with it, once no job runs there.
+#
+# sweep removes, as clean does, every run of SCRATCH named for NAME, run-NAME-<time>-<mark>
+# (host_run_name), whose job is not running: the earlier runs of a driver that runs under one
+# name, one at a time, as the nightly does (scripts/nightly-host.sh's lock), left by drivers
+# stopped before their end (TASK-489). Any other directory, another's run among them, it leaves.
+# room prints the bytes free on SCRATCH's filesystem and where it is mounted; size, the bytes DIR
+# holds, root's files among them.
 #
 # reap NAME kills what is left of the job NAME's processes, those in fxjob's scope of it, root's
 # among them, which the user's systemd manager can neither stop nor kill: a job its memory limit
@@ -48,7 +60,7 @@
 # fxjob kills what is left of its scope itself since TASK-353; reap stays for what it can't reach:
 # cancel's TERM ends the job's shell, freeing its lock, while fxjob still reaps, and a job whose
 # fxjob was killed outright, or is older than that, leaves its scope to reap here.
-# CLADEFS_HOST_PROC names the processes' directory (default /proc), for the tests.
+# CLADEFS_TEST_HOST_PROC names the processes' directory (default /proc), for the tests.
 set -euo pipefail
 
 # The job's command runs as root, sudo's, with the user's Rust (scripts/lib/host.sh's
@@ -66,7 +78,7 @@ give_back() {
 # reap NAME kills the processes left in the scope of the job NAME, each process's cgroup naming it
 # (fxjob-NAME-PID.scope), and succeeds once none is left.
 reap() {
-    local name=$1 proc=${CLADEFS_HOST_PROC:-/proc} pids tries
+    local name=$1 proc=${CLADEFS_TEST_HOST_PROC:-/proc} pids tries
     for (( tries = 0; tries < 30; tries++ )); do
         pids=$(grep -l -- "/fxjob-$name-[0-9]*\.scope\$" "$proc"/[0-9]*/cgroup 2> /dev/null |
             sed 's|.*/\([0-9]*\)/cgroup$|\1|') || true
@@ -106,7 +118,7 @@ prepare() {
     done < <(find "$(dirname "$dir")" -mindepth 1 -maxdepth 1 -name 'run-*' -mtime +3)
     git -C "$repo" worktree prune
     # One run at a time fetches, and adds worktrees, which share the clone's objects and modules.
-    exec 8> "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/fxdax-host.lock"
+    exec 8> "$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/cladefs-host.lock"
     flock 8
     for pair in "${pairs[@]}"; do
         label=${pair%%=*} commit=${pair#*=}
@@ -162,17 +174,22 @@ launch() {
 }
 
 wait_job() {
-    local job=$1/job
+    local job=$1/job status
     echo waiting
     if [[ ! -e $job/pid ]]; then
         echo none
         return 0
     fi
     flock "$job/lock" true
-    if [[ -f $job/status ]]; then
-        echo "status $(< "$job/status")"
-    else
+    if [[ ! -f $job/status ]]; then
         echo lost
+        return 0
+    fi
+    status=$(cat "$job/status" 2> /dev/null) || status=''
+    if [[ $status =~ ^[0-9]+$ ]]; then
+        echo "status $status"
+    else
+        echo "lost unreadable"
     fi
 }
 
@@ -201,6 +218,36 @@ clean() {
     git -C "$repo" worktree prune
 }
 
+sweep() {
+    local scratch=$1 repo=$2 name=$3 dir
+    [[ $name =~ ^[a-z0-9]+$ ]] || { echo "sweep: $name names no runs" >&2; return 2; }
+    for dir in "$scratch/run-$name-"*; do
+        [[ -d $dir && $(basename "$dir") =~ ^run-$name-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$ ]] ||
+            continue
+        if running "$dir"; then
+            echo "Keeping $dir: its job runs." >&2
+            continue
+        fi
+        echo "Removing $dir, an earlier run of $name's." >&2
+        clean "$dir" "$repo"
+    done
+}
+
+room() {
+    local avail mount
+    mkdir -p "$1"
+    read -r _ _ _ avail _ mount < <(df -Pk "$1" | sed -n 2p)
+    [[ $avail =~ ^[0-9]+$ ]] || { echo "room: df says no free space of $1" >&2; return 1; }
+    echo "$((avail * 1024)) $mount"
+}
+
+size() {
+    local kib
+    kib=$(sudo du -sk "$1" | cut -f1)
+    [[ $kib =~ ^[0-9]+$ ]] || { echo "size: du says no size of $1" >&2; return 1; }
+    echo "$((kib * 1024))"
+}
+
 # The script's own text is this shell's standard input, which nothing it runs reads.
 case ${1:-} in
     prepare) shift; prepare "$@" ;;
@@ -214,5 +261,8 @@ case ${1:-} in
     cancel) cancel "$2" ;;
     reap) reap "$2" ;;
     clean) shift; clean "$@" ;;
+    sweep) shift; sweep "$@" ;;
+    room) room "$2" ;;
+    size) size "$2" ;;
     *) echo "host-remote.sh: no such action: ${1:-}" >&2; exit 2 ;;
 esac < /dev/null

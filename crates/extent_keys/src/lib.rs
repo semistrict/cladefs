@@ -4,7 +4,7 @@
 
 //! cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
-//! each of which wraps its volumes' DEKs ([`Secret::wrap`]); an object's data is sealed
+//! each of which wraps its vdisks' DEKs ([`Secret::wrap`]); an object's data is encrypted
 //! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
 //! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]); raw files on local disk are
 //! encrypted a sector at a time ([`xts::Xts`]). Every primitive the workspace encrypts with is
@@ -41,7 +41,7 @@ pub const MAC_LEN: usize = 32;
 /// The bytes of a key wrapped by another (AES-KW, RFC 3394: the key and 8 bytes).
 pub const WRAPPED_LEN: usize = KEY_LEN + 8;
 
-/// Data, a key or a MAC that is not what was sealed, wrapped or authenticated: tampered with,
+/// Data, a key or a MAC that is not what was encrypted, wrapped or authenticated: tampered with,
 /// corrupt, or under another key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("not authentic: {0}")]
@@ -115,6 +115,24 @@ impl Secret {
         let key = hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]);
         hmac::verify(&key, bytes, mac).map_err(|_| Unauthentic("bytes, by their MAC"))
     }
+
+    /// cladefs: the HMAC-SHA256 under it of `pieces`, one after another, truncated to its first
+    /// [`TAG_LEN`] bytes (RFC 2104, 5; NIST SP 800-107, 5.3.3): a tag as long as an AES-256-GCM
+    /// tag, to authenticate what is encrypted otherwise, as a raw file's XTS sectors are
+    /// (TASK-411.23). A MAC needing no nonce: tagging the same bytes twice gives the same tag, and
+    /// other bytes tell nothing of the key.
+    pub fn tag(&self, pieces: &[&[u8]]) -> [u8; TAG_LEN] {
+        let mut context = hmac::Context::with_key(&hmac::Key::new(hmac::HMAC_SHA256, &self.0[..]));
+        pieces.iter().for_each(|piece| context.update(piece));
+        let mac = context.sign();
+        mac.as_ref()[..TAG_LEN].try_into().expect("HMAC-SHA256 is longer than a tag")
+    }
+
+    /// cladefs: checks `tag` is the tag of `pieces` under it ([`Secret::tag`]), in constant time.
+    pub fn verify_tag(&self, pieces: &[&[u8]], tag: &[u8; TAG_LEN]) -> Result<(), Unauthentic> {
+        aws_lc_rs::constant_time::verify_slices_are_equal(&self.tag(pieces), tag)
+            .map_err(|_| Unauthentic("bytes, by their tag"))
+    }
 }
 
 impl Drop for Secret {
@@ -129,7 +147,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// A salt for [`Secret::derive`]: random, one per object sealed, kept with it in the clear.
+/// A salt for [`Secret::derive`]: random, one per object encrypted, kept with it in the clear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Salt(pub [u8; SALT_LEN]);
 
@@ -240,11 +258,12 @@ mod tests {
         assert_eq!(aead.open(7, b"segments/1/0", &mut data, &flipped), refused);
     }
 
-    /// What objects are sealed with is a format (doc-11): the nonce's layout and the cipher may not
-    /// change unnoticed. The values were checked against other implementations on 2026-11-14: the
-    /// ciphertext as LibreSSL's AES-256 of the nonce and counter 2, the tag by a GHASH in Python.
+    /// What objects are encrypted with is a format (doc-11): the nonce's layout and the cipher may
+    /// not change unnoticed. The values were checked against other implementations on 2026-11-14:
+    /// the ciphertext as LibreSSL's AES-256 of the nonce and counter 2, the tag by a GHASH in
+    /// Python.
     #[test]
-    fn sealing_is_as_it_was() {
+    fn encryption_is_as_it_was() {
         let mut data = [0; 16];
         let tag = Aead::new(&key(1)).seal(7, b"aad", &mut data);
         assert_eq!(hex(&data), "ef922a7cb2a6d40ca3c5567b611615d9");
@@ -286,6 +305,24 @@ mod tests {
         let refused = Err(Unauthentic("bytes, by their MAC"));
         assert_eq!(key(1).verify(b"a footer!", &mac), refused);
         assert_eq!(key(2).verify(b"a footer", &mac), refused);
+    }
+
+    /// TASK-411.23: a tag is HMAC-SHA256's first 16 bytes of its pieces, one after another, however
+    /// they are cut; it verifies for those bytes under that key alone. The tag pinned is the first
+    /// half of HMAC-SHA256(32 bytes of 1, "a raw part"), checked in Python's hmac on 2026-11-15.
+    #[test]
+    fn tags_are_truncated_macs_of_their_pieces() {
+        let tag = key(1).tag(&[b"a raw ", b"part"]);
+        assert_eq!(tag, key(1).tag(&[b"a raw part"]));
+        assert_eq!(tag[..], key(1).mac(b"a raw part")[..TAG_LEN]);
+        assert_eq!(hex(&tag), "8a5232c2b730346b5e0e41d305bdd2d3");
+        assert_eq!(key(1).verify_tag(&[b"a raw part"], &tag), Ok(()));
+        let refused = Err(Unauthentic("bytes, by their tag"));
+        assert_eq!(key(1).verify_tag(&[b"a raw part!"], &tag), refused);
+        assert_eq!(key(2).verify_tag(&[b"a raw part"], &tag), refused);
+        let mut flipped = tag;
+        flipped[15] ^= 1;
+        assert_eq!(key(1).verify_tag(&[b"a raw part"], &flipped), refused);
     }
 
     #[test]

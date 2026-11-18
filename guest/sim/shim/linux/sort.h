@@ -3,7 +3,7 @@
 /*
  * The kernel's sort(), as lib/sort.c's: in place, not stable, with no scheduling point. An
  * insertion sort, not the kernel's heapsort, which orders what compares equal otherwise: dax.c
- * sorts nothing whose order among equals matters (fxfs_dax_relieve, TASK-164.10).
+ * sorts nothing whose order among equals matters (cladefs_dax_relieve, TASK-164.10).
  */
 #ifndef _SIM_SORT_H
 #define _SIM_SORT_H

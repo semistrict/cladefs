@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Generate the Go package extentdv1 (go/extentd/v1) from the extent daemon's .proto
-# (crates/cladefs/proto/cladefs/extentd/v1/extentd.proto, TASK-219), as buf.gen.yaml says: into go/,
+# Generate the Go package cladefsdv1 (go/cladefsd/v1) from the extent daemon's .proto
+# (crates/cladefs/proto/cladefs/cladefsd/v1/cladefsd.proto, TASK-219), as buf.gen.yaml says: into go/,
 # or with --check, into a scratch directory, failing if what is checked in differs from it.
 #
 #   go/generate.sh [--check]

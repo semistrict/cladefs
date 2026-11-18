@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: random sequences of what a filesystem's user asks of an image and of its clones, all
+//! cladefs: random sequences of what a filesystem's user asks of an image and of its forks, all
 //! kept in the image's own bucket, among passes of the bucket's collector, checked against a model
 //! of their files (TASK-291.4). fxfs-posix's model holds Fxfs to a model on a device of memory,
 //! under which no bucket is: this one holds the images' extents, in their stores and their
 //! bucket, to what their files were written, as the collector compacts and deletes under them.
 //!
 //! Files are made, written over and past their ends, truncated, removed and synced; images are
-//! cloned, and remounted; and the bucket collected, as an operation of the sequence's, a pass
+//! forked, and remounted; and the bucket collected, as an operation of the sequence's, a pass
 //! alone with no grace period, and after each commit, as often as passes end, compacting what is
 //! half freed and deleting it at once ([`BUSY`]). Each operation reads back what it changed; a
 //! remount compares every file of the image, and the sequence's end every file of every image,
@@ -17,7 +17,7 @@
 //! (TASK-390).
 //!
 //! Seeded by proptest, which says the sequence if one fails, shrunk. CLADEFS_COLLECT_MODEL_CASES
-//! asks for more sequences than 4: each takes seconds, in remounts and clones, which wait for the
+//! asks for more sequences than 4: each takes seconds, in remounts and forks, which wait for the
 //! file bucket's syncs.
 
 use super::Storage;
@@ -37,14 +37,14 @@ const SIZE: u64 = 64 << 20;
 const MIB: usize = 1 << 20;
 /// How many files each image may have.
 const FILES: usize = 4;
-/// How many clones a sequence may make.
-const CLONES: usize = 2;
+/// How many forks a sequence may make.
+const FORKS: usize = 2;
 
 /// Passes as often as one ends, after commits, compacting what is half freed and deleting it
 /// at once.
 pub(super) const BUSY: Pace = Pace {
     every: Duration::ZERO,
-    options: extent_remote::collector::Options { compact_below: 0.5, grace: 0 },
+    options: extent_bucket::collector::Options { compact_below: 0.5, grace: 0 },
 };
 
 /// The files of a filesystem, by their names: what they hold.
@@ -76,7 +76,7 @@ async fn file_holds(fs: &Filesystem, name: &[u8], contents: Option<&Vec<u8>>, wh
     assert!(read == *contents, "{what}: {name:?} differs");
 }
 
-/// What a sequence asks: of the image or clone `on` (of those made so far, wrapping), of its file
+/// What a sequence asks: of the image or fork `on` (of those made so far, wrapping), of its file
 /// `file`.
 #[derive(Clone, Debug)]
 enum Op {
@@ -103,11 +103,11 @@ enum Op {
         on: usize,
         file: usize,
     },
-    /// A clone of the image or clone, mounted, which later operations go to as well.
-    Clone {
+    /// A fork of the image or fork, mounted, which later operations go to as well.
+    Fork {
         on: usize,
     },
-    /// The image or clone closed, and mounted again.
+    /// The image or fork closed, and mounted again.
     Remount {
         on: usize,
     },
@@ -116,7 +116,7 @@ enum Op {
 }
 
 fn op() -> impl Strategy<Value = Op> {
-    let on = || 0..=CLONES;
+    let on = || 0..=FORKS;
     let file = || 0..FILES;
     prop_oneof![
         8 => (on(), file(), 0usize..4, 1usize..=5, any::<u64>())
@@ -125,13 +125,13 @@ fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(on, file, quarters)| Op::Truncate { on, file, quarters }),
         2 => (on(), file()).prop_map(|(on, file)| Op::Unlink { on, file }),
         4 => (on(), file()).prop_map(|(on, file)| Op::Fsync { on, file }),
-        1 => on().prop_map(|on| Op::Clone { on }),
+        1 => on().prop_map(|on| Op::Fork { on }),
         2 => on().prop_map(|on| Op::Remount { on }),
         3 => Just(Op::Collect),
     ]
 }
 
-/// An image, or a clone, mounted, and what its files hold.
+/// An image, or a fork, mounted, and what its files hold.
 struct Mounted {
     path: PathBuf,
     fs: Filesystem,
@@ -165,7 +165,7 @@ impl Images {
         &mut self.mounted[on % len]
     }
 
-    /// Applies `op`, and checks what it changed: the file it was of, or, cloning, remounting or
+    /// Applies `op`, and checks what it changed: the file it was of, or, forking, remounting or
     /// collecting, every file of every image.
     fn apply(&mut self, op: &Op, step: usize) {
         let what = format!("step {step}, {op:?}");
@@ -215,14 +215,14 @@ impl Images {
                 }
                 (on, file)
             }
-            Op::Clone { on } => {
-                if self.mounted.len() > CLONES {
+            Op::Fork { on } => {
+                if self.mounted.len() > FORKS {
                     return;
                 }
-                let path = self.dir.join(format!("clone{}", self.mounted.len()));
+                let path = self.dir.join(format!("fork{}", self.mounted.len()));
                 let Mounted { fs, files, .. } = self.on(on);
                 let files = files.clone();
-                let storage = block_on(fs.clone_storage_to(&path)).unwrap();
+                let storage = block_on(fs.fork_storage_to(&path)).unwrap();
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
                 self.mounted.push(Mounted { path, fs, files });
                 return self.check(&what);
@@ -271,7 +271,7 @@ impl Images {
     }
 }
 
-/// TASK-291.4: whatever an image and its clones are asked, and whenever their bucket is
+/// TASK-291.4: whatever an image and its forks are asked, and whenever their bucket is
 /// collected, among their commits and as an operation of their own, what their files were written
 /// they hold, mounted, remounted and opened anew.
 #[test]

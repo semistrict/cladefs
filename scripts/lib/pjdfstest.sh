@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The pjdfstest (BSD-2-Clause) every run of it builds, one pin for all: the guest's Fxfs's
-# (pjdfstest-fxfs-guest, as scripts/test-e2e.sh builds the guest tests) and FUSE mounts'
+# The pjdfstest (BSD-2-Clause) every run of it builds, one pinned version for all: the guest's
+# Fxfs's (pjdfstest-fxfs-guest, as scripts/test-e2e.sh builds the guest tests) and FUSE mounts'
 # (scripts/pjdfstest-fuse.py, CI). Sourced; each may be set beforehand instead.
 export PJDFSTEST_REPO=${PJDFSTEST_REPO:-https://github.com/pjd/pjdfstest}
 export PJDFSTEST_COMMIT=${PJDFSTEST_COMMIT:-85a8aea9e685999ef0540392fd80535f873d7ff7}

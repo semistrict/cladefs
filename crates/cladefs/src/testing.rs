@@ -4,7 +4,7 @@
 
 //! cladefs: what tests share of looking at the host's disk beside stores (the `testing` feature,
 //! TASK-463): the files under a directory that hold what a test wrote in the clear, as tests of
-//! sealed stores look for (TASK-411.5), here and in sqlite_extents'.
+//! encrypted stores look for (TASK-411.5), here and in sqlite_extents'.
 
 use std::collections::BTreeSet;
 use std::io;

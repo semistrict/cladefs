@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a volume on a store an extent daemon serves, in this process, as a host's would
+//! SQLite on a file set on a store an extent daemon serves, in this process, as a host's would
 //! serve it from its own (TASK-300): pages read in place in the daemon's window.
 
 #![cfg(target_os = "linux")]
@@ -11,7 +11,7 @@ mod common;
 
 use futures::executor::block_on;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Options, Registration, Volume, daemon, register};
+use sqlite_extents::{FileSet, Options, Registration, daemon, register};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,13 +29,13 @@ fn serve() -> (tempfile::TempDir, PathBuf) {
 fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", url);
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_BUCKET", url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();
-    let socket = sockets.path().join("extentd.sock");
+    let socket = sockets.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || cladefs::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::cladefsd::serve(listener));
     (sockets, socket)
 }
 
@@ -44,19 +44,19 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     reads_in_place_and_survives_reopening("plain");
 }
 
-/// TASK-411.7 (TASK-411's AC #3, sqlite volumes, Linux): a database on a store of a sealed cell
-/// the daemon serves, its tenant's KEK in the host's KMS (the common tenant's, whose cells the
+/// TASK-411.7 (TASK-411's AC #3, SQLite vdisks, Linux): a database on a store of an encrypted cell
+/// the daemon serves, its tenant's KEK in the host's KMS (the default tenant's, whose cells the
 /// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
 /// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
 /// clear.
 #[test]
-fn a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening() {
+fn an_encrypted_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     let keys = tempfile::tempdir().unwrap();
     let kms = keys.path().join("kms");
     extent_keys::kms::LocalKms::open(&kms).unwrap().create(0).unwrap();
     // The daemon's KMS, as a host's is named: SAFETY: before this process starts any other thread.
     unsafe { std::env::set_var("CLADEFS_KMS", format!("local://{}", kms.display())) };
-    assert_eq!(reads_in_place_and_survives_reopening("sealed"), Vec::<String>::new());
+    assert_eq!(reads_in_place_and_survives_reopening("encrypted"), Vec::<String>::new());
 }
 
 /// Data that compresses not, which a file holding it in the clear holds as it is.
@@ -82,9 +82,9 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
     let marker = noise(4096);
 
     for round in 0..2i64 {
-        let volume = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+        let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
         let vfs = format!("cladefs-daemon-{name}-{round}");
-        let registration = register(&vfs, volume.clone()).unwrap();
+        let registration = register(&vfs, file_set.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs.as_str())
                 .unwrap();
@@ -107,7 +107,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         connection
             .execute("INSERT OR REPLACE INTO t VALUES (?1, ?2)", params![5000, marker])
             .unwrap();
-        let before = volume.fetched();
+        let before = file_set.fetched();
         let check: String =
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, "ok");
@@ -122,56 +122,56 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         let read: Vec<u8> =
             connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
         assert!(read == marker, "the row of noise reads back otherwise");
-        assert!(volume.fetched() > before + 100, "{} pages fetched", volume.fetched() - before);
+        assert!(file_set.fetched() > before + 100, "{} pages fetched", file_set.fetched() - before);
         drop(connection);
         drop(registration);
-        volume.close().unwrap();
+        file_set.close().unwrap();
     }
     // Beside the daemon's store, which works on behind its API (TASK-463).
     cladefs::testing::files_holding_beside(&store, &[&marker[..64]])
 }
 
-/// A volume on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
+/// A file set on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
 /// database reading it in place, and the store, to fork.
 struct Mounted {
-    store: Arc<cladefs::RemoteExtentStore>,
-    volume: Arc<Volume>,
+    store: Arc<cladefs::DaemonExtentStore>,
+    file_set: Arc<FileSet>,
     _registration: Registration,
     connection: Connection,
 }
 
 impl Mounted {
     fn new(socket: &Path, store: &Path, vfs: &str) -> Self {
-        let store = Arc::new(cladefs::RemoteExtentStore::connect(socket, store, 1 << 30).unwrap());
+        let store = Arc::new(cladefs::DaemonExtentStore::connect(socket, store, 1 << 30).unwrap());
         let window = daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device = DeviceHolder::new(cladefs::RemoteDevice::new(store.clone()).unwrap());
-        let volume = Volume::open_mapped(device, Box::new(window), Options::default()).unwrap();
-        let registration = register(vfs, volume.clone()).unwrap();
+        let device = DeviceHolder::new(cladefs::DaemonDevice::new(store.clone()).unwrap());
+        let file_set = FileSet::open_mapped(device, Box::new(window), Options::default()).unwrap();
+        let registration = register(vfs, file_set.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs).unwrap();
         connection.execute_batch("PRAGMA mmap_size = 1073741824").unwrap();
-        Self { store, volume, _registration: registration, connection }
+        Self { store, file_set, _registration: registration, connection }
     }
 
-    /// Checks the device holds every extent the volume names, those it references and those it
+    /// Checks the device holds every extent the file set names, those it references and those it
     /// has yet to free: so that none it frees, or failed to, is one the device never held, which
-    /// it would try to free again at each commit; and closes the volume.
+    /// it would try to free again at each commit; and closes the file set.
     fn close(self) {
-        let Self { store, volume, _registration, connection } = self;
+        let Self { store, file_set, _registration, connection } = self;
         drop(connection);
-        let device = volume.device();
+        let device = file_set.device();
         let mut buffer = block_on(device.allocate_buffer(device.block_size() as usize));
-        for extent in volume.extents().unwrap() {
+        for extent in file_set.extents().unwrap() {
             block_on(device.read(extent, 0, buffer.as_mut()))
-                .unwrap_or_else(|error| panic!("{extent:?} the volume names: {error:#}"));
+                .unwrap_or_else(|error| panic!("{extent:?} the file set names: {error:#}"));
         }
         drop((store, _registration));
-        volume.close().unwrap();
+        file_set.close().unwrap();
     }
 }
 
 /// A fork of a store on the daemon, as of its last commit, holds the database as it was, inherited
-/// with the store's extents and pages, while the volume on the store is open, frees in its root
+/// with the store's extents and pages, while the file set on the store is open, frees in its root
 /// still to make; the two then change apart, the fork rewriting and so freeing all it inherited,
 /// and each reads its own, in place, before and after opening again.
 #[test]
@@ -200,12 +200,12 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
     }
 }
 
-/// TASK-364: a SQLite volume is a volume of its cell, fenced with it. Another host, of a later
-/// placement, takes the cell, and the volume's branch with it: the first host's commit, durable on
+/// TASK-364: a SQLite vdisk is a vdisk of its cell, fenced with it. Another host, of a later
+/// placement, takes the cell, and the vdisk's branch with it: the first host's commit, durable on
 /// its disk alone, is not in the bucket, its wait for it failing; its commits after it fail.
 #[test]
 fn a_database_is_fenced_with_its_cell() {
-    use extent_remote::cell;
+    use extent_bucket::cell;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let bucket = dir.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
@@ -215,12 +215,12 @@ fn a_database_is_fenced_with_its_cell() {
     let listener = UnixListener::bind(&control_socket).unwrap();
     let tenants = sockets.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
-    std::thread::spawn(move || cladefs::extentd::control::serve_control(listener, tenants));
-    let control = cladefs::extentd::control::Client::connect(&control_socket).unwrap();
+    std::thread::spawn(move || cladefs::cladefsd::control::serve_control(listener, tenants));
+    let control = cladefs::cladefsd::control::Client::connect(&control_socket).unwrap();
 
     let store = dir.path().join("store");
-    let volume = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
-    let _registration = register("cladefs-fenced", volume.clone()).unwrap();
+    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let _registration = register("cladefs-fenced", file_set.clone()).unwrap();
     let connection =
         Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), "cladefs-fenced")
             .unwrap();
@@ -228,20 +228,23 @@ fn a_database_is_fenced_with_its_cell() {
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
     control.sync_store(&store).unwrap();
     let ours = control.branch(&store).unwrap();
-    let objects = extent_remote::store::Store::from_url(&url).unwrap();
+    let objects = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours.cell)).unwrap().unwrap();
-    let named = cell::Volume { branch: ours.id, kind: cell::Kind::Sqlite };
-    assert_eq!(held.volumes, std::collections::BTreeMap::from([("store".to_owned(), named)]));
+    let named = cell::Vdisk { branch: ours.id, kind: cell::Kind::Sqlite };
+    assert_eq!(held.vdisks, std::collections::BTreeMap::from([("store".to_owned(), named)]));
     assert_eq!((held.epoch, held.token), (1, 1));
 
     // Another host's, placed later.
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
-        let (held, _) =
-            cell::hold(&*objects, ours.cell, (2, 2), (false, None), None).await.unwrap();
-        // Its writer fences the branch (TASK-371).
-        drop(extent_remote::Writer::open(objects.clone(), ours, 0x22, held.epoch).await.unwrap());
+        let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), None, None).await.unwrap();
+        // Its writer fences the branch (TASK-371), unwrapping the cell's KEK through the host's
+        // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
+        let kms = cladefs::bucket::kms().unwrap();
+        let writer =
+            extent_bucket::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
+        drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
     let fenced = control.sync_store(&store).unwrap_err();

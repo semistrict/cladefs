@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-06 09:22'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 22:52'
 labels:
   - real-bucket
   - perf
@@ -25,7 +25,7 @@ ordinal: 645000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Every guest suite so far ran on `file://` or `memory://` buckets. Against a real one (GCS, `gs://echophase-cladefs-bench`, us-east4; hosts in us-east1-c, n2-standard-4, jailed, production seccomp filter; main f81174090), four `fxfs-guest-checks*` cases fail on time alone (GCE r740), where the same tree on a file bucket passes them all (r741). Given 4x their budgets (`CLADEFS_CHECKS_SCALE=4`, r742), every check passes: nothing hangs, it is slow. `fxfs-guest-docker-dax` passed at 242 s of its 300 s limit (45 s on a file bucket).
 
-**Failed checks, r740 (killed at their budgets, which `host.rs:83-84` doubles for any `CLADEFS_EXTENTD_REMOTE`), and as long as they took in r742 / on a file bucket (r741):**
+**Failed checks, r740 (killed at their budgets, which `host.rs:83-84` doubles for any `CLADEFSD_REMOTE`), and as long as they took in r742 / on a file bucket (r741):**
 
 | check | r742 GCS | r741 file | x |
 |---|---|---|---|
@@ -38,7 +38,7 @@ Every guest suite so far ran on `file://` or `memory://` buckets. Against a real
 
 Whole cases: checks 175 s against 60 s, checks-dax 209 s against 75 s. Every other suite passed on GCS, 1.2x to 3.2x slower: fxfs-guest, -dax, -crash*, -live-fork, -snapshot*, -suspend-dax, -migrate*-dax, -checks-overrun, extent-guest; pgbench and pgbench-dax 1.01x.
 
-**Where the time goes**, the main daemon's requests (`extentd-stats.txt`), per request, r740 against r741, the same 20 cases:
+**Where the time goes**, the main daemon's requests (`cladefsd-stats.txt`), per request, r740 against r741, the same 20 cases:
 
 | request | GCS | file | x |
 |---|---|---|---|

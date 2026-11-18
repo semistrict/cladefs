@@ -34,7 +34,7 @@ def report(directory):
 
 
 class ObjectStorage(unittest.TestCase):
-    def results(self, stats):
+    def results(self, stats, name="cladefsd-stats.txt"):
         directory = Path(tempfile.mkdtemp())
         case = {
             "case": "bench-fs-fxfs-guest-dax",
@@ -48,7 +48,7 @@ class ObjectStorage(unittest.TestCase):
         (directory / "bench-fs-fxfs-guest-dax.json").write_text(json.dumps(case))
         (directory / "logs").mkdir()
         if stats is not None:
-            (directory / "logs" / "extentd-stats.txt").write_text(stats)
+            (directory / "logs" / name).write_text(stats)
         return directory
 
     def test_the_stats_kept_are_reported_with_their_cost(self):
@@ -76,6 +76,11 @@ Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, moves
 """,
         )
 
+    def test_a_run_of_a_tree_from_before_cladefsd_is_reported_the_same(self):
+        """Its stats file named for the daemon's name before TASK-503."""
+        self.assertEqual(report(self.results(STATS, name="extent" + "d-stats.txt")),
+                         report(self.results(STATS)))
+
     def test_failed_requests_are_reported_after_the_bytes(self):
         failed = STATS.rstrip("\n") + (
             " failed-get=0 failed-get-range=0 failed-head=0 failed-list=0 failed-create=25 "
@@ -86,7 +91,7 @@ Uploaded 121.5 MiB (segments 121.5 MiB, extents 0 B, checkpoints 20.0 KiB, moves
             section,
             """
 
-Failed: 26 requests (create 25, update 1), each retried until answered; extentd.log says why.
+Failed: 26 requests (create 25, update 1), each retried until answered; cladefsd.log says why.
 
 """,
         )

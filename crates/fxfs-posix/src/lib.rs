@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Fxfs as a POSIX filesystem: a volume of a mounted Fxfs, served by object ID, which is the
-//! inode number. Its callers are a VFS: the guest kernel's (guest/rust/fxfs-linux), and cladefs's
+//! inode number. Its callers are a VFS: the guest kernel's (guest/rust/cladefs-linux), and cladefs's
 //! host filesystem (crates/cladefs), each of which keeps what a VFS keeps (`Platform`).
 //!
 //! The VFS checks what it can before calling: names exist or not, types match, and permissions
@@ -102,7 +102,7 @@ const S_IFBLK: u32 = 0o060000;
 #[cfg(test)]
 const S_IFSOCK: u32 = 0o140000;
 
-/// An inode's attributes: `struct fxfs_attr`.
+/// An inode's attributes: `struct cladefs_attr`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Attr {
@@ -113,7 +113,7 @@ pub struct Attr {
     pub mtime_ns: u64,
     pub ctime_ns: u64,
     /// cladefs: with the inode's attribute flags (chattr) above the kernel's 16 bits, which the
-    /// kernel keeps there (`FXFS_MODE_*`): Fxfs's objects have no record of them of their own.
+    /// kernel keeps there (`CLADEFS_MODE_*`): Fxfs's objects have no record of them of their own.
     pub mode: u32,
     pub nlink: u32,
     pub uid: u32,
@@ -133,7 +133,7 @@ pub const SET_CTIME: u32 = 1 << 6;
 /// window, which maps that block.
 pub const SET_KEEP_TAIL: u32 = 1 << 7;
 
-/// Attributes to set: `struct fxfs_setattr`.
+/// Attributes to set: `struct cladefs_setattr`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SetAttr {
@@ -147,7 +147,7 @@ pub struct SetAttr {
     pub ctime_ns: u64,
 }
 
-/// What a rename or unlink replaced: `FXFS_REPLACED_*`.
+/// What a rename or unlink replaced: `CLADEFS_REPLACED_*`.
 pub const REPLACED_NONE: u32 = 0;
 /// A file or symlink, which other names may still link.
 pub const REPLACED_OBJECT: u32 = 1;
@@ -161,7 +161,7 @@ pub enum ReaddirStart<'a> {
     After(&'a [u8]),
 }
 
-/// The filesystem's usage: `struct fxfs_statfs`.
+/// The filesystem's usage: `struct cladefs_statfs`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StatFs {
@@ -171,7 +171,7 @@ pub struct StatFs {
     pub files: u64,
 }
 
-/// A piece of a file's data, which a DAX window maps: `struct fxfs_dax_extent`.
+/// A piece of a file's data, which a DAX window maps: `struct cladefs_dax_extent`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DaxExtent {
@@ -617,7 +617,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// cladefs: `read`, a read of its trees: a follower's under its fill barrier, which the kernel's
-    /// call in holds (fs/fxfs, vfs.h), so that it sees whole batches; checked, in a debug kernel.
+    /// call in holds (fs/cladefs, vfs.h), so that it sees whole batches; checked, in a debug kernel.
     pub async fn reading<T, R: Future<Output = Result<T, Error>>>(
         &self,
         read: impl FnOnce() -> R,
@@ -638,7 +638,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Makes the file `ino` at least `range.end` bytes long (fallocate, with no flags), as the
-    /// guest's fallocate does (`fxfs_data_fallocate`): NoSpace if the filesystem hasn't room for
+    /// guest's fallocate does (`cladefs_data_fallocate`): NoSpace if the filesystem hasn't room for
     /// the range beyond what the file holds already, but no blocks set aside, which an extent store
     /// can't do, each write taking new ones (copy-on-write); blocks not written read as zeros.
     ///
@@ -1660,7 +1660,7 @@ impl<P: Platform> Fxfs<P> {
             let begun = self.begin(if cut { Op::Cut } else { Op::Grow }, None).await?;
             file.truncate_with_options(begun.options(), set.size).await?;
             // cladefs: once the cut has freed what it may, which only a sync makes room of, as a
-            // write that finds the filesystem full makes it (`fxfs_vfs_make_room`). With no room
+            // write that finds the filesystem full makes it (`cladefs_vfs_make_room`). With no room
             // even so what the last block holds past the end stays, as the file must still be cut.
             if cut && set.valid & SET_KEEP_TAIL == 0 {
                 let mut zeroed = file.zero_tail().await;

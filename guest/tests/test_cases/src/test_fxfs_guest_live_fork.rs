@@ -71,8 +71,8 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
-            let extentd: PathBuf =
-                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
+            let cladefsd: PathBuf =
+                std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
             let (store, fork) = (dir.join("store"), dir.join("fork"));
             // Short, as Unix sockets' paths must be.
             let uds = std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
@@ -84,7 +84,7 @@ mod host {
             let mut answers = stream.try_clone()?;
             BufReader::new(stream).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the guest said {said:?}");
-            crate::common::control(&extentd)?.fork_store(&store, &fork)?;
+            crate::common::control(&cladefsd)?.fork_store(&store, &fork)?;
             writeln!(answers, "forked")?;
             // One after the other: they boot from the same root filesystem's image.
             wait(source)?;
@@ -140,7 +140,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())

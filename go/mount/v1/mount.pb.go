@@ -3,20 +3,23 @@
 // found in the LICENSE file.
 
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
-// `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
-// stores: one OS mount, not one per store. Attach takes a cell of the mount's bucket, as its
-// holder, and every Fxfs volume of it into a store at DIR/TENANT/CELL/VOLUME, its lease with it,
-// each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and CELL in 16 hexadecimal digits as the
-// bucket's keys have them; Detach writes them back, so that a VM, or another mount, may take the
-// cell. A cell's other volumes are not shown: its SQLite volumes' databases open through
-// sqlite_extents' VFS alone, and its volumes VMs attach are theirs, on the same host.
+// cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
+// mount, however many stores: one OS mount, not one per store (TASK-475.2). Attach takes a cell of
+// the daemon's bucket, as its holder, and every Fxfs vdisk of it into a store at
+// DIR/TENANT/CELL/VDISK, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VDISK, TENANT and
+// CELL in base 32, 13 digits (Crockford's, lower case, zero-padded), as the bucket's keys have
+// them; Detach writes them back, so that another host may take the cell. A cell's other vdisks
+// are not shown: its SQLite vdisks' databases open through sqlite_extents' VFS alone, and its
+// vdisks VMs attach are theirs, in the same daemon.
 //
-// It is served over a Unix socket, the mounting user's alone, mode 0600 whatever its umask, as
-// every caller may do everything.
+// It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
+// (cladefs/cladefsd/v1/cladefsd.proto), the daemon's user's alone, mode 0600 whatever its umask, as
+// every caller may do everything. A daemon mounting no cells has no Mount service: its calls fail
+// UNIMPLEMENTED. As the daemon drains, its calls fail UNAVAILABLE.
 //
 // Errors are gRPC statuses whose code follows the errno the mount failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
-// control API has them (cladefs/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
+// control API has them (cladefs/cladefsd/v1/cladefsd.proto): ENOENT is NOT_FOUND, EEXIST
 // ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
@@ -120,8 +123,8 @@ type AttachResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The cell: the one asked for, or the new one made.
 	Cell uint64 `protobuf:"varint,1,opt,name=cell,proto3" json:"cell,omitempty"`
-	// Its volumes shown, by name.
-	Volumes       []*Volume `protobuf:"bytes,2,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// Its vdisks shown, by name.
+	Vdisks        []*Vdisk `protobuf:"bytes,2,rep,name=vdisks,proto3" json:"vdisks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -163,15 +166,15 @@ func (x *AttachResponse) GetCell() uint64 {
 	return 0
 }
 
-func (x *AttachResponse) GetVolumes() []*Volume {
+func (x *AttachResponse) GetVdisks() []*Vdisk {
 	if x != nil {
-		return x.Volumes
+		return x.Vdisks
 	}
 	return nil
 }
 
-// What volume to make, and in what cell.
-type CreateVolumeRequest struct {
+// What vdisk to make, and in what cell.
+type CreateVdiskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The tenant.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
@@ -186,20 +189,20 @@ type CreateVolumeRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CreateVolumeRequest) Reset() {
-	*x = CreateVolumeRequest{}
+func (x *CreateVdiskRequest) Reset() {
+	*x = CreateVdiskRequest{}
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CreateVolumeRequest) String() string {
+func (x *CreateVdiskRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CreateVolumeRequest) ProtoMessage() {}
+func (*CreateVdiskRequest) ProtoMessage() {}
 
-func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
+func (x *CreateVdiskRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -211,41 +214,41 @@ func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CreateVolumeRequest.ProtoReflect.Descriptor instead.
-func (*CreateVolumeRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use CreateVdiskRequest.ProtoReflect.Descriptor instead.
+func (*CreateVdiskRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *CreateVolumeRequest) GetTenant() uint64 {
+func (x *CreateVdiskRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *CreateVolumeRequest) GetCell() uint64 {
+func (x *CreateVdiskRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-func (x *CreateVolumeRequest) GetName() string {
+func (x *CreateVdiskRequest) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *CreateVolumeRequest) GetCapacity() uint64 {
+func (x *CreateVdiskRequest) GetCapacity() uint64 {
 	if x != nil {
 		return x.Capacity
 	}
 	return 0
 }
 
-// The volume made.
-type CreateVolumeResponse struct {
+// The vdisk made.
+type CreateVdiskResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its branch, a new one of the cell's.
 	Branch        uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
@@ -253,20 +256,20 @@ type CreateVolumeResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CreateVolumeResponse) Reset() {
-	*x = CreateVolumeResponse{}
+func (x *CreateVdiskResponse) Reset() {
+	*x = CreateVdiskResponse{}
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CreateVolumeResponse) String() string {
+func (x *CreateVdiskResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CreateVolumeResponse) ProtoMessage() {}
+func (*CreateVdiskResponse) ProtoMessage() {}
 
-func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
+func (x *CreateVdiskResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -278,12 +281,12 @@ func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CreateVolumeResponse.ProtoReflect.Descriptor instead.
-func (*CreateVolumeResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use CreateVdiskResponse.ProtoReflect.Descriptor instead.
+func (*CreateVdiskResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{3}
 }
 
-func (x *CreateVolumeResponse) GetBranch() uint64 {
+func (x *CreateVdiskResponse) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
@@ -482,8 +485,8 @@ type AttachedCell struct {
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
-	// Its volumes shown, by name.
-	Volumes       []*Volume `protobuf:"bytes,3,rep,name=volumes,proto3" json:"volumes,omitempty"`
+	// Its vdisks shown, by name.
+	Vdisks        []*Vdisk `protobuf:"bytes,3,rep,name=vdisks,proto3" json:"vdisks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -532,15 +535,15 @@ func (x *AttachedCell) GetCell() uint64 {
 	return 0
 }
 
-func (x *AttachedCell) GetVolumes() []*Volume {
+func (x *AttachedCell) GetVdisks() []*Vdisk {
 	if x != nil {
-		return x.Volumes
+		return x.Vdisks
 	}
 	return nil
 }
 
-// A volume of a cell, shown in the mount.
-type Volume struct {
+// A vdisk of a cell, shown in the mount.
+type Vdisk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its name in the cell.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -552,20 +555,20 @@ type Volume struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Volume) Reset() {
-	*x = Volume{}
+func (x *Vdisk) Reset() {
+	*x = Vdisk{}
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Volume) String() string {
+func (x *Vdisk) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Volume) ProtoMessage() {}
+func (*Vdisk) ProtoMessage() {}
 
-func (x *Volume) ProtoReflect() protoreflect.Message {
+func (x *Vdisk) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -577,26 +580,26 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Volume.ProtoReflect.Descriptor instead.
-func (*Volume) Descriptor() ([]byte, []int) {
+// Deprecated: Use Vdisk.ProtoReflect.Descriptor instead.
+func (*Vdisk) Descriptor() ([]byte, []int) {
 	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{9}
 }
 
-func (x *Volume) GetName() string {
+func (x *Vdisk) GetName() string {
 	if x != nil {
 		return x.Name
 	}
 	return ""
 }
 
-func (x *Volume) GetBranch() uint64 {
+func (x *Vdisk) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *Volume) GetDetaching() bool {
+func (x *Vdisk) GetDetaching() bool {
 	if x != nil {
 		return x.Detaching
 	}
@@ -612,16 +615,16 @@ const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x19\n" +
 	"\x05token\x18\x03 \x01(\x04H\x00R\x05token\x88\x01\x01B\b\n" +
-	"\x06_token\"X\n" +
+	"\x06_token\"U\n" +
 	"\x0eAttachResponse\x12\x12\n" +
-	"\x04cell\x18\x01 \x01(\x04R\x04cell\x122\n" +
-	"\avolumes\x18\x02 \x03(\v2\x18.cladefs.mount.v1.VolumeR\avolumes\"q\n" +
-	"\x13CreateVolumeRequest\x12\x16\n" +
+	"\x04cell\x18\x01 \x01(\x04R\x04cell\x12/\n" +
+	"\x06vdisks\x18\x02 \x03(\v2\x17.cladefs.mount.v1.VdiskR\x06vdisks\"p\n" +
+	"\x12CreateVdiskRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x1a\n" +
-	"\bcapacity\x18\x04 \x01(\x04R\bcapacity\".\n" +
-	"\x14CreateVolumeResponse\x12\x16\n" +
+	"\bcapacity\x18\x04 \x01(\x04R\bcapacity\"-\n" +
+	"\x13CreateVdiskResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\"Q\n" +
 	"\rDetachRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
@@ -630,18 +633,18 @@ const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\x0eDetachResponse\"\r\n" +
 	"\vListRequest\"D\n" +
 	"\fListResponse\x124\n" +
-	"\x05cells\x18\x01 \x03(\v2\x1e.cladefs.mount.v1.AttachedCellR\x05cells\"n\n" +
+	"\x05cells\x18\x01 \x03(\v2\x1e.cladefs.mount.v1.AttachedCellR\x05cells\"k\n" +
 	"\fAttachedCell\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x02 \x01(\x04R\x04cell\x122\n" +
-	"\avolumes\x18\x03 \x03(\v2\x18.cladefs.mount.v1.VolumeR\avolumes\"R\n" +
-	"\x06Volume\x12\x12\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12/\n" +
+	"\x06vdisks\x18\x03 \x03(\v2\x17.cladefs.mount.v1.VdiskR\x06vdisks\"Q\n" +
+	"\x05Vdisk\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06branch\x18\x02 \x01(\x04R\x06branch\x12\x1c\n" +
-	"\tdetaching\x18\x03 \x01(\bR\tdetaching2\xc7\x02\n" +
+	"\tdetaching\x18\x03 \x01(\bR\tdetaching2\xc4\x02\n" +
 	"\x05Mount\x12K\n" +
-	"\x06Attach\x12\x1f.cladefs.mount.v1.AttachRequest\x1a .cladefs.mount.v1.AttachResponse\x12]\n" +
-	"\fCreateVolume\x12%.cladefs.mount.v1.CreateVolumeRequest\x1a&.cladefs.mount.v1.CreateVolumeResponse\x12K\n" +
+	"\x06Attach\x12\x1f.cladefs.mount.v1.AttachRequest\x1a .cladefs.mount.v1.AttachResponse\x12Z\n" +
+	"\vCreateVdisk\x12$.cladefs.mount.v1.CreateVdiskRequest\x1a%.cladefs.mount.v1.CreateVdiskResponse\x12K\n" +
 	"\x06Detach\x12\x1f.cladefs.mount.v1.DetachRequest\x1a .cladefs.mount.v1.DetachResponse\x12E\n" +
 	"\x04List\x12\x1d.cladefs.mount.v1.ListRequest\x1a\x1e.cladefs.mount.v1.ListResponseB3Z1github.com/semistrict/cladefs/go/mount/v1;mountv1b\x06proto3"
 
@@ -659,27 +662,27 @@ func file_cladefs_mount_v1_mount_proto_rawDescGZIP() []byte {
 
 var file_cladefs_mount_v1_mount_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_cladefs_mount_v1_mount_proto_goTypes = []any{
-	(*AttachRequest)(nil),        // 0: cladefs.mount.v1.AttachRequest
-	(*AttachResponse)(nil),       // 1: cladefs.mount.v1.AttachResponse
-	(*CreateVolumeRequest)(nil),  // 2: cladefs.mount.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil), // 3: cladefs.mount.v1.CreateVolumeResponse
-	(*DetachRequest)(nil),        // 4: cladefs.mount.v1.DetachRequest
-	(*DetachResponse)(nil),       // 5: cladefs.mount.v1.DetachResponse
-	(*ListRequest)(nil),          // 6: cladefs.mount.v1.ListRequest
-	(*ListResponse)(nil),         // 7: cladefs.mount.v1.ListResponse
-	(*AttachedCell)(nil),         // 8: cladefs.mount.v1.AttachedCell
-	(*Volume)(nil),               // 9: cladefs.mount.v1.Volume
+	(*AttachRequest)(nil),       // 0: cladefs.mount.v1.AttachRequest
+	(*AttachResponse)(nil),      // 1: cladefs.mount.v1.AttachResponse
+	(*CreateVdiskRequest)(nil),  // 2: cladefs.mount.v1.CreateVdiskRequest
+	(*CreateVdiskResponse)(nil), // 3: cladefs.mount.v1.CreateVdiskResponse
+	(*DetachRequest)(nil),       // 4: cladefs.mount.v1.DetachRequest
+	(*DetachResponse)(nil),      // 5: cladefs.mount.v1.DetachResponse
+	(*ListRequest)(nil),         // 6: cladefs.mount.v1.ListRequest
+	(*ListResponse)(nil),        // 7: cladefs.mount.v1.ListResponse
+	(*AttachedCell)(nil),        // 8: cladefs.mount.v1.AttachedCell
+	(*Vdisk)(nil),               // 9: cladefs.mount.v1.Vdisk
 }
 var file_cladefs_mount_v1_mount_proto_depIdxs = []int32{
-	9, // 0: cladefs.mount.v1.AttachResponse.volumes:type_name -> cladefs.mount.v1.Volume
+	9, // 0: cladefs.mount.v1.AttachResponse.vdisks:type_name -> cladefs.mount.v1.Vdisk
 	8, // 1: cladefs.mount.v1.ListResponse.cells:type_name -> cladefs.mount.v1.AttachedCell
-	9, // 2: cladefs.mount.v1.AttachedCell.volumes:type_name -> cladefs.mount.v1.Volume
+	9, // 2: cladefs.mount.v1.AttachedCell.vdisks:type_name -> cladefs.mount.v1.Vdisk
 	0, // 3: cladefs.mount.v1.Mount.Attach:input_type -> cladefs.mount.v1.AttachRequest
-	2, // 4: cladefs.mount.v1.Mount.CreateVolume:input_type -> cladefs.mount.v1.CreateVolumeRequest
+	2, // 4: cladefs.mount.v1.Mount.CreateVdisk:input_type -> cladefs.mount.v1.CreateVdiskRequest
 	4, // 5: cladefs.mount.v1.Mount.Detach:input_type -> cladefs.mount.v1.DetachRequest
 	6, // 6: cladefs.mount.v1.Mount.List:input_type -> cladefs.mount.v1.ListRequest
 	1, // 7: cladefs.mount.v1.Mount.Attach:output_type -> cladefs.mount.v1.AttachResponse
-	3, // 8: cladefs.mount.v1.Mount.CreateVolume:output_type -> cladefs.mount.v1.CreateVolumeResponse
+	3, // 8: cladefs.mount.v1.Mount.CreateVdisk:output_type -> cladefs.mount.v1.CreateVdiskResponse
 	5, // 9: cladefs.mount.v1.Mount.Detach:output_type -> cladefs.mount.v1.DetachResponse
 	7, // 10: cladefs.mount.v1.Mount.List:output_type -> cladefs.mount.v1.ListResponse
 	7, // [7:11] is the sub-list for method output_type

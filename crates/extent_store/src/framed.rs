@@ -93,17 +93,9 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
 }
 
 /// cladefs: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
-/// their checks: refused if it is in the clear and `keys` hold its branch sealed, a downgrade
-/// (TASK-411.3).
+/// their checks (TASK-411.3): one in the clear does not (TASK-411.28).
 fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
-    match Parts::of_suffix(suffix, keys) {
-        Ok(parts) => Ok(Some(parts)),
-        Err(extent_frame::Error::Clear) => {
-            let named = extent_remote::Error::Downgrade("a framed file of the store's".into());
-            Err(Error::new(named))
-        }
-        Err(_) => Ok(None),
-    }
+    Ok(Parts::of_suffix(suffix, keys).ok())
 }
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
@@ -244,8 +236,8 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 
 /// A file of extents' data, open.
 pub(crate) enum Source<F> {
-    /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the store
-    /// is sealed, which reads decrypt (TASK-411.5).
+    /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the
+    /// store is, which reads decrypt (TASK-411.5).
     Raw(Arc<RawFile<F>>),
     /// Framed: a closed segment's, or a sealed extent's own.
     Framed(Arc<Framed<F>>),
@@ -271,7 +263,7 @@ impl<F: File> Source<F> {
         at: u64,
         len: u64,
         unpacked: &Unpacked,
-        parts: &mut Vec<Part<F>>,
+        parts: &mut Vec<Located<F>>,
     ) -> Result<(), Corrupt> {
         let framed = match self {
             Self::Raw(file) => {
@@ -292,8 +284,8 @@ impl<F: File> Source<F> {
             let (skip, len) = (from - place.start, to - from);
             let key = (framed.id, part);
             parts.push(match unpacked.get(key) {
-                Some(bytes) => Part::Unpacked { bytes, skip, len },
-                None => Part::Packed {
+                Some(bytes) => Located::Unpacked { bytes, skip, len },
+                None => Located::Packed {
                     part: Packed { file: framed.file.clone(), part: opened, key },
                     skip,
                     len,
@@ -306,27 +298,27 @@ impl<F: File> Source<F> {
 
 /// Adds `len` bytes at `offset` in `file`, a raw file, to `parts`, extending the last if they
 /// follow it.
-fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<RawFile<F>>, offset: u64, len: u64) {
-    if let Some(Part::Data { file: last, offset: last_offset, len: last_len }) = parts.last_mut()
+fn push_data<F>(parts: &mut Vec<Located<F>>, file: &Arc<RawFile<F>>, offset: u64, len: u64) {
+    if let Some(Located::Data { file: last, offset: last_offset, len: last_len }) = parts.last_mut()
         && Arc::ptr_eq(last, file)
         && *last_offset + *last_len == offset
     {
         *last_len += len;
         return;
     }
-    parts.push(Part::Data { file: file.clone(), offset, len });
+    parts.push(Located::Data { file: file.clone(), offset, len });
 }
 
-/// A part of a range of an extent: bytes of a raw file; bytes of a part of a framed file, which
-/// [`crate::Store::unpack`] checks and unpacks from its stored bytes; bytes of a part unpacked
-/// lately; or zeros, where nothing was written.
-pub enum Part<F> {
+/// A piece of a range of an extent, located ([`crate::Store::locate`]): bytes of a raw file; bytes
+/// of a part of a framed file, which [`crate::Store::unpack`] checks and unpacks from its stored
+/// bytes; bytes of a part unpacked lately; or zeros, where nothing was written.
+pub enum Located<F> {
     /// cladefs: bytes of a raw file, which the store wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
-    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: a
-    /// sealed store's are encrypted, a sector at a time: a reader of the file's stored bytes reads
-    /// [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the [`RawFile`]
-    /// itself does (TASK-411.5).
+    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: an
+    /// encrypted store's are encrypted, a sector at a time: a reader of the file's stored bytes
+    /// reads [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the
+    /// [`RawFile`] itself does (TASK-411.5).
     Data {
         file: Arc<RawFile<F>>,
         offset: u64,
@@ -346,7 +338,7 @@ pub enum Part<F> {
     Zeros(u64),
 }
 
-impl<F> Part<F> {
+impl<F> Located<F> {
     /// The bytes of the extent it is.
     pub fn len(&self) -> u64 {
         match self {
@@ -361,7 +353,7 @@ impl<F> Part<F> {
 }
 
 /// A part of a framed file, stored raw or compressed: read whole, to be checked against its CRC,
-/// opened if sealed, and unpacked.
+/// opened if encrypted, and unpacked.
 pub struct Packed<F> {
     pub file: Arc<F>,
     /// cladefs: the part, as its file's tail says it is stored and opened (TASK-411.2).
@@ -384,7 +376,7 @@ impl<F> Packed<F> {
     }
 
     /// The part, unpacked from `stored`, its stored bytes and any after them, read from its file,
-    /// checked against its CRC, opened in place if sealed (TASK-411.2), and kept in `unpacked`:
+    /// checked against its CRC, opened in place if encrypted (TASK-411.2), and kept in `unpacked`:
     /// one stored compressed unpacked into what keeps it, rather than copied there (TASK-92.19);
     /// one stored raw kept in the buffer it was read into, which a page-in reads all of, uncopied
     /// (TASK-153.11).
@@ -422,8 +414,8 @@ impl<F> Packed<F> {
 static UNPACKS: AtomicU64 = AtomicU64::new(0);
 
 /// cladefs: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
-/// [`Corrupt`] alone, as before parts were sealed; one sealed under a key the store doesn't hold
-/// by `extent_frame::Error::NoKey` (TASK-411.2).
+/// [`Corrupt`] alone, as before parts were encrypted; one encrypted under a key the store doesn't
+/// hold by `extent_frame::Error::NoKey` (TASK-411.2).
 fn unread(error: extent_frame::Error) -> Error {
     match error {
         extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
@@ -441,14 +433,15 @@ pub fn unpacks() -> u64 {
 /// reads of extents are of neighbouring blocks, which a part holds.
 #[derive(Default)]
 pub(crate) struct Unpacked {
-    kept: Mutex<Kept>,
+    kept: Mutex<Recent>,
 }
 
 /// A part unpacked: its file's opening, and its number.
 type Key = (u64, u64);
 
+/// The parts [`Unpacked`] keeps, by when they were last read.
 #[derive(Default)]
-struct Kept {
+struct Recent {
     /// Each part, and when it was last read.
     parts: HashMap<Key, (Arc<Aligned>, u64)>,
     by_use: BTreeMap<u64, Key>,
@@ -497,7 +490,11 @@ mod tests {
     fn bytes_past_the_data_are_located_nowhere() {
         let dir = MemDir::new();
         let file = dir.create("framed", true).unwrap();
-        let bytes = extent_frame::framed(&[7; 4096], &[], None);
+        let bytes = extent_frame::framed(
+            &[7; 4096],
+            &[],
+            extent_bucket::testing::encrypting(extent_bucket::layout::test_branch(1)),
+        );
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
         let source = Source::Framed(Arc::new(framed));
@@ -522,7 +519,11 @@ mod tests {
         let framed = |key: u64| {
             made.set(made.get() + 1);
             let file = dir.create(&made.get().to_string(), true).unwrap();
-            let bytes = extent_frame::framed(&[key as u8; 4096], &[], None);
+            let bytes = extent_frame::framed(
+                &[key as u8; 4096],
+                &[],
+                extent_bucket::testing::encrypting(extent_bucket::layout::test_branch(1)),
+            );
             file.write_at(&bytes, 0).unwrap();
             Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))
         };

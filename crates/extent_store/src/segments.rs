@@ -10,30 +10,30 @@
 
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
+use crate::extents::Extents;
 use crate::framed::{Files, Framed, Source, read_parts};
 use crate::framing::{self, Look, Looked, Seen};
 use crate::held::Hold;
 use crate::layout::{
-    Change, Data, EXTENTS, Extents, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId,
-    branch_dir, extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number,
-    segment_path, spare_path,
+    Change, Data, EXTENTS, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId, branch_dir,
+    extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number, segment_path,
+    spare_path,
 };
-use crate::raw::{RawFile, Sealer};
+use crate::raw::{RawEncryption, RawFile};
 use crate::store::{Options, Usage};
 use crate::timings::{self, Timing, durable, framing as framing_phase};
 use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use extent_bucket::keys::Ring;
 use extent_frame::PART;
-use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
-use extent_frame::{KeyId, Secret};
-use extent_remote::keys::Ring;
+use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, VersionCut, epoch_of};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::time::Instant;
 use storage_device::ExtentId;
 
-/// cladefs: the bytes of a sector of an open segment, whose raw file a sealed store encrypts a
+/// cladefs: the bytes of a sector of an open segment, whose raw file an encrypted store encrypts a
 /// sector at a time, AES-256-XTS, the sector its tweak (doc-16, TASK-411.5, [`crate::raw`]):
 /// which takes no reading, modifying and writing again only if what reaches the segment is whole
 /// sectors, at offsets in it and of lengths that are multiples of this (TASK-411.8).
@@ -87,16 +87,16 @@ enum Phase<F> {
 }
 
 /// cladefs: a segment's log, and the salt of its records, its header's (`wal::log_header`); cladefs:
-/// and what MACs them, its raw file's sealer, if sealed (TASK-411.5).
+/// and what MACs them, its raw file's encryption (TASK-411.5).
 pub(crate) struct Log<F> {
     pub file: Arc<F>,
     pub salt: u64,
-    pub sealer: Option<Arc<Sealer>>,
+    pub encryption: Arc<RawEncryption>,
 }
 
 impl<F> Clone for Log<F> {
     fn clone(&self) -> Self {
-        Self { file: self.file.clone(), salt: self.salt, sealer: self.sealer.clone() }
+        Self { file: self.file.clone(), salt: self.salt, encryption: self.encryption.clone() }
     }
 }
 
@@ -133,10 +133,8 @@ struct Segment<F> {
 impl<F> Segment<F> {
     fn new(phase: Phase<F>, live: u64) -> Self {
         let (len, size, writers, pending) = (0, 0, 0, 0);
-        // cladefs: a sealed raw file's parts no look ahead sees: their bytes in it are XTS
-        // ciphertext, and its framing, never in place (TASK-411.5), reads them all anyway.
-        let sealed = matches!(&phase, Phase::Open { raw, .. } if raw.clear().is_none());
-        let ahead = (!sealed).then(Ahead::default);
+        // cladefs: looked at ahead, encrypted (TASK-411.23, TASK-421).
+        let ahead = Some(Ahead::default());
         Self {
             phase,
             len,
@@ -229,10 +227,13 @@ pub(crate) struct Segments<F> {
     close_wanted: bool,
     /// The forks the next commit makes at its end, which close the open segment.
     forking: Vec<Child>,
+    /// cladefs: the versions the next commit cuts at its end, which close the open segment
+    /// (TASK-476).
+    cutting: Vec<VersionCut>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
     /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
-    /// store opened, which stamps each footer with its place: its number, its writer's lease epoch
+    /// store opened, which stamps each footer with its place: its number, its writer's epoch
     /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
     /// numbered on from the segment open as the branch was opened, one for each segment closed.
     chain: Chain,
@@ -322,7 +323,7 @@ impl<F: File> Segments<F> {
             rapidhash::rapidhash(&bytes)
         };
         let salt = new_salt(lifetime, open);
-        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, keys.sealing())?;
+        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, keys.encrypting())?;
         for kind in [OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&branch_dir(kind, branch))?;
         }
@@ -336,6 +337,7 @@ impl<F: File> Segments<F> {
             opened: Instant::now(),
             close_wanted: false,
             forking: Vec::new(),
+            cutting: Vec::new(),
             window: Window::starting(branch, epoch + 1),
             chain,
             files: Files::new(open_files),
@@ -485,8 +487,7 @@ impl<F: File> Segments<F> {
 
     /// cladefs: segment `number`'s raw file, to look at a part of ahead of its framing, if its
     /// framing is yet to take its parts' looks (TASK-400); and the look at its parts seen so far,
-    /// which says whether to pack the next ahead too ([`framing::see`]). cladefs: never a sealed
-    /// segment's, which has no looks ahead (`Segment::new`, TASK-411.5).
+    /// which says whether to pack the next ahead too ([`framing::see`]).
     pub fn see(&self, number: SegmentId) -> Option<(Arc<RawFile<F>>, Look)> {
         let segment = self.tracked.get(&number)?;
         let look = segment.ahead.as_ref()?.look;
@@ -586,6 +587,13 @@ impl<F: File> Segments<F> {
         self.forking.push(child);
     }
 
+    /// cladefs: has the next commit cut the version `cut` at its end, which its contents name, and
+    /// close the open segment, whose footer names the version (doc-18, TASK-476).
+    pub fn close_for_version(&mut self, cut: VersionCut) {
+        self.close_wanted = true;
+        self.cutting.push(cut);
+    }
+
     /// Whether the open segment holds commits up to `epoch`, the last, which closing it records.
     /// cladefs: or the first full one, which holds those made before it filled, the open segment
     /// none since (TASK-92.41).
@@ -635,15 +643,15 @@ impl<F: File> Segments<F> {
                 file.read_cached(&mut header, 0)?;
                 let header = LogHeader::of(&header, number)
                     .ok_or_else(|| anyhow!("{number:?}'s log has no header of its own"))?;
-                let sealer = header.sealer(number, &self.keys)?;
-                Ok(Log { file: Arc::new(file), salt: header.salt, sealer })
+                let encryption = header.encryption(number, &self.keys)?;
+                Ok(Log { file: Arc::new(file), salt: header.salt, encryption })
             }
         }
     }
 
     /// cladefs: segment `number`'s raw file, as stored, whose data a commit's record checks
     /// (`wal::LogRecord`): there until it goes, once the segment is framed and its commits durable.
-    /// cladefs: encrypted, if sealed, as its records hold its runs (TASK-411.5).
+    /// cladefs: encrypted, as its records hold its runs (TASK-411.5).
     pub fn raw_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Arc<F>, Error> {
         match self.tracked.get(&number).map(|segment| &segment.phase) {
             Some(
@@ -707,6 +715,7 @@ impl<F: File> Segments<F> {
         contents.capacity = capacity;
         contents.next_sequence = next_sequence;
         contents.forks = std::mem::take(&mut self.forking);
+        contents.versions = std::mem::take(&mut self.cutting);
         self.window.fold(&contents);
         self.committed_len = self.tracked[&self.open].len;
         records.push((self.open, contents));
@@ -736,7 +745,7 @@ impl<F: File> Segments<F> {
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
         let placing = (&mut self.spares, &mut self.prepared);
-        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.sealing())?;
+        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
         // Nothing fails from here on.
         let window =
             std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
@@ -847,7 +856,7 @@ impl<F: File> Segments<F> {
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
         let placing = (&mut self.spares, &mut self.prepared);
-        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.sealing())?;
+        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
         let window =
             std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
@@ -969,15 +978,15 @@ impl<F: File> Segments<F> {
         self.unsynced_entries.retain(|number| !synced.contains(number));
     }
 
-    /// cladefs: where segment `number` is in its life, for why a commit's sealing copies the extents
-    /// in it ([`crate::seals`], TASK-92.41).
-    pub fn stage(&self, number: SegmentId) -> crate::seals::Stage {
-        use crate::seals::Stage;
+    /// cladefs: where segment `number` stands for a commit sealing the extents in it, for why it
+    /// copies them ([`crate::seals`], TASK-92.41).
+    pub fn standing(&self, number: SegmentId) -> crate::seals::Standing {
+        use crate::seals::Standing;
         match self.tracked.get(&number).map(|segment| &segment.phase) {
-            _ if number == self.open => Stage::Open,
-            Some(Phase::Full { .. }) => Stage::Full,
-            Some(Phase::Framing { .. } | Phase::Failed { .. }) => Stage::Framing,
-            Some(Phase::Open { .. }) | Some(Phase::Closed) | None => Stage::Closed,
+            _ if number == self.open => Standing::Open,
+            Some(Phase::Full { .. }) => Standing::Full,
+            Some(Phase::Framing { .. } | Phase::Failed { .. }) => Standing::Framing,
+            Some(Phase::Open { .. }) | Some(Phase::Closed) | None => Standing::Closed,
         }
     }
 
@@ -1038,8 +1047,8 @@ impl<F: File> Segments<F> {
         }
         self.preparing = true;
         let spare = self.spares.pop();
-        let sealer = new_sealer(self.keys.sealing());
-        Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), sealer })
+        let encryption = new_encryption(self.keys.encrypting());
+        Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), encryption })
     }
 
     /// cladefs: a preparation's log is made, as `prepared` says: if it is still the next segment's,
@@ -1075,11 +1084,12 @@ impl<F: File> Segments<F> {
             // running, and ended here, it left the next segment nothing prepared until another
             // flush or closing, the last flush's having found it running (TASK-404).
             Ok(stale) => {
-                // cladefs: the next's raw file sealed under a salt of its own, drawn anew (TASK-411.5).
-                let (salt, sealer) =
-                    (new_salt(self.lifetime, next), new_sealer(self.keys.sealing()));
+                // cladefs: the next's raw file encrypted under a salt of its own, drawn anew
+                // (TASK-411.5).
+                let (salt, encryption) =
+                    (new_salt(self.lifetime, next), new_encryption(self.keys.encrypting()));
                 let spare = Some(stale.spare);
-                return Preparing::Again(Preparation { segment: next, spare, salt, sealer });
+                return Preparing::Again(Preparation { segment: next, spare, salt, encryption });
             }
             Err((spare, error)) => {
                 log::warn!("extent store: preparing {next:?}'s log: {error:#}");
@@ -1104,7 +1114,7 @@ impl<F: File> Segments<F> {
         dir: &D,
         prepared: Prepared<F>,
     ) -> Result<Placed<F>, Error> {
-        let Prepared { segment, spare, file, salt, sealer } = prepared;
+        let Prepared { segment, spare, file, salt, encryption } = prepared;
         let raw = dir.create(&open_segment_path(segment), true)?;
         let (from, to) = (spare_path(spare), log_path(segment));
         if let Err(error) = dir.rename(&from, &to) {
@@ -1114,7 +1124,7 @@ impl<F: File> Segments<F> {
             }
             return Err(Error::new(error).context(format!("renaming {from} {to}")));
         }
-        Ok(Placed { segment, raw, log: file, salt, sealer, synced: false })
+        Ok(Placed { segment, raw, log: file, salt, encryption, synced: false })
     }
 
     /// cladefs: the entries of segment `segment`, placed ([`Segments::prepared`]), were made durable,
@@ -1307,7 +1317,7 @@ pub(crate) struct Unframed<F> {
     /// cladefs: whether no write was in progress in it as it closed, none to come: what framing it
     /// in place needs, which leaves its data where it is (TASK-310).
     quiet: bool,
-    /// cladefs: the store's keys, whose newest DEK of its branch it is sealed under, if any
+    /// cladefs: the store's keys, whose newest DEK of its branch it is encrypted under, if any
     /// (TASK-411.3).
     keys: Arc<Ring>,
 }
@@ -1339,7 +1349,7 @@ impl<F: File> Unframed<F> {
         let mut timing = Timing::since(Instant::now());
         // The extents stored on their own it names, durable before it is, as a flush syncs them,
         // several at once: one at a time, each a journal commit of the host's file system's, they
-        // held up for as long the syncs of the flushes of extentd's turns, which wait on the same
+        // held up for as long the syncs of the flushes of cladefsd's turns, which wait on the same
         // files, up to 0.9 s under pgbench (GCE r730, TASK-165.9).
         let mut own = Syncs::default();
         for (extent, _) in self.footer.own() {
@@ -1352,8 +1362,9 @@ impl<F: File> Unframed<F> {
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
         let raw = (raw_path.as_str(), &self.raw);
         let data = (self.len, self.quiet, ahead);
-        let sealing = self.keys.sealing();
-        let (framed, how) = frame_segment(dir, &path, raw, data, (&footer, sealing), &mut timing)?;
+        let encryption = self.keys.encrypting();
+        let (framed, how) =
+            frame_segment(dir, &path, raw, data, (&footer, encryption), &mut timing)?;
         timings::framed(self.number, how, timing.end());
         Ok(framed)
     }
@@ -1518,37 +1529,38 @@ impl Ahead {
 /// `raw_path`, holds, with `footer`, into the framed file at `path` in `dir`: counted in
 /// [`segment_closes`], and timed in `timing`, reading, compressing and writing (TASK-336); and
 /// returns how ([`How`]). In place, if `quiet`, no write in progress in it, and compressing its
-/// parts saves less than an eighth of its data ([`framing::IN_PLACE_SAVING`]), each stored raw then,
-/// as an object of such parts holds them as they are, where they are: its raw file, its tail
+/// parts saves less than an eighth of its data ([`framing::IN_PLACE_SAVING`]), each stored raw
+/// then, as an object of such parts holds them as they are, where they are: its raw file, its tail
 /// appended, is its framed file, by another name ([`Dir::link`]), its data written once, as its
 /// guest wrote it (TASK-310). A segment's data was written twice, raw, which the host's disk wrote
 /// back as the guest wrote it, and framed: as much again as its guest wrote, the disk's other
 /// writers waiting behind it, on a disk VMs share. Or else in a file of its own, as before. Its
 /// parts looked at `ahead`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a
-/// copy, and not those packed then, held still (TASK-400). cladefs: sealed, if `sealing` gives a
-/// DEK, its branch's newest, never in place, as a sealed object's bytes are never its data
-/// (TASK-411.3); nor is a sealed raw file's, which holds them encrypted otherwise, AES-256-XTS by
-/// sector: framing it in place would write every byte of it again anyway, and a crash part way
-/// would leave a file neither raw nor framed (TASK-411.5). So no look ahead sees a sealed segment's
-/// parts, nor packs and holds them (`Segment::new`): `ahead` is empty for one, and its framing reads
-/// every part through its raw file, decrypting, then packs and seals it.
+/// copy, and not those packed then, held still (TASK-400). cladefs: encrypted, if `encrypting` gives a
+/// DEK, its branch's newest: in a copy, its parts compressed and encrypted with AES-GCM (TASK-411.3);
+/// in place as in the clear, its raw file, encrypted, AES-256-XTS by sector, the object of its
+/// sectors as they are, each part tagged ([`extent_frame::Encryption::Sectors`], TASK-411.23). Framed in
+/// a copy, an encrypted segment wrote every byte twice, the guests' writes 1.9 times over on
+/// fxfs-guest-sandboxes against 1.16 in the clear. Its parts looked at ahead are seen as stored,
+/// and held packed in the clear until its framing encrypts them ([`framing`], TASK-421).
 fn frame_segment<D: Dir>(
     dir: &D,
     path: &str,
     (raw_path, raw): (&str, &Arc<RawFile<D::File>>),
     (len, quiet, ahead): (u64, bool, Vec<Option<Looked>>),
-    (footer, sealing): (&[u8], extent_remote::layout::Sealing<'_>),
+    (footer, encrypting): (&[u8], extent_bucket::layout::EncryptionKey<'_>),
     timing: &mut Timing<4>,
 ) -> Result<(Arc<Framed<D::File>>, How), Error> {
     let started = Instant::now();
     // cladefs: its parts read, each in a buffer kept for the framings after; checksummed and looked
     // at if it may be framed in place (TASK-336), but for those seen ahead, and those packed then
     // (TASK-400).
-    // cladefs: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
-    // data (TASK-411.2, TASK-411.3).
-    let mut packer = extent_frame::Packer::new(sealing);
-    let clear = raw.clear().filter(|_| packer.key().is_none());
-    let in_place_maybe = quiet && len > 0 && clear.is_some();
+    // cladefs: in a copy, its parts encrypted with AES-GCM (TASK-411.2, TASK-411.3).
+    let mut packer = extent_frame::Packer::new(encrypting);
+    // cladefs: in place, whole sectors of its raw file, its object their sectors under the raw
+    // file's key (TASK-411.23).
+    let sectors = raw.sectors();
+    let in_place_maybe = quiet && len > 0 && len.is_multiple_of(SECTOR);
     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
     // cladefs: in place at once if a look at its parts says compressing them saves too little,
     // compressing no more of them: compressing every part to tell was most of what framings took
@@ -1578,11 +1590,11 @@ fn frame_segment<D: Dir>(
     }
     let in_place =
         sampled || (in_place_maybe && packer.end() > len - len / framing::IN_PLACE_SAVING);
-    if (in_place && !packer.raw()) || sampled {
-        packer = extent_frame::Packer::new(None);
+    if in_place {
+        packer = extent_frame::Packer::in_place(sectors.clone());
         let raw_parts = parts.iter().zip(0..).map(|(read, part)| {
-            let part_len = (len - part * PART).min(PART);
-            (part_len, read.seen.crc)
+            debug_assert_eq!(read.seen.part.len, (len - part * PART).min(PART), "part {part}");
+            read.seen.part
         });
         packer.push_raw_parts(raw_parts);
     }
@@ -1590,9 +1602,9 @@ fn frame_segment<D: Dir>(
     let end = packer.end();
     let (tail, parts) = packer.finish_parts(footer);
     timing.took(framing_phase::COMPRESS);
-    let framed = match (in_place, clear) {
-        (true, Some(raw)) => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
-        _ => None,
+    let framed = match in_place {
+        true => frame_in_place(dir, (raw_path, raw.file()), path, end, &tail)?,
+        false => None,
     };
     let how = How { in_place: framed.is_some(), len, read, held };
     let framed = match framed {
@@ -1645,7 +1657,8 @@ fn write_framed<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> 
 }
 
 /// cladefs: frames a segment's data, `raw`, its raw file at `raw_path`, its parts stored raw, in
-/// place ([`frame_segment`]): `tail` appended at `end`, the end of its data, which the making
+/// place ([`frame_segment`]), the file as it stores them, encrypted or not: `tail` appended at `end`,
+/// the end of its data, in the clear as any object's tail is (TASK-411.23), which the making
 /// durable after writes back (TASK-401: written back here, a tail of a few KiB waited 1.5 s
 /// behind the disk's queue); and the file linked at `path`, its framed file's. Its
 /// raw path goes once the commits its footer names are durable, as a raw file does
@@ -1705,7 +1718,7 @@ fn commit_contents(
     let mut contents = Contents { frees: frees.into_iter().collect(), ..Contents::default() };
     let mut continued: BTreeMap<SegmentId, Vec<Run>> = BTreeMap::new();
     for extent in touched {
-        let entry = extents.get(&extent).expect("touched and held");
+        let entry = extents.get(&extent).expect("touched and held").into_cow();
         match &entry.data {
             Data::Pieces(pieces) => {
                 let [piece] = pieces[..] else { bail!("{extent:?} is not sealed in one run") };
@@ -1724,7 +1737,7 @@ fn commit_contents(
                 ensure!(extent.branch == segment.branch, "{extent:?} is another branch's");
                 contents.own.push((extent.sequence, entry.len));
             }
-            Data::Remote(_) => {}
+            Data::Bucket(_) => {}
         }
     }
     Ok((contents, continued))
@@ -1756,6 +1769,8 @@ struct Window {
     root: Option<Vec<u8>>,
     capacity: Option<u64>,
     forks: Vec<Child>,
+    /// cladefs: the versions cut at their ends (TASK-476).
+    versions: Vec<VersionCut>,
     /// cladefs: the runs of the commit its segment's footer goes on with, which the segments after
     /// it end, if any: the last thing it folds (TASK-92.41).
     continued: Option<Continued>,
@@ -1791,6 +1806,7 @@ impl Window {
             self.capacity = commit.capacity;
         }
         self.forks.extend_from_slice(&commit.forks);
+        self.versions.extend_from_slice(&commit.versions);
         if let Some(&last) = commit.commits.last() {
             self.last = Some(epoch_of(last));
         }
@@ -1819,6 +1835,7 @@ impl Window {
             forks: self.forks,
             capacity: self.capacity,
             continued: self.continued,
+            versions: self.versions,
         }
     }
 }
@@ -1849,7 +1866,7 @@ pub(crate) struct Prepared<F> {
     spare: SegmentId,
     file: F,
     salt: u64,
-    sealer: Option<Arc<Sealer>>,
+    encryption: Arc<RawEncryption>,
 }
 
 /// cladefs: the next segment's raw file and log, made ahead of it, there under their names, which
@@ -1862,7 +1879,7 @@ pub(crate) struct Placed<F> {
     raw: F,
     log: F,
     salt: u64,
-    sealer: Option<Arc<Sealer>>,
+    encryption: Arc<RawEncryption>,
     synced: bool,
 }
 
@@ -1884,12 +1901,13 @@ const MADE: u64 = 1 << 63;
 
 /// cladefs: what to prepare of segment `segment`'s log ([`Segments::to_prepare`]): from `spare`'s
 /// spare log, if any, else a file made anew under a spare's name of its own ([`MADE`]), salted
-/// `salt`; cladefs: sealed by `sealer`, with its raw file, if the store is sealed (TASK-411.5).
+/// `salt`; cladefs: encrypted by `encryption`, with its raw file, if the store is encrypted
+/// (TASK-411.5).
 pub(crate) struct Preparation {
     segment: SegmentId,
     spare: Option<SegmentId>,
     salt: u64,
-    sealer: Option<Arc<Sealer>>,
+    encryption: Arc<RawEncryption>,
 }
 
 impl Preparation {
@@ -1899,7 +1917,7 @@ impl Preparation {
     /// the store's state lock in `create_open`, a write filling the open segment, every write and
     /// read of the store and its flushes waiting (TASK-333). Fails with the spare it took.
     pub fn prepare<D: Dir>(self, dir: &D) -> Result<Prepared<D::File>, (Option<SegmentId>, Error)> {
-        let Self { segment, spare, salt, sealer } = self;
+        let Self { segment, spare, salt, encryption } = self;
         // Where it runs, off the store's state lock, the segment's opening free to come first.
         fail::fail_point!("segments::preparing");
         // A file made anew under a name no segment's spare log has: a stale one, its segment
@@ -1913,25 +1931,25 @@ impl Preparation {
                 Some(_) => dir.open(&path, false)?,
                 None => dir.create(&path, false)?,
             };
-            write_header(&log, salt, segment, sealer.as_deref())?;
+            write_header(&log, salt, segment, &encryption)?;
             Ok(log)
         };
         match make() {
-            Ok(file) => Ok(Prepared { segment, spare: named, file, salt, sealer }),
+            Ok(file) => Ok(Prepared { segment, spare: named, file, salt, encryption }),
             Err(error) => Err((spare, Error::new(error).context(format!("preparing {path}")))),
         }
     }
 }
 
 /// cladefs: writes the header of `segment`'s log, its records salted `salt`, to `log`, and syncs it
-/// (`wal::log_header`); a sealed log's, if `sealer` seals it.
+/// (`wal::log_header`), MACed by `encryption`.
 fn write_header<F: File>(
     log: &F,
     salt: u64,
     segment: SegmentId,
-    sealer: Option<&Sealer>,
+    encryption: &RawEncryption,
 ) -> io::Result<()> {
-    let header = log_header(salt, segment, sealer);
+    let header = log_header(salt, segment, encryption);
     log.write_at(&header, 0)?;
     crate::written::wrote(crate::written::Kind::Log, header.len());
     log.sync_cached()
@@ -1947,17 +1965,17 @@ fn create_open<D: Dir>(
     segment: SegmentId,
     (spares, placed): (&mut Vec<SegmentId>, &mut Option<Placed<D::File>>),
     salt: u64,
-    sealing: Option<(&Secret, KeyId)>,
+    encrypting: extent_bucket::layout::EncryptionKey<'_>,
 ) -> Result<(Phase<D::File>, bool), Error> {
     if let Some(ready) = placed.take_if(|ready| ready.segment == segment && ready.salt == salt) {
-        let raw = Arc::new(RawFile::new(ready.raw, ready.sealer.clone()));
-        let log = Log { file: Arc::new(ready.log), salt, sealer: ready.sealer };
+        let raw = Arc::new(RawFile::new(ready.raw, ready.encryption.clone()));
+        let log = Log { file: Arc::new(ready.log), salt, encryption: ready.encryption };
         return Ok((Phase::Open { raw, log }, ready.synced));
     }
-    // cladefs: sealed if the store is, under its branch's newest DEK (TASK-411.5).
-    let sealer = new_sealer(sealing);
+    // cladefs: encrypted, as every store is, under its branch's newest DEK (TASK-411.5).
+    let encryption = new_encryption(encrypting);
     let raw =
-        Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, sealer.clone()));
+        Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, encryption.clone()));
     // cladefs: its log a spare, if there is one, its header written over the one there (TASK-301):
     // durable before any record is appended, and before the spare is renamed its log: renamed
     // first, a crash, or a failure, before the header was durable left the spare's header, and the
@@ -1965,7 +1983,7 @@ fn create_open<D: Dir>(
     // this segment's commits, their runs past its raw data (TASK-310's crash round 270).
     let path = log_path(segment);
     let headed = |log: D::File| -> io::Result<D::File> {
-        write_header(&log, salt, segment, sealer.as_deref())?;
+        write_header(&log, salt, segment, &encryption)?;
         Ok(log)
     };
     let reused = spares.pop().map(|spare| {
@@ -1982,13 +2000,13 @@ fn create_open<D: Dir>(
         }
         None => headed(dir.create(&path, false)?)?,
     };
-    Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, sealer } }, false))
+    Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, encryption } }, false))
 }
 
-/// cladefs: the sealer of a new segment's raw file and log, if `sealing` gives a DEK, its branch's
-/// newest, which they are sealed under then, from a salt of their own (TASK-411.5).
-fn new_sealer(sealing: Option<(&Secret, KeyId)>) -> Option<Arc<Sealer>> {
-    sealing.map(|(dek, key)| Arc::new(Sealer::new(dek, key)))
+/// cladefs: the encryption of a new segment's raw file and log, under `encrypting`'s DEK, its branch's
+/// newest, from a salt of their own (TASK-411.5).
+fn new_encryption((dek, key): extent_bucket::layout::EncryptionKey<'_>) -> Arc<RawEncryption> {
+    Arc::new(RawEncryption::new(dek, key))
 }
 
 /// The store's epoch of the last commit of the segment whose footer is `footer`. cladefs: the one it
@@ -2060,7 +2078,7 @@ mod tests {
     use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = SECTOR;
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }
@@ -2074,7 +2092,7 @@ mod tests {
             dir,
             (BRANCH.id, BTreeMap::new()),
             (0, 0, chain),
-            (open_files, Ring::clear()),
+            (open_files, extent_bucket::testing::ring([BRANCH])),
         )
         .unwrap()
     }
@@ -2113,10 +2131,11 @@ mod tests {
     fn data(segments: &mut Segments<MemFile>, dir: &MemDir, number: SegmentId) -> Vec<u8> {
         match segments.source(dir, number).unwrap() {
             Source::Raw(file) => read_file(&*file).unwrap(),
-            Source::Framed(framed) => {
-                extent_frame::data(&read_whole(&*framed.file).unwrap(), &extent_frame::NoKeys)
-                    .unwrap()
-            }
+            Source::Framed(framed) => extent_frame::data(
+                &read_whole(&*framed.file).unwrap(),
+                &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+            )
+            .unwrap(),
         }
     }
 
@@ -2284,47 +2303,136 @@ mod tests {
         assert_eq!(data(&mut segments, &dir, segment(0)), raw_data, "framed as it was written");
     }
 
-    /// cladefs: TASK-400 in a sealed store (TASK-411.5): no look ahead sees a sealed segment's
-    /// parts, written whole or appended, nor packs and holds them, though they compress: their
-    /// bytes in its raw file are XTS ciphertext, and its framing, never in place, reads them all,
-    /// decrypted, packing and sealing them in a copy.
-    #[test]
-    fn sealed_segments_parts_are_neither_seen_nor_held_ahead() {
-        let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+    /// The segments of an encrypted branch, under `dek`, with none closed, and its keys.
+    fn encrypted_opened(dir: &MemDir, dek: [u8; 32]) -> (Segments<MemFile>, Arc<Ring>) {
+        create_branch_dirs(dir, BRANCH.id).unwrap();
         let chain = Chain::new(BRANCH, 0, 0, 0);
-        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
-        let keys = Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
+        let keys =
+            Ring::encrypting_for_tests(BRANCH.id, 1, extent_frame::Secret::from_bytes(&dek), []);
         let tracked = (BRANCH.id, BTreeMap::new());
-        let mut segments =
-            Segments::open(&dir, tracked, (0, 0, chain), (64, keys.clone())).unwrap();
-        // Letters at random, sixteen of them, which compress: a clear store packs and holds them.
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let words = (0..3 * PART / 8).map(|_| {
+        let segments = Segments::open(dir, tracked, (0, 0, chain), (64, keys.clone())).unwrap();
+        (segments, keys)
+    }
+
+    /// `len` bytes of xorshift64's, from `seed`: noise, or, if `text`, letters at random, sixteen
+    /// of them, which compress by about half.
+    fn bytes_of(seed: u64, len: u64, text: bool) -> Vec<u8> {
+        let mut state = (seed + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let words = (0..len / 8).map(|_| {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             state
         });
-        let text: Vec<u8> = words.flat_map(u64::to_le_bytes).map(|byte| b'a' + byte % 16).collect();
+        let noise = words.flat_map(u64::to_le_bytes);
+        noise.map(|byte| if text { b'a' + byte % 16 } else { byte }).collect()
+    }
+
+    /// Whether any file of `dir` holds a sector's first 32 bytes of `data`, in the clear.
+    fn in_the_clear(dir: &MemDir, data: &[u8]) -> Vec<String> {
+        let pieces: std::collections::HashSet<&[u8]> =
+            data.chunks(SECTOR as usize).map(|sector| &sector[..32]).collect();
+        (dir.files().into_iter())
+            .filter(|(_, bytes)| bytes.windows(32).any(|window| pieces.contains(window)))
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    /// cladefs: TASK-400 in an encrypted store (TASK-411.23, TASK-421): an encrypted segment's parts that
+    /// compress, written whole or appended, are looked at ahead, packed and held, in the clear, in
+    /// memory; its framing in a copy reads none of them back, and encrypts them under its object's
+    /// key, the bytes it framed opening to its data under the branch's key. No file holds its
+    /// data in the clear.
+    #[test]
+    fn encrypted_segments_parts_are_held_ahead_and_encrypted_framing() {
+        let dir = MemDir::new();
+        let (mut segments, keys) = encrypted_opened(&dir, [3; 32]);
+        let text = bytes_of(1, 3 * PART, true);
         let (number, file, at) = segments.reserve(2 * PART).unwrap();
         file.write_at(&text[..2 * PART as usize], at).unwrap();
         segments.held(number, (at, 2 * PART));
         let (file, at) = segments.append(PART).unwrap();
         file.write_at(&text[2 * PART as usize..], at).unwrap();
         segments.appended(number, at, PART);
-        assert_eq!(segments.take_seeing(), [], "no part of a sealed segment to look at");
-        assert!(segments.see(number).is_none());
+        let seeing = segments.take_seeing();
+        assert_eq!(seeing, [(number, 0), (number, 1), (number, 2)]);
+        let held = HeldParts::new();
+        look_ahead(&mut segments, &held, seeing);
+        let holding = held.bytes();
+        assert!(holding > PART && holding < 2 * PART, "compressed, held: {holding}");
         let unframed = segments.close(&dir, 1, 0).unwrap();
         let ahead = segments.take_seen(number);
-        assert!(ahead.is_empty(), "nothing seen, nor held");
+        assert_eq!(
+            ahead.iter().map(|looked| looked.as_ref().unwrap().held.is_some()).collect::<Vec<_>>(),
+            [true; 3]
+        );
         let before = (framing_reads().0, segments_framed_in_place());
         let framed = unframed.frame(&dir, ahead).unwrap();
-        assert_eq!(framing_reads().0 - before.0, 3 * PART, "its parts all read");
+        assert_eq!(framing_reads().0 - before.0, 0, "none read back");
         assert_eq!(segments_framed_in_place() - before.1, 0, "framed in a copy");
+        assert_eq!(held.bytes(), 0, "taken");
         let object = read_whole(&*framed.file).unwrap();
         assert!(object.len() < 2 * PART as usize, "compressed: {} bytes", object.len());
+        let encryption = extent_frame::Frame::of(&object).unwrap().encryption;
+        assert!(
+            matches!(encryption, extent_frame::Encryption::Encrypted { key, .. } if key == extent_frame::KeyId { branch: BRANCH.id, generation: 1 }),
+            "{encryption:?}"
+        );
         assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), text);
+        assert_eq!(in_the_clear(&dir, &text), Vec::<String>::new());
+    }
+
+    /// cladefs: TASK-411.23: an encrypted segment of noise is framed in place as a clear one is (TASK-310,
+    /// TASK-400): its parts seen ahead as stored, the last alone read, its raw file its framed file,
+    /// nothing of its data written again but its tail; the object of its raw file's XTS sectors,
+    /// under the raw file's DEK and salt, which opens to its data under the branch's key, to none
+    /// without it, and holds none of it in the clear.
+    #[test]
+    fn encrypted_segments_of_noise_are_framed_in_place() {
+        let dir = MemDir::new();
+        let (mut segments, keys) = encrypted_opened(&dir, [4; 32]);
+        let noise = bytes_of(2, 3 * PART + BLOCK, false);
+        let (number, file, at) = segments.reserve(3 * PART).unwrap();
+        file.write_at(&noise[..3 * PART as usize], at).unwrap();
+        segments.held(number, (at, 3 * PART));
+        let (number, file, at) = segments.reserve(BLOCK).unwrap();
+        file.write_at(&noise[3 * PART as usize..], at).unwrap();
+        segments.held(number, (at, BLOCK));
+        let raw = file.file().clone();
+        let salt = file.sectors().salt();
+        let held = HeldParts::new();
+        let seeing = segments.take_seeing();
+        look_ahead(&mut segments, &held, seeing);
+        assert_eq!(held.bytes(), 0, "noise, held not");
+        let unframed = segments.close(&dir, 1, 0).unwrap();
+        let seen = segments.take_seen(number);
+        let before = (framing_reads().0, segments_framed_in_place(), crate::written().framed);
+        let framed = unframed.frame(&dir, seen).unwrap();
+        assert_eq!(framing_reads().0 - before.0, BLOCK, "the last part alone read");
+        assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
+        assert!(Arc::ptr_eq(&framed.file, &raw), "its raw file, its framed file");
+        let object = read_whole(&*framed.file).unwrap();
+        let tail = object.len() as u64 - noise.len() as u64;
+        assert_eq!(crate::written().framed - before.2, tail, "its tail alone written");
+        let frame = extent_frame::Frame::of(&object).unwrap();
+        let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
+        assert_eq!(frame.encryption, extent_frame::Encryption::Sectors { key, salt });
+        assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), noise);
+        let locked = extent_frame::data(&object, &extent_frame::NoKeys);
+        assert_eq!(locked, Err(extent_frame::Error::NoKey(key)));
+        assert_eq!(in_the_clear(&dir, &noise), Vec::<String>::new());
+        make_durable(&dir, BRANCH.id, (&[(number, framed.clone())], false), Instant::now())
+            .unwrap();
+        segments.framed(number, framed);
+        let Source::Framed(read) = segments.source(&dir, number).unwrap() else { panic!() };
+        let parts = &read.parts;
+        let at = PART + 5;
+        let range = parts.read(at..at + 100, |range| {
+            let mut bytes = vec![0; (range.end - range.start) as usize];
+            read.file.read_at(&mut bytes, range.start).unwrap();
+            Ok::<_, extent_frame::Error>(bytes)
+        });
+        assert_eq!(range.unwrap(), &noise[at as usize..at as usize + 100]);
     }
 
     /// Footers are stamped by the writer's chain the segments opened with, numbered on from it,
@@ -2337,13 +2445,17 @@ mod tests {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         let chain = Chain::new(BRANCH, 3, 5, 100);
-        let segments =
-            Segments::open(&dir, (BRANCH.id, BTreeMap::new()), (0, 2, chain), (64, Ring::clear()));
+        let segments = Segments::open(
+            &dir,
+            (BRANCH.id, BTreeMap::new()),
+            (0, 2, chain),
+            (64, extent_bucket::testing::ring([BRANCH])),
+        );
         let mut segments = segments.unwrap();
         assert_eq!(segments.open_segment(), segment(2));
         let close = |segments: &mut Segments<MemFile>, epoch| {
             let footer = segments.close(&dir, epoch, 7).unwrap().footer;
-            (footer.seq, footer.epoch, footer.contents.commits, footer.contents.next_sequence)
+            (footer.segment, footer.epoch, footer.contents.commits, footer.contents.next_sequence)
         };
         assert_eq!(close(&mut segments, 3), (5, 3, vec![tag(3, 3)], 100));
         assert_eq!(close(&mut segments, 4), (6, 3, vec![tag(3, 4)], 100));
@@ -2401,7 +2513,7 @@ mod tests {
         let dir = MemDir::new();
         let mut segments = opened(&dir, 64);
         let (first, second) = (ExtentId::new(BRANCH.id, 1), ExtentId::new(BRANCH.id, 2));
-        let mut extents = Extents::new();
+        let mut extents = Extents::default();
         let mut commit = |segments: &mut Segments<MemFile>, epoch, extent, piece: Piece| {
             let data = Data::Pieces(vec![piece]);
             extents.insert(extent, Extent { len: BLOCK, data: data.clone() });

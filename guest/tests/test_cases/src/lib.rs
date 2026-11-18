@@ -18,6 +18,12 @@ pub fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
     value
 }
 
+// cladefs: the known plaintext cases write, and the check that a run's stores keep none of it in the
+// clear (TASK-411.15).
+pub mod canary;
+#[cfg(feature = "host")]
+pub mod encrypted;
+
 mod test_pjdfstest;
 use test_pjdfstest::TestPjdfstest;
 
@@ -37,7 +43,7 @@ use test_fxfs_guest_pgbench::{
     Database as PgbenchDatabase, Probe, Storage as PgbenchStorage, TestFxfsGuestPgbench,
 };
 mod test_fxfs_guest_bigmap;
-// cladefs: what extentd asks of a disk it shares with many VMs and the bucket (TASK-310).
+// cladefs: what cladefsd asks of a disk it shares with many VMs and the bucket (TASK-310).
 mod test_fxfs_guest_shared_disk;
 use test_fxfs_guest_shared_disk::TestFxfsGuestSharedDisk;
 mod test_fxfs_guest_bucket_soak;
@@ -206,7 +212,7 @@ tags! {
     /// The nightly's (.github/workflows/nightly.yml), as production runs them: e2e's and
     /// kernel's, every other case cheap enough on a release kernel, and xfstests.
     Nightly = "nightly",
-    /// scripts/dax-gate.sh's suites, rounds of each, in its first run.
+    /// scripts/dax-gate.sh's suites, repeats of each, in its first run.
     DaxGate = "dax-gate",
     /// scripts/soak-workloads-host.sh's crash group: the VM stopped mid-workload.
     SoakCrash = "soak-crash",
@@ -547,20 +553,17 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new(
             "fxfs-guest-follow-torture-mutant",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-faults-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture {
-                dax: true,
-                mutant: Some(Mutant::InvalidationFaults),
-            }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::DropFaults) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-barrier-dax",

@@ -8,13 +8,13 @@
 //! A guest's virtio extent driver numbers every request it makes of its device (doc-4's `unique`,
 //! a per-device counter from 1), which costs it nothing more: that number is the request's ID. The
 //! VMM serves each request with it current ([`guest_request`]); the extent daemon's client says it
-//! in each call it makes for the request (`extentd::wire::REQUEST`); and the daemon serves each such
+//! in each call it makes for the request (`cladefsd::wire::REQUEST`); and the daemon serves each such
 //! call with it current again, with the store its connection serves, since every VM's device
-//! numbers its own requests. So the daemon's log records about a request (`extentd::logging`), the
+//! numbers its own requests. So the daemon's log records about a request (`cladefsd::logging`), the
 //! object store's requests made for it among them, name it, as anything that traces it can.
 //!
 //! A request is current while what serves it is polled, or run, on a thread ([`InRequest`],
-//! [`within_now`]), and carried by hand to another ([`within`]): the remotes' runtime's reads of
+//! [`within_now`]), and carried by hand to another ([`within`]): the bucket runtime's reads of
 //! object storage, and the pager's.
 
 use std::cell::Cell;

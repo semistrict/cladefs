@@ -8,15 +8,15 @@
 # pages a writeback under way swapped out and has yet to commit: the sync seals without them.
 # cow_fsync_during_writeback's sync.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -3440,7 +3440,8 @@
  	if (nr < 0)
  		return nr;
  	for (i = 0; i < nr; i++) {
--		struct inode *inode = fxfs_dax_inode_of(dax, files[i]);
+-		struct inode *inode = cladefs_dax_inode_of(dax, files[i]);
 +		struct inode *inode = atomic_long_read(&files[i]->dirty_pages) ?
-+				      fxfs_dax_inode_of(dax, files[i]) : NULL;
++				      cladefs_dax_inode_of(dax, files[i]) : NULL;
  
  		if (inode) {
- 			int wrote = fxfs_dax_write_back(inode);
+ 			int wrote = cladefs_dax_write_back(inode);

@@ -31,13 +31,13 @@ Step(e) ==
     CASE e.a = "Rename" -> Rename
       [] e.a = "Write" -> nextExt = e.e /\ Write(e.f)
       [] e.a = "Fetch" -> Fetch /\ target' = e.t
-      [] e.a = "WaitBarrier" -> Wait
+      [] e.a = "Wait" -> Wait
       [] e.a = "StartBatch" -> StartBatch
-      [] e.a = "Invalidate" -> Invalidate(e.f)
+      [] e.a = "Drop" -> Drop(e.f)
       [] e.a = "Dropped" -> Dropped
       [] e.a = "ApplyOne" -> pending # <<>> /\ Head(pending) = <<e.k, e.v>> /\ ApplyOne
       [] e.a = "EndBatch" -> EndBatch
-      [] e.a = "Advance" -> Advance
+      [] e.a = "LetGo" -> LetGo
       [] e.a = "Release" -> ReleaseOf(<<e.e, e.c>>)
       [] e.a = "StartPair" -> StartPair(e.r) /\ StartUnchanged
       [] e.a = "StartFault" -> StartFault(e.r, e.f) /\ StartUnchanged

@@ -25,6 +25,7 @@ writes-retried-at-once: a wait for its turn taken out whole
 written-back-twice: a second write added: a cost, as the algorithm's
 own-extents-in-flight-collected: a condition narrowed (the collector's ahead)
 uploads-wake-no-waiter: a wake taken out whole: a wait's condition and its wake are in different modules, which a syntactic rule can't pair (the guest's are, unwoken.cocci)
+versions-named-past-their-cuts: arithmetic (a term added to the segment a version is at)
 a-batch-loses-its-last-run: a batch's last flush taken out whole (Fxfs's graveyard)
 a-create-leaves-its-directorys-times: a flag negated
 a-create-times-its-directory-on-the-guest: a flag forced true

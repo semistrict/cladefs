@@ -27,13 +27,13 @@
 //! The VMs send the host their histories, which it checks once they are done with TASK-42.1's
 //! checker (`follower_history`): the writer's operations, each with the files it changed, and the
 //! store's latest commit as each of its syncs returned; and its followers' reads, each with the
-//! commits its follower may have been as of (fs/fxfs's FXFS_IOC_FOLLOW_EPOCHS). Each reader must
+//! commits its follower may have been as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS). Each reader must
 //! find what a prefix of the writer's operations those commits may hold left, a prefix no shorter
 //! than its last read's. A reader records each read that found what it last found of the file
 //! otherwise, and the others every RECORD_EVERY.
 //!
 //! The kernel's command line may widen
-//! the protocol's windows (fs/fxfs's `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's
+//! the protocol's windows (fs/cladefs's `follow_apply_delay_us`, `follow_iomap_delay_us`), and no VM's
 //! kernel may complain (a debug kernel's lockdep, KCSAN and DEBUG_ATOMIC_SLEEP, or the follower's
 //! own WARN_ONs). A mutant, with one window widened and the rule that closes it switched off, must
 //! be caught: its followers report what is stale, and its history is wrong.
@@ -55,14 +55,14 @@ pub struct TestFxfsGuestFollowTorture {
 #[cfg_attr(feature = "guest", allow(dead_code))]
 pub enum Mutant {
     /// Their batches' drops and settling: the window between a batch applied and settled.
-    Invalidation,
+    Drop,
     /// Their batches' drops and settling, with the window between a DAX fault's extents and its
     /// mapping widened instead: a fault maps what a batch changed after, which nothing drops.
-    InvalidationFaults,
+    DropFaults,
     /// Their readers' fill barrier (TASK-42.10): the window between a batch dropping what the
     /// kernel keeps of what it changes and applying it, and between its apply and its attributes
     /// set. A reader's fault maps an extent of the state before a batch after the batch let its
-    /// commit go: extentd refuses the window's map of the extent released (doc-8, testing 1), and
+    /// commit go: cladefsd refuses the window's map of the extent released (doc-8, testing 1), and
     /// the follower's VMM, which can't resolve the fault, aborts; or a reader finds a name the
     /// batch half applied; what its readers found is a wrong history.
     Barrier,
@@ -80,7 +80,7 @@ const PORT: u32 = 5054;
 /// The vsock port each VM sends its history on, which the host checks (TASK-42.1's checker,
 /// `follower_history`), one record a line: the writer's operations (`op AFTER NAME=OBJECT:CONTENTS
 /// ...`, `NAME=-` for none) and syncs (`sync`, which the host answers with the store's latest
-/// commit's epoch); a follower's reads (`read READER FROM TO NAME FOUND`) and reads of files it
+/// commit's number); a follower's reads (`read READER FROM TO NAME FOUND`) and reads of files it
 /// held open (`held READER FROM TO OBJECT FOUND`), FOUND a number, `-` for nothing, or `!WHAT` for
 /// what isn't whole, made as of a commit from FROM to TO.
 const HISTORY_PORT: u32 = 5056;
@@ -144,24 +144,24 @@ mod host {
             // The windows the protocol closes, widened; or a mutant's, the rule closing it off.
             match self.mutant {
                 None => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_iomap_delay_us=50");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_iomap_delay_us=50");
                 }
-                Some(Mutant::Invalidation) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_skip_invalidate=1");
+                Some(Mutant::Drop) => {
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_skip_drop=1");
                 }
-                Some(Mutant::InvalidationFaults) => {
-                    vm.env(c"fxfs.follow_iomap_delay_us=50");
-                    vm.env(c"fxfs.follow_skip_invalidate=1");
+                Some(Mutant::DropFaults) => {
+                    vm.env(c"cladefs.follow_iomap_delay_us=50");
+                    vm.env(c"cladefs.follow_skip_drop=1");
                 }
                 Some(Mutant::Barrier) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_skip_barrier=1");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_skip_barrier=1");
                 }
                 Some(Mutant::Nested) => {
-                    vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_read_faults=1");
+                    vm.env(c"cladefs.follow_apply_delay_us=200");
+                    vm.env(c"cladefs.follow_read_faults=1");
                 }
             }
             vm.vsock(uds);
@@ -273,8 +273,8 @@ mod host {
         Ok(std::thread::spawn(move || {
             let control = match &store {
                 Some(_) => {
-                    let extentd = std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD set");
-                    Some(crate::common::control(Path::new(&extentd))?)
+                    let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
+                    Some(crate::common::control(Path::new(&cladefsd))?)
                 }
                 None => None,
             };
@@ -289,9 +289,9 @@ mod host {
                 writeln!(records, "{line}")?;
                 record(line, &history, &mut || {
                     let (control, store) = (control.as_ref().unwrap(), store.as_ref().unwrap());
-                    let epoch = control.committed(store)?;
-                    writeln!(answers, "{epoch}")?;
-                    Ok(epoch)
+                    let commit = control.committed(store)?;
+                    writeln!(answers, "{commit}")?;
+                    Ok(commit)
                 })
                 .map_err(|err| err.context(format!("the history's line {line:?}")))?;
             }
@@ -300,7 +300,7 @@ mod host {
         }))
     }
 
-    /// Takes the record `line` into `history`, a sync's epoch from `synced`.
+    /// Takes the record `line` into `history`, a sync's commit number from `synced`.
     fn record(
         line: &str,
         history: &Mutex<History<String, u64>>,
@@ -338,13 +338,13 @@ mod host {
                 history.lock().unwrap().operation(number(after)?, changes);
             }
             ["sync"] => {
-                let epoch = synced()?;
-                history.lock().unwrap().synced(epoch);
+                let commit = synced()?;
+                history.lock().unwrap().synced(commit);
             }
             ["read", reader, from, to, name, what] => {
                 let read = Read {
                     reader: number(reader)? as usize,
-                    epochs: number(from)?..=number(to)?,
+                    commits: number(from)?..=number(to)?,
                     name: name.to_owned(),
                     found: found(what)?,
                 };
@@ -354,7 +354,7 @@ mod host {
                 let found = found(what)?.and_then(|found| found.ok_or_else(|| "nothing".into()));
                 let read = HeldRead {
                     reader: number(reader)? as usize,
-                    epochs: number(from)?..=number(to)?,
+                    commits: number(from)?..=number(to)?,
                     object_id: number(object_id)?,
                     found,
                 };
@@ -393,10 +393,10 @@ mod host {
                 None => "OK writer\nOK follower1\nOK follower2\nOK history\n",
                 Some(Mutant::Nested) => "OK writer\nHUNG follower1\nHUNG follower2\nOK history\n",
                 // How a mutant's followers fail depends on the schedule: a reader finds a page
-                // stale (STALE), a fault maps an extent a batch let go of, which extentd refuses
+                // stale (STALE), a fault maps an extent a batch let go of, which cladefsd refuses
                 // and the VMM aborts on (ABORTED), or a reader finds what it can't, and stops (no
                 // line). Caught, none passes, and what they read is a wrong history.
-                Some(Mutant::Invalidation | Mutant::InvalidationFaults | Mutant::Barrier) => {
+                Some(Mutant::Drop | Mutant::DropFaults | Mutant::Barrier) => {
                     let lines: Vec<&str> = output.lines().collect();
                     let caught = lines.first() == Some(&"OK writer")
                         && lines.last() == Some(&"WRONG history")
@@ -453,7 +453,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
@@ -568,13 +568,13 @@ mod guest {
             self.record(format_args!("op {after} {}", changes.join(" ")));
         }
 
-        /// The writer's sync, returned: the epoch of the store's latest commit, as the host says.
+        /// The writer's sync, returned: the number of the store's latest commit, as the host says.
         fn synced(&self) -> u64 {
             self.record(format_args!("sync"));
             self.flush();
-            let mut epoch = String::new();
-            self.answers.lock().unwrap().read_line(&mut epoch).unwrap();
-            epoch.trim_end().parse().unwrap()
+            let mut commit = String::new();
+            self.answers.lock().unwrap().read_line(&mut commit).unwrap();
+            commit.trim_end().parse().unwrap()
         }
 
         fn flush(&self) {
@@ -587,19 +587,19 @@ mod guest {
     const BLOCK_OBJECTS: u64 = 1 << 62;
     const SHAPE_OBJECTS: u64 = 1 << 61;
 
-    /// The commits a follower's state is as of (fs/fxfs's FXFS_IOC_FOLLOW_EPOCHS): every batch up
-    /// to `settled`'s invalidated, none past `applied`'s applied.
+    /// The commits a follower's state is as of (fs/cladefs's CLADEFS_IOC_FOLLOW_COMMITS): every batch up
+    /// to `settled`'s settled, none past `applied`'s applied.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    struct Epochs {
+    struct FollowCommits {
         settled: u64,
         applied: u64,
     }
 
-    nix::ioctl_read!(follow_epochs, b'x', 0x42, Epochs);
+    nix::ioctl_read!(follow_commits, b'x', 0x42, FollowCommits);
 
-    /// A follower's batches, and how long they waited for its fill barrier (fs/fxfs's
-    /// FXFS_IOC_FOLLOW_STATS).
+    /// A follower's batches, and how long they waited for its fill barrier (fs/cladefs's
+    /// CLADEFS_IOC_FOLLOW_STATS).
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct Stats {
@@ -613,16 +613,16 @@ mod guest {
     fn stats(dir: &fs::File) -> Stats {
         let mut stats = Stats::default();
         // SAFETY: The ioctl writes a `Stats`.
-        unsafe { follow_stats(dir.as_raw_fd(), &mut stats) }.expect("FXFS_IOC_FOLLOW_STATS");
+        unsafe { follow_stats(dir.as_raw_fd(), &mut stats) }.expect("CLADEFS_IOC_FOLLOW_STATS");
         stats
     }
 
     /// The commits the follower whose directory `dir` is is as of now.
-    fn epochs(dir: &fs::File) -> Epochs {
-        let mut epochs = Epochs::default();
-        // SAFETY: The ioctl writes an `Epochs`.
-        unsafe { follow_epochs(dir.as_raw_fd(), &mut epochs) }.expect("FXFS_IOC_FOLLOW_EPOCHS");
-        epochs
+    fn commits(dir: &fs::File) -> FollowCommits {
+        let mut commits = FollowCommits::default();
+        // SAFETY: The ioctl writes a `FollowCommits`.
+        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }.expect("CLADEFS_IOC_FOLLOW_COMMITS");
+        commits
     }
 
     /// What a reader found of a file: its contents, nothing, or, not whole, what it found.
@@ -650,10 +650,10 @@ mod guest {
 
         /// Reads the file `name` with `read`, recording what it found.
         fn read(&mut self, name: &str, read: impl FnOnce() -> Found) -> Found {
-            let before = epochs(&self.dir);
+            let before = commits(&self.dir);
             let found = read();
             if self.last.get(name) != Some(&found) || self.recorded.elapsed() >= RECORD_EVERY {
-                let after = epochs(&self.dir);
+                let after = commits(&self.dir);
                 let (id, from, to) = (self.id, before.settled, after.applied);
                 let what = show(&found);
                 self.history.record(format_args!("read {id} {from} {to} {name} {what}"));
@@ -665,9 +665,9 @@ mod guest {
 
         /// Reads the file held open whose object is `object` with `read`, recording what it found.
         fn held(&mut self, object: u64, read: impl FnOnce() -> Found) -> Found {
-            let before = epochs(&self.dir);
+            let before = commits(&self.dir);
             let found = read();
-            let after = epochs(&self.dir);
+            let after = commits(&self.dir);
             let (id, from, to, what) = (self.id, before.settled, after.applied, show(&found));
             self.history.record(format_args!("held {id} {from} {to} {object} {what}"));
             found
@@ -704,7 +704,7 @@ mod guest {
     /// writes what it left, in `done`.
     fn writer() {
         let history = History::connect();
-        // The store's epoch, as of its last sync: each operation since begins after it.
+        // The store's latest commit, as of its last sync: each operation since begins after it.
         let mut after = 0;
         fs::create_dir(path("tok")).unwrap();
         fs::write(path("tok/token.0"), b"").unwrap();
@@ -869,7 +869,7 @@ mod guest {
         /// read(2), into a private, writable mapping of the blocks' file at this address, its
         /// pages dropped each pass (MADV_DONTNEED): each copy to a page the reader no longer has
         /// faults it in from the follower, a fill inside the read(2)'s, which must wait for no
-        /// batch waiting for the read(2) (fs/fxfs's fxfs_vfs_follower_read).
+        /// batch waiting for the read(2) (fs/cladefs's cladefs_vfs_follower_read).
         ReadIntoMapping(usize),
     }
 

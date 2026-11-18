@@ -53,15 +53,15 @@ def memory_line(phase, guest_used, anon, shmem=0, files=0):
     total = 4096 * MIB
     rss = anon + shmem + files
     return (f"memory: vm=1 phase={phase} host_used=1 vmm_rss={rss} vmm_pss={rss} "
-            f"vmm_anon={anon} vmm_shmem={shmem} extentd_pss={8 * MIB} "
-            f"extentd_memory_bytes={MIB} guest_total={total} "
+            f"vmm_anon={anon} vmm_shmem={shmem} cladefsd_pss={8 * MIB} "
+            f"cladefsd_memory_bytes={MIB} guest_total={total} "
             f"guest_available={total - guest_used} guest_faults=3")
 
 
 class Parse(unittest.TestCase):
     def test_measurements_by_role_and_memory_by_phase(self):
         log = "\n".join([
-            f"memory: vm=0 phase=before host_used=5 extentd_pss={4 * MIB}",
+            f"memory: vm=0 phase=before host_used=5 cladefsd_pss={4 * MIB}",
             "some other line of the log",
             memory_line("checkout-booted-pinned", 190 * MIB, 233 * MIB),
         ])
@@ -106,7 +106,7 @@ class Report(unittest.TestCase):
     def test_memory_is_in_mib(self):
         _, lines = self.cases()["fxfs-dax"]
         self.assertEqual(report.memory("fxfs-dax", lines), "\n".join([
-            "| fxfs-dax: phase | guest used | VM RSS | VM anon | VM shmem | extentd PSS | extentd arenas |",
+            "| fxfs-dax: phase | guest used | VM RSS | VM anon | VM shmem | cladefsd PSS | cladefsd arenas |",
             "|---|---|---|---|---|---|---|",
             "| checkout-read | 434 | 3,366 | 2,915 | 451 | 8 | 1 |",
         ]))

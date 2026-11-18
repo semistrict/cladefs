@@ -24,7 +24,7 @@ static void drop_ranges(struct sim_mount *mount, struct file *file)
 	int err;
 
 	filemap_invalidate_lock(inode->i_mapping);
-	err = fxfs_dax_changed(mount->info->dax, mount->info->dax_volume, inode, inode->i_ino, 0,
+	err = cladefs_dax_changed(mount->info->dax, mount->info->dax_volume, inode, inode->i_ino, 0,
 			       MAX_LFS_FILESIZE);
 	filemap_invalidate_unlock(inode->i_mapping);
 	check(!err, "dropping ino %lu's ranges: %d", inode->i_ino, err);
@@ -47,9 +47,9 @@ static void scenario(void *arg)
 	}
 	/* Written back, each after the last in the staging extent, and then sealed at once. */
 	for (f = 0; f < FILES; f++)
-		check(!fxfs_dax_write_back(file_inode(files[f])), "file %d's writeback", f);
+		check(!cladefs_dax_write_back(file_inode(files[f])), "file %d's writeback", f);
 	check(!sim_fsync(files[FILES - 1]), "the fsync");
-	fxfs_sim_extent_sizes_unknown(true);
+	cladefs_sim_extent_sizes_unknown(true);
 	/*
 	 * Made here, each is a page-cache inode until read in again (doc-13, TASK-164.3), and its
 	 * ranges, which outlive its inode, dropped: as a VM that attached the base finds them, none.
@@ -70,7 +70,7 @@ static void scenario(void *arg)
 	      sim_dax_stat(mount, "window_slices") - slices, FILES);
 	check(sim_device_map_requests() - requests == 1, "%llu MAP requests for %d files",
 	      sim_device_map_requests() - requests, FILES);
-	fxfs_sim_extent_sizes_unknown(false);
+	cladefs_sim_extent_sizes_unknown(false);
 	for (f = 0; f < FILES; f++)
 		sim_file_evict(files[f]);
 	sim_mount_free(mount);

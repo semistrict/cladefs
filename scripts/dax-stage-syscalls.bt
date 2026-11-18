@@ -4,7 +4,7 @@
 // found in the LICENSE file.
 //
 // What a VM process's changes to its DAX window cost its thread receiving from the extent daemon,
-// `extentd client`, which makes every change in turn (crates/cladefs/src/dax/uffd.rs), and its
+// `cladefsd client`, which makes every change in turn (crates/cladefs/src/dax/uffd.rs), and its
 // fault thread's, `dax faults` (TASK-276.6): each second, each system call the threads made, by
 // kind (an mmap by the protection it maps with, an ioctl by its command: userfaultfd's
 // UFFDIO_COPY c028aa03, REGISTER c020aa00, WAKE 8010aa02, WRITEPROTECT c018aa06, KVM's
@@ -22,21 +22,21 @@ BEGIN
 }
 
 tracepoint:syscalls:sys_enter_mmap
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@kind[tid] = args.prot == 0 ? "mmap-none" : (args.prot == 1 ? "mmap-ro" : "mmap-rw");
 	@start[tid] = nsecs;
 }
 
 tracepoint:syscalls:sys_enter_fallocate
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@kind[tid] = "fallocate";
 	@start[tid] = nsecs;
 }
 
 tracepoint:syscalls:sys_enter_mprotect
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@kind[tid] = "mprotect";
 	@start[tid] = nsecs;
@@ -45,14 +45,14 @@ tracepoint:syscalls:sys_enter_mprotect
 // pwrite64 has no syscall tracepoint here (Linux 7.0, ubu1): its kernel function, as the
 // others' tracepoints are, entered and returned.
 kprobe:ksys_pwrite64
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@kind[tid] = "pwrite";
 	@start[tid] = nsecs;
 }
 
 tracepoint:syscalls:sys_enter_ioctl
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@cmd[tid] = args.cmd;
 	@start[tid] = nsecs;
@@ -78,7 +78,7 @@ tracepoint:syscalls:sys_exit_ioctl
 }
 
 kprobe:smp_call_function_many_cond
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@ipi_start[tid] = nsecs;
 }
@@ -92,7 +92,7 @@ kretprobe:smp_call_function_many_cond
 }
 
 kprobe:kvm_flush_remote_tlbs
-/(comm == "extentd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
+/(comm == "cladefsd client" || comm == "dax faults") && ($1 == 0 || ($1 >> cpu) & 1)/
 {
 	@calls[comm, "kvm-flush"] = count();
 }

@@ -20,7 +20,7 @@ use storage_device::ExtentRange;
 
 /// cladefs: whether a DAX window may map a file's blocks ([`DataObjectHandle::extents_in`]): it maps
 /// sealed extents only, read-only (backlog doc-13). By the numbers of
-/// guest/linux/fs/fxfs/fxfs.h's `enum fxfs_dax_access`.
+/// guest/linux/fs/cladefs/cladefs.h's `enum cladefs_dax_access`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ExtentAccess {

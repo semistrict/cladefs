@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the errnos a VFS gives for Fxfs's errors, the guest kernel's (guest/rust/fxfs-linux)
+//! cladefs: the errnos a VFS gives for Fxfs's errors, the guest kernel's (guest/rust/cladefs-linux)
 //! and the host's (crates/cladefs) alike: one table of [`FxfsError`]'s, and one rule for which of
 //! an error's it is classified by ([`errno`]).
 

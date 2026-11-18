@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Memory a volume maps its files' committed blocks into, read-only, as a VM's DAX window maps
+//! Memory a file set maps its files' committed blocks into, read-only, as a VM's DAX window maps
 //! its filesystem's (backlog doc-13): so that a read copies from memory, with no request of the
 //! device, and SQLite's memory-mapped I/O (`xFetch`) reads pages in place, copying nothing.
 //!
 //! A file holds a region of the window, laid out as the file is: its chunk `k` at `k` blocks into
 //! the region, mapped to the block of the extent that holds it, or to zeros if a hole. A commit
-//! maps what it changed again, before any read sees the file as of it (`volume`).
+//! maps what it changed again, before any read sees the file as of it (`file_set`).
 
 use anyhow::Error;
 use std::ptr::NonNull;
@@ -31,9 +31,9 @@ pub struct Run {
     pub contents: Contents,
 }
 
-/// A window. Offsets and lengths are multiples of the device's block size, which is the window's
-/// page size.
-pub trait Window: Send + Sync {
+/// A file set's window. Offsets and lengths are multiples of the device's block size, which is the
+/// window's page size.
+pub trait FileSetWindow: Send + Sync {
     /// The memory: its first byte, and how many it holds.
     fn memory(&self) -> (NonNull<u8>, u64);
 

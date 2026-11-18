@@ -6,14 +6,14 @@
 #
 # A write past the end that copies nothing grows the file to where it was to begin.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2913,7 +2913,7 @@
  	 * leaves it as it was, wherever it began past the end.
  	 */
  	if (iocb->ki_pos < end && end > old_size) {
--		err = fxfs_data_resize(inode, done ? max(old_size, iocb->ki_pos) : old_size, NULL, NULL);
-+		err = fxfs_data_resize(inode, max(old_size, iocb->ki_pos), NULL, NULL);
+-		err = cladefs_data_resize(inode, done ? max(old_size, iocb->ki_pos) : old_size, NULL, NULL);
++		err = cladefs_data_resize(inode, max(old_size, iocb->ki_pos), NULL, NULL);
  		if (err && !done)
  			ret = err;
  	}

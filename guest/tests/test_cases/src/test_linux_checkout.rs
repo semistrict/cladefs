@@ -31,7 +31,7 @@
 //! (`CLADEFS_E2E_TEST=linux-checkout-fxfs-dax scripts/test-host.sh`), and
 //! scripts/linux-checkout-report.py makes tables of what they said. CLADEFS_LINUX_CHECKOUT_WINDOW
 //! sets the DAX window's bytes (as large as the data, [`crate::common::dax_window`]), and
-//! CLADEFS_LINUX_CHECKOUT_EXTENTD_MEMORY the daemon's (by default, a page cache of the host's free memory, TASK-358): each
+//! CLADEFS_LINUX_CHECKOUT_CLADEFSD_MEMORY the daemon's (by default, a page cache of the host's free memory, TASK-358): each
 //! larger than the tree, its warm reread finds it all still there, as ext4's finds the host's page
 //! cache; a window or memory smaller than the tree, 1 GiB, finds nothing of it the second time
 //! (GCE r870 and r881: 25.6 s against 600 ms, TASK-227). ext4's disk, and its pmem device, is an 8 GiB image file, the host's page cache
@@ -155,18 +155,18 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             // A daemon of the case's own, whose memory the host measures, its socket's path short,
             // as Unix sockets' must be; its bucket a directory, whose bytes the host measures.
             let sockets = tempdir::TempDir::new("cladefs-linux")?;
-            let extentd = sockets.path().join("extentd.sock");
+            let cladefsd = sockets.path().join("cladefsd.sock");
             let metrics = metrics_address()?;
             let bucket = dir.join("bucket");
             std::fs::create_dir(&bucket)?;
             let (metrics_at, bucket_at) =
                 (metrics.to_string(), format!("file://{}/", bucket.canonicalize()?.display()));
             let env = [
-                ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
-                ("CLADEFS_EXTENTD_REMOTE", OsStr::new(&bucket_at)),
+                ("CLADEFSD_METRICS", OsStr::new(&metrics_at)),
+                ("CLADEFSD_BUCKET", OsStr::new(&bucket_at)),
             ];
-            let memory = bytes("CLADEFS_LINUX_CHECKOUT_EXTENTD_MEMORY")?;
-            let daemon = spawn_daemon(test_setup, &extentd, "extentd", &env, memory)?;
+            let memory = bytes("CLADEFS_LINUX_CHECKOUT_CLADEFSD_MEMORY")?;
+            let daemon = spawn_daemon(test_setup, &cladefsd, "cladefsd", &env, memory)?;
             let memory = HostMemory::new(daemon.id(), metrics);
             memory.say(0, "before", None, "")?;
             let window = match self.on {
@@ -176,7 +176,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
                 },
                 Checkout::Ext4 | Checkout::Ext4Pmem | Checkout::Fxfs => 0,
             };
-            let mut vms = Vms::new(test_setup, root, extentd, CAPACITY, window);
+            let mut vms = Vms::new(test_setup, root, cladefsd, CAPACITY, window);
             (vms.cpus, vms.memory_mib, vms.memory) = (CPUS, MEMORY_MIB, Some(memory));
             match self.on {
                 Checkout::Ext4 | Checkout::Ext4Pmem => ext4(&vms, dir, self.on),
@@ -207,7 +207,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
     /// The checkout on Fxfs: in the first VM's store, which a second VM opens, and published, which
     /// sandboxes attach.
     fn fxfs(vms: &Vms, dir: &Path) -> anyhow::Result<()> {
-        let control = control(&vms.extentd)?;
+        let control = control(&vms.cladefsd)?;
         let publisher = dir.join("publisher");
         format(&publisher, CAPACITY)?;
         let (vm, stream) = vms.run("checkout", &publisher, true)?;

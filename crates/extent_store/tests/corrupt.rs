@@ -12,6 +12,7 @@
 
 mod common;
 
+use base32_id::Padded;
 use common::noise;
 use extent_frame::{Corrupt, Encoding, PART, Parts};
 use extent_store::{Description, Dir, File as _, MemDir, Options, Place, Store};
@@ -19,7 +20,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 const MIB: usize = 1 << 20;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
 /// Segments of a few parts, and extents on their own from 8 MiB.
 const OPTIONS: Options = Options {
@@ -82,9 +83,11 @@ struct Stored {
 fn stored(dir: &MemDir, store: &Store<MemDir>, extent: ExtentId, offset: u64) -> Stored {
     let (path, at) = match store.place(extent).unwrap().unwrap() {
         Place::Run { branch, number, offset: run } => {
-            (format!("segments/{branch:016x}/{number:016x}"), run + offset)
+            (format!("segments/{}/{}", Padded(branch), Padded(number)), run + offset)
         }
-        Place::Own => (format!("extents/{:016x}/{:016x}", extent.branch, extent.sequence), offset),
+        Place::Own => {
+            (format!("extents/{}/{}", Padded(extent.branch), Padded(extent.sequence)), offset)
+        }
         place => panic!("{extent:?} is {place:?}"),
     };
     let bytes = extent_store::read_whole(&dir.open(&path, true).unwrap()).unwrap();
@@ -163,7 +166,7 @@ fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments() {
     store.write(extent(2), 0, &noise(2, BLOCK)).unwrap();
     assert!(store.close_now().unwrap());
     store.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).unwrap();
-    let segment = format!("segments/{:016x}/{:016x}", BRANCH.id, 0);
+    let segment = format!("segments/{}/{}", Padded(BRANCH.id), Padded(0));
     let bytes = extent_store::read_whole(&dir.open(&segment, true).unwrap()).unwrap();
     let part = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
     assert_eq!(part.encoding, Encoding::Raw);
@@ -190,7 +193,11 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         store.flush().unwrap();
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
-        assert_eq!(extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap(), data);
+        assert_eq!(
+            extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+                .unwrap(),
+            data
+        );
         // The framed file under its own name, which the thread making framings durable renames it
         // to once durable, after the flush returns (TASK-399): what `stored` opens.
         store.wait_idle().unwrap();

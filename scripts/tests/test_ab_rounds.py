@@ -204,9 +204,9 @@ class Timings(unittest.TestCase):
 # 2026-11-15 did (docs/measurements/macos-bucket-lifecycle-2026-11-15,
 # macos-fork-extent-memory-2026-11-15), and gc-sweep.sh's tables (macos-gc-dead-cells-2026-11-15).
 LIFECYCLE = """\
-SETUP extents=1024 point of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000000/cells/point's/branches/point x4]
-PHASE extents=1024 cold fork: requests=6 in-series=6.4 at-once=1 wall-ms=370 bucket-ms=192 up=170 down=158 [create=2 get=3 update=1] again=[get tenants/0000000000000000/cells/cold-fork's/branches/cold-fork x2]
-  REQUEST +0..32ms get tenants/0000000000000000/cells/cold-fork's/branches/cold-fork up=0 down=0
+SETUP extents=1024 point of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000/cells/point's/branches/point x4]
+PHASE extents=1024 cold fork: requests=6 in-series=6.4 at-once=1 wall-ms=370 bucket-ms=192 up=170 down=158 [create=2 get=3 update=1] again=[get tenants/0000000000000/cells/cold-fork's/branches/cold-fork x2]
+  REQUEST +0..32ms get tenants/0000000000000/cells/cold-fork's/branches/cold-fork up=0 down=0
 """
 FORK_MEMORY = """\
 fork memory: extents=1024 parent=point forks=20 held=5475939 per-fork=273796 marginal-per-fork=274175 marginal-per-fork-per-extent=267.7 open=125.29ms
@@ -318,13 +318,13 @@ class Counts(unittest.TestCase):
                             observations={"fxfs-guest-dax-fork-cold": {
                                 "guest-read-requests": [value, value],
                                 "guest-read-ms": [812.5, 799.0],
-                                "extentd-fetched-bytes": [1048576.0, 1048576.0]}})
+                                "cladefsd-fetched-bytes": [1048576.0, 1048576.0]}})
 
     def test_a_count_one_higher_in_every_round_changed_contaminated_rounds_too(self):
         self.observed([1833.0, 1833.0, 1833.0], verdicts={2: "contaminated"})
         comparison = ab_rounds.compare(self.results, "base", "head")
         self.assertEqual(self.rows(comparison), {
-            ("fxfs-guest-dax-fork-cold", "extentd-fetched-bytes"): "same",
+            ("fxfs-guest-dax-fork-cold", "cladefsd-fetched-bytes"): "same",
             ("fxfs-guest-dax-fork-cold", "guest-read-requests"): "higher"})
         row = next(row for row in comparison["metrics"] if row["name"] == "guest-read-requests")
         self.assertEqual([(each["round"], each["a"], each["b"]) for each in row["rounds"]],
@@ -344,15 +344,35 @@ class Counts(unittest.TestCase):
                 directory = write_round(self.results, name, number, {"ext4-guest-kernel": CONTROL})
                 (directory / "logs").mkdir()
                 (directory / "logs" / "budgets.json").write_text(json.dumps([{
-                    "daemon": "extentd-stats.txt", "checks": [],
+                    "daemon": "cladefsd-stats.txt", "checks": [],
                     "figures": {"max_anon": anon, "anon_budget": 2147483648,
                                 "per_guest_byte": {"raw": 1.0, "framed": framed, "io": 1.204}}}]))
         comparison = ab_rounds.compare(self.results, "base", "head")
         self.assertEqual(self.rows(comparison), {
-            ("daemon extentd-stats.txt", "max_anon"): "same",
-            ("daemon extentd-stats.txt", "written per guest byte, framed"): "higher",
-            ("daemon extentd-stats.txt", "written per guest byte, io"): "same",
-            ("daemon extentd-stats.txt", "written per guest byte, raw"): "same"})
+            ("daemon cladefsd-stats.txt", "max_anon"): "same",
+            ("daemon cladefsd-stats.txt", "written per guest byte, framed"): "higher",
+            ("daemon cladefsd-stats.txt", "written per guest byte, io"): "same",
+            ("daemon cladefsd-stats.txt", "written per guest byte, raw"): "same"})
+
+    def test_a_side_from_before_cladefsd_is_compared_under_the_new_names(self):
+        """A base from before TASK-503, LangSmith's pin or the nightly's night before, names the
+        daemon's metrics and stats file as the head's did then: its rows are the head's."""
+        old = "extent" + "d"
+        for number in (1, 2, 3):
+            for name, daemon, fetched in (("base", old, 1048576.0), ("head", "cladefsd", 2097152.0)):
+                directory = write_round(
+                    self.results, name, number,
+                    {"ext4-guest-kernel": CONTROL,
+                     "fxfs-guest-dax-fork-cold": {"fork-read-usr": [2.1, 2.2]}},
+                    observations={"fxfs-guest-dax-fork-cold": {
+                        f"{daemon}-fetched-bytes": [fetched, fetched]}})
+                (directory / "logs").mkdir()
+                (directory / "logs" / "budgets.json").write_text(json.dumps([{
+                    "daemon": f"{daemon}-stats.txt", "checks": [],
+                    "figures": {"max_anon": 1046523000, "anon_budget": 2147483648}}]))
+        self.assertEqual(self.rows(ab_rounds.compare(self.results, "base", "head")), {
+            ("fxfs-guest-dax-fork-cold", "cladefsd-fetched-bytes"): "higher",
+            ("daemon cladefsd-stats.txt", "max_anon"): "same"})
 
     def test_a_count_bound_lets_counts_move_within_it(self):
         self.observed([1833.0, 1833.0, 1833.0])

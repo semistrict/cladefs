@@ -8,11 +8,11 @@
 #
 # - specs/follower: live read-only followers' protocol (doc-8);
 # - specs/dax-cow: the guest Fxfs's DAX, copying on write: the window mapping sealed extents and
-#   zeros, a store's page private on the host, written back and rebound (guest/linux/fs/fxfs/dax.c,
+#   zeros, a store's page private on the host, written back and rebound (guest/linux/fs/cladefs/dax.c,
 #   doc-13, TASK-164.4). Writable DAX's specs (dax, dax-region, extent-open) went with it
 #   (dead-ends/writable-dax.md);
 # - specs/bucket: branches in object storage with the host's WAL (doc-7, doc-14, TASK-165.2): its
-#   mutations, one per rule of extent_remote's Rules (two of newest_checkpoint), of branch::delete
+#   mutations, one per rule of extent_bucket's Rules (two of newest_checkpoint), of branch::delete
 #   and of the WAL;
 # - specs/journal: Fxfs's journal, objects' flushes, device flushes and the super-block
 #   (crates/fxfs's write_super_block, TASK-149.11): a super-block claims only what its journal
@@ -49,7 +49,8 @@
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
 # below, is fetched once into ~/.cache/cladefs/tla and checked against its SHA-256. v1.8.0 is a
 # pre-release TLA+ re-cuts in place (2026-10-30's, pinned 2026-11-02), and 1.7.4, the last that
-# stays put, lacks -noGenerateSpecTE: a jar re-cut since fails the check until the pin follows it.
+# stays put, lacks -noGenerateSpecTE: a jar re-cut since fails the check until the pinned version
+# follows it.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 specs="$root/specs"
@@ -354,7 +355,7 @@ if (( traces )); then
             grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
         fi
     done
-    # The mutant's runs, which invalidate before they apply: none may be matched.
+    # The mutant's runs, whose batches drop nothing: none may be matched.
     rejected=0
     for run in "$runs"/mutant-*; do
         log="$run/tlc.log"
@@ -366,7 +367,7 @@ if (( traces )); then
             rejected=$((rejected + 1))
         else
             unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run"), which invalidates first, was matched:"
+            echo "FAIL follower/traces: $(basename "$run"), which drops nothing, was matched:"
             grep -E '^Error|is violated|No error has been found' "$log" < /dev/null | sed -n 1,20p
         fi
     done

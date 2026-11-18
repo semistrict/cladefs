@@ -48,11 +48,11 @@ async fn ended(following: Following, since: u64) {
     let Following { writer, fs, view, failing } = following;
     failing.store(false, Ordering::SeqCst);
     assert_eq!(view.lock().since(), since, "the failed batch let go of the commit it was as of");
-    let epoch = view.lock().epoch();
+    let commit = view.lock().commit();
     writer.apply(Op::Create(NAMES[2])).await;
     writer.apply(Op::Sync).await;
     fs.follow().await.expect_err("a follower followed on after a batch failed");
-    assert_eq!(view.lock().epoch(), epoch, "a batch after the failed one advanced the view");
+    assert_eq!(view.lock().commit(), commit, "a batch after the failed one advanced the view");
     fs.close().await.expect("closing the follower failed");
     writer.fs.close().await.expect("closing the writer failed");
 }

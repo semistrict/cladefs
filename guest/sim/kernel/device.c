@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright 2026 The cladefs Authors.
 /*
- * The extent-store device under fs/fxfs/device.c (doc-4): the driver's interface, with the host's
+ * The extent-store device under fs/cladefs/device.c (doc-4): the driver's interface, with the host's
  * rules for the window (crates/cladefs's map), which copies on write (doc-13). A MAP is of an extent
  * the store holds, ENOENT if not, and maps zeros past its end; the window maps sealed extents and
  * zeros alone: a MAP of an open extent fails EPERM, which tests count, as Fxfs may take an extent
@@ -254,7 +254,7 @@ static void free_private(u64 first, u64 pages)
  * A store the window faulted on, at `offset`: why the host refuses it. The host would copy a page
  * mapped read-only, sealed or zeros, within private_max; but the guest makes each page
  * it dirties private first, by the PRIVATE of the iomap that dirties it (dax.c's
- * fxfs_dax_dirty, TASK-164.9), so that a store never reaches one: a store the host would copy
+ * cladefs_dax_dirty, TASK-164.9), so that a store never reaches one: a store the host would copy
  * at is to a page no iomap made the VM's, whose block a writeback may move, and Fxfs free under it,
  * before the store lands (guest/sim's seed 2802). Refused, as the oracle of that rule: dirty
  * implies private. From the fault, in the store: no scheduling point, and no lock.
@@ -662,7 +662,7 @@ bool virtio_extent_map_many(struct virtio_extent *vext)
 	return true;
 }
 
-bool virtio_extent_map_ahead(struct virtio_extent *vext)
+bool virtio_extent_map_prefault(struct virtio_extent *vext)
 {
 	return false;
 }

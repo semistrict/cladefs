@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-31 20:30'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 22:52'
 labels: []
 dependencies: []
 priority: high
@@ -22,8 +22,8 @@ Where it stands, at main dde8d58d3:
 - Store files: extent_store's FORMAT, "cladefs extent store 6" (crates/extent_store/src/layout.rs:16), any other refused by extent_store::Format, ENOTSUP (crates/cladefs/src/host_store.rs:555-558, older_stores_are_refused_by_their_format; TASK-165.6). Done.
 - Branches in a bucket: extent_remote's layout::FORMAT 2 (crates/extent_remote/src/layout.rs:23), any other refused with Error::Format, older ones too (crates/extent_remote/src/record.rs:211, records_of_other_formats_are_refused; 064701057, TASK-165.3). Done.
 - Fxfs: LATEST_VERSION 61 (crates/fxfs/src/serialized_types/types.rs:45), EARLIEST_SUPPORTED_VERSION 60 (types.rs:59): a version-60 filesystem still mounts and is upgraded, since 321fb94f2 (TASK-136.3). TASK-141.1.
-- VM process and daemon: no handshake; BUILD is optional, an older daemon's EINVAL let be (crates/cladefs/src/extentd/wire.rs:177-181, crates/cladefs/src/extentd/client.rs:136-140). TASK-141.3.
-- Daemon restart: every VM on the host exits 158 (ExtentdLost); SIGTERM reports NOT_SERVING and exits, closing no store (crates/cladefs/src/bin/cladefs-extentd.rs:112-145, crates/cladefs/src/extentd/mod.rs:125-131). TASK-141.4.
+- VM process and daemon: no handshake; BUILD is optional, an older daemon's EINVAL let be (crates/cladefs/src/cladefsd/wire.rs:177-181, crates/cladefs/src/cladefsd/client.rs:136-140). TASK-141.3.
+- Daemon restart: every VM on the host exits 158 (CladefsdLost); SIGTERM reports NOT_SERVING and exits, closing no store (crates/cladefs/src/bin/cladefsd.rs:112-145, crates/cladefs/src/cladefsd/mod.rs:125-131). TASK-141.4.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -11,12 +11,12 @@
 # (ubu1, 2026-11-10; the budget's guest time 2.06 s of 3 s, which alone would have passed it; a 6 ms
 # sleep's median 11.1 ms). super.c, which guest/sim doesn't build. Put in by hand, not a past bug.
 
---- a/guest/linux/fs/fxfs/super.c
-+++ b/guest/linux/fs/fxfs/super.c
-@@ -2133,6 +2133,7 @@ int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+--- a/guest/linux/fs/cladefs/super.c
++++ b/guest/linux/fs/cladefs/super.c
+@@ -2133,6 +2133,7 @@ int cladefs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
  	int err;
  
- 	trace_fxfs_fsync_start(inode->i_ino);
+ 	trace_cladefs_fsync_start(inode->i_ino);
 +	msleep(60);
  	err = file_write_and_wait_range(file, start, end);
  

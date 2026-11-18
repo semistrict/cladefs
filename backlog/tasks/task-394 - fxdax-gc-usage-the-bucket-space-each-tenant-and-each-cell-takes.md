@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-13T08:25:00Z'
-updated_date: '2026-11-15 11:36'
+updated_date: '2026-11-16 22:53'
 labels:
   - tools
   - extent_remote
@@ -17,7 +17,7 @@ ordinal: 771000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Operators have no way to say how much of the bucket a tenant or a cell takes: for billing, quotas, and for seeing which cell grows. extentd exports each tenant's host disk (`cladefs_extentd_tenant_disk_bytes`), but a host holds only the cells placed on it, and only what it caches of them; the bucket holds every cell whole. Since TASK-364 every object of a cell is under its prefix, `tenants/<tenant>/cells/<cell>/`, and what the collector compacts of it under `moves/` of such a key, so a listing sums it.
+Operators have no way to say how much of the bucket a tenant or a cell takes: for billing, quotas, and for seeing which cell grows. cladefsd exports each tenant's host disk (`cladefsd_tenant_disk_bytes`), but a host holds only the cells placed on it, and only what it caches of them; the bucket holds every cell whole. Since TASK-364 every object of a cell is under its prefix, `tenants/<tenant>/cells/<cell>/`, and what the collector compacts of it under `moves/` of such a key, so a listing sums it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

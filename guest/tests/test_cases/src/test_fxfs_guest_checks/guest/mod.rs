@@ -56,7 +56,7 @@ use window::*;
 
 const MNT: &str = "/mnt/cladefs";
 /// The device's tag, which the image is mounted by, and its mount's counts are named by
-/// (/proc/fs/fxfs/<tag>).
+/// (/proc/fs/cladefs/<tag>).
 const TAG: &str = "cladefs";
 
 pub(crate) fn path(name: &str) -> String {
@@ -79,7 +79,7 @@ fn mount_with(flags: libc::c_ulong) -> std::io::Result<()> {
     fs::create_dir_all(MNT).unwrap();
     let source = CString::new(TAG).unwrap();
     let target = CString::new(MNT).unwrap();
-    let fstype = CString::new("fxfs").unwrap();
+    let fstype = CString::new("cladefs").unwrap();
     let ret = unsafe {
         libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), flags, std::ptr::null())
     };
@@ -121,14 +121,14 @@ fn unmount() {
     assert_eq!(ret, 0, "umount: {}", std::io::Error::last_os_error());
 }
 
-/// cladefs: what a coverage kernel counted of fs/fxfs so far, copied to the store for the host:
+/// cladefs: what a coverage kernel counted of fs/cladefs so far, copied to the store for the host:
 /// a kernel without gcov has no such directory in debugfs, and leaves nothing (TASK-119.14).
 fn save_coverage() {
     const DEBUGFS: &CStr = c"/sys/kernel/debug";
     fn fxfs_counts(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         (fs::read_dir(dir).ok()?.flatten()).find_map(|entry| {
             let path = entry.path();
-            if path.ends_with("fs/fxfs") { Some(path) } else { fxfs_counts(&path) }
+            if path.ends_with("fs/cladefs") { Some(path) } else { fxfs_counts(&path) }
         })
     }
     let debugfs = c"debugfs".as_ptr();
@@ -172,13 +172,13 @@ fn clone_range(dst: &fs::File, src: &fs::File, src_offset: u64, len: u64, dst_of
 }
 
 /// cladefs: has the kernel log what it traced of `path`'s page `page`, if it traces
-/// (fxfs.dax_trace, TASK-121): before a check fails on the page.
+/// (cladefs.dax_trace, TASK-121): before a check fails on the page.
 fn trace_dump(path: &str, page: u64) {
     use std::os::unix::fs::MetadataExt;
-    let traced = fs::read_to_string("/sys/module/fxfs/parameters/dax_trace");
+    let traced = fs::read_to_string("/sys/module/cladefs/parameters/dax_trace");
     if traced.is_ok_and(|traced| traced.trim() == "Y") {
         let ino = fs::metadata(path).unwrap().ino();
-        let _ = fs::write("/sys/module/fxfs/parameters/dax_trace_dump", format!("{ino} {page}"));
+        let _ = fs::write("/sys/module/cladefs/parameters/dax_trace_dump", format!("{ino} {page}"));
     }
 }
 
@@ -194,20 +194,20 @@ fn stats() -> std::collections::BTreeMap<String, u64> {
 }
 
 /// cladefs: what the host was asked and took so far: the device's write requests, the mount's
-/// durable commits, and the host's time, the device's requests in flight (`busy_ns`). What a part
+/// uploaded commits, and the host's time, the device's requests in flight (`busy_ns`). What a part
 /// of a check asked of the host, and waited for it, is the difference of two (TASK-263).
 #[derive(Clone, Copy)]
 struct Host {
     writes: u64,
-    durable_commits: u64,
+    uploaded_commits: u64,
     took: Duration,
 }
 
 impl Host {
     fn now() -> Self {
         let took = crate::extent_driver::busy().expect("the device bound");
-        let durable_commits = stats()["device_durable_commits"];
-        Self { writes: device_requests("write"), durable_commits, took }
+        let uploaded_commits = stats()["device_uploaded_commits"];
+        Self { writes: device_requests("write"), uploaded_commits, took }
     }
 
     /// What was asked of the host since `self`, and what it took.
@@ -215,7 +215,7 @@ impl Host {
         let now = Self::now();
         Self {
             writes: now.writes - self.writes,
-            durable_commits: now.durable_commits - self.durable_commits,
+            uploaded_commits: now.uploaded_commits - self.uploaded_commits,
             took: now.took - self.took,
         }
     }
@@ -224,8 +224,8 @@ impl Host {
 /// As a part of a check's line says what it asked of the host, and the host took.
 impl std::fmt::Display for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { writes, durable_commits, took } = self;
-        write!(f, "{writes} writes, {durable_commits} durable commits, {took:.2?} the host's")
+        let Self { writes, uploaded_commits, took } = self;
+        write!(f, "{writes} writes, {uploaded_commits} uploaded commits, {took:.2?} the host's")
     }
 }
 
@@ -285,7 +285,7 @@ fn wait_for_child(child: libc::pid_t, limit: std::time::Duration) -> i32 {
 }
 
 /// cladefs: where fxfs's module parameters are.
-const PARAMS: &str = "/sys/module/fxfs/parameters";
+const PARAMS: &str = "/sys/module/cladefs/parameters";
 
 /// cladefs: one of fxfs's module parameters set for the rest of a check, or a part of it, as it was
 /// again once the guard goes. What a check leaves set, as it crashes or hangs, the agent sets back
@@ -314,16 +314,16 @@ impl Drop for Param {
     }
 }
 
-/// cladefs: pause points (fxfs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
+/// cladefs: pause points (cladefs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
 /// for a task to wait at `step`.
 struct Pauses;
 
 impl Pauses {
-    const PAUSED: &str = "/sys/module/fxfs/parameters/dax_paused";
-    /// A write(2) with its iomap made, before its copy (FXFS_DAX_STEP_WRITE_MAPPED).
+    const PAUSED: &str = "/sys/module/cladefs/parameters/dax_paused";
+    /// A write(2) with its iomap made, before its copy (CLADEFS_DAX_STEP_WRITE_MAPPED).
     const WRITE_MAPPED: u64 = 1 << 5;
     /// A rebind about to MAP over a file's private pages, holding its semaphore for writing
-    /// (FXFS_DAX_STEP_REBIND, fxfs_dax_rebind).
+    /// (CLADEFS_DAX_STEP_REBIND, cladefs_dax_rebind).
     const REBIND: u64 = 1 << 7;
 
     /// Pauses `steps`, as `begin`, those of a file only the file `path`'s tasks.

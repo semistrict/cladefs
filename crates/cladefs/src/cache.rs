@@ -22,11 +22,11 @@
 
 use crate::dax::{Origin, Source, Window};
 use crate::error::{Errno, Result};
-use crate::extents::{ExtentId, PublicReach};
+use crate::extents::PublicReach;
 use crate::pages::{ArenaId, page_size};
 use crate::profile::Recorder;
 use crate::stats::{self, Counter};
-use extent_remote::trace;
+use extent_bucket::trace;
 use extent_store::shared::SharedLock;
 use extent_store::{HostDir, Store};
 use futures::future::BoxFuture;
@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use storage_device::ExtentId;
 use storage_device::NoExtent;
 
 /// The process's cache of sealed extents (see the module docs): its pager's threads, which read
@@ -74,27 +75,27 @@ impl Default for Holders {
 /// store holds them without their data.
 struct Holder {
     store: Weak<Store<HostDir>>,
-    remote: Option<Weak<crate::remote::Fetcher>>,
+    fetcher: Option<Weak<crate::bucket::HostFetcher>>,
 }
 
 /// A [`Holder`] open still.
-type OpenHolder = (Arc<Store<HostDir>>, Option<Arc<crate::remote::Fetcher>>);
+type OpenHolder = (Arc<Store<HostDir>>, Option<Arc<crate::bucket::HostFetcher>>);
 
 impl Holders {
-    /// Adds `store`, reading through `remote`, unless it is there, letting go of those closed.
-    fn add(&self, store: &Arc<Store<HostDir>>, remote: Option<&Arc<crate::remote::Fetcher>>) {
+    /// Adds `store`, reading through `fetcher`, unless it is there, letting go of those closed.
+    fn add(&self, store: &Arc<Store<HostDir>>, fetcher: Option<&Arc<crate::bucket::HostFetcher>>) {
         let mut holders = self.0.with(Mutex::lock);
         holders.retain(|holder| holder.store.strong_count() > 0);
         if !holders.iter().any(|holder| std::ptr::eq(holder.store.as_ptr(), Arc::as_ptr(store))) {
-            let (store, remote) = (Arc::downgrade(store), remote.map(Arc::downgrade));
-            holders.push(Holder { store, remote });
+            let (store, fetcher) = (Arc::downgrade(store), fetcher.map(Arc::downgrade));
+            holders.push(Holder { store, fetcher });
         }
     }
 
     /// Adds those of `other` open still, as [`Holders::add`] does.
     fn adopt(&self, other: &Holders) {
-        for (store, remote) in other.open() {
-            self.add(&store, remote.as_ref());
+        for (store, fetcher) in other.open() {
+            self.add(&store, fetcher.as_ref());
         }
     }
 
@@ -103,7 +104,7 @@ impl Holders {
         let holders = self.0.with(Mutex::lock);
         (holders.iter())
             .filter_map(|holder| {
-                Some((holder.store.upgrade()?, holder.remote.as_ref().and_then(Weak::upgrade)))
+                Some((holder.store.upgrade()?, holder.fetcher.as_ref().and_then(Weak::upgrade)))
             })
             .collect()
     }
@@ -129,7 +130,7 @@ impl Holders {
     }
 
     /// Whether one open still, but `store`, holds `extent`.
-    fn another_holds(&self, store: &Arc<Store<HostDir>>, extent: storage_device::ExtentId) -> bool {
+    fn another_holds(&self, store: &Arc<Store<HostDir>>, extent: ExtentId) -> bool {
         (self.open().into_iter())
             .filter(|(holder, _)| !Arc::ptr_eq(holder, store))
             .any(|(holder, _)| holder.extent(extent).is_ok_and(|held| held.is_some()))
@@ -185,7 +186,7 @@ fn extent_cache() -> &'static ExtentCache {
 /// or the arenas past the total's, give back (TASK-50.3). Returns the bytes it evicted. Evicted
 /// pages are read in again as they are touched.
 ///
-/// cladefs: in a span of its own, `cache.relief` (`extent_remote::trace`, TASK-258).
+/// cladefs: in a span of its own, `cache.relief` (`extent_bucket::trace`, TASK-258).
 pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {
     let span = trace::Span::start("cache.relief");
     if let Some(arena) = arena {
@@ -260,7 +261,7 @@ pub(crate) fn evict_arena(arena: ArenaId) {
 /// store holds goes from the cache, its pages evicted, unmapped from every window that maps them
 /// first, so that what the stores' keys decrypted is no longer in memory, nor read in again: a
 /// window that maps it, faulting, finds no store to read it through. An extent another store open
-/// holds stays, its pages theirs to read (a shared point's clone of another tenant's, a public
+/// holds stays, its pages theirs to read (another tenant's fork of a shared point, a public
 /// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
 /// extents.
 pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {
@@ -280,7 +281,7 @@ pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {
 /// Which arena an extent's pages are of, and whether a tenant's copy of it may move to the default
 /// arena: only an extent reachable from a published generation may (TASK-234), as every VM process
 /// maps the default arena, and a tenant's pages there would be every tenant's to read.
-pub(crate) enum Placement {
+pub(crate) enum CachedIn {
     /// Of `arena`: a tenant's, or the default for a store of none, which takes no other arena's
     /// copy.
     Arena(ArenaId),
@@ -289,35 +290,35 @@ pub(crate) enum Placement {
     Public(PublicReach),
 }
 
-impl Placement {
+impl CachedIn {
     fn arena(&self) -> ArenaId {
         match self {
-            Placement::Arena(arena) => *arena,
-            Placement::Public(_) => ArenaId::DEFAULT,
+            CachedIn::Arena(arena) => *arena,
+            CachedIn::Public(_) => ArenaId::DEFAULT,
         }
     }
 }
 
-/// The sealed `extent`, of `len` bytes, in the cache, of `placement`'s arena, cached from `store` if it isn't:
-/// read from it, or from `remote`, with its page-ins recorded by `recorder`, if any; and from any
+/// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `store` if it isn't:
+/// read from it, or from `fetcher`, with its page-ins recorded by `recorder`, if any; and from any
 /// other store that asked for it, which `store` is one of from now on (TASK-79.7).
 pub(crate) fn cached(
     store: &Arc<Store<HostDir>>,
-    placement: Placement,
-    remote: Option<Arc<crate::remote::Fetcher>>,
+    cached_in: CachedIn,
+    fetcher: Option<Arc<crate::bucket::HostFetcher>>,
     recorder: Option<Arc<Recorder>>,
     extent: ExtentId,
     len: u64,
 ) -> Result<Arc<CachedExtent>> {
     let cache = extent_cache();
     let mut extents = cache.extents.with(Mutex::lock);
-    let key = held_key(&extents, placement.arena(), extent);
+    let key = held_key(&extents, cached_in.arena(), extent);
     let mut moved = None;
     if !extents.contains_key(&key) {
         let holders = Arc::new(Holders::default());
         let stored = StoredExtent::new(holders.clone(), store, extent, recorder);
         let mut contents: Box<dyn Contents> = Box::new(stored);
-        if let Placement::Public(reach) = &placement {
+        if let CachedIn::Public(reach) = &cached_in {
             // A tenant's copy, which moves here (TASK-234): of this extent alone.
             assert_eq!(reach.extent(), extent, "a tenant's copy moved for another extent");
             let arenas = cache.arenas.with(Mutex::lock);
@@ -336,7 +337,7 @@ pub(crate) fn cached(
     }
     let cached = extents.get_mut(&key).expect("cached");
     cached.extent.used();
-    cached.holders.add(store, remote.as_ref());
+    cached.holders.add(store, fetcher.as_ref());
     let found = cached.extent.clone();
     let most = MOST_CACHED.load(Ordering::Relaxed);
     let gone = (extents.len() > most.max(TRIM_AT.load(Ordering::Relaxed))).then(|| {
@@ -410,7 +411,7 @@ pub(crate) fn freed(
             extents.get(&key).map(|cached| (cached.extent.clone(), cached.holders.clone()))?;
         (key, cached, holders)
     };
-    if !holders.another_holds(store, extent.into()) {
+    if !holders.another_holds(store, extent) {
         let mut extents = cache.extents.with(Mutex::lock);
         let same = extents.get(&key).is_some_and(|now| Arc::ptr_eq(&now.extent, &cached));
         let removed = same.then(|| extents.remove(&key));
@@ -423,7 +424,7 @@ pub(crate) fn freed(
 /// The extents cached: how many something but the cache holds (`pinned`), as a window's mapping, a
 /// read or a page-in does, which it keeps however many it holds, and how many nothing else does
 /// (`idle`), which it lets go of past its bound (TASK-104), the extent daemon's gauges
-/// (`crate::extentd::metrics`, TASK-131.6).
+/// (`crate::cladefsd::metrics`, TASK-131.6).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Entries {
@@ -523,12 +524,11 @@ impl StoredExtent {
         extent: ExtentId,
         recorder: Option<Arc<Recorder>>,
     ) -> Self {
-        let id: storage_device::ExtentId = extent.into();
         // Its offset in the data of the object it is in: a segment's, its own file's, or the one
         // object storage holds it in.
-        let offset = match store.place(id) {
+        let offset = match store.place(extent) {
             Ok(Some(extent_store::Place::Run { offset, .. })) => offset,
-            Ok(Some(extent_store::Place::Remote(location))) => location.offset,
+            Ok(Some(extent_store::Place::Bucket(location))) => location.offset,
             _ => 0,
         };
         let phase = offset % extent_frame::PART / page_size() * page_size();
@@ -548,10 +548,10 @@ impl Contents for StoredExtent {
         if let Some(recorder) = &self.recorder {
             recorder.record(self.extent, offset, buf.len() as u64);
         }
-        let id: storage_device::ExtentId = self.extent.into();
+        let id = self.extent;
         // Through the first of the stores that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));
-        for (store, remote) in self.holders.open() {
+        for (store, fetcher) in self.holders.open() {
             // An extent freed since it was mapped, which a follower's view keeps, reads as kept
             // (doc-8).
             let read = match store.read(id, offset, buf) {
@@ -566,10 +566,10 @@ impl Contents for StoredExtent {
                     return Box::pin(std::future::ready(Ok(())));
                 }
                 Err(ref error)
-                    if let Some(data) = error.downcast_ref::<extent_store::RemoteData>()
-                        && let Some(remote) = remote =>
+                    if let Some(data) = error.downcast_ref::<extent_store::BucketData>()
+                        && let Some(fetcher) = fetcher =>
                 {
-                    let fetched = remote.read(id, data.location.clone(), offset, buf.len() as u64);
+                    let fetched = fetcher.read(id, data.location.clone(), offset, buf.len() as u64);
                     return Box::pin(async move {
                         let data = fetched.await?;
                         stats::add(Counter::FetchedBytes, data.len() as u64);
@@ -729,7 +729,8 @@ impl CachedExtent {
 
     /// Reads its bytes at `offset` into `data`, reading in its pages that aren't in memory, as a
     /// read of the extent that maps nothing does: blocks the calling thread while they are read
-    /// in. Past its end, zeros.
+    /// in. Past its end, zeros. cladefs: a page in memory is copied as it is found, allocating
+    /// nothing; one not, brought in first (`Source::bring_in`, a future boxed), TASK-453.
     pub(crate) fn read(self: &Arc<Self>, offset: u64, data: &mut [u8]) -> Result<()> {
         let ps = page_size();
         let held = self.len.saturating_sub(offset).min(data.len() as u64) as usize;
@@ -740,15 +741,19 @@ impl CachedExtent {
             let at = offset + done as u64;
             let (page, within) = (at / ps, (at % ps) as usize);
             let len = (ps as usize - within).min(bytes.len() - done);
+            {
+                let pages = self.pages.with(Mutex::lock);
+                if let Some(Slot::Present(frame)) = pages.slots.get(page as usize) {
+                    // SAFETY: The page is the extent's, in memory while its lock is held, and
+                    // encrypted: only read.
+                    let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
+                    bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
+                    done += len;
+                    continue;
+                }
+            }
+            // Read in, then copied, unless evicted meanwhile: read in again.
             futures::executor::block_on(self.clone().bring_in(page))?;
-            let pages = self.pages.with(Mutex::lock);
-            // Evicted meanwhile: read in again.
-            let Some(Slot::Present(frame)) = pages.slots.get(page as usize) else { continue };
-            // SAFETY: The page is the extent's, in memory while its lock is held, and sealed: only
-            // read.
-            let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
-            bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
-            done += len;
         }
         Ok(())
     }
@@ -849,11 +854,11 @@ impl CachedExtent {
         bytes
     }
 
-    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`extent_remote::trace`,
+    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`extent_bucket::trace`,
     /// TASK-258): its reads, from the store or the bucket, its children.
     fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
         let span = trace::Span::start("cache.page_in");
-        span.set_with(trace::BRANCH, || format!("{:x}", self.extent.branch));
+        span.set_with(trace::BRANCH, || base32_id::Short(self.extent.branch).to_string());
         span.set_count(trace::EXTENT, self.extent.sequence);
         span.set_count(trace::ARENA, u64::from(self.arena.0));
         span.set_count(trace::BYTES, (pages.end - pages.start) * page_size());

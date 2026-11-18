@@ -128,10 +128,10 @@ pub(super) fn test_inherited_acls_on_full_filesystem() {
 /// filled the filesystem failed, for the checks after it.
 /// cladefs: writes that find the filesystem full share the syncs that make room (TASK-149.25): many
 /// writers, each with its file, write together on a full filesystem, round after round, each
-/// write making room before it fails (fxfs_vfs_make_room), and syncs made for them are far fewer
+/// write making room before it fails (cladefs_vfs_make_room), and syncs made for them are far fewer
 /// than the writes that asked: one begun after a write found no room is room enough. A sync each, 128 writers at ENOSPC,
 /// xfstests' generic/269's fsstress, waited behind each other's syncs for two hours (GCE r941,
-/// r942: fxfs_vfs_write_begin, sync_filesystem, fxfs_sync).
+/// r942: cladefs_vfs_write_begin, sync_filesystem, cladefs_sync).
 pub(super) fn test_writers_on_a_full_filesystem_share_syncs() {
     const WRITERS: usize = 32;
     const WRITES: usize = 2;
@@ -327,7 +327,7 @@ pub(super) fn test_xattrs_bounded() {
     let writes = fill_host.writes;
     assert!(writes >= sets, "{sets} sets: {fill_host}, not one written as each was set");
     assert!(writes <= sets + sets / 4, "{sets} sets: {fill_host}, more than 1.25 each");
-    assert_eq!(fill_host.durable_commits, 0, "{sets} sets: {fill_host}");
+    assert_eq!(fill_host.uploaded_commits, 0, "{sets} sets: {fill_host}");
     // cladefs: where its time goes, against its budget (TASK-168): what was set made durable, then
     // the files removed, and their room freed; and in each what was asked of the host, and what it
     // took, which the budget leaves out (TASK-263).
@@ -359,7 +359,7 @@ fn vmstat(name: &str) -> u64 {
 
 /// cladefs: an inode whose writeback failed, as sync's or the flusher's, whose errors nothing
 /// reports, stays dirty: the next fsync writes it back, or fails as it does, until it is durable
-/// (fxfs.fail_write_inode). The VFS took it for clean, and the fsync after found nothing to write:
+/// (cladefs.fail_write_inode). The VFS took it for clean, and the fsync after found nothing to write:
 /// 0, and a chmod lost at the next eviction (TASK-199).
 pub(super) fn test_failed_write_inode_reported() {
     let name = path("write-inode-failed");

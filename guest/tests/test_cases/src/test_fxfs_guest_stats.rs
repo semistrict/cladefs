@@ -2,18 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs TASK-111.4: `cladefsctl stats --json` takes one snapshot of what the extent daemon, a live
-//! VM's process and its guest counted, each with the commit it was built of.
+//! cladefs TASK-111.4: `cladefsctl stats --json` takes the stats of one moment, what the extent
+//! daemon, a live VM's process and its guest counted, each with the commit it was built of.
 //!
 //! The host boots the guest kernel with an extent-store device with a DAX window, on a new store,
 //! which the guest formats as it mounts it. The guest writes a file, durably, and reads it through
-//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/fxfs/extents), asks the host
-//! over vsock for a snapshot, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against the
-//! daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks it:
+//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/cladefs/extents), asks the host
+//! over vsock for the stats, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against
+//! the daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks
+//! it:
 //! the daemon's build and the VM process's, one commit; the VM's store, answered, its window's
 //! mappings and its host mappings within their budget; its guest's build, a commit, and its
 //! counters, each between what the guest read before asking and after, which the host's answer
-//! tells it. The second snapshot is later than the first, and counts the guest's writes since.
+//! tells it. The second taking is later than the first, and counts the guest's writes since.
 
 use macros::{guest, host};
 
@@ -26,8 +27,8 @@ const CAPACITY: u64 = 256 * MIB;
 /// The DAX window, as large as the data ([`crate::common::dax_window`]).
 #[cfg(feature = "host")]
 const WINDOW: crate::common::Window = crate::common::Window::Large;
-/// The vsock port the guest asks for each snapshot on: a line of `stats`, and the counters it read,
-/// `NAME=VALUE` each; the host answers with `ok` and what the snapshot says of them, or the
+/// The vsock port the guest asks for each taking of stats on: a line of `stats`, and the counters
+/// it read, `NAME=VALUE` each; the host answers with `ok` and what the stats say of them, or the
 /// failure.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const PORT: u32 = 5051;
@@ -48,13 +49,13 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
-    /// The daemon's snapshot, as `cladefsctl stats --json` prints it through the control socket of
-    /// the daemon at `extentd`.
-    fn stats(extentd: &Path) -> anyhow::Result<(String, Value)> {
+    /// The daemon's stats, as `cladefsctl stats --json` prints them through the control socket of
+    /// the daemon at `cladefsd`.
+    fn stats(cladefsd: &Path) -> anyhow::Result<(String, Value)> {
         let cladefsctl = std::env::var_os("CLADEFSCTL_BIN").context("CLADEFSCTL_BIN")?;
         let output = std::process::Command::new(cladefsctl)
             .args(["stats", "--json"])
-            .env("CLADEFS_EXTENTD_GRPC", extentd.with_extension("control"))
+            .env("CLADEFSD_GRPC", cladefsd.with_extension("control"))
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
         ensure!(
@@ -73,13 +74,13 @@ mod host {
         commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 
-    /// Checks the snapshot `json` holds the daemon's and the VM process's builds, one commit, and
+    /// Checks the stats `json` hold the daemon's and the VM process's builds, one commit, and
     /// the VM's store, at `store`, its process's and its guest's counters; and returns those of its
     /// guest's `asked` names, and when it was taken.
     fn check(json: &Value, store: &Path, asked: &[&str]) -> anyhow::Result<(Vec<u64>, u64)> {
-        let build = json["extentd"]["build"].as_str().context("the daemon's build")?;
+        let build = json["cladefsd"]["build"].as_str().context("the daemon's build")?;
         ensure!(is_commit(build), "the daemon's build: {build:?}");
-        ensure!(json["extentd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
+        ensure!(json["cladefsd"]["counters"]["maps"].as_u64().is_some(), "the daemon's counters");
         let vms = json["vms"].as_array().context("vms")?;
         let vm = (vms.iter())
             .find(|vm| vm["path"].as_str().map(PathBuf::from).as_deref() == Some(store))
@@ -105,11 +106,11 @@ mod host {
         Ok((counters, json["taken_unix_ns"].as_u64().context("taken_unix_ns")?))
     }
 
-    /// Takes a snapshot each time the guest asks, on the connection `listener` takes, keeping its
-    /// JSON in `dir`, and answers with what it says of the guest's counters, or why it failed.
-    fn snapshots(
+    /// Takes the stats each time the guest asks, on the connection `listener` takes, keeping their
+    /// JSON in `dir`, and answers with what they say of the guest's counters, or why it failed.
+    fn takings(
         listener: UnixListener,
-        extentd: &Path,
+        cladefsd: &Path,
         store: &Path,
         dir: &Path,
     ) -> anyhow::Result<()> {
@@ -126,9 +127,9 @@ mod host {
                     Ok((name, value.parse()?))
                 })
                 .collect::<anyhow::Result<_>>()?;
-            let checked = stats(extentd).and_then(|(text, json)| {
+            let checked = stats(cladefsd).and_then(|(text, json)| {
                 std::fs::write(dir.join(format!("stats-{}.json", round + 1)), &text)?;
-                eprintln!("cladefsctl stats --json, snapshot {}:\n{text}", round + 1);
+                eprintln!("cladefsctl stats --json, taking {}:\n{text}", round + 1);
                 let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
                 let (counters, taken) = check(&json, &store, &names)?;
                 ensure!(taken > taken_before, "taken at {taken}, before {taken_before}");
@@ -169,8 +170,8 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
-            let extentd = PathBuf::from(
-                std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD names the daemon"),
+            let cladefsd = PathBuf::from(
+                std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
@@ -183,7 +184,7 @@ mod host {
             let dir = test_setup.tmp_dir.clone();
             std::thread::spawn(move || {
                 // Created as the guest mounts it, before it asks.
-                if let Err(err) = snapshots(listener, &extentd, &store, &dir) {
+                if let Err(err) = takings(listener, &cladefsd, &store, &dir) {
                     eprintln!("stats: {err:#}");
                 }
             });
@@ -215,7 +216,7 @@ mod guest {
     fn mount() {
         let source = CString::new("extents").unwrap();
         let target = CString::new(MNT).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };
@@ -249,7 +250,7 @@ mod guest {
         COUNTERS.iter().map(|name| stats[*name]).collect()
     }
 
-    /// The host, over vsock: where the guest asks for snapshots.
+    /// The host, over vsock: where the guest asks for stats.
     struct Host {
         asks: fs::File,
         answers: BufReader<fs::File>,
@@ -269,9 +270,9 @@ mod guest {
             Self { asks, answers }
         }
 
-        /// Asks for a snapshot, having read `before` of [`COUNTERS`], and returns what it says
+        /// Asks for the stats, having read `before` of [`COUNTERS`], and returns what they say
         /// of them.
-        fn snapshot(&mut self, before: &[u64]) -> Vec<u64> {
+        fn stats(&mut self, before: &[u64]) -> Vec<u64> {
             let read: String = COUNTERS
                 .iter()
                 .zip(before)
@@ -281,7 +282,7 @@ mod guest {
             let mut answer = String::new();
             self.answers.read_line(&mut answer).unwrap();
             let said = answer.trim_end().strip_prefix("ok");
-            let said = said.unwrap_or_else(|| panic!("the host's snapshot: {answer}"));
+            let said = said.unwrap_or_else(|| panic!("the host's stats: {answer}"));
             (said.split_whitespace())
                 .zip(COUNTERS)
                 .map(|(pair, name)| {
@@ -298,21 +299,21 @@ mod guest {
             mount();
             write_and_read(&format!("{MNT}/first"), 8 * MIB);
             let mut host = Host::connect();
-            let mut snapshots = Vec::new();
+            let mut takings = Vec::new();
             for round in 0..2 {
                 if round == 1 {
                     write_and_read(&format!("{MNT}/second"), 8 * MIB);
                 }
                 let before = counted();
-                let snapshot = host.snapshot(&before);
+                let taken = host.stats(&before);
                 let after = counted();
-                for ((name, snapshot), after) in COUNTERS.iter().zip(&snapshot).zip(&after) {
-                    assert!(snapshot <= after, "{name}: the snapshot's {snapshot}, after {after}");
+                for ((name, taken), after) in COUNTERS.iter().zip(&taken).zip(&after) {
+                    assert!(taken <= after, "{name}: the stats' {taken}, after {after}");
                 }
-                snapshots.push(snapshot);
+                takings.push(taken);
             }
             // The guest's writes since the first, in the second.
-            assert!(snapshots[1][0] > snapshots[0][0], "device_writes: {snapshots:?}");
+            assert!(takings[1][0] > takings[0][0], "device_writes: {takings:?}");
             unmount();
             println!("OK");
         }

@@ -41,7 +41,22 @@ echo "0::/user.slice/user-1000.slice/user@1000.service/fxdax.slice/$slice/fxjob-
     > "$CLADEFS_SELF_CGROUP"
 exec "$@"
 """
+# df and du, as a test has them say what the scratch disk holds: with $HOME/df-free, KiB, df -Pk
+# says the disk /mnt/fake-scratch has that much free; with $HOME/du-size, KiB, du says its
+# argument holds that much. Without them, the host's own.
+DF = r"""#!/bin/sh
+[ -f "$HOME/df-free" ] || exec /bin/df "$@"
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 262144000 0 $(cat "$HOME/df-free") 0% /mnt/fake-scratch"
+"""
+DU = r"""#!/bin/sh
+[ -f "$HOME/du-size" ] || exec /usr/bin/du "$@"
+for last in "$@"; do :; done
+printf '%s\t%s\n' "$(cat "$HOME/du-size")" "$last"
+"""
 TOOLS = {
+    "df": DF,
+    "du": DU,
     "sudo": '#!/bin/sh\nexec "$@"\n',
     "setsid": f'#!/bin/sh\nexec {sys.executable} -c '
               '\'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])\' "$@"\n',

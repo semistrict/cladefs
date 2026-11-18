@@ -40,9 +40,10 @@
 
 #![cfg(feature = "shuttle")]
 
+use base32_id::Padded;
 use extent_frame::segment::{Chain, Child, Footer};
 use extent_store::{
-    Description, Dir, MemDir, Opening, Options, RemoteData, Rules, Store, set_rules,
+    BucketData, Description, Dir, MemDir, Opening, Options, Rules, Store, set_rules,
 };
 use shuttle::scheduler::{PctScheduler, RandomScheduler, ReplayScheduler};
 use shuttle::sync::Mutex;
@@ -59,7 +60,7 @@ mod stalling;
 use stalling::{Op, Stalling};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 /// Small segments, so that commits and the closer close several, and an extent of four blocks in
 /// a file of its own.
 const OPTIONS: Options = Options {
@@ -110,7 +111,7 @@ enum Step {
 }
 
 /// The branch the writer forks.
-const CHILD: extent_remote::layout::Branch = extent_remote::layout::test_branch(BRANCH.id + 1);
+const CHILD: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(BRANCH.id + 1);
 
 const STEPS: &[Step] = &[
     Step::Write(1, 1),
@@ -200,7 +201,7 @@ fn run_with(Run { steps, follow }: Run) {
                             _ => store.commit_ordered(None).unwrap(),
                         }
                         let mut history = history.lock().unwrap();
-                        assert_eq!(store.epoch().unwrap(), history.len() as u64);
+                        assert_eq!(store.last_commit().unwrap(), history.len() as u64);
                         history.push(holds.clone());
                     }
                 }
@@ -245,7 +246,7 @@ fn run_with(Run { steps, follow }: Run) {
             loop {
                 // Whether the writer was done before this round: then it takes everything.
                 let done = written.load(Ordering::SeqCst);
-                // As cladefs's uploader does (remote.rs): closes the open segment between commits,
+                // As cladefs's uploader does (upload.rs): closes the open segment between commits,
                 // and takes the segments closed whose commits are durable, reading them and their
                 // extents' own files.
                 store.close_now().unwrap();
@@ -263,7 +264,7 @@ fn run_with(Run { steps, follow }: Run) {
                     for epoch in after + 1..=last {
                         for seed in [epoch, epoch + 100] {
                             let crashed = bucket.reopen(dir.crash(seed));
-                            let recovered = crashed.epoch().unwrap();
+                            let recovered = crashed.last_commit().unwrap();
                             assert!(
                                 recovered >= epoch,
                                 "uploaded commit {epoch} before durable: a crash recovered \
@@ -273,15 +274,23 @@ fn run_with(Run { steps, follow }: Run) {
                         *taken.lock().unwrap() = epoch;
                     }
                     let holds = held(last);
-                    let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys)
-                        .unwrap();
+                    let data = extent_frame::data(
+                        &closed.bytes().unwrap(),
+                        &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                    )
+                    .unwrap();
                     let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
                     bucket.put(bucket_key(&closed), data.to_vec());
                     bucket.acknowledge(closed.footer.clone());
                     for (key, bytes) in &own {
                         bucket.put(
                             key.clone(),
-                            extent_frame::data(bytes, &extent_frame::NoKeys).unwrap().to_vec(),
+                            extent_frame::data(
+                                bytes,
+                                &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                            )
+                            .unwrap()
+                            .to_vec(),
                         );
                     }
                     let in_segment =
@@ -289,8 +298,11 @@ fn run_with(Run { steps, follow }: Run) {
                             (extent, len, data[offset as usize..(offset + len) as usize].to_vec())
                         });
                     let on_their_own = closed.footer.own().map(|(extent, location)| {
-                        let data =
-                            extent_frame::data(&own[&location.key], &extent_frame::NoKeys).unwrap();
+                        let data = extent_frame::data(
+                            &own[&location.key],
+                            &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                        )
+                        .unwrap();
                         (extent, location.len, data)
                     });
                     // Each extent its footer names, as its last commit left it: in it, or in a
@@ -345,7 +357,8 @@ fn run_with(Run { steps, follow }: Run) {
                     let done = written.load(Ordering::SeqCst);
                     // A view opens as of a commit as it is made: its record may come later.
                     let holds = loop {
-                        if let Some(holds) = history.lock().unwrap().get(current.epoch() as usize) {
+                        if let Some(holds) = history.lock().unwrap().get(current.commit() as usize)
+                        {
                             break holds.clone();
                         }
                         thread::yield_now();
@@ -354,7 +367,10 @@ fn run_with(Run { steps, follow }: Run) {
                         let mut read = vec![0; data.len()];
                         let viewed = |read: &mut [u8]| store.read_view(current, *extent, 0, read);
                         bucket.read(&mut read, viewed).map_err(|error| {
-                            format!("a view's read of {extent:?} at {}: {error:#}", current.epoch())
+                            format!(
+                                "a view's read of {extent:?} at {}: {error:#}",
+                                current.commit()
+                            )
                         })?;
                         check(&read == data, || {
                             format!("a view's read of {extent:?} reads other data")
@@ -375,7 +391,7 @@ fn run_with(Run { steps, follow }: Run) {
                             || {
                                 format!(
                                     "a view at {} read {extent:?}, which its commit doesn't hold: {result:?}",
-                                    current.epoch()
+                                    current.commit()
                                 )
                             },
                         )?;
@@ -393,7 +409,7 @@ fn run_with(Run { steps, follow }: Run) {
                         bucket.read(&mut read, viewed).map_err(|error| {
                             format!(
                                 "a view's read of pinned {pinned:?} at {}: {error:#}",
-                                current.epoch()
+                                current.commit()
                             )
                         })?;
                         check(&read == data, || {
@@ -442,7 +458,7 @@ fn run_with(Run { steps, follow }: Run) {
     let taken = *taken.lock().unwrap();
     for seed in 0..4 {
         let crashed = bucket.reopen(dir.crash(seed));
-        let epoch = crashed.epoch().unwrap();
+        let epoch = crashed.last_commit().unwrap();
         assert!(epoch >= taken, "crash {seed}: recovered commit {epoch}, uploaded {taken}");
     }
 
@@ -471,15 +487,17 @@ impl Bucket {
     /// The store in `dir`, opened as the bucket holds its branch: its acknowledged footers
     /// replayed, its writer's chain after them.
     fn reopen(&self, dir: MemDir) -> Store<MemDir> {
-        let (mut state, mut chain) = (extent_remote::State::new(BRANCH), WRITER);
+        let (mut state, mut chain) = (extent_bucket::State::new(BRANCH), WRITER);
         for footer in self.1.lock().unwrap().iter() {
             state.apply(footer);
             chain = chain.admit(footer).expect("the footers acknowledged follow each other");
         }
-        let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
-        let taken = extent_remote::Taken::of(head, &state, chain);
-        let keys = extent_remote::keys::Ring::clear();
-        let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
+        let head =
+            extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
+        let taken = extent_bucket::TakenBranch::of(head, &state, chain);
+        let keys = extent_bucket::testing::ring([BRANCH]);
+        let opening =
+            Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
         Store::recover(dir).unwrap().open(OPTIONS, opening).unwrap()
     }
 
@@ -491,10 +509,10 @@ impl Bucket {
         read: impl FnOnce(&mut [u8]) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let error = match read(buf) {
-            Err(error) if error.downcast_ref::<RemoteData>().is_some() => error,
+            Err(error) if error.downcast_ref::<BucketData>().is_some() => error,
             read => return read,
         };
-        let location = &error.downcast_ref::<RemoteData>().unwrap().location;
+        let location = &error.downcast_ref::<BucketData>().unwrap().location;
         let objects = self.0.lock().unwrap();
         let Some(object) = objects.get(&location.key) else {
             anyhow::bail!("{error:#}, which the uploader uploaded not");
@@ -509,7 +527,7 @@ impl Bucket {
 
 /// cladefs: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
 fn bucket_key<F>(closed: &extent_store::Closed<F>) -> String {
-    extent_remote::layout::segment(closed.footer.branch, closed.footer.seq, closed.footer.epoch)
+    extent_bucket::layout::segment(closed.footer.branch, closed.footer.segment, closed.footer.epoch)
 }
 
 /// One run of writes racing commits, as a VM's requests may: a writer writes extents, in segments
@@ -713,7 +731,7 @@ fn uploading_during_flushes() {
             store.close_now().unwrap();
             for closed in store.closed(usize::MAX).unwrap() {
                 let crashed = Store::open(dir.crash(closed.last()), OPTIONS).unwrap();
-                let epoch = crashed.epoch().unwrap();
+                let epoch = crashed.last_commit().unwrap();
                 assert!(
                     epoch >= closed.last(),
                     "uploaded a segment of commit {} before durable: a crash recovered {epoch}",
@@ -853,7 +871,7 @@ fn closing_during_a_flush() {
         let store = store.clone();
         thread::spawn(move || {
             store.close().unwrap();
-            let epoch = Store::open(dir.crash(0), OPTIONS).unwrap().epoch().unwrap();
+            let epoch = Store::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap();
             assert!(epoch == 2, "a crash after the branch closed recovered commit {epoch} of 2");
         })
     };
@@ -871,7 +889,7 @@ fn framing_stalls() -> (Stalling, Arc<Store<Stalling>>) {
     let store = Arc::new(Store::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
-    dir.arm(Op::Create, &format!("segments/{:016x}/framing-{:016x}", BRANCH.id, 0));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
     (dir, store)
 }
 
@@ -958,7 +976,11 @@ fn closing_after_a_failed_framing() {
     let reopened = Store::open(dir.clone(), OPTIONS);
     let reopened = reopened.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
     // What was durable: the commits the flush took, extents 1 to 3's.
-    assert_eq!(reopened.epoch().unwrap(), 3, "{failure}: other commits than durable recovered");
+    assert_eq!(
+        reopened.last_commit().unwrap(),
+        3,
+        "{failure}: other commits than durable recovered"
+    );
     check_framed(&reopened, failure);
     // Writing on, it closes segments of its own, numbered past those it found, framed where no
     // framing of the store before frames them still, making files of their numbers.
@@ -984,7 +1006,7 @@ fn framing_at_a_commit_stalls() -> (Stalling, Arc<Store<Stalling>>) {
     for sequence in 2..5 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
     }
-    dir.arm(Op::Create, &format!("segments/{:016x}/framing-{:016x}", BRANCH.id, 0));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
     (dir, store)
 }
 
@@ -1125,7 +1147,7 @@ fn serving_during_a_flush() {
     store.flush().unwrap();
     drop(store);
     let reopened = Store::open(dir, OPTIONS).unwrap();
-    assert_eq!(reopened.epoch().unwrap(), 2, "the commits made durable were not");
+    assert_eq!(reopened.last_commit().unwrap(), 2, "the commits made durable were not");
     check_flushed(&reopened, "the branch opened again");
 }
 
@@ -1170,7 +1192,11 @@ fn flushing_during_a_framing() {
     assert!(!store.flush_pending(), "a commit flushed during a framing is pending");
     for seed in 0..4 {
         let crashed = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(crashed.epoch().unwrap(), 2, "a crash during a framing lost a commit flushed");
+        assert_eq!(
+            crashed.last_commit().unwrap(),
+            2,
+            "a crash during a framing lost a commit flushed"
+        );
         check_flushed(&crashed, "a crash during a framing");
     }
     dir.let_go(Ok(()));
@@ -1439,7 +1465,7 @@ fn fails_without(rules: Rules, expected: &[&str], test: fn()) {
 /// on its own that the writer frees, gone.
 #[test]
 fn needs_frees_kept() {
-    let expected = ["no extent", "extents/0000000000000007/0000000000000002 doesn't exist"];
+    let expected = ["no extent", "extents/0000000000007/0000000000002 doesn't exist"];
     fails_without(Rules { keep_frees: false, ..Rules::ALL }, &expected, run);
 }
 

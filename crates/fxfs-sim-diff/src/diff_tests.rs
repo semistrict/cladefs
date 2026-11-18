@@ -8,11 +8,11 @@
 //! last block whole), which are holes on both sides alike, shared alike, and never open in Fxfs
 //! where the model says sealed, which would have the sim's dax.c MAP what a host refuses.
 //!
-//! The operations: writeback (fxfs_write_many), of whole pages and of parts of them, up to the
+//! The operations: writeback (cladefs_write_many), of whole pages and of parts of them, up to the
 //! file's size, paid with room reserved or not, and failing between its bytes and its commit as a
-//! crash would (fxfs_set_fail_commits, FAIL_COMMITS); a truncate's size (fxfs_write_inode), cutting
-//! with and without FXFS_SET_KEEP_TAIL, and growing; a clone (fxfs_clone_range), of whole blocks or
-//! to the source's end; a punch; a seal (fxfs_fsync); and a remount of Fxfs, which the model, with
+//! crash would (cladefs_set_fail_commits, FAIL_COMMITS); a truncate's size (cladefs_write_inode), cutting
+//! with and without CLADEFS_SET_KEEP_TAIL, and growing; a clone (cladefs_clone_range), of whole blocks or
+//! to the source's end; a punch; a seal (cladefs_fsync); and a remount of Fxfs, which the model, with
 //! no journal, doesn't have.
 //!
 //! The sim interleaves tasks at the model's scheduling points (`sim_point`), where its locks let

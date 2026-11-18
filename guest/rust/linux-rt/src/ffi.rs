@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The C functions of guest/linux/fs/fxfs/rt.h.
+//! The C functions of guest/linux/fs/cladefs/rt.h.
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -25,27 +25,27 @@ pub struct Work {
 }
 
 unsafe extern "C" {
-    pub fn fxfs_rt_alloc(size: usize, align: usize) -> *mut c_void;
-    pub fn fxfs_rt_free(ptr: *mut c_void);
+    pub fn cladefs_rt_alloc(size: usize, align: usize) -> *mut c_void;
+    pub fn cladefs_rt_free(ptr: *mut c_void);
 
-    pub fn fxfs_rt_log(level: c_int, msg: *const c_char, len: usize);
-    pub fn fxfs_rt_panic(msg: *const c_char, len: usize) -> !;
+    pub fn cladefs_rt_log(level: c_int, msg: *const c_char, len: usize);
+    pub fn cladefs_rt_panic(msg: *const c_char, len: usize) -> !;
 
-    pub fn fxfs_rt_parker_new() -> *mut Parker;
-    pub fn fxfs_rt_parker_free(parker: *mut Parker);
-    pub fn fxfs_rt_park(parker: *mut Parker);
-    pub fn fxfs_rt_unpark(parker: *mut Parker);
+    pub fn cladefs_rt_parker_new() -> *mut Parker;
+    pub fn cladefs_rt_parker_free(parker: *mut Parker);
+    pub fn cladefs_rt_park(parker: *mut Parker);
+    pub fn cladefs_rt_unpark(parker: *mut Parker);
 
-    pub fn fxfs_rt_work_new(run: extern "C" fn(arg: *mut c_void), urgent: bool) -> *mut Work;
-    pub fn fxfs_rt_work_queue(work: *mut Work, arg: *mut c_void);
-    pub fn fxfs_rt_work_free(work: *mut Work);
+    pub fn cladefs_rt_work_new(run: extern "C" fn(arg: *mut c_void), urgent: bool) -> *mut Work;
+    pub fn cladefs_rt_work_queue(work: *mut Work, arg: *mut c_void);
+    pub fn cladefs_rt_work_free(work: *mut Work);
 
-    pub fn fxfs_rt_timer_new(fire: extern "C" fn(arg: *mut c_void), arg: *mut c_void)
+    pub fn cladefs_rt_timer_new(fire: extern "C" fn(arg: *mut c_void), arg: *mut c_void)
     -> *mut Timer;
-    pub fn fxfs_rt_timer_start(timer: *mut Timer, ns: u64);
-    pub fn fxfs_rt_timer_free(timer: *mut Timer);
+    pub fn cladefs_rt_timer_start(timer: *mut Timer, ns: u64);
+    pub fn cladefs_rt_timer_free(timer: *mut Timer);
 
-    pub fn fxfs_rt_monotonic_ns() -> u64;
+    pub fn cladefs_rt_monotonic_ns() -> u64;
 
-    pub fn fxfs_rt_random_bytes(buf: *mut c_void, len: usize);
+    pub fn cladefs_rt_random_bytes(buf: *mut c_void, len: usize);
 }

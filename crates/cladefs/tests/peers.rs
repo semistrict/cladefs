@@ -10,8 +10,8 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::extentd::control::Client;
-use cladefs::{ExtentId, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::cladefsd::control::Client;
+use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -42,18 +42,18 @@ struct Daemon {
 /// part cache in `dir`; serving its peers at `peers`' first address, and asking them all, if given.
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let (vms, control, stats) =
-        (dir.join("extentd.sock"), dir.join("control.sock"), dir.join("stats"));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
+        (dir.join("cladefsd.sock"), dir.join("control.sock"), dir.join("stats"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
-        .env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()))
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env("CLADEFS_EXTENTD_CACHE", dir.join("cache"))
-        .env("CLADEFS_EXTENTD_STATS", &stats)
-        .env("CLADEFS_EXTENTD_GRPC", &control);
+        .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_PART_CACHE", dir.join("cache"))
+        .env("CLADEFSD_STATS", &stats)
+        .env("CLADEFSD_GRPC", &control);
     if let Some(peers) = peers {
-        command.env("CLADEFS_EXTENTD_PEER_ADDRESS", &peers[0]);
-        command.env("CLADEFS_EXTENTD_PEERS", peers.join(","));
+        command.env("CLADEFSD_PEER_ADDRESS", &peers[0]);
+        command.env("CLADEFSD_PEERS", peers.join(","));
     }
     let process = KillOnDrop(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -130,7 +130,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let second = daemon(&hosts[1], &bucket, peered.then_some(&second_peers[..]));
 
     let base = hosts[0].join("base");
-    let store = RemoteExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
     let branch = store.branch();
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { branch, sequence };
@@ -144,7 +144,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let (copy, fork) = (hosts[1].join("point"), hosts[1].join("fork"));
     second.control.create_store(&copy, CAPACITY, point, None).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
-    let store = RemoteExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
         let extent = ExtentId { branch, sequence };
@@ -204,18 +204,18 @@ fn peers_are_set_at_runtime() {
 #[test]
 fn a_cache_budget_the_daemon_cant_take_stops_it() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"))
-        .arg(dir.path().join("extentd.sock"))
-        .env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", dir.path().display()))
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env("CLADEFS_EXTENTD_CACHE", dir.path().join("cache"))
-        .env("CLADEFS_EXTENTD_CACHE_BYTES", "1G")
+    let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
+        .arg(dir.path().join("cladefsd.sock"))
+        .env("CLADEFSD_BUCKET", format!("file://{}/", dir.path().display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))
+        .env("CLADEFSD_PART_CACHE_BYTES", "1G")
         .output()
         .unwrap();
     assert!(!output.status.success(), "the daemon started");
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(
-        said.contains("CLADEFS_EXTENTD_CACHE_BYTES must be a positive number of bytes: \"1G\""),
+        said.contains("CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: \"1G\""),
         "{said}"
     );
 }

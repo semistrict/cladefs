@@ -7,7 +7,7 @@
 # cladefs, its git identity, and its cron entry, at 02:00 local time, the quiet hour in fxjob's
 # history of ubu1 (jobs in every hour but 02:00-04:00, 2026-11-13..15). Run again, it changes
 # nothing that is right already: the entry is replaced, never added twice. ubu1's setup calls it
-# from a system-setup.d step, as the user (README's testing section has the step).
+# from a system-setup.d step, as the user (docs/testing.md has the step).
 #
 #   scripts/nightly-install.sh [ORIGIN]
 #

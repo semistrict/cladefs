@@ -298,12 +298,12 @@ impl Filesystem {
         Ok(())
     }
 
-    /// Clones the filesystem's image to a new image at `path`, which must not exist, while it is
-    /// mounted, and returns the clone's storage (see [`Image::clone_storage_to`]).
-    pub async fn clone_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
+    /// Forks the filesystem's image to a new image at `path`, which must not exist, while it is
+    /// mounted, and returns the fork's storage (see [`Image::fork_storage_to`]).
+    pub async fn fork_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
         // As every operation does, it fails once the filesystem is unmounted.
         self.mounted()?;
-        self.volume.image.clone_storage_to(path.as_ref()).await
+        self.volume.image.fork_storage_to(path.as_ref()).await
     }
 
     /// The filesystem's usage.
@@ -903,7 +903,7 @@ impl Node {
     }
 
     /// Sets the node's extended attribute `name` to `value`, as `mode` says, changing its status
-    /// change time, as Linux's filesystems do (the guest's `fxfs_vfs_xattr_set`).
+    /// change time, as Linux's filesystems do (the guest's `cladefs_vfs_xattr_set`).
     pub async fn setxattr(&self, name: &[u8], value: &[u8], mode: XattrMode) -> Result<()> {
         let volume = self.volume()?;
         let (ino, name, value, now) = (self.ino(), name.to_vec(), value.to_vec(), now()?);

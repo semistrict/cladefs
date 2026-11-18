@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cladefs::{DaemonConnection, RemoteExtentStore, WindowMapping};
+use cladefs::{DaemonConnection, DaemonExtentStore, WindowMapping};
 use log::{error, info};
 use zerocopy::FromZeros;
 
@@ -18,11 +18,11 @@ use crate::config::{Config, private_max};
 use crate::notices::{ConfigInterrupt, Following, Notices};
 use crate::persist::{ConfigState, MappingState, Snapshot, SnapshotError, State};
 use crate::protocol::{
-    ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER, QUEUE_SIZE,
-    VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
+    Bounds, ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER,
+    QUEUE_SIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
 };
 use crate::requests::Requests;
-use crate::window::{DaxWindow, DaxWindowError, PrefaultGuestMemory, WindowVm};
+use crate::window::{DaxWindowError, PrefaultGuestMemory, WindowMemory, WindowVm};
 use crate::workers::{RequestQueue, WorkerQueue, Workers};
 
 /// What the VMM does as a device's extent daemon goes: stops the VM, the guest's disk gone,
@@ -82,8 +82,8 @@ pub struct Device {
     // The store before the window, whose host memory the store's fault thread serves: the store
     // is dropped first.
     // cladefs: none from a follower's reset until it is activated again.
-    store: Option<Arc<RemoteExtentStore>>,
-    window: Option<DaxWindow>,
+    store: Option<Arc<DaemonExtentStore>>,
+    window: Option<WindowMemory>,
     /// Whether the store's window is created, which it is on the first activation.
     window_created: bool,
     /// Maps the window's pages for the guest as the store maps them.
@@ -182,7 +182,7 @@ impl Device {
             cladefs::userfaultfd_accessible()
                 .map_err(|err| Error::Userfaultfd(config.id.clone(), err))?;
         }
-        let store = connect(&config.extentd_socket, &config.id, &on_lost)
+        let store = connect(&config.cladefsd_socket, &config.id, &on_lost)
             .and_then(|daemon| match &making {
                 Making::Boot if config.read_only => daemon.open_read_only(&config.path_on_host),
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
@@ -214,12 +214,12 @@ impl Device {
                         return Err(Error::WindowNotSaved(config.id.clone()));
                     }
                 };
-                let window = DaxWindow::new(vm, size, at)?;
+                let window = WindowMemory::new(vm, size, at)?;
                 // cladefs: a writer's window copies on write (backlog doc-13); a follower's copies
                 // nothing.
                 if !config.read_only {
                     config_space.private_max =
-                        private_max(window.len(), config.dax_private_max).to_le();
+                        private_max(window.len(), config.dax_private_max_bytes).to_le();
                 }
                 Some(window)
             }
@@ -286,14 +286,16 @@ impl Device {
     }
 
     /// Its store: open, but from a follower's reset until it is activated again.
-    fn store(&self) -> &Arc<RemoteExtentStore> {
+    fn store(&self) -> &Arc<DaemonExtentStore> {
         self.store.as_ref().expect("the device's store is closed")
     }
 
     /// The requests of one of its queues, served with its store, while the device is activated:
     /// for a worker taking them off the queue, as [`Device::start_workers`]'s do.
     pub fn requests(&self) -> Requests {
-        Requests::new(self.store().clone(), self.notices.clone(), self.config.cache_type)
+        let window = self.window.as_ref().map_or(0, WindowMemory::len);
+        let bounds = Bounds::of(&self.config_space, window);
+        Requests::new(self.store().clone(), self.notices.clone(), self.config.cache_type, bounds)
     }
 
     /// Starts the workers serving `queues`, those the driver set up, the device activated
@@ -385,7 +387,7 @@ impl Device {
     /// reset ([`Device::reset`]), with its window's faults, before the new one creates its window
     /// in the same memory, which it left inaccessible meanwhile (TASK-79.8).
     fn reopen(&mut self) -> Result<(), cladefs::Error> {
-        let store = connect(&self.config.extentd_socket, &self.config.id, &self.on_lost)?
+        let store = connect(&self.config.cladefsd_socket, &self.config.id, &self.on_lost)?
             .open_read_only(&self.config.path_on_host)?;
         self.following = Arc::new(Following::default());
         hear_commits(&store, &self.following);
@@ -458,7 +460,7 @@ impl Device {
             .expect("an extent device's store is snapshotted before the device is saved");
         State {
             config: ConfigState::from(&self.config),
-            window_addr: self.window.as_ref().map(DaxWindow::guest_addr),
+            window_addr: self.window.as_ref().map(WindowMemory::guest_addr),
             point: snapshot.point.clone(),
             point_branch: snapshot.point_branch,
             mappings: snapshot.mappings.iter().map(MappingState::from).collect(),
@@ -488,15 +490,15 @@ fn connect(
 
 /// cladefs: has `following` hear of the commits of the writer of `store`, a follower's, from the
 /// one its view is as of.
-fn hear_commits(store: &RemoteExtentStore, following: &Arc<Following>) {
+fn hear_commits(store: &DaemonExtentStore, following: &Arc<Following>) {
     let heard = following.clone();
-    following.committed(store.on_committed(move |epoch| heard.committed(epoch)));
+    following.committed(store.on_committed(move |commit| heard.committed(commit)));
 }
 
 /// cladefs: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,
 /// through `notices`, while its driver takes asks; otherwise the store answers at once, with none
 /// of the guest's (TASK-111.4).
-fn hear_stats_asks(store: &RemoteExtentStore, notices: &Arc<Notices>) {
+fn hear_stats_asks(store: &DaemonExtentStore, notices: &Arc<Notices>) {
     let notices = notices.clone();
     store.on_stats_asked(move |ask| notices.stats.ask(ask));
 }

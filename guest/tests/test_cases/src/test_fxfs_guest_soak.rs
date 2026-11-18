@@ -3,12 +3,11 @@
 // found in the LICENSE file.
 
 //! cladefs: fxfs-guest-soak (TASK-67): hours of mixed load on forks of one base, through crashes of
-//! every kind doc-12 names, each round checked against it. Each of the runner's rounds
-//! (CLADEFS_E2E_ROUNDS) is a round of the soak, which goes on from where the last left it: a bucket,
-//! a host's stores and cache, and a ledger of what the guests were told, kept outside the results
-//! (`Paths`), which the first round makes.
+//! every kind doc-12 names, each repeat checked against it. Each repeat (CLADEFS_E2E_REPEATS) goes
+//! on from where the last left it: a bucket, a host's stores and cache, and a ledger of what the
+//! guests were told, kept outside the results (`Paths`), which the first repeat makes.
 //!
-//! A round, as the run's seed and its number say (`crate::soak::Plan`): a daemon of the soak's
+//! A repeat, as the run's seed and its number say (`crate::soak::Plan`): a daemon of the soak's
 //! own, its bucket answering late or an upload failing; a collector (cladefs-gc) collecting the
 //! bucket throughout; five VMs at once, each on a fork of the base, which holds files and a pgbench
 //! database, a VM's store forked anew now and then; each VM a writer, fsyncing file after file and
@@ -21,17 +20,18 @@
 //! told of is there whole (a prefix of each writer's fsyncs where the daemon died or the host was
 //! lost, with every file a syncfs was told of: `crate::soak::kept`), every fork reads its base,
 //! fsx's files are their model's, the database is consistent; the collector lists every live
-//! branch. The round's stores, cache and bucket are measured, and each daemon's peak memory, said
-//! on a line of the log (`soak-round {...}`), and a measure grown past twice the warm rounds' most
-//! fails the round (`crate::soak::Bound`).
+//! branch. The repeat's stores, cache and bucket are measured, and each daemon's peak memory, said
+//! on a line of the log (`soak-repeat {...}`), and a measure grown past twice the warm repeats'
+//! most fails the repeat (`crate::soak::Bound`).
 //!
-//! CLADEFS_SEED replays a run, round by round: its first round's seed, which the run's outcomes say;
+//! CLADEFS_SEED replays a run, repeat by repeat: its first repeat's seed, which the run's outcomes
+//! say;
 //! CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
 //! CLADEFS_SOAK_LOAD_SECS fixes the loads' time; CLADEFS_SOAK_STATE is where runs keep their state,
 //! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
-//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFS_EXTENTD_REMOTE's, under
+//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFSD_BUCKET's, under
 //! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
-//! with failpoints (scripts/test-e2e.sh's CLADEFS_EXTENTD_FAILPOINTS).
+//! with failpoints (scripts/test-e2e.sh's CLADEFSD_FAILPOINTS).
 
 use macros::{guest, host};
 
@@ -62,7 +62,7 @@ const SCALE: u64 = 4;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, cladefs_guest_should_run, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, control, setup_rootfs, spawn_daemon};
     use crate::script::Failure;
     use crate::soak::{self, Acks, Bound, Fault, Found, KEPT_RUNS, Load, Plan, SLOTS, WRITERS};
     use crate::vm::{self, Firecracker, Vm};
@@ -81,7 +81,7 @@ mod host {
     const MEMORY_MIB: u32 = 1024;
     const VCPUS: u8 = 2;
     /// The memory each daemon's kernel takes at most.
-    const EXTENTD_MEMORY: u64 = 4 << 30;
+    const CLADEFSD_MEMORY: u64 = 4 << 30;
     /// How long past its load a VM may run before it is hung.
     const GRACE: Duration = Duration::from_secs(120);
     /// How long a daemon may take to stop on SIGTERM, and its VMs to exit once it is killed.
@@ -93,7 +93,7 @@ mod host {
     const BASE: Duration = Duration::from_secs(600);
     /// The shortest load a VM is booted again for.
     const REBOOT_LEFT: u64 = 30;
-    /// The rounds whose measures later rounds' are held to, and how much more than twice they may
+    /// The repeats whose measures later repeats' are held to, and how much more than twice they may
     /// grow: past those, the stores, the bucket or a daemon's memory grow with the soak's age.
     const STORES: Bound = Bound { warm: (3, 6), slack: 1 << 30 };
     const BUCKET: Bound = Bound { warm: (3, 6), slack: 2 << 30 };
@@ -101,12 +101,12 @@ mod host {
     /// The least free space the state's filesystem may be left with: the cache leaves 4 GiB.
     const FREE: u64 = 2 << 30;
 
-    /// The soak's ledger across rounds: what guests were told, and what was measured.
+    /// The soak's ledger across repeats: what guests were told, and what was measured.
     #[derive(Default, Serialize, Deserialize)]
     struct Ledger {
         seed: u64,
-        /// The rounds done.
-        rounds: u64,
+        /// The repeats done.
+        repeats: u64,
         /// The placement's fencing token, which each lost host's successor's exceeds.
         token: u64,
         /// The base's branch, once made.
@@ -135,22 +135,22 @@ mod host {
         dropping: bool,
     }
 
-    /// What a round measured once checked.
+    /// What a repeat measured once checked.
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct Measure {
-        round: u64,
+        repeat: u64,
         /// Bytes the host's stores' directories take, and its cache's.
         stores: u64,
         cache: u64,
         /// Bytes of the bucket's objects.
         bucket: u64,
-        /// The peak resident memory of the round's loaded daemons, the most of them, and of the
+        /// The peak resident memory of the repeat's loaded daemons, the most of them, and of the
         /// checking one.
-        extentd_peak: u64,
-        check_extentd_peak: u64,
+        cladefsd_peak: u64,
+        check_cladefsd_peak: u64,
         /// The state's filesystem's free bytes.
         free: u64,
-        /// How long the round took.
+        /// How long the repeat took.
         secs: u64,
     }
 
@@ -178,9 +178,9 @@ mod host {
             let key = format!("{:016x}", soak::fnv(run.as_bytes()));
             let state = root.join(&key);
             let host = state.join("host");
-            let (bucket, bucket_dir) = match std::env::var("CLADEFS_EXTENTD_REMOTE") {
-                Ok(remote) if !remote.is_empty() => {
-                    (format!("{}/soak-{key}", remote.trim_end_matches('/')), None)
+            let (bucket, bucket_dir) = match std::env::var("CLADEFSD_BUCKET") {
+                Ok(url) if !url.is_empty() => {
+                    (format!("{}/soak-{key}", url.trim_end_matches('/')), None)
                 }
                 _ => {
                     let dir = state.join("bucket");
@@ -196,7 +196,7 @@ mod host {
                 state,
                 bucket,
                 bucket_dir,
-                socket: sockets.join("extentd.sock"),
+                socket: sockets.join("cladefsd.sock"),
                 gc: gc.into(),
             })
         }
@@ -252,14 +252,14 @@ mod host {
         }
     }
 
-    /// A VM of the round's load, booted on its slot's store.
+    /// A VM of the repeat's load, booted on its slot's store.
     struct Boot {
         slot: usize,
         name: String,
         load: Load,
         /// A writer's run's name.
         run: Option<String>,
-        /// When it booted, from the round's start.
+        /// When it booted, from the repeat's start.
         at: Duration,
         firecracker: Option<Firecracker>,
         ended: Option<Ended>,
@@ -274,16 +274,16 @@ mod host {
         Killed,
     }
 
-    /// The exit code of a VM process whose daemon went (Firecracker's `ExtentdLost`).
-    const EXTENTD_LOST: i32 = 158;
+    /// The exit code of a VM process whose daemon went (Firecracker's `CladefsdLost`).
+    const CLADEFSD_LOST: i32 = 158;
 
-    /// What a round's load came to.
+    /// What a repeat's load came to.
     #[derive(Default)]
     struct Happened {
         /// When the daemon was killed, or the host lost: what a run begun before may lose.
         losses: Vec<Duration>,
         host_lost: bool,
-        /// The peak memory of the round's loaded daemons, the most.
+        /// The peak memory of the repeat's loaded daemons, the most.
         peak: u64,
     }
 
@@ -339,7 +339,7 @@ mod host {
         paths: Paths,
         ledger: Ledger,
         plan: Plan,
-        /// How many daemons the round started, for their logs' names.
+        /// How many daemons the repeat started, for their logs' names.
         daemons: usize,
         started: Instant,
     }
@@ -364,16 +364,17 @@ mod host {
                 Err(err) => return Err(err.into()),
             };
             std::fs::write(setup.tmp_dir.join("seed"), ledger.seed.to_string())?;
-            let faults =
-                Fault::parse(&std::env::var("CLADEFS_SOAK_FAULTS").unwrap_or_else(|_| "all".into()))
-                    .map_err(anyhow::Error::msg)?;
+            let faults = Fault::parse(
+                &std::env::var("CLADEFS_SOAK_FAULTS").unwrap_or_else(|_| "all".into()),
+            )
+            .map_err(anyhow::Error::msg)?;
             let load_secs = match std::env::var("CLADEFS_SOAK_LOAD_SECS") {
                 Ok(secs) => Some(secs.parse().context("CLADEFS_SOAK_LOAD_SECS is seconds")?),
                 Err(_) => None,
             };
-            let mut plan = Plan::new(ledger.seed, ledger.rounds + 1, &faults, load_secs);
-            // A daemon without failpoints would fail no upload, and the round say it did.
-            if std::env::var_os("CLADEFS_EXTENTD_FAILPOINTS").is_none() {
+            let mut plan = Plan::new(ledger.seed, ledger.repeats + 1, &faults, load_secs);
+            // A daemon without failpoints would fail no upload, and the repeat say it did.
+            if std::env::var_os("CLADEFSD_FAILPOINTS").is_none() {
                 plan.upload_fails_after = None;
             }
             // Latency is added to every bucket the plan names: a file bucket's reads take it since
@@ -394,7 +395,7 @@ mod host {
             eprintln!("soak: {:>7.1?}: {what}", self.started.elapsed());
         }
 
-        /// A daemon of the soak's, at the ledger's token, with the round's faults if `faulty`.
+        /// A daemon of the soak's, at the ledger's token, with the repeat's faults if `faulty`.
         fn daemon(&mut self, faulty: bool) -> anyhow::Result<Daemon> {
             for path in [&self.paths.socket, &self.paths.socket.with_extension("control")] {
                 if let Err(err) = std::fs::remove_file(path)
@@ -408,15 +409,15 @@ mod host {
             let latency = if faulty { self.plan.latency_ms } else { 0 }.to_string();
             let failpoints = if faulty { self.plan.failpoints() } else { None }.unwrap_or_default();
             let env = [
-                ("CLADEFS_EXTENTD_REMOTE", self.paths.bucket.as_ref()),
-                ("CLADEFS_EXTENTD_TOKEN", token.as_ref()),
-                ("CLADEFS_EXTENTD_CACHE", self.paths.cache.as_os_str()),
-                ("CLADEFS_REMOTE_LATENCY_MS", latency.as_ref()),
+                ("CLADEFSD_BUCKET", self.paths.bucket.as_ref()),
+                ("CLADEFSD_TOKEN", token.as_ref()),
+                ("CLADEFSD_PART_CACHE", self.paths.cache.as_os_str()),
+                ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];
-            let name = format!("extentd-{}", self.daemons);
+            let name = format!("cladefsd-{}", self.daemons);
             let child =
-                spawn_daemon(self.setup, &self.paths.socket, &name, &env, Some(EXTENTD_MEMORY))?;
+                spawn_daemon(self.setup, &self.paths.socket, &name, &env, Some(CLADEFSD_MEMORY))?;
             self.say(format_args!("{name} (pid {}) serves, token {token}", child.id()));
             Ok(Daemon { child })
         }
@@ -475,7 +476,7 @@ mod host {
         fn said(&self, name: &str) -> anyhow::Result<String> {
             let console = self.setup.tmp_dir.join(format!("{name}.console.txt"));
             let output = vm::without_kernel_lines(&vm::guest_stdout(&std::fs::read(&console)?));
-            // Its root image goes: the round's VMs make many.
+            // Its root image goes: the repeat's VMs make many.
             let image = self.setup.tmp_dir.join(format!("{name}.rootfs.ext4"));
             if let Err(err) = std::fs::remove_file(&image)
                 && err.kind() != std::io::ErrorKind::NotFound
@@ -486,8 +487,8 @@ mod host {
             Ok(finished_lines(&output))
         }
 
-        /// The round: its load, then its check and measures.
-        fn round(&mut self) -> anyhow::Result<()> {
+        /// The repeat: its load, then its check and measures.
+        fn repeat(&mut self) -> anyhow::Result<()> {
             self.say(self.plan.describe());
             let daemon = self.daemon(true)?;
             let mut collector = self.collector()?;
@@ -567,7 +568,7 @@ mod host {
             Ok(())
         }
 
-        /// Boots slot `slot`'s VM for its load of `secs` seconds, the round's boot `boot` of it.
+        /// Boots slot `slot`'s VM for its load of `secs` seconds, the repeat's boot `boot` of it.
         fn boot_load(&self, slot: usize, boot: u32, secs: u64) -> anyhow::Result<Boot> {
             let load = self.plan.slots[slot].load;
             let state = &self.ledger.slots[slot];
@@ -581,7 +582,7 @@ mod host {
                 format!("{BASE_SEED}={}", self.ledger.seed),
             ];
             let run = (load == Load::Writer)
-                .then(|| soak::run_name(state.generation, self.plan.round, boot));
+                .then(|| soak::run_name(state.generation, self.plan.repeat, boot));
             if let Some(run) = &run {
                 env.push(format!("{RUN}={run}"));
             }
@@ -696,7 +697,7 @@ mod host {
             }
         }
 
-        /// Waits for the VMs running as their daemon died to exit, as they do, ExtentdLost.
+        /// Waits for the VMs running as their daemon died to exit, as they do, CladefsdLost.
         fn daemon_lost(&self, boots: &mut [Boot]) -> anyhow::Result<()> {
             let deadline = Instant::now() + LOST;
             for boot in boots.iter_mut() {
@@ -713,8 +714,8 @@ mod host {
             Ok(())
         }
 
-        /// Checks every store, as a daemon with no faults serves it, against what the round's VMs
-        /// were told, and measures the round.
+        /// Checks every store, as a daemon with no faults serves it, against what the repeat's VMs
+        /// were told, and measures the repeat.
         fn check(&mut self, boots: &[Boot], happened: &Happened) -> anyhow::Result<()> {
             let checker = self.daemon(false)?;
             let control = control(&self.paths.socket)?;
@@ -821,12 +822,12 @@ mod host {
                 }
             }
             let measure = Measure {
-                round: self.plan.round,
+                repeat: self.plan.repeat,
                 stores: du(&self.paths.stores)?,
                 cache: du(&self.paths.cache)?,
                 bucket: self.bucket_bytes()?,
-                extentd_peak: happened.peak,
-                check_extentd_peak: checker.peak()?,
+                cladefsd_peak: happened.peak,
+                check_cladefsd_peak: checker.peak()?,
                 free: free(&self.paths.state)?,
                 secs: self.started.elapsed().as_secs(),
             };
@@ -838,9 +839,9 @@ mod host {
             let grown = [
                 STORES.grown("the stores' bytes", &series(|m| m.stores)),
                 BUCKET.grown("the bucket's bytes", &series(|m| m.bucket)),
-                MEMORY.grown("the loaded daemons' peak memory", &series(|m| m.extentd_peak)),
+                MEMORY.grown("the loaded daemons' peak memory", &series(|m| m.cladefsd_peak)),
                 MEMORY
-                    .grown("the checking daemon's peak memory", &series(|m| m.check_extentd_peak)),
+                    .grown("the checking daemon's peak memory", &series(|m| m.check_cladefsd_peak)),
             ];
             for grown in grown.into_iter().flatten() {
                 failures.add(grown);
@@ -850,7 +851,7 @@ mod host {
                     .add(format!("{} bytes are left free on the state's filesystem", measure.free));
             }
             eprintln!(
-                "soak-round {}",
+                "soak-repeat {}",
                 serde_json::json!({
                     "plan": self.plan.describe(),
                     "measure": measure,
@@ -859,17 +860,18 @@ mod host {
             );
             ensure!(failures.0.is_empty(), "{}: {}", self.plan.describe(), failures.0.join("; "));
             self.ledger.slots = slots;
-            self.ledger.rounds += 1;
+            self.ledger.repeats += 1;
             std::fs::write(&self.paths.ledger, serde_json::to_vec_pretty(&self.ledger)?)?;
             Ok(())
         }
 
-        /// The branches whose uploads the round's daemons failed, as their logs say: those stores'
-        /// uploaders stopped, and their commits fail until they are attached again (remote.rs).
+        /// The branches whose uploads the repeat's daemons failed, as their logs say: those stores'
+        /// uploaders stopped, and their commits fail until they are attached again
+        /// (`extent_store::upload`).
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
-                let log = self.setup.tmp_dir.join(format!("extentd-{daemon}.log"));
+                let log = self.setup.tmp_dir.join(format!("cladefsd-{daemon}.log"));
                 stopped.extend(upload_failures(&std::fs::read_to_string(&log)?));
             }
             Ok(stopped)
@@ -877,12 +879,12 @@ mod host {
 
         /// The bytes of the bucket's objects.
         fn bucket_bytes(&self) -> anyhow::Result<u64> {
-            use extent_remote::bucket::Bucket as _;
+            use extent_bucket::bucket::Bucket as _;
             if let Some(dir) = &self.paths.bucket_dir {
                 return du(dir);
             }
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let bucket = extent_remote::store::Store::from_url(&self.paths.bucket)
+            let bucket = extent_bucket::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
                 .map_err(anyhow::Error::msg)?;
             let objects = runtime
                 .block_on(bucket.list(""))
@@ -892,7 +894,7 @@ mod host {
     }
 
     /// What's wrong with slot `slot`'s store, as `checked` found it, against what its ledger
-    /// `state` holds it to, and the round's runs' acknowledgements, `told`, which it takes in.
+    /// `state` holds it to, and the repeat's runs' acknowledgements, `told`, which it takes in.
     fn judge(
         state: &mut SlotState,
         told: &[(String, [Acks; WRITERS as usize], bool)],
@@ -953,7 +955,7 @@ mod host {
         problems
     }
 
-    /// A round's failures, each said as it is found.
+    /// A repeat's failures, each said as it is found.
     #[derive(Default)]
     struct Failures(Vec<String>);
 
@@ -994,7 +996,7 @@ mod host {
                 problems.push(format!("its guest died: {said:?}"));
             }
             Some(Ended::Exited(Some(0)) | Ended::Killed) => {}
-            Some(Ended::Exited(Some(EXTENTD_LOST))) if lossy => {}
+            Some(Ended::Exited(Some(CLADEFSD_LOST))) if lossy => {}
             other => problems.push(format!("it ended {other:?}")),
         }
         problems
@@ -1112,7 +1114,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let sockets = tempdir::TempDir::new("cladefs-soak")?;
-            let ran = Soak::new(&test_setup, sockets.path()).and_then(|mut soak| soak.round());
+            let ran = Soak::new(&test_setup, sockets.path()).and_then(|mut soak| soak.repeat());
             match ran {
                 Ok(()) => {
                     println!("OK");
@@ -1164,9 +1166,10 @@ RUN apk add --no-cache postgresql postgresql-contrib
         /// Only a store whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
-            let log = "ERROR cladefs::remote: cladefs: uploading branch 0/7a/fb232d4739d569c0: \
-                       reading failpoint writer::upload\nERROR cladefs::extents: cladefs: uploading \
-                       the store's commits: reading failpoint writer::upload\n";
+            let log = "ERROR extent_store::upload: cladefs: uploading branch \
+                       0/3t/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
+                       cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
+                       writer::upload\n";
             let cell = cladefs::Cell { tenant: 0, id: 0x7a };
             let branch = cladefs::Branch { cell, id: 0xfb23_2d47_39d5_69c0 };
             assert_eq!(upload_failures(log), BTreeSet::from([branch]));
@@ -1182,7 +1185,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
             let erred = "base ok\nerror syncfs: Input/output error (os error 5)\ndone\n";
             assert_eq!(load_problems(died, erred, false, true), Vec::<String>::new());
             assert_eq!(load_problems(died, erred, false, false).len(), 1);
-            let lost = Some(Ended::Exited(Some(EXTENTD_LOST)));
+            let lost = Some(Ended::Exited(Some(CLADEFSD_LOST)));
             assert_eq!(load_problems(lost, "base ok\n", true, false), Vec::<String>::new());
             assert_eq!(load_problems(lost, "base ok\n", false, false).len(), 1);
             assert_eq!(load_problems(Some(Ended::Killed), "", false, false), Vec::<String>::new());
@@ -1293,7 +1296,7 @@ mod guest {
     fn mount() {
         fs::create_dir_all(MNT).unwrap();
         let (source, target, fstype) =
-            (CString::new(TAG).unwrap(), CString::new(MNT).unwrap(), CString::new("fxfs").unwrap());
+            (CString::new(TAG).unwrap(), CString::new(MNT).unwrap(), CString::new("cladefs").unwrap());
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

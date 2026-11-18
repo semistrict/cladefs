@@ -8,7 +8,7 @@
 Parses each SOURCE with libclang against a configured arm64 tree (KERNEL), and counts what it
 spells itself: a name a macro expands to inside a header is the header's business, not the
 source's, and is what the shim gets to choose. The first SOURCE's directory is on the include
-path, so fs/fxfs's local headers count as the source's interface rather than as the kernel's.
+path, so fs/cladefs's local headers count as the source's interface rather than as the kernel's.
 """
 
 import collections
@@ -21,7 +21,7 @@ import clang.cindex as ci
 
 ci.Config.set_library_file(glob.glob("/usr/lib/*/libclang-*.so.1")[0])
 
-LOCAL = ("fxfs.h", "device.h", "vfs.h", "hist.h", "rt.h")
+LOCAL = ("cladefs.h", "device.h", "vfs.h", "hist.h", "rt.h")
 
 
 def flags(kernel, source):
@@ -29,7 +29,7 @@ def flags(kernel, source):
     arch = f"{kernel}/arch/arm64/include"
     return [
         "--target=aarch64-linux-gnu", "-nostdinc", "-std=gnu11", "-D__KERNEL__",
-        "-DKBUILD_MODNAME=\"fxfs\"", "-DKBUILD_BASENAME=\"dax\"",
+        "-DKBUILD_MODNAME=\"cladefs\"", "-DKBUILD_BASENAME=\"dax\"",
         f"-isystem{resource}/include",
         f"-I{os.path.dirname(os.path.abspath(source))}",
         f"-I{arch}", f"-I{arch}/generated", f"-I{kernel}/include", f"-I{arch}/uapi",
@@ -54,7 +54,7 @@ def filename(location):
 
 
 def category(path):
-    """Where a declaration lives: `local` (fs/fxfs), `self`, or `kernel`."""
+    """Where a declaration lives: `local` (fs/cladefs), `self`, or `kernel`."""
     return "local" if os.path.basename(path) in LOCAL else "kernel"
 
 

@@ -12,13 +12,14 @@
 
 use crate::upload::{self, Clock, Failure, Shared};
 use crate::{Description, MemDir, Place, Recovering, Store};
+use base32_id::Short;
+use extent_bucket::collector::{self, Options};
+use extent_bucket::fetch::{Budget, Limits};
+use extent_bucket::layout::{self, Child, Origin, epoch_of, writer_of};
+use extent_bucket::record::{Forked, Kind};
+use extent_bucket::testing::{Direct, Fault, SimBucket};
+use extent_bucket::{Error, Recovered, Writer, branch, recovery, rules};
 use extent_frame::spent::Spent;
-use extent_remote::collector::{self, Options};
-use extent_remote::fetch::{Budget, Limits};
-use extent_remote::layout::{self, Child, Origin, epoch_of, writer_of};
-use extent_remote::record::Kind;
-use extent_remote::testing::{Direct, Fault, SimBucket};
-use extent_remote::{Error, Recovered, Writer, branch, recovery, rules};
 use futures::channel::oneshot;
 use futures::executor::{LocalPool, LocalSpawner, block_on};
 use futures::future::{AbortHandle, FutureExt as _, abortable};
@@ -84,6 +85,13 @@ pub struct Weights {
     /// A writer whose session stopped, a later one taking its branch or its host cut off, which
     /// runs on unaware, checkpoints: late, past where the next writer recovered from (TASK-175).
     pub stale_checkpoint: u32,
+    /// cladefs: a branch's writer cuts a version, its store quiescent (doc-18, TASK-476).
+    pub version: u32,
+    /// cladefs: a branch's writer drops one of its versions, uploaded or local.
+    pub drop_version: u32,
+    /// cladefs: a host restores a version a branch's head names: a fork of it, its child's record
+    /// alone, as a point's restore.
+    pub restore_version: u32,
     /// The store's clock advances.
     pub tick: u32,
 }
@@ -99,7 +107,7 @@ pub struct Profile {
     /// from, each until an object at its key is deleted ([`SimBucket::hold`], TASK-79.18).
     pub hold: f64,
     /// Whether a host that crashes, its disk kept, starts again at once, taking back the branches
-    /// it had, as extentd opens its stores at boot: while the creates its writers had in flight
+    /// it had, as cladefsd opens its stores at boot: while the creates its writers had in flight
     /// land.
     pub restarts: bool,
     /// cladefs: the chance that a collector's pass is over one branch's cell alone, not a sweep over
@@ -148,6 +156,9 @@ impl Default for Profile {
                 write_point: 0,
                 usurp: 0,
                 stale_checkpoint: 0,
+                version: 0,
+                drop_version: 0,
+                restore_version: 0,
                 tick: 3,
             },
             options: Options { compact_below: 0.5, grace: 4 },
@@ -155,11 +166,11 @@ impl Default for Profile {
     }
 }
 
-/// cladefs: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
-/// or a fork, is (TASK-364).
-fn sim_branch(id: u64) -> extent_remote::layout::Branch {
-    let cell = extent_remote::layout::Cell { tenant: 1, id };
-    extent_remote::layout::Branch { cell, id }
+/// cladefs: the simulation's branch `id`: the one vdisk of a cell of its own, as a store made
+/// alone, or a fork, is (TASK-364).
+fn sim_branch(id: u64) -> extent_bucket::layout::Branch {
+    let cell = extent_bucket::layout::Cell { tenant: 1, id };
+    extent_bucket::layout::Branch { cell, id }
 }
 
 /// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
@@ -292,6 +303,9 @@ struct Host {
     /// What holds the parts its stores pack as their segments fill, which they share, as a
     /// daemon's do (`crate::held`, TASK-400).
     held: Arc<crate::HeldParts>,
+    /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its stores share,
+    /// as a daemon's do: every store encrypted (TASK-411.28).
+    keys: extent_bucket::keys::Host,
 }
 
 impl Default for Host {
@@ -299,7 +313,8 @@ impl Default for Host {
         let limits = Limits { requests: UPLOADS_AT_ONCE, bytes: u64::MAX };
         let (disks, sessions) = (HashMap::new(), BTreeMap::new());
         let held = crate::HeldParts::new();
-        Self { disks, sessions, uploads: Budget::new(limits), held }
+        let keys = extent_bucket::keys::testing::host();
+        Self { disks, sessions, uploads: Budget::new(limits), held, keys }
     }
 }
 
@@ -385,6 +400,11 @@ enum Event {
         created: Result<(), Error>,
         deleted: Option<Result<(), Error>>,
     },
+    /// cladefs: what a writer's dropping of a version gave.
+    VersionDropped {
+        id: u64,
+        result: Result<(), Error>,
+    },
     /// A writer took a point, which must not happen.
     PointTaken {
         point: u64,
@@ -407,8 +427,11 @@ struct Unfork {
 /// A fork of a point, until it is done: of which, naming what, on which host, and the task, unless
 /// a crash stopped it, for its host's next start to finish or delete.
 struct Restore {
-    point: u64,
+    /// cladefs: the point, or a version of the branch `origin` names (TASK-476).
+    of: Forked,
     origin: Origin,
+    /// The commit the fork's child starts from.
+    base: Option<u64>,
     host: usize,
     /// Its child's owner.
     owner: u64,
@@ -416,6 +439,15 @@ struct Restore {
     /// The fork whose child's ID it took, a guest having named it, that fork's segment not yet
     /// acknowledged: the child's, if that fork's record comes first (TASK-173).
     taken: Option<Branch>,
+}
+
+/// cladefs: a version a guest cut (TASK-476): of which branch, as of which of its commits, whether
+/// its writer drops it, asked, and whether it dropped it, told so.
+struct Cut {
+    branch: u64,
+    tag: u64,
+    dropping: bool,
+    dropped: bool,
 }
 
 /// What a segment's footer says of the branch's history: its commits' tags.
@@ -436,7 +468,7 @@ pub struct World {
     /// Each history of commits a store held, by the store's epoch of each: what the tags of the
     /// commits its writers upload name ([`World::truth_of`]).
     lineages: HashMap<u64, BTreeMap<u64, u64>>,
-    /// The history the commits each writer uploads are of, by its branch and lease epoch: a writer
+    /// The history the commits each writer uploads are of, by its branch and epoch: a writer
     /// uploads one store's.
     stamps: HashMap<(u64, u64), u64>,
     /// The forks the guests made, by their children: of which branch, as each guest named it. Its
@@ -448,6 +480,8 @@ pub struct World {
     stale: Vec<Arc<Writer<SimBucket>>>,
     unforks: BTreeMap<u64, Unfork>,
     restores: BTreeMap<u64, Restore>,
+    /// cladefs: the versions the guests cut, by their IDs (TASK-476).
+    versions: BTreeMap<u64, Cut>,
     /// The forks whose children's IDs a root is taking ([`World::usurp`]), until it is done: the
     /// child's, if the fork's record comes first.
     usurped: BTreeMap<u64, Branch>,
@@ -503,6 +537,7 @@ impl World {
             stale: Vec::new(),
             unforks: BTreeMap::new(),
             restores: BTreeMap::new(),
+            versions: BTreeMap::new(),
             usurped: BTreeMap::new(),
             footers: RefCell::default(),
             next_id: 1,
@@ -562,6 +597,9 @@ impl World {
             w.usurp,
             w.write,
             w.stale_checkpoint,
+            w.version,
+            w.drop_version,
+            w.restore_version,
             w.tick,
         ];
         let mut roll = self.rng.random_range(0..choices.iter().sum::<u32>());
@@ -594,6 +632,9 @@ impl World {
             20 => self.usurp(),
             21 => self.write(),
             22 => self.stale_checkpoint(),
+            23 => self.cut_version(),
+            24 => self.drop_version(),
+            25 => self.restore_version(),
             _ => {
                 let ticks = self.rng.random_range(1..=self.profile.options.grace);
                 self.bucket.advance(ticks);
@@ -636,7 +677,10 @@ impl World {
         match event {
             Event::Failed { host, branch, session, error } => {
                 if let Error::Lost(_) | Error::Corrupt(_) = error {
-                    self.violation(format!("branch {branch:x}'s writer: {error}"));
+                    self.violation(format!(
+                        "branch {branch}'s writer: {error}",
+                        branch = Short(branch)
+                    ));
                 }
                 self.end(host, branch, session);
             }
@@ -644,15 +688,24 @@ impl World {
                 Ok(()) => {}
                 // A later placement took it as it was deleted: it lives on.
                 Err(Error::Stale) => self.branches.get_mut(&branch).unwrap().deleting = false,
-                Err(error) => self.violation(format!("deleting branch {branch:x}: {error}")),
+                Err(error) => self.violation(format!(
+                    "deleting branch {branch}: {error}",
+                    branch = Short(branch)
+                )),
             },
             Event::Deleted { branch, stale: true, result } => match result {
                 Err(Error::Stale) => {}
-                // It found the branch's lease final, which only its latest placement's delete,
+                // It found the branch's head final, which only its latest placement's delete,
                 // begun since, writes: the branch is deleted, by that, as deletes are idempotent.
                 Ok(()) if self.branches[&branch].deleting => {}
-                Ok(()) => self.violation(format!("a placement cut off deleted branch {branch:x}")),
-                Err(error) => self.violation(format!("branch {branch:x}'s stale delete: {error}")),
+                Ok(()) => self.violation(format!(
+                    "a placement cut off deleted branch {branch}",
+                    branch = Short(branch)
+                )),
+                Err(error) => self.violation(format!(
+                    "branch {branch}'s stale delete: {error}",
+                    branch = Short(branch)
+                )),
             },
             Event::Unforked { child, result: Ok(true) } => drop(self.unforks.remove(&child)),
             // A restore's that took a fork's child's ID, the fork's record coming first: the
@@ -669,7 +722,10 @@ impl World {
                 self.branches.get_mut(&child).unwrap().deleting = false;
             }
             Event::Unforked { child, result } => {
-                self.violation(format!("deleting the failed fork to {child:x}: {result:?}"));
+                self.violation(format!(
+                    "deleting the failed fork to {child}: {result:?}",
+                    child = Short(child)
+                ));
             }
             Event::Contested { child, owner, deleted, taken } => match (deleted, taken) {
                 // The fork's deletion took the ID first.
@@ -679,8 +735,9 @@ impl World {
                     self.branches.insert(child, Branch::forked(None, None, false, owner));
                 }
                 (deleted, taken) => self.violation(format!(
-                    "deleting the failed fork to {child:x} gave {deleted:?}, another branch taking \
-                     its ID {taken:?}"
+                    "deleting the failed fork to {child} gave {deleted:?}, another branch taking \
+                     its ID {taken:?}",
+                    child = Short(child)
                 )),
             },
             Event::Collected { id, result } => {
@@ -698,19 +755,46 @@ impl World {
                     self.untwin(child, lost);
                 }
                 taken => self.violation(format!(
-                    "two forks naming branch {child:x} took records of their own for it: {taken:?}"
+                    "two forks naming branch {child} took records of their own for it: {taken:?}",
+                    child = Short(child)
                 )),
             },
             Event::Untwinned { result: Ok(false), .. } => {}
             // The other fork's branch deleted meanwhile, as any branch may be: gone, whoever's.
             Event::Untwinned { child, result: Ok(true) } if self.branches[&child].deleting => {}
             Event::Untwinned { child, result } => self.violation(format!(
-                "deleting a fork to branch {child:x}, which another fork took, gave {result:?}"
+                "deleting a fork to branch {child}, which another fork took, gave {result:?}",
+                child = Short(child)
             )),
+            Event::VersionDropped { id, result } => {
+                let cut = self.versions.get_mut(&id).unwrap();
+                cut.dropping = false;
+                let branch = cut.branch;
+                match result {
+                    Ok(()) => cut.dropped = true,
+                    Err(Error::Lost(_) | Error::Corrupt(_)) => {
+                        self.violation(format!(
+                            "dropping version {id}: {result:?}",
+                            id = Short(id)
+                        ));
+                    }
+                    // Its writer taken over, or its branch deleted: dropped as its swap of the head
+                    // landed or not, which a write that took effect, answered unavailable, then
+                    // found changed by the taking over, can't tell its writer (TASK-499): as the
+                    // head says, the writer writing it no more.
+                    Err(_) => {
+                        let direct = Direct(self.bucket.clone());
+                        let head = block_on(extent_bucket::head::get(&direct, sim_branch(branch)));
+                        let named =
+                            head.ok().flatten().is_some_and(|head| head.version(id).is_some());
+                        self.versions.get_mut(&id).unwrap().dropped = !named;
+                    }
+                }
+            }
             Event::Restored { child, result } => {
                 let Some(mut restore) = self.restores.remove(&child) else { return };
-                let (point, origin, owner) = (restore.point, Some(restore.origin), restore.owner);
-                let base = self.branches[&point].base;
+                let (point, origin, owner) = (restore.of, Some(restore.origin), restore.owner);
+                let base = restore.base;
                 match result {
                     // Told to its VM's manager: a branch from now on, whatever comes of the point.
                     Ok(()) => {
@@ -724,7 +808,7 @@ impl World {
                     }
                     // The point went, or the fork was given up on: its host deletes it.
                     Err(Error::Deleted) => self.fail_restore(child, restore, base),
-                    Err(error) => self.violation(format!("forking point {point:x}: {error}")),
+                    Err(error) => self.violation(format!("forking {point:?}: {error}")),
                 }
             }
             Event::Usurped { child, owner, created, deleted } => match (created, deleted) {
@@ -741,14 +825,18 @@ impl World {
                     drop(self.branches.insert(child, fork))
                 }
                 (created, deleted) => self.violation(format!(
-                    "a root taking the ID of the fork to {child:x} gave {created:?}, deleting it \
-                     {deleted:?}"
+                    "a root taking the ID of the fork to {child} gave {created:?}, deleting it \
+                     {deleted:?}",
+                    child = Short(child)
                 )),
             },
             Event::PointTaken { point, result } => match result {
                 // A fork's child is no branch until it has its record, nor a point.
                 Err(Error::Point | Error::Deleted | Error::NoBranch) => {}
-                result => self.violation(format!("a writer of point {point:x}: {result:?}")),
+                result => self.violation(format!(
+                    "a writer of point {point}: {result:?}",
+                    point = Short(point)
+                )),
             },
         }
     }
@@ -756,7 +844,7 @@ impl World {
     // The stores and their uploaders.
 
     /// Takes in what each session's uploader did since: its store opened, or refused to; its
-    /// uploader stopped; the lease epoch of its writer, which the tags of the commits it uploads
+    /// uploader stopped; the epoch of its writer, which the tags of the commits it uploads
     /// name; where it put the forks of the segments it took; and the commits it uploaded, which
     /// their guests are told are durable. Returns whether a session opened, ended or started anew,
     /// which the next run of the tasks may go on with.
@@ -780,9 +868,15 @@ impl World {
                     continue;
                 }
                 if let Some(failure) = session.uploader.failed() {
-                    trace!("host {host}: session {id} of {branch:x}'s uploader stopped: {failure}");
-                    if let Failure::Remote(Error::Lost(_) | Error::Corrupt(_)) = failure {
-                        self.violation(format!("branch {branch:x}'s uploader: {failure}"));
+                    trace!(
+                        "host {host}: session {id} of {branch}'s uploader stopped: {failure}",
+                        branch = Short(branch)
+                    );
+                    if let Failure::Bucket(Error::Lost(_) | Error::Corrupt(_)) = failure {
+                        self.violation(format!(
+                            "branch {branch}'s uploader: {failure}",
+                            branch = Short(branch)
+                        ));
                     }
                     self.end(host, branch, id);
                     changed = true;
@@ -824,7 +918,16 @@ impl World {
             if !rules().records_after_ack {
                 let bucket = self.bucket.clone();
                 self.spawn(async move {
-                    let _ = branch::record_fork(&*bucket, child, origin).await;
+                    let _ = branch::record_fork(
+                        &*bucket,
+                        child,
+                        origin,
+                        extent_bucket::keys::Parents::Kms(
+                            &extent_bucket::keys::testing::host_kms(),
+                            None,
+                        ),
+                    )
+                    .await;
                 });
             }
         }
@@ -858,7 +961,10 @@ impl World {
         };
         match recovering {
             Ok(recovering) => self.run_session(host, branch, token, recovering),
-            Err(err) => self.violation(format!("recovering branch {branch:x}'s store: {err:#}")),
+            Err(err) => self.violation(format!(
+                "recovering branch {branch}'s store: {err:#}",
+                branch = Short(branch)
+            )),
         }
     }
 
@@ -887,15 +993,19 @@ impl World {
             // (TASK-92.41).
             filling_wait: Duration::ZERO,
         };
-        let uploads = self.hosts[host].uploads.clone();
-        let uploader = Shared::new(options, uploads, intervals.clock());
+        let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
+        let uploader = Shared::new(options, uploads, intervals.clock(), keys);
         let (started, start) = mpsc::channel();
         let (running, bucket) = (uploader.clone(), self.bucket.clone());
         let running = self.spawn_uploader(async move {
+            let recovering = (recovering, None);
             running.run(recovering, store_options(), bucket, holder, started).await;
         });
         let lineage = self.hosts[host].disks[&branch].lineage;
-        trace!("host {host}: session {id} of {branch:x} starts, token {token}, history {lineage}");
+        trace!(
+            "host {host}: session {id} of {branch} starts, token {token}, history {lineage}",
+            branch = Short(branch)
+        );
         let session = Session {
             id,
             token,
@@ -917,16 +1027,24 @@ impl World {
         let disk = self.hosts[host].disks.get_mut(&branch).unwrap();
         if !disk.made {
             if let Err(err) = store.made() {
-                return self.violation(format!("making branch {branch:x}'s store: {err:#}"));
+                return self.violation(format!(
+                    "making branch {branch}'s store: {err:#}",
+                    branch = Short(branch)
+                ));
             }
             disk.made = true;
         }
         let session = &self.hosts[host].sessions[&branch];
         let (token, lineage, uploader) = (session.token, session.lineage, session.uploader.clone());
         let writer = uploader.writer().expect("a writer took the branch");
-        let epoch = match store.epoch() {
+        let epoch = match store.last_commit() {
             Ok(epoch) => epoch,
-            Err(err) => return self.violation(format!("branch {branch:x}'s store: {err:#}")),
+            Err(err) => {
+                return self.violation(format!(
+                    "branch {branch}'s store: {err:#}",
+                    branch = Short(branch)
+                ));
+            }
         };
         // Its last commit: its log's, past the branch's end, or the branch's, its log holding
         // nothing more: the store's history then, if it holds that commit, or the bucket's, the
@@ -960,10 +1078,11 @@ impl World {
         let session = self.hosts[host].sessions.get_mut(&branch).unwrap();
         let next_sequence = uploader.next_sequence();
         trace!(
-            "host {host}: session {} of {branch:x} opened by writer {} at epoch {epoch}, the \
+            "host {host}: session {} of {branch} opened by writer {} at epoch {epoch}, the \
              branch's last {last:?}: head {head:?}, history {lineage}",
             session.id,
-            writer.epoch()
+            writer.epoch(),
+            branch = Short(branch)
         );
         session.lineage = lineage;
         session.guest = Guest { head, held, written: BTreeMap::new(), next_sequence };
@@ -977,15 +1096,20 @@ impl World {
     /// segment ending one commit and going on with the next landed alone, its next commit, durable,
     /// dropped (TASK-345).
     fn refused(&mut self, host: usize, branch: u64, failure: Failure) {
-        trace!("host {host}: {branch:x}'s store refused: {failure}");
+        trace!("host {host}: {branch}'s store refused: {failure}", branch = Short(branch));
         let session = self.hosts[host].sessions.remove(&branch).unwrap();
         let token = session.token;
         self.stop(host, branch, session);
-        if let Failure::Remote(Error::Diverged) = failure {
+        if let Failure::Bucket(Error::Diverged) = failure {
             let disk = self.hosts[host].disks.get_mut(&branch).unwrap();
             let mut recovering = match Store::recover(disk.dir.clone()) {
                 Ok(recovering) => recovering,
-                Err(err) => return self.violation(format!("branch {branch:x}'s store: {err:#}")),
+                Err(err) => {
+                    return self.violation(format!(
+                        "branch {branch}'s store: {err:#}",
+                        branch = Short(branch)
+                    ));
+                }
             };
             let origin = self.branches[&branch].origin;
             let direct = Direct(self.bucket.clone());
@@ -994,12 +1118,16 @@ impl World {
             {
                 let last = recovered.state.last_commit;
                 return self.violation(format!(
-                    "branch {branch:x}'s log diverged, though the branch's last commit, {last:x?}, \
-                     is the log's"
+                    "branch {branch}'s log diverged, though the branch's last commit, {last:x?}, \
+                     is the log's",
+                    branch = Short(branch)
                 ));
             }
             if let Err(err) = recovering.drop_wal() {
-                return self.violation(format!("dropping branch {branch:x}'s log: {err:#}"));
+                return self.violation(format!(
+                    "dropping branch {branch}'s log: {err:#}",
+                    branch = Short(branch)
+                ));
             }
             let lineage = self.id();
             self.lineages.insert(lineage, BTreeMap::new());
@@ -1007,12 +1135,15 @@ impl World {
             return self.run_session(host, branch, Some(token), recovering);
         }
         if self.quiescing {
-            self.violation(format!("branch {branch:x} does not open: {failure}"));
+            self.violation(format!(
+                "branch {branch} does not open: {failure}",
+                branch = Short(branch)
+            ));
         }
     }
 
     /// The commit the guests made that `tag`, a commit's in a footer or a state of `branch`'s,
-    /// names: the tag names the lease epoch of the writer that uploaded it, which says which
+    /// names: the tag names the epoch of the writer that uploaded it, which says which
     /// store's history it is of, and the store's epoch of it there. A fork's child names its
     /// parent's commits until it has its own.
     fn truth_of(&self, branch: u64, tag: Option<u64>) -> Result<Option<u64>, String> {
@@ -1030,7 +1161,10 @@ impl World {
                 .and_then(|found| found.origin)
                 .map(|origin| origin.parent.id);
         }
-        Err(format!("branch {branch:x} names commit {tag:#x}, which no guest made"))
+        Err(format!(
+            "branch {branch} names commit {tag:#x}, which no guest made",
+            branch = Short(branch)
+        ))
     }
 
     /// Ends a session: its guest stops.
@@ -1047,7 +1181,7 @@ impl World {
     /// durable, before anything opens its directory again; a crash took what its disk keeps
     /// before ([`World::crash`]).
     fn stop(&mut self, host: usize, branch: u64, session: Session) {
-        trace!("host {host}: session {} of {branch:x} stops", session.id);
+        trace!("host {host}: session {} of {branch} stops", session.id, branch = Short(branch));
         session.running.abort();
         self.forks_taken(branch, &session.uploader);
         if let Some(writer) = session.uploader.writer() {
@@ -1064,20 +1198,32 @@ impl World {
         self.pool.run_until_stalled();
         assert!(
             closing.as_ref().is_none_or(|store| store.strong_count() == 0),
-            "branch {branch:x}'s store on host {host} is open still, its session stopped: {} \
+            "branch {branch}'s store on host {host} is open still, its session stopped: {} \
              holds of it, {} of its uploader",
             closing.as_ref().map_or(0, std::sync::Weak::strong_count),
             going.strong_count(),
+            branch = Short(branch),
         );
     }
 
     /// `branch`'s store on `host` failed doing what its guest asked, for `err`: which it may only
-    /// once its uploader stopped.
-    fn store_failed(&mut self, host: usize, branch: u64, err: anyhow::Error) {
+    /// once its uploader stopped. `store` is the caller's hold of it, let go first, as the
+    /// session's end closes the store ([`World::stop`]).
+    fn store_failed(
+        &mut self,
+        host: usize,
+        branch: u64,
+        store: Arc<Store<MemDir>>,
+        err: anyhow::Error,
+    ) {
+        drop(store);
         let session = &self.hosts[host].sessions[&branch];
         let (id, stopped) = (session.id, session.uploader.failed().is_some());
         if !stopped {
-            self.violation(format!("branch {branch:x}'s store on host {host}: {err:#}"));
+            self.violation(format!(
+                "branch {branch}'s store on host {host}: {err:#}",
+                branch = Short(branch)
+            ));
         }
         self.end(host, branch, id);
     }
@@ -1090,7 +1236,7 @@ impl World {
         for host in &self.hosts {
             for (&branch, session) in &host.sessions {
                 let Some(store) = &session.store else { continue };
-                let epoch = store.epoch().unwrap();
+                let epoch = store.last_commit().unwrap();
                 let _ = session.uploader.ask(epoch, false);
                 asked.push((branch, Arc::downgrade(&session.uploader), epoch));
             }
@@ -1101,9 +1247,10 @@ impl World {
             let Some(uploader) = uploader.upgrade() else { continue };
             if uploader.failed().is_none() && uploader.last_uploaded() < epoch {
                 self.violation(format!(
-                    "branch {branch:x}'s commits through {epoch} wait to be uploaded, everything \
+                    "branch {branch}'s commits through {epoch} wait to be uploaded, everything \
                      settled: uploaded through {}",
-                    uploader.last_uploaded()
+                    uploader.last_uploaded(),
+                    branch = Short(branch)
                 ));
             }
         }
@@ -1148,7 +1295,7 @@ impl World {
         let bytes = Self::content(seed, extent, len);
         let store = session.store.clone().unwrap();
         if let Err(err) = store.write(extent, 0, &bytes) {
-            self.store_failed(host, branch, err);
+            self.store_failed(host, branch, store, err);
             return false;
         }
         session.guest.written.insert(extent, bytes);
@@ -1160,9 +1307,12 @@ impl World {
 
     /// The store's epoch of the commit `store` just made, which follows `before`'s.
     fn committed(&mut self, branch: u64, store: &Store<MemDir>, before: u64) -> Option<u64> {
-        let epoch = store.epoch().ok()?;
+        let epoch = store.last_commit().ok()?;
         if epoch <= before {
-            self.violation(format!("branch {branch:x}'s commit after {before} made epoch {epoch}"));
+            self.violation(format!(
+                "branch {branch}'s commit after {before} made epoch {epoch}",
+                branch = Short(branch)
+            ));
             return None;
         }
         Some(epoch)
@@ -1171,7 +1321,11 @@ impl World {
     /// The guest of `branch`'s store on `host` made the commit `tag`, sealing what it wrote,
     /// freeing `frees`, the store's epoch of it `epoch`.
     fn made(&mut self, host: usize, branch: u64, tag: u64, epoch: u64, mut made: Truth) {
-        trace!("host {host}: {branch:x} commits {tag} at epoch {epoch}, after {:?}", made.parent);
+        trace!(
+            "host {host}: {branch} commits {tag} at epoch {epoch}, after {:?}",
+            made.parent,
+            branch = Short(branch)
+        );
         // A branch with no capacity yet takes its store's.
         if made.capacity.is_none() && self.capacity(made.parent).is_none() {
             made.capacity = Some(CAPACITY);
@@ -1217,7 +1371,7 @@ impl World {
         let store = session.store.clone().unwrap();
         let parent = session.guest.head;
         let committing = || -> anyhow::Result<u64> {
-            let before = store.epoch()?;
+            let before = store.last_commit()?;
             for extent in &frees {
                 store.free(*extent)?;
             }
@@ -1229,7 +1383,7 @@ impl World {
         };
         let before = match committing() {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, branch, err),
+            Err(err) => return self.store_failed(host, branch, store, err),
         };
         let Some(epoch) = self.committed(branch, &store, before) else { return };
         let session = self.hosts[host].sessions.get_mut(&branch).unwrap();
@@ -1246,14 +1400,14 @@ impl World {
         let session = &self.hosts[host].sessions[&branch];
         let (store, parent) = (session.store.clone().unwrap(), session.guest.head);
         let resizing = || -> anyhow::Result<u64> {
-            let before = store.epoch()?;
+            let before = store.last_commit()?;
             store.set_capacity(capacity)?;
             Ok(before)
         };
         let before = match resizing() {
             Ok(before) => before,
             Err(err) => {
-                self.store_failed(host, branch, err);
+                self.store_failed(host, branch, store, err);
                 return false;
             }
         };
@@ -1275,14 +1429,15 @@ impl World {
         }
         let (store, uploader) = (session.store.clone().unwrap(), session.uploader.clone());
         let asked =
-            store.epoch().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
+            store.last_commit().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
         if let Err(failure) = asked {
-            self.store_failed(host, branch, anyhow::Error::new(failure));
+            drop(uploader);
+            self.store_failed(host, branch, store, anyhow::Error::new(failure));
         }
     }
 
     /// A writer whose session stopped checkpoints, as one running on unaware of it would: a later
-    /// writer's, or none, holding its branch's lease.
+    /// writer's, or none, holding its branch's head.
     fn stale_checkpoint(&mut self) {
         if self.stale.is_empty() {
             return;
@@ -1314,13 +1469,15 @@ impl World {
         let (store, uploader, parent) =
             (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
         let forked = Child { branch: sim_branch(child), owner, point };
-        let before = match store.epoch() {
+        let before =
+            store.last_commit().and_then(|before| store.commit_fork(forked).map(|_| before));
+        let before = match before {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, branch, err),
+            Err(err) => {
+                drop(uploader);
+                return self.store_failed(host, branch, store, err);
+            }
         };
-        if let Err(err) = store.commit_fork(forked) {
-            return self.store_failed(host, branch, err);
-        }
         let Some(epoch) = self.committed(branch, &store, before) else { return };
         let session = self.hosts[host].sessions.get_mut(&branch).unwrap();
         let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
@@ -1441,11 +1598,11 @@ impl World {
     /// `child`, a fork of a point that failed, or a crash left, goes as its host's cleanup deletes
     /// it, or an operator does what no host held: which nothing relies on.
     fn fail_restore(&mut self, child: u64, restore: Restore, base: Option<u64>) {
-        let Restore { point, origin, owner, taken, .. } = restore;
+        let Restore { of, origin, owner, taken, .. } = restore;
         let mut found = Branch::forked(Some(origin), base, false, owner);
         found.deleting = true;
         self.branches.insert(child, found);
-        let forked = Kind::Forking { origin, point: sim_branch(point) };
+        let forked = Kind::Forking { origin, of };
         self.unforks.insert(child, Unfork { forked, owner, running: None, taken });
         self.spawn_unfork(child);
     }
@@ -1481,7 +1638,8 @@ impl World {
             _ => (child, None),
         };
         let host = self.rng.random_range(0..self.hosts.len());
-        let restore = Restore { point, origin, host, owner, running: None, taken };
+        let (of, base) = (Forked::Point(sim_branch(point)), self.branches[&point].base);
+        let restore = Restore { of, origin, base, host, owner, running: None, taken };
         self.restores.insert(child, restore);
         self.spawn_restore(child);
     }
@@ -1503,18 +1661,27 @@ impl World {
 
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
     fn spawn_restore(&mut self, child: u64) {
-        let Restore { point, origin, owner, .. } = self.restores[&child];
+        let Restore { of, origin, owner, .. } = self.restores[&child];
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
-            let result =
-                branch::fork_point(&*bucket, sim_branch(child), sim_branch(point), origin, owner)
-                    .await;
+            let child = sim_branch(child);
+            let result = match of {
+                Forked::Point(point) => {
+                    branch::fork_point(&*bucket, child, point, origin, owner).await
+                }
+                Forked::Version(id) => {
+                    let kms = extent_bucket::keys::testing::host_kms();
+                    let keys = extent_bucket::keys::Parents::Kms(&kms, None);
+                    branch::fork_version(&*bucket, child, id, origin, owner, keys).await
+                }
+            };
+            let child = child.id;
             events.borrow_mut().push(Event::Restored { child, result });
         });
         self.restores.get_mut(&child).unwrap().running = Some(running);
     }
 
-    /// A host's stale copy of a point tries to write it, as `extent_remote` allows no one to.
+    /// A host's stale copy of a point tries to write it, as `extent_bucket` allows no one to.
     fn write_point(&mut self) {
         let points = self.points();
         if points.is_empty() {
@@ -1527,6 +1694,107 @@ impl World {
             let result = Writer::open(bucket, sim_branch(point), holder, holder).await.map(drop);
             events.borrow_mut().push(Event::PointTaken { point, result });
         });
+    }
+
+    /// cladefs: a branch's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
+    /// having written nothing since its last commit: a commit of its store's whose segment's
+    /// footer names it, which its uploader is asked for, as a snapshot's caller may wait for it.
+    fn cut_version(&mut self) {
+        let Some((host, branch)) = self.ready() else { return };
+        let session = &self.hosts[host].sessions[&branch];
+        if !session.guest.written.is_empty() {
+            return;
+        }
+        let (store, uploader, parent) =
+            (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
+        let (id, tag) = (self.id(), self.id());
+        let before = match store.last_commit() {
+            Ok(before) => before,
+            Err(err) => return self.store_failed(host, branch, store, err),
+        };
+        let cut = layout::VersionCut { id, cell_cut: None, keep_last: None };
+        if let Err(err) = store.commit_version(cut) {
+            return self.store_failed(host, branch, store, err);
+        }
+        let Some(epoch) = self.committed(branch, &store, before) else { return };
+        let made = Truth {
+            branch,
+            parent,
+            extents: Vec::new(),
+            frees: Vec::new(),
+            root: None,
+            capacity: None,
+        };
+        self.made(host, branch, tag, epoch, made);
+        self.versions.insert(id, Cut { branch, tag, dropping: false, dropped: false });
+        trace!(
+            "host {host}: {branch} cuts version {id} as commit {tag} at epoch {epoch}",
+            branch = Short(branch),
+            id = Short(id)
+        );
+        let _ = uploader.ask(epoch, false);
+    }
+
+    /// cladefs: a branch's writer drops one of its versions, uploaded or local, which its store
+    /// forgets: told dropped once its swap of the head is done.
+    fn drop_version(&mut self) {
+        let Some((host, branch)) = self.ready() else { return };
+        let ids: Vec<u64> = (self.versions.iter())
+            .filter(|(_, cut)| cut.branch == branch && !cut.dropped && !cut.dropping)
+            .map(|(&id, _)| id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let id = ids[self.rng.random_range(0..ids.len())];
+        // Gone from the head as soon as its swap lands, which its writer may be told of later.
+        self.versions.get_mut(&id).unwrap().dropping = true;
+        let session = &self.hosts[host].sessions[&branch];
+        let ids = BTreeSet::from([id]);
+        session.store.as_ref().unwrap().forget_versions(&ids);
+        let (writer, events) = (session.uploader.writer().unwrap(), self.events.clone());
+        self.spawn(async move {
+            let result = writer.drop_versions(&ids).await;
+            events.borrow_mut().push(Event::VersionDropped { id, result });
+        });
+    }
+
+    /// cladefs: the versions the heads of the branches with versions name, each by its ID, of which
+    /// branch, the segment it is at and the commit it is of: as a host restoring one read it.
+    fn named_versions(&self) -> Vec<(u64, u64, u64, u64)> {
+        let direct = Direct(self.bucket.clone());
+        let branches: BTreeSet<u64> = self.versions.values().map(|cut| cut.branch).collect();
+        let mut named = Vec::new();
+        for branch in branches {
+            let Ok(Some(head)) = block_on(extent_bucket::head::get(&direct, sim_branch(branch)))
+            else {
+                continue;
+            };
+            for version in &head.versions {
+                if let Some(cut) = self.versions.get(&version.id) {
+                    named.push((version.id, branch, version.at, cut.tag));
+                }
+            }
+        }
+        named
+    }
+
+    /// cladefs: a host restores a version a branch's head names: its child's record, its reference,
+    /// the head read again, the fork made (`branch::fork_version`), as a point's restore.
+    fn restore_version(&mut self) {
+        let named = self.named_versions();
+        if named.is_empty() {
+            return;
+        }
+        let (id, branch, at, tag) = named[self.rng.random_range(0..named.len())];
+        let (child, owner) = (self.id(), self.id());
+        let host = self.rng.random_range(0..self.hosts.len());
+        let origin = Origin { parent: sim_branch(branch), at };
+        let of = Forked::Version(id);
+        let restore =
+            Restore { of, origin, base: Some(tag), host, owner, running: None, taken: None };
+        self.restores.insert(child, restore);
+        self.spawn_restore(child);
     }
 
     /// A placement cut off takes a branch back, on a host that has no writer of it, with an earlier
@@ -1604,7 +1872,7 @@ impl World {
     /// Deletes what a crash left of the fork of a point to `child`.
     fn give_up_restore(&mut self, child: u64) {
         let restore = self.restores.remove(&child).unwrap();
-        let base = self.branches[&restore.point].base;
+        let base = restore.base;
         self.fail_restore(child, restore, base);
     }
 
@@ -1614,8 +1882,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
-            let result =
-                branch::delete_fork(&*bucket, sim_branch(child), forked, owner, holder, 0).await;
+            let result = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                forked,
+                owner,
+                (holder, 0),
+                &extent_bucket::keys::testing::host_kms(),
+            )
+            .await;
             events.borrow_mut().push(Event::Unforked { child, result });
         });
         self.unforks.get_mut(&child).unwrap().running = Some(running);
@@ -1629,11 +1904,18 @@ impl World {
         let (forks, owner) = (self.id(), self.id());
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let deleting =
-                branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, forks, holder, 0);
+            let kms = extent_bucket::keys::testing::host_kms();
+            let deleting = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                Kind::Own,
+                forks,
+                (holder, 0),
+                &kms,
+            );
             let taking = async {
                 branch::create(&*bucket, sim_branch(child), owner).await?;
-                let taking = extent_remote::head::take(&*bucket, sim_branch(child), other, 0);
+                let taking = extent_bucket::head::take(&*bucket, sim_branch(child), other, 0);
                 taking.await.map(|held| held.head.epoch)
             };
             let (deleted, taken) = futures::join!(deleting, taking);
@@ -1675,7 +1957,16 @@ impl World {
         self.spawn(async move {
             let created = branch::create(&*bucket, sim_branch(child), owner).await;
             let deleted = match created {
-                Ok(()) => Some(branch::delete(&*bucket, sim_branch(child), holder, 0).await),
+                Ok(()) => Some(
+                    branch::delete(
+                        &*bucket,
+                        sim_branch(child),
+                        holder,
+                        0,
+                        &extent_bucket::keys::testing::host_kms(),
+                    )
+                    .await,
+                ),
                 Err(_) => None,
             };
             events.borrow_mut().push(Event::Usurped { child, owner, created, deleted });
@@ -1688,8 +1979,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let result =
-                branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, owner, holder, 0).await;
+            let result = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                Kind::Own,
+                owner,
+                (holder, 0),
+                &extent_bucket::keys::testing::host_kms(),
+            )
+            .await;
             events.borrow_mut().push(Event::Untwinned { child, result });
         });
     }
@@ -1747,7 +2045,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let result = match branch::delete(&*bucket, sim_branch(branch), holder, token).await {
+            let result = match branch::delete(
+                &*bucket,
+                sim_branch(branch),
+                holder,
+                token,
+                &extent_bucket::keys::testing::host_kms(),
+            )
+            .await
+            {
                 // A fork whose segment never made it: no branch.
                 Err(Error::NoBranch) => Ok(()),
                 result => result,
@@ -1935,9 +2241,19 @@ impl World {
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
-            // Its cells are in the clear: nothing is left sealed (TASK-411.6).
+            // Its cells are encrypted under the tests' KMS, which its collectors hold: nothing is
+            // left locked (TASK-411.6, TASK-411.28).
             locked: 0,
             uncompacted: 0,
+            // cladefs: the cells whose records went, as only a dead cell's removal deletes them,
+            // all of them at once (TASK-455).
+            removed: (gone())
+                .filter_map(|key| match layout::kind(key) {
+                    layout::Kind::Record { branch } => Some(branch.cell),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .len(),
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}
@@ -1961,24 +2277,27 @@ impl World {
                     let keys: BTreeSet<_> =
                         recovered.state.extents.values().map(|location| &location.key).collect();
                     text += &format!(
-                        "branch {branch:x} from {origin:?}: checkpoint {:?}, end {}, epoch {}, names {keys:?}\n",
+                        "branch {branch} from {origin:?}: checkpoint {:?}, end {}, epoch {}, names {keys:?}\n",
                         recovered.checkpoint(),
                         recovered.end(),
-                        recovered.epoch()
+                        recovered.epoch(),
+                        branch = Short(branch)
                     );
                 }
-                Err(error) => text += &format!("branch {branch:x}: {error}\n"),
+                Err(error) => {
+                    text += &format!("branch {branch}: {error}\n", branch = Short(branch))
+                }
             }
         }
         for key in self.bucket.keys() {
             text += &format!("  {key}\n");
             if let layout::Kind::Segment { .. } = layout::kind(&key)
-                && let Ok(object) = block_on(extent_remote::bucket::Bucket::get(&direct, &key))
+                && let Ok(object) = block_on(extent_bucket::bucket::Bucket::get(&direct, &key))
                 && let Ok(footer) = layout::Segment::footer(&object.bytes)
             {
                 let short = |extents: &mut dyn Iterator<Item = ExtentId>| {
                     extents
-                        .map(|extent| format!("{:x}", extent.sequence))
+                        .map(|extent| Short(extent.sequence).to_string())
                         .collect::<Vec<_>>()
                         .join(",")
                 };
@@ -1996,7 +2315,10 @@ impl World {
         let mut stamps: Vec<_> = self.stamps.iter().collect();
         stamps.sort();
         for ((branch, writer), lineage) in stamps {
-            text += &format!("writer {writer} of {branch:x} uploads history {lineage}\n");
+            text += &format!(
+                "writer {writer} of {branch} uploads history {lineage}\n",
+                branch = Short(*branch)
+            );
         }
         let mut lineages: Vec<_> = self.lineages.iter().collect();
         lineages.sort();
@@ -2005,11 +2327,14 @@ impl World {
         }
         for (tag, truth) in &self.commits {
             let short = |extents: &mut dyn Iterator<Item = ExtentId>| {
-                extents.map(|extent| format!("{:x}", extent.sequence)).collect::<Vec<_>>().join(",")
+                extents
+                    .map(|extent| Short(extent.sequence).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             };
             text += &format!(
-                "commit {tag} of {:x} after {:?}: extents [{}] frees [{}]\n",
-                truth.branch,
+                "commit {tag} of {} after {:?}: extents [{}] frees [{}]\n",
+                Short(truth.branch),
                 truth.parent,
                 short(&mut truth.extents.iter().map(|e| e.0)),
                 short(&mut truth.frees.iter().copied()),
@@ -2019,11 +2344,11 @@ impl World {
     }
 
     /// Checks that the bucket holds only what live branches need, compacted as the collectors
-    /// could (TASK-44.1): [`extent_remote::testing::uncollected`], its live branches by their records.
+    /// could (TASK-44.1): [`extent_bucket::testing::uncollected`], its live branches by their records.
     fn check_collected(&mut self) {
         let direct = Direct(self.bucket.clone());
         let compact_below = self.profile.options.compact_below;
-        for left in block_on(extent_remote::testing::uncollected(&direct, compact_below)) {
+        for left in block_on(extent_bucket::testing::uncollected(&direct, compact_below)) {
             self.violation(left);
         }
     }
@@ -2092,14 +2417,18 @@ impl World {
         let branch = recovered.state.branch;
         let mut footers = self.footers.borrow_mut();
         let mut applied = Vec::new();
-        let from = recovered.checkpoint().map_or(0, |(seq, _)| seq + 1);
-        for (seq, epoch) in recovered.head.iter().flat_map(|head| head.segments(from)) {
-            let commits = match footers.entry((branch.id, seq, epoch)) {
+        let from = recovered.checkpoint().map_or(0, |(segment, _)| segment + 1);
+        for (segment, epoch) in recovered.head.iter().flat_map(|head| head.segments(from)) {
+            let commits = match footers.entry((branch.id, segment, epoch)) {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
-                    let key = layout::segment(branch, seq, epoch);
-                    let Some(object) = block_on(extent_remote::bucket::get(direct, &key)) else {
-                        return Err(format!("branch {:x}: segment {seq:x} gone", branch.id));
+                    let key = layout::segment(branch, segment, epoch);
+                    let Some(object) = block_on(extent_bucket::bucket::get(direct, &key)) else {
+                        return Err(format!(
+                            "branch {}: segment {segment} gone",
+                            Short(branch.id),
+                            segment = Short(segment)
+                        ));
                     };
                     let footer = layout::Segment::footer(&object.bytes)
                         .map_err(|error| format!("{key}: {error}"))?;
@@ -2119,18 +2448,18 @@ impl World {
         let direct = Arc::new(Direct(self.bucket.clone()));
         let mut violations = Vec::new();
         let keys: BTreeSet<String> = self.bucket.keys().into_iter().collect();
-        // Nothing writes a point: no segment of its, no checkpoint, no lease but its deletion's.
+        // Nothing writes a point: no segment of its, no checkpoint, no head but its deletion's.
         for (&id, _) in self.branches.iter().filter(|(_, branch)| branch.point) {
             let written = |prefix: String| keys.iter().any(|key| key.starts_with(&prefix));
             if written(layout::segments(sim_branch(id)))
                 || written(layout::checkpoints(sim_branch(id)))
             {
-                violations.push(format!("point {id:x} was written"));
+                violations.push(format!("point {id} was written", id = Short(id)));
             }
-            if let Ok(Some(head)) = block_on(extent_remote::head::get(&*direct, sim_branch(id)))
+            if let Ok(Some(head)) = block_on(extent_bucket::head::get(&*direct, sim_branch(id)))
                 && head.epoch != layout::Head::FINAL
             {
-                violations.push(format!("point {id:x} has a writer's head"));
+                violations.push(format!("point {id} has a writer's head", id = Short(id)));
             }
         }
         for (&id, branch) in &self.branches {
@@ -2141,59 +2470,74 @@ impl World {
             let record = match block_on(branch::record(&*direct, sim_branch(id))) {
                 Ok(Some(record)) if !record.deleted => record,
                 Ok(Some(_)) if !branch.deleting => {
-                    violations
-                        .push(format!("branch {id:x} is deleted, though no delete of it held"));
+                    violations.push(format!(
+                        "branch {id} is deleted, though no delete of it held",
+                        id = Short(id)
+                    ));
                     continue;
                 }
                 Ok(_) => continue,
                 Err(error) => {
-                    violations.push(format!("branch {id:x}'s record: {error}"));
+                    violations.push(format!("branch {id}'s record: {error}", id = Short(id)));
                     continue;
                 }
             };
             if record.origin() != branch.origin {
-                violations.push(format!("branch {id:x}'s record says {:?}", record.origin()));
+                violations.push(format!(
+                    "branch {id}'s record says {:?}",
+                    record.origin(),
+                    id = Short(id)
+                ));
             }
             if record.is_point() != branch.point {
-                violations.push(format!("branch {id:x}'s record says {:?}", record.kind));
+                violations.push(format!(
+                    "branch {id}'s record says {:?}",
+                    record.kind,
+                    id = Short(id)
+                ));
             }
             if record.forking().is_some() {
-                violations.push(format!("branch {id:x}, told made, is being made still"));
+                violations
+                    .push(format!("branch {id}, told made, is being made still", id = Short(id)));
             }
             // No placement took it back from a later one. cladefs: a placement takes the branch's cell,
             // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
-            let cell = block_on(extent_remote::cell::read(&*direct, sim_branch(id).cell));
-            let lease = block_on(extent_remote::head::get(&*direct, sim_branch(id)));
-            match (cell, lease) {
-                (Ok(Some(cell)), Ok(Some(lease))) => {
+            let cell = block_on(extent_bucket::cell::read(&*direct, sim_branch(id).cell));
+            let head = block_on(extent_bucket::head::get(&*direct, sim_branch(id)));
+            match (cell, head) {
+                (Ok(Some(cell)), Ok(Some(head))) => {
                     if cell.token < branch.taken {
                         violations.push(format!(
-                            "branch {id:x}'s cell is an earlier placement's: token {} after {}",
-                            cell.token, branch.taken
+                            "branch {id}'s cell is an earlier placement's: token {} after {}",
+                            cell.token,
+                            branch.taken,
+                            id = Short(id)
                         ));
                     }
                     // A deletion's head, final, is taken with the highest token there is.
-                    if lease.epoch != layout::Head::FINAL && lease.token > cell.epoch {
+                    if head.epoch != layout::Head::FINAL && head.token > cell.epoch {
                         violations.push(format!(
-                            "branch {id:x}'s lease was taken at epoch {} of its cell, of epoch {}",
-                            lease.token, cell.epoch
+                            "branch {id}'s head was taken at epoch {} of its cell, of epoch {}",
+                            head.token,
+                            cell.epoch,
+                            id = Short(id)
                         ));
                     }
                 }
                 (Ok(_), Ok(None)) if branch.taken > 0 => {
-                    violations.push(format!("branch {id:x}, taken, has no lease"));
+                    violations.push(format!("branch {id}, taken, has no head", id = Short(id)));
                 }
                 (Ok(_), Ok(_)) => {}
                 (Err(error), _) | (_, Err(error)) => {
-                    violations.push(format!("branch {id:x}'s cell or lease: {error}"));
+                    violations.push(format!("branch {id}'s cell or head: {error}", id = Short(id)));
                 }
             }
             let recovered =
                 match block_on(recovery::recover(&*direct, sim_branch(id), record.origin())) {
                     Ok(recovered) => recovered,
                     Err(error) => {
-                        violations.push(format!("branch {id:x}: {error}"));
+                        violations.push(format!("branch {id}: {error}", id = Short(id)));
                         continue;
                     }
                 };
@@ -2202,7 +2546,8 @@ impl World {
             // what holds each extent it names, or the moves that say where that went.
             for key in &recovered.touched {
                 if !keys.contains(key) {
-                    violations.push(format!("branch {id:x} needs {key}, which is gone"));
+                    violations
+                        .push(format!("branch {id} needs {key}, which is gone", id = Short(id)));
                 }
             }
             for (extent, location) in &state.extents {
@@ -2210,7 +2555,11 @@ impl World {
                 let moves = layout::moves_of(&location.key).unwrap();
                 let moved = keys.iter().any(|key| key.starts_with(&moves));
                 if !keys.contains(&location.key) && !moved {
-                    violations.push(format!("{extent:?} of {id:x}: {} is gone", location.key));
+                    violations.push(format!(
+                        "{extent:?} of {id}: {} is gone",
+                        location.key,
+                        id = Short(id)
+                    ));
                 }
             }
             let head = match self.truth_of(id, state.last_commit) {
@@ -2223,7 +2572,10 @@ impl World {
             let own = self.own_path(id, head);
             let start = own.first().map_or(head, |first| self.commits[first].parent);
             if start != branch.base {
-                violations.push(format!("branch {id:x} holds commit {head:?}, not of its history"));
+                violations.push(format!(
+                    "branch {id} holds commit {head:?}, not of its history",
+                    id = Short(id)
+                ));
                 continue;
             }
             // Its segments since its newest checkpoint apply each commit after the one before, of
@@ -2244,7 +2596,8 @@ impl World {
                 };
                 if let Some(before) = before.filter(|&before| !follows(before)) {
                     violations.push(format!(
-                        "branch {id:x} applies commit {commit} after {before:?}, not of its history"
+                        "branch {id} applies commit {commit} after {before:?}, not of its history",
+                        id = Short(id)
                     ));
                     break;
                 }
@@ -2252,33 +2605,136 @@ impl World {
             }
             for &acked in &branch.acked {
                 if !self.precedes(acked, head) {
-                    violations.push(format!("branch {id:x} lost commit {acked}, acknowledged"));
+                    violations.push(format!(
+                        "branch {id} lost commit {acked}, acknowledged",
+                        id = Short(id)
+                    ));
                 }
             }
             let (extents, root) = self.expected(head);
             if state.root != root {
-                violations.push(format!("branch {id:x}'s root is {:?}, not {root:?}", state.root));
+                violations.push(format!(
+                    "branch {id}'s root is {:?}, not {root:?}",
+                    state.root,
+                    id = Short(id)
+                ));
             }
             let spent = self.spent(id, head);
             if state.spent != spent {
-                violations.push(format!("branch {id:x} spent {:?}, not {spent:?}", state.spent));
+                violations.push(format!(
+                    "branch {id} spent {:?}, not {spent:?}",
+                    state.spent,
+                    id = Short(id)
+                ));
             }
             let capacity = self.capacity(head);
             if state.capacity != capacity {
                 let found = state.capacity;
-                violations.push(format!("branch {id:x}'s capacity is {found:?}, not {capacity:?}"));
+                violations.push(format!(
+                    "branch {id}'s capacity is {found:?}, not {capacity:?}",
+                    id = Short(id)
+                ));
             }
             let held: Vec<_> = state.extents.keys().collect();
             let made: Vec<_> = extents.keys().collect();
             if held != made {
-                violations.push(format!("branch {id:x} holds {held:?}, its commits made {made:?}"));
+                violations.push(format!(
+                    "branch {id} holds {held:?}, its commits made {made:?}",
+                    id = Short(id)
+                ));
                 continue;
             }
             for (extent, location) in &state.extents {
-                match block_on(extent_remote::read(&direct, *extent, location)) {
+                match block_on(extent_bucket::testing::read(&direct, *extent, location)) {
                     Ok(bytes) if bytes == extents[extent] => {}
-                    Ok(_) => violations.push(format!("branch {id:x}: {extent:?} reads wrong")),
-                    Err(error) => violations.push(format!("branch {id:x}: {error}")),
+                    Ok(_) => violations
+                        .push(format!("branch {id}: {extent:?} reads wrong", id = Short(id))),
+                    Err(error) => violations.push(format!("branch {id}: {error}", id = Short(id))),
+                }
+            }
+        }
+        // cladefs: every version a live branch's head names recovers, holding what its guest's
+        // commits held as of its cut, read back; and every version acknowledged, its branch live,
+        // not dropped, its head names (TASK-476).
+        for (&id, branch) in &self.branches {
+            if branch.deleting || self.unforks.contains_key(&id) {
+                continue;
+            }
+            let Ok(Some(head)) = block_on(extent_bucket::head::get(&*direct, sim_branch(id)))
+            else {
+                continue;
+            };
+            if head.epoch == layout::Head::FINAL {
+                continue;
+            }
+            for version in &head.versions {
+                let Some(cut) = self.versions.get(&version.id).filter(|cut| cut.branch == id)
+                else {
+                    violations.push(format!(
+                        "branch {id} names version {}, cut by none",
+                        Short(version.id),
+                        id = Short(id)
+                    ));
+                    continue;
+                };
+                let ring = extent_bucket::keys::Ring::keyless();
+                let recovering =
+                    recovery::recover_version(&*direct, sim_branch(id), version.at, &ring);
+                let recovered = match block_on(recovering) {
+                    Ok(recovered) => recovered,
+                    Err(error) => {
+                        violations.push(format!(
+                            "version {} of {id}: {error}",
+                            Short(version.id),
+                            id = Short(id)
+                        ));
+                        continue;
+                    }
+                };
+                for key in &recovered.touched {
+                    if !keys.contains(key) {
+                        violations.push(format!(
+                            "version {} of {id} needs {key}, gone",
+                            Short(version.id),
+                            id = Short(id)
+                        ));
+                    }
+                }
+                let (extents, _) = self.expected(Some(cut.tag));
+                let held: Vec<_> = recovered.state.extents.keys().collect();
+                if held != extents.keys().collect::<Vec<_>>() {
+                    violations.push(format!(
+                        "version {} of {id} holds {held:?}",
+                        Short(version.id),
+                        id = Short(id)
+                    ));
+                    continue;
+                }
+                for (extent, location) in &recovered.state.extents {
+                    match block_on(extent_bucket::testing::read(&direct, *extent, location)) {
+                        Ok(bytes) if bytes == extents[extent] => {}
+                        Ok(_) => violations
+                            .push(format!("version {}: {extent:?} reads wrong", Short(version.id))),
+                        Err(error) => {
+                            violations.push(format!("version {}: {error}", Short(version.id)))
+                        }
+                    }
+                }
+            }
+            for (&version, cut) in &self.versions {
+                if cut.branch == id
+                    && !cut.dropped
+                    && !cut.dropping
+                    && branch.acked.contains(&cut.tag)
+                    && head.version(version).is_none()
+                {
+                    violations.push(format!(
+                        "branch {id} names version {version} no more, its commit {} told \
+                         durable: its head {head:?}",
+                        cut.tag,
+                        id = Short(id),
+                        version = Short(version)
+                    ));
                 }
             }
         }
@@ -2289,8 +2745,8 @@ impl World {
                 else {
                     continue;
                 };
-                let lease = block_on(extent_remote::head::epoch(&*direct, sim_branch(id)));
-                if writer.stopped().is_some() || lease != Ok(writer.epoch()) {
+                let head = block_on(extent_bucket::head::epoch(&*direct, sim_branch(id)));
+                if writer.stopped().is_some() || head != Ok(writer.epoch()) {
                     continue;
                 }
                 if session.uploader.failed().is_some() {
@@ -2301,32 +2757,43 @@ impl World {
                     // yet, whose free a collector may already have reclaimed (seed 4116 of
                     // `everything` at 25x, TASK-149.32).
                     let Some(bytes) = session.guest.held.get(extent) else { continue };
-                    match block_on(extent_remote::read(&direct, *extent, location)) {
+                    match block_on(extent_bucket::testing::read(&direct, *extent, location)) {
                         Ok(read) if read == *bytes => {}
-                        Ok(_) => violations
-                            .push(format!("branch {id:x}'s writer: {extent:?} reads wrong")),
-                        Err(error) => violations.push(format!("branch {id:x}'s writer: {error}")),
+                        Ok(_) => violations.push(format!(
+                            "branch {id}'s writer: {extent:?} reads wrong",
+                            id = Short(id)
+                        )),
+                        Err(error) => violations
+                            .push(format!("branch {id}'s writer: {error}", id = Short(id))),
                     }
                 }
                 // And its store, where it names them in the bucket (TASK-195).
                 for (extent, bytes) in &session.guest.held {
                     let location = match store.place(*extent) {
-                        Ok(Some(Place::Remote(location))) => location,
+                        Ok(Some(Place::Bucket(location))) => location,
                         Ok(Some(_)) => continue,
                         Ok(None) => {
-                            violations.push(format!("branch {id:x}'s store lost {extent:?}"));
+                            violations.push(format!(
+                                "branch {id}'s store lost {extent:?}",
+                                id = Short(id)
+                            ));
                             continue;
                         }
                         Err(err) => {
-                            violations.push(format!("branch {id:x}'s store: {err:#}"));
+                            violations
+                                .push(format!("branch {id}'s store: {err:#}", id = Short(id)));
                             continue;
                         }
                     };
-                    match block_on(extent_remote::read(&direct, *extent, &location)) {
+                    match block_on(extent_bucket::testing::read(&direct, *extent, &location)) {
                         Ok(read) if read == *bytes => {}
-                        Ok(_) => violations
-                            .push(format!("branch {id:x}'s store: {extent:?} reads wrong")),
-                        Err(error) => violations.push(format!("branch {id:x}'s store: {error}")),
+                        Ok(_) => violations.push(format!(
+                            "branch {id}'s store: {extent:?} reads wrong",
+                            id = Short(id)
+                        )),
+                        Err(error) => {
+                            violations.push(format!("branch {id}'s store: {error}", id = Short(id)))
+                        }
                     }
                 }
             }
@@ -2344,7 +2811,7 @@ impl World {
         let (bucket, options) = (self.bucket.clone(), self.profile.options);
         let reported = Rc::new(RefCell::new(None));
         let report = reported.clone();
-        let listed = block_on(extent_remote::Bucket::list(&Direct(self.bucket.clone()), ""));
+        let listed = block_on(extent_bucket::Bucket::list(&Direct(self.bucket.clone()), ""));
         let before: BTreeMap<String, u64> =
             listed.unwrap().into_iter().map(|meta| (meta.key, meta.size)).collect();
         self.spawn(async move {
@@ -2415,9 +2882,12 @@ impl World {
                 let Some(store) = session.store.clone() else { continue };
                 let parent = session.guest.head;
                 let tag = self.id();
-                let before = store.epoch().unwrap();
+                let before = store.last_commit().unwrap();
                 if let Err(err) = store.commit(None) {
-                    self.violation(format!("branch {branch:x}'s last store: {err:#}"));
+                    self.violation(format!(
+                        "branch {branch}'s last store: {err:#}",
+                        branch = Short(branch)
+                    ));
                     return;
                 }
                 let Some(epoch) = self.committed(branch, &store, before) else { return };

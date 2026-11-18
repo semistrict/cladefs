@@ -6,8 +6,8 @@
 """Compares the sides of an A/B of guest cases (scripts/ab-guest-cases.sh), OUT its results: for
 each case, each side's runs, by what the extent daemon of each said (its stats file's `daemon:`
 line and its log) and the case's own `shared-disk:` lines: the slowest framing and how many took
-past extentd's turn, the slowest making of segments framed durable (TASK-310), the commits'
-durable lag (median, 99th percentile, longest, within 50 ms), what the daemon wrote, the
+past cladefsd's turn, the slowest making of segments framed durable (TASK-310), the commits'
+local lag (median, 99th percentile, longest, within 50 ms), what the daemon wrote, the
 shared-disk case's seconds, and pgbench's tps. Each cell is the median of a side's runs and their
 range. It prints a Markdown table per case.
 
@@ -27,7 +27,8 @@ def deepest(run, name):
 
 
 def daemon_stats(run):
-    path = deepest(run, "extentd-stats.txt")
+    # A side from before TASK-503 names it as extent[d] does.
+    path = deepest(run, "cladefsd-stats.txt") or deepest(run, "extent[d]-stats.txt")
     if path is None:
         return {}
     for line in path.read_text().splitlines():
@@ -52,14 +53,14 @@ def measures(run):
     got["framings past 50 ms"] = stats.get("framing_slow")
     got["slowest making durable (ms)"] = slowest(stats, "durable")
     got["slowest flush (ms)"] = slowest(stats, "flush")
-    count = stats.get("durable_lag_count")
+    count = stats.get("local_lag_count")
     if count:
-        got["durable lag within 50 ms (%)"] = 100 * stats["durable_lag_within_50ms"] / count
-        got["durable lag p50 (ms)"] = stats.get("durable_lag_p50_ms")
-        got["durable lag p99 (ms)"] = stats.get("durable_lag_p99_ms")
-        got["durable lag max (ms)"] = stats["durable_lag_max_us"] / 1000
+        got["local lag within 50 ms (%)"] = 100 * stats["local_lag_within_50ms"] / count
+        got["local lag p50 (ms)"] = stats.get("local_lag_p50_ms")
+        got["local lag p99 (ms)"] = stats.get("local_lag_p99_ms")
+        got["local lag max (ms)"] = stats["local_lag_max_us"] / 1000
     if "io_write_bytes" in stats:
-        got["extentd wrote (GiB)"] = stats["io_write_bytes"] / (1 << 30)
+        got["cladefsd wrote (GiB)"] = stats["io_write_bytes"] / (1 << 30)
     texts = [path.read_text(errors="replace") for path in run.rglob("log.txt")]
     texts += [path.read_text(errors="replace") for path in run.rglob("stdout.txt")]
     text = "\n".join(texts)

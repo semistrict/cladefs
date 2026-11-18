@@ -10,7 +10,7 @@
 # past a second, a sandbox's command past its budget, or a daemon past its own
 # (scripts/budgets.py). The short mode, minutes, runs on every push to main (ci.yml), since main
 # passes it on the runner's disk and CPUs (TASK-336, TASK-400, TASK-401), and here by hand
-# (workflow_dispatch). The long mode runs on ubu1 alone, by hand, before each pin handed to
+# (workflow_dispatch). The long mode runs on ubu1 alone, by hand, before each candidate handed to
 # LangSmith (scripts/qualify.sh, TASK-330.4): it ran a 16 GB runner out of memory at every size
 # tried, and nobody pays for a larger one (TASK-330.5). On a runner made a host of guests, the
 # guest kernel kept between runs by what it's built from (.github/actions' guest-host and

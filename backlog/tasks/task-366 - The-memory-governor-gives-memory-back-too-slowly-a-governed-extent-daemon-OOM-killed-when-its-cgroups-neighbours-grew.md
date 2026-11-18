@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-11 21:24'
-updated_date: '2026-11-15 11:35'
+updated_date: '2026-11-16 22:52'
 labels:
   - bug
   - extentd
@@ -18,7 +18,7 @@ ordinal: 750000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found on ubu1, 2026-11-11 (journalctl -k): two governed cladefs-extentd daemons in fxjob --bench jobs were OOM-killed. 15:20 local: oom_memcg was the job's own scope (fxjob-t3305-long, the daemon at 802 MB anon); 15:44: oom_memcg was fxdax.slice (then MemoryMax 18G), task fxjob-t3305-long2's cladefs-extentd, while work jobs grew beside it. TASK-358's governor (crates/cladefs/src/extentd/governor.rs) looks every 100 ms at MemAvailable and each ancestor cgroup's room (max + inactive_file - current), and evicts past the allowance; its memory is memfd, which reclaim can't take, so a neighbour growing faster than one look per 100 ms, or past the headroom between looks, makes the kernel OOM-kill instead. Expected: the daemon gives memory back before any cgroup it is in reaches its limit; a governed daemon is never OOM-killed for memory it holds as cache.
+Found on ubu1, 2026-11-11 (journalctl -k): two governed cladefsd daemons in fxjob --bench jobs were OOM-killed. 15:20 local: oom_memcg was the job's own scope (fxjob-t3305-long, the daemon at 802 MB anon); 15:44: oom_memcg was fxdax.slice (then MemoryMax 18G), task fxjob-t3305-long2's cladefsd, while work jobs grew beside it. TASK-358's governor (crates/cladefs/src/cladefsd/governor.rs) looks every 100 ms at MemAvailable and each ancestor cgroup's room (max + inactive_file - current), and evicts past the allowance; its memory is memfd, which reclaim can't take, so a neighbour growing faster than one look per 100 ms, or past the headroom between looks, makes the kernel OOM-kill instead. Expected: the daemon gives memory back before any cgroup it is in reaches its limit; a governed daemon is never OOM-killed for memory it holds as cache.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

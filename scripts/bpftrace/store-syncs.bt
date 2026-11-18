@@ -4,11 +4,11 @@
 // found in the LICENSE file.
 //
 // What the extent daemon's syncs wait on, by what each syncs (TASK-310): every fsync and
-// fdatasync of extentd's on ext4 (ext4_sync_file: the kernel calls a file system's fsync without
+// fdatasync of cladefsd's on ext4 (ext4_sync_file: the kernel calls a file system's fsync without
 // vfs_fsync_range), by whose file it is (a store's, the file bucket's or the part cache's), the
 // kind of file or directory, its directory's name in the layout (segments, open-segments, logs,
 // extents, the store's own directory), whether a datasync, and the thread's name (the store's own
-// threads are named: store framer, store durable, store opener; a flush's, extentd flush); a
+// threads are named: store framer, store durable, store opener; a flush's, cladefsd flush); a
 // histogram of each kind's, and each past 100 ms as it ends, with its thread, how many names the
 // file has (2: a segment framed in place, its raw file linked among framed ones) and its size.
 // cladefs: and of each kind's time, how much it waited for ext4's journal to commit
@@ -33,8 +33,7 @@ BEGIN
 }
 
 fentry:vmlinux:ext4_sync_file
-/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
-  strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
+/strncmp(curtask->group_leader->comm, "cladefsd", 8) == 0 &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0)/
 {
 	@began[tid] = nsecs;
@@ -66,7 +65,7 @@ fexit:vmlinux:ext4_sync_file
 	// A directory's kind is its parent's name (segments/<branch>: segments); a file's, its
 	// grandparent's (segments/<branch>/<n>); the store's own files (wal, store), their parent's.
 	// Whose: a store's, the directory above (store-N), or the daemon's file bucket's
-	// (extentd.bucket/segments/<branch>/<n>#<writer>) or part cache's (extentd-cache).
+	// (cladefsd.bucket/segments/<branch>/<n>#<writer>) or part cache's (cladefsd-cache).
 	// (An if, not a ternary: bpftrace 0.25 reads a ternary's pointer as 0.)
 	$parent = $dentry->d_parent;
 	if (!$dir) {
@@ -74,8 +73,8 @@ fexit:vmlinux:ext4_sync_file
 	}
 	$kind = str($parent->d_name.name);
 	$above = str($parent->d_parent->d_name.name);
-	$whose = strncmp($above, "extentd.bucket", 14) == 0 ? "bucket" :
-		(strncmp($above, "extentd-cache", 13) == 0 ? "cache" : "store");
+	$whose = strncmp($above, "cladefsd.bucket", 15) == 0 ? "bucket" :
+		(strncmp($above, "cladefsd-cache", 14) == 0 ? "cache" : "store");
 	@sync_us[$whose, $dir ? "dir" : "file", $kind, args.datasync] = hist($us);
 	@sync_count[$whose, $dir ? "dir" : "file", $kind, comm] = count();
 	@sync_sum_ms[$whose, $dir ? "dir" : "file", $kind, comm] = sum($us / 1000);
@@ -95,8 +94,7 @@ fexit:vmlinux:ext4_sync_file
 // The stores' logs (logs/<branch>/<n>, and spare-<n> beside them), by the extent daemons' own
 // relative paths: made anew; a spare taken as a segment's log; a segment's kept as a spare.
 tracepoint:syscalls:sys_enter_openat
-/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
-  strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
+/strncmp(curtask->group_leader->comm, "cladefsd", 8) == 0 &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0) &&
  (args.flags & 0x40) != 0 && strcontains(str(args.filename), "logs/")/
 {
@@ -104,8 +102,7 @@ tracepoint:syscalls:sys_enter_openat
 }
 
 tracepoint:syscalls:sys_enter_renameat2
-/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
-  strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
+/strncmp(curtask->group_leader->comm, "cladefsd", 8) == 0 &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0) &&
  strcontains(str(args.oldname), "logs/")/
 {

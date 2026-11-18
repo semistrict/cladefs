@@ -5,7 +5,7 @@ title: >-
   cladefs
 type: guide
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-17 01:09'
 ---
 Web research of 2026-11-15 (four parallel research agents, ~200 searches and fetches), checked
 against main (36f194bbc). The ranked list in §2 is what to do; §1 is the evidence; §3 what not to
@@ -46,7 +46,7 @@ practice below has the same gate: **no reproducer in one of the project's oracle
 
 **Memory ordering.** Shuttle models every atomic as SeqCst (its docs, and it warns at runtime), so
 no cladefs test can see an Acquire/Release/Relaxed bug. The host crates (cladefs, physmem,
-extent_store, extent_remote, follower, virtio_extent) hold 450 non-SeqCst orderings. LLMs reason
+extent_store, extent_bucket, follower, virtio_extent) hold 450 non-SeqCst orderings. LLMs reason
 poorly about weak memory (arXiv 2501.14326), so an audit alone is not evidence; loom (MIT) is the
 disposer. AtomVChecker's classes (ordering too weak to publish related state; AtomicPtr data
 unsynchronised; stronger than needed) give the audit a shape. A fence-deletion mutant left one
@@ -121,7 +121,7 @@ item 10 is TASK-149.4, filed before.
    Ordering mutants (Release/Acquire to Relaxed, a fence deleted) must turn a loom model red, or
    that's a missing test. dax.c's barriers would want LKMM litmus tests (herd7), licence pending
    (§4).
-3. **Kernel review agents on guest/linux/fs/fxfs and the fs/dax.c patches.** review-prompts (orc)
+3. **Kernel review agents on guest/linux/fs/cladefs and the fs/dax.c patches.** review-prompts (orc)
    and Sashiko, both on Claude, with an fxfs/DAX context file of cladefs's invariants (doc-4, doc-9,
    doc-13, the dax-cow spec, dead-ends) and a known-issues file. First a whole-tree sweep for
    pre-existing bugs, 3-5 runs, findings kept only when they recur or a verifier confirms them;
@@ -132,7 +132,7 @@ item 10 is TASK-149.4, filed before.
    uffd handler vs mapper vs memfd lifetime) and SafeDep's sibling-method question; agent B labels
    each claim independently. Confirmation by a failing test, Miri on helpers factored away from
    syscalls, or Shuttle. clippy's `undocumented_unsafe_blocks` gates new code.
-5. **Specula on extent_remote, WAL segments, compaction and the head.** Imports specs/bucket;
+5. **Specula on extent_bucket, WAL segments, compaction and the head.** Imports specs/bucket;
    invariants mined from the backlog, dead-ends and git history that nobody wrote down. Each claim
    arrives as a code-level test. Cheap in tokens; run in its own worktree.
 6. **Variant hunts and rules from every fixed bug.** One agent per Done bug task: the root cause as
@@ -145,7 +145,7 @@ item 10 is TASK-149.4, filed before.
    Agents write mutants from a list of concerns drawn from the backlog's bug classes, an
    equivalence filter drops no-ops, survivors become tasks under TASK-149 with a killing test.
 8. **Assumptions as assertions on hostile and lifetime paths.** An agent walks virtio request
-   decoding, extentd's codec, the window and uffd paths and dax.c, and writes each "this is safe
+   decoding, cladefsd's codec, the window and uffd paths and dax.c, and writes each "this is safe
    because" as an assertion; fuzzers, the hostile tests, guest/sim and the hunt run with them on.
    Includes structure-aware generators for coverage plateaus in the cargo-fuzz targets.
 9. **Guardrails for agent work, as hooks.** Implementer agents can't edit tests, specs or mutation

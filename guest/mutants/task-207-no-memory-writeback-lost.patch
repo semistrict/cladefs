@@ -8,15 +8,15 @@
 # their room gone: a rebind brings back the blocks they replaced, and a clone carries those
 # (fxfs-guest-fsx-faults-dax, GCE r699). cow_writeback_found_no_memory: no room reserved again.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2234,7 +2234,8 @@
  		err = err ?: -ENOMEM;
  		kept = 0;
  	} else if (kept) {
--		kept = fxfs_dax_keep(inode, batch, nr);
+-		kept = cladefs_dax_keep(inode, batch, nr);
 +		err = err ?: -ENOMEM;
 +		kept = 0;
  	}
  	for (i = 0; i < nr; i++)
- 		fxfs_dax_put_range(dax, batch[i].range);
+ 		cladefs_dax_put_range(dax, batch[i].range);

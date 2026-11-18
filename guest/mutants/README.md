@@ -1,6 +1,6 @@
 # guest/mutants: past bugs of the guest's Fxfs, put back
 
-Each `*.patch` takes a fix away from the guest's code (`guest/linux/fs/fxfs`, the kernel's
+Each `*.patch` takes a fix away from the guest's code (`guest/linux/fs/cladefs`, the kernel's
 `fs/dax.c` as `guest/linux/patches` leave it, a patch of that series, left out of
 `scripts/build-guest-kernel.sh`'s, or `guest/sim`'s model of Fxfs), so that a run with it in shows
 whether the test that should find the bug still does. One set, whether the simulator or a
@@ -48,7 +48,7 @@ The comments after say what the bug was, how it was found, and how its killer fa
   against the model's comparison with Fxfs, and fails if one of `Kernel: model` lives; `--check`
   applies and reverses each.
 - `scripts/guest-mutants-host.py RESULTS` runs those of a real kernel on a Linux host of one's own
-  (`CLADEFS_HOST`, ubu1 by default), each a run of `scripts/test-host.sh` with its patch applied;
+  (`CLADEFS_TEST_HOST`, ubu1 by default), each a run of `scripts/test-host.sh` with its patch applied;
   `--check` checks every header, and that each of these and the model's applies (`scripts/test.sh`'s
   scripts part).
 - `scripts/dax-gate.sh` runs the simulator's first, then the rest, on ubu1: each must be killed.

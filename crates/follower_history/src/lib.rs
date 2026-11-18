@@ -6,14 +6,14 @@
 //! the writer's operations made, and which commits may hold them.
 //!
 //! The writer's operations are in order: after the `i`th, the files are the `i`th model, the 0th
-//! being none. Each one's transaction is in a commit after the store's epoch as it began (`after`),
-//! and, once a sync after it returns, at or before that sync's epoch (`by`). A follower as of
-//! commit `e` shows the files after the operations in commits up to `e`, a prefix of them: the
-//! `j`th model for a `j` from the last operation surely in `e` to the last that may be. A reader's
-//! operation, on a follower as of some commit from `from` to `to` (`epochs`: a follower moves on
-//! as its reader reads), must find what some model those may show holds; and a reader's operations
-//! each find a model no older than its last one did: a reader sees a prefix of the writer's
-//! history, moving forward (doc-8, decision 4).
+//! being none. Each one's transaction is in a commit after the store's latest as it began
+//! (`after`), and, once a sync after it returns, at or before that sync's latest (`by`). A follower
+//! as of commit `e` shows the files after the operations in commits up to `e`, a prefix of them:
+//! the `j`th model for a `j` from the last operation surely in `e` to the last that may be. A
+//! reader's operation, on a follower as of some commit from `from` to `to` (`commits`: a follower
+//! moves on as its reader reads), must find what some model those may show holds; and a reader's
+//! operations each find a model no older than its last one did: a reader sees a prefix of the
+//! writer's history, moving forward (doc-8, decision 4).
 //!
 //! A reader holding a file open reads it whole, as some such model holds it, or, once no such
 //! model holds it any more (its writer deleted it), as the last model that held it did (doc-8,
@@ -36,22 +36,22 @@ pub struct File<C> {
     pub contents: C,
 }
 
-/// A reader's operation: of the file `name`, on a follower as of a commit in `epochs`, and what it
+/// A reader's operation: of the file `name`, on a follower as of a commit in `commits`, and what it
 /// found: the file's contents, or nothing, no file having the name.
 #[derive(Clone, Debug)]
 pub struct Read<N, C> {
     pub reader: usize,
-    pub epochs: RangeInclusive<u64>,
+    pub commits: RangeInclusive<u64>,
     pub name: N,
     pub found: Result<Option<C>, String>,
 }
 
 /// A read of the file whose object is `object_id`, which a reader holds open, on a follower as of
-/// a commit in `epochs`, and what it found.
+/// a commit in `commits`, and what it found.
 #[derive(Clone, Debug)]
 pub struct HeldRead<C> {
     pub reader: usize,
-    pub epochs: RangeInclusive<u64>,
+    pub commits: RangeInclusive<u64>,
     pub object_id: u64,
     pub found: Result<C, String>,
 }
@@ -192,11 +192,11 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         self.operation(after, changes);
     }
 
-    /// Records a sync, which returned with the store at `epoch`: the operations before it are in
-    /// commits by then.
-    pub fn synced(&mut self, epoch: u64) {
+    /// Records a sync, which returned with the store at commit `commit`: the operations before it
+    /// are in commits by then.
+    pub fn synced(&mut self, commit: u64) {
         for bounds in self.bounds.iter_mut().rev().take_while(|bounds| bounds.by.is_none()) {
-            bounds.by = Some(epoch);
+            bounds.by = Some(commit);
         }
     }
 
@@ -217,7 +217,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     /// their commits may show.
     pub fn held_reads_of_deleted(&self) -> usize {
         let deleted = |read: &&HeldRead<C>| {
-            let models = self.models_as_of(&read.epochs);
+            let models = self.models_as_of(&read.commits);
             self.objects.get(&read.object_id).is_none_or(|versions| {
                 versions.pieces(models).iter().all(|(_, contents)| contents.is_none())
             })
@@ -225,13 +225,13 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         self.held_reads.iter().filter(deleted).count()
     }
 
-    /// The models a follower as of a commit in `epochs` may show: those after the operations surely
-    /// in commits up to the first, to those after the operations that may be in commits up to the
-    /// last.
-    pub fn models_as_of(&self, epochs: &RangeInclusive<u64>) -> RangeInclusive<usize> {
-        // The syncs' epochs bound a prefix of the operations, and grow, as their beginnings do.
-        let surely = self.bounds.partition_point(|b| b.by.is_some_and(|by| by <= *epochs.start()));
-        let maybe = self.bounds.partition_point(|b| b.after < *epochs.end());
+    /// The models a follower as of a commit in `commits` may show: those after the operations
+    /// surely in commits up to the first, to those after the operations that may be in commits up
+    /// to the last.
+    pub fn models_as_of(&self, commits: &RangeInclusive<u64>) -> RangeInclusive<usize> {
+        // The syncs' commits bound a prefix of the operations, and grow, as their beginnings do.
+        let surely = self.bounds.partition_point(|b| b.by.is_some_and(|by| by <= *commits.start()));
+        let maybe = self.bounds.partition_point(|b| b.after < *commits.end());
         surely..=maybe
     }
 
@@ -241,12 +241,12 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
         // The oldest model each reader's operations so far may all have read.
         let mut since = BTreeMap::<usize, usize>::new();
         for read in &self.reads {
-            let Read { reader, epochs, name, found } = read;
+            let Read { reader, commits, name, found } = read;
             let since = since.entry(*reader).or_insert(0);
             let found = found
                 .as_ref()
-                .map_err(|error| format!("reader {reader} as of commits {epochs:?}: {error}"))?;
-            let models = self.models_as_of(epochs);
+                .map_err(|error| format!("reader {reader} as of commits {commits:?}: {error}"))?;
+            let models = self.models_as_of(commits);
             let pieces = self.name_pieces(name, models.clone());
             let matching = pieces
                 .iter()
@@ -255,7 +255,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
                 .map(|(range, _)| (*range.start()).max(*since));
             *since = matching.ok_or_else(|| {
                 format!(
-                    "reader {reader} found {name:?} as {found:?} as of commits {epochs:?}, which \
+                    "reader {reader} found {name:?} as {found:?} as of commits {commits:?}, which \
                      only models {models:?} may show, and none from {since} on does: {pieces:?}"
                 )
             })?;
@@ -281,11 +281,11 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
     /// Checks a read of a file a reader held open: whole, as a model its follower's commit may
     /// show holds the file, or, if none does, as the last model before them that did.
     fn check_held(&self, read: &HeldRead<C>) -> Result<(), String> {
-        let HeldRead { reader, epochs, object_id, found } = read;
+        let HeldRead { reader, commits, object_id, found } = read;
         let found = found.as_ref().map_err(|error| {
-            format!("reader {reader} holding object {object_id} as of commits {epochs:?}: {error}")
+            format!("reader {reader} holding object {object_id} as of commits {commits:?}: {error}")
         })?;
-        let models = self.models_as_of(epochs);
+        let models = self.models_as_of(commits);
         let unheld = || format!("reader {reader} held object {object_id}, which no model holds");
         let versions = self.objects.get(object_id).ok_or_else(unheld)?;
         let held = versions.pieces(0..=*models.end());
@@ -302,7 +302,7 @@ impl<N: Ord + Clone + Debug, C: Clone + PartialEq + Debug> History<N, C> {
             return Ok(());
         }
         Err(format!(
-            "reader {reader} holding object {object_id} read {found:?} as of commits {epochs:?}, \
+            "reader {reader} holding object {object_id} read {found:?} as of commits {commits:?}, \
              which only models {models:?} may show: {allowed:?}"
         ))
     }
@@ -325,26 +325,26 @@ mod tests {
         Some(File { object_id, contents: fill })
     }
 
-    fn held(reader: usize, epoch: u64, object_id: u64, fill: u8) -> HeldRead<u8> {
-        HeldRead { reader, epochs: epoch..=epoch, object_id, found: Ok(fill) }
+    fn held(reader: usize, commit: u64, object_id: u64, fill: u8) -> HeldRead<u8> {
+        HeldRead { reader, commits: commit..=commit, object_id, found: Ok(fill) }
     }
 
     fn read(
         reader: usize,
-        epoch: u64,
+        commit: u64,
         name: &'static str,
         fill: Option<u8>,
     ) -> Read<&'static str, u8> {
-        read_between(reader, epoch..=epoch, name, fill)
+        read_between(reader, commit..=commit, name, fill)
     }
 
     fn read_between(
         reader: usize,
-        epochs: RangeInclusive<u64>,
+        commits: RangeInclusive<u64>,
         name: &'static str,
         fill: Option<u8>,
     ) -> Read<&'static str, u8> {
-        Read { reader, epochs, name, found: Ok(fill) }
+        Read { reader, commits, name, found: Ok(fill) }
     }
 
     /// Two writes of a, object 100, a sync at 5 after the first; the second began at 6.
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(history.check(), Ok(()));
     }
 
-    /// A read as of commits no model may show, its epochs at odds with the writer's syncs, finds
+    /// A read as of commits no model may show, its commits at odds with the writer's syncs, finds
     /// what none holds, even of a name never written.
     #[test]
     #[allow(clippy::reversed_empty_ranges)] // The empty range of models is the point.

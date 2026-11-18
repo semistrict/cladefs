@@ -2,15 +2,15 @@
 # Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""Reports what the guest checks ran of fs/fxfs, from a coverage kernel's counts (TASK-119.14).
+"""Reports what the guest checks ran of fs/cladefs, from a coverage kernel's counts (TASK-119.14).
 
-A kernel built with CLADEFS_GUEST_KERNEL_BUILD=coverage counts each VM's runs of fs/fxfs, which
+A kernel built with CLADEFS_GUEST_KERNEL_BUILD=coverage counts each VM's runs of fs/cladefs, which
 fxfs-guest-checks leaves under CLADEFS_COVERAGE, a directory of .gcda files for each VM. They are
 merged, and gcov reads them against what the kernel's build left.
 
 Usage: scripts/guest-coverage.py COUNTS OBJECTS REPORT
 
-COUNTS is CLADEFS_COVERAGE, OBJECTS the kernel's built fs/fxfs, and REPORT a new directory, which
+COUNTS is CLADEFS_COVERAGE, OBJECTS the kernel's built fs/cladefs, and REPORT a new directory, which
 holds gcov's annotated sources (dax.c.gcov and so on) and coverage.txt: for each source, its lines
 and branches run, the functions never called, and the lines never run in the others. gcov looks
 for sources as the kernel's build names them, from the top of its tree: REPORT links to them.

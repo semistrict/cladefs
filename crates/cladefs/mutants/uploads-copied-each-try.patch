@@ -3,24 +3,24 @@
 # memory held twice what it counts, 5-6 GB of anonymous memory under a backlog, and the host's OOM
 # killer took the daemon (TASK-317, TASK-330.3).
 # Kind: memory
-# Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
---- a/crates/extent_remote/src/bucket.rs
-+++ b/crates/extent_remote/src/bucket.rs
-@@ -219,7 +219,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
+# Killer: cladefsd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
+--- a/crates/extent_bucket/src/bucket.rs
++++ b/crates/extent_bucket/src/bucket.rs
+@@ -439,7 +439,7 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
 -        match bucket.put(key, bytes.clone(), PutMode::Create).await {
 +        match bucket.put(key, Bytes::copy_from_slice(&bytes), PutMode::Create).await {
-             Ok(_) => return Created::Created,
+             Ok(version) => return Created::Created(version),
              Err(Error::AlreadyExists) => {
                  // Perhaps this one's own write, which landed though its answer was lost.
-@@ -253,7 +253,7 @@ pub(crate) async fn update(
+@@ -476,7 +476,7 @@ pub(crate) async fn update(
      let bytes = Bytes::from(bytes);
      let mut failures = 0;
      loop {
 -        match bucket.put(key, bytes.clone(), PutMode::Update(version.clone())).await {
 +        match bucket.put(key, Bytes::copy_from_slice(&bytes), PutMode::Update(version.clone())).await {
-             Ok(_) => return Updated::Updated,
+             Ok(version) => return Updated::Updated(version),
              Err(Error::Precondition | Error::NotFound) => {
                  return match get(bucket, key).await {

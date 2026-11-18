@@ -11,24 +11,24 @@
 # Killer: scripts/sandboxes.sh short
 --- a/crates/extent_store/src/segments.rs
 +++ b/crates/extent_store/src/segments.rs
-@@ -1558,6 +1558,7 @@ fn frame_segment<D: Dir>(
-     let mut packer = extent_frame::Packer::new(sealing);
-     let clear = raw.clear().filter(|_| packer.key().is_none());
-     let in_place_maybe = quiet && len > 0 && clear.is_some();
+@@ -1546,6 +1546,7 @@
+     // file's key (TASK-411.23).
+     let sectors = raw.sectors();
+     let in_place_maybe = quiet && len > 0 && len.is_multiple_of(SECTOR);
 +    let in_place_maybe = false && in_place_maybe;
      let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
      // cladefs: in place at once if a look at its parts says compressing them saves too little,
      // compressing no more of them: compressing every part to tell was most of what framings took
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -2245,10 +2245,6 @@ impl<D: Dir> Store<D> {
-             raw.read_cached(buf, at)?;
+@@ -2267,10 +2267,6 @@
+             }
              let end = packer.end();
              let packed = packer.push(buf);
 -            // As they are, where they are, as those before.
--            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
+-            if framed.is_none() && in_place && packer.stored_raw() {
 -                continue;
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 None => {
+                 // Its raw parts before are no parts of a copy's, encrypted with AES-GCM: framed anew,

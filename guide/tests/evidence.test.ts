@@ -23,15 +23,15 @@ describe("the repo's evidence", () => {
   test("a mutant's header parses into its kernel, killer and story", () => {
     const m = parseMutant(
       "x.patch",
-      "# SPDX-License-Identifier: GPL-2.0\n# Copyright 2026 The cladefs Authors.\n#\n# Kernel: sim\n# Killer: scenarios cow_swap_during_write\n#\n# TASK-1: a swap\n# under the semaphore shared.\n\n--- a/guest/linux/fs/fxfs/dax.c\n+++ b/guest/linux/fs/fxfs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
+      "# SPDX-License-Identifier: GPL-2.0\n# Copyright 2026 The cladefs Authors.\n#\n# Kernel: sim\n# Killer: scenarios cow_swap_during_write\n#\n# TASK-1: a swap\n# under the semaphore shared.\n\n--- a/guest/linux/fs/cladefs/dax.c\n+++ b/guest/linux/fs/cladefs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
     );
     expect(m).toEqual({
       file: "x.patch",
       kernel: "sim",
       killer: "scenarios cow_swap_during_write",
       story: "TASK-1: a swap under the semaphore shared.",
-      touches: ["guest/linux/fs/fxfs/dax.c"],
-      patch: "--- a/guest/linux/fs/fxfs/dax.c\n+++ b/guest/linux/fs/fxfs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
+      touches: ["guest/linux/fs/cladefs/dax.c"],
+      patch: "--- a/guest/linux/fs/cladefs/dax.c\n+++ b/guest/linux/fs/cladefs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
     });
   });
 

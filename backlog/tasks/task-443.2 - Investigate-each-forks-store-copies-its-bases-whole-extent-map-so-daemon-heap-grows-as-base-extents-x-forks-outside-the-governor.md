@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:24'
-updated_date: '2026-11-15 20:13'
+updated_date: '2026-11-16 22:52'
 labels:
   - perf
   - review-2026-11-15
@@ -27,7 +27,7 @@ crates/extent_store/src/store.rs Recovering::open collects every extent of the b
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 extentd::tests::serves_hundreds_of_forks_of_a_base (or its like) run with a base of 32,768 and of 300,000 extents: daemon anonymous memory per open idle fork, and the extent count of a real sandbox base image, are recorded
+- [ ] #1 cladefsd::tests::serves_hundreds_of_forks_of_a_base (or its like) run with a base of 32,768 and of 300,000 extents: daemon anonymous memory per open idle fork, and the extent count of a real sandbox base image, are recorded
 - [x] #2 The notes give the measured cost and the workload size at which a customer would feel it; a fix, if needed, is filed as its own task
 <!-- AC:END -->
 
@@ -41,7 +41,7 @@ crates/extent_store/src/store.rs Recovering::open collects every extent of the b
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Bench on macOS at the layer that runs here: cladefs's host stores over a memory bucket (crates/cladefs/src/remote.rs tests, which already count the heap exactly with crate::heap::Bounded). bench_fork_extent_memory, ignored: for E in {64, 1,024, 32,768, 300,000}, a base of E 4 KiB extents, 100 forks of it, (a) forked from the live store (a checkpoint per fork, as extentd's serves_hundreds_of_forks_of_a_base makes them) and (b) forked from a point of it (one state for all); open them idle, read live heap bytes at 1, 10 and 100 open, time each opening; close them, open and close again and assert the heap returns exactly to what the first close left (report what the first close leaves over the baseline).
+1. Bench on macOS at the layer that runs here: cladefs's host stores over a memory bucket (crates/cladefs/src/remote.rs tests, which already count the heap exactly with crate::heap::Bounded). bench_fork_extent_memory, ignored: for E in {64, 1,024, 32,768, 300,000}, a base of E 4 KiB extents, 100 forks of it, (a) forked from the live store (a checkpoint per fork, as cladefsd's serves_hundreds_of_forks_of_a_base makes them) and (b) forked from a point of it (one state for all); open them idle, read live heap bytes at 1, 10 and 100 open, time each opening; close them, open and close again and assert the heap returns exactly to what the first close left (report what the first close leaves over the baseline).
 2. Breakdown by owner, each weighed alone under the same counter: the store's map (a copy of it, through a testing-only accessor of extent_store's), its key strings (sum of lengths), the writer's map (an unshared rebuild of the recovered state's persistent map), the rest by difference.
 3. From the code: what the governor and the anon budget count of it.
 4. Run in release, results under docs/measurements/macos-fork-extent-memory-2026-11-15/note.md; notes with table, extrapolation (labelled), verdict, how to read a real base's extent count; one fix task if real. Linux daemon-level run (AC #1) is the parent's: left unchecked.

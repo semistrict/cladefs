@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /* Copyright 2026 The cladefs Authors. */
-/* The kernel's integer types, for fs/fxfs's headers, over libc's. */
+/* The kernel's integer types, for fs/cladefs's headers, over libc's. */
 #ifndef _SHIM_LINUX_TYPES_H
 #define _SHIM_LINUX_TYPES_H
 

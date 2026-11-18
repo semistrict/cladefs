@@ -12,7 +12,7 @@
 use crate::error::{Errno, Error};
 use crate::executor::{Executor, assert_not_on_executor};
 use crate::filesystem::{Filesystem, Options};
-use crate::storage::{Kind, Storage, clone_image};
+use crate::storage::{Kind, Storage, fork_image};
 use crate::volume::{HostFxfs, Unmount, Volume};
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
@@ -267,15 +267,15 @@ impl Image {
             .map_err(volume_error)
     }
 
-    /// Clones the image to a new image at `path`, which must not exist, while it is mounted, and
-    /// returns the clone's storage (see [`Storage::clone_to`]).
+    /// Forks the image to a new image at `path`, which must not exist, while it is mounted, and
+    /// returns the fork's storage (see [`Storage::fork_to`]).
     ///
-    /// The journal is committed, flushing the image, before it is cloned, so the clone has
+    /// The journal is committed, flushing the image, before it is forked, so the fork has
     /// everything written before this was called.
-    /// The image's writes wait while it is cloned, so the clone is the image as it was at one
+    /// The image's writes wait while it is forked, so the fork is the image as it was at one
     /// time, which it recovers from as Fxfs does after a crash.
-    pub async fn clone_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
-        self.shared.clone_storage_to(path.as_ref()).await
+    pub async fn fork_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
+        self.shared.fork_storage_to(path.as_ref()).await
     }
 
     /// Unmounts the volumes still mounted, writing back what is dirty, closes the image, and gives
@@ -387,9 +387,9 @@ impl ImageShared {
         volume.begin_unmount()
     }
 
-    pub async fn clone_storage_to(&self, path: &Path) -> Result<Storage, Error> {
+    pub async fn fork_storage_to(&self, path: &Path) -> Result<Storage, Error> {
         let Kind::Image { image, writes, .. } = &self.storage_kind else {
-            return Err(Error::msg("memory cannot be cloned to an image"));
+            return Err(Error::msg("memory cannot be forked to an image"));
         };
         let filesystem = self.with_open(|open| (*open.filesystem).clone())?;
         self.executor
@@ -398,7 +398,7 @@ impl ImageShared {
             })
             .await
             .map_err(Error::new)?;
-        clone_image(image.clone(), writes.clone(), path).await
+        fork_image(image.clone(), writes.clone(), path).await
     }
 
     /// Unmounts the volumes still mounted, closes the filesystem, and gives the storage back.

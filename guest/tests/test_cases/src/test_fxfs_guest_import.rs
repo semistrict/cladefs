@@ -117,7 +117,7 @@ mod host {
             let base = dir.join("base");
             block_on(cladefs::import::store(&base, CAPACITY, &layout, Some("cladefs/test:import")))?;
             // A branch of each case's own, as each fork's is, its ID its bucket's to give: the
-            // one volume of a new cell of the base's tenant (TASK-364).
+            // one vdisk of a new cell of the base's tenant (TASK-364).
             let base = cladefs::ExtentStore::open(&base)?;
             base.fork(dir.join("extents"), cladefs::new_cell(base.branch().cell.tenant))?;
             drop(base);
@@ -162,7 +162,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())

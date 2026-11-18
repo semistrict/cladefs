@@ -94,14 +94,14 @@ class Mutants(unittest.TestCase):
 
     def test_the_simulations_crates_mutants_build_with_the_profile_sim(self):
         # The simulation, optimized, as scripts/test.sh runs it (TASK-92.40), extent_store's,
-        # which extent_remote's mutants run too (TASK-88); others as their tests build.
-        self.mutants({"sweep": SWEEP}, "extent_remote", "extent_store", "extent_frame")
+        # which extent_bucket's mutants run too (TASK-88); others as their tests build.
+        self.mutants({"sweep": SWEEP}, "extent_bucket", "extent_store", "extent_frame")
         self.assertEqual(
             [call[:8] for call in self.calls()],
             [
                 [
-                    "-p", "extent_remote", "--profile", "sim",
-                    "--test-package", "extent_remote", "--test-package", "extent_store",
+                    "-p", "extent_bucket", "--profile", "sim",
+                    "--test-package", "extent_bucket", "--test-package", "extent_store",
                 ],
                 ["-p", "extent_store", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3"],
                 # Its missed, under Shuttle.
@@ -181,8 +181,8 @@ class Mutants(unittest.TestCase):
 
     def test_a_failed_crate_leaves_the_next_to_run(self):
         self.assertEqual(
-            self.mutants({"sweep": {"status": 4}}, "extent_frame", "extent_remote"),
-            (1, "extent_frame: failed with status 4\nextent_remote: failed with status 4\n"),
+            self.mutants({"sweep": {"status": 4}}, "extent_frame", "extent_bucket"),
+            (1, "extent_frame: failed with status 4\nextent_bucket: failed with status 4\n"),
         )
         self.assertEqual(len(self.calls()), 2)
 
