@@ -54,9 +54,10 @@ type PeerClient interface {
 	// This host's replica directory's incarnation: what a configuration naming it names.
 	Incarnation(ctx context.Context, in *IncarnationRequest, opts ...grpc.CallOption) (*IncarnationResponse, error)
 	// A writer's appends to its configuration's logs on this member, each answered once synced, in
-	// order. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of a later
-	// epoch fenced the cell (its promise said), OUT_OF_RANGE for an append past a log's end,
-	// RESOURCE_EXHAUSTED past what a member holds for a cell.
+	// order, with the log's end: an append past it writes nothing, and the writer sends again from
+	// the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
+	// a later epoch fenced the cell (its promise said), RESOURCE_EXHAUSTED past what a member holds
+	// for a configuration. Messages are 64 MiB at most.
 	Append(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendRequest, AppendResponse], error)
 	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
 	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
@@ -163,9 +164,10 @@ type PeerServer interface {
 	// This host's replica directory's incarnation: what a configuration naming it names.
 	Incarnation(context.Context, *IncarnationRequest) (*IncarnationResponse, error)
 	// A writer's appends to its configuration's logs on this member, each answered once synced, in
-	// order. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of a later
-	// epoch fenced the cell (its promise said), OUT_OF_RANGE for an append past a log's end,
-	// RESOURCE_EXHAUSTED past what a member holds for a cell.
+	// order, with the log's end: an append past it writes nothing, and the writer sends again from
+	// the end answered. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of
+	// a later epoch fenced the cell (its promise said), RESOURCE_EXHAUSTED past what a member holds
+	// for a configuration. Messages are 64 MiB at most.
 	Append(grpc.BidiStreamingServer[AppendRequest, AppendResponse]) error
 	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
 	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
