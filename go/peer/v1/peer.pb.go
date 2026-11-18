@@ -754,12 +754,17 @@ func (*DropLogsResponse) Descriptor() ([]byte, []int) {
 // A part asked for.
 type GetPartRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
+	// The URL of the asker's bucket, as it names it (CLADEFSD_BUCKET): compared with this host's
+	// only while either has no region.
 	Bucket string `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
 	// The object's key.
 	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	// The part's number, from 0.
-	Part          uint64 `protobuf:"varint,3,opt,name=part,proto3" json:"part,omitempty"`
+	Part uint64 `protobuf:"varint,3,opt,name=part,proto3" json:"part,omitempty"`
+	// The asker's region (TASK-633.4): its home bucket's number, 0 if it has none yet.
+	Home uint32 `protobuf:"varint,8,opt,name=home,proto3" json:"home,omitempty"`
+	// The asker's root bucket's identity's ID, naming its system of buckets: 0 if it has none yet.
+	Root          uint64 `protobuf:"fixed64,9,opt,name=root,proto3" json:"root,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -811,6 +816,20 @@ func (x *GetPartRequest) GetKey() string {
 func (x *GetPartRequest) GetPart() uint64 {
 	if x != nil {
 		return x.Part
+	}
+	return 0
+}
+
+func (x *GetPartRequest) GetHome() uint32 {
+	if x != nil {
+		return x.Home
+	}
+	return 0
+}
+
+func (x *GetPartRequest) GetRoot() uint64 {
+	if x != nil {
+		return x.Root
 	}
 	return 0
 }
@@ -906,11 +925,13 @@ const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\athrough\x18\x02 \x01(\x04H\x00R\athrough\x88\x01\x01B\n" +
 	"\n" +
 	"\b_through\"\x12\n" +
-	"\x10DropLogsResponse\"\x82\x01\n" +
+	"\x10DropLogsResponse\"\xaa\x01\n" +
 	"\x0eGetPartRequest\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x12\n" +
-	"\x04part\x18\x03 \x01(\x04R\x04partJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x06offsetR\x03lenR\x03crcR\bencoding\"'\n" +
+	"\x04part\x18\x03 \x01(\x04R\x04part\x12\x12\n" +
+	"\x04home\x18\b \x01(\rR\x04home\x12\x12\n" +
+	"\x04root\x18\t \x01(\x06R\x04rootJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x06offsetR\x03lenR\x03crcR\bencoding\"'\n" +
 	"\x0fGetPartResponse\x12\x14\n" +
 	"\x05bytes\x18\x01 \x01(\fR\x05bytes2\xe6\x03\n" +
 	"\x04Peer\x12L\n" +

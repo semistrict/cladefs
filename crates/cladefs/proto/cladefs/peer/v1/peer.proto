@@ -22,8 +22,10 @@ service Peer {
   // or fetched from the bucket once, however many hosts ask at once, and kept. NOT_FOUND if this
   // host has no such part: the object gone, or holding no part of that number. INVALID_ARGUMENT
   // for an object whose parts are not served (a branch's record, a head, a cell's object, a
-  // reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
-  // fetching it failed.
+  // reference); FAILED_PRECONDITION if the asker is of another cloud region than this host (its
+  // home bucket another, or its root bucket's: peers never serve across regions, TASK-633.4), or,
+  // either of no region yet, its bucket's URL not this host's; UNAVAILABLE if fetching it failed.
+  // The object may be of any bucket of the system: the host fetches it from its cell's bucket.
   rpc GetPart(GetPartRequest) returns (GetPartResponse);
 
   // Replicated cells (doc-21, TASK-537): a daemon is a member of other hosts' cells'
@@ -160,7 +162,8 @@ message DropLogsResponse {}
 
 // A part asked for.
 message GetPartRequest {
-  // The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
+  // The URL of the asker's bucket, as it names it (CLADEFSD_BUCKET): compared with this host's
+  // only while either has no region.
   string bucket = 1;
   // The object's key.
   string key = 2;
@@ -169,6 +172,10 @@ message GetPartRequest {
   // Where, how long and how its stored bytes were, as the asker's tail said, before TASK-407.
   reserved 4, 5, 6, 7;
   reserved "offset", "len", "crc", "encoding";
+  // The asker's region (TASK-633.4): its home bucket's number, 0 if it has none yet.
+  uint32 home = 8;
+  // The asker's root bucket's identity's ID, naming its system of buckets: 0 if it has none yet.
+  fixed64 root = 9;
 }
 
 // A part's stored bytes, as asked for.

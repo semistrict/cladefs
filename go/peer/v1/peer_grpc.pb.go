@@ -48,8 +48,10 @@ type PeerClient interface {
 	// or fetched from the bucket once, however many hosts ask at once, and kept. NOT_FOUND if this
 	// host has no such part: the object gone, or holding no part of that number. INVALID_ARGUMENT
 	// for an object whose parts are not served (a branch's record, a head, a cell's object, a
-	// reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
-	// fetching it failed.
+	// reference); FAILED_PRECONDITION if the asker is of another cloud region than this host (its
+	// home bucket another, or its root bucket's: peers never serve across regions, TASK-633.4), or,
+	// either of no region yet, its bucket's URL not this host's; UNAVAILABLE if fetching it failed.
+	// The object may be of any bucket of the system: the host fetches it from its cell's bucket.
 	GetPart(ctx context.Context, in *GetPartRequest, opts ...grpc.CallOption) (*GetPartResponse, error)
 	// This host's replica directory's incarnation: what a configuration naming it names.
 	Incarnation(ctx context.Context, in *IncarnationRequest, opts ...grpc.CallOption) (*IncarnationResponse, error)
@@ -158,8 +160,10 @@ type PeerServer interface {
 	// or fetched from the bucket once, however many hosts ask at once, and kept. NOT_FOUND if this
 	// host has no such part: the object gone, or holding no part of that number. INVALID_ARGUMENT
 	// for an object whose parts are not served (a branch's record, a head, a cell's object, a
-	// reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
-	// fetching it failed.
+	// reference); FAILED_PRECONDITION if the asker is of another cloud region than this host (its
+	// home bucket another, or its root bucket's: peers never serve across regions, TASK-633.4), or,
+	// either of no region yet, its bucket's URL not this host's; UNAVAILABLE if fetching it failed.
+	// The object may be of any bucket of the system: the host fetches it from its cell's bucket.
 	GetPart(context.Context, *GetPartRequest) (*GetPartResponse, error)
 	// This host's replica directory's incarnation: what a configuration naming it names.
 	Incarnation(context.Context, *IncarnationRequest) (*IncarnationResponse, error)

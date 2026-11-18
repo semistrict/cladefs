@@ -96,7 +96,12 @@
 //! comma-separated, each spelled as it names itself; the control API's `SetPeers` replaces them.
 //! The network is trusted: peers are unauthenticated, as every host reads the whole bucket anyway,
 //! and what a peer gives is checked against the CRCs of the asker's own tail of the object; on any
-//! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds.
+//! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds. cladefs:
+//! peers are of one cloud region (TASK-633.4, backlog doc-23): a host's region is its home
+//! bucket, and a peer refuses one of another region, or another system of buckets, which then
+//! asks it nothing again, nor counts it among a part's owners, whatever its list says; within the
+//! region, parts of any bucket are served, those of another region's buckets fetched from there
+//! once by their owner here.
 //! With `CLADEFSD_REPLICAS` naming a directory too, made if it is not there, the daemon is a
 //! member of other hosts' replicated cells' configurations (backlog doc-21, TASK-537): it keeps
 //! their writers' logs there until the bucket does, each cell's to the lag bound in bytes, and

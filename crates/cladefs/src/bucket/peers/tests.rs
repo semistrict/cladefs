@@ -62,13 +62,19 @@ struct InProcess {
     calls: AtomicU64,
     failing: AtomicBool,
     missing: AtomicBool,
+    /// cladefs: refusing as of another region (TASK-633.4).
+    foreign: AtomicBool,
 }
 
 impl Link for InProcess {
-    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>> {
+    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, Refusal>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         if self.failing.load(Ordering::Relaxed) {
-            return futures::future::ready(Err("unreachable".to_owned())).boxed();
+            return futures::future::ready(Err(Refusal::Failed("unreachable".to_owned()))).boxed();
+        }
+        if self.foreign.load(Ordering::Relaxed) {
+            let refused = Refusal::Foreign("another region".to_owned());
+            return futures::future::ready(Err(refused)).boxed();
         }
         if self.missing.load(Ordering::Relaxed) {
             return futures::future::ready(Ok(None)).boxed();
@@ -77,7 +83,8 @@ impl Link for InProcess {
         async move {
             let Asked { key, part } = asked;
             let served = serving.stored_part(&key, part).await;
-            served.map(|bytes| bytes.map(|bytes| bytes.to_vec())).map_err(|err| err.to_string())
+            let served = served.map(|bytes| bytes.map(|bytes| bytes.to_vec()));
+            served.map_err(|err| Refusal::Failed(err.to_string()))
         }
         .boxed()
     }
@@ -110,6 +117,7 @@ fn hosts(
                 calls: AtomicU64::new(0),
                 failing: AtomicBool::new(false),
                 missing: AtomicBool::new(false),
+                foreign: AtomicBool::new(false),
             };
             ((*address).to_owned(), Arc::new(link))
         })
@@ -191,6 +199,43 @@ fn a_peer_that_fails_is_asked_nothing_for_a_while() {
     assert!(member.health.up_at(Instant::now() + DOWN));
 }
 
+/// TASK-633.4: a peer that says it is of another region is never asked again, and owns no part:
+/// every part comes from this region, the bucket here, once the one asked refused. Peers never
+/// serve across regions.
+#[test]
+fn a_peer_of_another_region_is_never_asked_again() {
+    let data = noise(PARTS * PART);
+    let (bucket, location) = holding(&data);
+    let addresses = ["10.0.0.1:7070", "10.0.0.2:7070"];
+    let (hosts, links) = hosts(&bucket, &addresses, true);
+    assert!(owned(&addresses, addresses[1], &location.key) > 1, "the test needs two parts owned");
+    let other = &links[addresses[1]];
+    other.foreign.store(true, Ordering::Relaxed);
+    assert!(read_all(&hosts[0], &location) == data);
+    assert!(read_all(&hosts[0], &location) == data);
+    assert_eq!(other.calls.load(Ordering::Relaxed), 1, "asked again after it refused");
+    let member = hosts[0].peers.others.read().unwrap()[0].clone();
+    assert!(member.health.is_foreign());
+    assert!(member.health.up_at(Instant::now() + DOWN), "foreign is not down for a while");
+    for part in 0..PARTS as u64 {
+        assert!(hosts[0].peers.owner(&location.key, part).is_none(), "part {part} owned abroad");
+    }
+}
+
+/// TASK-633.4: hosts of one region serve each other; of another region, or another system of
+/// buckets, never; with no region yet, by their bucket's URL alone.
+#[test]
+fn peers_serve_their_region_alone() {
+    let (east, west) = (Region { home: 2, root: 7 }, Region { home: 3, root: 7 });
+    let other_system = Region { home: 2, root: 8 };
+    assert_eq!(admits((Some(east), "s3://e"), (Some(east), "s3://e")), Ok(()));
+    assert!(admits((Some(east), "s3://e"), (Some(west), "s3://e")).is_err());
+    assert!(admits((Some(east), "s3://e"), (Some(other_system), "s3://e")).is_err());
+    assert_eq!(admits((None, "file:///b"), (None, "file:///b")), Ok(()));
+    assert!(admits((None, "file:///b"), (None, "file:///c")).is_err());
+    assert_eq!(admits((Some(east), "s3://e"), (None, "s3://e")), Ok(()));
+}
+
 /// A peer without the part is no failure: the part comes from the bucket, and the peer is asked
 /// for the next.
 #[test]
@@ -245,6 +290,7 @@ fn peers_set_again_stay_as_they_were() {
         calls: AtomicU64::new(0),
         failing: AtomicBool::new(false),
         missing: AtomicBool::new(false),
+        foreign: AtomicBool::new(false),
     });
     let peers = Peers::new(addresses[0], move |_| link.clone());
     peers.set(addresses);
