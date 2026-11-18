@@ -1,0 +1,17 @@
+# What a store's own work may still add for what was written, its commits copying, logging and
+# framing it, which nothing refuses, is not weighed against a tenant's limit: its guests' writes
+# are admitted up to the limit, and its own work takes it past (doc-22, TASK-539.7). Before
+# TASK-539.5 a walk forgetting the writes in flight let it past so (TASK-94).
+# Kind: disk
+# Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
+--- a/crates/bucket_cell/src/host_disk.rs
++++ b/crates/bucket_cell/src/host_disk.rs
+@@ -138,7 +138,7 @@
+ 
+     /// What is taken, reserved and pledged: what an admission weighs a write against.
+     pub fn committed(&self) -> u64 {
+-        self.bytes() + self.reserved() + self.pledged()
++        self.bytes() + self.pledged()
+     }
+ 
+     /// Counts `bytes` more, `unframed` if so.

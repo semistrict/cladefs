@@ -1,16 +1,17 @@
 # A tenant's disk limit holds nothing: its VM processes' writes are admitted whatever its disk
 # takes, so one tenant fills the host's disk, every tenant's stores with it, its stores' capacities
-# alone bounding it, and it makes as many as it likes (TASK-94).
+# alone bounding it, and it makes as many as it likes (TASK-94; admitted by its stores since
+# TASK-539.8).
 # Kind: disk
 # Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
---- a/crates/cladefs/src/cladefsd/disk.rs
-+++ b/crates/cladefs/src/cladefsd/disk.rs
-@@ -169,7 +169,7 @@
-         if !take(&USED, TOTAL_LIMIT.load(Ordering::Relaxed)) {
-             return Err(self.refuse());
-         }
--        if !take(&self.used, self.limit.load(Ordering::Relaxed)) {
-+        if !take(&self.used, NONE) {
-             USED.fetch_sub(bytes, Ordering::SeqCst);
-             return Err(self.refuse());
-         }
+--- a/crates/local_cell/src/footprint.rs
++++ b/crates/local_cell/src/footprint.rs
+@@ -203,7 +203,7 @@
+         let over =
+             |tally: &Tally, limit: &AtomicU64| tally.committed() > limit.load(Ordering::Relaxed);
+         let full = match &allotment {
+-            Some(allotment) if over(&allotment.tally, &allotment.limit) => {
++            Some(allotment) if over(&allotment.tally, &AtomicU64::new(u64::MAX)) => {
+                 Some(DiskFull::Allotment)
+             }
+             Some(_) if over(&TOTAL.tally, &TOTAL.limit) => Some(DiskFull::Total),

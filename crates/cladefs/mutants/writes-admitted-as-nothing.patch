@@ -1,16 +1,17 @@
 # A write is admitted as nothing: a tenant's disk counts none of what its VM processes write until
-# a walk of its directory finds it, every 10 s, so that between walks they write past its limit
-# as fast as the disk takes it (TASK-94).
+# it lands, and nothing of what its store's own work may add for it, so that its writes in flight
+# pass its limit as fast as the disk takes them (TASK-94; admitted by its stores since
+# TASK-539.8).
 # Kind: disk
 # Killer: cladefsd::tests::hostile::a_tenant_filling_its_disk_leaves_others_committing
---- a/crates/cladefs/src/cladefsd/server.rs
-+++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1224,7 +1224,7 @@
-                     }
-                 };
-                 // cladefs: within its tenant's disk (TASK-94).
--                let _admitted = self.tenant.admit_to_disk(data.len() as u64)?;
-+                let _admitted = self.tenant.admit_to_disk(0)?;
-                 store.write_with_barriers(*extent, *offset, &[data], *barriers)
-             }
-             Request::Free(extent) => store.free(*extent),
+--- a/crates/local_cell/src/cell.rs
++++ b/crates/local_cell/src/cell.rs
+@@ -1587,7 +1587,7 @@
+         // cladefs: within its disk's allowance and its tenant's limits, with room left for what the
+         // store's own work adds for it, which nothing refuses (doc-22, TASK-539.8).
+         let pledge =
+-            self.dir.footprint().map(|footprint| footprint.admit(len, grows)).transpose()?;
++            self.dir.footprint().map(|footprint| footprint.admit(0, 0)).transpose()?;
+         if to_segment {
+             self.make_room(&mut state, len)?;
+         }
