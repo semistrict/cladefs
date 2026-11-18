@@ -251,6 +251,7 @@ message CreateCellRequest {
   // disks before the bucket, the hosts the daemon's peers (SetPeers); 0 for a cell durable off its
   // host once uploaded alone. At most 3. Unset keeps what the cell's head says, of a cell taken,
   // and makes a new one not replicated; set, it is the cell's from this taking on, on any host.
+  // Of 1 or more, refused by a daemon with no peers or no replica directory (ENOTSUP).
   optional uint32 replicas = 9;
   // What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
   // otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.

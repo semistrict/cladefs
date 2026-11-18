@@ -357,6 +357,16 @@ impl Cladefsd for Control {
             request.into_inner();
         let store = path(store)?;
         let replication = wish(replicas, fsync)?;
+        // cladefs: a replicated cell's members are the daemon's peers, in their replica
+        // directories (doc-21): without them, refused before anything is made.
+        if replication.is_some_and(|wish| wish.f >= 1) && crate::bucket::members().is_none() {
+            return Err(saying(
+                Errno::ENOTSUP,
+                "a replicated cell needs the daemon's peers and replica directory \
+                 (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS)"
+                    .to_owned(),
+            ));
+        }
         let kind = match CellKind::try_from(kind) {
             Ok(CellKind::Fxfs) => Kind::Fxfs,
             Ok(CellKind::Sqlite) => Kind::Sqlite,

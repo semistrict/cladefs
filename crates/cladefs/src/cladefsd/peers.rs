@@ -21,8 +21,8 @@ use proto::{
     GetPartRequest, GetPartResponse, IncarnationRequest, IncarnationResponse, LogEnd,
     ReadLogRequest, ReadLogResponse, ReplicaOf,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tonic::{Code, Request, Response, Status};
 
@@ -45,8 +45,6 @@ const THREADS: usize = 2;
 /// cladefs: how often a member's stream to or from a peer pings it, unanswered past [`CONNECT`]
 /// a stream to a peer down (doc-21): a writer's appends have no deadline, a stream's life being
 /// the configuration's.
-// TASK-537.3.3: the writer's side connects to its members so; until it lands, tests alone do.
-#[cfg_attr(not(test), allow(dead_code))]
 const KEEPALIVE: Duration = Duration::from_secs(5);
 
 /// cladefs: how much of a log a member sends a take at once (`ReadLog`).
@@ -99,6 +97,13 @@ pub fn start(
     };
     if let Some(replicas) = &replicas {
         sweeping(replicas.clone(), bucket.clone(), &runtime)?;
+        let members = ReplicaMembers {
+            bucket: url.clone(),
+            me: address.to_owned(),
+            incarnation: replicas.incarnation(),
+            runtime: runtime.clone(),
+        };
+        crate::bucket::replicate_with(Arc::new(members))?;
     }
     let serving = crate::bucket::serving_peers(bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
@@ -490,8 +495,6 @@ fn link(runtime: &tokio::runtime::Handle, address: &str, bucket: &str) -> Arc<dy
 /// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime: with
 /// no deadline on a request, as a writer's stream of appends lasts as long as its configuration,
 /// but pinging it, so that a member down ends its stream within [`KEEPALIVE`] and [`CONNECT`].
-// TASK-537.3.3: the writer's side connects to its members so; until it lands, tests alone do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn member(
     runtime: &tokio::runtime::Handle,
     address: &str,
@@ -507,6 +510,177 @@ pub(crate) fn member(
         .tcp_nodelay(true);
     let client = PeerClient::new(endpoint.connect_lazy());
     Ok(client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST))
+}
+
+/// cladefs: the hosts sharing the bucket, as a replicated cell's members (doc-21, TASK-537.3.3):
+/// this host, at `me`, of its replica directory's incarnation, and its peers, reached on
+/// `runtime`, the bucket runtime. Members are picked by rendezvous hashing of the cell and the
+/// configuration's number over the peers (`crate::bucket::peers::ranked`), each that answers its
+/// incarnation, distinct hosts.
+pub(crate) struct ReplicaMembers {
+    bucket: String,
+    me: String,
+    incarnation: u64,
+    runtime: tokio::runtime::Handle,
+}
+
+impl local_cell::upload::Members for ReplicaMembers {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        Ok(bucket_cell::layout::Member { address: self.me.clone(), incarnation: self.incarnation })
+    }
+
+    fn pick(
+        &self,
+        cell: crate::CellId,
+        number: u64,
+        f: u8,
+    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
+        let peers = crate::bucket::peers().ok_or("the daemon has no peers")?;
+        let addresses = peers.addresses();
+        let others = addresses.iter().map(String::as_str).filter(|address| *address != self.me);
+        let key = format!("{}.{}", cell.tenant, cell.id);
+        let wanted = 2 * usize::from(f);
+        let mut picked = Vec::with_capacity(wanted);
+        for address in crate::bucket::peers::ranked(others, &key, number) {
+            if picked.len() == wanted {
+                break;
+            }
+            match self.incarnation_of(address) {
+                Ok(incarnation) => picked
+                    .push(bucket_cell::layout::Member { address: address.to_owned(), incarnation }),
+                Err(err) => log::warn!("cladefsd: {address} as a member of {key}: {err}"),
+            }
+        }
+        if picked.len() < wanted {
+            return Err(format!(
+                "{} of the {wanted} members a configuration of f {f} needs answered, of {} peers",
+                picked.len(),
+                addresses.len().saturating_sub(1)
+            ));
+        }
+        Ok(picked)
+    }
+
+    fn link(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn local_cell::replicate::MemberLink> {
+        let of = ReplicaOf {
+            bucket: self.bucket.clone(),
+            tenant: cell.tenant,
+            cell: cell.id,
+            configuration: Some(proto::Configuration {
+                number: configuration.number,
+                epoch: configuration.epoch,
+            }),
+            incarnation: member.incarnation,
+        };
+        let client = member_client(&self.runtime, &member.address);
+        Arc::new(GrpcMember { runtime: self.runtime.clone(), client, of, stream: Mutex::default() })
+    }
+}
+
+impl ReplicaMembers {
+    /// The incarnation of the replica directory of the host at `address`, as it answers within
+    /// [`DEADLINE`]. Blocks.
+    fn incarnation_of(&self, address: &str) -> Result<u64, String> {
+        let mut client = member(&self.runtime, address)?;
+        let asked = IncarnationRequest { bucket: self.bucket.clone() };
+        let asking = async move { tokio::time::timeout(DEADLINE, client.incarnation(asked)).await };
+        // Called by a take's `local_cell::upload::blocking` section, off any task's thread.
+        match self.runtime.block_on(asking) {
+            Ok(Ok(answer)) => Ok(answer.into_inner().incarnation),
+            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+            Err(_) => Err(format!("no answer within {DEADLINE:?}")),
+        }
+    }
+}
+
+/// cladefs: a client of the member at `address`, checked a peer's when the peers were set.
+fn member_client(
+    runtime: &tokio::runtime::Handle,
+    address: &str,
+) -> PeerClient<tonic::transport::Channel> {
+    member(runtime, address).expect("a peer's address checked")
+}
+
+/// cladefs: a member of a replicated cell's configuration, reached over gRPC (doc-21): one stream
+/// of appends, opened as it is first needed, and again after any failure.
+struct GrpcMember {
+    runtime: tokio::runtime::Handle,
+    client: PeerClient<tonic::transport::Channel>,
+    of: ReplicaOf,
+    stream: Mutex<Option<Appending>>,
+}
+
+/// An open stream of appends to a member: where they go, and its answers.
+type Appending = (tokio::sync::mpsc::Sender<AppendRequest>, tonic::Streaming<AppendResponse>);
+
+/// cladefs: what the replicator makes of a member's refusal (peer.proto).
+fn link_error(status: &Status) -> local_cell::replicate::LinkError {
+    use local_cell::replicate::LinkError;
+    let what = format!("{:?}: {}", status.code(), status.message());
+    match status.code() {
+        Code::FailedPrecondition if status.message().contains("fenced") => LinkError::Fenced(what),
+        Code::Aborted | Code::FailedPrecondition => LinkError::Refused(what),
+        _ => LinkError::Down(what),
+    }
+}
+
+impl local_cell::replicate::MemberLink for GrpcMember {
+    fn append(
+        &self,
+        log: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, local_cell::replicate::LinkError> {
+        use local_cell::replicate::LinkError;
+        // One replicating thread per member calls this: the lock is never waited on.
+        let mut stream = self.stream.lock().unwrap();
+        let request =
+            AppendRequest { of: Some(self.of.clone()), log, offset, bytes: bytes.to_vec() };
+        let answered = self.runtime.block_on(async {
+            if stream.is_none() {
+                let (sending, sent) = tokio::sync::mpsc::channel(4);
+                let mut client = self.client.clone();
+                let answers = client
+                    .append(tokio_stream::wrappers::ReceiverStream::new(sent))
+                    .await
+                    .map_err(|status| link_error(&status))?
+                    .into_inner();
+                *stream = Some((sending, answers));
+            }
+            let (sending, answers) = stream.as_mut().unwrap();
+            if sending.send(request).await.is_err() {
+                return Err(LinkError::Down("the stream of appends ended".into()));
+            }
+            match answers.message().await {
+                Ok(Some(answer)) => Ok(answer.end),
+                Ok(None) => Err(LinkError::Down("the member ended the stream".into())),
+                Err(status) => Err(link_error(&status)),
+            }
+        });
+        if answered.is_err() {
+            *stream = None;
+        }
+        answered
+    }
+
+    fn drop_through(&self, through: u64) -> Result<(), local_cell::replicate::LinkError> {
+        let request = DropLogsRequest { of: Some(self.of.clone()), through: Some(through) };
+        let mut client = self.client.clone();
+        let dropping =
+            async move { tokio::time::timeout(DEADLINE, client.drop_logs(request)).await };
+        match self.runtime.block_on(dropping) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(link_error(&status)),
+            Err(_) => Err(local_cell::replicate::LinkError::Down(format!(
+                "no answer within {DEADLINE:?}"
+            ))),
+        }
+    }
 }
 
 /// A peer reached over gRPC.

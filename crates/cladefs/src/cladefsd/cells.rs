@@ -603,7 +603,9 @@ fn keeping() -> Result<local_cell::upload::Options, Errno> {
     })?;
     let (cache, interval) = (part_cache()?, upload_interval());
     let held = Some(super::memory::held_parts().clone());
-    Ok(local_cell::upload::Options { cache, held, token, interval, ..Default::default() })
+    // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
+    let members = crate::bucket::members().map(local_cell::upload::MembersOf);
+    Ok(local_cell::upload::Options { cache, held, token, interval, members, ..Default::default() })
 }
 
 /// How long the stores' durable commits wait at most before they upload: the uploader's default;

@@ -1,0 +1,245 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+/// A member in memory: its logs, and what it does when sent something.
+#[derive(Default)]
+struct Fake {
+    logs: Mutex<BTreeMap<u64, Vec<u8>>>,
+    dropped: Mutex<Option<u64>>,
+    /// What it answers instead of taking an append, if anything.
+    failing: Mutex<Option<LinkError>>,
+    appends: AtomicUsize,
+}
+
+impl Fake {
+    fn fail(&self, error: Option<LinkError>) {
+        *self.failing.lock().unwrap() = error;
+    }
+
+    fn log(&self, log: u64) -> Vec<u8> {
+        self.logs.lock().unwrap().get(&log).cloned().unwrap_or_default()
+    }
+
+    /// Loses what it held of `log`, as a member whose disk was replaced would.
+    fn lose(&self, log: u64) {
+        self.logs.lock().unwrap().remove(&log);
+    }
+}
+
+impl MemberLink for Fake {
+    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
+        if let Some(error) = self.failing.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.appends.fetch_add(1, Ordering::Relaxed);
+        let mut logs = self.logs.lock().unwrap();
+        let held = logs.entry(log).or_default();
+        let end = held.len() as u64;
+        if offset > end {
+            return Ok(end);
+        }
+        held.truncate(offset as usize);
+        held.extend_from_slice(bytes);
+        Ok(held.len() as u64)
+    }
+
+    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
+        if let Some(error) = self.failing.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.logs.lock().unwrap().retain(|&log, _| log > through);
+        *self.dropped.lock().unwrap() = Some(through);
+        Ok(())
+    }
+}
+
+fn members(count: usize) -> Vec<Arc<Fake>> {
+    (0..count).map(|_| Arc::new(Fake::default())).collect()
+}
+
+fn start(f: usize, base: u64, members: &[Arc<Fake>]) -> (Arc<Replicator>, Arc<AtomicUsize>) {
+    let notified = Arc::new(AtomicUsize::new(0));
+    let counted = notified.clone();
+    let links = members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect();
+    let spool = Arc::new(MemSpool::default());
+    let replicator = Replicator::start(f, base, spool, links, move || {
+        _ = counted.fetch_add(1, Ordering::Relaxed);
+    });
+    (replicator, notified)
+}
+
+/// Waits for `done` to hold, failing the test past 10 s.
+fn until(what: &str, done: impl Fn() -> bool) {
+    let started = Instant::now();
+    while !done() {
+        assert!(started.elapsed() < Duration::from_secs(10), "waited for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn flushed(epoch: u64, appends: &[(u64, u64, &[u8])]) -> Flushed {
+    Flushed {
+        epoch,
+        appends: appends
+            .iter()
+            .map(|&(log, offset, bytes)| (log, offset, bytes.to_vec()))
+            .collect(),
+    }
+}
+
+/// With f = 1, a commit is replicated once one member besides the writer holds it, not before;
+/// with both down, never, its waiters left to the bucket (doc-21's disjunction).
+#[test]
+fn commits_are_replicated_on_f_members_besides_the_writer() {
+    let members = members(2);
+    members[1].fail(Some(LinkError::Down("out of reach".into())));
+    let (replicator, notified) = start(1, 0, &members);
+    replicator.flushed(flushed(3, &[(log_of(1), 0, b"header+record")])).unwrap();
+    until("one member", || replicator.replicated() == 3);
+    assert!(notified.load(Ordering::Relaxed) >= 1);
+    assert_eq!(members[0].log(log_of(1)), b"header+record");
+    assert_eq!(replicator.down().len(), 1);
+
+    members[0].fail(Some(LinkError::Down("out of reach too".into())));
+    replicator.flushed(flushed(4, &[(log_of(1), 13, b"+next")])).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(replicator.replicated(), 3, "no member holds 4");
+    members[1].fail(None);
+    until("the other member, caught up from its start", || replicator.replicated() == 4);
+    assert_eq!(members[1].log(log_of(1)), b"header+record+next");
+}
+
+/// With f = 2, two of four members must hold a commit.
+#[test]
+fn f_of_two_needs_two_members() {
+    let members = members(4);
+    for member in &members[1..] {
+        member.fail(Some(LinkError::Down("down".into())));
+    }
+    let (replicator, _) = start(2, 0, &members);
+    replicator.flushed(flushed(7, &[(log_of(2), 0, b"x")])).unwrap();
+    until("the first member", || members[0].log(log_of(2)) == b"x");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(replicator.replicated(), 0);
+    members[3].fail(None);
+    until("two members", || replicator.replicated() == 7);
+}
+
+/// What a guest is told replicated counts the members only once the bucket holds the commits
+/// before the replicator started, which no member holds.
+#[test]
+fn commits_before_the_start_are_told_replicated_once_uploaded() {
+    let members = members(2);
+    let (replicator, _) = start(1, 10, &members);
+    replicator.flushed(flushed(12, &[(log_of(5), 0, b"x")])).unwrap();
+    until("replicated", || replicator.replicated() == 12);
+    assert_eq!(replicator.told(9), 9, "commit 10 is on no member, nor uploaded");
+    assert_eq!(replicator.told(10), 12);
+}
+
+/// A member answering less than it was sent, having lost what it held, is sent its log again from
+/// where it says it ends.
+#[test]
+fn members_that_lost_logs_are_sent_them_again() {
+    let members = members(2);
+    members[1].fail(Some(LinkError::Down("down".into())));
+    let (replicator, _) = start(1, 0, &members);
+    replicator.flushed(flushed(1, &[(log_of(1), 0, b"aaaa")])).unwrap();
+    until("held", || replicator.replicated() == 1);
+    members[0].lose(log_of(1));
+    replicator.flushed(flushed(2, &[(log_of(1), 4, b"bbbb")])).unwrap();
+    until("sent again from its start", || replicator.replicated() == 2);
+    assert_eq!(members[0].log(log_of(1)), b"aaaabbbb");
+}
+
+/// A log longer than a piece goes in pieces.
+#[test]
+fn long_logs_go_in_pieces() {
+    let members = members(2);
+    let (replicator, _) = start(1, 0, &members);
+    let long = vec![9; PIECE * 2 + 1];
+    replicator.flushed(flushed(1, &[(log_of(1), 0, &long)])).unwrap();
+    until("held", || replicator.replicated() == 1);
+    assert_eq!(members[0].log(log_of(1)), long);
+    assert!(members[0].appends.load(Ordering::Relaxed) >= 3);
+}
+
+/// A member saying a later epoch fenced the cell fences the writer: nothing more is replicated,
+/// and it is told.
+#[test]
+fn a_member_fencing_fences_the_writer() {
+    let members = members(2);
+    for member in &members {
+        member.fail(Some(LinkError::Fenced("fenced at epoch 9".into())));
+    }
+    let (replicator, notified) = start(1, 0, &members);
+    replicator.flushed(flushed(1, &[(log_of(1), 0, b"x")])).unwrap();
+    until("fenced", || replicator.fenced().is_some());
+    assert!(notified.load(Ordering::Relaxed) >= 1);
+    assert_eq!(replicator.replicated(), 0);
+}
+
+/// The head naming a segment drops its logs, here and on the members, and the marks of commits in
+/// them count as held, in the bucket.
+#[test]
+fn acknowledged_segments_are_dropped() {
+    let members = members(2);
+    members[1].fail(Some(LinkError::Down("down".into())));
+    let (replicator, _) = start(1, 0, &members);
+    replicator.flushed(flushed(1, &[(log_of(1), 0, b"one"), (own_of(1), 0, b"own")])).unwrap();
+    replicator.flushed(flushed(2, &[(log_of(2), 0, b"two")])).unwrap();
+    until("held", || replicator.replicated() == 2);
+    replicator.acknowledged(1);
+    until("dropped", || *members[0].dropped.lock().unwrap() == Some(own_of(1)));
+    assert_eq!(members[0].log(log_of(1)), b"");
+    assert_eq!(members[0].log(log_of(2)), b"two");
+    assert_eq!(replicator.spooled(), 3);
+    // The member down, back, is sent the drop and segment 2 alone.
+    members[1].fail(None);
+    until("the other caught up", || members[1].log(log_of(2)) == b"two");
+    assert_eq!(members[1].log(log_of(1)), b"");
+}
+
+/// Own extents' frames read back as framed, and a torn last frame not at all.
+#[test]
+fn own_frames_read_back() {
+    let mut bytes = own_frame(4, b"four");
+    bytes.extend(own_frame(9, b""));
+    bytes.extend(own_frame(12, b"twelve"));
+    assert_eq!(
+        own_frames(&bytes),
+        [(4, b"four".to_vec()), (9, Vec::new()), (12, b"twelve".to_vec())]
+    );
+    assert_eq!(own_frames(&bytes[..bytes.len() - 1]).len(), 2);
+}
+
+/// A spool that fails breaks the replicator: nothing more is sent, its commits wait for the bucket
+/// (degraded), and the flush that found it fails.
+#[test]
+fn a_spool_failing_breaks_the_replicator() {
+    struct Failing;
+    impl Spool for Failing {
+        fn append(&self, _: u64, _: u64, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("the disk is full"))
+        }
+        fn read(&self, _: u64, _: u64, _: u64) -> std::io::Result<Vec<u8>> {
+            unreachable!()
+        }
+        fn remove(&self, _: u64) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let members = members(2);
+    let links = members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect();
+    let replicator = Replicator::start(1, 0, Arc::new(Failing), links, || {});
+    assert!(replicator.flushed(flushed(1, &[(log_of(1), 0, b"x")])).is_err());
+    assert!(replicator.broken().is_some());
+    assert!(replicator.degraded());
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(members[0].log(log_of(1)), b"");
+}

@@ -412,6 +412,24 @@ impl<F: File> SegmentLog<F> {
         Self { file, end: LOG_RECORDS, salt, encryption }
     }
 
+    /// cladefs: its header, its first [`LOG_RECORDS`] bytes, which its replica starts with
+    /// ([`ReplicaLog`], TASK-537.3.3).
+    pub fn header(&self) -> std::io::Result<Vec<u8>> {
+        let mut header = vec![0; LOG_RECORDS as usize];
+        self.file.read_cached(&mut header, 0)?;
+        Ok(header)
+    }
+
+    /// cladefs: what MACs its records, which MACs its replica's too.
+    pub fn encryption(&self) -> &Arc<RawEncryption> {
+        &self.encryption
+    }
+
+    /// cladefs: whether it holds records: one appended to since it was made, or reused.
+    pub fn holds_records(&self) -> bool {
+        self.end > LOG_RECORDS
+    }
+
     /// Appends `records` after those before, encoded, salted ([`crate::layout::encode_salted`]),
     /// and syncs them. cladefs: keeping the log's pages in the host's page cache, as the open
     /// segment's raw file keeps its (TASK-301): a log is appended to and synced again and again,
@@ -423,10 +441,7 @@ impl<F: File> SegmentLog<F> {
     ) -> Result<(), Error> {
         let start = self.end;
         for record in records {
-            let mut payload = bincode::serialize(record).expect("records serialize");
-            let mac = self.encryption.mac(self.end, &payload);
-            payload.extend_from_slice(&mac);
-            let record = &crate::layout::frame_salted(&payload, self.salt);
+            let record = &framed(record, self.end, self.salt, &self.encryption);
             self.file.write_at(record, self.end)?;
             crate::written::wrote(crate::written::Kind::Log, record.len());
             self.end += record.len() as u64;
@@ -435,6 +450,66 @@ impl<F: File> SegmentLog<F> {
             self.file.sync_cached()?;
         }
         Ok(())
+    }
+}
+
+/// `record` as a log holds it at `at`: encoded, MACed at `at` by `encryption` (TASK-411.5), and
+/// framed, salted with `salt` ([`LOG_MAGIC`]).
+fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) -> Vec<u8> {
+    let mut payload = bincode::serialize(record).expect("records serialize");
+    let mac = encryption.mac(at, &payload);
+    payload.extend_from_slice(&mac);
+    crate::layout::frame_salted(&payload, salt)
+}
+
+/// cladefs: the commits the records of `log`, segment `segment`'s replica log as a member holds it,
+/// name, in order: read holding no key, as a taker restores it before it opens (TASK-537.3.3).
+pub(crate) fn replica_commits(log: &[u8], segment: SegmentId) -> Vec<u64> {
+    let records = LogRecord::decode(log, segment, None).unwrap_or_default();
+    records.iter().flat_map(|record| record.contents.commits.iter().copied()).collect()
+}
+
+/// cladefs: a segment's log as a replicated cell's members hold it (doc-21, TASK-537.3.3): the
+/// local log's header, then each of its records held whole ([`Runs::Held`], whatever the local
+/// log holds), framed, salted and MACed at its offset in this log as [`SegmentLog::append`] does
+/// in the local one. A log of the segment in its own right: a taker writes it as the segment's log
+/// beside an empty raw file, and recovers the segment from it, its records restoring their runs
+/// ([`LogRecord::restore`]).
+pub(crate) struct ReplicaLog {
+    end: u64,
+    salt: u64,
+    encryption: Arc<RawEncryption>,
+}
+
+impl ReplicaLog {
+    /// The replica of a segment's log whose header is `header`, the local log's first
+    /// [`LOG_RECORDS`] bytes: the bytes it starts with, and the log.
+    pub fn new(
+        header: &[u8],
+        segment: SegmentId,
+        encryption: Arc<RawEncryption>,
+    ) -> Result<(Vec<u8>, Self), Error> {
+        let salt = log_salt(header, segment)
+            .ok_or_else(|| anyhow::anyhow!("{segment:?}'s log has no header of its own"))?;
+        let bytes = header[..LOG_RECORDS as usize].to_vec();
+        Ok((bytes, Self { end: LOG_RECORDS, salt, encryption }))
+    }
+
+    /// The bytes `records`, each held whole, append to the log, at its end before.
+    pub fn append<'a>(&mut self, records: impl IntoIterator<Item = &'a LogRecord>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for record in records {
+            debug_assert!(!matches!(record.runs, Runs::Checked(_)), "a replica's records are held");
+            let record = framed(record, self.end, self.salt, &self.encryption);
+            self.end += record.len() as u64;
+            bytes.extend_from_slice(&record);
+        }
+        bytes
+    }
+
+    /// Where its next record goes.
+    pub fn end(&self) -> u64 {
+        self.end
     }
 }
 
