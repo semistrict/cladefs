@@ -152,8 +152,8 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     // log, which its store makes as it opens to write (backlog doc-14, `wal`), and the header of
     // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
     let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
-    let granule = bucket_cell::host_disk::GRANULE;
-    let wals: u64 = forks.iter().map(|fork| granule + counted(&fork.join("wal"))).sum();
+    let wal = |fork: &Path| std::fs::metadata(fork.join("wal")).unwrap().len();
+    let wals: u64 = forks.iter().map(|fork| bucket_cell::host_disk::counted(wal(fork))).sum();
     let opened = wals + forks.len() as u64 * LOG_HEADER;
     assert_eq!((full, stores(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
     let tenant = "{tenant=\"1\"}";
