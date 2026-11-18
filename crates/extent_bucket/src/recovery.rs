@@ -398,7 +398,7 @@ pub async fn recover_under(
 
 /// cladefs: the state of `branch` as [`recover_under`] finds it, starting from `head`, what a read of
 /// its head found, rather than a read of its own (TASK-449): as an opening store reads its head at
-/// once with its record, and a version's copy knows it has none. The head read before is as good as
+/// once with its record, and a store at a version knows it has none. The head read before is as good as
 /// one read now: it names what the branch held as of that read, the recovery is of that, and
 /// whatever takes the branch after goes on from what is there then (`Writer::take`). Something it
 /// names gone, it starts again from a read of the head, as [`recover_under`] does.

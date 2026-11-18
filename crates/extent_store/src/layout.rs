@@ -66,8 +66,8 @@ pub(crate) struct StoreFile {
     pub token: Option<u64>,
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
-    /// cladefs: the version of its branch it is a copy of, if it is one: its branch's state at the
-    /// version, which nothing writes, as a version's copy (doc-18, TASK-476).
+    /// cladefs: the version of its branch it is at, if it is one: its branch's state at the
+    /// version, which nothing writes, as a store at a version (doc-18, TASK-476).
     pub version: Option<u64>,
 }
 
@@ -580,7 +580,7 @@ mod tests {
         let named = StoreFile { kind: Some(Kind::Sqlite), ..kept.clone() };
         assert!(named.text().ends_with("\nkind sqlite\n"));
         assert_eq!(StoreFile::parse(&named.text()).unwrap(), named);
-        // cladefs: a version's copy names the version (TASK-476).
+        // cladefs: a store at a version names the version (TASK-476).
         let copy = StoreFile { version: Some(190), ..kept.clone() };
         assert!(copy.text().ends_with("version 000000000005y\n"));
         assert_eq!(StoreFile::parse(&copy.text()).unwrap(), copy);

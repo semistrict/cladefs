@@ -189,8 +189,8 @@ pub use extent_bucket::cell::Kind;
 pub use extent_frame::segment::{Branch, Cell};
 pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
 pub use host::{
-    create_host, create_host_copy, delete_host, host_branch, host_bucket, host_token, host_version,
-    made_host, place_host, unmade_host,
+    create_host, create_host_at_version, delete_host, host_branch, host_bucket, host_token,
+    host_version, made_host, place_host, unmade_host,
 };
 pub use layout::{Description, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};

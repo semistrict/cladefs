@@ -36,13 +36,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 /// The daemon's stores, by their keys ([`store_key`]): who holds each, a connection writing it or
-/// the daemon working on it, and what is open of it, the store connections have open or a copy
+/// the daemon working on it, and what is open of it, the store connections have open or a kept store
 /// kept open for forks.
-pub(super) type Table = StoreTable<Connection, ExtentStore, Copy>;
+pub(super) type Table = StoreTable<Connection, ExtentStore, Kept>;
 
 /// A store held ([`table`]): by a connection writing it, or by the daemon working on it, which no
 /// connection opens meanwhile; until it is dropped.
-pub(super) type Hold = store_table::Hold<'static, Connection, ExtentStore, Copy>;
+pub(super) type Hold = store_table::Hold<'static, Connection, ExtentStore, Kept>;
 
 /// The daemon's stores ([`Table`]).
 pub(super) fn table() -> &'static Table {
@@ -52,18 +52,18 @@ pub(super) fn table() -> &'static Table {
 
 /// Holds the store `key` names for `connection` to write it, once a connection whose VM process
 /// is gone lets it go, waiting at most [`CLOSING_WAIT`] (`EBUSY`), holding no thread meanwhile:
-/// `EBUSY` while a connection not going writes it. cladefs: the copy kept open of it for forks,
+/// `EBUSY` while a connection not going writes it. cladefs: the store kept open of it for forks,
 /// which the hold takes, closed, once the forks of it under way are done.
 pub(super) async fn hold_to_write(key: &Path, connection: Weak<Connection>) -> Result<Hold, Errno> {
-    let (hold, copy) = table().hold_to_write(key, connection, CLOSING_WAIT).await?;
-    close_copy(copy).await;
+    let (hold, kept) = table().hold_to_write(key, connection, CLOSING_WAIT).await?;
+    close_kept(kept).await;
     Ok(hold)
 }
 
 /// cladefs: the store followers have open at the key `hold` holds for a writer, or a writer's that
 /// went, which the writer takes over ([`ExtentStore::take_over`]), if one is: `EBUSY` if it is
 /// open in an arena not `arena` ([`in_arena`]), retired, or something is open in it; and as the
-/// store refuses a writer, a copy or a public base ([`crate::StoreAccess::may_write`]).
+/// store refuses a writer, a kept store or a public base ([`crate::StoreAccess::may_write`]).
 pub(super) fn take_over(
     hold: &Hold,
     arena: &Arc<Arena>,
@@ -148,11 +148,11 @@ pub(super) fn store_key(path: &Path) -> PathBuf {
 
 /// Holds the store `key` names for the daemon, which no connection opens meanwhile: `EBUSY` while
 /// a connection writes it, once a connection whose VM process is gone lets it go, waiting at most
-/// [`CLOSING_WAIT`]. cladefs: the copy kept open of it for forks, if any, closed: the daemon's work
+/// [`CLOSING_WAIT`]. cladefs: the store kept open of it for forks, if any, closed: the daemon's work
 /// on it but forking it has it alone (TASK-92.5). It blocks.
 fn hold_blocking(key: &Path) -> Result<Hold, Errno> {
     let hold = table().hold(key, Some(CLOSING_WAIT))?;
-    close_copy_blocking(hold.take_copy());
+    close_kept_blocking(hold.take_kept());
     Ok(hold)
 }
 
@@ -160,10 +160,10 @@ fn hold_blocking(key: &Path) -> Result<Hold, Errno> {
 /// (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM process opening
 /// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
 /// going writes it, or followers have it open; waits for one going, or the daemon's work, at most
-/// [`CLOSING_WAIT`]. The copy kept open of it for forks, if any, closed. It blocks.
+/// [`CLOSING_WAIT`]. The store kept open of it for forks, if any, closed. It blocks.
 pub(crate) fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
-    let (hold, copy) = table().hold_mounted(&store_key(path), CLOSING_WAIT)?;
-    close_copy_blocking(copy);
+    let (hold, kept) = table().hold_mounted(&store_key(path), CLOSING_WAIT)?;
+    close_kept_blocking(kept);
     Ok(MountHold(hold))
 }
 
@@ -174,12 +174,12 @@ pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Ho
 /// it waits.
 async fn hold(path: &Path) -> Result<Hold, Errno> {
     let hold = hold_to_fork(path).await?;
-    close_copy(hold.take_copy()).await;
+    close_kept(hold.take_kept()).await;
     Ok(hold)
 }
 
-/// cladefs: holds the store at `path` for the daemon, as [`hold`] does, but for the copy kept open
-/// of it, which it leaves open: to fork it, or open it to ([`copy`]).
+/// cladefs: holds the store at `path` for the daemon, as [`hold`] does, but for the store kept open
+/// of it, which it leaves open: to fork it, or open it to ([`kept_or_open`]).
 async fn hold_to_fork(path: &Path) -> Result<Hold, Errno> {
     table().hold_async(&store_key(path), CLOSING_WAIT).await
 }
@@ -218,7 +218,7 @@ pub(super) struct HeldStore {
 enum Then {
     /// The daemon's hold of its path.
     LetGo { _hold: Hold },
-    /// cladefs: what says a copy kept open is closed, to what closes it ([`Copy`]).
+    /// cladefs: what says a store kept open is closed, to what closes it ([`Kept`]).
     SayClosed { _closing: futures::channel::oneshot::Sender<std::convert::Infallible> },
 }
 
@@ -246,9 +246,9 @@ impl Here {
         Self(Some(Arc::new(HeldStore::new(store, hold))))
     }
 
-    /// cladefs: `copy`, a copy kept open for forks ([`keep`]).
-    fn kept(copy: Arc<HeldStore>) -> Self {
-        Self(Some(copy))
+    /// cladefs: `kept`, a store kept open for forks ([`keep`]).
+    fn kept(kept: Arc<HeldStore>) -> Self {
+        Self(Some(kept))
     }
 
     fn store(&self) -> &Arc<HeldStore> {
@@ -291,42 +291,42 @@ impl Capacity for Here {
     }
 }
 
-/// cladefs: how long a copy the daemon opened to fork stays open with no fork of it (TASK-92.5):
-/// a zygote's restores, which fork its snapshot's copy, come together, and the copy's opening,
+/// cladefs: how long a kept store the daemon opened to fork stays open with no fork of it (TASK-92.5):
+/// a zygote's restores, which fork its snapshot's kept store, come together, and the kept store's opening,
 /// attaching and closing, a second or more with object storage a region away, is paid once for
 /// them, rather than by each in turn, the last of them waiting for all those before it.
 const LINGER: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// cladefs: a copy the daemon opened to fork, kept open for the forks after it ([`keep`]): its
+/// cladefs: a kept store the daemon opened to fork, kept open for the forks after it ([`keep`]): its
 /// store, which they fork at once, as it is; what says it is closed, to what closes it, once the
 /// forks forking it are done; and when it was last forked. Kept in the daemon's [`table`], at the
 /// key of the store it is, of which no connection has anything open: what holds the store's path
-/// to work on it, but to fork it, closes the copy first ([`hold`], [`hold_to_write`]).
-pub(super) struct Copy {
+/// to work on it, but to fork it, closes the kept store first ([`hold`], [`hold_to_write`]).
+pub(super) struct Kept {
     store: Arc<HeldStore>,
     closed: futures::channel::oneshot::Receiver<std::convert::Infallible>,
     forked: std::time::Instant,
 }
 
-/// cladefs: the copy kept open at `key`, if one is, forked now.
+/// cladefs: the store kept open at `key`, if one is, forked now.
 fn kept(key: &Path) -> Option<Arc<HeldStore>> {
-    table().copy(key, |copy| {
-        copy.forked = std::time::Instant::now();
-        copy.store.clone()
+    table().kept(key, |kept| {
+        kept.forked = std::time::Instant::now();
+        kept.store.clone()
     })
 }
 
-/// cladefs: when `copy`, kept open at `key`, was last forked, if it is kept still.
-fn forked(key: &Path, copy: &Weak<HeldStore>) -> Option<std::time::Instant> {
-    let kept = |kept: &mut Copy| std::ptr::eq(Arc::as_ptr(&kept.store), copy.as_ptr());
-    table().copy(key, |copy| kept(copy).then_some(copy.forked)).flatten()
+/// cladefs: when `open`, kept open at `key`, was last forked, if it is kept still.
+fn forked(key: &Path, open: &Weak<HeldStore>) -> Option<std::time::Instant> {
+    let is_open = |kept: &mut Kept| std::ptr::eq(Arc::as_ptr(&kept.store), open.as_ptr());
+    table().kept(key, |kept| is_open(kept).then_some(kept.forked)).flatten()
 }
 
 /// cladefs: keeps `store`, opened to fork at the key `hold` holds, open for the forks after it
 /// (TASK-92.5), until none forks it for [`LINGER`] ([`let_go_when_idle`]), a fork of it fails
 /// ([`let_go_failed`]), or the daemon holds its path to work on it otherwise, or a connection to
 /// write it. Its caller found nothing open there: were something, the table would refuse it, and
-/// the copy, not kept, would close once its caller's fork is done.
+/// the kept store, not kept, would close once its caller's fork is done.
 fn keep(hold: &Hold, store: ExtentStore) -> Arc<HeldStore> {
     let (closing, closed) = futures::channel::oneshot::channel();
     // What says it is closed goes after the store.
@@ -334,77 +334,77 @@ fn keep(hold: &Hold, store: ExtentStore) -> Arc<HeldStore> {
         store: Arc::new(store),
         _then: Some(Then::SayClosed { _closing: closing }),
     });
-    let copy = Copy { store: store.clone(), closed, forked: std::time::Instant::now() };
-    match hold.keep(copy) {
+    let kept = Kept { store: store.clone(), closed, forked: std::time::Instant::now() };
+    match hold.keep(kept) {
         Ok(()) => {
             let idle = let_go_when_idle(hold.key().to_owned(), Arc::downgrade(&store));
             // On the runtime that lives as long as the daemon, whatever its caller's.
             drop(super::server::IO.spawn(idle));
         }
         Err(_) => log::error!(
-            "cladefsd: {} has something open already: the copy opened isn't kept",
+            "cladefsd: {} has something open already: the kept opened isn't kept",
             hold.key().display()
         ),
     }
     store
 }
 
-/// cladefs: closes `copy`, if given, a copy kept open its holder took, and returns once it is
+/// cladefs: closes `kept`, if given, a store kept open its holder took, and returns once it is
 /// closed: once the forks forking it are done. It blocks.
-fn close_copy_blocking(copy: Option<Copy>) {
-    let Some(Copy { store, closed, .. }) = copy else { return };
+fn close_kept_blocking(kept: Option<Kept>) {
+    let Some(Kept { store, closed, .. }) = kept else { return };
     drop(store);
     let _ = futures::executor::block_on(closed);
 }
 
-/// cladefs: closes `copy`, as [`close_copy_blocking`] does, holding no thread while it waits, its
+/// cladefs: closes `kept`, as [`close_kept_blocking`] does, holding no thread while it waits, its
 /// closing on a blocking thread.
-async fn close_copy(copy: Option<Copy>) {
-    let Some(Copy { store, closed, .. }) = copy else { return };
+async fn close_kept(kept: Option<Kept>) {
+    let Some(Kept { store, closed, .. }) = kept else { return };
     drop(tokio::task::spawn_blocking(move || drop(store)));
     let _ = closed.await;
 }
 
-/// cladefs: closes every copy kept open for forks, as the daemon drains (TASK-141.4), each under the
+/// cladefs: closes every store kept open for forks, as the daemon drains (TASK-141.4), each under the
 /// daemon's hold of its path, once the forks forking it are done, as [`let_go_when_idle`] closes
 /// one: those it takes no hold of, logged, are closed past the drain's bound, if at all.
-pub(super) async fn close_copies() {
-    for key in table().copies() {
+pub(super) async fn close_all_kept() {
+    for key in table().kept_keys() {
         if let Err(errno) = hold(&key).await {
-            log::warn!("cladefsd: closing the copy at {}: {errno}", key.display());
+            log::warn!("cladefsd: closing the kept at {}: {errno}", key.display());
         }
     }
 }
 
-/// cladefs: closes `copy`, kept open at `key`, once none has forked it for [`LINGER`], under the
+/// cladefs: closes `kept`, kept open at `key`, once none has forked it for [`LINGER`], under the
 /// daemon's hold of its path, so that no fork opens it anew as it closes; unless something closed
 /// it before, as a connection's opening it does, which this then leaves to it.
-async fn let_go_when_idle(key: PathBuf, copy: Weak<HeldStore>) {
+async fn let_go_when_idle(key: PathBuf, kept: Weak<HeldStore>) {
     loop {
-        let Some(last) = forked(&key, &copy) else { return };
+        let Some(last) = forked(&key, &kept) else { return };
         match LINGER.checked_sub(last.elapsed()).filter(|left| !left.is_zero()) {
             Some(left) => tokio::time::sleep(left).await,
             None => {
                 let Ok(hold) = hold_to_fork(&key).await else { return };
-                if forked(&key, &copy).is_some_and(|last| last.elapsed() >= LINGER) {
-                    return close_copy(hold.take_copy()).await;
+                if forked(&key, &kept).is_some_and(|last| last.elapsed() >= LINGER) {
+                    return close_kept(hold.take_kept()).await;
                 }
             }
         }
     }
 }
 
-/// cladefs: closes `copy`, kept open at `key`, if it is kept still, one of its forks having failed,
+/// cladefs: closes `kept`, kept open at `key`, if it is kept still, one of its forks having failed,
 /// as all do once another placement takes its branch: the next fork opens it anew, as each did
-/// before copies were kept. Under the daemon's hold of its path, as [`let_go_when_idle`] closes
-/// one; its caller holds the copy no more.
-async fn let_go_failed(key: &Path, copy: Weak<HeldStore>) {
-    if forked(key, &copy).is_none() {
+/// before kept stores were kept. Under the daemon's hold of its path, as [`let_go_when_idle`] closes
+/// one; its caller holds the kept store no more.
+async fn let_go_failed(key: &Path, kept: Weak<HeldStore>) {
+    if forked(key, &kept).is_none() {
         return;
     }
     let Ok(hold) = hold_to_fork(key).await else { return };
-    if forked(key, &copy).is_some() {
-        close_copy(hold.take_copy()).await;
+    if forked(key, &kept).is_some() {
+        close_kept(hold.take_kept()).await;
     }
 }
 
@@ -596,7 +596,7 @@ fn attached<T>(
 }
 
 /// How the daemon's stores' uploaders keep their branches in their buckets: with this host's
-/// placement's token, for a copy never placed; the host's cache of the bucket's objects; and the
+/// placement's token, for a kept store never placed; the host's cache of the bucket's objects; and the
 /// upload interval ([`upload_interval`]). cladefs: and what holds the parts their segments pack as
 /// they fill, which the daemon's memory governor lets go of first (`memory::held_parts`,
 /// TASK-400).
@@ -645,7 +645,7 @@ pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: crate::Error) -> Errn
 /// returns its branch: a new one, or `branch`, if given, whose store kept in the daemon's bucket
 /// the daemon takes once it opens it (`cladefsctl take`); placed at `token` if given ([`place`]).
 /// cladefs: made as [`ExtentStore::create_placed`] makes it, its head taken with `token`, not the
-/// daemon's, so that a copy placed later than the one on another host that took the branch last
+/// daemon's, so that a kept store placed later than the one on another host that took the branch last
 /// takes it over (TASK-266: `ESTALE`, its head taken with the daemon's token before it was
 /// placed).
 pub(super) async fn create(
@@ -779,7 +779,7 @@ async fn opened_version(cell: Branch, version: u64, capacity: u64) -> Result<Pat
             capacity,
             branch: cell,
         };
-        ExtentStore::create_copy(&made, (&url, kind), description, version)
+        ExtentStore::create_at_version(&made, (&url, kind), description, version)
             .map_err(|err| errno_of(format_args!("opening version {version} of {cell} here"), err))
     })
     .await?;
@@ -799,11 +799,11 @@ pub(super) async fn fork_version(
     (path, tenant): (&Path, Option<u64>),
 ) -> Result<(), Errno> {
     let from = opened_version(cell, version, capacity).await?;
-    match fork_copy(&from, capacity, (path, tenant)).await {
+    match fork_kept(&from, capacity, (path, tenant)).await {
         (Err(errno), Opened::Before) if store_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
             removed_if_unmade(path)?;
-            fork_copy(&from, capacity, (path, tenant)).await.0
+            fork_kept(&from, capacity, (path, tenant)).await.0
         }
         (forked, _) => forked,
     }
@@ -835,8 +835,8 @@ pub(super) async fn at_version(
     store: &ExtentStore,
 ) -> Result<(), Errno> {
     let from = opened_version(cell, version, capacity).await?;
-    let (copy, _) = copy(&from, capacity).await?;
-    if store.holds_what(&copy.store)? {
+    let (kept, _) = kept_or_open(&from, capacity).await?;
+    if store.holds_what(&kept.store)? {
         return Ok(());
     }
     log::warn!(
@@ -847,25 +847,25 @@ pub(super) async fn at_version(
     Err(Errno::EEXIST)
 }
 
-/// cladefs: forks the copy at `from` to `path`, as [`fork_version`] does, once: and says when the
-/// copy was opened. A copy whose fork fails is let go of ([`let_go_failed`]).
-async fn fork_copy(
+/// cladefs: forks the kept store at `from` to `path`, as [`fork_version`] does, once: and says when the
+/// kept store was opened. A kept store whose fork fails is let go of ([`let_go_failed`]).
+async fn fork_kept(
     from: &Path,
     capacity: u64,
     (path, tenant): (&Path, Option<u64>),
 ) -> (Result<(), Errno>, Opened) {
-    let (copy, opened) = match copy(from, capacity).await {
-        Ok(copy) => copy,
+    let (kept, opened) = match kept_or_open(from, capacity).await {
+        Ok(kept) => kept,
         Err(errno) => return (Err(errno), Opened::Now),
     };
-    // A new cell of `tenant`'s, or of the copy's tenant's (TASK-364).
-    let tenant = tenant.unwrap_or(copy.store.branch().cell.tenant);
-    let forked = copy.store.fork(path, tenant);
+    // A new cell of `tenant`'s, or of the kept store's tenant's (TASK-364).
+    let tenant = tenant.unwrap_or(kept.store.branch().cell.tenant);
+    let forked = kept.store.fork(path, tenant);
     let forked = forked.map(drop).map_err(|err| {
         errno_of(format_args!("forking {} to {}", from.display(), path.display()), err)
     });
-    let failed = Arc::downgrade(&copy);
-    drop(copy);
+    let failed = Arc::downgrade(&kept);
+    drop(kept);
     if forked.is_err_and(store_at_fault) {
         let_go_failed(&store_key(from), failed).await;
     }
@@ -873,14 +873,14 @@ async fn fork_copy(
 }
 
 /// cladefs: whether a fork that failed with `errno` may have failed by the store it forks, as a
-/// copy kept open whose branch another host took, which is let go of, and opened anew for a fork
+/// store kept open whose branch another host took, which is let go of, and opened anew for a fork
 /// once more: not by its child's path being taken (`EEXIST`), nor by the fork being refused, as of
-/// another tenant's copy not shared (`EACCES`, TASK-395.7), which no store opened anew changes.
+/// another tenant's kept store not shared (`EACCES`, TASK-395.7), which no store opened anew changes.
 fn store_at_fault(errno: Errno) -> bool {
     !matches!(errno, Errno::EEXIST | Errno::EACCES)
 }
 
-/// cladefs: when a restore's copy was opened ([`copy`]).
+/// cladefs: when a restore's kept store was opened ([`kept_or_open`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Opened {
     /// For it, or for the restores beside it.
@@ -889,20 +889,20 @@ enum Opened {
     Before,
 }
 
-/// cladefs: the copy at `from` for a restore to fork, of `capacity` bytes if the daemon takes its
+/// cladefs: the kept store at `from` for a restore to fork, of `capacity` bytes if the daemon takes its
 /// branch from its bucket into the store there ([`take_store`]), which forks fork at once
-/// (TASK-92.5): the copy kept open, if one is ([`kept`]); or, under the daemon's hold of its path,
+/// (TASK-92.5): the store kept open, if one is ([`kept`]); or, under the daemon's hold of its path,
 /// which no connection opens it meanwhile, the store followers have open, forked as it is, held
-/// until the fork is done; or the copy opened, kept open from then on ([`keep`]). And when it was
+/// until the fork is done; or the kept store opened, kept open from then on ([`keep`]). And when it was
 /// opened. A restore waiting for another's opening of it holds no thread.
-async fn copy(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), Errno> {
-    if let Some(copy) = kept(&store_key(from)) {
-        return Ok((copy, Opened::Before));
+async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), Errno> {
+    if let Some(kept) = kept(&store_key(from)) {
+        return Ok((kept, Opened::Before));
     }
     let hold = hold_to_fork(from).await?;
     // Opened by a restore that held it before, beside this one.
-    if let Some(copy) = kept(hold.key()) {
-        return Ok((copy, Opened::Now));
+    if let Some(kept) = kept(hold.key()) {
+        return Ok((kept, Opened::Now));
     }
     if let Some((store, _)) = hold.instance() {
         return Ok((Arc::new(HeldStore::new(store, Some(hold))), Opened::Now));
@@ -912,11 +912,11 @@ async fn copy(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), Er
 
 /// Forks the store at `from` to a new cell at `to`, and returns its branch: live, if a connection
 /// has it open, once nothing is open (`EBUSY` otherwise); or its followers, with no writer; or the
-/// copy kept open of it, as restores fork it (TASK-92.5), opened here if none is, and kept open for
+/// store kept open of it, as restores fork it (TASK-92.5), opened here if none is, and kept open for
 /// the forks after it. Its commits' uploads, which the fork follows, are waited for first, holding
 /// no thread; the fork, as of then, is made on a blocking thread. The store at `to` is held
 /// throughout, so that a connection opens the child only once the fork is made, in the bucket too
-/// (TASK-79.95). A copy kept open whose fork fails, as once another host took its cell, is opened
+/// (TASK-79.95). A store kept open whose fork fails, as once another host took its cell, is opened
 /// anew for one more fork ([`fork_version`], TASK-79.103). The child is a new cell of `tenant`'s, if
 /// given: the granted tenant's whose directory `to` is in; or else of `from`'s tenant's (TASK-364).
 /// A version not shared forks to no cell of another tenant's (`EACCES`, TASK-395.7); nor does a
@@ -941,7 +941,7 @@ async fn fork_from_store(from: &Path, to: &Path, tenant: Option<u64>) -> Result<
 }
 
 /// cladefs: forks the store at `from`, whose key is `key`, to `to`, which the caller holds, as
-/// [`fork`] does, once, to a new cell of `tenant`'s, and returns its branch. A copy whose fork fails is let go of ([`let_go_failed`]).
+/// [`fork`] does, once, to a new cell of `tenant`'s, and returns its branch. A kept store whose fork fails is let go of ([`let_go_failed`]).
 async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Branch, Errno> {
     let live = |connection: &Connection| {
         Some(Forked { store: Here::of(connection.store()?.clone(), None), live: true })
@@ -951,8 +951,8 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Br
             return Ok(Forked { store: Here::of(store, hold), live: true });
         }
         // Opened by a restore that held it before.
-        if let Some(copy) = kept(key) {
-            return Ok(Forked { store: Here::kept(copy), live: false });
+        if let Some(kept) = kept(key) {
+            return Ok(Forked { store: Here::kept(kept), live: false });
         }
         let opening = from.to_owned();
         let store = blocking(move || open_here(&opening)).await?;
@@ -964,7 +964,7 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Br
         Ok(Forked { store, live: false })
     };
     let forking = match kept(key) {
-        Some(copy) => Forked { store: Here::kept(copy), live: false },
+        Some(kept) => Forked { store: Here::kept(kept), live: false },
         None => store_requests::forking(table(), key, live, CLOSING_WAIT, open).await?,
     };
     let (store, live) = (forking.store.store().clone(), forking.live);
@@ -1082,12 +1082,12 @@ fn bucket_of(path: &Path) -> Result<Arc<extent_bucket::object_bucket::ObjectBuck
     }
 }
 
-/// cladefs: deletes this host's copy of the store at `path`, or of the fork whose handle it is
+/// cladefs: deletes this host's kept store of the store at `path`, or of the fork whose handle it is
 /// (TASK-154): as [`delete`] does, but for its branch in the daemon's bucket, which stays, for what
-/// else restores it: another host's copy, or this one's taken again. What its commits hold that
-/// the bucket doesn't goes with it. A copy the VM manager took for a tenant goes so: the tenant
+/// else restores it: another host's kept store, or this one's taken again. What its commits hold that
+/// the bucket doesn't goes with it. A kept store the VM manager took for a tenant goes so: the tenant
 /// restores it no more, and the snapshot lives on.
-pub(super) async fn drop_copy(path: PathBuf) -> Result<(), Errno> {
+pub(super) async fn drop_here(path: PathBuf) -> Result<(), Errno> {
     delete_alone(path, None).await
 }
 
@@ -1110,20 +1110,20 @@ async fn delete_alone(
 /// it open, if one does, which grows it, or shrinks it if its guest agrees, holding no thread while
 /// it waits for the guest's answer; or, if none does, here, growing it (`EBUSY` to shrink it, its
 /// guest not here to agree), no connection opening it meanwhile. cladefs: as the store's access says
-/// ([`crate::StoreAccess::may_resize`]): a copy's capacity, as all else of it, changes nowhere
+/// ([`crate::StoreAccess::may_resize`]): a kept store's capacity, as all else of it, changes nowhere
 /// (`EROFS`).
 pub(super) async fn resize(path: PathBuf, capacity: u64) -> Result<(), Errno> {
     let key = store_key(&path);
     let open = |hold: Option<Hold>| {
         let key = key.clone();
         blocking(move || {
-            // cladefs: open for followers, it grows as it is; the copy kept open of it for forks,
+            // cladefs: open for followers, it grows as it is; the store kept open of it for forks,
             // it opens anew, closed first (TASK-92.5): attached, as any store the daemon opens,
-            // which says whether it is a copy (TASK-160.10).
+            // which says whether it is a kept store (TASK-160.10).
             let store = match table().instance(&key) {
                 Some((store, _)) => store,
                 None => {
-                    close_copy_blocking(hold.as_ref().and_then(Hold::take_copy));
+                    close_kept_blocking(hold.as_ref().and_then(Hold::take_kept));
                     if !key.exists() {
                         return Err(Errno::ENOENT);
                     }

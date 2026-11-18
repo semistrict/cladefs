@@ -762,7 +762,11 @@ impl ExtentStore {
     pub fn access(&self) -> StoreAccess {
         let role = match &self.following {
             Some(_) => StoreRole::Follower,
-            None if self.uploader.as_ref().is_some_and(extent_store::upload::Uploader::is_copy) => {
+            None if self
+                .uploader
+                .as_ref()
+                .is_some_and(extent_store::upload::Uploader::is_at_version) =>
+            {
                 StoreRole::Version
             }
             None => StoreRole::Writer,
@@ -1499,7 +1503,7 @@ impl ExtentStore {
     /// cladefs: what the store's uploader has done, and has left to do, if it has one
     /// (TASK-50.5).
     pub fn upload_status(&self) -> Result<Option<extent_store::upload::UploadStatus>> {
-        let uploading = self.uploader.as_ref().filter(|uploader| !uploader.is_copy());
+        let uploading = self.uploader.as_ref().filter(|uploader| !uploader.is_at_version());
         uploading.map(|uploader| uploader.status().map_err(upload_errno)).transpose()
     }
 
@@ -1949,26 +1953,26 @@ impl ExtentStore {
         Ok(uploader.share_version(id, shared).map_err(upload_errno)?)
     }
 
-    /// cladefs: the version of its cell it is a copy of, if it is one ([`ExtentStore::copy_version`]).
+    /// cladefs: the version of its cell it is at, if it is one ([`ExtentStore::open_version_at`]).
     pub fn version(&self) -> Option<u64> {
         self.store.version()
     }
 
     /// cladefs: opens the version `id` of the store's cell at `path`, which must not exist, as the
-    /// daemon opens a version for forks of it ([`ExtentStore::create_copy`]), once the version is
+    /// daemon opens a version for forks of it ([`ExtentStore::create_at_version`]), once the version is
     /// uploaded: for tests of forks of versions.
     #[cfg(test)]
-    pub(crate) fn copy_version(&self, path: impl AsRef<Path>, id: u64) -> Result<(), Error> {
+    pub(crate) fn open_version_at(&self, path: impl AsRef<Path>, id: u64) -> Result<(), Error> {
         let path = path.as_ref();
         let kind = self.store.kind().ok_or(Errno::EINVAL)?;
         let url = self.store.bucket().ok_or(Errno::EINVAL)?;
-        Self::create_copy(path, (url, kind), self.store.description(), id)
+        Self::create_at_version(path, (url, kind), self.store.description(), id)
     }
 
     /// cladefs: makes a store at `path`, which must not exist, of the version `id` of the cell
     /// `description` names, of `kind`, kept in the bucket at `url`: what the daemon opens a version
     /// in for forks of it on a host, nothing writing it.
-    pub fn create_copy(
+    pub fn create_at_version(
         path: &Path,
         (url, kind): (&str, Kind),
         description: extent_store::Description,
@@ -1978,7 +1982,7 @@ impl ExtentStore {
             std::io::ErrorKind::AlreadyExists => Error::new(Errno::EEXIST),
             _ => Error::new(anyhow::Error::new(err).context(format!("making {}", path.display()))),
         })?;
-        let made = extent_store::create_host_copy(path, description, url, kind, id)
+        let made = extent_store::create_host_at_version(path, description, url, kind, id)
             .and_then(|()| extent_store::made_host(path));
         if let Err(err) = made {
             let _ = std::fs::remove_dir_all(path);
@@ -1987,13 +1991,13 @@ impl ExtentStore {
         Ok(())
     }
 
-    /// cladefs: makes a version, uploaded, and opens it at `path` as [`ExtentStore::copy_version`]
+    /// cladefs: makes a version, uploaded, and opens it at `path` as [`ExtentStore::open_version_at`]
     /// does: for tests of forks of versions.
     #[cfg(test)]
-    pub(crate) fn copy_uploaded(&self, path: impl AsRef<Path>) -> Result<u64, Error> {
+    pub(crate) fn uploaded_version_at(&self, path: impl AsRef<Path>) -> Result<u64, Error> {
         let id = self.make_version(None)?;
         self.make_uploaded()?;
-        self.copy_version(path, id)?;
+        self.open_version_at(path, id)?;
         Ok(id)
     }
 

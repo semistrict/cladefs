@@ -164,8 +164,8 @@ fn made(branch: Branch) -> MemDir {
     dir
 }
 
-/// A store's directory, made, a copy of the version `id` of `branch` ([`Store::make_copy`]).
-fn made_copy(branch: Branch, id: u64) -> MemDir {
+/// A store's directory, made, a store at the version `id` of `branch` ([`Store::make_copy`]).
+fn made_at_version(branch: Branch, id: u64) -> MemDir {
     let dir = MemDir::new();
     let description = Description { block_size: 4096, capacity: 1 << 30, branch };
     Store::make_copy(&dir, description, Some("memory:///encrypted"), None, Some(id)).unwrap();
@@ -574,7 +574,7 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
 /// record and checkpoint, and its keys.
 fn forked(store: &Store<MemDir>, uploader: &Uploader<MemDir>, child: Child) -> Result<(), Failure> {
     let inheriting = uploader.inheriting(child)?;
-    let epoch = match uploader.is_copy() {
+    let epoch = match uploader.is_at_version() {
         true => 0,
         false => store.commit_fork(child).unwrap(),
     };
@@ -705,7 +705,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(world.calls(), (0, 3));
 }
 
-/// TASK-411.4 AC #1, #2: a copy of a version reads what it names under its branch's cell's KEK.
+/// TASK-411.4 AC #1, #2: a store at a version reads what it names under its branch's cell's KEK.
 /// Shared, the version forks into a cell of another tenant's, the clone keeping the keys it
 /// inherits rewrapped under its own cell's KEK, with no KMS call. A host whose KMS refuses the
 /// version's tenant opens no copy of it, so forks none; a host holding a copy open, told the
@@ -726,7 +726,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     uploader.wait_uploaded(epoch.unwrap()).unwrap();
     uploader.share_version(id, true).unwrap();
     drop((store, uploader));
-    let point_dir = made_copy(test_branch(7), id);
+    let point_dir = made_at_version(test_branch(7), id);
 
     // A host whose KMS refuses the version's tenant: no copy, no fork.
     world.kms.inner().revoke(TENANT).unwrap();
@@ -738,29 +738,29 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     // before anything of it is made.
     let forker = world.pooled_host(7);
     let kms = forker.runtime.keys.kms.clone();
-    let (copy, copy_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
+    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
     let clone = child_in(OTHER, 4, 10);
-    let refused = forked(&copy, &copy_uploader, clone).unwrap_err();
+    let refused = forked(&copy, &version_uploader, clone).unwrap_err();
     let revoked = extent_bucket::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert!(!world.has_record(clone.branch) && world.cell_of(clone.branch.cell).is_none());
     assert_eq!(kms.in_pool(OTHER), 4);
-    drop((copy, copy_uploader));
+    drop((copy, version_uploader));
 
-    // Another host's copy forks it: no KMS call but its origin's cell's KEK unwrapped as the copy
+    // Another host's copy forks it: no KMS call but its origin's cell's KEK unwrapped as the store at the version
     // opened.
     let forker = world.pooled_host(8);
     let kms = forker.runtime.keys.kms.clone();
     world.kms.reset();
-    let (copy, copy_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
+    let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
     assert_eq!(world.calls(), (0, 1));
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
     world.kms.reset();
-    forked(&copy, &copy_uploader, clone).unwrap();
+    forked(&copy, &version_uploader, clone).unwrap();
     assert_eq!(world.calls(), (0, 0));
     let record = world.record(clone.branch);
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
@@ -769,7 +769,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let clone_dir = made(clone.branch);
     let (clone_store, _clone_uploader) = open_on(&world, &forker, &clone_dir).unwrap();
     assert_eq!(read(&world, &forker, &clone_store, a, 4096), Ok(noise(1, 4096)));
-    drop((copy, copy_uploader, clone_store, _clone_uploader));
+    drop((copy, version_uploader, clone_store, _clone_uploader));
 
     world.kms.inner().destroy(TENANT).unwrap();
     let other = world.host(9);

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Restores of one version on several hosts with something going wrong at each of their steps
-//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of a version's copy
+//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of a store at a version
 //! failing, on each host; its host dying there; or, there, other hosts restoring the version and a
 //! pass of the collector running, or the version being dropped; or a write of it going wrong.
 //! Then, whatever came of it, what [`Hosts::settle`] checks: no fork told it was made lost
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// How many hosts hold a copy of the version, none of them its cell's writer.
+/// How many hosts hold a store at the version, none of them its cell's writer.
 const HOSTS: usize = 3;
 
 /// What goes wrong in a restore on one of the hosts.
@@ -166,7 +166,7 @@ impl Hosts {
                     branch: source.branch(),
                 };
                 let kind = extent_bucket::cell::Kind::Fxfs;
-                ExtentStore::create_copy(&path, (&url, kind), description, version).unwrap();
+                ExtentStore::create_at_version(&path, (&url, kind), description, version).unwrap();
             }
             let copy = reopened(&path, options()).unwrap();
             assert_eq!(copy.access().role, StoreRole::Version, "host {host} holds no copy");
@@ -346,7 +346,10 @@ impl Hosts {
             match reopened(&path, options()) {
                 Ok(copy) => self.copies[host] = Some(Arc::new(copy)),
                 Err(err) => {
-                    assert!(self.deleted.load(Ordering::SeqCst), "{case}: the copy: {err}");
+                    assert!(
+                        self.deleted.load(Ordering::SeqCst),
+                        "{case}: the store at the version: {err}"
+                    );
                 }
             }
         }

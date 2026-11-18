@@ -1107,7 +1107,7 @@ mod tests {
     /// A store's uploader holds its directory taken until it stops, after the store closed: the
     /// store's closing let it go, and its uploader, which uploads the store's last commits as it
     /// stops, wrote the branch's marker in the directory after, while another process, a crash
-    /// test's copy, had taken it, and the copy found the marker's new file gone (TASK-129, GCE, the
+    /// test's copy, had taken it, and the store at the version found the marker's new file gone (TASK-129, GCE, the
     /// DAX gate's second run).
     #[test]
     fn uploaders_hold_their_stores_directory_until_they_stop() {
@@ -1274,7 +1274,7 @@ mod tests {
             false => base,
             true => {
                 let path = dir.path().join("copy");
-                base.copy_uploaded(&path).unwrap();
+                base.uploaded_version_at(&path).unwrap();
                 drop(base);
                 reopened(&path, idle()).unwrap()
             }
@@ -1492,7 +1492,7 @@ mod tests {
                 false => base,
                 true => {
                     let path = dir.path().join("copy");
-                    base.copy_uploaded(&path).unwrap();
+                    base.uploaded_version_at(&path).unwrap();
                     reopened(&path, idle()).unwrap()
                 }
             };
@@ -3044,7 +3044,7 @@ mod tests {
     /// A fork of a store kept in object storage is a fork of its branch there, recorded once the
     /// parent uploaded through it: it inherits the parent's extents rather than upload them again,
     /// and what either commits after is its own.
-    /// TASK-160.10: a version's copy refuses all that would change what it holds, with `EROFS`,
+    /// TASK-160.10: a store at a version refuses all that would change what it holds, with `EROFS`,
     /// whoever asks: writes, frees, commits, a resize, a writer taking it over. What changes none
     /// of its extents it does: it forks, and is made public.
     #[test]
@@ -3056,7 +3056,7 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"root")).unwrap();
         let path = dir.path().join("copy");
-        source.copy_uploaded(&path).unwrap();
+        source.uploaded_version_at(&path).unwrap();
         drop(source);
 
         let version = reopened(&path, idle()).unwrap();
@@ -3098,7 +3098,7 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"base")).unwrap();
         let path = dir.path().join("copy");
-        let version = source.copy_uploaded(&path).unwrap();
+        let version = source.uploaded_version_at(&path).unwrap();
         source.free(extent).unwrap();
         source.commit(Some(b"later")).unwrap();
         // Another fork, gone: a checkpoint past the version's, so that only the version, and its
@@ -3166,7 +3166,7 @@ mod tests {
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"base")).unwrap();
         let path = dir.path().join("copy");
-        let version = source.copy_uploaded(&path).unwrap();
+        let version = source.uploaded_version_at(&path).unwrap();
         source.free(extent).unwrap();
         source.commit(Some(b"later")).unwrap();
         let delete = |path: &std::path::Path| {

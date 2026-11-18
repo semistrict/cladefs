@@ -198,7 +198,7 @@ pub struct Ring {
     places: HashMap<u64, Branch>,
     encrypted: BTreeSet<u64>,
     encrypting: Option<KeyId>,
-    /// cladefs: a copy's, the DEK it encrypts what nothing writes under ([`Ring::for_copy`]): none of
+    /// cladefs: a store at a version's, the DEK it encrypts what nothing writes under ([`Ring::for_version`]): none of
     /// its DEKs, which nothing inherits nor any host's fetchers hold.
     unwritten: Option<Arc<Secret>>,
     /// The branch whose store it was opened for ([`ring`]): what a host forgetting a tenant's or a
@@ -266,11 +266,11 @@ impl Ring {
         Arc::new(ring)
     }
 
-    /// cladefs: this ring, a version's copy's store's, `branch`'s, given a key to encrypt what
-    /// nothing writes under (TASK-411.28): a copy's store's open segment, which no write reaches (a
-    /// copy is read-only), is encrypted as every store's is, under a DEK drawn for it alone, of
-    /// generation 0, which no record keeps, never written out.
-    pub fn for_copy(&self, branch: Branch) -> Arc<Self> {
+    /// cladefs: this ring, a store's at a version of `branch`, given a key to encrypt what nothing
+    /// writes under (TASK-411.28): its open segment, which no write reaches, is encrypted as every
+    /// store's is, under a DEK drawn for it alone, of generation 0, which no record keeps, never
+    /// written out.
+    pub fn for_version(&self, branch: Branch) -> Arc<Self> {
         let id = KeyId { branch: branch.id, generation: 0 };
         let unwritten = Some(Arc::new(Secret::random()));
         let (deks, places, encrypted) =

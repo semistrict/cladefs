@@ -17,7 +17,7 @@
 //! one that plainly diverged before the head is taken refuses before, fencing no writer. A branch
 //! with no record is made, a root (`extent_bucket::branch::create`).
 //!
-//! **A copy of a version** takes no head (doc-20): its store holds the version's state, recovered,
+//! **A store at a version** takes no head (doc-20): its store holds the version's state, recovered,
 //! which nothing writes, and no log; nothing it does goes to the bucket but its forks' records
 //! ([`Uploader::forked`], `extent_bucket::branch::fork_version`). Any number of hosts hold one at
 //! once.
@@ -378,8 +378,8 @@ pub(crate) struct Shared<D: Dir, B: extent_bucket::Bucket = ObjectBucket> {
     writer: Mutex<Option<Arc<Writer<B>>>>,
     /// The fencing token its writers take the branch's head with, once one did.
     token: std::sync::OnceLock<u64>,
-    /// cladefs: the version the store is a copy of, if it is one (TASK-476).
-    copy: std::sync::OnceLock<Copy>,
+    /// cladefs: the version the store is at, if it is one (TASK-476).
+    at_version: std::sync::OnceLock<AtVersion>,
     /// The origins of the forks of the segments the uploader took, by their children: what a fork
     /// that fails deletes its child by (TASK-165.7).
     forks: Mutex<std::collections::BTreeMap<Branch, Origin>>,
@@ -433,9 +433,9 @@ fn blocking<T>(work: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(work)
 }
 
-/// cladefs: a version of its branch a store is a copy of, and the segment its branch's head names
+/// cladefs: a version of its branch a store is at, and the segment its branch's head names
 /// it at (TASK-476): its forks fork the version, which its branch's head must name still.
-struct Copy {
+struct AtVersion {
     origin: Origin,
     version: u64,
     /// The ring its forks' checkpoints at the version are sealed under, its branch's newest DEK,
@@ -615,7 +615,7 @@ impl<D: Dir> Uploader<D> {
     /// took it after [`Uploader::child_free`] found it free (`extent_bucket::Error::IdTaken`): the
     /// fork failed, and the uploader goes on.
     ///
-    /// A fork of a copy of a version commits nothing: the child's record is the fork, and fails if
+    /// A fork of a store at a version commits nothing: the child's record is the fork, and fails if
     /// the version was dropped ([`Failure::VersionDropped`]; `branch::fork_version`).
     ///
     /// cladefs: a fork into another cell, `inheriting` given ([`Uploader::inheriting`]), then gives
@@ -647,20 +647,20 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// Makes the fork the store made of its branch with its commit `epoch` a fork of the branch in
-    /// object storage, its child's record and checkpoint ([`Uploader::forked`]). A fork of a copy
+    /// object storage, its child's record and checkpoint ([`Uploader::forked`]). A fork of a store at a version
     /// of a version says what it made: its checkpoint at the version, for a child of another cell,
     /// sealed under the version's branch's keys (TASK-476).
     fn fork_made(&self, epoch: u64, child: Child) -> Result<Made, Failure> {
         let shared = &self.shared;
-        if let Some(copy) = shared.copy.get() {
+        if let Some(at) = shared.at_version.get() {
             let holding = async { None };
             let (child, owner) = (child.branch, child.owner);
-            let keys = keys::Parents::Held(&copy.sealing);
+            let keys = keys::Parents::Held(&at.sealing);
             let forking = branch::fork_version_with(
                 &*self.bucket,
                 child,
-                copy.version,
-                copy.origin,
+                at.version,
+                at.origin,
                 owner,
                 keys,
                 holding,
@@ -709,14 +709,14 @@ impl<D: Dir> Uploader<D> {
     /// the fork's segment gave the child its origin, if the uploader took it; or of no parent, if
     /// it never did. It is deleted as the host's placement (`Options::token`).
     ///
-    /// cladefs: a fork of a version, this store a copy of it, as a fork of the version, naming its
+    /// cladefs: a fork of a version, this store at it, as a fork of the version, naming its
     /// origin: its record deleted then names it, so that its cell's pass of the collector retires
     /// the reference the fork wrote under the origin's cell (TASK-395.3). As a branch of its own,
     /// naming none, the reference would stay for ever.
     pub fn unfork(&self, child: Child) -> Result<(), Failure> {
         let origin = self.shared.fork_origin(child.branch);
-        let forked = match (self.shared.copy.get(), origin) {
-            (Some(copy), _) => Kind::Forking { origin: copy.origin, version: copy.version },
+        let forked = match (self.shared.at_version.get(), origin) {
+            (Some(at), _) => Kind::Forking { origin: at.origin, version: at.version },
             (None, None) => Kind::Own,
             (None, Some(origin)) => Kind::Fork(origin),
         };
@@ -742,7 +742,7 @@ impl<D: Dir> Uploader<D> {
     /// Whether `child`'s ID is free in object storage for a fork the store is making of its
     /// branch, before the fork's commit: unless another branch has it, as a guest may give any,
     /// whose record its parent's writers, finding it another's, would fail on for ever. One GET of
-    /// the child's record. cladefs: a fork of a copy of a version needs none: its child's record's
+    /// the child's record. cladefs: a fork of a store at a version needs none: its child's record's
     /// create finds any there, and refuses it alike (`branch::fork_version`, TASK-449).
     pub fn child_free(&self, child: Branch) -> Result<bool, Failure> {
         let found = block_on(branch::record(&*self.bucket, child))??;
@@ -753,7 +753,7 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: the store's versions (doc-18, TASK-476): those its branch's head names, uploaded,
     /// as its writer last swapped it, oldest first; then those its commits cut that the head names
     /// not yet, local, each by its commit's number, which [`Remote::uploaded`] waits for. None of a
-    /// version's or a version's copy, which has no writer.
+    /// version's or a store at a version, which has no writer.
     pub fn versions(&self) -> Versions {
         let uploaded = match self.shared.writer() {
             Some(writer) => block_on(writer.versions()).unwrap_or_default(),
@@ -768,7 +768,7 @@ impl<D: Dir> Uploader<D> {
 
     /// cladefs: drops the versions `ids` names, uploaded or local: the head swapped to name them
     /// no more, and no acknowledgement naming those local (`Writer::drop_versions`, TASK-476).
-    /// Fails with no writer, of a version's or a version's copy.
+    /// Fails with no writer, of a version's or a store at a version.
     pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
         self.store().forget_versions(ids);
@@ -782,10 +782,10 @@ impl<D: Dir> Uploader<D> {
         Ok(block_on(writer.share_version(id, shared))??)
     }
 
-    /// Whether the store is a copy of a version: nothing it does goes to object storage but its
+    /// Whether the store is a store at a version: nothing it does goes to object storage but its
     /// forks' records.
-    pub fn is_copy(&self) -> bool {
-        self.shared.copy.get().is_some()
+    pub fn is_at_version(&self) -> bool {
+        self.shared.at_version.get().is_some()
     }
 
     /// The lowest sequence number the store's guest may mint extents' IDs from, which the writer's
@@ -855,7 +855,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             store: std::sync::OnceLock::new(),
             writer: Default::default(),
             token: Default::default(),
-            copy: Default::default(),
+            at_version: Default::default(),
             forks: Default::default(),
             progress: Mutex::new(Progress::default()),
             changed: Event::new(),
@@ -1345,8 +1345,8 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
         // (TASK-411.28); its forks' checkpoints sealed under its branch's.
         let sealing = keys.clone();
-        let keys = keys.for_copy(branch);
-        let _ = self.copy.set(Copy { origin, version: id, sealing });
+        let keys = keys.for_version(branch);
+        let _ = self.at_version.set(AtVersion { origin, version: id, sealing });
         Ok((recovered, keys))
     }
 

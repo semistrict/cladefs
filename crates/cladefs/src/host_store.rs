@@ -54,7 +54,7 @@ pub(crate) fn may_fork_into(
     tenant: u64,
 ) -> Result<(), Error> {
     let own = parent.cell.tenant;
-    if uploader.is_copy() || own == DEFAULT_TENANT || own == tenant {
+    if uploader.is_at_version() || own == DEFAULT_TENANT || own == tenant {
         return Ok(());
     }
     let refused = format!(
@@ -452,10 +452,12 @@ fn fork_in<H>(
     };
     // A fork of a version needs no look first: its child's record's create refuses a record there
     // alike (`Uploader::child_free`, TASK-449).
-    if !uploader.is_copy() && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+    if !uploader.is_at_version()
+        && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?
+    {
         return Err(Error::new(taken(branch)));
     }
-    let made = match uploader.is_copy() {
+    let made = match uploader.is_at_version() {
         true => {
             drop(held);
             uploader.forked(0, child, inheriting).map_err(failed)
@@ -533,7 +535,7 @@ pub(crate) fn delete(
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
-    // A version's copy deletes nothing in the bucket: the version is its cell's.
+    // A store at a version deletes nothing in the bucket: the version is its cell's.
     delete_with(path, |dir, branch| match bucket {
         Some(_) if extent_store::host_version(dir)?.is_some() => Ok(()),
         Some(bucket) => {

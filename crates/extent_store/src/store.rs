@@ -235,7 +235,7 @@ pub struct Store<D: Dir> {
     lineage: BTreeSet<u64>,
     /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
     kind: Option<Kind>,
-    /// cladefs: the version of its branch it is a copy of, if it is one (TASK-476).
+    /// cladefs: the version of its branch it is at, if it is one (TASK-476).
     version: Option<u64>,
     /// cladefs: the versions its commits cut that its branch's head may not name yet, by the
     /// numbers of the commits cutting them: those of its write-ahead log, and those cut since it
@@ -827,7 +827,7 @@ impl<D: Dir> Recovering<D> {
         self.file.kind
     }
 
-    /// cladefs: the version of its branch it is a copy of, if its description names one: its
+    /// cladefs: the version of its branch it is at, if its description names one: its
     /// branch's state at it, which nothing writes (doc-18, TASK-476).
     pub fn version(&self) -> Option<u64> {
         self.file.version
@@ -1197,7 +1197,7 @@ impl<D: Dir> Store<D> {
 
     /// cladefs: makes a new store's directory in `dir`, as [`Store::make`] does, a copy of the
     /// version `version` of its branch, if given: its branch's state at the version, which nothing
-    /// writes, as a version's copy holds the version's (doc-18, TASK-476).
+    /// writes, as a store at a version holds the version's (doc-18, TASK-476).
     pub fn make_copy(
         dir: &D,
         description: Description,
@@ -1406,7 +1406,7 @@ impl<D: Dir> Store<D> {
         self.cuts.lock().unwrap().retain(|_, cut| !ids.contains(&cut.id));
     }
 
-    /// cladefs: the version of its branch it is a copy of, if it is one (TASK-476).
+    /// cladefs: the version of its branch it is at, if it is one (TASK-476).
     pub fn version(&self) -> Option<u64> {
         self.version
     }
@@ -2384,7 +2384,7 @@ impl<D: Dir> Store<D> {
             }
             let file = match &mut framed {
                 Some(file) => file,
-                // Its raw parts before are no parts of a copy's, encrypted with AES-GCM: framed anew,
+                // Its raw parts before are no parts of a store at a version's, encrypted with AES-GCM: framed anew,
                 // whole.
                 None if end > 0 => {
                     self.write_own(state, extent, len, |at, buf| raw.read_cached(buf, at))?;

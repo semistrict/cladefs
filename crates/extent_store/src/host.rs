@@ -31,10 +31,10 @@ pub fn create_host(
     Store::make(&HostDir::new(path)?, description, Some(bucket), Some(kind))
 }
 
-/// cladefs: makes a new store at `path` as [`create_host`] does, a copy of the version `version` of
+/// cladefs: makes a new store at `path` as [`create_host`] does, a store at the version `version` of
 /// its branch: the branch's state at the version, which nothing writes, and which forks fork
 /// (doc-18, doc-20). Opening it reads the version from the bucket, once the cell's head names it.
-pub fn create_host_copy(
+pub fn create_host_at_version(
     path: &Path,
     description: Description,
     bucket: &str,
@@ -245,7 +245,7 @@ pub fn host_bucket(path: &Path) -> Result<Option<String>, Error> {
     Ok(store_file(path)?.bucket)
 }
 
-/// cladefs: the version of its branch the store at `path` is a copy of, if it is one.
+/// cladefs: the version of its branch the store at `path` is at, if it is one.
 pub fn host_version(path: &Path) -> Result<Option<u64>, Error> {
     Ok(store_file(path)?.version)
 }

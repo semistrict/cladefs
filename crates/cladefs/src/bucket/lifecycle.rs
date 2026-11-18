@@ -445,7 +445,7 @@ impl Made {
         let url = super::tests::url_of(bucket);
         let description = extent_store::Description { block_size: BLOCK as u32, capacity, branch };
         let kind = extent_bucket::cell::Kind::Fxfs;
-        ExtentStore::create_copy(&self.at(name), (&url, kind), description, version).unwrap();
+        ExtentStore::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
         ExtentStore::take_with(self.at(name), (capacity, branch, None), opening()).unwrap()
     }
 
@@ -479,7 +479,7 @@ fn based(
     base.commit(None).unwrap();
     drop(base);
     let base = open(&made.join("base"));
-    let (version, asked, _) = run.asked(|| base.copy_uploaded(made.join("copy")).unwrap());
+    let (version, asked, _) = run.asked(|| base.uploaded_version_at(made.join("copy")).unwrap());
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} version of the base: {line}");
     (base.branch(), version)

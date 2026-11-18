@@ -394,7 +394,7 @@ impl Cladefsd for Control {
         request: Request<DropStoreRequest>,
     ) -> Result<Response<DropStoreResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::drop_copy(store).await.map(|()| DropStoreResponse {}))
+        reply(stores::drop_here(store).await.map(|()| DropStoreResponse {}))
     }
 
     async fn resize_store(
