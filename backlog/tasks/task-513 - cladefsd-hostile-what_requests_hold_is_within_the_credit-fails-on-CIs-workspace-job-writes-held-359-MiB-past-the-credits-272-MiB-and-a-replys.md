@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 04:32'
-updated_date: '2026-11-18 04:33'
+updated_date: '2026-11-18 06:35'
 labels:
   - bug
   - flaky
@@ -32,3 +32,9 @@ CI run on main 558c354e2 (test (workspace)): assertion at crates/cladefs/src/cla
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+CI history with TASK-444.13's heap counting: failed on 558c354e2 and 08dc77a00, passed on 457603481 and ddc9ac1f7; passed before on 073feb370 and ad2b6a371. Intermittent, 2 of 4 since; whether the counting (the old allocation held until realloc returns, not released before) raises the peak under load is open.
+<!-- SECTION:NOTES:END -->

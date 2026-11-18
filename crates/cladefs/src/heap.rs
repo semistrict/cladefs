@@ -134,7 +134,7 @@ mod tests {
         let before = held();
         let mut bytes = Vec::<u8>::new();
         assert!(bytes.try_reserve_exact(isize::MAX as usize).is_err());
-        assert_eq!(held(), before);
+        assert_held_as(before);
     }
 
     /// A growth the system refuses leaves what was held held: it was counted as the new size
@@ -144,6 +144,13 @@ mod tests {
         let mut bytes = vec![0u8; 4096];
         let before = held();
         assert!(bytes.try_reserve_exact(isize::MAX as usize - bytes.len()).is_err());
-        assert_eq!(held(), before);
+        assert_held_as(before);
+    }
+
+    /// The heap holds what it held `before`, give or take what the process's other threads, the
+    /// test harness's, allocated meanwhile, a few bytes: a refusal counted was `isize::MAX`'s.
+    fn assert_held_as(before: usize) {
+        let held = held();
+        assert!(held.abs_diff(before) < 1 << 20, "{held} bytes held, {before} before");
     }
 }
