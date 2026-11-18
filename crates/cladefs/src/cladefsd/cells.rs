@@ -756,8 +756,13 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
     if dir.exists() && !crate::host_cell::unmade(&dir) {
         return Ok(dir);
     }
-    let writers = table().instances().into_iter().filter(|(_, store)| store.cell() == cell);
-    for (path, _) in writers.collect::<Vec<_>>() {
+    // Their paths alone: a reference to a store kept across its sync would keep it from closing
+    // (TASK-648).
+    let writers: Vec<PathBuf> = (table().instances().into_iter())
+        .filter(|(_, store)| store.cell() == cell)
+        .map(|(path, _)| path)
+        .collect();
+    for path in writers {
         sync(path).await?;
     }
     let made = dir.clone();
@@ -1073,7 +1078,14 @@ pub(super) async fn sync(path: PathBuf) -> Result<(), Errno> {
     if let Some(store) = open_by_connection(&path) {
         return uploaded(&store).await;
     }
-    let here = Here::open(&path, hold(&path).await?).await?;
+    let held = hold(&path).await?;
+    // A store its connection let go of may live on a while, its last reference dropped on a
+    // blocking thread: synced as it is, under the hold, never opened a second time beside it,
+    // which this process's claim on its directory refuses (TASK-648).
+    if let Some((store, _)) = held.instance() {
+        return uploaded(&store).await;
+    }
+    let here = Here::open(&path, held).await?;
     let synced = uploaded(here.store()).await;
     here.close().await;
     synced

@@ -4445,6 +4445,40 @@ fn control_forks_failing_fork_again() {
     served.join().unwrap();
 }
 
+/// TASK-648: a fork of a version made right after its writer's connection went, the store still
+/// open in this process as its last reference is dropped, syncs that store as it is: before, it
+/// opened it again beside it, which this process's claim on its directory refused (`EBUSY`). Here
+/// the store lingers by a reference the test keeps, as a close on a blocking thread, or a busy
+/// host, would.
+#[test]
+fn forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
+    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
+    let extent = minted(&made);
+    write(&made, extent, 0, &pattern(5, BLOCK)).unwrap();
+    made.commit(Some(b"root")).unwrap();
+    let version = made.make_version().unwrap();
+    let key = super::cells::store_key(&store);
+    let lingering = super::cells::table().instance(&key).map(|(store, _)| store);
+    assert!(lingering.is_some(), "the store is not open");
+    drop(made);
+    let forked = control(super::cells::fork_of_version(
+        version_cell(version),
+        version.version,
+        restored.clone(),
+        None,
+    ));
+    assert_eq!(forked.map(drop), Ok(()));
+    drop(lingering);
+    let ours = CellClient::connect(&socket, &restored, 0).unwrap();
+    assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
+}
+
 /// TASK-44.10: a restore, a fork of a version, which commits nothing, failing once its child's record
 /// is made, its cleanup failing with it, leaves nothing at the restore's path, and in the bucket an
 /// orphan, the child's record live (doc-14): a restore there forks anew. Before, it left a handle
