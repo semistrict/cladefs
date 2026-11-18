@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:23'
-updated_date: '2026-11-18 18:56'
+updated_date: '2026-11-18 19:23'
 labels: []
 dependencies: []
 priority: high
@@ -33,16 +33,16 @@ When a commit leaves more than FREE_BATCH (64) extents dying, commit_root mints 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 After a commit whose root names a dying list (65 or more extents left dying by VACUUM, a full-row UPDATE, a truncation or a delete), a clean close followed by an open succeeds and reads every file as last committed, for a SQLite cell (sqlite_extents::FileSet::close) and for a memory cell (MemoryCell::close then MemoryCell::open).
-- [ ] #2 A file set opened after a crash whose root names a dying list, then closed with no commit in between, opens again.
-- [ ] #3 A regression test in extent_files on a FakeDevice writes a file in 70 commits to fresh chunks (small max_extent_blocks), truncates it to 0 and syncs so the root names a dying list, closes, and reopens from the device's image expecting success and an empty file; a second case reopens after the listing commit, closes with no commit and reopens again; both go red with the fix reverted.
+- [x] #1 After a commit whose root names a dying list (65 or more extents left dying by VACUUM, a full-row UPDATE, a truncation or a delete), a clean close followed by an open succeeds and reads every file as last committed, for a SQLite cell (sqlite_extents::FileSet::close) and for a memory cell (MemoryCell::close then MemoryCell::open).
+- [x] #2 A file set opened after a crash whose root names a dying list, then closed with no commit in between, opens again.
+- [x] #3 A regression test in extent_files on a FakeDevice writes a file in 70 commits to fresh chunks (small max_extent_blocks), truncates it to 0 and syncs so the root names a dying list, closes, and reopens from the device's image expecting success and an empty file; a second case reopens after the listing commit, closes with no commit and reopens again; both go red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -66,4 +66,12 @@ Checked with the code temporarily changed:
 - With refresh remapping while pages are fetched, the held-page case fails and the random runs do not: random fetches rarely land on a clean, mapped page (holes can't be fetched), so the fixed case carries that check.
 
 Not covered: memory cells (crates/cladefs/src/memory_cell.rs is Linux-only and needs the daemon) have no close-then-reopen test yet. FakeDevice::close only sets a flag, while DaemonDevice and ImageDevice commit on close, so crash images never include what close freed.
+
+Fixed: Inner::list holds the list extent the last root names, apart from inner.dying; close() frees only inner.dying; the next commit counts the list among its dying (restored on a failed write); extents() names it. Verified: macOS scripts/test.sh clippy+workspace, 2622 passed. ubu1 (fxjob): extent_files, sqlite_extents and cladefs memory tests, 68 passed. New cladefsd test a_memory_cell_opens_again_after_a_commit_freeing_many_extents fails with 'reading the dying extents' list' on the old file_set.rs and passes with the fix. The extent_files model and the sqlite test were red before the fix and are green after it. upstream-changes.py --check passes; extent_files is cladefs's own code, so no upstream deviation. Linux full workspace: left to CI on main.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+FileSet::close no longer frees the dying list the last root names, so a file set opens again after closing. Covered by the extent_files random model with close/reopen and crash ops, SQLite rounds closed after each, and a memory-cell close-and-reopen test; all red before the fix.
+<!-- SECTION:FINAL_SUMMARY:END -->
