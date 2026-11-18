@@ -431,6 +431,9 @@ struct cladefs_dax_extent {
  */
 ssize_t cladefs_dax_extents(struct cladefs *fs, u64 ino, u64 offset, u64 len,
 			 struct cladefs_dax_extent *out, size_t max);
+/* The first max pieces in the interval. A short batch exhausts the lookup. */
+ssize_t cladefs_extent_batch(struct cladefs *fs, u64 ino, u64 offset, u64 len,
+			     struct cladefs_dax_extent *out, size_t max);
 /*
  * Extended attributes of inode `ino`, by their full names (`user.x`): getxattr(2)'s and
  * listxattr(2)'s semantics, ssize_t results as theirs (the length, or with `size` 0 the length

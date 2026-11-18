@@ -7,8 +7,8 @@
 //! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_ENCRYPTED`), and this checks, holding no key, what
 //! their stores left:
 //!
-//! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a cell
-//!   that wrote anything, but versions' and deleted ones', has a DEK; every framed object (segments,
+//! - **The buckets**: every cell has a wrapped KEK (or was shredded); every live cell
+//!   that wrote objects has a DEK; every framed object (segments,
 //!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
 //! - **The stores' directories**: no framed file in the clear, no segment's log headed so
@@ -62,7 +62,6 @@ pub fn kms(dir: &Path) -> anyhow::Result<()> {
 pub struct Report {
     pub stores: usize,
     pub cells: usize,
-    pub records: usize,
     pub objects: usize,
     pub files: usize,
     pub bytes: u64,
@@ -75,9 +74,9 @@ pub struct Report {
 impl Report {
     /// What it looked at, on a line.
     pub fn summary(&self) -> String {
-        let Self { stores, cells, records, objects, files, bytes, unread, clear } = self;
+        let Self { stores, cells, objects, files, bytes, unread, clear } = self;
         let mut said = format!(
-            "{stores} stores, {cells} cells, {records} records, {objects} objects, {files} files \
+            "{stores} stores, {cells} cells, {objects} objects, {files} files \
              ({} MiB) read: {} in the clear",
             bytes >> 20,
             clear.len()
@@ -220,37 +219,40 @@ async fn bucket(
     let store =
         bucket_cell::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
     let listed = store.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
-    let mut written = BTreeSet::new();
-    let mut records = Vec::new();
+    let written: BTreeSet<_> = listed
+        .iter()
+        .filter_map(|meta| match layout::kind(&meta.key) {
+            layout::Kind::Segment { cell, .. }
+            | layout::Kind::Extent { cell, .. }
+            | layout::Kind::Checkpoint { cell, .. } => Some(cell),
+            _ => None,
+        })
+        .collect();
     for meta in &listed {
         let key = meta.key.as_str();
         let at = || format!("{url} {key}");
+        let Some(object) = bucket_cell::bucket::get(&store, key).await else {
+            continue; // Deleted since it was listed.
+        };
         let framed = match layout::kind(key) {
-            layout::Kind::Segment { cell, .. }
-            | layout::Kind::Extent { cell, .. }
-            | layout::Kind::Checkpoint { cell, .. } => {
-                written.insert(cell);
-                true
-            }
-            layout::Kind::Moves { .. } => true,
-            layout::Kind::Cell { cell } => {
+            layout::Kind::Segment { .. }
+            | layout::Kind::Extent { .. }
+            | layout::Kind::Checkpoint { .. }
+            | layout::Kind::Moves { .. } => true,
+            layout::Kind::Head { cell } => {
                 report.cells += 1;
-                match bucket_cell::cell::read(&store, cell).await.with_context(at)? {
-                    Some(object) if object.keks.is_empty() && !object.shredded => {
-                        report.clear.push(format!("{}: cell {cell}: no KEK, in the clear", at()));
-                    }
-                    _ => {}
+                let head = layout::Head::decode(cell, &object.bytes).with_context(at)?;
+                if head.keks.is_empty() && !head.shredded {
+                    report.clear.push(format!("{}: cell {cell}: no KEK, in the clear", at()));
+                }
+                if head.deks.is_empty() && !head.deleted() && written.contains(&cell) {
+                    report
+                        .clear
+                        .push(format!("{}: cell {cell} wrote objects, its head has no DEK", at()));
                 }
                 false
             }
-            layout::Kind::Record { cell } => {
-                records.push(cell);
-                false
-            }
             _ => false,
-        };
-        let Some(object) = bucket_cell::bucket::get(&store, key).await else {
-            continue; // Deleted since it was listed.
         };
         report.objects += 1;
         report.bytes += object.bytes.len() as u64;
@@ -263,16 +265,6 @@ async fn bucket(
         }
         if let Some(offset) = finder.find(&object.bytes) {
             report.clear.push(format!("{}: holds known plaintext at {offset}", at()));
-        }
-    }
-    for cell in records {
-        report.records += 1;
-        let Some(record) = bucket_cell::lifecycle::record(&store, cell).await? else { continue };
-        if record.deks.is_empty() && !record.deleted && written.contains(&cell) {
-            report.clear.push(format!(
-                "{url} {}: cell {cell} wrote objects, its record has no DEK",
-                layout::record(cell)
-            ));
         }
     }
     Ok(())

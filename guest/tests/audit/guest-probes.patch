@@ -7,10 +7,10 @@
 +static unsigned long audit_fail_flags_ino;
 +module_param_named(audit_fail_flags_ino, audit_fail_flags_ino, ulong, 0644);
 +
- int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
+ static int cladefs_vfs_store_attr(struct inode *inode, u32 valid, u32 flags, struct timespec64 ctime)
  {
  	struct timespec64 atime = inode_get_atime(inode), mtime = inode_get_mtime(inode);
-@@ -238,6 +241,8 @@
+@@ -237,6 +240,8 @@
  		.ctime_ns = timespec64_to_ns(&ctime),
  	};
  
@@ -19,25 +19,25 @@
  	return cladefs_nofs(cladefs_write_inode(cladefs_vfs_fs(inode->i_sb), inode->i_ino, &set));
  }
  
-@@ -929,6 +934,11 @@
+@@ -948,6 +953,11 @@
  }
  
- /* The most of a file's data whose pieces one call asks Fxfs for, and so the most pieces. */
+ /* Limit the number of pieces copied per lookup, irrespective of the distance between them. */
 +static unsigned long audit_seek_tid;
 +module_param_named(audit_seek_tid, audit_seek_tid, ulong, 0644);
 +static unsigned long audit_seek_calls;
 +module_param_named(audit_seek_calls, audit_seek_calls, ulong, 0444);
 +
- #define CLADEFS_EXTENT_WINDOW (1 << 20)
- #define CLADEFS_EXTENT_BATCH (CLADEFS_EXTENT_WINDOW / PAGE_SIZE)
+ #define CLADEFS_EXTENT_BATCH 256
  
-@@ -952,6 +962,8 @@
+ /*
+@@ -970,6 +980,8 @@
  
  		/* cladefs: a follower's window as of one state; `fn` may copy out, which may fault. */
  		cladefs_vfs_fill_begin(inode->i_sb);
 +		if (READ_ONCE(audit_seek_tid) == current->pid)
 +			audit_seek_calls++;
- 		count = cladefs_nofs(cladefs_dax_extents(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
+ 		count = cladefs_nofs(cladefs_extent_batch(cladefs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
  						   extents, CLADEFS_EXTENT_BATCH));
  		cladefs_vfs_fill_end(inode->i_sb);
 --- a/guest/linux/fs/cladefs/dax.c
@@ -72,16 +72,20 @@
  static unsigned long cladefs_dax_pause_steps;
  module_param_named(dax_pause, cladefs_dax_pause_steps, ulong, 0644);
  MODULE_PARM_DESC(dax_pause, "Steps (bits) of the DAX protocol tasks wait at, until cleared (pause points)");
-@@ -652,6 +674,8 @@
- static bool cladefs_dax_range_dirty(const struct cladefs_dax_range *range)
- {
- 	lockdep_assert_held(&range->file->sem);
-+	if (READ_ONCE(audit_visit_tid) == current->pid)
-+		audit_range_visits++;
- 	return cladefs_dax_pages_any_dirty(range->state);
+@@ -2333,8 +2355,11 @@
+ 	size_t dirty = 0;
+ 
+ 	lockdep_assert_held(&file->sem);
+-	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0)
++	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
++		if (READ_ONCE(audit_visit_tid) == current->pid)
++			audit_range_visits++;
+ 		dirty++;
++	}
+ 	return dirty;
  }
  
-@@ -2362,6 +2386,10 @@
+@@ -2371,6 +2396,10 @@
  	 * them, and an fsync returns only once they are durable. Returning at once, as no page was
  	 * dirty, an fsync met by the worker's writeback sealed none of its pages (guest/sim, seed 962).
  	 */
@@ -92,7 +96,7 @@
  	mutex_lock(&file->wb_lock);
  	if (!atomic_long_read(&file->dirty_pages))
  		goto out;
-@@ -2374,6 +2402,13 @@
+@@ -2383,6 +2412,13 @@
  		goto out;
  	}
  	down_read(&file->sem);
@@ -106,7 +110,16 @@
  	most = cladefs_dax_dirty_ranges(file);
  	up_read(&file->sem);
  	/*
-@@ -2428,6 +2463,8 @@
+@@ -2412,6 +2448,8 @@
+ 		most = now;
+ 	}
+ 	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
++		if (READ_ONCE(audit_visit_tid) == current->pid)
++			audit_range_visits++;
+ 		xa_clear_mark(&file->ranges, chunk, XA_MARK_0);
+ 		batch[nr].range = range;
+ 		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */
+@@ -2436,6 +2474,8 @@
  		cladefs_dax_put_range(dax, batch[i].range);
  	atomic64_inc(&dax->writebacks);
  	written = pages - kept;
@@ -115,7 +128,7 @@
  	atomic64_add(written, &dax->written);
  	/*
  	 * As the page cache's writeback: what an I/O error stopped is clean, the error the file's
-@@ -2545,11 +2582,25 @@
+@@ -2553,11 +2593,25 @@
  	size_t nr = 0, most = 0;
  	unsigned long ino;
  
@@ -143,7 +156,7 @@
  	if (most)
  		*files = cladefs_nofs(kvmalloc_array(most, sizeof(**files), GFP_KERNEL));
  	if (*files) {
-@@ -2560,6 +2611,15 @@
+@@ -2568,6 +2622,15 @@
  				(*files)[nr++] = file;
  			}
  		}
@@ -172,11 +185,12 @@
  mod copies;
 --- a/guest/tests/test_cases/src/test_fxfs_guest_checks/mod.rs
 +++ b/guest/tests/test_cases/src/test_fxfs_guest_checks/mod.rs
-@@ -148,6 +148,11 @@
+@@ -148,6 +148,12 @@
              // pass after them (TASK-160.30).
              crashes: Failing, 3 => test_crashes;
              hangs: Failing, 3 => test_hangs;
 +            failed_flag_update: All, 5 => test_failed_flag_update;
++            sparse_extent_batches: All, 30 => test_sparse_extent_batches;
 +            sparse_lookup_count: All, 5 => test_sparse_lookup_count;
 +            single_dirty_range_visits: LargeDax, 15 => test_single_dirty_range_visits;
 +            busy_file_collection: LargeDax, 20 => test_busy_file_collection;
@@ -186,7 +200,7 @@
              regular_write: All, 3 => test_regular_write, verify_regular_write;
 --- /dev/null
 +++ b/guest/tests/test_cases/src/test_fxfs_guest_checks/guest/audit.rs
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,303 @@
 +// Copyright 2026 The cladefs Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -214,7 +228,7 @@
 +    file.sync_all().unwrap();
 +    let flags = |file: &fs::File| {
 +        let mut value: i32 = 0;
-+        assert_eq!(unsafe { libc::ioctl(file.as_raw_fd(), GET, &mut value) }, 0);
++        assert_eq!(unsafe { libc::ioctl(file.as_raw_fd(), GET as _, &mut value) }, 0);
 +        value
 +    };
 +    let original = flags(&file);
@@ -223,7 +237,7 @@
 +        "audit_fail_flags_ino",
 +        &file.metadata().unwrap().ino().to_string(),
 +    );
-+    assert_eq!(unsafe { libc::ioctl(file.as_raw_fd(), SET, &new) }, -1);
++    assert_eq!(unsafe { libc::ioctl(file.as_raw_fd(), SET as _, &new) }, -1);
 +    assert_eq!(
 +        std::io::Error::last_os_error().raw_os_error(),
 +        Some(libc::EIO)
@@ -447,4 +461,46 @@
 +    unmount();
 +    mount();
 +    assert_eq!(fs::read(path("sync-high")).unwrap(), b"after!");
++}
++
++/// A FIEMAP result buffer can span several metadata batches, then fill before EOF.
++/// Resume from the end of its last extent. Every gap must survive both boundaries.
++pub(super) fn test_sparse_extent_batches() {
++    const PAGE: u64 = 4096;
++    const DISTANT: u64 = 1 << 30;
++    const CAPACITY: usize = 258;
++    const FIEMAP: libc::c_ulong = 0xc020660b;
++    const LAST: u32 = 1;
++
++    let name = path("audit-sparse-batches");
++    let file = fs::File::create_new(&name).unwrap();
++    let offsets: Vec<u64> = (0..260).map(|i| 2 * PAGE * i).chain([DISTANT]).collect();
++    for &offset in &offsets {
++        file.write_all_at(&[1; PAGE as usize], offset).unwrap();
++    }
++    file.sync_all().unwrap();
++    let fd = file.as_raw_fd();
++    let seek = |offset, whence| unsafe { libc::lseek(fd, offset as i64, whence) };
++    assert_eq!(seek(DISTANT - PAGE, libc::SEEK_DATA), DISTANT as i64);
++    assert_eq!(seek(DISTANT - PAGE, libc::SEEK_HOLE), (DISTANT - PAGE) as i64);
++    assert_eq!(seek(DISTANT, libc::SEEK_HOLE), (DISTANT + PAGE) as i64);
++
++    let mut start = 0;
++    for expected in offsets.chunks(CAPACITY) {
++        // struct fiemap followed by CAPACITY 56-byte fiemap_extents.
++        let mut buf = vec![0u64; 4 + CAPACITY * 7];
++        buf[0] = start;
++        buf[1] = u64::MAX;
++        buf[3] = CAPACITY as u64;
++        let ret = unsafe { libc::ioctl(fd, FIEMAP as _, buf.as_mut_ptr()) };
++        assert_eq!(ret, 0, "FIEMAP from {start}: {}", std::io::Error::last_os_error());
++        assert_eq!((buf[2] >> 32) as usize, expected.len());
++        for (&offset, extent) in expected.iter().zip(buf[4..].chunks_exact(7)) {
++            assert_eq!((extent[0], extent[2]), (offset, PAGE));
++            assert_eq!((extent[5] as u32 & LAST) != 0, offset == DISTANT);
++            start = extent[0] + extent[2];
++        }
++    }
++    drop(file);
++    fs::remove_file(name).unwrap();
 +}
