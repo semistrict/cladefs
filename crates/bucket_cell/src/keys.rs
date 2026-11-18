@@ -1187,10 +1187,13 @@ pub async fn rotate(
 /// ([`Inherited`]); and its ancestors', along its origins, each head read.
 ///
 /// An ancestor of another cell (TASK-411.4): a head with its keys holds those of every one it
-/// reads, as they were given it with them ([`taking`]), so that it needs no other cell's KEK, an
-/// encrypted ancestor it holds not refused ([`Error::Inherited`]). A head without them yet, a
-/// fork's child's before they are given, is read by crossing into that ancestor's cell, its KEK
-/// unwrapped by the KMS, its keys and those it inherits taken from there on.
+/// reads, as they were given it with them ([`taking`]), so that it needs no other cell's KEK, and
+/// reads no ancestor's head (TASK-633.5): its parent's keys not among them, it is refused
+/// ([`Error::Inherited`]), as a fork is that would give it its own without them ([`inheriting`]),
+/// which gives every ancestor's at once. So a child is taken with its parent's bucket, in
+/// another cloud region perhaps, out of reach (backlog doc-23). A head without them yet, a
+/// fork's child's before they are given, is read by crossing into each ancestor's cell, its head
+/// read, its KEK unwrapped by the KMS, its keys and those it inherits taken from there on.
 pub async fn ring(
     bucket: &impl Bucket,
     keys: &CellKeys,
@@ -1208,8 +1211,14 @@ pub async fn ring(
         })?;
         ring.encrypting = Some(KeyId { cell: cell.id, generation: newest });
     }
-    // Whether its head has its keys, and with them all it inherits from other cells.
-    let given = !head.deks.is_empty();
+    // Whether its head has its keys, and with them all it inherits from other cells: its parent's
+    // checked, no ancestor's head read.
+    if !head.deks.is_empty() {
+        return match head.origin() {
+            Some(at) if !ring.holds(at.parent) => Err(Error::Inherited { cell, from: at.parent }),
+            _ => Ok(Arc::new(ring)),
+        };
+    }
     let mut origin = head.origin();
     let mut seen = BTreeSet::from([cell]);
     while let Some(at) = origin {
@@ -1222,9 +1231,6 @@ pub async fn ring(
         origin = found.origin();
         if found.deks.is_empty() || ring.holds(parent) {
             continue;
-        }
-        if given {
-            return Err(Error::Inherited { cell, from: parent });
         }
         ring.take(&CellKeys::of(parent, &found, keys.kms.clone()), parent, &found).await?;
     }
@@ -1628,9 +1634,10 @@ mod tests {
         let inherited: Vec<_> = given.head.inherited.iter().map(|had| had.cell).collect();
         assert_eq!(inherited, [parent]);
 
-        // The parent's tenant shredded: the child's ring, on a host unwrapping anew, needs its own
-        // KEK alone.
+        // The parent's tenant shredded, and its head out of reach (TASK-633.5): the child's ring,
+        // on a host unwrapping anew, needs its own KEK alone, and reads no ancestor's head.
         counted.inner().destroy(TEST_CELL.tenant).unwrap();
+        block_on(crate::bucket::delete(&bucket, &layout::head(parent)));
         counted.reset();
         let (_, fresh) = kms_over(&counted);
         let keys = CellKeys::of(child, &head(child), fresh.clone());

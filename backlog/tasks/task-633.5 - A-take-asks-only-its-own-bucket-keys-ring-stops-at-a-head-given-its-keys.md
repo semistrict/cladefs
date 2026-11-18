@@ -1,9 +1,11 @@
 ---
 id: TASK-633.5
 title: 'A take asks only its own bucket: keys::ring stops at a head given its keys'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 17:03'
+updated_date: '2026-11-18 22:44'
 labels:
   - bucket
   - multi-region
@@ -38,3 +40,9 @@ ordinal: 936000
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: keys::ring no longer reads any ancestor's head for a head given its keys: it checks its parent's keys are held (Error::Inherited otherwise) and returns; a head without keys still walks. Test: rings_cross_cells_until_heads_hold_what_they_inherit deletes the parent's head before the given child's ring; a hand mutant walking anyway fails with Lost. Left: a writer's checkpoint reading inherited objects' moves in their own bucket, which needs TASK-633.4's routing, and the failing-bucket test of AC #2.
+<!-- SECTION:NOTES:END -->
