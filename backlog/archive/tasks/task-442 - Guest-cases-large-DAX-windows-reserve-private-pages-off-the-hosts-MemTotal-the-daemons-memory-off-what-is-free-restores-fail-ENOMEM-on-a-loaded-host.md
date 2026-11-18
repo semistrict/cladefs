@@ -36,5 +36,7 @@ Window::Large sizes a case's DAX window at the host's MemTotal (guest/tests/test
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
+2026-11-15 again on ubu1 (branch t456-3, fxjob --mem 8G, CLADEFS_DAX_WINDOW_MIB=2048): fxfs-guest-snapshot-dax's second restore's window ENOMEM, and fxfs-guest-snapshot-memory-volume-dax's page-ins 'Errno(ENOMEM): no pages to read into': the daemon's memory, a page cache of what of the host's and the run's cgroup's memory is free (test-e2e.sh, TASK-358), left little after the run's own build in the same cgroup; the same cases passed earlier in the day. CLADEFS_EXTENTD_MEMORY set explicitly sidesteps it.
+
 Superseded by TASK-501: copying windows reserve nothing against the daemon memory, so a loaded host no longer refuses a restore window ENOMEM for its private pages.
 <!-- SECTION:NOTES:END -->

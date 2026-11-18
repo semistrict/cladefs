@@ -114,7 +114,7 @@ pub(crate) mod wire;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-pub use client::{DaemonConnection, DaemonExtentStore, spawn_on_replies};
+pub use client::{DaemonConnection, DaemonExtentStore, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 pub use device::DaemonDevice;
 pub use metrics::serve_metrics;

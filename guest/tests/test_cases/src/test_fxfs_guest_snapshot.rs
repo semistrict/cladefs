@@ -49,6 +49,11 @@
 //! superblock without a call to its filesystem, which waited for it, and the device refused the
 //! snapshot (TASK-202).
 //!
+//! fxfs-guest-snapshot-memory-vdisk-dax: as fxfs-guest-snapshot-dax, the snapshot's memory then
+//! imported into a memory vdisk of a cell (`Memory::Vdisk`, TASK-456.3), its zero pages holes, a
+//! point made of it; the two VMs restored from the point, each its memory a fork of it, as a
+//! copy-on-write window the extent daemon serves, their pages shared but those each writes.
+//!
 //! The VMs run in Firecracker driven through its API. Their root filesystem's disk is read-only,
 //! as the restored VMs share it. The guest tells the host it is frozen over vsock, and each
 //! restored guest, whose connection the restore resets, asks the host its name on a new one. The
@@ -67,6 +72,17 @@ pub struct TestFxfsGuestSnapshot {
     pub volumes: usize,
     /// What of the guest's is read-only as it freezes.
     pub read_only: ReadOnly,
+    /// What the restored VMs' memory is.
+    pub memory: Memory,
+}
+
+/// What the restored VMs' memory is (TASK-456.3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Memory {
+    /// The snapshot's memory file, mapped privately.
+    File,
+    /// A fork of a memory vdisk the memory file was imported into, each restore's.
+    Vdisk,
 }
 
 /// What of the guest's is read-only as it freezes (TASK-202).
@@ -198,6 +214,7 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
+    use cladefs::memory_vdisk::MemoryVdisk;
     use cladefs::{Filesystem, Image, Storage};
     use futures::executor::block_on;
     use std::io::{BufRead, BufReader, Write};
@@ -370,6 +387,20 @@ mod host {
                 )?;
                 source.kill()?;
             }
+            // The snapshot's memory as a memory vdisk's point, its file imported into it.
+            let memory_point = dir.join("memory-point");
+            if self.memory == Memory::Vdisk {
+                let size = std::fs::metadata(&memory)?.len();
+                let vdisk = MemoryVdisk::open(&cladefsd, &dir.join("memory-vdisk"), size)?;
+                let start = std::time::Instant::now();
+                vdisk.import(&memory)?;
+                eprintln!("memory: imported in {:?}", start.elapsed());
+                vdisk.point(&memory_point)?;
+                vdisk.close()?;
+                // The import left the memory's pages in the daemon's memory: evicted, so that the
+                // restores page in what they read, the first of them at least.
+                crate::common::control(&cladefsd)?.shrink_memory(None, 0)?;
+            }
             if phase == Some(Phase::Source) {
                 // For another host to restore: the point's branch is in the bucket.
                 let bundle = bundle()?;
@@ -424,13 +455,24 @@ mod host {
                 let uds = uds(name);
                 let listener = listen(&uds)?;
                 let firecracker = Firecracker::spawn(dir, name, &Vm::api_socket(name), None, &[])?;
-                loads.push(serde_json::json!({
+                let mut load = serde_json::json!({
                     "snapshot_path": snapshot,
                     "mem_backend": { "backend_type": "File", "backend_path": memory },
                     "resume_vm": true,
                     "vsock_override": { "uds_path": uds },
                     "cladefs_overrides": overrides,
-                }));
+                });
+                if self.memory == Memory::Vdisk {
+                    load["mem_backend"] = serde_json::json!({
+                        "backend_type": "Vdisk",
+                        "backend_path": dir.join(format!("memory-{name}")),
+                    });
+                    load["memory_vdisk"] = serde_json::json!({
+                        "point_on_host": memory_point,
+                        "cladefsd_socket": cladefsd,
+                    });
+                }
+                loads.push(load);
                 // Each connection the guest makes, as one reset by the restore is made again.
                 std::thread::spawn(move || -> std::io::Result<()> {
                     for stream in listener.incoming() {
@@ -439,6 +481,68 @@ mod host {
                     Ok(())
                 });
                 restored.push(firecracker);
+            }
+            // From a memory vdisk, one after the other, each run to its end: the second takes
+            // almost none of the daemon's memory the first did not, the daemon's pages of the
+            // snapshot's memory shared, the second's memory the first's but what each wrote
+            // (TASK-456.3). What the daemon holds, a shrink to no less than it says (`u64::MAX`).
+            if self.memory == Memory::Vdisk {
+                let control = crate::common::control(&cladefsd)?;
+                let held = || control.shrink_memory(None, u64::MAX);
+                let mut grew = Vec::new();
+                for ((firecracker, load), name) in
+                    restored.into_iter().zip(&loads).zip(self.restores(phase))
+                {
+                    let before = held()?;
+                    // The windows' pages and private pages while the VM runs, at most: of its
+                    // memory's window, and its disk's, a few.
+                    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let sampling = {
+                        let (stop, cladefsd) = (stop.clone(), cladefsd.clone());
+                        std::thread::spawn(move || -> anyhow::Result<(u64, u64)> {
+                            let control = crate::common::control(&cladefsd)?;
+                            let mut most = (0, 0);
+                            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                let gauges = control.stats(Some(std::time::Duration::from_millis(1)))?.gauges;
+                                let gauge = |name: &str| gauges.get(name).copied().unwrap_or(0);
+                                most.0 = most.0.max(gauge("window_pages"));
+                                most.1 = most.1.max(gauge("window_private_pages"));
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                            Ok(most)
+                        })
+                    };
+                    let start = std::time::Instant::now();
+                    firecracker.request("PUT", "/snapshot/load", load)?;
+                    eprintln!("{name}: restored in {:?}", start.elapsed());
+                    let (status, console) = firecracker.wait()?;
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let (pages, private) = sampling.join().expect("the sampling")?;
+                    eprintln!("{name}: its windows mapped {pages} pages at most, {private} private");
+                    // The first restore's window shares more than half of what it maps: its
+                    // private pages are its guest's stores, a third or so of its pages, the
+                    // case's files read into its page cache among them. Its loads, of pages its
+                    // window installs ahead, take none: with no pages installed ahead, x86 KVM's
+                    // asynchronous page fault worker made nine in ten private (TASK-456.3,
+                    // docs/research/kvm-async-pf-and-shared-guest-memory.md).
+                    anyhow::ensure!(
+                        *name != "a" || private * 2 < pages,
+                        "{name}: {private} of {pages} pages private: its memory isn't shared"
+                    );
+                    crate::vm::split_console(std::fs::File::open(&console)?)?;
+                    anyhow::ensure!(status.success(), "a restored VM exited {status}");
+                    let after = held()?;
+                    eprintln!("{name}: the daemon held {before} bytes, then {after}");
+                    grew.push(after.saturating_sub(before));
+                }
+                anyhow::ensure!(
+                    grew[1] * 4 < grew[0],
+                    "the second restore took {} bytes of the daemon's memory, the first {}: their \
+                     pages aren't shared",
+                    grew[1],
+                    grew[0]
+                );
+                return Ok(());
             }
             // All at once: no restore of one point waits for another's. cladefs: each timed, as it
             // maps the window's mappings again before the VM resumes (TASK-92.14).
@@ -886,7 +990,48 @@ mod guest {
             }
             unmount_volumes(volumes);
             unmount();
+            // Restored from a memory vdisk, the second restore's guest writes all the memory it
+            // has free, each of its pages a private copy of its window's: it holds as many as the
+            // guest has pages (TASK-456.3). The first's reads and writes no more than the case's,
+            // whose pages its window shares.
+            if self.memory == Memory::Vdisk && name == "b" {
+                write_free_memory(&name);
+            }
             println!("OK {name}");
         }
+    }
+
+    /// Writes every page of what memory the guest has available but a margin, and reads it back.
+    fn write_free_memory(name: &str) {
+        let meminfo = fs::read_to_string("/proc/meminfo").unwrap();
+        let line = meminfo.lines().find(|line| line.starts_with("MemAvailable:")).unwrap();
+        let kib: usize = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let page = 4096;
+        let len = (kib * 1024).saturating_sub(48 << 20) / page * page;
+        // SAFETY: new anonymous memory, which this function owns.
+        let memory = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(memory, libc::MAP_FAILED);
+        let memory = memory.cast::<u8>();
+        let byte = |at: usize| (at / page) as u8 ^ 0x5a;
+        for at in (0..len).step_by(page) {
+            // SAFETY: within the mapping.
+            unsafe { memory.add(at).write_volatile(byte(at)) };
+        }
+        for at in (0..len).step_by(page) {
+            // SAFETY: within the mapping.
+            assert_eq!(unsafe { memory.add(at).read_volatile() }, byte(at), "{name}: page {at:#x}");
+        }
+        // SAFETY: the mapping, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(memory.cast(), len) }, 0);
+        eprintln!("{name}: wrote {} MiB of memory", len >> 20);
     }
 }

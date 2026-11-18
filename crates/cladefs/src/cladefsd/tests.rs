@@ -2552,6 +2552,95 @@ fn memory_vdisks_commit_pages_and_holes_and_forks_store_only_their_own() {
     child.close().unwrap();
 }
 
+/// TASK-456.3: a memory vdisk's window, a VM's memory restored from it, maps nothing until faults
+/// reach it: then the runs of the tree node around each page, data and holes, as the vdisk's last
+/// commit has them. Two forks' windows map the daemon's one page of each extent's block, shared;
+/// a store of the guest's makes a page private in its window alone, the other's still the shared
+/// page; the windows' private pages reserve nothing in the daemon.
+#[test]
+fn memory_windows_map_what_faults_reach_and_share_their_pages() {
+    use crate::memory_vdisk::MemoryVdisk;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let ps = page_size();
+    // Three nodes of the tree's, the last part of one.
+    const PAGES: u64 = 400;
+    let size = PAGES * ps;
+    let memory = MemoryVdisk::open(&socket, &dir.path().join("memory"), size).unwrap();
+    let mut image = Vec::with_capacity(size as usize);
+    for page in 0..PAGES {
+        image.extend(pattern(page as u8, ps as usize));
+    }
+    memory.write(0, &image).unwrap();
+    memory.punch(200 * ps, 30 * ps).unwrap();
+    image[(200 * ps) as usize..(230 * ps) as usize].fill(0);
+    memory.commit().unwrap();
+    let (one, two) = (dir.path().join("one"), dir.path().join("two"));
+    memory.fork(&one).unwrap();
+    memory.fork(&two).unwrap();
+    memory.close().unwrap();
+
+    let restore = |path: &Path| {
+        let vdisk = MemoryVdisk::open(&socket, path, size).unwrap();
+        let base = memory_noreserve(PAGES as usize);
+        // SAFETY: The memory is the test's, and outlives the vdisk (unmapped once it goes).
+        unsafe { vdisk.window(base, size, None) }.unwrap();
+        (vdisk, base)
+    };
+    let ((first, a), (second, b)) = (restore(&one), restore(&two));
+    // The window's bytes from `at` to `end`, as the guest reads them.
+    let read = |base: NonNull<u8>, at: u64, end: u64| -> Vec<u8> {
+        // SAFETY: The window's memory, whose faults its vdisk serves.
+        (at..end).map(|at| unsafe { base.as_ptr().add(at as usize).read_volatile() }).collect()
+    };
+    assert!(read(a, 0, size) == image, "the first window holds the image");
+    assert!(read(b, 0, size) == image, "the second window holds the image");
+    for page in [0, 150, 340, 399] {
+        let (at, bt) = (a.as_ptr() as usize + (page * ps) as usize, b.as_ptr() as usize);
+        let bt = bt + (page * ps) as usize;
+        assert_eq!(mapped_from(at), mapped_from(bt), "page {page} isn't shared");
+    }
+
+    crate::guest_thread_started();
+    let at = a.as_ptr() as usize + (5 * ps) as usize;
+    // SAFETY: As above, a store of the guest's.
+    unsafe { (at as *mut u8).write_volatile(0xee) };
+    let bt = b.as_ptr() as usize + (5 * ps) as usize;
+    assert_ne!(mapped_from(at), mapped_from(bt), "the store reached the shared page");
+    assert_eq!(read(a, 5 * ps, 5 * ps + 1), [0xee]);
+    assert_eq!(read(b, 5 * ps, 6 * ps), pattern(5, ps as usize), "the other window changed");
+    assert_eq!(first.private_runs().unwrap(), vec![5 * ps..6 * ps]);
+    assert_eq!(second.private_pages().unwrap(), 0);
+
+    first.close().unwrap();
+    second.close().unwrap();
+    for base in [a, b] {
+        // SAFETY: Unmaps the memory, which nothing uses any more.
+        assert_eq!(unsafe { libc::munmap(base.as_ptr().cast(), size as usize) }, 0);
+    }
+}
+
+/// `pages` pages of anonymous memory the test owns, reserving none: what a VMM maps a guest's
+/// memory as.
+fn memory_noreserve(pages: usize) -> NonNull<u8> {
+    // SAFETY: Maps anonymous memory, which the test owns.
+    let memory = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            pages * page_size() as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(memory, libc::MAP_FAILED);
+    NonNull::new(memory.cast()).unwrap()
+}
+
 /// TASK-39.4: with a bucket, deleting a store through the daemon deletes its branch there too,
 /// and the collector keeps what its fork needs of it.
 #[test]
