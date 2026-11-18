@@ -79,7 +79,8 @@ fn counted(dir: &Path) -> u64 {
 /// What the stores in a tenant's directory, `dir`, take, as their footprints count them: each
 /// directory in it a store.
 fn stores(dir: &Path) -> u64 {
-    std::fs::read_dir(dir).unwrap().map(|store| counted(&store.unwrap().path())).sum()
+    let stores = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path());
+    stores.filter(|store| store.is_dir()).map(|store| counted(&store)).sum()
 }
 
 /// Waits until `done` says so, polling, a minute at most: what it waits for, as an upload's

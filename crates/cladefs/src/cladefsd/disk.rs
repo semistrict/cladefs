@@ -499,7 +499,9 @@ mod tests {
         std::fs::create_dir(&store).unwrap();
         let cache = PageCache::without_flusher(Options::default());
         let dir = HostDir::on(local_cell::DiskDir::new(&store).unwrap(), cache.clone()).unwrap();
-        dir.create("dirty", true).unwrap().write_at(&vec![1; 4 << 12], 0).unwrap();
+        // Open, its pages held: its last opening's going writes them back.
+        let file = dir.create("dirty", true).unwrap();
+        file.write_at(&vec![1; 4 << 12], 0).unwrap();
         let dirty = cache.usage().dirty;
         assert_eq!(dirty, 4 << 12);
         super::count(Some(0x538)).unwrap();
@@ -508,5 +510,6 @@ mod tests {
         super::super::metrics::render();
         assert_eq!(cache.usage().dirty, dirty);
         assert_eq!(theirs.used(), 4 << 12);
+        drop(file);
     }
 }
