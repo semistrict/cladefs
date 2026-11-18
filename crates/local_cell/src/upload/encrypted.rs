@@ -546,7 +546,7 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let at = location(&store, extent);
     // Another host's memory, of no store yet, which keeps what it reads in a cache.
     let cache_dir = tempfile::tempdir().unwrap();
-    let cache = Arc::new(bucket_cell::cache::Cache::open(cache_dir.path(), 1 << 30, 0).unwrap());
+    let cache = Arc::new(bucket_cell::cache::Cache::open(cache_dir.path(), 1 << 30).unwrap());
     let memory = Memory::new();
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), Some(cache));
@@ -1362,7 +1362,7 @@ fn caching_fetcher(
     memory: &Arc<Memory>,
     dir: &std::path::Path,
 ) -> Fetcher<ObjectBucket> {
-    let cache = Arc::new(bucket_cell::cache::Cache::open(dir, 1 << 30, 0).unwrap());
+    let cache = Arc::new(bucket_cell::cache::Cache::open(dir, 1 << 30).unwrap());
     Fetcher::new(world.bucket.clone(), Budget::new(Limits::UNBOUNDED), memory.clone(), Some(cache))
 }
 

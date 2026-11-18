@@ -1575,14 +1575,12 @@ fn write_stats(file: &std::path::Path, lines: &[String]) -> std::io::Result<()> 
 /// (`scripts/budgets.py`, TASK-330.2).
 static STATS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 
-/// cladefs: how much of its filesystem the cache leaves free.
-const CACHE_FLOOR: u64 = 4 << 30;
-
 /// cladefs: where the daemon keeps its part cache, and how much it may keep there, as the environment
 /// says: the directory `CLADEFSD_PART_CACHE` names, if it names one (empty, it names none); the
 /// bytes of objects `CLADEFSD_PART_CACHE_BYTES` gives, a budget, as a host whose cache shares its
-/// disk with its stores needs (TASK-406.1), or, unset, as many as leave [`CACHE_FLOOR`] free. Read
-/// at the daemon's start, to refuse what it can't use, and again by its first store to open.
+/// disk with its stores needs (TASK-406.1), or, unset, none: as many as the disk governor leaves it
+/// (doc-22). Read at the daemon's start, to refuse what it can't use, and again by its first store
+/// to open.
 pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
     let set = |var| std::env::var_os(var).filter(|value| !value.is_empty());
     let dir = set("CLADEFSD_PART_CACHE");
@@ -1624,7 +1622,7 @@ pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
         Errno::EINVAL
     })?;
     let cache = match config {
-        Some((dir, capacity)) => match Cache::open(&dir, capacity, CACHE_FLOOR) {
+        Some((dir, capacity)) => match Cache::open(&dir, capacity) {
             Ok(cache) => Some(Arc::new(cache)),
             Err(err) => {
                 log::error!("cladefsd: CLADEFSD_PART_CACHE: {err}");

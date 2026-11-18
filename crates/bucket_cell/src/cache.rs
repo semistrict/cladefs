@@ -7,9 +7,11 @@
 //! ([`Cache::adopt`]). Each object's is a sparse file of its size, at its key, holding its tail,
 //! which says where its parts are stored, and those of its parts kept, as stored, compressed or
 //! not, at their offsets, the rest holes. Those read least recently are evicted, by punching holes,
-//! an object's tail with its last part, so that they take no more than a capacity and the
-//! filesystem keeps a floor of free space. They are copies of what is in the bucket, so none is
-//! data the bucket lacks.
+//! an object's tail with its last part, so that they take no more than its limit: its budget, if it
+//! has one, and what the disk governor leaves it of its filesystem ([`Cache::set_limit`], backlog
+//! doc-22), which it gives back as the stores, or the host, need it. They are copies of what is in
+//! the bucket, so none is data the bucket lacks. What it keeps, it counts on its filesystem's disk
+//! ([`HostDisk::cache`]), its fills in flight too.
 //!
 //! The files are all the cache keeps: one opened finds what an earlier one kept in them
 //! ([`Cache::open`]), so that a host's restart refetches nothing it had. Its index is rebuilt from
@@ -19,6 +21,7 @@
 //! crash left of a write, torn or lost, reads as not kept, never as other bytes, and is fetched
 //! again by its reader. One cache at a time has a directory.
 
+use crate::host_disk::HostDisk;
 use crate::object;
 use extent_frame::{Frame, Parts, TRAILER};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -28,7 +31,8 @@ use std::ops::Range;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// The number an object's tail is kept by, among its parts, which count from 0: its footer, table
@@ -43,15 +47,17 @@ const TAIL: u64 = u64::MAX;
 #[derive(Debug)]
 pub struct Cache {
     files: Files,
-    capacity: u64,
-    floor: u64,
+    /// The most it keeps, its budget, if it has one.
+    budget: u64,
+    /// The most the disk governor leaves it ([`Cache::set_limit`]): `u64::MAX` until it says.
+    governed: AtomicU64,
     kept: Mutex<Index>,
     /// The directory, locked, so that no other cache opens it while this one has it.
     _lock: File,
 }
 
 /// The cache's index: the objects it keeps parts of, and those parts by when they were last read.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Index {
     objects: HashMap<String, Object>,
     /// The parts kept, by when they were last read.
@@ -59,8 +65,11 @@ struct Index {
     /// The objects whose files are being removed, or replaced by one adopted.
     removing: HashSet<String>,
     clock: u64,
-    /// The bytes of the parts kept, and being written.
+    /// The bytes of the parts kept, and being written: as its disk counts them too
+    /// ([`Index::take`], [`Index::give`]).
     bytes: u64,
+    /// cladefs: its filesystem's disk, which counts what it keeps (doc-22).
+    disk: Arc<HostDisk>,
 }
 
 /// An object the cache keeps some of, or is writing: in the cache's index while it keeps or
@@ -123,6 +132,29 @@ enum Evicted {
 }
 
 impl Index {
+    fn new(disk: Arc<HostDisk>) -> Self {
+        Self {
+            objects: HashMap::new(),
+            by_use: BTreeMap::new(),
+            removing: HashSet::new(),
+            clock: 0,
+            bytes: 0,
+            disk,
+        }
+    }
+
+    /// Counts `len` bytes more kept, or being written, here and on its disk.
+    fn take(&mut self, len: u64) {
+        self.bytes += len;
+        self.disk.cache.add(len);
+    }
+
+    /// Counts `len` bytes fewer.
+    fn give(&mut self, len: u64) {
+        self.bytes -= len;
+        self.disk.cache.sub(len);
+    }
+
     /// Counts part `part` of the object at `key` read now, and its tail after it.
     fn touch(&mut self, key: &str, part: u64) {
         let parts: &[u64] = if part == TAIL { &[TAIL] } else { &[part, TAIL] };
@@ -162,33 +194,33 @@ impl Index {
     }
 
     /// Evicts what was read least recently, but tails whose objects keep or write other parts, until
-    /// `len` bytes more fit in `capacity` and `free` bytes, and those evictions free, leave `floor`
-    /// and `needed` more free. Returns whether they do, and what the evictions leave to do.
-    fn make_room(
-        &mut self,
-        (capacity, floor): (u64, u64),
-        free: u64,
-        len: u64,
-        needed: u64,
-    ) -> (bool, Vec<Evicted>) {
-        let (mut evicted, mut freed, mut from) = (Vec::new(), 0, 0);
-        let fits = loop {
-            if self.bytes + len <= capacity && free + freed >= floor + needed {
-                break true;
+    /// `len` bytes more fit in `limit`; or nothing, if they can't be made to. Returns whether they
+    /// fit, and what the evictions leave to do. Chosen first, evicted only if enough: a fill that
+    /// can't fit evicted all it could, emptying the cache for nothing (TASK-443.8).
+    fn make_room(&mut self, limit: u64, len: u64) -> (bool, Vec<Evicted>) {
+        let (mut chosen, mut freed) = (Vec::new(), 0);
+        // What each object keeps, as the evictions chosen leave it.
+        let mut left: HashMap<&str, usize> = HashMap::new();
+        for (key, part) in self.by_use.values() {
+            if self.bytes + len <= limit.saturating_add(freed) {
+                break;
             }
-            let Some((&used, (key, part))) = self.by_use.range(from..).next() else { break false };
-            from = used + 1;
-            let (key, part) = (key.clone(), *part);
-            let object = &self.objects[&key];
+            let object = &self.objects[key];
+            let kept = left.entry(key).or_insert(object.kept.len());
             // A tail goes with its object's last part, and not while one is being written.
             let writing = object.busy.values().any(|busy| *busy == Busy::Writing);
-            if part == TAIL && (object.kept.len() > 1 || writing) {
+            if *part == TAIL && (*kept > 1 || writing) {
                 continue;
             }
-            freed += object.len(part);
-            evicted.extend(self.evict(&key, part));
-        };
-        (fits, evicted)
+            *kept -= 1;
+            freed += object.len(*part);
+            chosen.push((key.clone(), *part));
+        }
+        if self.bytes + len > limit.saturating_add(freed) {
+            return (false, Vec::new());
+        }
+        let evicted = chosen.into_iter().flat_map(|(key, part)| self.evict(&key, part)).collect();
+        (true, evicted)
     }
 
     /// Drops part `part` of the object at `key`, kept: its tail drops the object. Returns what that
@@ -201,8 +233,8 @@ impl Index {
         let used = object.kept.remove(&part).expect("a part kept");
         self.by_use.remove(&used);
         let place = object.place(part);
-        self.bytes -= place.end - place.start;
         object.busy.insert(part, Busy::Punching);
+        self.give(place.end - place.start);
         Some(Evicted::Punch { key: key.to_owned(), part, place })
     }
 
@@ -211,10 +243,12 @@ impl Index {
     fn forget(&mut self, key: &str) -> Option<Evicted> {
         let object = self.objects.get_mut(key)?;
         object.forgotten = true;
+        let mut gone = 0;
         for (part, used) in std::mem::take(&mut object.kept) {
             self.by_use.remove(&used);
-            self.bytes -= object.len(part);
+            gone += object.len(part);
         }
+        self.give(gone);
         self.release(key)
     }
 
@@ -223,13 +257,15 @@ impl Index {
     /// that leaves it nothing.
     fn written(&mut self, key: &str, part: u64, written: bool) -> Option<Evicted> {
         let object = self.objects.get_mut(key).expect("an object its busy parts keep");
+        let len = object.len(part);
+        self.disk.cache_writing.sub(len);
         if written && !object.forgotten {
             object.busy.remove(&part);
             self.keep(key, part);
             self.touch(key, TAIL);
             return None;
         }
-        self.bytes -= object.len(part);
+        self.give(len);
         self.freed(key, part)
     }
 
@@ -260,11 +296,11 @@ const FILES: &str = "cladefs-parts";
 const BLOCK: u64 = extent_frame::ALIGN;
 
 impl Cache {
-    /// The cache in `dir`, keeping at most `capacity` bytes of objects, and `floor` bytes free
-    /// there: what an earlier one kept, read from its files, those that fail their checks removed,
-    /// then evicted, those read least recently first, as far as `capacity` and `floor` need. Fails
-    /// while another cache has the directory.
-    pub fn open(dir: &Path, capacity: u64, floor: u64) -> io::Result<Self> {
+    /// The cache in `dir`, keeping at most `budget` bytes of objects (`u64::MAX`, none), and what
+    /// the disk governor leaves it, once it says ([`Cache::set_limit`]): what an earlier one kept,
+    /// read from its files, those that fail their checks removed, then evicted, those read least
+    /// recently first, as far as `budget` needs. Fails while another cache has the directory.
+    pub fn open(dir: &Path, budget: u64) -> io::Result<Self> {
         let dir = dir.join(FILES);
         std::fs::create_dir_all(&dir)?;
         let lock = lock(&dir)?;
@@ -273,16 +309,25 @@ impl Cache {
         files.walk(Path::new(""), &mut found)?;
         // By when each was written last: it was read then, if not since.
         found.sort_by_key(|(_, found)| found.modified);
-        let mut kept = Index::default();
+        let mut kept = Index::new(files.disk.clone());
         for (key, found) in found {
-            kept.bytes += found.bytes();
+            kept.take(found.bytes());
             kept.insert(&key, found);
         }
-        let cache = Self { files, capacity, floor, kept: Mutex::new(kept), _lock: lock };
-        let free = cache.files.free()?;
-        let (_, evicted) = cache.kept.lock().unwrap().make_room((capacity, floor), free, 0, 0);
-        cache.evict(evicted)?;
+        let governed = AtomicU64::new(u64::MAX);
+        let cache = Self { files, budget, governed, kept: Mutex::new(kept), _lock: lock };
+        cache.set_limit(u64::MAX)?;
         Ok(cache)
+    }
+
+    /// cladefs: keeps no more than `bytes` of objects, nor its budget, from now on, evicting what was
+    /// read least recently down to that at once: what the disk governor leaves it of its
+    /// filesystem (doc-22). Returns what it keeps then.
+    pub fn set_limit(&self, bytes: u64) -> io::Result<u64> {
+        self.governed.store(bytes, Ordering::Relaxed);
+        let (_, evicted) = self.kept.lock().unwrap().make_room(self.capacity(), 0);
+        self.evict(evicted)?;
+        Ok(self.bytes())
     }
 
     #[cfg(test)]
@@ -371,10 +416,9 @@ impl Cache {
     /// (TASK-407), but a file the cache found corrupt, goes first, unless parts of it are busy.
     pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
         let len = tail.bytes.len() as u64;
-        if len > self.capacity {
+        if len > self.capacity() {
             return Ok(());
         }
-        let free = self.files.free()?;
         let mut kept = self.kept.lock().unwrap();
         if let Some(object) = kept.objects.get(key)
             && object.parts != tail.parts
@@ -396,9 +440,10 @@ impl Cache {
             None => {}
         }
         kept.objects.insert(key.to_owned(), Object::writing(tail.parts.clone(), TAIL));
-        let (fits, mut evicted) = kept.make_room((self.capacity, self.floor), free, len, len);
+        let (fits, mut evicted) = kept.make_room(self.capacity(), len);
         if fits {
-            kept.bytes += len;
+            kept.take(len);
+            kept.disk.cache_writing.add(len);
         } else {
             evicted.extend(kept.freed(key, TAIL));
         }
@@ -429,10 +474,9 @@ impl Cache {
         };
         debug_assert!(stored.check(bytes).is_ok(), "part {part} of {key}, kept unchecked");
         let len = stored.len;
-        if len > self.capacity {
+        if len > self.capacity() {
             return Ok(());
         }
-        let free = self.files.free()?;
         let (fits, evicted) = {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get_mut(key) else { return Ok(()) };
@@ -444,9 +488,10 @@ impl Cache {
                 return Ok(());
             }
             object.busy.insert(part, Busy::Writing);
-            let (fits, mut evicted) = kept.make_room((self.capacity, self.floor), free, len, len);
+            let (fits, mut evicted) = kept.make_room(self.capacity(), len);
             if fits {
-                kept.bytes += len;
+                kept.take(len);
+                kept.disk.cache_writing.add(len);
             } else {
                 evicted.extend(kept.freed(key, part));
             }
@@ -475,16 +520,16 @@ impl Cache {
     /// `key`, by renaming it, evicting what was read least recently to make room: then it is kept as
     /// any is, its parts evicted as fetched ones are. Returns whether it took it: not if no room can
     /// be made, or the object it keeps at `key` is busy, and then the file is left where it is. One
-    /// it keeps at `key` already, it replaces.
+    /// it keeps at `key` already, it replaces. cladefs: its file's blocks, the store's, are the cache's
+    /// once it takes it, the disk holding as much as before (doc-22).
     pub fn adopt(&self, key: &str, from: &Path) -> io::Result<bool> {
         let found = found(from, key, self.files.holes)?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, format!("{}: no object", from.display()))
         })?;
         let len = found.bytes();
-        if len > self.capacity {
+        if len > self.capacity() {
             return Ok(false);
         }
-        let free = self.files.free()?;
         let (fits, evicted) = {
             let mut kept = self.kept.lock().unwrap();
             match kept.objects.get(key) {
@@ -498,10 +543,9 @@ impl Cache {
                     kept.removing.insert(key.to_owned());
                 }
             }
-            // Its file's blocks are allocated already.
-            let (fits, mut evicted) = kept.make_room((self.capacity, self.floor), free, len, 0);
+            let (fits, mut evicted) = kept.make_room(self.capacity(), len);
             if fits {
-                kept.bytes += len;
+                kept.take(len);
             } else {
                 evicted.push(Evicted::Remove(key.to_owned()));
             }
@@ -520,7 +564,7 @@ impl Cache {
                 Ok(true)
             }
             Err(err) => {
-                kept.bytes -= len;
+                kept.give(len);
                 Err(err)
             }
         }
@@ -545,13 +589,14 @@ impl Cache {
     }
 
     /// cladefs: the disk of its filesystem (doc-22).
-    pub fn disk(&self) -> &std::sync::Arc<crate::host_disk::HostDisk> {
+    pub fn disk(&self) -> &Arc<HostDisk> {
         &self.files.disk
     }
 
-    /// The most bytes of objects it keeps.
+    /// The most bytes of objects it keeps: its budget, or what the disk governor leaves it, the
+    /// less.
     pub fn capacity(&self) -> u64 {
-        self.capacity
+        self.budget.min(self.governed.load(Ordering::Relaxed))
     }
 
     /// How many bytes of objects are kept.
@@ -586,6 +631,15 @@ impl Cache {
             }
         }
         done
+    }
+}
+
+/// cladefs: what it kept, its files, stays on its disk, which another opening of it counts anew.
+impl Drop for Cache {
+    fn drop(&mut self) {
+        let kept = self.kept.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bytes = kept.bytes;
+        kept.give(bytes);
     }
 }
 
@@ -765,7 +819,7 @@ enum Change {
 struct Files {
     dir: PathBuf,
     /// cladefs: its filesystem's disk (doc-22).
-    disk: std::sync::Arc<crate::host_disk::HostDisk>,
+    disk: Arc<HostDisk>,
     /// Whether its filesystem finds the holes punched in its files ([`probed`]).
     holes: bool,
     #[cfg(test)]
@@ -776,7 +830,7 @@ impl Files {
     fn new(dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
             holes: probed(&dir)?,
-            disk: crate::host_disk::HostDisk::of(&dir)?,
+            disk: HostDisk::of(&dir)?,
             dir,
             #[cfg(test)]
             cut: None,
@@ -920,11 +974,6 @@ impl Files {
             Some(cut) => cut.pieces(change, range),
             None => vec![range],
         }
-    }
-
-    /// The bytes free to unprivileged users on the cache's filesystem.
-    fn free(&self) -> io::Result<u64> {
-        Ok(self.disk.sample()?.free)
     }
 }
 
@@ -1158,7 +1207,7 @@ mod tests {
     fn keeps_parts_evicting_the_least_recently_read() {
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 6 * PART, 1);
-        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len(), 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len()).unwrap();
         object.keep_tail(&cache);
         for part in 0..3 {
             object.keep_part(&cache, part);
@@ -1200,7 +1249,7 @@ mod tests {
         let object = Object::noise(KEY, 64 * PART, 1);
         // Its tail takes a block, of the parts' last.
         let tail = object.tail_len().next_multiple_of(4096);
-        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len(), 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len()).unwrap();
         object.keep_tail(&cache);
         for part in 0..3 {
             object.keep_part(&cache, part);
@@ -1210,15 +1259,49 @@ mod tests {
         assert_eq!(allocated(&cache, KEY), 3 * PART + tail);
     }
 
-    /// Nothing is kept that would leave less than the floor free.
+    /// TASK-539.6: a limit the disk governor sets evicts what was read least recently down to it
+    /// at once, and keeps what would pass it from being kept; lifted, the cache keeps again. Its
+    /// disk counts what it keeps, and stops counting it as it goes.
     #[test]
-    fn keeps_the_floor_free() {
+    fn a_governed_limit_evicts_down_to_it_at_once() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 3 * PART, u64::MAX / 2).unwrap();
-        let object = Object::noise(KEY, PART, 1);
+        let object = Object::noise(KEY, 4 * PART, 1);
+        let cache = Cache::open(dir.path(), u64::MAX).unwrap();
+        let disk = cache.disk().clone();
+        let counted = disk.cache.get() - cache.bytes();
         object.keep(&cache);
-        assert_eq!((cache.tail(KEY).unwrap(), object.read(&cache, 0)), (None, None));
-        assert_eq!(cache.bytes(), 0);
+        assert_eq!((cache.bytes(), disk.cache.get() - counted), (object.len(), object.len()));
+        object.read(&cache, 2);
+        object.read(&cache, 3);
+        let limit = 2 * PART + object.tail_len();
+        assert_eq!(cache.set_limit(limit).unwrap(), limit);
+        assert_eq!((object.kept(&cache), cache.capacity()), (vec![2, 3], limit));
+        // Kept within it by evicting what was read least recently.
+        object.keep_part(&cache, 0);
+        assert_eq!((object.kept(&cache), cache.bytes()), (vec![0, 3], limit));
+        cache.set_limit(0).unwrap();
+        assert_eq!((cache.bytes(), cache.keys(), disk.cache.get() - counted), (0, vec![], 0));
+        cache.set_limit(u64::MAX).unwrap();
+        object.keep(&cache);
+        assert_eq!(object.kept(&cache), [0, 1, 2, 3]);
+        drop(cache);
+        assert_eq!(disk.cache.get(), counted, "what a cache closed kept counts no more");
+    }
+
+    /// TASK-443.8: a fill that can't fit, whatever is evicted, evicts nothing: it emptied the cache
+    /// for nothing, as one past a floor the filesystem's free space couldn't meet did. Here the
+    /// object filled's own tail can't go while its part is written.
+    #[test]
+    fn fills_that_cant_fit_evict_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (small, large) = (Object::noise(OTHER, PART / 4, 2), Object::noise(KEY, PART, 1));
+        let limit = PART + large.tail_len() - 1;
+        let cache = Cache::open(dir.path(), limit).unwrap();
+        small.keep(&cache);
+        large.keep_tail(&cache);
+        large.keep_part(&cache, 0);
+        assert_eq!((small.kept(&cache), large.kept(&cache)), (vec![0], vec![]));
+        assert_eq!(cache.bytes(), small.len() + large.tail_len());
     }
 
     /// What goes first is what was read least recently, not kept: each read counts.
@@ -1226,7 +1309,7 @@ mod tests {
     fn reads_order_eviction() {
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 6 * PART, 1);
-        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len(), 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART + object.tail_len()).unwrap();
         object.keep_tail(&cache);
         for part in 0..3 {
             object.keep_part(&cache, part);
@@ -1242,7 +1325,7 @@ mod tests {
     #[test]
     fn parts_are_kept_with_their_tails() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         let object = Object::noise(KEY, 2 * PART, 1);
         object.keep_part(&cache, 0);
         assert_eq!((cache.bytes(), cache.keys()), (0, Vec::<String>::new()));
@@ -1264,7 +1347,7 @@ mod tests {
     #[test]
     fn parts_failing_their_crcs_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         let object = Object::noise(KEY, 2 * PART, 1);
         object.keep(&cache);
         flip(&cache.path(KEY), object.stored(1).offset + 7);
@@ -1283,7 +1366,7 @@ mod tests {
     #[test]
     fn parts_gone_read_as_not_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 3 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let object = Object::noise(KEY, PART + 100, 1);
         object.keep(&cache);
         File::options().write(true).open(cache.path(KEY)).unwrap().set_len(PART).unwrap();
@@ -1306,7 +1389,7 @@ mod tests {
     fn kept_objects_hold_no_pages_in_the_page_cache() {
         use std::os::fd::AsRawFd as _;
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         let object = Object::noise(KEY, 2 * PART + 100, 1);
         object.keep(&cache);
         assert_eq!(object.read(&cache, 1).as_deref(), Some(object.part(1)));
@@ -1340,7 +1423,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (object, other) = (Object::noise(KEY, 1000, 1), Object::noise(OTHER, PART + 100, 2));
         let capacity = 1000 + object.tail_len() + other.tail_len();
-        let cache = Cache::open(dir.path(), capacity, 0).unwrap();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
         other.keep_tail(&cache);
         other.keep_part(&cache, 1);
         other.keep_part(&cache, 1);
@@ -1359,7 +1442,7 @@ mod tests {
     #[test]
     fn files_are_their_objects_size() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 3 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let object = Object::noise(KEY, 5 * PART, 1);
         object.keep_tail(&cache);
         assert_eq!(std::fs::metadata(cache.path(KEY)).unwrap().len(), object.bytes.len() as u64);
@@ -1369,7 +1452,7 @@ mod tests {
     #[test]
     fn tails_whose_writes_fail_are_not_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 3 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let (object, other) = (Object::noise(KEY, PART, 1), Object::noise(OTHER, PART, 2));
         std::fs::create_dir_all(cache.path(OTHER)).unwrap();
         let failed = cache.keep_tail(OTHER, &other.tail).unwrap_err();
@@ -1386,7 +1469,7 @@ mod tests {
     #[test]
     fn parts_dropped_whose_files_went_are_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 3 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 3 * PART).unwrap();
         let object = Object::noise(KEY, PART + 100, 1);
         object.keep(&cache);
         std::fs::remove_file(cache.path(KEY)).unwrap();
@@ -1410,7 +1493,7 @@ mod tests {
         };
         let objects: Arc<Vec<_>> =
             Arc::new((0..OBJECTS).map(|at| Object::noise(&key(at), PARTS * PART, at)).collect());
-        let cache = Arc::new(Cache::open(dir.path(), 6 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 6 * PART).unwrap());
         let threads: Vec<_> = (0..4u64)
             .map(|thread| {
                 let (cache, objects) = (cache.clone(), objects.clone());
@@ -1458,7 +1541,7 @@ mod tests {
         let kept = read(&cache);
         assert!(cache.kept.lock().unwrap().removing.is_empty());
         drop(cache);
-        assert_eq!(read(&Cache::open(dir.path(), 6 * PART, 0).unwrap()), kept);
+        assert_eq!(read(&Cache::open(dir.path(), 6 * PART).unwrap()), kept);
     }
 
     /// TASK-92.21: a benchmark of reads of a part kept while others are kept, each evicting one,
@@ -1470,7 +1553,7 @@ mod tests {
     fn bench_reads_while_parts_are_kept() {
         const PUTS: u64 = 2048;
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 16 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 16 * PART).unwrap());
         let read = Object::noise(KEY, PART, 1);
         read.keep(&cache);
         let objects: Vec<_> = (0..PUTS / 8)
@@ -1514,7 +1597,7 @@ mod tests {
         let object = Object::noise(KEY, 4 * PART + 100, 1);
         let other = Object::noise(OTHER, 3000, 2);
         let capacity = 3 * PART + 100 + object.tail_len() + other.len();
-        let cache = Cache::open(dir.path(), capacity, 0).unwrap();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
         object.keep_tail(&cache);
         for part in [0, 1, 2, 4] {
             object.keep_part(&cache, part);
@@ -1527,7 +1610,7 @@ mod tests {
         let bytes = cache.bytes();
         drop(cache);
 
-        let cache = Cache::open(dir.path(), capacity, 0).unwrap();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
         cache.check();
         assert_eq!(cache.bytes(), bytes);
         assert_eq!(object.kept(&cache), [0, 2, 3, 4]);
@@ -1554,7 +1637,7 @@ mod tests {
                 )
             })
             .collect();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         for object in &objects {
             object.keep(&cache);
         }
@@ -1571,7 +1654,7 @@ mod tests {
         std::fs::create_dir_all(cache.path("checkpoints/0000000000001")).unwrap();
         drop(cache);
 
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         cache.check();
         assert_eq!(cache.keys(), [objects[3].key.clone()]);
         assert_eq!(files(dir.path()), [objects[3].key.clone()]);
@@ -1586,12 +1669,12 @@ mod tests {
     fn earlier_parts_failing_their_crcs_are_dropped_as_read() {
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 2 * PART, 1);
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         object.keep(&cache);
         drop(cache);
         flip(&dir.path().join(FILES).join(KEY), object.stored(1).offset + 100);
 
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         let counted = object.len() - if cfg!(target_os = "linux") { 0 } else { PART };
         assert_eq!(cache.bytes(), counted);
         assert_eq!(object.read(&cache, 1), None);
@@ -1599,14 +1682,14 @@ mod tests {
         assert_eq!(object.kept(&cache), [0]);
     }
 
-    /// TASK-165.4: a cache opened with a smaller capacity than an earlier one evicts what that one
-    /// kept, by when each object was written last, until what is left fits; with a floor past
-    /// what the filesystem has free, it evicts all.
+    /// TASK-165.4: a cache opened with a smaller budget than an earlier one evicts what that one
+    /// kept, by when each object was written last, until what is left fits; limited to nothing,
+    /// it evicts all.
     #[test]
-    fn capacity_and_floor_hold_across_restarts() {
+    fn budgets_and_limits_hold_across_restarts() {
         let dir = tempfile::tempdir().unwrap();
         let (object, other) = (Object::noise(KEY, 2 * PART, 1), Object::noise(OTHER, PART, 2));
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         object.keep(&cache);
         other.keep(&cache);
         let (path, written) = (cache.path(OTHER), SystemTime::now());
@@ -1616,13 +1699,14 @@ mod tests {
         file.set_modified(written + std::time::Duration::from_secs(10)).unwrap();
 
         let capacity = PART + object.tail_len() + other.len();
-        let cache = Cache::open(dir.path(), capacity, 0).unwrap();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
         cache.check();
         assert!(cache.bytes() <= capacity);
         assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1], vec![0]));
         drop(cache);
 
-        let cache = Cache::open(dir.path(), capacity, u64::MAX / 2).unwrap();
+        let cache = Cache::open(dir.path(), capacity).unwrap();
+        cache.set_limit(0).unwrap();
         assert_eq!((cache.bytes(), cache.keys(), files(dir.path())), (0, vec![], vec![]));
     }
 
@@ -1643,7 +1727,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scenario = fail::FailScenario::setup();
         fail::cfg("direct::bypass", "return").unwrap();
-        let err = Cache::open(dir.path(), 8 * PART, 0).err().unwrap();
+        let err = Cache::open(dir.path(), 8 * PART).err().unwrap();
         scenario.teardown();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
         let refused = "its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE)";
@@ -1656,11 +1740,11 @@ mod tests {
     #[test]
     fn one_cache_has_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), PART, 0).unwrap();
-        let err = Cache::open(dir.path(), PART, 0).unwrap_err();
+        let cache = Cache::open(dir.path(), PART).unwrap();
+        let err = Cache::open(dir.path(), PART).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
         drop(cache);
-        Cache::open(dir.path(), PART, 0).unwrap();
+        Cache::open(dir.path(), PART).unwrap();
     }
 
     /// TASK-165.4: an object adopted from a file on the cache's filesystem, as a WAL segment
@@ -1671,7 +1755,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 2 * PART + 100, 1);
         let other = Object::noise(OTHER, PART, 2);
-        let cache = Cache::open(dir.path(), object.len() + other.len() - PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), object.len() + other.len() - PART).unwrap();
         let from = object.write_to(dir.path());
         assert!(cache.adopt(KEY, &from).unwrap());
         assert!(!from.exists());
@@ -1684,7 +1768,7 @@ mod tests {
         assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1, 2], vec![0]));
         cache.check();
         drop(cache);
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         assert_eq!((object.kept(&cache), other.kept(&cache)), (vec![1, 2], vec![0]));
     }
 
@@ -1692,7 +1776,7 @@ mod tests {
     #[test]
     fn adoptions_replace_what_is_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         let object = Object::noise(KEY, 2 * PART, 1);
         object.keep_tail(&cache);
         object.keep_part(&cache, 1);
@@ -1701,26 +1785,27 @@ mod tests {
         cache.check();
     }
 
-    /// TASK-165.4: an object that can't fit, past the capacity or the floor, isn't adopted: its
-    /// file is left where it was. One holding no object fails.
+    /// TASK-165.4: an object that can't fit, past the budget or the governed limit, isn't adopted:
+    /// its file is left where it was. One holding no object fails.
     #[test]
-    fn adoptions_past_the_capacity_or_the_floor_are_refused() {
+    fn adoptions_past_the_limit_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let object = Object::noise(KEY, 2 * PART, 1);
         let other = Object::noise(OTHER, 100, 2);
-        let cache = Cache::open(dir.path(), object.len() - 1, 0).unwrap();
+        let cache = Cache::open(dir.path(), object.len() - 1).unwrap();
         other.keep(&cache);
         let from = object.write_to(dir.path());
         assert!(!cache.adopt(KEY, &from).unwrap());
         assert_eq!((cache.bytes(), other.kept(&cache)), (other.len(), vec![0]));
         drop(cache);
-        let cache = Cache::open(dir.path(), 8 * PART, u64::MAX / 2).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
+        cache.set_limit(0).unwrap();
         assert!(!cache.adopt(KEY, &from).unwrap());
         assert_eq!((std::fs::read(&from).unwrap(), cache.bytes()), (object.bytes.clone(), 0));
         assert_eq!(cache.keys(), Vec::<String>::new());
 
         drop(cache);
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART).unwrap();
         std::fs::write(&from, b"no object").unwrap();
         let err = cache.adopt(KEY, &from).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
@@ -1828,7 +1913,7 @@ mod tests {
     /// another from a file in `wal`.
     fn crash_workload(dir: &Path, wal: &Path, cut: Arc<Cut>) {
         let [a, b, c, d, e] = crash_objects();
-        let mut cache = Cache::open(dir, CRASH_CAPACITY, 0).unwrap();
+        let mut cache = Cache::open(dir, CRASH_CAPACITY).unwrap();
         cache.files.cut = Some(cut);
         // A crash past a change makes none after it: what fails then is not the cache's.
         let keep = |object: &Object, parts: &[u64]| {
@@ -1856,7 +1941,7 @@ mod tests {
     /// all keeps all anew, as in a cache never crashed, which one opened after it finds.
     fn check_after_crash(dir: &Path, crashed: &str) {
         let objects = crash_objects();
-        let cache = Cache::open(dir, CRASH_CAPACITY, 0).unwrap();
+        let cache = Cache::open(dir, CRASH_CAPACITY).unwrap();
         cache.check();
         assert!(cache.bytes() <= CRASH_CAPACITY, "{crashed}: {} bytes", cache.bytes());
         assert_eq!(cache.keys(), files(dir), "{crashed}");
@@ -1875,12 +1960,12 @@ mod tests {
         cache.check();
         drop(cache);
 
-        let cache = Cache::open(dir, 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir, 8 * PART).unwrap();
         for object in &objects {
             object.fetch(&cache);
         }
         drop(cache);
-        let cache = Cache::open(dir, 8 * PART, 0).unwrap();
+        let cache = Cache::open(dir, 8 * PART).unwrap();
         for object in &objects {
             assert_eq!(object.kept(&cache), Vec::from_iter(0..object.parts()), "{crashed}");
         }

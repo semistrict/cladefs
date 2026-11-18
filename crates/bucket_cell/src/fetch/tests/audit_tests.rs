@@ -43,7 +43,7 @@ fn unexpected_cache_read_errors_do_not_issue_gets() {
     for warm_tail in [false, true] {
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fresh =
             || Rc::new(Fetcher::new(bucket.clone(), limits(1), memory(), Some(cache.clone())));
         let mut reads = Reads::new();

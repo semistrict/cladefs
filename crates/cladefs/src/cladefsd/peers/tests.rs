@@ -18,7 +18,7 @@ const URL: &str = "memory:///peers";
 /// A daemon's peer server on the loopback, serving the parts of `bucket`, named [`URL`], kept in a
 /// cache in `dir`: its address.
 fn serving(bucket: &Arc<ObjectBucket>, dir: &std::path::Path) -> String {
-    let cache = Arc::new(Cache::open(dir, u64::MAX, 0).unwrap());
+    let cache = Arc::new(Cache::open(dir, u64::MAX).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();

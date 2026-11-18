@@ -1462,7 +1462,7 @@ mod tests {
         let data = noise(2 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetcher =
             Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone())));
         let mut reads = Reads::new();
@@ -1485,7 +1485,7 @@ mod tests {
         let data = noise(PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetcher =
             || Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone())));
         let mut reads = Reads::new();
@@ -1528,7 +1528,7 @@ mod tests {
         let data = noise(12 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 64 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 64 * PART).unwrap());
         let mut reads = Reads::new();
         let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone()));
         let fetcher = Rc::new(fetcher.reading_ahead(reads.spawn()));
@@ -1560,7 +1560,7 @@ mod tests {
         let data = noise(4 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 64 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 64 * PART).unwrap());
         let location = location(4 * PART);
         let mut reads = Reads::new();
         let first = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone()));
@@ -1591,7 +1591,7 @@ mod tests {
         let stored = parts.stored[1];
         assert_eq!(stored.encoding, extent_frame::Encoding::Zstd);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetcher =
             Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone())));
         let mut reads = Reads::new();
@@ -1742,7 +1742,7 @@ mod tests {
         block_on(Direct(bucket.clone()).put(&checkpoint, bytes.clone().into(), PutMode::Create))
             .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache));
         let lookup = |key: &str, extent| bucket.served(fetcher.lookup(key, extent));
 
@@ -1896,7 +1896,7 @@ mod tests {
         let data = pattern(4 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 64 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 64 * PART).unwrap());
         let mut reads = Reads::new();
         let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone()));
         let fetcher = Rc::new(fetcher.reading_ahead(reads.spawn()));
@@ -1936,7 +1936,7 @@ mod tests {
         for read_len in [64 << 10, PART] {
             let bucket = bucket(&data);
             let dir = tempfile::tempdir().unwrap();
-            let cache = Arc::new(Cache::open(dir.path(), 2 * LEN, 0).unwrap());
+            let cache = Arc::new(Cache::open(dir.path(), 2 * LEN).unwrap());
             let mut reads = Reads::new();
             let fetcher = Fetcher::new(bucket.clone(), limits(64), memory(), Some(cache.clone()));
             let fetcher = Rc::new(fetcher.reading_ahead(reads.spawn()));
@@ -1961,7 +1961,7 @@ mod tests {
         let data = noise(2 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetcher =
             || Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone())));
         let mut reads = Reads::new();
@@ -1984,7 +1984,7 @@ mod tests {
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
         let read = |reading: &[u64]| {
-            let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+            let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
             let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache)));
             let mut reads = Reads::new();
             let started: Vec<_> = (reading.iter())
@@ -2013,7 +2013,7 @@ mod tests {
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
         let read = || {
-            let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+            let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
             let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache)));
             let mut reads = Reads::new();
             let read = reads.read(&fetcher, location(PART), 100, 10, Priority::Demand);
@@ -2048,7 +2048,7 @@ mod tests {
             .unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 64 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 64 * PART).unwrap());
         let fetcher =
             Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone())));
         let mut reads = Reads::new();
@@ -2098,7 +2098,7 @@ mod tests {
         let data = noise(PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetchers = host(&bucket, &cache, 4);
         let mut reads = Reads::new();
         let all: Vec<_> = (fetchers.iter())
@@ -2120,7 +2120,7 @@ mod tests {
         let data = noise(2 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let (memory, budget) = (memory(), limits(1));
         let mut reads = Reads::new();
         let ahead =
@@ -2162,7 +2162,7 @@ mod tests {
             .unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetchers = host(&bucket, &cache, 4);
         let mut reads = Reads::new();
         for (object, fetcher) in (0..).zip(&fetchers) {
@@ -2184,7 +2184,7 @@ mod tests {
     #[test]
     fn fetchers_of_a_host_hold_no_more_tails_in_memory_than_its_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetchers = host(&SimBucket::new(), &cache, 2);
         for (fetcher, cell) in fetchers.iter().zip(2..) {
             for number in 0..TAILS / TAIL {
@@ -2203,7 +2203,7 @@ mod tests {
         let data = pattern(2 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let fetchers = host(&bucket, &cache, 2);
         let (base, fork) = (&fetchers[0], &fetchers[1]);
         let mut reads = Reads::new();
@@ -2228,7 +2228,7 @@ mod tests {
         let data = noise(12 * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 64 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 64 * PART).unwrap());
         let mut reads = Reads::new();
         let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache));
         let fetcher = Rc::new(fetcher.reading_ahead(reads.spawn()));
@@ -2259,7 +2259,7 @@ mod tests {
         let data = noise(PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let mut reads = Reads::new();
         let keeping = Fetcher::new(bucket.clone(), limits(8), memory(), Some(cache.clone()));
         reads.read(&Rc::new(keeping), location(PART), 0, 10, Priority::Demand);
@@ -2315,7 +2315,7 @@ mod tests {
         let data = noise(PARTS * PART);
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 2 * PARTS * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 2 * PARTS * PART).unwrap());
         let keeping = Fetcher::new(bucket.clone(), limits(64), memory(), Some(cache.clone()));
         let (keeping, mut reads) = (Rc::new(keeping), Reads::new());
         for part in 0..PARTS {
@@ -2360,7 +2360,7 @@ mod tests {
         let data = Arc::new(noise(PARTS * PART));
         let bucket = bucket(&data);
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 2 * PARTS * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 2 * PARTS * PART).unwrap());
         let (budget, memory) = (limits(64), memory());
         let warming =
             Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), Some(cache.clone()));
@@ -2410,7 +2410,7 @@ mod tests {
         let reads = Reads::new();
         let bucket = SimBucket::new();
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), PART).unwrap());
         let fetcher =
             Fetcher::new(bucket, limits(8), memory(), Some(cache)).reading_ahead(reads.spawn());
         let streams = || fetcher.streams.lock().unwrap().len();
@@ -2486,7 +2486,7 @@ mod tests {
         let data = noise(2 * PART);
         let bucket = bucket(&data);
         let dirs = [(); 3].map(|()| tempfile::tempdir().unwrap());
-        let cache = |at: usize| Some(Arc::new(Cache::open(dirs[at].path(), 8 * PART, 0).unwrap()));
+        let cache = |at: usize| Some(Arc::new(Cache::open(dirs[at].path(), 8 * PART).unwrap()));
         let owning = Arc::new(
             Fetcher::new(bucket.clone(), limits(8), memory(), cache(0)).asking(Arc::new(Alone)),
         );

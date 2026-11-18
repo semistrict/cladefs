@@ -8,7 +8,7 @@ use super::*;
 fn free_space_admission_reserves_space_for_unwritten_fills() {
     for pending_tail in [true, false] {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
         let object = Object::noise(KEY, PART, 1);
         if !pending_tail {
             object.keep_tail(&cache);
@@ -39,16 +39,12 @@ fn free_space_admission_reserves_space_for_unwritten_fills() {
                 })
                 .unwrap()
         };
-        // The fill is admitted, but has yet to write any disk blocks. Present the next
-        // admission with a deterministic free-space sample: room for exactly one fill.
+        // The fill is admitted, but has yet to write any disk blocks: a limit with room for it
+        // alone leaves none for another (TASK-539.6, where a free-space floor sampled before the
+        // fill landed left room for two).
         started.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        let floor = 16 * PART;
-        let (fits, evicted) = cache.kept.lock().unwrap().make_room(
-            (cache.capacity(), floor),
-            floor + needed,
-            needed,
-            needed,
-        );
+        let limit = cache.bytes();
+        let (fits, evicted) = cache.kept.lock().unwrap().make_room(limit, needed);
         resume.send(()).unwrap();
         writer.join().unwrap();
         scenario.teardown();

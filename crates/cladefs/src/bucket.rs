@@ -799,7 +799,7 @@ mod tests {
             let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
-        let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap()));
+        let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).unwrap();
@@ -950,7 +950,7 @@ mod tests {
             futures::executor::block_on(pass).unwrap()
         };
         let cache =
-            cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap()));
+            cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap()));
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).unwrap();
@@ -1684,7 +1684,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
@@ -3915,7 +3915,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
+        let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30).unwrap());
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();

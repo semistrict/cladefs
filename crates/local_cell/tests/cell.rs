@@ -3697,7 +3697,7 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let device = |path: &std::path::Path| std::fs::metadata(path).unwrap().dev();
     assert_ne!(device(cached.path()), device(temp.path()), "two filesystems");
-    let cache = Arc::new(bucket_cell::cache::Cache::open(cached.path(), 1 << 20, 0).unwrap());
+    let cache = Arc::new(bucket_cell::cache::Cache::open(cached.path(), 1 << 20).unwrap());
     let cache_dir = cache.dir().to_owned();
     let dir = HostDir::new(temp.path()).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };

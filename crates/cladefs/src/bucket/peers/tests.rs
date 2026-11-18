@@ -94,7 +94,7 @@ fn hosts(
         .iter()
         .map(|_| {
             let cache = tempfile::tempdir().unwrap();
-            let kept = Arc::new(Cache::open(cache.path(), u64::MAX, 0).unwrap());
+            let kept = Arc::new(Cache::open(cache.path(), u64::MAX).unwrap());
             let (budget, memory) = (Budget::new(Limits::UNBOUNDED), Memory::new());
             // cladefs: holding the tests' keys, which the objects are encrypted under, for good.
             std::mem::forget(memory.keys().hold(bucket_cell::testing::ring([test_cell(1)])));
