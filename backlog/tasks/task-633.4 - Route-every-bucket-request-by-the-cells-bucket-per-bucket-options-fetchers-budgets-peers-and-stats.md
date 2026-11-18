@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:03'
+updated_date: '2026-11-18 22:52'
 labels:
   - bucket
   - multi-region
@@ -33,6 +34,8 @@ Every bucket a process opens shares the process environment (`reach(url, std::en
 - [ ] #2 Fetchers, recovery's checkpoints and a writer's moves read each key from its cell's bucket, each bucket with its own GET budget
 - [ ] #3 Peers serve and ask parts of every bucket in their registry
 - [ ] #4 Stats and /metrics count GETs and bytes per bucket number; tests read one store's inherited extents from a second bucket of another kind (file and S3 server)
+- [ ] #5 Parts of objects read from another cloud region's bucket are kept in the host's part cache and served by its region's peers exactly as its own bucket's are: the region's owner of a part fetches it from the remote bucket once
+- [ ] #6 Peers never cross a cloud region: every peer request names the asking host's home bucket number, a peer refuses any not its own, and a host asks no peer of another region whatever its list says; a test shows a peer of another home bucket refused and never asked
 <!-- AC:END -->
 
 ## Definition of Done

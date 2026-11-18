@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 20:48'
+updated_date: '2026-11-18 22:52'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -26,6 +26,7 @@ OPEN_QUESTIONS.md had planned for more than one cloud region before this.
 | Bucket numbers | **Sequential**, from the **root bucket**, number 1. Adding a bucket gives it the next number by a conditional write (CAS) of the root's record of every bucket, which serializes additions. Each number is kept in a create-only identity object in its bucket. (Superseded the same day: random numbers, an explicit one as an option, and a registry in each host's configuration.) |
 | Record of buckets | **In the root of every bucket**: each bucket's number, provider, cloud region, URL, endpoint, KMS and master key's ID; never a key or a credential. The root's copy is the authority; every other bucket holds a copy no older than the one before it. |
 | Credentials | Every host and collector may **write to every bucket**: a fork and a pass write across buckets themselves. No proxy through A's hosts. |
+| Caching remote objects | **Cached like any other** (the user, 2026-11-18): parts read from another cloud region's bucket go into the host's part cache and are served by its own region's peers. **Peers never cross a cloud region, under any circumstances:** the peer network is partitioned by region, a host's region being its home bucket. |
 | Not chosen | Hosts of several cloud regions sharing one bucket, as the general shape. Surviving the loss of a bucket's cloud region for the cells it is home to (DR). doc-21's replicas spread across cloud regions. |
 
 ## Why not the other shapes
@@ -97,7 +98,7 @@ One **resolver** maps a cell ID to its bucket: `id >> 48` → the registry → a
 
 - **Fetchers** route each key by `layout::cell_of(key)`, each bucket with its own GET budget.
 - **Recovery's checkpoints** and a writer's moves read each inherited object's moves from its own bucket.
-- **Peers** are kept per bucket number. A peer serves a part of any bucket in its registry, and the part cache keys stay as they are, since keys are now unique.
+- **Peers, partitioned by cloud region** (the user, 2026-11-18). A host's region is its home bucket. Every peer request names the asking host's home bucket number, and a peer refuses any whose number is not its own. A host's peer list holds hosts of its region alone, and it asks no other, whatever its list says. Within a region, a peer serves a part of **any** bucket: the region's owner of a part (`owner_of`) fetches it on a miss, from its own bucket or another region's, with its own credentials, and keeps it in its part cache. So a part of a remote bucket crosses regions about once per region, not once per host, and never between peers. The part cache keys stay as they are, since keys are now unique across buckets, and a remote object's parts are cached exactly as a local one's.
 - The **part cache's per-bucket bytes**, and every GET, carry the bucket's number in the stats and `/metrics`, so that cross-bucket egress shows.
 
 ### Taking a cell asks only its own bucket
@@ -120,8 +121,13 @@ The forking host, in B's cloud region, forks version `at` of P (home A) into a n
 
 1. Allocate C's ID from B's allocator.
 2. Wrap P's DEKs as of the fork under C's cell KEK from KMS B (`Inheriting`). This needs Decrypt on P's KEK in KMS A, as forks into other tenants' cells do today.
-3. In **A**: the reference `<P>refs/<at>/<C>` and the checkpoint at the version, ordered as `fork_version_keyed` orders them today (`NoForksReferFirst`, `NoForksRecordFirst`).
-4. In **B**: C's head, its `Origin { parent: P, at }` naming A by P's ID, and its inherited keys.
+3. In **B**: C's head, being made, its `Origin { parent: P, at }` naming A by P's ID, and its inherited keys.
+4. **Where its reference goes**, read in B: B if the version's mirror is marked there, else A. Then the reference `<P>refs/<at>/<C>` written there, and the checkpoint at the version in A, ordered as `fork_version_keyed` orders them today.
+5. **P's head read in A**, naming the version, or the fork fails (forks write their reference first, `forksReferFirst`, as in one bucket).
+6. **Having referred in A**, the marker read again in B: if it is there now, the reference written in B, then its own in A deleted (`forksRecheck`, `forksLeaveA`). Referring in B at once when marked only saves a fork after a mirror those two writes.
+7. C's head made.
+
+**A fork reads P's head in A, so a fork into B waits for A, even once the version is mirrored.** A fork going by the marker alone races B's collector deleting the copy: the collector would have to drop the marker, then list references, and a fork that read the marker before the drop leaves a child reading A for a version A no longer keeps (worked through for TASK-633.2). Mirrors make children's reads independent of A, not new forks.
 
 Every step is one object's conditional write, and each survives a crash where it is, as today. No transaction across buckets is needed: each bucket is linearizable for its own objects (S3, GCS and Azure all are, Azure's primary alone; a geo-redundant secondary is never read). Writes to two objects in two buckets are ordered in real time by the forking host, which is all the order the protocol uses.
 
@@ -134,15 +140,18 @@ Every step is one object's conditional write, and each survives a crash where it
 
 A **mirror** is a copy of a version's state in another bucket, at the same keys: the checkpoint at `at`, every object it names, and their moves objects, byte for byte. Copies are authentic where they land (`extent_frame/src/lib.rs`: "A whole object copied to another key is authentic there"), and keys are written once (TASK-407), so a copy and its source cannot differ.
 
-- **The order:**
-  1. Copy every object into B. Server-side where the clouds allow it: S3 `CopyObject` across AWS cloud regions, GCS `objects.rewrite`, Azure Put Blob From URL (which pulls from any URL, S3's presigned ones included). Into S3 from another cloud, a host must GET and PUT.
-  2. In B, the reference `<P>refs/<at>/<C>` for each child in B that the mirror serves.
-  3. In B, a create-only **mirror marker** under P's prefix, naming `at` and the checkpoint's epoch, which `state_at` finds today from P's head, in A.
-  4. In A, the `retired` mark of each such child's reference.
-  5. In A, the deletion of those references.
+- **The order** (checked by `specs/buckets`, TASK-633.2):
+  1. In B, the mirror's **pin**: a reference of its own under P's prefix, which keeps the copy from B's collector while it is made.
+  2. **P's head read in A**: the version dropped, the mirror is given up (its pin dropped, no marker). Without this read, a pass of B that read the version dropped and listed B's references before the pin deletes the copy under the marker (TLC found it, `mirrorChecks`).
+  3. **Copy** every object into B. Server-side where the clouds allow it: S3 `CopyObject` across AWS cloud regions, GCS `objects.rewrite`, Azure Put Blob From URL (which pulls from any URL, S3's presigned ones included). Into S3 from another cloud, a host must GET and PUT. An object gone from A before it is copied gives the mirror up.
+  4. In B, the create-only **mirror marker** under P's prefix, naming `at` and the checkpoint's epoch, which `state_at` finds today from P's head, in A: only once every object is copied (`markerAfterCopy`).
+  5. **List the children referring in A** to the version, after the marker (`mirrorListsAfterMark`: listed before, a fork that referred in A and read the head before the marker is missed), and write their references in B.
+  6. In A, the `retired` mark of each such child's reference, then its deletion.
+  7. Drop the pin.
+  - A mirror's host may die at any step: the mirror starts again from its pin, what it wrote kept (writes are create-only or idempotent). One that finds its marker already in B goes on to step 5 (`mirrorResumesMarked`): reading the head instead, it would give up if the version was dropped since, its children left referring in A (TLC found it).
 - **Reads:** the resolver serves P's keys at `at` from B once the marker is there, and from A before it.
-- **One mirror serves every child in B of that version,** and later forks of it in B are made against the mirror: their references are B's alone.
-- **B's collector** keeps a mirror while a reference to it stands, and removes it whole when none does. A mirror has no head, no writer and no KEK of P's, so no compactor ever touches it.
+- **One mirror serves every child in B of that version,** and later forks of it into B refer to it in B alone.
+- **B's collector** keeps a copy while P's head names its version (read first, in A: `copiesKeptWhileNamed`, `copyRelists`) or a reference in B to it stands; otherwise it deletes the marker, then the objects (`markerGoesFirst`). A mirror has no head, no writer and no KEK of P's, so no compactor ever touches it.
 - **What hydrates, and when:** every version forked into another bucket, at once (the user, 2026-11-18). The first such fork starts the mirror in the background; later forks of the version into that bucket find it under way or done. The mirror's create-only marker is the switch: before it, reads go to A; once it exists, every host reads B.
 - **Prior art:** Fly volumes fork across regions and hydrate behind, usable meanwhile (https://fly.io/docs/volumes/volume-states/). EBS loads a volume lazily from its snapshot. Cloudflare R2's Sippy migrates lazily.
 
@@ -153,12 +162,12 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 | Taking, committing, uploading, checkpointing a child | works (once a take asks only its own bucket) | works |
 | Reads of inherited extents cached in memory or the part cache | work | work |
 | Cold reads of inherited extents | wait for A | work |
-| New forks of P's versions | wait for A | made against the mirror, in B |
+| New forks of P's versions | wait for A | wait for A: a fork reads P's head |
 | B's passes over references in A | delete nothing, retry | none left in A |
 
 ## Costs
 
-- **A cold inherited read across buckets:** a tail GET of 64 KiB, then the part, so 2 round trips, about 140 ms between us-east-1 and eu-west-1. A tail larger than 64 KiB takes a third. Peers keyed by bucket bring each part across about once per cloud region, not once per host.
+- **A cold inherited read across buckets:** a tail GET of 64 KiB, then the part, so 2 round trips, about 140 ms between us-east-1 and eu-west-1. A tail larger than 64 KiB takes a third. The region's peers bring each part across about once per region, not once per host; no peer of another region is ever asked.
 - **Egress per GB:**
 
   | Route | Price |
@@ -174,31 +183,20 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 - **A mirror** costs the version's objects' bytes once per bucket, dead extents included. For a 20 GiB base that is about $0.40 within AWS's US and about $1.80 across clouds, against $0.04–0.18 per host for each 2 GiB read lazily.
 - **Bucket requests:** a fork across buckets makes the same requests as one within a bucket, some of them in A. A mirror adds one COPY or GET+PUT per object, plus the marker and the references.
 
-## What the spec must check
+## What the spec checks
 
-`specs/bucket/Bucket.tla`, with its configs `BucketRefsForks`, `BucketResumes` and `BucketInherit` and their mutations:
+`specs/buckets/Buckets.tla` (TASK-633.2), cut down from `specs/bucket`'s forks, references and collection, as `specs/replication` was: one parent cell P at home in A, children forked into B, P's writer dropping versions, children deleted, the automatic mirror (a host dying at any step of it), the collectors of P in A, of P's copy in B, and of each child, and buckets going down. Each step reads or writes one bucket.
 
-- **Cells are `<<bucket, id>>`.** References, checkpoints and objects live in buckets.
-- **`Down ⊆ Buckets`,** with steps that take a bucket down and bring it back. A step that needs a bucket in `Down` cannot run.
-- **`GcFinish` split** into its retirement and its removal, which may then be in different buckets.
-- **Mirrors:** a copy step, the marker, and readers that read A until the marker exists.
-- **Invariants:** `NothingNeededGone`, `ReferencesNamed`, `ReferencesStand` and `NoIdTwice` hold unchanged, across buckets.
-- **New rules, each with a mutation TLC shows breaking one:**
-
-  | Rule | Mutation breaks |
-  |---|---|
-  | retire before remove, across buckets | `ReferencesNamed` |
-  | a mirror's reference in B before the retirement in A (`NoMirrorReferFirst`) | `NothingNeededGone` |
-  | a pass short of a bucket deletes nothing (`NoPassesWhileDown`) | `NothingNeededGone` |
-  | a take asks only its own bucket once given, and holds every key it needs (`NoGivenComplete`) | a key's completeness |
-
-- **Liveness, under weak fairness and every bucket back up:** every reference that should go is eventually retired, and every mirror asked for is eventually complete.
-
-Each model runs in under 10 minutes, split by the steps it takes, as Replication.tla's are.
+- **Invariants:** every child made reads its version whole from where the resolver sends it, and every version P's head names is whole in A (`NothingNeededGone`); a marker never names an incomplete copy (`MarkersWhole`); every reference is a pin or names its child's version (`ReferencesNamed`); every child made holds a reference (`ChildrenReferred`); once a mirror is done, every child of its version refers in B and not in A (`MirroredChildrenOnB`).
+- **Forks against the mirror at every point:** before it starts, while it copies, between its last copy and its marker, after the marker and after it is done; racing each other, the collectors and the version's drop.
+- **Rules, each with a mutation TLC shows breaking an invariant:** `forksReferFirst`, `forksRecheck`, `forksLeaveA`, `mirrorListsAfterMark`, `mirrorPins`, `mirrorChecks`, `mirrorResumesMarked`, `markerAfterCopy`, `copiesKeptWhileNamed`, `markerGoesFirst`, `copyRelists`. Three models (`Reaches*`) show the spec reaches a child made, a mirror done with a child, and a copy collected.
+- **TLC found** the mirror's head read after its pin was needed, and a mirror started again after its marker must not read the head again, and that two steps of the first design were not: a fork referring in B at once (the read again covers it) and a mirror listing children before its copy (the listing after the marker covers it).
+- **Buckets down:** a step a bucket down refuses changes nothing, so every behaviour with a bucket down is one without it, its steps later; the safety models leave them out, and `BucketsLive` checks with them, under fairness, that every mirror begun ends.
+- **Not modelled:** the root bucket's registry (TASK-633.9's tests), compaction and moves (a copy takes moves objects too, as more objects), the children's own data, and P's collection beyond its versions (`specs/bucket`'s).
 
 ## Order of the work
 
-Nothing here waits for a measurement (TASK-633.1, archived 2026-11-18): a mirror is asked for by a control call, its policy the VM manager's, and a cold read across buckets costs what Costs says.
+Nothing here waits for a measurement (TASK-633.1, archived 2026-11-18): a mirror starts with the first fork of its version into a bucket, and a cold read across buckets costs what Costs says.
 
 1. **The spec** (above).
 2. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).

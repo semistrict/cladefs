@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:02'
+updated_date: '2026-11-18 20:49'
 labels:
   - bucket
   - multi-region
@@ -31,6 +32,7 @@ Forks across buckets split today's single-bucket steps between two buckets, eith
 - [ ] #1 Bucket.tla models cells as <<bucket, id>>, buckets going down and coming back, GcFinish split into its retirement and its removal, and mirrors with their marker
 - [ ] #2 NothingNeededGone, ReferencesNamed, ReferencesStand and NoIdTwice hold across buckets; liveness: references retired and mirrors completed once every bucket is up
 - [ ] #3 Each new rule has a mutation config that TLC shows breaking an invariant; every model runs in under 10 minutes and scripts/check-tla.sh runs them
+- [ ] #4 Forks of a version land at every point of its mirror: before its copy starts, during it, between its last object and its marker, after the marker, and racing each other, the collector of either bucket, and a bucket going down; nothing needed goes and every child reads its version whole
 <!-- AC:END -->
 
 ## Definition of Done
