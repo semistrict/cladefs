@@ -143,6 +143,19 @@ URL, endpoint, KMS and master key's ID, as given with `--region`, `--endpoint`, 
 `--master-key-id`: never a key or a credential, which each host keeps. The root's cloud region
 being down blocks only additions.
 
+A host finds another bucket by its number (TASK-633.3): in the record in its own bucket's root,
+or, for a number that copy lacks, in the root bucket's. It opens the bucket at the URL recorded and
+refuses it unless the bucket's identity is the one recorded (`ESTALE`); a number no record holds
+is `ENOENT`. Each bucket is opened with the host's environment, its own variables first:
+`CLADEFSD_BUCKET_<N>_<NAME>` stands for `NAME` for bucket N, so that buckets of other clouds,
+regions or accounts each get their own credentials:
+
+```sh
+AWS_REGION=us-east-1                                  # the host's own bucket, and the default
+CLADEFSD_BUCKET_2_AWS_REGION=eu-west-1                # bucket 2's
+CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT=/etc/cladefs/gcs-3.json
+```
+
 ## Encryption and shredding
 
 Backlog doc-16 is the design. Every store is encrypted, always:

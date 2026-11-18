@@ -141,6 +141,53 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
     Ok(bucket)
 }
 
+/// cladefs: the buckets this process found by number ([`bucket_numbered`]), by the URL of the
+/// bucket it found them from and the number: each opened once, its identity checked.
+static NUMBERED: Mutex<BTreeMap<(String, u16), Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
+
+/// cladefs: the bucket numbered `number`, as the host whose bucket is at `home` reaches it
+/// (TASK-633.3, backlog doc-23): `home` itself, if of that number; else the bucket the registry in
+/// `home`'s root records, or, if that copy records none of that number, the root bucket's
+/// registry, the authority; opened with its own options ([`ObjectBucket::from_url_numbered`]),
+/// and refused unless its identity is the one recorded (`Error::Mismatched`). `NoBucket` if no
+/// registry records it. It blocks.
+pub(crate) fn bucket_numbered(home: &str, number: u16) -> Result<Arc<ObjectBucket>, Failure> {
+    use bucket_cell::identity::{self, ROOT};
+    let key = (home.to_owned(), number);
+    if let Some(found) = NUMBERED.lock().unwrap().get(&key) {
+        return Ok(found.clone());
+    }
+    let ours = bucket(home)?;
+    let identity = upload::block_on(identity::get(&*ours))??;
+    let identity = identity.ok_or(bucket_cell::Error::NoBucket(number))?;
+    if identity.number == number {
+        return Ok(ours);
+    }
+    // The bucket an entry records, opened with its options, and checked to be it.
+    let open = |entry: &identity::Entry| -> Result<Arc<ObjectBucket>, Failure> {
+        let url = entry.details.url.as_deref().ok_or(bucket_cell::Error::NoBucket(entry.number))?;
+        let opened =
+            ObjectBucket::from_url_numbered(url, entry.number).map_err(anyhow::Error::msg)?;
+        identity::verified(entry, upload::block_on(identity::get(&opened))??)?;
+        Ok(Arc::new(opened))
+    };
+    let copy = upload::block_on(identity::registry(&*ours))??;
+    let entry = match copy.as_ref().and_then(|copy| copy.bucket(number)) {
+        Some(entry) => entry.clone(),
+        None => {
+            let root = match (identity.number, copy.as_ref().and_then(|copy| copy.bucket(ROOT))) {
+                (ROOT, _) | (_, None) => return Err(bucket_cell::Error::NoBucket(number).into()),
+                (_, Some(root)) => open(root)?,
+            };
+            let registry = upload::block_on(identity::registry(&*root))??;
+            let entry = registry.as_ref().and_then(|registry| registry.bucket(number)).cloned();
+            entry.ok_or(bucket_cell::Error::NoBucket(number))?
+        }
+    };
+    let found = open(&entry)?;
+    Ok(NUMBERED.lock().unwrap().entry(key).or_insert(found).clone())
+}
+
 /// cladefs: what the decoded states of the cells this process's buckets keep, or its stores hold
 /// as the maps of the extents they share, hold: each once, however many stores share it
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).
@@ -652,6 +699,57 @@ mod tests {
             open(&path, keeping().unwrap()).map(|opened| opened.store.description().cell).ok(),
             Some(cell)
         );
+    }
+
+    /// TASK-633.3: a host finds each bucket by its number: its own; others by the registry in its
+    /// bucket's root; one its copy lacks by the root bucket's; and refuses one whose URL reaches
+    /// another bucket, and a number no registry records.
+    #[test]
+    fn hosts_find_buckets_by_number() {
+        use bucket_cell::identity::{self, Details, Entry};
+        let dir = tempfile::tempdir().unwrap();
+        let url = |name: &str| {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+            format!("file://{}", dir.path().join(name).display())
+        };
+        let (root, home, other, late) = (url("root"), url("home"), url("other"), url("late"));
+        let number = |bucket: &ObjectBucket| {
+            upload::block_on(identity::get(bucket)).unwrap().unwrap().unwrap().number
+        };
+        crate::bucket::format_bucket(&root, Details::default()).unwrap();
+        assert_eq!(crate::bucket::add_bucket(&root, &home, Details::default()).unwrap().number, 2);
+        assert_eq!(crate::bucket::add_bucket(&root, &other, Details::default()).unwrap().number, 3);
+        assert_eq!(number(&bucket_numbered(&home, 2).unwrap()), 2);
+        assert_eq!(number(&bucket_numbered(&home, 3).unwrap()), 3);
+        assert_eq!(number(&bucket_numbered(&home, 1).unwrap()), 1);
+
+        // Added, its registry copied to the root and to it alone: home's copy lacks it.
+        let (root_bucket, late_bucket) = (bucket(&root).unwrap(), bucket(&late).unwrap());
+        let late_details = Details { url: Some(late.clone()), ..Details::default() };
+        let (_, registry) = upload::block_on(identity::add(
+            &*root_bucket,
+            &Details::default(),
+            &*late_bucket,
+            late_details,
+        ))
+        .unwrap()
+        .unwrap();
+        upload::block_on(identity::spread(&registry, &*late_bucket)).unwrap().unwrap();
+        assert_eq!(number(&bucket_numbered(&home, 4).unwrap()), 4);
+
+        // A copy recording bucket 5 at another's URL: that bucket refused as it.
+        let mut wrong = registry.clone();
+        wrong.version += 1;
+        let at_other = Details { url: Some(other.clone()), ..Details::default() };
+        wrong.buckets.push(Entry { number: 5, id: 99, details: at_other });
+        upload::block_on(identity::spread(&wrong, &*bucket(&home).unwrap())).unwrap().unwrap();
+        let refused = bucket_numbered(&home, 5).map(drop);
+        assert_eq!(
+            refused,
+            Err(bucket_cell::Error::Mismatched { number: 5, found: Some(3) }.into())
+        );
+        let refused = bucket_numbered(&home, 9).map(drop);
+        assert_eq!(refused, Err(bucket_cell::Error::NoBucket(9).into()));
     }
 
     /// TASK-364: a new store's cell's ID is its bucket's to give, one of a block this process

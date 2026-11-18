@@ -228,6 +228,16 @@ pub async fn add(
     }
 }
 
+/// `found`, the identity of the bucket the registry records as `entry`, if it is that bucket: of
+/// its number and its identity's random ID (TASK-633.3). Otherwise another bucket's, or no bucket's,
+/// which a host refuses to use as it.
+pub fn verified(entry: &Entry, found: Option<Identity>) -> Result<Identity, Error> {
+    match found {
+        Some(found) if (found.number, found.id) == (entry.number, entry.id) => Ok(found),
+        found => Err(Error::Mismatched { number: entry.number, found: found.map(|f| f.number) }),
+    }
+}
+
 /// Copies `registry` to `bucket`'s root, unless it holds one as new or newer: no copy goes back.
 pub async fn spread(registry: &Registry, bucket: &impl Bucket) -> Result<(), Error> {
     let bytes = layout::encode(registry);

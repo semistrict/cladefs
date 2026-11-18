@@ -654,6 +654,16 @@ impl ObjectBucket {
         Ok(Self::paged(objects, pages, &prefix))
     }
 
+    /// cladefs: the bucket numbered `number` at `url`, as [`ObjectBucket::from_url`] reaches it,
+    /// but configured by the environment's variables for that bucket over the others
+    /// ([`numbered_options`], TASK-633.3): its credentials, cloud region or endpoint, which the
+    /// registry of buckets never holds.
+    pub fn from_url_numbered(url: &str, number: u16) -> Result<Self, String> {
+        let options = numbered_options(std::env::vars(), number);
+        let Reached { objects, pages, prefix } = reach(url, options, &Client::DEFAULT)?;
+        Ok(Self::paged(objects, pages, &prefix))
+    }
+
     fn path(&self, key: &str) -> Path {
         if self.prefix.is_empty() {
             Path::from(key)
@@ -726,6 +736,23 @@ pub(crate) struct Reached {
     pub pages: Pages,
     /// The prefix the URL names in it.
     pub prefix: String,
+}
+
+/// cladefs: the options of the bucket numbered `number`, from the variables `vars` (TASK-633.3):
+/// each `CLADEFSD_BUCKET_<number>_<NAME>` as `NAME`, over the variable `NAME` itself, so that a
+/// host reaches buckets of other clouds, regions or accounts than its own's, each with its own
+/// credentials (`CLADEFSD_BUCKET_2_AWS_REGION`, `CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT`).
+pub fn numbered_options(
+    vars: impl IntoIterator<Item = (String, String)>,
+    number: u16,
+) -> Vec<(String, String)> {
+    let prefix = format!("CLADEFSD_BUCKET_{number}_");
+    let (own, others): (Vec<_>, Vec<_>) =
+        vars.into_iter().partition(|(name, _)| name.starts_with(&prefix));
+    let own: Vec<(String, String)> =
+        own.into_iter().map(|(name, value)| (name[prefix.len()..].to_owned(), value)).collect();
+    let overridden = |name: &str| own.iter().any(|(theirs, _)| theirs.eq_ignore_ascii_case(name));
+    others.into_iter().filter(|(name, _)| !overridden(name)).chain(own.iter().cloned()).collect()
 }
 
 /// cladefs: the provider of the bucket at `url`, as the registry of buckets records it
@@ -1107,6 +1134,31 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
+
+    /// TASK-633.3: a bucket's own variables, `CLADEFSD_BUCKET_<number>_<NAME>`, stand for `NAME`
+    /// over the variable itself; other buckets' stay as they are, which no builder reads.
+    #[test]
+    fn numbered_options_take_their_buckets_own_variables_first() {
+        let vars = [
+            ("AWS_REGION", "us-east-1"),
+            ("AWS_ACCESS_KEY_ID", "shared"),
+            ("CLADEFSD_BUCKET_2_AWS_REGION", "eu-west-1"),
+            ("CLADEFSD_BUCKET_3_AWS_REGION", "ap-south-1"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        let mut two = numbered_options(vars.clone(), 2);
+        two.sort();
+        let expected = [
+            ("AWS_ACCESS_KEY_ID", "shared"),
+            ("AWS_REGION", "eu-west-1"),
+            ("CLADEFSD_BUCKET_3_AWS_REGION", "ap-south-1"),
+        ]
+        .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        assert_eq!(two, expected);
+        let mut seven = numbered_options(vars, 7);
+        seven.sort();
+        assert!(seven.contains(&("AWS_REGION".to_owned(), "us-east-1".to_owned())), "{seven:?}");
+    }
 
     /// Requests that failed wait from 50 ms, doubling, to at most 5 s.
     #[test]

@@ -122,6 +122,15 @@ pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
     on_buckets(bucket_cell::identity::registry(&*bucket))
 }
 
+/// cladefs: the bucket numbered `number`, as this host reaches it from its own (`CLADEFSD_BUCKET`):
+/// by the registry of buckets in its root, or the root bucket's, opened with its own options and
+/// checked to be the one recorded (TASK-633.3). `ENOENT` if no registry records it, `ESTALE` if the
+/// bucket at its URL is another.
+pub fn bucket_numbered(number: u16) -> Result<Arc<ObjectBucket>, crate::Error> {
+    let home = Host::from_env().map_err(|err| crate::Error::new(anyhow::anyhow!(err)))?.bucket;
+    Ok(crate::host_cell::bucket_numbered(&home, number)?)
+}
+
 /// The errno of `failure`, as doc-4 and doc-7 have them: a cell this writer lost, to another
 /// writer or deleted, or one nothing writes, is one the store takes no more commits for (`EROFS`);
 /// one a later placement holds, which a placement cut off takes back no more, or one another
@@ -155,6 +164,9 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Formatted(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotRoot(_)) => Some(Errno::EINVAL),
         Failure::Bucket(Error::NoNumbers) => Some(Errno::ENOSPC),
+        // cladefs: a bucket no registry records, or one other than the registry says (TASK-633.3).
+        Failure::Bucket(Error::NoBucket(_)) => Some(Errno::ENOENT),
+        Failure::Bucket(Error::Mismatched { .. }) => Some(Errno::ESTALE),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2); and a taking's race for the
         // cell's keys, which it takes again (`bucket_cell::keys::taking`).

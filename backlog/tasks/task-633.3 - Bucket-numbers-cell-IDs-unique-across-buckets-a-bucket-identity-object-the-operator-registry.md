@@ -3,10 +3,11 @@ id: TASK-633.3
 title: >-
   Hosts find buckets by number: the registry in their bucket's root, credentials
   per bucket
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-18 20:24'
+updated_date: '2026-11-18 22:42'
 labels:
   - bucket
   - multi-region
@@ -43,3 +44,12 @@ With TASK-633.9 every bucket has a sequential number and every bucket's root hol
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. bucket_cell: identity::verified (an entry against the identity found), Error::NoBucket and Error::Mismatched; object_bucket::numbered_options and ObjectBucket::from_url_numbered (CLADEFSD_BUCKET_<N>_<NAME> over NAME).
+2. cladefs host_cell::bucket_numbered(home, number): home itself; else the entry in home's registry copy, or the root bucket's registry for one the copy lacks; opened with its options, identity verified; cached per (home, number). cladefs::bucket::bucket_numbered over CLADEFSD_BUCKET; errnos ENOENT, ESTALE.
+3. Tests: hosts_find_buckets_by_number (own, by copy, by the root for a stale copy, mismatch refused, unknown refused), numbered_options; a hand mutant of the identity check.
+4. operating-a-host.md.
+<!-- SECTION:PLAN:END -->

@@ -196,6 +196,17 @@ pub enum Error {
     /// cladefs: every bucket number is given ([`identity::add`]).
     #[error("every bucket number is given")]
     NoNumbers,
+    /// cladefs: no registry of buckets this host reads records the bucket of this number
+    /// (TASK-633.3).
+    #[error("no bucket {0} is recorded")]
+    NoBucket(u16),
+    /// cladefs: the bucket the registry records as this number's is another: of the number found
+    /// in its identity, or none (TASK-633.3).
+    #[error("the bucket recorded as bucket {number} is {}", match found {
+        Some(found) => format!("bucket {found}, or another bucket {number}"),
+        None => "no bucket".to_owned(),
+    })]
+    Mismatched { number: u16, found: Option<u16> },
 }
 
 /// cladefs: why a pass of the collector left its cell to another ([`Error::Left`]).
