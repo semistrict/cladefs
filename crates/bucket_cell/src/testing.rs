@@ -547,14 +547,16 @@ pub async fn fork_version(
     crate::lifecycle::fork_version(bucket, child, id, origin, owner, parents).await
 }
 
-/// cladefs: gives `child` the record of a fork of a version made at `origin`, a clone's
-/// ([`crate::record::Kind::Clone`]), and the parent's checkpoint at the origin, which its recovery
-/// reads (`recovery::checkpoint_at`): what [`fork_version`] leaves, for tests that need a child
-/// recovering from an origin, whatever version was there.
+/// cladefs: gives `child` what [`fork_version`] leaves, for tests that need a child recovering
+/// from an origin, whatever version was there: the parent's checkpoint at the origin, which its
+/// recovery reads (`recovery::checkpoint_at`); its reference, which keeps that state; and its
+/// record, a clone's ([`crate::record::Kind::Clone`]).
 pub async fn forked_at(bucket: &impl Bucket, child: CellId, origin: layout::Origin) {
     let kms = crate::keys::testing::host_kms();
     let parents = crate::keys::Parents::Kms(&kms, None);
     crate::recovery::checkpoint_at(bucket, origin.parent, origin.at, parents).await.unwrap();
+    let reference = layout::reference(origin.parent, origin.at, child);
+    crate::bucket::create(bucket, &reference, layout::encode(&layout::Reference::of(0))).await;
     let record = crate::record::Kind::Clone(origin).of(0);
     crate::bucket::create(bucket, &layout::record(child), layout::encode(&record)).await;
 }

@@ -71,10 +71,9 @@ fn collects_a_bucket_once() {
     assert!(out.status.success());
 }
 
-/// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect or
-/// to delete a cell, before it touches the bucket, naming both variables: every cell is encrypted,
-/// and compacting needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, needs
-/// none.
+/// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect,
+/// before it touches the bucket, naming both variables: every cell is encrypted, and compacting
+/// needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, and a deletion, needs none.
 #[test]
 fn refuses_to_collect_without_a_kms() {
     let keyless = |args: &[&str]| {
@@ -83,19 +82,18 @@ fn refuses_to_collect_without_a_kms() {
         command.env_remove("CLADEFS_MASTER_KEY_FILE").args(args).output().unwrap()
     };
     let refused = format!("Error: {:?}\n", bucket_cell::bucket_kms::no_kms());
-    for args in [
-        &["memory:///"][..],
-        &["memory:///", "--mark-only"],
-        &["memory:///", "--delete-cell", "1/1"],
-    ] {
+    for args in [&["memory:///"][..], &["memory:///", "--mark-only"]] {
         let out = keyless(args);
         assert_eq!(String::from_utf8_lossy(&out.stderr), refused, "{args:?}");
         assert_eq!(out.status.code(), Some(1), "{args:?}");
     }
     assert!(refused.contains("CLADEFS_KMS") && refused.contains("CLADEFS_MASTER_KEY"));
-    for args in
-        [&["memory:///", "--dry-run"][..], &["memory:///", "--cells"], &["memory:///", "--usage"]]
-    {
+    for args in [
+        &["memory:///", "--dry-run"][..],
+        &["memory:///", "--cells"],
+        &["memory:///", "--usage"],
+        &["memory:///", "--delete-cell", "1/1"],
+    ] {
         assert!(keyless(args).status.success(), "{args:?}");
     }
 }
@@ -203,14 +201,13 @@ fn collects_a_file_bucket() {
     });
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000001/cells/0000000000001";
-    let cell = "0000000000001";
-    // Its head, which names its checkpoint (TASK-407); cladefs: its cell's object, keeping its
-    // KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
+    // Its head, which names its checkpoint (TASK-407), and its record; cladefs: its cell's object,
+    // keeping its KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
     let kept = [
-        format!("{at}/cells/{cell}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{cell}/0000000000001.0000000000001"),
-        format!("{at}/heads/{cell}"),
+        format!("{at}/checkpoints/0000000000001.0000000000001"),
+        format!("{at}/head"),
+        format!("{at}/record"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(left, kept);
@@ -269,7 +266,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let cell = "0000000000001";
     let segment = |number: u64| {
         format!(
-            "tenants/{cell}/cells/{cell}/segments/{cell}/0000000000001.{number}",
+            "tenants/{cell}/cells/{cell}/segments/0000000000001.{number}",
             number = base32_id::Padded(number)
         )
     };
@@ -332,12 +329,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let kept = [
         // The word that the bucket is marked, which an operator removes with the marks.
         bucket_cell::layout::MARKING.to_owned(),
-        format!("{at}/cells/{cell}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{cell}/0000000000001.0000000000001"),
+        format!("{at}/checkpoints/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
         marks,
-        format!("{at}/heads/{cell}"),
+        format!("{at}/head"),
+        format!("{at}/record"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(names, kept);
@@ -382,15 +379,12 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     ];
     let unpassed = CellId { tenant: 1, id: 0x30 };
     futures::executor::block_on(async {
-        for (id, cell) in cells.into_iter().enumerate() {
-            lifecycle::create(&*bucket, CellId { tenant: cell.tenant, id: id as u64 + 1 }, 0)
-                .await
-                .unwrap();
+        for cell in cells {
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
         }
         // In the first cell, a segment written and one freeing it: what the pass deletes.
         let kms = host_kms(&bucket);
-        let cell = CellId { tenant: (cells[0]).tenant, id: 1 };
-        let writer = Writer::open_under(bucket.clone(), cell, (10, 1), &kms).await.unwrap();
+        let writer = Writer::open_under(bucket.clone(), cells[0], (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
@@ -413,20 +407,15 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let (did, slowest) = said.split_at(said.find("cladefs-gc: took").unwrap());
     assert_eq!(
         did,
-        "cladefs-gc: cell 1/1: deleted 2 (612 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\ncladefs-gc: deleted 2 (612 bytes), compacted 0 (0 bytes), retired 0 \
+        "cladefs-gc: cell 1/1: deleted 2 (580 bytes), compacted 0 (0 bytes), retired 0 references, \
+         in T s; requests: R\ncladefs-gc: deleted 2 (580 bytes), compacted 0 (0 bytes), retired 0 \
          references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\n"
     );
     assert!(slowest.starts_with("cladefs-gc: took T s; slowest: "), "{slowest}");
     let after = now().as_millis() as u64;
     // A cell made after the pass, which no pass went over.
-    futures::executor::block_on(lifecycle::create(
-        &*bucket,
-        CellId { tenant: unpassed.tenant, id: 4 },
-        0,
-    ))
-    .unwrap();
+    futures::executor::block_on(lifecycle::create(&*bucket, unpassed, 0)).unwrap();
     let listed = futures::executor::block_on(bucket.list("")).unwrap();
 
     // Each cell's objects and bytes by kind, as the bucket lists them now.

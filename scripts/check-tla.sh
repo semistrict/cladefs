@@ -32,9 +32,8 @@
 # A model too large to check at once is split (TASK-405): its configuration's `\* part:` lines,
 # each constants set on top of the others (`\* part: Takers = 121; TakePhases = {11, 21, 32}`),
 # are models of their own, checked one after another, `MODEL` all of them, `MODEL#K` the K-th,
-# `MODEL#whole` the whole. Each part fixes choices every behaviour makes at most once (Bucket.tla's
-# splits: Takers, TakePhases, CommitPhases, CommitTakes, ForkTo, PassCells), so that its parts
-# check between them every behaviour the whole does. `cover MODEL [NAME=VALUE...]` shows it, on
+# `MODEL#whole` the whole. Each part fixes choices every behaviour makes at most once, so that its
+# parts check between them every behaviour the whole does. `cover MODEL [NAME=VALUE...]` shows it, on
 # the model made small by the constants given or its `\* cover:` lines': every state the whole
 # reaches, one of its parts does (states that a symmetry, of Hosts, relates counted as one), and,
 # without a symmetry, they reach no other. A full run checks every split model's covers.

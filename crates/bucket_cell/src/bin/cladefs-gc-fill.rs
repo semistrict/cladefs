@@ -51,7 +51,6 @@ use bucket_cell::bucket::Bucket as _;
 use bucket_cell::keys::{self, CachingKms};
 use bucket_cell::layout::{CellId, NewVersion, Origin};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::objectid::Allocator;
 use bucket_cell::{Bytes, Writer, cell, lifecycle};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
@@ -265,9 +264,6 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
             }
         })
         .collect();
-    // What gives the IDs of the cells, as a host's does: one for the filling, its blocks
-    // taken in the bucket of the cell that first needs one, copied with it.
-    let ids = Allocator::new();
     let threads = std::thread::available_parallelism().map_or(4, |threads| threads.get());
     let next = AtomicUsize::new(0);
     let sums: Vec<Result<Vec<(CellId, Sum)>, String>> = std::thread::scope(|scope| {
@@ -278,9 +274,8 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
                     while let Some(&(cell, shape, of)) =
                         shapes.get(next.fetch_add(1, Ordering::Relaxed))
                     {
-                        let sum =
-                            futures::executor::block_on(fill(&files, kms, cell, shape, of, &ids))
-                                .map_err(|err| format!("cell {cell}: {err}"))?;
+                        let sum = futures::executor::block_on(fill(&files, kms, cell, shape, of))
+                            .map_err(|err| format!("cell {cell}: {err}"))?;
                         sums.push((cell, sum));
                     }
                     Ok(sums)
@@ -319,9 +314,8 @@ async fn fill(
     cell: CellId,
     shape: Shape,
     of: Option<&Version>,
-    ids: &Allocator,
 ) -> Result<Sum, String> {
-    let written = write(kms, cell, shape, of, ids).await?;
+    let written = write(kms, cell, shape, of).await?;
     Ok(copy(&written.bucket, files, of).await?.0)
 }
 
@@ -334,7 +328,7 @@ async fn fill_base(
     cell: CellId,
     shape: Shape,
 ) -> Result<(Sum, Version), String> {
-    let written = write(kms, cell, shape, None, &Allocator::new()).await?;
+    let written = write(kms, cell, shape, None).await?;
     let (id, origin) = written.version.ok_or("a base of no version")?;
     let keys = keys::Parents::Kms(kms, None);
     bucket_cell::recovery::checkpoint_at(&*written.bucket, origin.parent, origin.at, keys)
@@ -346,13 +340,11 @@ async fn fill_base(
 
 /// Writes `cell`, its cell as `shape` says, into a bucket in memory: one starting from `of`'s
 /// objects, the cell a clone of that version, if given.
-/// Its cell's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
     kms: &Arc<CachingKms>,
     cell: CellId,
     shape: Shape,
     of: Option<&Version>,
-    ids: &Allocator,
 ) -> Result<Written, String> {
     let memory = Arc::new(InMemory::new());
     for (key, bytes) in of.into_iter().flat_map(|version| &version.objects) {
@@ -365,10 +357,7 @@ async fn write(
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
     let failed = |err: bucket_cell::Error| err.to_string();
     make_cell(&bucket, kms, cell).await.map_err(failed)?;
-    let id = match shape {
-        Shape::Vm { .. } => CellId { tenant: cell.tenant, id: 1 },
-        Shape::Garbage { .. } => CellId { tenant: cell.tenant, id: ids.next(&*bucket).await },
-    };
+    let id = cell;
     match of {
         None => lifecycle::create(&*bucket, id, 0).await.map_err(failed)?,
         Some(version) => {
@@ -607,10 +596,10 @@ mod tests {
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [3, 0, 0]);
         // The base's second pass in full, for its sandboxes' retirements after its first.
-        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 1, 2]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 0, 1]);
         assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [3, 0, 0]);
         // A look at the base's cell: its lease read, its listing.
-        assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
+        assert_eq!(requests(&swept[2]), [1, 0, 1, 2, 4]);
         for id in 2..=4 {
             let cell = CellId { tenant: 1, id };
             assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
@@ -634,24 +623,21 @@ mod tests {
         let files = LocalFileSystem::new_with_prefix(&clones.dir).unwrap();
         let sandbox = Shape::Garbage { segments: 2, deleted: true };
         let cell = CellId { tenant: 1, id: 5 };
-        let ids = Allocator::new();
         let sum = futures::executor::block_on(fill(
             &files,
             &kms(),
             cell,
             sandbox,
             Some(&filled.bases[0]),
-            &ids,
         ));
-        // Its cell's object, its record, its head, two segments, a checkpoint, its reference, and
-        // the block of IDs its allocator took.
-        assert_eq!(sum.unwrap().objects, 8);
+        // Its cell's object, its record, its head, two segments, a checkpoint, and its reference.
+        assert_eq!(sum.unwrap().objects, 7);
         assert_eq!(of_base(&bucket), [1, 0]);
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [1, 0, 0]);
-        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [1, 1, 2]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 0, 1]);
         assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [1, 0, 0]);
-        assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
+        assert_eq!(requests(&swept[2]), [1, 0, 1, 2, 4]);
         assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
         assert_eq!(of_base(&bucket), [0, 0]);
     }

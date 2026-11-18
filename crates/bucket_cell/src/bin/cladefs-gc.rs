@@ -1056,15 +1056,13 @@ mod tests {
         let parent = layout::CellId { tenant: 1, id: 4 };
         let retired = vec![layout::reference(parent, 5, cell(6))];
         let (listed, summary) = dry_run(&DryRun { doomed, compactable, retired, fenced: false });
-        let at = "tenants/0000000000001/cells/0000000000002/";
-        let parents = "tenants/0000000000001/cells/0000000000009/";
+        let cells = "tenants/0000000000001/cells";
         let expected = format!(
-            "{at}segments/0000000000001.0000000000002 segment 100 delete\n\
-             {at}checkpoints/0000000000003/0000000000001.0000000000001 checkpoint 20 \
-             delete\n\
-             {at}segments/0000000000001.0000000000004 segment 7 compact\n\
-             {parents}refs/0000000000004/0000000000005/\
-             0000000000001.0000000000002.0000000000006 reference - retire\n"
+            "{cells}/0000000000001/segments/0000000000001.0000000000002 segment 100 delete\n\
+             {cells}/0000000000003/checkpoints/0000000000001.0000000000001 checkpoint 20 delete\n\
+             {cells}/0000000000001/segments/0000000000001.0000000000004 segment 7 compact\n\
+             {cells}/0000000000004/refs/0000000000005/0000000000001.0000000000006 reference - \
+             retire\n"
         );
         assert_eq!(listed, expected);
         assert_eq!(
@@ -1100,15 +1098,15 @@ mod tests {
         let cell = cell(1);
         assert_eq!(
             marked_line(cell, &marking),
-            "cladefs-gc: cell 1/2: marked 2 (11 bytes) in \
-             tenants/0000000000001/cells/0000000000002/gc/marks/000000000001a, deleted 0, \
+            "cladefs-gc: cell 1/1: marked 2 (11 bytes) in \
+             tenants/0000000000001/cells/0000000000001/gc/marks/000000000001a, deleted 0, \
              compacted 3, resurrected 1"
         );
         let report = Report { compacted: 1, ..Report::default() };
         let fenced = Marking { report, ..Marking::default() };
         assert_eq!(
             marked_line(cell, &fenced),
-            "cladefs-gc: cell 1/2: marked nothing, a later pass having taken the lease, compacted 1"
+            "cladefs-gc: cell 1/1: marked nothing, a later pass having taken the lease, compacted 1"
         );
     }
 
@@ -1140,7 +1138,7 @@ mod tests {
             BTreeMap::from([(cell(0xa), base), (cell(0xb), fork.clone()), (cell(0xc), fork)]);
         let held = held_cells("1/c\n").unwrap();
         assert_eq!(listed(&live, &held), "1/a\n1/b 1/a g\n");
-        let refused = "no cell, TENANT/CELL in base 32: 1/2/C".to_owned();
+        let refused = "no cell, TENANT/CELL in base 32: 1/C".to_owned();
         assert_eq!(held_cells("1/c 1/C"), Err(refused));
     }
 
@@ -1169,7 +1167,7 @@ mod tests {
         let tokio = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         tokio.block_on(async {
             for &cell in &cells {
-                let key = layout::record(layout::CellId { tenant: cell.tenant, id: 1 });
+                let key = layout::record(cell);
                 bucket.put(&key, vec![1].into(), PutMode::Create).await.unwrap();
             }
         });
@@ -1542,7 +1540,7 @@ cladefs_gc_peak_resident_bytes 67108864
             &["u", "--dry-run", "--usage"],
             &["u", "--cell"],
             &["u", "--cell", "1"],
-            &["u", "--cell", "1/3"],
+            &["u", "--cell", "1/2/3"],
             &["u", "--cell", "1/2", "--cell", "1/3"],
             &["u", "--cells", "--cell", "X/2"],
             &["u", "--cells", "--cell", "1/2", "--cell", "1/2"],

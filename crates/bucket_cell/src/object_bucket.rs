@@ -1650,8 +1650,9 @@ pub(crate) mod tests {
         let location = &inherited.extents[&large];
         assert_eq!(crate::testing::read(&bucket, large, location).await.unwrap(), vec![7; 4096]);
 
-        // Freed by the parent's writer, and by the child, which inherited them, nothing reaches
-        // them: the collector reclaims their objects.
+        // Freed by the parent's writer, and by the child, which inherited them, and the child
+        // deleted, its reference retired, nothing reaches them: the collector reclaims their
+        // objects.
         let segment = add(&second, Commit { tag: 4, frees: vec![large], ..Commit::default() });
         second.upload(segment).await.unwrap();
         second.acknowledge().await.unwrap();
@@ -1661,7 +1662,9 @@ pub(crate) mod tests {
         heir.upload(segment).await.unwrap();
         heir.acknowledge().await.unwrap();
         heir.checkpoint().await.unwrap();
-        collector::collect(&*bucket, 21, &options).await.unwrap();
+        drop(heir);
+        lifecycle::delete(&*bucket, test_cell(child), 13, u64::MAX).await.unwrap();
+        crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
         for extent in [small, large] {
             let key = &inherited.extents[&extent].key;
             assert_eq!(bucket.head(key).await.map(|_| ()), Err(Error::NotFound), "{extent:?}");

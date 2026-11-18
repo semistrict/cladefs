@@ -1471,10 +1471,10 @@ mod tests {
         let relabelled = Dek { generation: 3, ..wrapped.clone() };
         assert_eq!(
             refused(test_cell(7), &relabelled),
-            "corrupt: cell 1/1/7's DEK of generation 3: not authentic: a wrapped key, by its \
+            "corrupt: cell 1/7's DEK of generation 3: not authentic: a wrapped key, by its \
              integrity check"
         );
-        let other_cell = CellId { tenant: 1, id: 7 };
+        let other_cell = CellId { tenant: 2, id: 7 };
         assert!(unwrap_dek(&kek, other_cell, &wrapped).is_err());
     }
 
@@ -1595,7 +1595,7 @@ mod tests {
             layout::encode(&forked),
         ));
         let given = block_on(with_dek(&bucket, &objectless, elsewhere, forked.clone()));
-        let no_kek = "cell 1/2 keeps no KEK, which every cell's object does";
+        let no_kek = "cell 1/a keeps no KEK, which every cell's object does";
         assert_eq!(given.map(|_| ()), Err(Error::Corrupt(no_kek.into())));
     }
 
@@ -1675,8 +1675,8 @@ mod tests {
         let keys = CellKeys::of(child, &read_cell(&bucket, child), fresh.clone());
         let rung = block_on(ring(&bucket, &keys, child, &given, true)).unwrap();
         assert_eq!(rung.cells(), BTreeSet::from([TEST_CELL.id, 10]));
-        let id = KeyId { cell: 7, generation: 1 };
-        assert_eq!(rung.of(7).dek(id).unwrap().expose(), dek.expose());
+        let id = KeyId { cell: TEST_CELL.id, generation: 1 };
+        assert_eq!(rung.of(TEST_CELL.id).dek(id).unwrap().expose(), dek.expose());
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
         // A record given its keys without its parent's: refused, not read across.
         let stripped = Record { inherited: Vec::new(), ..given.clone() };
@@ -1693,7 +1693,7 @@ mod tests {
         assert_ne!(rotated.inherited[0].dek.wrapped, given.inherited[0].dek.wrapped);
         let keys = CellKeys::of(child, &read_cell(&bucket, child), fresh);
         let rung = block_on(ring(&bucket, &keys, child, &rotated, true)).unwrap();
-        assert_eq!(rung.of(7).dek(id).unwrap().expose(), dek.expose());
+        assert_eq!(rung.of(TEST_CELL.id).dek(id).unwrap().expose(), dek.expose());
     }
 
     /// TASK-411.4: a host's pools. A take from a pooled host refills a pool left low, a batch of

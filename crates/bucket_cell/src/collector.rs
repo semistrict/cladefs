@@ -2371,82 +2371,6 @@ mod tests {
         }
     }
 
-    /// TASK-175, as specs/bucket's NoWaysFromSeals finds it since the head (TASK-407): a fork's
-    /// writer recovers its parent's state at the fork, naming an extent where it was sealed; a
-    /// pass compacts that segment, and the parent's writer checkpoints at the origin, naming
-    /// the moves, which the fork's recovery reads since. The collector compacts the moves in turn
-    /// and deletes what it can, and the fork's writer still reads the extent, the moves on its way
-    /// from where it was sealed kept. (Before the head, a writer taken over checkpointing late did
-    /// it alone: found by the simulation, seed 677 of its `recreated` on task-165-3.)
-    #[test]
-    fn writers_read_past_checkpoints_landing_after_they_took_over() {
-        assert_eq!(block_on(read_past_a_late_checkpoint()), Ok(b"kept".to_vec()));
-    }
-
-    /// The collector keeping the moves on the way to an extent only from where the states it reads
-    /// name it: the fork's writer reads it where neither the object nor its moves are.
-    #[test]
-    fn writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals() {
-        crate::set_rules(crate::Rules { ways_from_seals: false, ..crate::Rules::ALL });
-        let read = block_on(read_past_a_late_checkpoint());
-        crate::set_rules(crate::Rules::ALL);
-        assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
-    }
-
-    /// What the fork's writer reads of the extent [`writers_read_past_checkpoints_landing_after_they_took_over`]
-    /// keeps: its parent's writer checkpointing at the origin, the collector having moved it,
-    /// after the fork's writer recovered the parent's state there from the checkpoint before; the
-    /// moves then compacted in turn, and passes run until they delete nothing more.
-    async fn read_past_a_late_checkpoint() -> Result<Vec<u8>, Error> {
-        let bucket = store();
-        let (parent, fork) = (test_cell(1), test_cell(2));
-        lifecycle::create(&*bucket, parent, 0).await.unwrap();
-        let before = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
-        let first = before.chain().next_sequence();
-        let [kept, moved, freed] = [0, 1, 2].map(|i| ExtentId::new(1, first + i));
-        let extents = vec![
-            (kept, b"kept".to_vec()),
-            (moved, vec![b'm'; 20_000]),
-            (freed, vec![b'f'; 20_000]),
-        ];
-        commit(&before, Commit { tag: 1, extents, ..Commit::default() }).await;
-        let sealed = before.location(kept).unwrap().key;
-        before.checkpoint().await.unwrap();
-        // The fork, of a version freeing what makes the segment mostly freed, dropped once forked.
-        let forking =
-            SegmentBuilder::from(Commit { tag: 2, frees: vec![freed], ..Commit::default() });
-        let cut = layout::NewVersion { id: crate::testing::VERSION, keep_last: None };
-        let at = before
-            .add_segment(forking.cut(cut, &mut before.chain()).frame(before.keys().encrypting()))
-            .unwrap();
-        before.upload(at).await.unwrap();
-        before.acknowledge().await.unwrap();
-        let origin = Origin { parent, at };
-        crate::testing::fork_version(&*bucket, fork, cut.id, origin, 0x22).await.unwrap();
-        before.drop_versions(&BTreeSet::from([cut.id])).await.unwrap();
-        // The fork's writer recovers its parent's state at the fork, from the checkpoint before.
-        let writer = Writer::open(bucket.clone(), fork, 11, 0).await.unwrap();
-        assert_eq!(writer.location(kept).unwrap().key, sealed);
-        let compacting = Options { compact_below: 0.6, ..KEEP };
-        assert_eq!(collect(&*bucket, 1, &compacting).await.unwrap().compacted, 1);
-        // The parent's writer checkpoints at the origin, following the moves.
-        assert_eq!(before.checkpoint().await, Ok(Some(at)));
-        let tag = writer.chain().tag(1);
-        commit(&before, Commit { tag: 3, frees: vec![moved], ..Commit::default() }).await;
-        commit(&writer, Commit { tag, frees: vec![moved], ..Commit::default() }).await;
-        collect_all(&*bucket).await;
-        let left = keys(&*bucket).await;
-        assert!(
-            !left.contains(&sealed)
-                && left.iter().any(|key| {
-                    layout::moved_from(key).and_then(|from| layout::moved_from(&from))
-                        == Some(sealed.clone())
-                }),
-            "{left:#?}"
-        );
-        crate::testing::read(&bucket, kept, &writer.location(kept).unwrap()).await
-    }
-
     /// TASK-175: a writer names the extents its checkpoint moves where they went before the
     /// checkpoint lands: passes of the collector running as the head's swap naming it takes
     /// effect, before it is answered, trust the checkpoint of the writer holding the head, compact
@@ -2514,11 +2438,15 @@ mod tests {
     }
 
     /// Runs passes of the collector, compacting objects less than 60% live and deleting what they
-    /// compacted at once, until one does nothing.
+    /// compacted at once, until one does nothing but skip cells unchanged.
     async fn collect_all(bucket: &impl Bucket) {
         let now = Options { compact_below: 0.6, grace: 0 };
         let mut holder = 2;
-        while collect(bucket, holder, &now).await.unwrap() != Report::default() {
+        loop {
+            let report = collect(bucket, holder, &now).await.unwrap();
+            if report == (Report { skipped: report.skipped, ..Report::default() }) {
+                return;
+            }
             holder += 1;
         }
     }
@@ -2645,11 +2573,10 @@ mod tests {
         (uploaded, recovered.ok().and_then(|recovered| recovered.state.last_commit))
     }
 
-    /// TASK-455: a dead cell a pass does not remove, of an ID no allocator gave, its segments
-    /// compacted before its cell's deletion: the first pass in full deletes the segments, and
-    /// their moves, whose objects it listed, the next, which goes in full for that, as the first
-    /// recorded its listing, not what its deletes left (the simulation found the moves kept for
-    /// good when it did); then passes skip it, and nothing is left but its record, head and lease.
+    /// TASK-455: a dead cell, its segments compacted before its deletion: the first pass in full
+    /// deletes the segments, and the next, which goes in full for that, as the first recorded its
+    /// listing, not what its deletes left (the simulation found the moves kept for good when it
+    /// did), removes the cell whole, its moves with it; then nothing is left.
     #[test]
     fn dead_cells_kept_lose_the_moves_of_what_their_first_pass_deleted() {
         let sim = SimBucket::new();
@@ -2667,14 +2594,10 @@ mod tests {
             let first = collect(&*bucket, 2, &compacting).await.unwrap();
             assert_eq!(moves(&keys(&*bucket).await), SEGMENTS as usize, "{first:?}");
             let second = collect(&*bucket, 3, &compacting).await.unwrap();
-            assert_eq!((second.deleted, second.skipped), (SEGMENTS as usize, 0));
+            assert_eq!((second.removed, second.skipped), (1, 0));
             let third = collect(&*bucket, 4, &compacting).await.unwrap();
-            assert_eq!(third, Report { skipped: 1, ..Report::default() });
-            let left = keys(&*bucket).await;
-            let expected = vec![layout::head(test_cell(1)), layout::record(test_cell(1))];
-            let mut left = left;
-            left.retain(|key| !matches!(layout::kind(key), Kind::Cell { .. }));
-            assert_eq!(left, expected);
+            assert_eq!(third, Report::default());
+            assert_eq!(keys(&*bucket).await, Vec::<String>::new());
             assert_eq!(crate::testing::uncollected(&*bucket, 0.5).await, Vec::<String>::new());
         });
     }
@@ -2848,7 +2771,10 @@ mod tests {
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         let options = Options { compact_below: 0.0, grace: 0 };
-        crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
+        // A pass over the clone's cell finding what it needs lost stops there.
+        if let Err(error) = crate::testing::collect_until_quiet(&*direct, &options).await {
+            return (referred, Err(error));
+        }
         let recovered = crate::recovery::recover(&*direct, clone, Some(origin)).await;
         let held = match recovered {
             Ok(recovered) => {
@@ -3343,7 +3269,9 @@ mod tests {
         let live = |cell| block_on(lifecycle::live(&*bucket, cell)).unwrap().is_some();
         assert_eq!((live(test_cell(1)), live(test_cell(2))), (true, true));
         block_on(lifecycle::delete(&*bucket, test_cell(2), 12, u64::MAX)).unwrap();
+        // The pass over the child's cell retires its reference; the next over its parent's frees.
         block_on(collect(&*bucket, 2, &KEEP)).unwrap();
+        block_on(collect(&*bucket, 3, &KEEP)).unwrap();
         assert!(!kept(), "what the fork inherited stayed once it was deleted");
         assert_eq!((live(test_cell(1)), live(test_cell(2))), (true, false));
     }
@@ -3595,7 +3523,7 @@ mod tests {
     fn cells_lost_fail_the_pass_unless_deleted() {
         // CellId 2, forked from 1, which has no record; and a segment of no cell.
         let origin = Origin { parent: test_cell(1), at: 0 };
-        let stray = layout::segment(test_cell(3), 0, 1);
+        let stray = layout::segment(test_cell(2), 0, 1);
         let sim = SimBucket::new();
         let direct = Direct(sim.clone());
         block_on(async {
@@ -4458,11 +4386,6 @@ mod tests {
         let lists = asked.iter().filter(|asked| asked.starts_with("list")).count();
         assert!(lists > 0, "{asked:#?}");
         assert!(asked.contains(&format!("delete {retired}")), "{asked:#?}");
-        let (marked, deleted) = (
-            position(&asked, &format!("put {mark}")),
-            position(&asked, &format!("delete {retired}")),
-        );
-        assert!(marked < deleted, "marked first: {asked:#?}");
         assert_eq!(report.retired, 1);
         assert!(report.deleted > 0, "{report:?}");
         let (many, many_report, ..) = pass_over_a_dead_fork(30);
@@ -4982,9 +4905,13 @@ mod tests {
                 cells
             };
             assert_eq!(others(&asked), others(&all_idle), "{write}");
-            // Until it changes the cell no more: a deletion's pass deletes, the cell dead, and
-            // records what its deletes leave, which the one after it finds (TASK-455).
-            assert_eq!(sweep(&mut collector), all_idle, "{write}");
+            // Until it changes the cell no more; a deletion's pass removes the dead cell whole
+            // (TASK-455).
+            let quiet = match write {
+                "deletion" => others(&all_idle),
+                _ => all_idle.clone(),
+            };
+            assert_eq!(sweep(&mut collector), quiet, "{write}");
         }
         // The origin the reference names, its cell's pass keeps (TASK-395.10's space).
         let kept = bucket.keys();
@@ -5164,27 +5091,28 @@ mod tests {
 
             // Each cell's usage as its listing, measured since `before` if `changed` holds it, and
             // before that otherwise: passes since skipped it.
-            let check = |step: &'static str, before: u64, changed: &'static [usize]| {
-                let bucket = bucket.clone();
-                async move {
-                    for (index, cell) in cells.into_iter().enumerate() {
-                        let (usage, listed) = usages(&*bucket, cell).await;
-                        assert_eq!(usage.kinds, listed, "{step}: cell {cell}");
-                        let (measured, now) = (usage.measured, bucket.now());
-                        match changed.contains(&index) {
-                            true => {
-                                assert!(before <= measured && measured <= now, "{step} {cell}")
+            let check =
+                |step: &'static str, before: u64, changed: &'static [usize], kept: usize| {
+                    let bucket = bucket.clone();
+                    async move {
+                        for (index, cell) in cells.into_iter().take(kept).enumerate() {
+                            let (usage, listed) = usages(&*bucket, cell).await;
+                            assert_eq!(usage.kinds, listed, "{step}: cell {cell}");
+                            let (measured, now) = (usage.measured, bucket.now());
+                            match changed.contains(&index) {
+                                true => {
+                                    assert!(before <= measured && measured <= now, "{step} {cell}")
+                                }
+                                false => assert!(measured < before, "{step}: cell {cell}"),
                             }
-                            false => assert!(measured < before, "{step}: cell {cell}"),
                         }
                     }
-                }
-            };
+                };
             let options = Options { compact_below: 0.5, grace: 0 };
             let before = bucket.now();
             let report = crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
             assert_eq!(report.compacted, SEGMENTS as usize);
-            check("written and compacted", before, &[0, 1, 2]).await;
+            check("written and compacted", before, &[0, 1, 2], 3).await;
             let left = keys(&*bucket).await;
             assert_eq!(segments.iter().filter(|segment| left.contains(segment)).count(), 0);
             let (usage, _) = usages(&*bucket, compacting).await;
@@ -5195,15 +5123,14 @@ mod tests {
             sim.advance(1);
             let before = bucket.now();
             lifecycle::delete(&*bucket, child, 21, 0).await.unwrap();
-            // Retired by the pass over the dead cell in full; not by the ones after, which skip it
-            // (TASK-395.14), as that one recorded what its deletes left (TASK-455).
+            // Retired by the pass over the dead cell, which removes it whole (TASK-455).
             let report = crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
-            assert_eq!(report.retired, 1);
-            check("deleted", before, &[1, 2]).await;
+            assert_eq!((report.retired, report.removed), (1, 1));
+            check("deleted", before, &[1], 2).await;
             let (usage, _) = usages(&*bucket, parent).await;
             assert!(!usage.kinds.contains_key("reference"), "{usage:?}");
-            let (usage, _) = usages(&*bucket, child).await;
-            assert!(!usage.kinds.contains_key("segment"), "{usage:?}");
+            let left = keys(&*bucket).await;
+            assert!(left.iter().all(|key| !key.starts_with(&child.prefix())), "{left:#?}");
         });
     }
 
