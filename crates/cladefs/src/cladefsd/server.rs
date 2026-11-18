@@ -1084,7 +1084,7 @@ fn refuse_version(header: &Header, answer: Answer) {
 
 /// cladefs: the failpoint of requests of `kind`, if they have one (TASK-44.10).
 #[cfg(feature = "failpoints")]
-fn failpoint(kind: u32) -> Option<&'static str> {
+pub(super) fn failpoint(kind: u32) -> Option<&'static str> {
     Some(match kind {
         READ => "cladefsd::read",
         WRITE => "cladefsd::write",

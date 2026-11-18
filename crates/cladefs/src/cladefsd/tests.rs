@@ -613,11 +613,13 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
 
-    // The daemon holds the read, saying it has it, until let go.
+    // The daemon holds the read, saying it has it, until let go: at its failpoint, named as the
+    // daemon names it, as the test waits for it.
+    let point = super::server::failpoint(super::wire::READ).unwrap();
     let (has, had) = mpsc::channel();
     let (go, gone) = mpsc::channel::<()>();
     let gone = Mutex::new(gone);
-    fail::cfg_callback("extentd::read", move || {
+    fail::cfg_callback(point, move || {
         has.send(()).unwrap();
         gone.lock().unwrap().recv().unwrap();
     })
@@ -633,7 +635,7 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     assert_eq!(store.take_transfer_slots().len(), TRANSFER_SLOTS - 1);
 
     // Answered, its slot comes back: as the reply comes, on the client's receiving thread.
-    fail::remove("extentd::read");
+    fail::remove(point);
     go.send(()).unwrap();
     while store.take_transfer_slots().len() < TRANSFER_SLOTS {
         std::thread::yield_now();
