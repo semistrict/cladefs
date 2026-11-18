@@ -525,11 +525,11 @@ impl FileSet {
         if file.opens > 0 {
             bail!("deleting {name}, open");
         }
-        let file = self.remove_file(&mut inner, name);
         if file.committed {
             let dead: Vec<_> = block_on(file.pages.extents(&**self.device))?.into_iter().collect();
-            self.commit_root(&mut inner, None, dead, None)?;
+            self.commit_root(&mut inner, name, dead, None)?;
         }
+        self.remove_file(&mut inner, name);
         Ok(true)
     }
 
@@ -549,8 +549,7 @@ impl FileSet {
         // What it minted is spent, whatever came of it.
         inner.mint = next;
         let plan = plan?;
-        let changed = Some((name, plan.root.clone()));
-        let committed = self.commit_root(inner, changed, plan.dead.clone(), Some(&plan));
+        let committed = self.commit_root(inner, name, plan.dead.clone(), Some(&plan));
         committed.with_context(|| format!("committing {name}"))?;
         let inner = &mut *inner;
         let file = inner.files.get_mut(name).expect("a file open");
@@ -564,14 +563,14 @@ impl FileSet {
         Ok(())
     }
 
-    /// Commits the root: each file committed as it is, but `changed`, if given, as it says, `plan`'s
+    /// Commits the root: each file committed as it is, except `name`, replaced by `plan` or deleted. The plan's
     /// extents written first, the last write carrying the root; and `dead` among the dying, freed
     /// once a batch of them waits ([`FREE_BATCH`]), their root durable. A failure before the root
     /// changes nothing, but that what it wrote is freed; one committing it fails the file set.
     fn commit_root(
         &self,
         inner: &mut Inner,
-        changed: Option<(&str, format::FileRoot)>,
+        name: &str,
         dead: Vec<ExtentId>,
         plan: Option<&Plan>,
     ) -> Result<(), Error> {
@@ -580,8 +579,10 @@ impl FileSet {
             .filter(|(_, file)| file.committed)
             .map(|(name, file)| (name.clone(), file.pages.root()))
             .collect();
-        if let Some((name, root)) = changed {
-            files.insert(name.to_owned(), root);
+        if let Some(plan) = plan {
+            files.insert(name.to_owned(), plan.root.clone());
+        } else {
+            files.remove(name);
         }
         let carried = std::mem::take(&mut inner.dying);
         let dying: Vec<_> = carried.iter().copied().chain(dead).collect();

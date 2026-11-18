@@ -1,7 +1,7 @@
 ---
 id: TASK-533
 title: A contiguous memory-cell read issues a device read for each 4 KiB block
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 12:25'
 labels: []
@@ -23,12 +23,22 @@ Isolated arm64 macOS validation. Commit one node of nonzero data with 4 KiB bloc
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A contiguous run is read in requests bounded by extent and device limits. Operation counts cover contiguous and mixed runs, with byte-for-byte verification.
+- [x] #1 A contiguous run is read in requests bounded by extent and device limits. Operation counts cover contiguous and mixed runs, with byte-for-byte verification.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The storage audit counted device operations during first touch. Byte comparisons and single-page path counts missed serial reads within a contiguous run. The file_operations regression checks the complete node and its device read count. The read loop groups physically consecutive blocks under the transfer size used by extent writes. Dirty pages, punched holes, recently written pages and mapped pages retain their own read sources. The existing one-page helper still serves partial-page writes and compaction.
+An independent macOS probe read an unaligned 600-page span containing a dirty page and a punched page. It verified all bytes and counted five device requests across the three clean runs, including transfer-limit splits.
+
+The unchanged regression failed in the macOS audit run and passed against the implementation. Both implementation reviews reported no findings.
+The regression also passed on ubu1 in run r516e against 24c6081a6 with the production patch. All 19 extent_files tests passed on both platforms. The macOS crate run passed 412 of 413 (TASK-530 failed), and its workspace run stopped on TASK-521. The ubu1 crate run passed 681 of 684 (TASK-519, TASK-520 and TASK-522 failed, as in the baseline audit). Workspace qualification remains open.
+<!-- SECTION:NOTES:END -->
