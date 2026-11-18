@@ -52,6 +52,7 @@
 //! Shuttle schedules among them, run through it as the store does on a host.
 
 use crate::dir::File;
+use crate::frames::{Frame, Frames};
 use crate::shared::Holding;
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::{BTreeMap, VecDeque};
@@ -149,6 +150,9 @@ pub struct PageCache {
     /// Wakes writers held back.
     drained: Condvar,
     holding: Mutex<()>,
+    /// cladefs: what its pages are held in: frames of slabs of its own, those of pages gone
+    /// holding the next (TASK-433.9).
+    frames: Arc<Frames>,
 }
 
 /// The process's page cache, which every store's files share ([`crate::HostDir`]).
@@ -199,6 +203,7 @@ impl PageCache {
             flushing: Mutex::new(false),
             drained: Condvar::new(),
             holding: Mutex::new(()),
+            frames: Frames::new(),
         })
     }
 
@@ -479,7 +484,8 @@ trait Paged: Send + Sync {
 
 /// A page held.
 struct Page {
-    bytes: Box<[u8]>,
+    /// cladefs: a frame of its cache's (TASK-433.9).
+    bytes: Frame,
     /// The number of the oldest write it holds that no write-back took yet, if it is dirty: what
     /// a sync goes by, so that a page written before a sync and again after it began is written
     /// back for it, as it is now.
@@ -877,26 +883,40 @@ impl<F: File> File for Cached<F> {
         let end = offset + buf.len() as u64;
         let mut at = offset;
         let (mut added, mut dirtied) = (0, 0);
+        let mut failed = None;
         while at < end {
             let index = at / PAGE;
             let within = (at % PAGE) as usize;
             let take = ((PAGE - at % PAGE).min(end - at)) as usize;
             let size = pages.size;
+            let written = &buf[(at - offset) as usize..(at - offset) as usize + take];
             let page = match pages.pages.entry(index) {
-                std::collections::btree_map::Entry::Occupied(page) => page.into_mut(),
+                std::collections::btree_map::Entry::Occupied(page) => {
+                    let page = page.into_mut();
+                    page.bytes[within..within + take].copy_from_slice(written);
+                    page
+                }
                 std::collections::btree_map::Entry::Vacant(vacant) => {
-                    let mut bytes = vec![0; PAGE as usize].into_boxed_slice();
-                    // What of the page the write leaves, as the file holds it.
-                    let partial = within != 0 || take != PAGE as usize;
-                    if partial && index * PAGE < size {
-                        shared.file.read_at(&mut bytes, index * PAGE)?;
-                    }
+                    // cladefs: a frame filled whole, by the write, or by zeros, and what of the
+                    // page the write leaves as the file holds it: never what a frame held before,
+                    // another file's (TASK-433.9).
+                    let bytes = if take == PAGE as usize {
+                        shared.cache.frames.copied(written)
+                    } else {
+                        let mut bytes = shared.cache.frames.zeroed();
+                        if index * PAGE < size
+                            && let Err(err) = shared.file.read_at(&mut bytes, index * PAGE)
+                        {
+                            failed = Some(err);
+                            break;
+                        }
+                        bytes[within..within + take].copy_from_slice(written);
+                        bytes
+                    };
                     added += 1;
                     vacant.insert(Page { bytes, dirty: None, last: 0, writing: false })
                 }
             };
-            page.bytes[within..within + take]
-                .copy_from_slice(&buf[(at - offset) as usize..(at - offset) as usize + take]);
             if page.dirty.is_none() {
                 dirtied += 1;
                 page.dirty = Some(number);
@@ -904,8 +924,12 @@ impl<F: File> File for Cached<F> {
             page.last = number;
             at += take as u64;
         }
-        pages.size = pages.size.max(end);
-        pages.dirtied.get_or_insert_with(Instant::now);
+        // cladefs: what it wrote before a read failed counted as what it wrote whole is: the pages
+        // it holds go uncounted no more, to be taken off the counts as they go (TASK-433.10).
+        pages.size = pages.size.max(at);
+        if at > offset {
+            pages.dirtied.get_or_insert_with(Instant::now);
+        }
         let held = shared.cache.held.fetch_add(added * PAGE, Ordering::Relaxed) + added * PAGE;
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
         let dirty =
@@ -913,7 +937,7 @@ impl<F: File> File for Cached<F> {
         shared.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
         drop(pages);
         shared.cache.dirtied();
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// The pages in the range written back, and the file told to write them back too, as one
@@ -1009,6 +1033,75 @@ mod tests {
         assert_eq!(cache.evict_to(0), 0);
         file.read_at(&mut read, 0).unwrap();
         assert_eq!(read, data, "read from the file, evicted");
+    }
+
+    /// cladefs: the frames of pages gone hold the next pages written, never what they held
+    /// before, another file's (TASK-433.9).
+    #[test]
+    fn frames_of_pages_gone_hold_the_next_and_none_of_their_bytes() {
+        let dir = MemDisk::new();
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let gone = Cached::new(dir.create("gone", true).unwrap(), &cache).unwrap();
+        gone.write_at(&pattern(5, 2 * PAGE as usize), 0).unwrap();
+        gone.sync().unwrap();
+        drop(gone);
+        assert_eq!(cache.bytes(), 0);
+
+        let next = Cached::new(dir.create("next", true).unwrap(), &cache).unwrap();
+        next.write_at(&pattern(6, 10), 100).unwrap();
+        let mut read = vec![0; PAGE as usize];
+        next.read_at(&mut read, 0).unwrap();
+        let mut model = vec![0; 100];
+        model.extend(pattern(6, 10));
+        model.resize(PAGE as usize, 0);
+        assert_eq!(read, model, "zeros but what was written, in a frame that held another file's");
+        assert_eq!(cache.bytes(), PAGE);
+    }
+
+    /// cladefs: a file whose reads fail, its writes and the rest as `F`'s.
+    struct FailingReads<F>(F);
+
+    impl<F: File> File for FailingReads<F> {
+        fn read_at(&self, _buf: &mut [u8], _offset: u64) -> io::Result<()> {
+            Err(io::Error::other("a read refused"))
+        }
+
+        fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+            self.0.write_at(buf, offset)
+        }
+
+        fn size(&self) -> io::Result<u64> {
+            self.0.size()
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            self.0.sync()
+        }
+
+        fn sync_cached(&self) -> io::Result<()> {
+            self.0.sync_cached()
+        }
+    }
+
+    /// cladefs: a write whose read of what the file holds of a partial page fails counts the pages
+    /// it held and dirtied before, which their going takes off the counts after, none wrapping
+    /// (TASK-433.10).
+    #[test]
+    fn a_write_failing_its_read_counts_what_it_held() {
+        let dir = MemDisk::new();
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let raw = dir.create("f", true).unwrap();
+        raw.write_at(&pattern(7, 3 * PAGE as usize), 0).unwrap();
+        let file = Cached::new(FailingReads(raw), &cache).unwrap();
+        // Two whole pages, then part of a third, which the file holds: its read fails.
+        let err = file.write_at(&pattern(8, 2 * PAGE as usize + 10), 0).unwrap_err();
+        assert_eq!(err.to_string(), "a read refused");
+        assert_eq!(cache.usage().held, 2 * PAGE);
+        assert_eq!(cache.usage().dirty, 2 * PAGE);
+        file.sync().unwrap();
+        assert_eq!(cache.usage().dirty, 0);
+        assert_eq!(cache.evict_to(0), 0);
+        assert_eq!(cache.usage().held, 0);
     }
 
     /// A write over part of a page keeps the rest as the file holds it; one past the end, zeros

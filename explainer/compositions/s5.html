@@ -1,0 +1,68 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s5-pos { position: absolute; left: 890px; top: 435px; width: 140px; height: 170px; }
+    #s5-hop { position: absolute; inset: 0; }
+    #s5-fs { position: absolute; inset: 0; }
+    .s5-box { position: absolute; inset: 0 0 14px 0; border: 5px solid var(--ink); border-radius: 24px; background: var(--peach); }
+    .s5-drawer { position: absolute; left: 14px; right: 14px; height: 58px; border: 4px solid var(--ink); border-radius: 14px; background: #ffd0b8; }
+    .s5-handle { position: absolute; left: 36px; right: 36px; bottom: 8px; height: 10px; border-radius: 5px; background: var(--ink); }
+    .s5-eye { position: absolute; top: 14px; width: 10px; height: 14px; border-radius: 50%; background: var(--ink); }
+    .s5-foot { position: absolute; bottom: 0; width: 34px; height: 20px; border: 4px solid var(--ink); border-radius: 50%; background: #e08a62; }
+    #s5-tag { position: absolute; left: 30px; top: -46px; padding: 0 12px; border: 4px solid var(--ink); border-radius: 14px; background: var(--butter); font-weight: 900; font-size: 26px; }
+    #s5-fuchsia { position: absolute; left: 150px; top: 470px; height: 110px; }
+    #s5-from { left: 150px; top: 610px; }
+    #s5-vm { position: absolute; left: 1160px; top: 300px; width: 600px; height: 460px; border: 6px solid var(--ink); border-radius: 36px; background: var(--face); overflow: hidden; }
+    #s5-vm-bar { position: absolute; left: 0; right: 0; top: 0; height: 50px; background: var(--lilac); border-bottom: 5px solid var(--ink); padding: 4px 0 0 22px; font-weight: 900; font-size: 28px; }
+    #s5-tux { position: absolute; left: 1600px; top: 580px; height: 150px; }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-l1" class="line"><span class="w">That</span><span class="w">filesystem</span><span class="w">is</span><span class="w">Fxfs</span></div>
+    <div id="s5-l2" class="line"><span class="w">Born</span><span class="w">in</span><span class="w">Fuchsia,</span><span class="w">Google's</span><span class="w">OS</span></div>
+    <div id="s5-l3" class="line"><span class="w">Ported</span><span class="w">into</span><span class="w">Linux,</span><span class="w">in</span><span class="w">each</span><span class="w">sandbox</span></div>
+    <img id="s5-fuchsia" src="assets/logos/fuchsia.svg" alt="Fuchsia" />
+    <div id="s5-from" class="note">an open-source OS from Google</div>
+    <div id="s5-vm"><div id="s5-vm-bar">a sandbox</div></div>
+    <img id="s5-tux" src="assets/logos/tux.svg" alt="Linux" />
+    <div id="s5-pos"><div id="s5-hop"><div id="s5-fs">
+      <div class="s5-foot" style="left:22px"></div><div class="s5-foot" style="left:84px"></div>
+      <div class="s5-box"><div class="s5-drawer" style="top:14px"><div class="s5-eye" id="s5-eye-l" style="left:34px"></div><div class="s5-eye" id="s5-eye-r" style="left:62px"></div><div class="s5-handle"></div></div><div class="s5-drawer" style="top:82px"><div class="s5-handle"></div></div></div>
+      <div id="s5-tag">Fxfs</div>
+    </div></div></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const tl = gsap.timeline({ paused: true });
+      const eyes = ["#s5-eye-l", "#s5-eye-r"];
+      gsap.set("#s5-pos", { scale: 1.8 });
+      // The filesystem gets its name.
+      C.words(tl, "#s5-l1", 0.2);
+      tl.fromTo("#s5-tag", { scale: 0, rotation: -12 }, { scale: 1, rotation: -6, duration: 0.45, ease: "back.out(2.6)" }, 0.8);
+      C.blink(tl, eyes, 1.4);
+      tl.fromTo("#s5-fs", { scaleY: 1 }, { scaleY: 1.06, duration: 0.2, ease: "sine.inOut", yoyo: true, repeat: 3, transformOrigin: "50% 100%" }, 1.0);
+      // Where it comes from.
+      C.wordsOut(tl, "#s5-l1", 2.2);
+      tl.fromTo("#s5-fuchsia", { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)" }, 2.2);
+      tl.to("#s5-pos", { x: -250, y: 10, scale: 1.2, duration: 0.6, ease: "power3.inOut" }, 2.3);
+      C.words(tl, "#s5-l2", 2.4);
+      tl.fromTo("#s5-from", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.0);
+      // Into a Linux VM, in one hop.
+      C.wordsOut(tl, "#s5-l2", 4.4);
+      tl.fromTo("#s5-vm", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2)" }, 4.0);
+      tl.fromTo("#s5-tux", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 4.25);
+      C.words(tl, "#s5-l3", 4.6);
+      tl.to("#s5-fs", { scaleX: 1.15, scaleY: 0.82, duration: 0.12, ease: "power2.out", transformOrigin: "50% 100%" }, 4.5);
+      tl.to("#s5-pos", { x: 1380 - 960, y: 60, scale: 1.4, duration: 0.7, ease: "power1.inOut" }, 4.62);
+      tl.to("#s5-hop", { y: -260, duration: 0.35, ease: "power2.out", yoyo: true, repeat: 1 }, 4.62);
+      tl.to("#s5-fs", { scaleX: 0.9, scaleY: 1.12, duration: 0.15, ease: "power2.out" }, 4.64);
+      tl.to("#s5-fs", { scaleX: 1.18, scaleY: 0.8, duration: 0.1, ease: "power2.in" }, 5.27);
+      tl.to("#s5-fs", { scaleX: 1, scaleY: 1, duration: 0.5, ease: "elastic.out(1, 0.4)" }, 5.38);
+      C.blink(tl, eyes, 5.9);
+      // Exit.
+      C.wordsOut(tl, "#s5-l3", 6.5);
+      tl.to(["#s5-fuchsia", "#s5-from", "#s5-tux", "#s5-vm", "#s5-pos"], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.03 }, 6.55);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>

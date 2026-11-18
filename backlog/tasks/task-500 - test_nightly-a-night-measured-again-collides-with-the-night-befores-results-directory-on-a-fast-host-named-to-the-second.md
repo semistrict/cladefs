@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-16 18:06'
+updated_date: '2026-11-18 04:41'
 labels:
   - scripts
   - nightly
@@ -33,3 +34,9 @@ scripts/tests/test_nightly.py's Nights.test_a_night_that_measured_nothing_is_mea
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Seen again 2026-11-17 on ubu1 under fxjob (TASK-433.9's suite): mkdir ... ubu1-nightly-2026-11-18T044011Z-584de327: File exists.
+<!-- SECTION:NOTES:END -->

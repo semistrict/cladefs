@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09 13:04'
+updated_date: '2026-11-18 04:04'
 labels:
   - fuse
   - flaky
@@ -33,3 +34,9 @@ Seen 2026-11-09 on ubu1 (x86_64, non-root, fusermount3), TASK-302's branch d6818
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Seen again 2026-11-17 on ubu1 (fxjob, test-threads 4), random_calls_on_a_mount_come_to_what_they_do_on_tmpfs at call 0: mount root perm 0 uid 0 against 0755 uid 1000; tree 073feb370 + TASK-512/433.9/433.10 (page cache frames).
+<!-- SECTION:NOTES:END -->

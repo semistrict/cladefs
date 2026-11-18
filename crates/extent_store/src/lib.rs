@@ -158,6 +158,7 @@ mod extents;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
 pub use extents::{OWN_ENTRY_BYTES, Own, own_held};
 mod framed;
+mod frames;
 mod framing;
 mod held;
 pub use held::{HeldCounts, HeldParts};

@@ -1,0 +1,126 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .s3-head { position: absolute; top: 236px; font-weight: 900; font-size: 36px; color: var(--soft); }
+    .s3-proc { position: absolute; top: 300px; width: 150px; height: 104px; border: 5px solid var(--ink); border-radius: 26px; background: var(--mint); }
+    .s3-proc-eye { position: absolute; top: 30px; width: 12px; height: 16px; border-radius: 50%; background: var(--ink); }
+    .s3-proc-mouth { position: absolute; left: 60px; top: 54px; width: 22px; height: 11px; border: 4px solid transparent; border-bottom-color: var(--ink); border-top-width: 0; border-radius: 0 0 50% 50% / 0 0 100% 100%; }
+    .s3-box { position: absolute; border: 5px solid var(--ink); border-radius: 24px; background: var(--face); }
+    .s3-box-label { position: absolute; left: 20px; top: 10px; font-weight: 900; font-size: 30px; }
+    .s3-tile { position: absolute; top: 56px; width: 56px; height: 48px; border: 4px solid var(--ink); border-radius: 12px; background: var(--face); }
+    #s3-cache { left: 120px; top: 500px; width: 520px; height: 124px; }
+    #s3-disk { left: 120px; top: 700px; width: 520px; height: 96px; background: #e6ddff; }
+    #s3-hmem { left: 1000px; top: 500px; width: 600px; height: 124px; }
+    #s3-hdisk { left: 1000px; top: 700px; width: 600px; height: 96px; background: #e6ddff; }
+    #s3-note { left: 120px; top: 830px; }
+    #s3-bucket-label { left: 1650px; top: 896px; }
+    #s3-svg { z-index: 0; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-l1" class="line"><span class="w">Your</span><span class="w">OS</span><span class="w">solved</span><span class="w">this</span><span class="w">long</span><span class="w">ago</span></div>
+    <div id="s3-l2" class="line"><span class="w">One</span><span class="w">page,</span><span class="w">shared</span><span class="w">by</span><span class="w">every</span><span class="w">process</span></div>
+    <div id="s3-l3" class="line"><span class="w">cladefs</span><span class="w">stores</span><span class="w">disks</span><span class="w">like</span><span class="w">this</span></div>
+    <div id="s3-l4" class="line"><span class="w">The</span><span class="w">bucket</span><span class="w">is</span><span class="w">the</span><span class="w">disk</span></div>
+    <div id="s3-l5" class="line"><span class="w">The</span><span class="w">host</span><span class="w">is</span><span class="w">the</span><span class="w">cache</span></div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+
+    <div id="s3-left">
+      <div class="s3-head" style="left:120px">your OS, three processes</div>
+      <div class="s3-proc" id="s3-p1" style="left:120px"><div class="s3-proc-eye" style="left:50px"></div><div class="s3-proc-eye" style="left:82px"></div><div class="s3-proc-mouth"></div></div>
+      <div class="s3-proc" id="s3-p2" style="left:305px"><div class="s3-proc-eye" style="left:50px"></div><div class="s3-proc-eye" style="left:82px"></div><div class="s3-proc-mouth"></div></div>
+      <div class="s3-proc" id="s3-p3" style="left:490px"><div class="s3-proc-eye" style="left:50px"></div><div class="s3-proc-eye" style="left:82px"></div><div class="s3-proc-mouth"></div></div>
+      <div class="s3-box" id="s3-cache" data-layout-allow-overflow>
+        <div class="s3-box-label">page cache</div>
+        <div class="s3-tile" style="left:240px"></div><div class="s3-tile" id="s3-page" style="left:308px"></div><div class="s3-tile" style="left:376px"></div><div class="s3-tile" style="left:444px"></div>
+      </div>
+      <div class="s3-box" id="s3-disk"><div class="s3-box-label">disk</div></div>
+      <div id="s3-note" class="note">read from disk once, kept once</div>
+    </div>
+
+    <div id="s3-right">
+      <div class="s3-head" style="left:1000px">cladefs, on one host</div>
+      <div id="s3-vms"></div>
+      <div class="s3-box" id="s3-hmem" data-layout-allow-overflow>
+        <div class="s3-box-label">host memory</div>
+        <div class="s3-tile" style="left:256px"></div><div class="s3-tile" id="s3-brick" style="left:324px"></div><div class="s3-tile" style="left:392px"></div><div class="s3-tile" style="left:460px"></div><div class="s3-tile" style="left:528px"></div>
+      </div>
+      <div class="s3-box" id="s3-hdisk"><div class="s3-box-label">host disk</div></div>
+      <div id="s3-bucket-label" class="label">bucket (S3)</div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s3-svg");
+      const vmHost = document.getElementById("s3-vms");
+      const vms = [0, 1, 2].map((i) => C.vm(vmHost, { x: 1000 + i * 190, y: 300, w: 140, h: 104 }));
+      const pail = C.bucket(svg, { x: 1730, y: 790, w: 180, h: 156, id: "s3-pail" });
+      const line = (d, stroke, w) => C.el("path", { d, fill: "none", stroke, "stroke-width": w, "stroke-linecap": "round", pathLength: 100 }, svg);
+      const dots = (d) => C.el("path", { d, fill: "none", stroke: "#2e2440", "stroke-width": 5, "stroke-linecap": "round", "stroke-dasharray": "1 15" }, svg);
+      // Process → the one page (page tile centre: 120 + 5 + 308 + 28, top 500 + 5 + 56).
+      const pageX = 461, pageY = 561;
+      const share = [195, 380, 565].map((x) => line(`M${x} 404 C${x} 470 ${pageX} 470 ${pageX} ${pageY}`, "#e2177e", 5));
+      // VM → the one brick in host memory.
+      const brickX = 1000 + 5 + 324 + 28;
+      const map = [1070, 1260, 1450].map((x) => line(`M${x} 404 C${x} 470 ${brickX} 470 ${brickX} ${pageY}`, "#e2177e", 5));
+      // Equivalences across the columns.
+      const eqCache = dots("M650 600 C760 560 880 560 990 600");
+      const eqDisk = dots("M650 760 C900 760 1380 880 1628 850");
+      const eqProc = dots("M650 350 C760 320 880 320 990 350");
+
+      const tl = gsap.timeline({ paused: true });
+      const draw = (paths, at, stagger) => tl.fromTo(paths, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.5, ease: "power2.out", stagger: stagger || 0.1 }, at);
+      const dashed = (paths, at) => tl.fromTo(paths, { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out", stagger: 0.12 }, at);
+
+      // The OS column, built part by part.
+      C.words(tl, "#s3-l1", 0.2);
+      tl.fromTo("#s3-left .s3-head", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.3);
+      tl.fromTo(["#s3-p1", "#s3-p2", "#s3-p3"], { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: 0.12 }, 0.4);
+      tl.fromTo(["#s3-cache", "#s3-disk"], { opacity: 0, scale: 0.85 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)", stagger: 0.15 }, 0.9);
+      draw(share, 1.6);
+      tl.fromTo("#s3-page", { backgroundColor: "#ffffff", scale: 1 }, { backgroundColor: "#e2177e", scale: 1.25, duration: 0.2, ease: "power2.out" }, 2.1);
+      tl.to("#s3-page", { scale: 1, duration: 0.5, ease: "elastic.out(1, 0.4)" }, 2.3);
+      tl.fromTo("#s3-note", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 2.5);
+      C.wordsOut(tl, "#s3-l1", 3.0);
+      C.words(tl, "#s3-l2", 3.2);
+      // The processes look at their shared page, then nod.
+      tl.fromTo("#s3-left .s3-proc-eye", { y: 0 }, { y: 6, duration: 0.25, ease: "power2.out" }, 3.6);
+      tl.fromTo(["#s3-p1", "#s3-p2", "#s3-p3"], { y: 0 }, { y: -12, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, stagger: 0.1 }, 4.0);
+
+      // The cladefs column, as a mirror.
+      tl.fromTo("#s3-right .s3-head", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 4.4);
+      tl.fromTo(vms.map((v) => v.root), { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: 0.12 }, 4.5);
+      tl.fromTo(["#s3-hmem", "#s3-hdisk"], { opacity: 0, scale: 0.85 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)", stagger: 0.15 }, 4.9);
+      tl.fromTo(pail, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.2)" }, 5.2);
+      tl.fromTo("#s3-bucket-label", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 5.4);
+      tl.fromTo("#s3-brick", { backgroundColor: "#ffffff", scale: 1 }, { backgroundColor: "#e2177e", scale: 1.25, duration: 0.2, ease: "power2.out" }, 5.6);
+      tl.to("#s3-brick", { scale: 1, duration: 0.5, ease: "elastic.out(1, 0.4)" }, 5.8);
+      draw(map, 5.7);
+      C.wordsOut(tl, "#s3-l2", 6.0);
+      C.words(tl, "#s3-l3", 6.2);
+      dashed([eqProc, eqCache, eqDisk], 7.0);
+      tl.fromTo(vms.map((v) => v.mouth), { scaleX: 1 }, { scaleX: 1.4, duration: 0.3, ease: "back.out(3)", stagger: 0.1 }, 7.6);
+
+      // The bucket is the disk.
+      C.wordsOut(tl, "#s3-l3", 9.0);
+      C.words(tl, "#s3-l4", 9.2);
+      tl.fromTo(eqDisk, { strokeWidth: 5 }, { strokeWidth: 10, duration: 0.3, ease: "back.out(2)" }, 9.5);
+      tl.fromTo(pail, { rotation: 0 }, { rotation: 7, duration: 0.14, ease: "sine.inOut", yoyo: true, repeat: 5, transformOrigin: "50% 100%" }, 9.6);
+      tl.fromTo("#s3-disk", { y: 0 }, { y: -10, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1 }, 9.7);
+      tl.to(eqDisk, { strokeWidth: 5, duration: 0.3 }, 11.0);
+
+      // The host is the cache.
+      C.wordsOut(tl, "#s3-l4", 11.2);
+      C.words(tl, "#s3-l5", 11.4);
+      tl.fromTo(eqCache, { strokeWidth: 5 }, { strokeWidth: 10, duration: 0.3, ease: "back.out(2)" }, 11.7);
+      tl.fromTo(["#s3-hmem", "#s3-hdisk"], { scaleX: 1 }, { scaleX: 1.04, duration: 0.15, ease: "sine.inOut", yoyo: true, repeat: 3, stagger: 0.12 }, 11.8);
+      tl.fromTo(["#s3-hmem", "#s3-hdisk"], { borderWidth: 5 }, { borderWidth: 9, duration: 0.3, ease: "power2.out" }, 11.8);
+      tl.fromTo("#s3-cache", { y: 0 }, { y: -10, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1 }, 11.9);
+
+      // Exit.
+      C.wordsOut(tl, "#s3-l5", 14.3);
+      tl.to(["#s3-left", "#s3-right", svg], { opacity: 0, scale: 0.92, duration: 0.35, ease: "power2.in", stagger: 0.05, transformOrigin: "50% 50%" }, 14.45);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>
