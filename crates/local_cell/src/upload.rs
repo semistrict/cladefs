@@ -743,6 +743,15 @@ impl<D: Dir> Drop for Uploader<D> {
     }
 }
 
+/// cladefs: its disk under pressure urges it: it closes its store's open segment at its next
+/// gather, whatever its guest is doing, and uploads it, so that what it held leaves the disk.
+impl<D: Dir, B: bucket_cell::Bucket> bucket_cell::host_disk::Urge for Shared<D, B> {
+    fn urge(&self) {
+        self.progress.lock().unwrap().wanted = true;
+        self.wake.notify_one();
+    }
+}
+
 impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
     /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the host's
@@ -892,7 +901,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// Runs the uploader of the store `recovering` recovered, opening it first, with what the host
     /// learned of its cell for this opening, if anything ([`learned`]).
     pub(crate) async fn run(
-        &self,
+        self: &Arc<Self>,
         recovering: (Recovering<D>, Option<Learned>),
         options: crate::Options,
         bucket: Arc<B>,
@@ -903,6 +912,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         self.holders.lock().unwrap().0 = holder;
         let writer = match self.start(recovering, options, &bucket, holder).await {
             Ok(writer) => {
+                // cladefs: urged by its disk as it comes under pressure (doc-22, TASK-539.9).
+                if let Some(disk) = crate::dir::Dir::disk(self.store().dir()) {
+                    let urged: std::sync::Weak<dyn bucket_cell::host_disk::Urge> =
+                        Arc::downgrade(self) as _;
+                    disk.on_pressure(urged);
+                }
                 started.send(Ok(self.store().clone())).unwrap();
                 writer
             }

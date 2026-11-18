@@ -173,13 +173,21 @@ service Cladefsd {
   // daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
   rpc ShrinkMemory(ShrinkMemoryRequest) returns (ShrinkMemoryResponse);
   // Limits the host's disk a tenant takes, or every tenant together (TASK-94): what is in its
-  // directory, its stores' files, each file once, the host's part cache no tenant's. Past a
-  // tenant's limit, its VMs' writes, and the stores they make, fail with ENOSPC, which the VM's
-  // guest sees as a full disk, and the daemon and other tenants' writes go on; past the total, any
-  // tenant's do. Commits go on, and what leaves the disk (uploaded, freed, a store deleted) lets
-  // the tenant write again. A limit under what is taken holds as data leaves.
+  // directory, its stores' files, each file's length rounded up to 4 KiB, once however many names
+  // it has, counted as written (doc-22), the host's part cache no tenant's. A write is admitted
+  // only if what is taken, what writes admitted hold, and what the stores' own work may still add
+  // for what was written (their commits copying, logging and framing it, which nothing refuses)
+  // stay within it. Past a tenant's limit, its VMs' writes, and the stores they make, fail with
+  // ENOSPC, which the VM's guest sees as a full disk, and the daemon and other tenants' writes go
+  // on; past the total, any tenant's do. Commits go on, and what leaves the disk (uploaded, freed,
+  // a store deleted) lets the tenant write again. A limit under what is taken holds as data leaves.
   rpc SetDiskLimit(SetDiskLimitRequest) returns (SetDiskLimitResponse);
-  // What the host's disk a tenant takes, or every tenant together, counted now, and its limit.
+  // Weighs a tenant's disk against the others' (doc-22): as a disk the daemon keeps stores on
+  // comes near what the disk governor allows them, each tenant's writes are refused past its share
+  // by weight of what is left, a tenant within its share writing on. Every tenant weighs 1 until
+  // set.
+  rpc SetDiskWeight(SetDiskWeightRequest) returns (SetDiskWeightResponse);
+  // What the host's disk a tenant takes, or every tenant together, and its limit.
   rpc GetTenantDisk(GetTenantDiskRequest) returns (GetTenantDiskResponse);
   // Has the hosts sharing the daemon's bucket be these (TASK-406.2): its stores' fetchers ask the
   // host that owns a part, by rendezvous hashing of the object's key and the part's number over
@@ -770,6 +778,18 @@ message SetDiskLimitRequest {
 // The limit is set.
 message SetDiskLimitResponse {}
 
+// Weighs a tenant's disk.
+message SetDiskWeightRequest {
+  // The tenant, alive now or granted later, until its weight is set again (INVALID_ARGUMENT for the
+  // default tenant).
+  uint64 tenant = 1;
+  // Its weight: 0 for no share kept under pressure.
+  uint64 weight = 2;
+}
+
+// The weight is set.
+message SetDiskWeightResponse {}
+
 // The hosts sharing the daemon's bucket.
 message SetPeersRequest {
   // Each `HOST:PORT`, as it serves its peers (its CLADEFSD_PEER_ADDRESS), spelled as every
@@ -788,11 +808,14 @@ message GetTenantDiskRequest {
 
 // What a tenant's disk takes.
 message GetTenantDiskResponse {
-  // The bytes of the filesystem's blocks its directories' files take, as `du -sx` counts them,
-  // with what writes admitted add as the count is made.
+  // The bytes its stores' files take: each file's length rounded up to 4 KiB, once however many
+  // names it has, counted as written.
   uint64 bytes = 1;
   // Its limit, if it has one.
   optional uint64 limit_bytes = 2;
+  // What it holds past `bytes` against its limit: what its stores' own work may still add for what
+  // was written, and what writes admitted and not yet landed hold.
+  uint64 reserved_bytes = 3;
 }
 
 // Shreds a cell.

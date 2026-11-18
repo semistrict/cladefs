@@ -1878,12 +1878,15 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             // windows are granted.
             let limit = held() as u64 + SLACK + hostiles.len() as u64 * credit(0);
             LIMIT.store(limit as usize, Ordering::Relaxed);
-            // Its disk limited a few MiB past what it takes, which its fills reach (TASK-94); but
-            // as a connection of its floods, whose write, which its reads read, is to be admitted.
-            let (taken, _) = disk::count(Some(MALLORY)).unwrap();
+            // Its disk limited a few MiB past what it takes and reserves, which its fills reach
+            // (TASK-94): each MiB written into an extent of its own admitted with what its store's
+            // own work may add for it (doc-22, `RESERVE_FACTOR`); but as a connection of its
+            // floods, whose write, which its reads read, is to be admitted.
+            let disk::Counted { bytes: taken, reserved, .. } = disk::count(Some(MALLORY)).unwrap();
             let files_before = files_taking(&vms);
             let flooding = hostiles.iter().any(|hostile| hostile.flood);
-            let disk_limit = (!flooding).then_some(taken + FILL_ROOM);
+            let admitted = 1 + 2 * bucket_cell::host_disk::RESERVE_FACTOR;
+            let disk_limit = (!flooding).then_some(taken + reserved + admitted * FILL_ROOM);
             disk::set_limit(Some(MALLORY), disk_limit).unwrap();
 
             // Mallory's connections at once, and alice beside them.
@@ -1953,16 +1956,13 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             let stayed = connections().saturating_sub(connected);
             prop_assert!(ended.is_ok(), "{stayed} connections of mallory's stayed");
             // It took no more of the host's disk than its limit, whatever it said: what was
-            // admitted, and what its stores' own work adds beside it, a MiB at most (TASK-94).
-            // That work: their logs, cells and segments' tails, tens of KiB; and their
-            // extents' holes, zeros a commit seals with them, admitted for no write. A segment
-            // holding them is framed in a copy, compressed, where they take nothing, unless
-            // compressing it saves under an eighth of it (`local_cell`'s `IN_PLACE_SAVING`),
-            // framed in place, raw: its holes under an eighth of it, a seventh of the rest of it,
-            // written and admitted; under 4/7 MiB of the case's `FILL_ROOM` (TASK-343).
-            let (counted, _) = disk::count(Some(MALLORY)).unwrap();
+            // admitted, and what its stores' own work adds beside it, which admission reserves
+            // room for (doc-22, TASK-539.8): their logs, cells and segments' tails; their extents'
+            // holes, zeros a commit seals with them, counted as the extents open grow; framings in
+            // copies. Before TASK-539.8 a MiB of slack held it (TASK-343).
+            let counted = disk::count(Some(MALLORY)).unwrap().bytes;
             prop_assert!(
-                disk_limit.is_none_or(|limit| counted <= limit + (1 << 20)),
+                disk_limit.is_none_or(|limit| counted <= limit),
                 "mallory's disk takes {counted} bytes, past its limit of {disk_limit:?}, from \
                  {taken} as the case began; the files grown since: {}",
                 grown_since(&files_before, &files_taking(&vms))
@@ -2498,9 +2498,15 @@ fn noise(seed: u64, len: usize) -> Vec<u8> {
 #[test]
 fn a_tenant_filling_its_disk_leaves_others_committing() {
     use super::super::disk::STORE_MADE;
+    use bucket_cell::host_disk::{RESERVE_FACTOR, RESERVE_PER_STORE};
     const CONNECTIONS: u64 = 8;
     const MIB: u64 = 1 << 20;
-    const ROOM: u64 = 16 * MIB;
+    /// What a MiB written to an extent of its own is admitted as: it, and what its store's own
+    /// work may add for it, as raw data and as an extent open (doc-22).
+    const ADMITTED: u64 = (1 + 2 * RESERVE_FACTOR) * MIB;
+    /// Room for 16 such MiB, and for each store made and open, what its making is admitted as and
+    /// what each store open reserves.
+    const ROOM: u64 = 16 * ADMITTED + CONNECTIONS * (STORE_MADE + RESERVE_PER_STORE);
     const ALICES: u64 = 32;
     host();
     let dir = tempfile::tempdir().unwrap();
@@ -2516,7 +2522,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     };
     let (mstores, msocket, mallory) = tenant("mallory", MALLORY);
     let (astores, asocket, _alice) = tenant("alice", ALICE);
-    let (taken, _) = disk::count(Some(MALLORY)).unwrap();
+    let taken = disk::count(Some(MALLORY)).unwrap().bytes;
     let limit = taken + ROOM;
     disk::set_limit(Some(MALLORY), Some(limit)).unwrap();
 
@@ -2556,7 +2562,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     let filled: Vec<_> = fills.into_iter().map(|fill| fill.join().unwrap()).collect();
     let written: u64 = filled.iter().map(|(_, written, _)| written).sum();
     let refusals: Vec<Errno> = filled.iter().map(|(_, _, refused)| *refused).collect();
-    let (counted, _) = disk::count(Some(MALLORY)).unwrap();
+    let counted = disk::count(Some(MALLORY)).unwrap().bytes;
     println!(
         "mallory's {CONNECTIONS} VM processes wrote {written} MiB, refused with {:?}; its disk \
          takes {} KiB, of a {} KiB limit; alice wrote and committed {ALICES} MiB",
@@ -2569,10 +2575,11 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     assert_eq!(alices, vec![(Ok(()), Ok(())); ALICES as usize], "alice was refused");
     let last = ExtentId { cell: alice.cell(), sequence: ALICES };
     assert_eq!(read(&alice, last, 0, MIB as usize), Ok(noise(1 << 40 | ALICES, MIB as usize)));
-    // Mallory's VM processes were refused at its limit, having written within it: what its stores
-    // were admitted as made, and what they wrote, its room.
+    // Mallory's VM processes were refused at its limit, having written within it: its stores
+    // made, what their files took no more than they were admitted as, and open, and what they
+    // wrote, each MiB with what their own work may add for it, its room.
     assert_eq!(refusals, vec![Errno::ENOSPC; CONNECTIONS as usize]);
-    assert_eq!(written, (ROOM - CONNECTIONS * STORE_MADE) / MIB);
+    assert_eq!(written, 16);
     assert!(counted <= limit, "mallory's disk takes {counted} bytes, past its limit of {limit}");
     assert!(mallory.disk().unwrap().used() <= limit);
     // At its limit, its stores commit; lifted, they write on.

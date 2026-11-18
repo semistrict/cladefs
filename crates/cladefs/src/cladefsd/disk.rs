@@ -37,20 +37,21 @@
 //! takes any of it. And it is the host's setup, a filesystem's that has them, which the daemon
 //! can't set as tenants are granted.
 
+use super::governor::DiskHeadroom;
 use crate::Errno;
-use local_cell::footprint::{self, Allotment, Pledge};
+use bucket_cell::host_disk::{self, HostDisk};
+use local_cell::footprint::{self, Allotment};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-/// What a store a tenant's VM process makes is admitted as, before it is counted: a store's
-/// files, a fork's made and an uploaded base's, take 12 to 16 KiB of a filesystem's 4 KiB blocks
-/// (`tests/disk.rs`), four times which leaves room for larger blocks.
-pub const STORE_MADE: u64 = 64 << 10;
+/// What a store a tenant's VM process makes is admitted as ([`footprint::STORE_MADE`]).
+pub const STORE_MADE: u64 = footprint::STORE_MADE;
 
 /// The tenants' disks alive, and their limits, under one lock, so that a tenant made as its limit
 /// is set is limited as it was set.
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry { disks: Vec::new(), limits: None });
+static REGISTRY: Mutex<Registry> =
+    Mutex::new(Registry { disks: Vec::new(), limits: None, weights: None });
 
 struct Registry {
     /// The disks of the tenants alive: a tenant revoked and granted again with another directory,
@@ -59,6 +60,8 @@ struct Registry {
     /// The tenants' limits, in bytes, by ID: those granted later, or again, are limited as they
     /// are made.
     limits: Option<HashMap<u64, u64>>,
+    /// The tenants' weights, by ID, as their limits are ([`set_weight`]).
+    weights: Option<HashMap<u64, u64>>,
 }
 
 impl Registry {
@@ -68,6 +71,11 @@ impl Registry {
 
     fn limit(&self, tenant: u64) -> Option<u64> {
         self.limits.as_ref().and_then(|limits| limits.get(&tenant).copied())
+    }
+
+    fn weight(&self, tenant: u64) -> u64 {
+        let weight = self.weights.as_ref().and_then(|weights| weights.get(&tenant).copied());
+        weight.unwrap_or(footprint::DEFAULT_WEIGHT)
     }
 }
 
@@ -85,6 +93,7 @@ impl Disk {
         let allotment = footprint::allotment(dir)?;
         let mut registry = REGISTRY.lock().unwrap();
         allotment.set_limit(registry.limit(tenant));
+        allotment.set_weight(registry.weight(tenant));
         let disk = Arc::new(Self { tenant, allotment });
         registry.disks.retain(|alive| alive.strong_count() > 0);
         registry.disks.push(Arc::downgrade(&disk));
@@ -104,13 +113,6 @@ impl Disk {
     /// Whether its last write was refused, its limit or every tenant's reached.
     pub(super) fn is_full(&self) -> bool {
         self.allotment.is_full()
-    }
-
-    /// Admits a write of `bytes` more, if they are within its limit, and every tenant's: held
-    /// until the write lands, which the write says by dropping what this returns; counted as it
-    /// lands. `ENOSPC` otherwise.
-    pub(super) fn admit(&self, bytes: u64) -> Result<Pledge, Errno> {
-        self.allotment.admit(bytes).map_err(|_| Errno::ENOSPC)
     }
 }
 
@@ -136,6 +138,20 @@ pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
     Ok(())
 }
 
+/// cladefs: weighs the disk of the tenant `tenant`, alive now or granted later, against the
+/// others' as their disks come under pressure (doc-22, TASK-539.10): each tenant's writes are
+/// refused past its share by weight of what the disk governor leaves the tenants, a tenant within
+/// its share writing on. Every tenant's weight is [`footprint::DEFAULT_WEIGHT`] until set.
+pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+    super::grants::check_tenant(tenant)?;
+    let mut registry = REGISTRY.lock().unwrap();
+    registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
+    for disk in registry.alive().filter(|disk| disk.tenant == tenant) {
+        disk.allotment.set_weight(weight);
+    }
+    Ok(())
+}
+
 /// The limit of every tenant's disk together, if it has one.
 pub fn total_limit() -> Option<u64> {
     footprint::total_limit()
@@ -146,25 +162,46 @@ pub fn total() -> u64 {
     footprint::total().bytes()
 }
 
+/// A tenant's disk, or every tenant's, as the control API reports it ([`count`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Counted {
+    /// What its stores' files take.
+    pub bytes: u64,
+    /// Its limit, if it has one.
+    pub limit: Option<u64>,
+    /// What it holds past `bytes` against its limit: its stores' reserves, and its writes
+    /// admitted ([`Allotment::reserved`]).
+    pub reserved: u64,
+}
+
 /// What the disk of the tenant `tenant` takes, or every tenant's together, without one, and its
 /// limit, if it has one: `ENOENT` if no tenant `tenant` is alive. Read, not counted anew.
-pub fn count(tenant: Option<u64>) -> Result<(u64, Option<u64>), Errno> {
-    let Some(id) = tenant else { return Ok((total(), total_limit())) };
+pub fn count(tenant: Option<u64>) -> Result<Counted, Errno> {
+    let Some(id) = tenant else {
+        let all = footprint::total();
+        let reserved = all.reserved() + all.pledged();
+        return Ok(Counted { bytes: all.bytes(), limit: total_limit(), reserved });
+    };
     let registry = REGISTRY.lock().unwrap();
     let disks: Vec<_> = registry.alive().filter(|disk| disk.tenant == id).collect();
     if disks.is_empty() {
         return Err(Errno::ENOENT);
     }
-    Ok((used(&disks), registry.limit(id)))
+    let allotments = allotments(&disks);
+    Ok(Counted {
+        bytes: allotments.iter().map(|allotment| allotment.bytes()).sum(),
+        limit: registry.limit(id),
+        reserved: allotments.iter().map(|allotment| allotment.reserved()).sum(),
+    })
 }
 
-/// What `disks`, a tenant's, take: each allotment once, as one tenant granted again with its
+/// The allotments of `disks`, a tenant's, each once, as one tenant granted again with its
 /// directory has two disks of it.
-fn used(disks: &[Arc<Disk>]) -> u64 {
+fn allotments(disks: &[Arc<Disk>]) -> Vec<&Arc<Allotment>> {
     let mut allotments: Vec<&Arc<Allotment>> = disks.iter().map(|disk| &disk.allotment).collect();
     allotments.sort_by_key(|allotment| Arc::as_ptr(allotment));
     allotments.dedup_by(|one, other| Arc::ptr_eq(one, other));
-    allotments.iter().map(|allotment| allotment.bytes()).sum()
+    allotments
 }
 
 /// A tenant's disk, as the metrics show it.
@@ -175,6 +212,12 @@ pub struct TenantDisk {
     pub bytes: u64,
     /// Its limit, if it has one.
     pub limit: Option<u64>,
+    /// What it holds past `bytes` against its limit ([`Allotment::reserved`]).
+    pub reserved: u64,
+    /// Its weight ([`set_weight`]).
+    pub weight: u64,
+    /// What it keeps while its disk is under pressure, if it is.
+    pub share: Option<u64>,
 }
 
 /// The disk of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
@@ -187,14 +230,229 @@ pub fn tenants() -> Vec<TenantDisk> {
     }
     let mut disks: Vec<_> = by_tenant
         .into_iter()
-        .map(|(tenant, disks)| TenantDisk {
-            tenant,
-            bytes: used(&disks),
-            limit: registry.limit(tenant),
+        .map(|(tenant, disks)| {
+            let allotments = allotments(&disks);
+            let shares = allotments.iter().filter_map(|allotment| allotment.share());
+            let share = shares.reduce(|one, other| one + other);
+            TenantDisk {
+                tenant,
+                bytes: allotments.iter().map(|allotment| allotment.bytes()).sum(),
+                limit: registry.limit(tenant),
+                reserved: allotments.iter().map(|allotment| allotment.reserved()).sum(),
+                weight: registry.weight(tenant),
+                share,
+            }
         })
         .collect();
     disks.sort_by_key(|disk| disk.tenant);
     disks
+}
+
+/// cladefs: how the disk governor governs (doc-22, TASK-539.9): the headroom it leaves of each
+/// filesystem, and the most the daemon keeps on all of them together, if fixed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiskConfig {
+    /// `CLADEFSD_DISK_HEADROOM`'s, if set ([`super::governor::disk_headroom`]).
+    pub headroom: Option<DiskHeadroom>,
+    /// `CLADEFSD_DISK_BYTES`, if set: stores and part cache together, on every disk.
+    pub fixed: Option<u64>,
+}
+
+impl DiskConfig {
+    /// As the environment says it: refused, naming the variable, if it says what isn't one.
+    pub fn from_env() -> Result<Self, String> {
+        let var = |name| std::env::var(name).ok();
+        let headroom = super::governor::disk_headroom_of(var("CLADEFSD_DISK_HEADROOM").as_deref())?;
+        let fixed = match var("CLADEFSD_DISK_BYTES").filter(|value| !value.is_empty()) {
+            None => None,
+            Some(bytes) => match bytes.parse() {
+                Ok(0) | Err(_) => {
+                    return Err(format!(
+                        "CLADEFSD_DISK_BYTES must be a positive number of bytes: {bytes:?}"
+                    ));
+                }
+                Ok(bytes) => Some(bytes),
+            },
+        };
+        Ok(Self { headroom, fixed })
+    }
+}
+
+/// cladefs: starts, once, the daemon's disk governor, on a thread of its own, looking at its disks
+/// every [`super::governor::INTERVAL`], and at once when a write is refused or the part cache passes
+/// what its stores leave it (`bucket_cell::host_disk::wake_governor`). Later starts change nothing.
+pub fn start(config: DiskConfig) -> Result<(), String> {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("disk governor".into())
+        .spawn(move || {
+            let mut errors = std::collections::HashSet::new();
+            loop {
+                govern_once(config, &mut errors);
+                host_disk::wait_for_governor(super::governor::INTERVAL);
+            }
+        })
+        .map_err(|err| format!("starting the disk governor: {err}"))?;
+    Ok(())
+}
+
+/// cladefs: the disk governor's look at the host's disks, as `config` says (doc-22, TASK-539.9): each
+/// one's allowance, what its stores and part cache may keep on it, the headroom it leaves, and
+/// whether it is under pressure, published on it; the part cache on it sized to what its stores
+/// leave, evicting at once; its stores' uploaders urged as pressure begins. A disk whose space
+/// can't be read keeps what it was allowed, logged once until it is read again (`errors`).
+pub fn govern_once(config: DiskConfig, errors: &mut std::collections::HashSet<u64>) {
+    let disks = HostDisk::all();
+    let cache = super::cells::opened_cache();
+    for disk in &disks {
+        let dev = disk.dev().unwrap_or_default();
+        let sample = match disk.sample() {
+            Ok(sample) => {
+                errors.remove(&dev);
+                sample
+            }
+            Err(err) => {
+                if errors.insert(dev) {
+                    log::error!("cladefsd: reading the space of disk {dev:#x}: {err}");
+                }
+                continue;
+            }
+        };
+        let headroom = super::governor::disk_headroom(sample.size, config.headroom);
+        // What it counts that its filesystem doesn't hold yet: the stores' pages dirty, and the
+        // cache's fills in flight.
+        let in_flight = local_cell::pages::shared().usage().dirty + disk.cache_writing.get();
+        let mut allowance =
+            super::governor::disk_allowance(disk.held(), sample.free, in_flight, headroom);
+        if let Some(fixed) = config.fixed {
+            let others: u64 = (disks.iter())
+                .filter(|other| !Arc::ptr_eq(other, disk))
+                .map(|other| other.held())
+                .sum();
+            allowance = allowance.min(fixed.saturating_sub(others));
+        }
+        let spare = allowance.saturating_sub(disk.stores.committed());
+        // Derived first: the part cache keeps what the stores leave, down a band below it once it
+        // must give back, so that it doesn't evict at every look.
+        if let Some(cache) = cache.as_ref().filter(|cache| Arc::ptr_eq(cache.disk(), disk)) {
+            let limit = match cache.bytes() > spare {
+                true => spare.saturating_sub(headroom / 4),
+                false => spare,
+            };
+            if let Err(err) = cache.set_limit(limit) {
+                log::warn!("cladefsd: evicting the part cache to {limit} bytes: {err}");
+            }
+        }
+        let was = disk.under_pressure();
+        let pressure = super::governor::pressured(was, spare, headroom);
+        disk.govern(allowance, headroom, pressure);
+        share(disk, allowance, pressure);
+        // Urged as it begins: each urging closes the stores' open segments, however little they
+        // hold.
+        if pressure && !was {
+            log::warn!(
+                "cladefsd: disk {dev:#x} under pressure: its stores take {} bytes and reserve \
+                 {} more of {allowance}, its filesystem {} bytes free; urging their uploads",
+                disk.stores.bytes(),
+                disk.stores.reserved() + disk.stores.pledged(),
+                sample.free
+            );
+            disk.urge();
+        }
+    }
+}
+
+/// cladefs: each host's disk's gauges, by name: their help, and each disk's value, by its device as
+/// `MAJOR:MINOR` (`super::metrics`, doc-22). What can't be sampled is left out.
+pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
+    type Gauge = (&'static str, &'static str, fn(&HostDisk, &host_disk::Sample) -> u64);
+    let gauges: [Gauge; 12] = [
+        ("cladefsd_host_disk_size_bytes", "A disk's filesystem's size.", |_, sample| sample.size),
+        ("cladefsd_host_disk_free_bytes", "What a disk's filesystem has free.", |_, sample| {
+            sample.free
+        }),
+        (
+            "cladefsd_host_disk_headroom_bytes",
+            "What the disk governor leaves free of a disk.",
+            |disk, _| disk.headroom(),
+        ),
+        (
+            "cladefsd_host_disk_allowance_bytes",
+            "What the disk governor allows the daemon on a disk.",
+            |disk, _| disk.allowance(),
+        ),
+        ("cladefsd_host_disk_stores_bytes", "What the stores on a disk take.", |disk, _| {
+            disk.stores.bytes()
+        }),
+        (
+            "cladefsd_host_disk_unframed_bytes",
+            "Of that, their files whose framing is to come.",
+            |disk, _| disk.stores.unframed(),
+        ),
+        (
+            "cladefsd_host_disk_reserved_bytes",
+            "What the stores' own work on a disk may still add.",
+            |disk, _| disk.stores.reserved(),
+        ),
+        ("cladefsd_host_disk_pledged_bytes", "What writes admitted on a disk hold.", |disk, _| {
+            disk.stores.pledged()
+        }),
+        ("cladefsd_host_disk_cache_bytes", "What the part cache keeps on a disk.", |disk, _| {
+            disk.cache.get()
+        }),
+        (
+            "cladefsd_host_disk_spare_bytes",
+            "What the stores on a disk leave of its allowance.",
+            |disk, _| disk.allowance().saturating_sub(disk.stores.committed()),
+        ),
+        (
+            "cladefsd_host_disk_other_bytes",
+            "What a disk's filesystem holds that the daemon counts as none of its own.",
+            |disk, sample| sample.used.saturating_sub(disk.held()),
+        ),
+        ("cladefsd_host_disk_pressure", "Whether a disk is under pressure: 1 if so.", |disk, _| {
+            u64::from(disk.under_pressure())
+        }),
+    ];
+    let sampled: Vec<_> = (HostDisk::all().into_iter())
+        .filter_map(|disk| {
+            let sample = disk.sample().ok()?;
+            let dev = disk.dev()?;
+            let device =
+                format!("{}:{}", libc::major(dev as libc::dev_t), libc::minor(dev as libc::dev_t));
+            Some((device, disk, sample))
+        })
+        .collect();
+    (gauges.into_iter())
+        .map(|(name, help, of)| {
+            let values =
+                sampled.iter().map(|(device, disk, sample)| (device.clone(), of(disk, sample)));
+            (name, help, values.collect())
+        })
+        .collect()
+}
+
+/// cladefs: shares what `disk`'s allowance leaves the tenants by their allotments' weights while it is
+/// under pressure, each allotment on it refused past its share; none otherwise (TASK-539.10).
+/// What its stores in no allotment take, the default tenant's, comes off first.
+fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
+    let on_disk: Vec<_> = (footprint::allotments().into_iter())
+        .filter(|allotment| Arc::ptr_eq(allotment.disk(), disk))
+        .collect();
+    if !pressure {
+        on_disk.iter().for_each(|allotment| allotment.set_share(None));
+        return;
+    }
+    let allotted: u64 = on_disk.iter().map(|allotment| allotment.committed()).sum();
+    let others = disk.stores.committed().saturating_sub(allotted);
+    let weighted: Vec<_> =
+        on_disk.iter().enumerate().map(|(at, allotment)| (at as u64, allotment.weight())).collect();
+    for (at, share) in super::governor::shares(allowance.saturating_sub(others), &weighted) {
+        on_disk[at as usize].set_share(Some(share));
+    }
 }
 
 #[cfg(test)]

@@ -486,7 +486,11 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         Errno::ENOENT
     } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherCell>() {
         Errno::EPERM
-    } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
+    } else if error.is::<NoSpace>()
+        || error.is::<TooSmall>()
+        || error.is::<local_cell::footprint::DiskFull>()
+    {
+        // cladefs: and its disk, or its tenant's limits, refusing it (doc-22).
         Errno::ENOSPC
     } else if error.is::<Unaligned>() || error.is::<Unsectored>() || error.is::<TooLong>() {
         Errno::EINVAL
@@ -1201,10 +1205,10 @@ impl OpenCell {
         self.store.description().cell
     }
 
-    /// cladefs: the bytes the cell's files take of the host's disk: what is not acknowledged in
-    /// the bucket yet, and the open segment (TASK-165.8).
-    pub fn disk_bytes(&self) -> Result<u64> {
-        Ok(self.store.usage().map_err(errno)?.disk_bytes)
+    /// cladefs: the bytes the cell's files take of the host's disk, as its store's footprint counts
+    /// them: what is not acknowledged in the bucket yet, and the open segment (doc-22).
+    pub fn disk_bytes(&self) -> u64 {
+        self.store.dir().footprint().bytes()
     }
 
     /// What the store holds (`INFO`).

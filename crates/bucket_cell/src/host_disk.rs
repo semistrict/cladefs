@@ -68,18 +68,42 @@ impl Count {
     }
 }
 
-/// Bytes of files counted, and of them unframed files': raw data whose framing, or sealing in
-/// place, is still to come, which a store's own work, never refused, may add to.
+/// How many times what a store's own work may still add, never refused, its unframed bytes and
+/// its open extents' are: each byte of an open extent copied once by the commit that seals it,
+/// held once in a log's record, and framed once in a copy, and each raw byte framed once in a copy
+/// (backlog doc-22). What a store's own work took, its guest's writes stopped, was at most 2.5 times
+/// those, or 1.08 times past [`RESERVE_PER_STORE`] (`local_cell/tests/reserve.rs`, TASK-539.7).
+pub const RESERVE_FACTOR: u64 = 3;
+
+/// What each store open may still add, never refused, whatever it holds unframed or open: a
+/// segment's log's header, its framed file being made durable, its write-ahead log's records; at
+/// most 28 KiB as measured (TASK-539.7).
+pub const RESERVE_PER_STORE: u64 = 64 << 10;
+
+/// What stores take of a disk, counted, and may still take: their files' bytes, and of them their
+/// unframed files', raw data whose framing, or sealing in place, is still to come; the bytes of
+/// their extents open, each as far as it goes, which the commits sealing them copy; the stores
+/// open; and the writes admitted and not yet landed. One per store, summed by each allotment, every
+/// allotment and each disk.
 #[derive(Debug, Default)]
 pub struct Tally {
     bytes: Count,
     unframed: Count,
+    open: Count,
+    stores: Count,
+    pledged: Count,
 }
 
 impl Tally {
     /// Nothing counted.
     pub const fn new() -> Self {
-        Self { bytes: Count::new(), unframed: Count::new() }
+        Self {
+            bytes: Count::new(),
+            unframed: Count::new(),
+            open: Count::new(),
+            stores: Count::new(),
+            pledged: Count::new(),
+        }
     }
 
     /// The bytes counted.
@@ -90,6 +114,31 @@ impl Tally {
     /// Of those, unframed files'.
     pub fn unframed(&self) -> u64 {
         self.unframed.get()
+    }
+
+    /// The bytes of the extents open, each as far as it goes.
+    pub fn open(&self) -> u64 {
+        self.open.get()
+    }
+
+    /// The stores open.
+    pub fn stores(&self) -> u64 {
+        self.stores.get()
+    }
+
+    /// The writes admitted and not yet landed.
+    pub fn pledged(&self) -> u64 {
+        self.pledged.get()
+    }
+
+    /// What the stores' own work may still add, never refused ([`RESERVE_FACTOR`]).
+    pub fn reserved(&self) -> u64 {
+        RESERVE_FACTOR * (self.unframed() + self.open()) + RESERVE_PER_STORE * self.stores.get()
+    }
+
+    /// What is taken, reserved and pledged: what an admission weighs a write against.
+    pub fn committed(&self) -> u64 {
+        self.bytes() + self.reserved() + self.pledged()
     }
 
     /// Counts `bytes` more, `unframed` if so.
@@ -115,6 +164,37 @@ impl Tally {
             false => self.unframed.sub(bytes),
         }
     }
+
+    /// Counts `bytes` more of extents open, or fewer, if not `more`.
+    pub fn opened(&self, bytes: u64, more: bool) {
+        match more {
+            true => self.open.add(bytes),
+            false => self.open.sub(bytes),
+        }
+    }
+
+    /// Counts a store opened, or closed, if not `open`.
+    pub fn store(&self, open: bool) {
+        match open {
+            true => self.stores.add(1),
+            false => self.stores.sub(1),
+        }
+    }
+
+    /// Counts `bytes` more pledged, or fewer, if not `more`.
+    pub fn pledge(&self, bytes: u64, more: bool) {
+        match more {
+            true => self.pledged.add(bytes),
+            false => self.pledged.sub(bytes),
+        }
+    }
+}
+
+/// What a disk urges as it comes under pressure ([`HostDisk::urge`]): a store's uploader, which
+/// closes its store's open segment then and uploads it, rather than wait for its guest to fill it,
+/// so that what it held leaves the disk.
+pub trait Urge: Send + Sync {
+    fn urge(&self);
 }
 
 /// How a disk is sampled: a host's filesystem through a descriptor of a directory of it, or a
@@ -131,8 +211,6 @@ pub struct HostDisk {
     /// however many names it has, and their directories, a [`GRANULE`] each; and of that, their
     /// unframed files'.
     pub stores: Tally,
-    /// What writes admitted and not yet landed hold.
-    pub pledged: Count,
     /// What the part cache on it holds, its fills in flight included.
     pub cache: Count,
     /// Of `cache`, its fills in flight, counted but not yet written.
@@ -144,6 +222,10 @@ pub struct HostDisk {
     headroom: AtomicU64,
     /// Whether it is under pressure: its spare under its headroom.
     pressure: AtomicBool,
+    /// Whether the last write it was weighed for was refused: logged as it begins to be.
+    full: AtomicBool,
+    /// What it urges under pressure ([`HostDisk::urge`]).
+    urged: Mutex<Vec<Weak<dyn Urge>>>,
 }
 
 /// The host's filesystems' disks alive, so that two directories of one filesystem share one.
@@ -176,12 +258,13 @@ impl HostDisk {
         Self {
             sampler,
             stores: Tally::default(),
-            pledged: Count::default(),
             cache: Count::default(),
             cache_writing: Count::default(),
             allowance: AtomicU64::new(u64::MAX),
             headroom: AtomicU64::new(0),
             pressure: AtomicBool::new(false),
+            full: AtomicBool::new(false),
+            urged: Mutex::new(Vec::new()),
         }
     }
 
@@ -226,6 +309,31 @@ impl HostDisk {
         self.pressure.load(Ordering::Relaxed)
     }
 
+    /// Has it urge `urged` as it comes under pressure, while `urged` lives.
+    pub fn on_pressure(&self, urged: Weak<dyn Urge>) {
+        let mut all = self.urged.lock().unwrap();
+        all.retain(|urged| urged.strong_count() > 0);
+        all.push(urged);
+    }
+
+    /// Urges what it urges under pressure ([`HostDisk::on_pressure`]): the uploaders of the stores
+    /// on it, which close and upload their open segments.
+    pub fn urge(&self) {
+        let urged: Vec<_> = self.urged.lock().unwrap().iter().filter_map(Weak::upgrade).collect();
+        urged.iter().for_each(|urged| urged.urge());
+    }
+
+    /// A write weighed against it is refused: returns whether its refusals begin with it, to be
+    /// logged once.
+    pub fn refused(&self) -> bool {
+        !self.full.swap(true, Ordering::Relaxed)
+    }
+
+    /// A write weighed against it is admitted: its refusals, if any, ended.
+    pub fn admitted(&self) {
+        self.full.store(false, Ordering::Relaxed);
+    }
+
     /// The governor's look at it: what it allows, the headroom it leaves, and whether it is under
     /// pressure.
     pub fn govern(&self, allowance: u64, headroom: u64, pressure: bool) {
@@ -240,7 +348,6 @@ impl std::fmt::Debug for HostDisk {
         f.debug_struct("HostDisk")
             .field("dev", &self.dev())
             .field("stores", &self.stores)
-            .field("pledged", &self.pledged)
             .field("cache", &self.cache)
             .field("allowance", &self.allowance())
             .finish_non_exhaustive()

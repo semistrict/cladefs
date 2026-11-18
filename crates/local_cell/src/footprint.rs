@@ -34,7 +34,7 @@
 use crate::dir::{Dir, DirFile};
 use crate::layout::{OPEN_EXTENTS, OPEN_SEGMENTS};
 use crate::sync::Mutex;
-use bucket_cell::host_disk::{self, Count, HostDisk, Tally};
+use bucket_cell::host_disk::{self, HostDisk, Tally};
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,8 @@ pub struct Footprint {
     disk: Option<Arc<HostDisk>>,
     /// Its files' lengths and its directories, counted.
     tally: Tally,
+    /// The most `tally` counted since it was last asked ([`Footprint::take_peak`]).
+    peak: AtomicU64,
     /// The allotment it charges as it is charged, if any's directory holds it.
     allotment: Mutex<Option<Arc<Allotment>>>,
     /// Its files and directories by name, while its store is open.
@@ -64,6 +66,8 @@ struct Opened {
     files: HashMap<String, Arc<FileLen>>,
     /// Its directories, by path.
     dirs: BTreeSet<String>,
+    /// Whether its store's directory went while it was open, which counted it closed.
+    forgotten: bool,
 }
 
 impl Footprint {
@@ -74,6 +78,7 @@ impl Footprint {
             path,
             disk,
             tally: Tally::default(),
+            peak: AtomicU64::new(0),
             allotment: Mutex::new(None),
             opened: Mutex::default(),
         })
@@ -87,6 +92,16 @@ impl Footprint {
     /// Of those, the bytes of its unframed files.
     pub fn unframed(&self) -> u64 {
         self.tally.unframed()
+    }
+
+    /// The bytes of its store's extents open, each as far as it goes.
+    pub fn open(&self) -> u64 {
+        self.tally.open()
+    }
+
+    /// What its store's own work may still add to it, never refused ([`Tally::reserved`]).
+    pub fn reserved(&self) -> u64 {
+        self.tally.reserved()
     }
 
     /// The allotment it is in, if any is.
@@ -122,6 +137,13 @@ impl Footprint {
     /// Counts `bytes` more, `unframed` if so.
     fn charge(&self, bytes: u64, unframed: bool) {
         self.counting(|tally| tally.charge(bytes, unframed));
+        self.peak.fetch_max(self.bytes(), Ordering::Relaxed);
+    }
+
+    /// The most its store's files took since this was last asked, or it was made: what its
+    /// store's own work, between, took at its peak.
+    pub fn take_peak(&self) -> u64 {
+        self.peak.swap(self.bytes(), Ordering::Relaxed).max(self.bytes())
     }
 
     /// Counts `bytes` fewer, `unframed` if so.
@@ -137,22 +159,87 @@ impl Footprint {
     /// Counts it in `allotment`'s, in place of the one it was in.
     fn allot(&self, allotment: &Arc<Allotment>) {
         let mut allotted = self.allotment.lock().unwrap();
-        let (bytes, unframed) = (self.bytes(), self.unframed());
         if let Some(was) = allotted.take() {
-            was.tally.discharge(bytes - unframed, false);
-            was.tally.discharge(unframed, true);
-            TOTAL.tally.discharge(bytes - unframed, false);
-            TOTAL.tally.discharge(unframed, true);
+            moved(&self.tally, &was.tally, false);
+            moved(&self.tally, &TOTAL.tally, false);
         }
-        allotment.tally.charge(bytes - unframed, false);
-        allotment.tally.charge(unframed, true);
-        TOTAL.tally.charge(bytes - unframed, false);
-        TOTAL.tally.charge(unframed, true);
+        moved(&self.tally, &allotment.tally, true);
+        moved(&self.tally, &TOTAL.tally, true);
         *allotted = Some(allotment.clone());
     }
 
+    /// cladefs: its store's extents open take `open` bytes, each as far as it goes: what the commit
+    /// sealing them may copy, which its reserve covers ([`host_disk::RESERVE_FACTOR`]).
+    pub(crate) fn set_open(&self, open: u64) {
+        let was = self.tally.open();
+        if open != was {
+            self.counting(|tally| tally.opened(open.abs_diff(was), open > was));
+        }
+    }
+
+    /// Admits a write of `len` bytes, which grows its extent by `grows`, if the store's disk, its
+    /// allotment, if it is in one, and every allotment have room for them and what its store's own
+    /// work may add for them: held until the returned pledge goes, the write landed, counted as it
+    /// lands ([`DiskFull`] otherwise, logged as refusals begin). Every one admitted leaves room for
+    /// every commit, flush and framing of every store, which nothing refuses (doc-22).
+    pub fn admit(self: &Arc<Self>, len: u64, grows: u64) -> Result<Pledge, DiskFull> {
+        self.admit_bytes(len + host_disk::RESERVE_FACTOR * (len + grows))
+    }
+
+    /// Admits the making of a store, as [`Footprint::admit`] does a write: what its files take
+    /// made, [`STORE_MADE`].
+    pub fn admit_made(self: &Arc<Self>) -> Result<Pledge, DiskFull> {
+        self.admit_bytes(STORE_MADE)
+    }
+
+    /// Admits `bytes` more, as [`Footprint::admit`] says.
+    fn admit_bytes(self: &Arc<Self>, bytes: u64) -> Result<Pledge, DiskFull> {
+        // Pledged first, so that two admitted at once each count the other.
+        let pledge = Pledge::new(self.clone(), bytes);
+        let allotment = self.allotment();
+        let over =
+            |tally: &Tally, limit: &AtomicU64| tally.committed() > limit.load(Ordering::Relaxed);
+        let full = match &allotment {
+            Some(allotment) if over(&allotment.tally, &allotment.limit) => {
+                Some(DiskFull::Allotment)
+            }
+            Some(_) if over(&TOTAL.tally, &TOTAL.limit) => Some(DiskFull::Total),
+            Some(allotment) if over(&allotment.tally, &allotment.share) => Some(DiskFull::Share),
+            _ => self.disk.as_ref().and_then(|disk| disk_full(disk)),
+        };
+        let Some(full) = full else {
+            if let Some(allotment) = &allotment {
+                allotment.full.store(false, Ordering::Relaxed);
+            }
+            self.disk.iter().for_each(|disk| disk.admitted());
+            return Ok(pledge);
+        };
+        let begins = match (full, &allotment) {
+            (DiskFull::Disk, _) => self.disk.as_ref().is_some_and(|disk| disk.refused()),
+            (_, Some(allotment)) => !allotment.full.swap(true, Ordering::Relaxed),
+            (_, None) => false,
+        };
+        drop(pledge);
+        if begins {
+            log::warn!(
+                "extent store: {} refuses writes (ENOSPC): {full}; it takes {} bytes, its \
+                 allotment {:?} of {:?}, every allotment {} of {:?}, its disk {:?}",
+                self.path.as_deref().map_or("a store".into(), |path| path.display().to_string()),
+                self.bytes(),
+                allotment.as_ref().map(|allotment| allotment.bytes()),
+                allotment.as_ref().and_then(|allotment| allotment.limit()),
+                total().bytes(),
+                total_limit(),
+                self.disk,
+            );
+        }
+        host_disk::wake_governor();
+        Err(full)
+    }
+
     /// Counts its store opened once more, in `dir`: the first opening while none other is alive
-    /// lists the directory, and counts what it finds in place of what was counted before.
+    /// lists the directory, and counts what it finds in place of what was counted before, and
+    /// counts the store open, reserving what each store open may add ([`host_disk::RESERVE_PER_STORE`]).
     pub(crate) fn attach<D: Dir>(&self, dir: &D) -> io::Result<()> {
         let mut opened = self.opened.lock().unwrap();
         if opened.openings == 0 {
@@ -160,6 +247,8 @@ impl Footprint {
             let (files, dirs) = self.found(found);
             opened.files = files;
             opened.dirs = dirs;
+            opened.forgotten = false;
+            self.counting(|tally| tally.store(true));
         }
         opened.openings += 1;
         Ok(())
@@ -208,6 +297,9 @@ impl Footprint {
         if opened.openings == 0 {
             opened.files.clear();
             opened.dirs.clear();
+            if !opened.forgotten {
+                self.counting(|tally| tally.store(false));
+            }
         }
     }
 
@@ -220,6 +312,11 @@ impl Footprint {
         opened.dirs.clear();
         self.reframe(self.unframed(), false);
         self.discharge(self.bytes(), false);
+        self.set_open(0);
+        if opened.openings > 0 && !opened.forgotten {
+            self.counting(|tally| tally.store(false));
+        }
+        opened.forgotten = true;
         *self.allotment.lock().unwrap() = None;
     }
 
@@ -315,6 +412,11 @@ impl Footprint {
 /// No limit.
 const NONE: u64 = u64::MAX;
 
+/// What a store made is admitted as ([`Footprint::admit_made`]): a store's files, a fork's made and
+/// an uploaded base's, take 12 to 16 KiB of a filesystem's 4 KiB blocks (cladefs's `tests/disk.rs`),
+/// four times which leaves room for larger blocks.
+pub const STORE_MADE: u64 = 64 << 10;
+
 /// A directory a tenant is granted, as its stores' files take the host's disk: their footprints
 /// summed, and its tenant's limit (TASK-539.5). See the module docs.
 pub struct Allotment {
@@ -322,24 +424,30 @@ pub struct Allotment {
     dir: PathBuf,
     /// Its stores' footprints, summed.
     tally: Tally,
-    /// What writes admitted and not yet landed hold.
-    pledged: Count,
     /// Its limit, or [`NONE`].
     limit: AtomicU64,
     /// Whether the last write refused was refused by it: logged as it begins to be.
     full: AtomicBool,
+    /// The disk of its directory's filesystem, whose governor shares what it leaves by weight.
+    disk: Arc<HostDisk>,
+    /// Its weight against the other allotments on its disk ([`DEFAULT_WEIGHT`] until set).
+    weight: AtomicU64,
+    /// What it keeps while its disk is under pressure, its share by weight, or [`NONE`]
+    /// otherwise: past it, its writes are refused (doc-22, TASK-539.10).
+    share: AtomicU64,
 }
 
+/// An allotment's weight unless it is set: each alike.
+pub const DEFAULT_WEIGHT: u64 = 1;
+
 /// Every allotment's together, and every tenant's limit.
-pub struct Total {
+struct Total {
     tally: Tally,
-    pledged: Count,
     limit: AtomicU64,
 }
 
 /// Every allotment's, together.
-static TOTAL: Total =
-    Total { tally: Tally::new(), pledged: Count::new(), limit: AtomicU64::new(NONE) };
+static TOTAL: Total = Total { tally: Tally::new(), limit: AtomicU64::new(NONE) };
 
 /// Every allotment made: kept for the process's life, as their stores' files are on its disk,
 /// granted or not.
@@ -355,12 +463,15 @@ pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
         if let Some(made) = allotments.iter().find(|allotment| allotment.dir == dir) {
             return Ok(made.clone());
         }
+        let disk = HostDisk::of(&dir)?;
         let made = Arc::new(Allotment {
             dir,
             tally: Tally::new(),
-            pledged: Count::new(),
             limit: AtomicU64::new(NONE),
             full: AtomicBool::new(false),
+            disk,
+            weight: AtomicU64::new(DEFAULT_WEIGHT),
+            share: AtomicU64::new(NONE),
         });
         allotments.push(made.clone());
         made
@@ -437,7 +548,7 @@ impl Allotment {
 
     /// What writes admitted and not yet landed hold.
     pub fn pledged(&self) -> u64 {
-        self.pledged.get()
+        self.tally.pledged()
     }
 
     /// Its limit, if it has one.
@@ -450,76 +561,100 @@ impl Allotment {
         self.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
     }
 
+    /// The disk of its directory's filesystem.
+    pub fn disk(&self) -> &Arc<HostDisk> {
+        &self.disk
+    }
+
+    /// Its weight against the other allotments on its disk.
+    pub fn weight(&self) -> u64 {
+        self.weight.load(Ordering::Relaxed)
+    }
+
+    /// Weighs it `weight` against the other allotments on its disk.
+    pub fn set_weight(&self, weight: u64) {
+        self.weight.store(weight, Ordering::Relaxed);
+    }
+
+    /// What it keeps while its disk is under pressure, if it is.
+    pub fn share(&self) -> Option<u64> {
+        Some(self.share.load(Ordering::Relaxed)).filter(|share| *share != NONE)
+    }
+
+    /// Has it keep `bytes` while its disk is under pressure, its share by weight; or, without, no
+    /// share, its disk under pressure no more.
+    pub fn set_share(&self, bytes: Option<u64>) {
+        self.share.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+    }
+
+    /// What its stores take, reserve and hold admitted: what its limit and share weigh.
+    pub fn committed(&self) -> u64 {
+        self.tally.committed()
+    }
+
+    /// What its stores' own work may still add, and its writes admitted hold.
+    pub fn reserved(&self) -> u64 {
+        self.tally.reserved() + self.tally.pledged()
+    }
+
     /// Whether the last write refused it was refused by its limit or every tenant's.
     pub fn is_full(&self) -> bool {
         self.full.load(Ordering::Relaxed)
     }
-
-    /// Admits a write of `bytes` more, if what it takes and holds admitted leaves room for them
-    /// within its limit, and every allotment's within every tenant's: held until the returned
-    /// pledge goes, the write landed, and counted as it lands. [`Full`] otherwise, logged as its
-    /// refusals begin.
-    pub fn admit(self: &Arc<Self>, bytes: u64) -> Result<Pledge, Full> {
-        // Pledged first, so that two admitted at once each count the other.
-        let pledge = Pledge::new(self.clone(), bytes);
-        let within = |tally: &Tally, pledged: &Count, limit: &AtomicU64| {
-            tally.bytes() + pledged.get() <= limit.load(Ordering::Relaxed)
-        };
-        let full = match () {
-            () if !within(&self.tally, &self.pledged, &self.limit) => Some(Full::Allotment),
-            () if !within(&TOTAL.tally, &TOTAL.pledged, &TOTAL.limit) => Some(Full::Total),
-            () => None,
-        };
-        let Some(full) = full else {
-            self.full.store(false, Ordering::Relaxed);
-            return Ok(pledge);
-        };
-        drop(pledge);
-        if !self.full.swap(true, Ordering::Relaxed) {
-            log::warn!(
-                "cladefs: {} at its disk's limit, its writes refused (ENOSPC): {full}; it takes {} \
-                 bytes of {:?}, every tenant's {} of {:?}",
-                self.dir.display(),
-                self.bytes(),
-                self.limit(),
-                total().bytes(),
-                total_limit()
-            );
-        }
-        Err(full)
-    }
 }
 
-/// What refused a write ([`Allotment::admit`]).
+/// What refused a write ([`Footprint::admit`]): `ENOSPC` to its guest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum Full {
+pub enum DiskFull {
+    /// Its store's disk: what the disk governor allows its stores and the part cache.
+    #[error("its disk's allowance")]
+    Disk,
     /// Its tenant's limit.
     #[error("its tenant's limit")]
     Allotment,
     /// Every tenant's limit.
     #[error("every tenant's limit")]
     Total,
+    /// Its tenant's share by weight of its disk, under pressure.
+    #[error("its tenant's share of its disk under pressure")]
+    Share,
 }
 
-/// A write admitted ([`Allotment::admit`]): what it holds of its allotment until it goes.
+/// Whether `disk` has no room for what is pledged on it: its stores' bytes, reserves and pledges,
+/// and its part cache past a band of it, which the governor evicts at once, past its allowance.
+fn disk_full(disk: &HostDisk) -> Option<DiskFull> {
+    let (allowance, cache) = (disk.allowance(), disk.cache.get());
+    let committed = disk.stores.committed();
+    if committed.saturating_add(cache) > allowance {
+        host_disk::wake_governor();
+    }
+    let band = disk.headroom() / 4;
+    (committed.saturating_add(cache.saturating_sub(band)) > allowance).then_some(DiskFull::Disk)
+}
+
+/// A write admitted ([`Footprint::admit`]): what it holds of its store's disk, allotment and every
+/// allotment until it goes.
 pub struct Pledge {
-    allotment: Arc<Allotment>,
+    footprint: Arc<Footprint>,
     bytes: u64,
 }
 
 impl Pledge {
-    fn new(allotment: Arc<Allotment>, bytes: u64) -> Self {
-        allotment.pledged.add(bytes);
-        TOTAL.pledged.add(bytes);
-        Self { allotment, bytes }
+    fn new(footprint: Arc<Footprint>, bytes: u64) -> Self {
+        footprint.counting(|tally| tally.pledge(bytes, true));
+        Self { footprint, bytes }
     }
 }
 
 impl Drop for Pledge {
     fn drop(&mut self) {
-        self.allotment.pledged.sub(self.bytes);
-        TOTAL.pledged.sub(self.bytes);
+        self.footprint.counting(|tally| tally.pledge(self.bytes, false));
     }
+}
+
+/// Every allotment made.
+pub fn allotments() -> Vec<Arc<Allotment>> {
+    ALLOTMENTS.lock().unwrap().clone()
 }
 
 /// What every allotment's stores' files take together.
@@ -535,6 +670,24 @@ pub fn total_limit() -> Option<u64> {
 /// Limits every allotment together to `bytes`, or lifts the limit, without.
 pub fn set_total_limit(bytes: Option<u64>) {
     TOTAL.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+}
+
+/// `own`, a footprint's tally, counted in `tally`, or no longer, if not `more`.
+fn moved(own: &Tally, tally: &Tally, more: bool) {
+    let (bytes, unframed) = (own.bytes(), own.unframed());
+    match more {
+        true => {
+            tally.charge(bytes - unframed, false);
+            tally.charge(unframed, true);
+        }
+        false => {
+            tally.discharge(bytes - unframed, false);
+            tally.discharge(unframed, true);
+        }
+    }
+    tally.opened(own.open(), more);
+    (0..own.stores()).for_each(|_| tally.store(more));
+    tally.pledge(own.pledged(), more);
 }
 
 /// Whether `path` is an unframed file's: one under `open-segments/` or `open-extents/`.

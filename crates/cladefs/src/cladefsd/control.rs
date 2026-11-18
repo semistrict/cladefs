@@ -667,8 +667,20 @@ impl Cladefsd for Control {
         request: Request<GetTenantDiskRequest>,
     ) -> Result<Response<GetTenantDiskResponse>, Status> {
         let tenant = request.into_inner().tenant;
-        let response = |(bytes, limit_bytes)| GetTenantDiskResponse { bytes, limit_bytes };
+        let response = |disk::Counted { bytes, limit, reserved }| GetTenantDiskResponse {
+            bytes,
+            limit_bytes: limit,
+            reserved_bytes: reserved,
+        };
         reply(disk::count(tenant).map(response))
+    }
+
+    async fn set_disk_weight(
+        &self,
+        request: Request<SetDiskWeightRequest>,
+    ) -> Result<Response<SetDiskWeightResponse>, Status> {
+        let SetDiskWeightRequest { tenant, weight } = request.into_inner();
+        reply(disk::set_weight(tenant, weight).map(|()| SetDiskWeightResponse {}))
     }
 
     async fn set_peers(

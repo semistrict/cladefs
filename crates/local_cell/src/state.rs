@@ -931,6 +931,9 @@ pub(crate) struct Uncommitted<F> {
     /// cladefs: the capacity set since the last commit, which the next sets in the cell's state
     /// as object storage keeps it, its segment's footer saying so (TASK-165.3).
     capacity: Option<u64>,
+    /// cladefs: the bytes of the extents open, each as far as its writes that finished took it,
+    /// holes and all: what the next commit, sealing them, may copy (TASK-539.8).
+    open_bytes: u64,
 }
 
 /// An extent open: where its data goes, and its opening's number, which the writes to it carry;
@@ -945,7 +948,7 @@ struct Open<F> {
 impl<F> Default for Uncommitted<F> {
     fn default() -> Self {
         let (open, changes, overwritten, let_go) = (HashMap::new(), Vec::new(), 0, 0);
-        Self { open, openings: 0, changes, overwritten, let_go, capacity: None }
+        Self { open, openings: 0, changes, overwritten, let_go, capacity: None, open_bytes: 0 }
     }
 }
 
@@ -1021,6 +1024,21 @@ impl<F> Uncommitted<F> {
         Some(open.packing)
     }
 
+    /// cladefs: the bytes of the extents open, each as far as it goes ([`Uncommitted::grew`]).
+    pub fn open_bytes(&self) -> u64 {
+        self.open_bytes
+    }
+
+    /// cladefs: an extent open grew by `bytes`, a write finishing past its end.
+    pub fn grew(&mut self, bytes: u64) {
+        self.open_bytes += bytes;
+    }
+
+    /// cladefs: an extent open, of `bytes`, was freed.
+    pub fn shrank(&mut self, bytes: u64) {
+        self.open_bytes -= bytes;
+    }
+
     /// The extents open, which the next commit seals, in the order they were opened. cladefs: an
     /// order the cell's writes decide, not the map's, which differs from one run to the next,
     /// so that where a commit seals each, and what its record says, do not (TASK-79.79).
@@ -1050,6 +1068,7 @@ impl<F> Uncommitted<F> {
         self.open.clear();
         self.overwritten = 0;
         self.let_go = 0;
+        self.open_bytes = 0;
         std::mem::take(&mut self.changes)
     }
 

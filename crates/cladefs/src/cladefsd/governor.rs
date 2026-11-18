@@ -19,6 +19,14 @@
 //!
 //! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
+//!
+//! cladefs: the host's disk, governed alike (backlog doc-22, TASK-539.9): each filesystem the daemon
+//! keeps stores or its part cache on, a disk (`bucket_cell::host_disk`), is the daemon's but for a
+//! headroom ([`disk_headroom`]), and no more than `CLADEFSD_DISK_BYTES` of all of them together, if
+//! that is set. Its stores come first; the part cache takes what they leave, evicted at once as
+//! they need it; then, its stores near the allowance ([`pressured`]), their uploaders are urged,
+//! and past it their guests' writes refused. The policy is here, its look at the disks in
+//! `super::disk`.
 
 use super::memory;
 use physmem::CHUNK_SIZE;
@@ -190,6 +198,58 @@ pub fn start() -> Result<(), String> {
     Ok(())
 }
 
+/// cladefs: what the disk governor leaves free of a filesystem, as `CLADEFSD_DISK_HEADROOM` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskHeadroom {
+    /// So many bytes.
+    Bytes(u64),
+    /// So many hundredths of the filesystem.
+    Percent(u64),
+}
+
+/// cladefs: the headroom `CLADEFSD_DISK_HEADROOM` gives, if any: bytes, or `N%` of each
+/// filesystem; refused otherwise, naming the variable.
+pub fn disk_headroom_of(value: Option<&str>) -> Result<Option<DiskHeadroom>, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else { return Ok(None) };
+    let refused = || format!("CLADEFSD_DISK_HEADROOM is bytes or N%, not {value:?}");
+    match value.strip_suffix('%') {
+        Some(percent) => match percent.parse() {
+            Ok(percent) if percent < 100 => Ok(Some(DiskHeadroom::Percent(percent))),
+            _ => Err(refused()),
+        },
+        None => value.parse().map(|bytes| Some(DiskHeadroom::Bytes(bytes))).map_err(|_| refused()),
+    }
+}
+
+/// cladefs: what the disk governor leaves free of a filesystem of `size` bytes: `set`, or, unset,
+/// a twentieth of it, 4 GiB at least, half of it at most: room for others' writes between its looks,
+/// for what its stores' commits add unadmitted (TASK-539.15), and a neighbour's (user, 2026-11-18:
+/// 5%, 4 GiB at least).
+pub fn disk_headroom(size: u64, set: Option<DiskHeadroom>) -> u64 {
+    match set {
+        Some(DiskHeadroom::Bytes(bytes)) => bytes,
+        Some(DiskHeadroom::Percent(percent)) => size / 100 * percent,
+        None => (size / 20).max(4 << 30).min(size / 2),
+    }
+}
+
+/// cladefs: what the daemon may keep on a disk, holding `held`, its filesystem `free`, `in_flight`
+/// of what it holds not on the disk yet, leaving `headroom`: as the memory's allowance, held and
+/// free less the headroom.
+pub fn disk_allowance(held: u64, free: u64, in_flight: u64, headroom: u64) -> u64 {
+    (held + free).saturating_sub(in_flight + headroom)
+}
+
+/// cladefs: whether a disk whose stores leave `spare` of its allowance is under pressure, `was` it
+/// as the last look found it: entered under `headroom`, left only past it and a quarter more, so
+/// that a disk at its edge doesn't urge its uploaders on and off at every look.
+pub fn pressured(was: bool, spare: u64, headroom: u64) -> bool {
+    match was {
+        true => spare < headroom + headroom / 4,
+        false => spare < headroom,
+    }
+}
+
 /// The size of physical memory for a governed daemon: all of the host's, in whole chunks. Fails if
 /// the host maps less (`vm.max_map_count` on Linux): a daemon whose cache can't grow into the
 /// host's memory doesn't start.
@@ -241,6 +301,42 @@ mod tests {
         // A chunk at least, and whole chunks.
         assert_eq!(allowance(0, squeezed, 2 * GIB), chunk);
         assert_eq!(allowance(chunk + 1, HostMemory { total: GIB, available: 0 }, 0), chunk);
+    }
+
+    #[test]
+    fn disk_headrooms_are_bytes_or_a_share_and_by_default_a_twentieth() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(disk_headroom_of(None), Ok(None));
+        assert_eq!(disk_headroom_of(Some("")), Ok(None));
+        assert_eq!(disk_headroom_of(Some("1024")), Ok(Some(DiskHeadroom::Bytes(1024))));
+        assert_eq!(disk_headroom_of(Some("5%")), Ok(Some(DiskHeadroom::Percent(5))));
+        for wrong in ["5 %", "100%", "-1", "1G", "%"] {
+            assert_eq!(
+                disk_headroom_of(Some(wrong)),
+                Err(format!("CLADEFSD_DISK_HEADROOM is bytes or N%, not {wrong:?}"))
+            );
+        }
+        // A twentieth of a large disk; 4 GiB at least; half of a small one at most.
+        assert_eq!(disk_headroom(4000 * GIB, None), 200 * GIB);
+        assert_eq!(disk_headroom(40 * GIB, None), 4 * GIB);
+        assert_eq!(disk_headroom(2 * GIB, None), GIB);
+        assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Percent(2))), 80 * GIB);
+        assert_eq!(disk_headroom(4000 * GIB, Some(DiskHeadroom::Bytes(GIB))), GIB);
+    }
+
+    #[test]
+    fn a_disks_allowance_is_whats_held_and_free_less_whats_not_landed_and_the_headroom() {
+        assert_eq!(disk_allowance(40, 100, 10, 30), 100);
+        assert_eq!(disk_allowance(40, 0, 10, 50), 0);
+    }
+
+    #[test]
+    fn pressure_enters_under_the_headroom_and_leaves_a_quarter_past_it() {
+        let headroom = 400;
+        assert!(!pressured(false, 400, headroom));
+        assert!(pressured(false, 399, headroom));
+        assert!(pressured(true, 499, headroom));
+        assert!(!pressured(true, 500, headroom));
     }
 
     #[test]

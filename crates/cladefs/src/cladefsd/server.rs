@@ -371,13 +371,6 @@ impl Tenant {
         self.disk.as_ref()
     }
 
-    /// cladefs: admits a write of `bytes` more of its disk, within its limit and every tenant's,
-    /// until the write is done, what it returns dropped (TASK-94): `ENOSPC` otherwise. The default
-    /// tenant's, uncounted, always.
-    fn admit_to_disk(&self, bytes: u64) -> Result<Option<local_cell::footprint::Pledge>, Errno> {
-        self.disk.as_ref().map(|disk| disk.admit(bytes)).transpose()
-    }
-
     /// Whether its VM processes may name the store at `path`, whichever way `path` names it:
     /// `EACCES` unless it is where they name stores ([`Stores`]).
     fn holds(&self, path: &Path) -> Result<(), Errno> {
@@ -801,7 +794,7 @@ impl Answer {
                 let disk = store.disk_bytes();
                 log::warn!(
                     "cladefsd: request {} (flags {:#x}, args {:#x?}) found the store full: \
-                     used and capacity {used:?}, {disk:?} bytes of the host's disk",
+                     used and capacity {used:?}, {disk} bytes of the host's disk",
                     header.kind,
                     header.flags,
                     header.args
@@ -1342,8 +1335,7 @@ impl Connection {
                         self.transfer.get().ok_or(Errno::EINVAL)?.slice(at, len)?
                     }
                 };
-                // cladefs: within its tenant's disk (TASK-94).
-                let _admitted = self.tenant.admit_to_disk(data.len() as u64)?;
+                // cladefs: within its disk and its tenant's limits, as its store admits it (doc-22).
                 store.write_with_barriers(*extent, *offset, &[data], *barriers)
             }
             Request::Free(extent) => store.free(*extent),
@@ -1391,8 +1383,6 @@ impl Connection {
             }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
             Request::Fork { path } => {
-                // cladefs: a store made, within its tenant's disk (TASK-94).
-                let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
                 // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
                 let forked = store.fork(path, store.cell().tenant);
                 if let Err(err) = &forked
@@ -1580,12 +1570,8 @@ impl Connection {
         let hold = cells::hold_to_write(&store_key(path), self.this.clone()).await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
         self.tenant.reaches(path)?;
-        // cladefs: a store it makes, within its tenant's disk (TASK-94).
-        let makes = matches!(how, codec::Opening::Create(..) | codec::Opening::ForkOf { .. });
-        let _admitted = match makes && !path.exists() {
-            true => self.tenant.admit_to_disk(super::disk::STORE_MADE)?,
-            false => None,
-        };
+        // cladefs: a store it makes, within its disk and its tenant's limits, as its making admits
+        // it (doc-22).
         // Closed before its hold lets its path go, if it fails here.
         let store = self.open_held(path, &hold, &how).await?;
         // A VM process opens no store to write that its writer may not write

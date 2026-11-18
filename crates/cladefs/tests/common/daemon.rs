@@ -25,6 +25,10 @@ pub struct Daemon {
 impl Daemon {
     pub fn new(dir: &Path) -> Self {
         super::host();
+        // Its disks governed, as a host's daemon's are, leaving a test's headroom (doc-22).
+        let headroom = Some(cladefs::cladefsd::governor::DiskHeadroom::Bytes(64 << 20));
+        let disks = cladefs::cladefsd::disk::DiskConfig { headroom, fixed: None };
+        cladefs::cladefsd::disk::start(disks).unwrap();
         let (vms, control) = (dir.join("vms.sock"), dir.join("control.sock"));
         let listener = UnixListener::bind(&vms).unwrap();
         std::thread::spawn(move || serve(listener));
@@ -221,6 +225,14 @@ impl Daemon {
         let request = GetTenantDiskRequest { tenant };
         let response = self.runtime.block_on(self.client.get_tenant_disk(request))?.into_inner();
         Ok((response.bytes, response.limit_bytes))
+    }
+
+    /// What the disk of `tenant`, or of every tenant, holds past what it takes against its limit:
+    /// its stores' reserves and its writes admitted (doc-22).
+    pub fn tenant_reserved(&mut self, tenant: Option<u64>) -> u64 {
+        let request = GetTenantDiskRequest { tenant };
+        let response = self.runtime.block_on(self.client.get_tenant_disk(request)).unwrap();
+        response.into_inner().reserved_bytes
     }
 
     pub fn counters(&mut self) -> GetCountersResponse {

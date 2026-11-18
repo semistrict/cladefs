@@ -110,6 +110,7 @@ const (
 	Cladefsd_SetTenantInFlight_FullMethodName = "/cladefs.cladefsd.v1.Cladefsd/SetTenantInFlight"
 	Cladefsd_ShrinkMemory_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ShrinkMemory"
 	Cladefsd_SetDiskLimit_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/SetDiskLimit"
+	Cladefsd_SetDiskWeight_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/SetDiskWeight"
 	Cladefsd_GetTenantDisk_FullMethodName     = "/cladefs.cladefsd.v1.Cladefsd/GetTenantDisk"
 	Cladefsd_SetPeers_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/SetPeers"
 	Cladefsd_ShredCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ShredCell"
@@ -223,13 +224,21 @@ type CladefsdClient interface {
 	// daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
 	ShrinkMemory(ctx context.Context, in *ShrinkMemoryRequest, opts ...grpc.CallOption) (*ShrinkMemoryResponse, error)
 	// Limits the host's disk a tenant takes, or every tenant together (TASK-94): what is in its
-	// directory, its stores' files, each file once, the host's part cache no tenant's. Past a
-	// tenant's limit, its VMs' writes, and the stores they make, fail with ENOSPC, which the VM's
-	// guest sees as a full disk, and the daemon and other tenants' writes go on; past the total, any
-	// tenant's do. Commits go on, and what leaves the disk (uploaded, freed, a store deleted) lets
-	// the tenant write again. A limit under what is taken holds as data leaves.
+	// directory, its stores' files, each file's length rounded up to 4 KiB, once however many names
+	// it has, counted as written (doc-22), the host's part cache no tenant's. A write is admitted
+	// only if what is taken, what writes admitted hold, and what the stores' own work may still add
+	// for what was written (their commits copying, logging and framing it, which nothing refuses)
+	// stay within it. Past a tenant's limit, its VMs' writes, and the stores they make, fail with
+	// ENOSPC, which the VM's guest sees as a full disk, and the daemon and other tenants' writes go
+	// on; past the total, any tenant's do. Commits go on, and what leaves the disk (uploaded, freed,
+	// a store deleted) lets the tenant write again. A limit under what is taken holds as data leaves.
 	SetDiskLimit(ctx context.Context, in *SetDiskLimitRequest, opts ...grpc.CallOption) (*SetDiskLimitResponse, error)
-	// What the host's disk a tenant takes, or every tenant together, counted now, and its limit.
+	// Weighs a tenant's disk against the others' (doc-22): as a disk the daemon keeps stores on
+	// comes near what the disk governor allows them, each tenant's writes are refused past its share
+	// by weight of what is left, a tenant within its share writing on. Every tenant weighs 1 until
+	// set.
+	SetDiskWeight(ctx context.Context, in *SetDiskWeightRequest, opts ...grpc.CallOption) (*SetDiskWeightResponse, error)
+	// What the host's disk a tenant takes, or every tenant together, and its limit.
 	GetTenantDisk(ctx context.Context, in *GetTenantDiskRequest, opts ...grpc.CallOption) (*GetTenantDiskResponse, error)
 	// Has the hosts sharing the daemon's bucket be these (TASK-406.2): its stores' fetchers ask the
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
@@ -525,6 +534,16 @@ func (c *cladefsdClient) SetDiskLimit(ctx context.Context, in *SetDiskLimitReque
 	return out, nil
 }
 
+func (c *cladefsdClient) SetDiskWeight(ctx context.Context, in *SetDiskWeightRequest, opts ...grpc.CallOption) (*SetDiskWeightResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetDiskWeightResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_SetDiskWeight_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *cladefsdClient) GetTenantDisk(ctx context.Context, in *GetTenantDiskRequest, opts ...grpc.CallOption) (*GetTenantDiskResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetTenantDiskResponse)
@@ -681,13 +700,21 @@ type CladefsdServer interface {
 	// daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
 	ShrinkMemory(context.Context, *ShrinkMemoryRequest) (*ShrinkMemoryResponse, error)
 	// Limits the host's disk a tenant takes, or every tenant together (TASK-94): what is in its
-	// directory, its stores' files, each file once, the host's part cache no tenant's. Past a
-	// tenant's limit, its VMs' writes, and the stores they make, fail with ENOSPC, which the VM's
-	// guest sees as a full disk, and the daemon and other tenants' writes go on; past the total, any
-	// tenant's do. Commits go on, and what leaves the disk (uploaded, freed, a store deleted) lets
-	// the tenant write again. A limit under what is taken holds as data leaves.
+	// directory, its stores' files, each file's length rounded up to 4 KiB, once however many names
+	// it has, counted as written (doc-22), the host's part cache no tenant's. A write is admitted
+	// only if what is taken, what writes admitted hold, and what the stores' own work may still add
+	// for what was written (their commits copying, logging and framing it, which nothing refuses)
+	// stay within it. Past a tenant's limit, its VMs' writes, and the stores they make, fail with
+	// ENOSPC, which the VM's guest sees as a full disk, and the daemon and other tenants' writes go
+	// on; past the total, any tenant's do. Commits go on, and what leaves the disk (uploaded, freed,
+	// a store deleted) lets the tenant write again. A limit under what is taken holds as data leaves.
 	SetDiskLimit(context.Context, *SetDiskLimitRequest) (*SetDiskLimitResponse, error)
-	// What the host's disk a tenant takes, or every tenant together, counted now, and its limit.
+	// Weighs a tenant's disk against the others' (doc-22): as a disk the daemon keeps stores on
+	// comes near what the disk governor allows them, each tenant's writes are refused past its share
+	// by weight of what is left, a tenant within its share writing on. Every tenant weighs 1 until
+	// set.
+	SetDiskWeight(context.Context, *SetDiskWeightRequest) (*SetDiskWeightResponse, error)
+	// What the host's disk a tenant takes, or every tenant together, and its limit.
 	GetTenantDisk(context.Context, *GetTenantDiskRequest) (*GetTenantDiskResponse, error)
 	// Has the hosts sharing the daemon's bucket be these (TASK-406.2): its stores' fetchers ask the
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
@@ -807,6 +834,9 @@ func (UnimplementedCladefsdServer) ShrinkMemory(context.Context, *ShrinkMemoryRe
 }
 func (UnimplementedCladefsdServer) SetDiskLimit(context.Context, *SetDiskLimitRequest) (*SetDiskLimitResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetDiskLimit not implemented")
+}
+func (UnimplementedCladefsdServer) SetDiskWeight(context.Context, *SetDiskWeightRequest) (*SetDiskWeightResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetDiskWeight not implemented")
 }
 func (UnimplementedCladefsdServer) GetTenantDisk(context.Context, *GetTenantDiskRequest) (*GetTenantDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTenantDisk not implemented")
@@ -1294,6 +1324,24 @@ func _Cladefsd_SetDiskLimit_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Cladefsd_SetDiskWeight_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetDiskWeightRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).SetDiskWeight(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_SetDiskWeight_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).SetDiskWeight(ctx, req.(*SetDiskWeightRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Cladefsd_GetTenantDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetTenantDiskRequest)
 	if err := dec(in); err != nil {
@@ -1490,6 +1538,10 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetDiskLimit",
 			Handler:    _Cladefsd_SetDiskLimit_Handler,
+		},
+		{
+			MethodName: "SetDiskWeight",
+			Handler:    _Cladefsd_SetDiskWeight_Handler,
 		},
 		{
 			MethodName: "GetTenantDisk",

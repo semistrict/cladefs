@@ -41,10 +41,20 @@
 //!   (TASK-50.3); `cladefsd_tenant_memory_bytes{tenant}` and
 //!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
 //!   base 32, as cells name it.
-//! - `cladefsd_disk_bytes` and `cladefsd_disk_limit_bytes`: the host's disk every
-//!   tenant's directory takes together, as last counted, and its limit, if any (TASK-94);
-//!   `cladefsd_tenant_disk_bytes{tenant}` and `cladefsd_tenant_disk_limit_bytes{tenant}`:
-//!   each tenant's alive, by its ID (`super::disk`).
+//! - `cladefsd_disk_bytes`, `cladefsd_disk_reserved_bytes` and `cladefsd_disk_limit_bytes`: the
+//!   host's disk every tenant's stores take together, counted as they write, what they hold past
+//!   it against the limit (their reserves and writes admitted), and the limit, if any (TASK-94,
+//!   doc-22); `cladefsd_tenant_disk_bytes{tenant}`, `cladefsd_tenant_disk_reserved_bytes{tenant}`,
+//!   `cladefsd_tenant_disk_limit_bytes{tenant}`, `cladefsd_tenant_disk_weight{tenant}` and,
+//!   under pressure, `cladefsd_tenant_disk_share_bytes{tenant}`: each tenant's alive, by its ID
+//!   (`super::disk`).
+//! - cladefs: `cladefsd_host_disk_*_bytes{device}`, for each filesystem the daemon keeps stores or
+//!   the part cache on, by its device as `MAJOR:MINOR` (doc-22, TASK-539.11): its `size`, `free`,
+//!   the governor's `headroom` and `allowance`, what its `stores` take, of that `unframed`, their
+//!   `reserved` and `pledged` bytes, what the `cache` keeps, the `spare` the stores leave of the
+//!   allowance, and the `other` bytes used on it that the daemon counts as none of its own, an
+//!   uncounted writer's on a dedicated disk; `cladefsd_host_disk_pressure{device}`, 1 while under
+//!   pressure.
 //! - `cladefsd_upload_pending_bytes{cell}`, `cladefsd_upload_oldest_pending_seconds
 //!   {cell}` and `cladefsd_upload_stalls_total{cell}`: for each open store whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
@@ -328,6 +338,43 @@ pub fn render() -> String {
                 writeln!(out, "{name}{{tenant=\"{}\"}} {limit}", base32_id::Short(tenant.tenant));
         }
     }
+    // cladefs: what they hold past it, their weights and shares (doc-22).
+    type Of = fn(&super::disk::TenantDisk) -> Option<u64>;
+    let per_tenant: [(&str, &str, Of); 3] = [
+        (
+            "cladefsd_tenant_disk_reserved_bytes",
+            "What a tenant's disk holds past what it takes against its limit, by its ID.",
+            |tenant| Some(tenant.reserved),
+        ),
+        (
+            "cladefsd_tenant_disk_weight",
+            "A tenant's disk's weight against the others', by its ID.",
+            |tenant| Some(tenant.weight),
+        ),
+        (
+            "cladefsd_tenant_disk_share_bytes",
+            "What a tenant's disk keeps while its disk is under pressure, by its ID.",
+            |tenant| tenant.share,
+        ),
+    ];
+    for (name, help, of) in per_tenant {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        for tenant in &tenants {
+            if let Some(value) = of(tenant) {
+                let id = base32_id::Short(tenant.tenant);
+                let _ = writeln!(out, "{name}{{tenant=\"{id}\"}} {value}");
+            }
+        }
+    }
+    // cladefs: the host's disks, as the disk governor sees them (doc-22).
+    for (name, help, values) in super::disk::host_disks() {
+        let _ = writeln!(out, "# HELP {name} {help}");
+        let _ = writeln!(out, "# TYPE {name} gauge");
+        for (device, value) in values {
+            let _ = writeln!(out, "{name}{{device=\"{device}\"}} {value}");
+        }
+    }
 
     for (name, value) in crate::stats::stats().named() {
         let name = format!("cladefsd_{}_total", name.replace('-', "_"));
@@ -562,7 +609,13 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
     }
     // cladefs: TASK-94.
     let disk = super::disk::total();
-    gauges.push(("disk_bytes", "The host's disk every tenant's directory takes.", disk));
+    gauges.push(("disk_bytes", "The host's disk every tenant's stores take.", disk));
+    let reserved = super::disk::count(None).map_or(0, |counted| counted.reserved);
+    gauges.push((
+        "disk_reserved_bytes",
+        "What every tenant's stores hold past what they take against the limit.",
+        reserved,
+    ));
     if let Some(limit) = super::disk::total_limit() {
         gauges.push(("disk_limit_bytes", "The limit of every tenant's disk together.", limit));
     }

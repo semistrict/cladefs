@@ -25,6 +25,11 @@ use tonic::Code;
 /// The extents VMs write, of a MiB each.
 const EXTENT: u64 = 1 << 20;
 
+/// What a write of one, a new extent's, is admitted as until its commit: it, and what its store's
+/// own work may add for it as raw data and as an extent open (doc-22); once committed, the open
+/// extent's share goes.
+const ADMITTED: u64 = (1 + 2 * bucket_cell::host_disk::RESERVE_FACTOR) * EXTENT;
+
 /// Extent `seed`'s bytes, which don't compress: as a closed segment's framing would otherwise
 /// shrink them.
 fn contents(seed: u64) -> Vec<u8> {
@@ -124,13 +129,15 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
         assert!(counted(fork) <= STORE_MADE, "{} takes {} bytes", fork.display(), counted(fork));
     }
 
-    // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads.
-    let limit = taken + 16 * EXTENT;
-    daemon.set_disk_limit(Some(1), Some(limit)).unwrap();
-    assert_eq!(daemon.tenant_disk(Some(1)).unwrap(), (taken, Some(limit)));
+    // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads: room for them as
+    // admitted, past what its stores, open, take and reserve.
     let vms: Vec<_> = (forks.iter())
         .map(|fork| CellClient::connect(&acme_socket, fork, CAPACITY).unwrap())
         .collect();
+    let (open, _) = daemon.tenant_disk(Some(1)).unwrap();
+    let limit = open + daemon.tenant_reserved(Some(1)) + 16 * ADMITTED;
+    daemon.set_disk_limit(Some(1), Some(limit)).unwrap();
+    assert_eq!(daemon.tenant_disk(Some(1)).unwrap(), (open, Some(limit)));
     let mut written = 0;
     let refused = loop {
         let vm = &vms[written as usize % vms.len()];
@@ -165,17 +172,29 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
     write(&ours, 1, 2000).unwrap();
     ours.commit(None).unwrap();
-    // And acme's VMs commit, refused as they write.
+    // And acme's VMs commit, refused as they write: their commits, sealing their extents, free the
+    // room their extents open held, 16 times what a commit may copy of each, for six more.
     for vm in &vms {
         vm.commit(None).unwrap();
     }
-    assert_eq!(write(&vms[0], 1, 3000), Err(Errno::ENOSPC));
+    let open_share = ADMITTED - (1 + bucket_cell::host_disk::RESERVE_FACTOR) * EXTENT;
+    let mut more = 0;
+    let refused = loop {
+        let vm = &vms[more as usize % vms.len()];
+        match write(vm, 200 + more, 200 + more) {
+            Ok(()) => more += 1,
+            Err(errno) => break errno,
+        }
+    };
+    assert_eq!((refused, more), (Errno::ENOSPC, 16 * open_share / ADMITTED));
 
     // What it wrote, freed and uploaded, leaves the disk: it writes again.
     for (index, vm) in vms.iter().enumerate() {
-        let sequences = (0..written).filter(|written| *written as usize % vms.len() == index);
-        for sequence in sequences {
-            vm.free(ExtentId { cell: vm.cell(), sequence: 100 + sequence }).unwrap();
+        let freeing = |first: u64, count: u64| {
+            (0..count).filter(move |n| *n as usize % vms.len() == index).map(move |n| first + n)
+        };
+        for sequence in freeing(100, written).chain(freeing(200, more)) {
+            vm.free(ExtentId { cell: vm.cell(), sequence }).unwrap();
         }
         vm.commit(None).unwrap();
     }
@@ -185,16 +204,20 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     write(&vms[0], 1, 3000).unwrap();
     vms[0].commit(None).unwrap();
 
-    // Lifted, it writes on; every tenant's limit, reached, refuses any.
+    // Lifted, it writes on; every tenant's limit, reached, refuses any: room for two writes past
+    // what every tenant takes and reserves, and for what their uploads let go of meanwhile, which
+    // frames and leaves their stores, a few more at most.
     daemon.set_disk_limit(Some(1), None).unwrap();
     let (every, none) = daemon.tenant_disk(None).unwrap();
     assert_eq!(none, None);
-    daemon.set_disk_limit(None, Some(every + 2 * EXTENT)).unwrap();
-    assert_eq!(metric("cladefsd_disk_limit_bytes"), every + 2 * EXTENT);
+    let total = every + daemon.tenant_reserved(None) + 2 * ADMITTED;
+    daemon.set_disk_limit(None, Some(total)).unwrap();
+    assert_eq!(metric("cladefsd_disk_limit_bytes"), total);
     write(&vms[1], 1, 3001).unwrap();
     write(&theirs, 100, 3002).unwrap();
-    assert_eq!(write(&vms[2], 1, 3003), Err(Errno::ENOSPC));
-    assert_eq!(write(&theirs, 101, 3004), Err(Errno::ENOSPC));
+    let refused = (0..8).find(|n| write(&vms[2], 1 + n, 3003 + n) == Err(Errno::ENOSPC));
+    assert!(refused.is_some(), "every tenant's limit refused none of acme's writes");
+    assert_eq!(write(&theirs, 101, 3020), Err(Errno::ENOSPC));
     // The daemon's own VMs, of the default tenant, aren't counted.
     write(&ours, 2, 3005).unwrap();
 

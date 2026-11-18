@@ -333,6 +333,8 @@ pub struct Write<'a, D: Dir> {
     /// The bytes it reserved, which it may add to the store.
     grows: u64,
     finished: bool,
+    /// cladefs: what it holds of its store's disk, admitted, until it lands (doc-22).
+    _pledge: Option<crate::footprint::Pledge>,
 }
 
 impl<D: Dir> Write<'_, D> {
@@ -1178,6 +1180,9 @@ impl<D: Dir> LocalCell<D> {
             "bad block size {block_size}"
         );
         ensure!(capacity >= block_size as u64, "the store is smaller than a block");
+        // cladefs: what a store made takes, within its disk's allowance and its tenant's limits
+        // (doc-22, TASK-539.8).
+        let _pledge = dir.footprint().map(|footprint| footprint.admit_made()).transpose()?;
         dir.take().context("taking the store's directory")?;
         let made = || -> Result<(), Error> {
             for path in KINDS {
@@ -1579,6 +1584,10 @@ impl<D: Dir> LocalCell<D> {
         // large extents' raw files take, encrypted a sector at a time (TASK-411.5).
         Unsectored::check(offset, len)?;
         state.check_room(grows, overwrites)?;
+        // cladefs: within its disk's allowance and its tenant's limits, with room left for what the
+        // store's own work adds for it, which nothing refuses (doc-22, TASK-539.8).
+        let pledge =
+            self.dir.footprint().map(|footprint| footprint.admit(len, grows)).transpose()?;
         if to_segment {
             self.make_room(&mut state, len)?;
         }
@@ -1615,6 +1624,7 @@ impl<D: Dir> LocalCell<D> {
             segment,
             grows,
             finished: false,
+            _pledge: pledge,
         })
     }
 
@@ -1774,6 +1784,7 @@ impl<D: Dir> LocalCell<D> {
         if grew > 0 {
             state.space.grew(grew, true);
             entry.len = end;
+            state.uncommitted.grew(grew);
         }
         match (write.segment, &mut entry.data) {
             (Some(number), Data::Pieces(pieces)) => {
@@ -1800,10 +1811,19 @@ impl<D: Dir> LocalCell<D> {
             _ => unreachable!("an extent's data is in segments or its own file"),
         }
         state.next_sequence = state.next_sequence.max(extent.sequence + 1);
+        self.count_open(state);
         self.written(state);
         self.see_ahead(state);
         let number = write.segment?;
         state.segments.write_behind(number, write.offset + write.len)
+    }
+
+    /// cladefs: has its footprint count its extents open as `state` holds them, which its reserve
+    /// covers the sealing of (doc-22, TASK-539.8).
+    fn count_open(&self, state: &State<D::File>) {
+        if let Some(footprint) = self.dir.footprint() {
+            footprint.set_open(state.uncommitted.open_bytes());
+        }
     }
 
     fn abandon_write(&self, write: &Write<'_, D>) {
@@ -1944,6 +1964,10 @@ impl<D: Dir> LocalCell<D> {
             state.unreferenced.doomed.push(open_extent_path(extent));
         }
         let Some(entry) = state.extents.remove(&extent) else { return Ok(()) };
+        if packing.is_some() {
+            state.uncommitted.shrank(entry.len);
+            self.count_open(state);
+        }
         // cladefs: sealed, the cell's own is written no more (TASK-79.6).
         if packing.is_none() && extent.cell == self.cell.id {
             state.spent.insert(extent.sequence);
@@ -2046,6 +2070,7 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<(), Error> {
         self.publish(state, epoch, root, sealing);
         let (changes, capacity) = (state.uncommitted.take(), state.uncommitted.take_capacity());
+        self.count_open(state);
         // The open segment's footer records them, before the segment closes; cladefs: and its log,
         // unless it closes with them (TASK-165.9).
         let changed = (root, capacity);
@@ -3343,6 +3368,10 @@ impl<D: Dir> Drop for LocalCell<D> {
     fn drop(&mut self) {
         if let Err(err) = self.close() {
             log::error!("extent store: making the last commits durable: {err:#}");
+        }
+        // cladefs: what it had open, uncommitted, no commit will seal (doc-22).
+        if let Some(footprint) = self.dir.footprint() {
+            footprint.set_open(0);
         }
     }
 }

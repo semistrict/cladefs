@@ -32,7 +32,9 @@ impl Error {
 
     /// The errno that caused the error, if one did: `ENOTSUP` for a store of another format, an
     /// older one included, which is refused (`local_cell::Format`, TASK-165.6); `ENOENT` for one
-    /// its maker never made whole, which is no store (`local_cell::Unmade`, TASK-196).
+    /// its maker never made whole, which is no store (`local_cell::Unmade`, TASK-196); `ENOSPC` for
+    /// one whose making its disk or its tenant's limits refused (`local_cell::footprint::DiskFull`,
+    /// doc-22).
     pub fn errno(&self) -> Option<Errno> {
         // An errno added as context is found by downcasting the error, not its causes.
         let errno = self.0.downcast_ref::<Errno>().copied();
@@ -48,6 +50,11 @@ impl Error {
                 (self.0.chain())
                     .any(|cause| cause.is::<local_cell::Unmade>())
                     .then_some(Errno::ENOENT)
+            })
+            .or_else(|| {
+                (self.0.chain())
+                    .any(|cause| cause.is::<local_cell::footprint::DiskFull>())
+                    .then_some(Errno::ENOSPC)
             })
     }
 

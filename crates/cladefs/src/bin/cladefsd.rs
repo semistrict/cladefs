@@ -141,6 +141,10 @@ fn main() -> anyhow::Result<()> {
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     cladefs::cladefsd::cache_config().map_err(anyhow::Error::msg)?;
+    // cladefs: its disks governed, each but a headroom of it its, or as much as CLADEFSD_DISK_BYTES
+    // says (doc-22, TASK-539.9).
+    let disks = cladefs::cladefsd::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;
+    cladefs::cladefsd::disk::start(disks).map_err(anyhow::Error::msg)?;
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
     let set = |var| std::env::var(var).ok().filter(|value| !value.is_empty());
     let peers = set("CLADEFSD_PEERS");
