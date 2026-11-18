@@ -439,7 +439,7 @@ impl Made {
     }
 
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
-    /// as the daemon's `CreateStore` with a version, then the store's opening, make it.
+    /// as the daemon's `CreateCell` with a version, then the store's opening, make it.
     fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
         let ((branch, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
@@ -533,7 +533,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.late(true);
 
     // A restore on a host that never saw the version: a copy of it made, as the daemon's
-    // `CreateStore` with a version does, opened, forked, the fork opened.
+    // `CreateCell` with a version does, opened, forked, the fork opened.
     let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
     let unwritten = run.phase("cold fork", || taken.fork(at("cold"), DEFAULT_TENANT).unwrap());
     run.names.name(unwritten, "cold-fork");

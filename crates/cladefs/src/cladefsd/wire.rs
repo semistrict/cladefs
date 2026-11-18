@@ -322,7 +322,7 @@ pub(crate) const STAGE_MAPPED: u32 = 106;
 /// is mapped there. Acknowledged ([`STAGE_ACK`]): it takes the page mapped there away, and the
 /// daemon keeps the page it is copied from until it is made.
 pub(crate) const STAGE_PRIVATE: u32 = 108;
-/// The store's capacity is `args[0]` bytes now, which the guest takes (the control API's `ResizeStore`); or, with
+/// The store's capacity is `args[0]` bytes now, which the guest takes (the control API's `ResizeCell`); or, with
 /// [`CAPACITY_ASK`], the guest is asked to shrink to `args[0]` bytes, and answers ([`RESIZED`]).
 pub(crate) const CAPACITY: u32 = 104;
 pub(crate) const CAPACITY_ASK: u32 = 1 << 0;

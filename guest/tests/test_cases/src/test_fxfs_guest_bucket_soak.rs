@@ -26,7 +26,7 @@
 //!   at the end, succeed, the longest waiting through the bucket's failure;
 //! - every commit made before the bucket answers again is uploaded within doc-12's bound of it
 //!   answering: its next retry's 5 s, the upload interval's second, and the time the guests took
-//!   to write what waited (the control API's `SyncStore` of each store, from then);
+//!   to write what waited (the control API's `SyncCell` of each store, from then);
 //! - no VM is let go (TASK-249): each runs to its end, exiting 0, and the daemon's log lets none go.
 //!
 //! scripts/budgets.py checks the daemon's stats file beside its log too, as every run's daemons'.
@@ -221,7 +221,7 @@ mod host {
                     for store in &stores {
                         let (socket, store) = (socket.clone(), store.clone());
                         syncs.push(std::thread::spawn(move || {
-                            let synced = crate::common::control(&socket)?.sync_store(&store);
+                            let synced = crate::common::control(&socket)?.sync_cell(&store);
                             synced.with_context(|| format!("syncing {}", store.display()))?;
                             anyhow::Ok(since.elapsed())
                         }));

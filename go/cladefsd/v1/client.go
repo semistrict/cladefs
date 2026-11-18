@@ -38,7 +38,7 @@ const ErrnoKey = "cladefs-errno"
 // A call's error carries the errno the daemon failed with, as a [syscall.Errno] that
 // [errors.Is] and [errors.As] find, beside its gRPC status, which [status.FromError] finds:
 //
-//	_, err := client.StatStore(ctx, &cladefsdv1.StatStoreRequest{Path: path})
+//	_, err := client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: path})
 //	if errors.Is(err, syscall.ENOENT) { ... }
 //
 // The errno is Linux's, the daemon's host's, as the client is on that host: a client elsewhere,

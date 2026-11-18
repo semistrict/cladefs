@@ -62,7 +62,7 @@ type AttachRequest struct {
 	// Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket and its branch's
 	// too, the bucket gives.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
-	// The fencing token of the placement to take the cell at, if any: as CreateStore's.
+	// The fencing token of the placement to take the cell at, if any: as CreateCell's.
 	Token *uint64 `protobuf:"varint,3,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// A new cell's: the most bytes its store holds, as VMs' disks hold. Ignored for a cell named.
 	Capacity      uint64 `protobuf:"varint,4,opt,name=capacity,proto3" json:"capacity,omitempty"`

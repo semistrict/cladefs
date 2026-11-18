@@ -26,14 +26,14 @@
 // of another tenant's only while shared (ShareVersion; PERMISSION_DENIED, EACCES, otherwise); one
 // dropped since (DropVersions) fails with NOT_FOUND (ENOENT), and what was restored from it lives
 // on. A restore on another host than the snapshot's waits for nothing: the version is in the
-// bucket once SyncStore of the VM's store returns.
+// bucket once SyncCell of the VM's store returns.
 //
 // A store with a writer forks into cells of other tenants' only if it is the default tenant's, as
-// the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
+// the daemon's own stores and public bases are (TASK-395.9): a ForkCell of another tenant's into
 // another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing. A fork of a
 // store with a writer is a commit of its cell, which takes its writer: such a store forks on one
 // host at a time. A base forked on many hosts is given a version first, and its version forked on
-// each (ForkStore's `version`).
+// each (ForkCell's `version`).
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -85,22 +85,22 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Cladefsd_CreateStore_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/CreateStore"
+	Cladefsd_CreateCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/CreateCell"
 	Cladefsd_ImportImage_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ImportImage"
-	Cladefsd_ForkStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ForkStore"
-	Cladefsd_DeleteStore_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/DeleteStore"
-	Cladefsd_DropStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/DropStore"
-	Cladefsd_ResizeStore_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ResizeStore"
-	Cladefsd_PlaceStore_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/PlaceStore"
+	Cladefsd_ForkCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/ForkCell"
+	Cladefsd_DeleteCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/DeleteCell"
+	Cladefsd_DropCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/DropCell"
+	Cladefsd_ResizeCell_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ResizeCell"
+	Cladefsd_PlaceCell_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/PlaceCell"
 	Cladefsd_MakePublic_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
 	Cladefsd_MakeVersion_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
 	Cladefsd_ListVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
 	Cladefsd_DropVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
 	Cladefsd_ShareVersion_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
 	Cladefsd_AttachBase_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
-	Cladefsd_SyncStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/SyncStore"
-	Cladefsd_StatStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/StatStore"
-	Cladefsd_ListStores_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/ListStores"
+	Cladefsd_SyncCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/SyncCell"
+	Cladefsd_StatCell_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/StatCell"
+	Cladefsd_ListCells_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/ListCells"
 	Cladefsd_GetCounters_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/GetCounters"
 	Cladefsd_GetStats_FullMethodName          = "/cladefs.cladefsd.v1.Cladefsd/GetStats"
 	Cladefsd_Grant_FullMethodName             = "/cladefs.cladefsd.v1.Cladefsd/Grant"
@@ -125,7 +125,7 @@ const (
 type CladefsdClient interface {
 	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
 	// takes once it opens the store (a VM on another host than the cell's).
-	CreateStore(ctx context.Context, in *CreateStoreRequest, opts ...grpc.CallOption) (*CreateStoreResponse, error)
+	CreateCell(ctx context.Context, in *CreateCellRequest, opts ...grpc.CallOption) (*CreateCellResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(ctx context.Context, in *ImportImageRequest, opts ...grpc.CallOption) (*ImportImageResponse, error)
 	// Forks a store to a new cell, a new store sharing its data: live, if a VM has it open, at a
@@ -133,25 +133,25 @@ type CladefsdClient interface {
 	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
 	// writer is, one host at a time; a fork of a version (`version`) is its child's record alone,
 	// made on any number of hosts at once.
-	ForkStore(ctx context.Context, in *ForkStoreRequest, opts ...grpc.CallOption) (*ForkStoreResponse, error)
+	ForkCell(ctx context.Context, in *ForkCellRequest, opts ...grpc.CallOption) (*ForkCellResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
 	// other cells share of it, which stays until the last of them goes. What was forked from it
 	// lives on.
-	DeleteStore(ctx context.Context, in *DeleteStoreRequest, opts ...grpc.CallOption) (*DeleteStoreResponse, error)
-	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
+	DeleteCell(ctx context.Context, in *DeleteCellRequest, opts ...grpc.CallOption) (*DeleteCellResponse, error)
+	// Deletes this host's copy of a store, or a fork, as DeleteCell does, but for its branch in the
 	// daemon's bucket, which stays, with what else holds it. A store whose
-	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
-	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
+	// forks live here keeps its directory, which no longer opens, and takes no CreateCell until the
+	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncCell first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
-	DropStore(ctx context.Context, in *DropStoreRequest, opts ...grpc.CallOption) (*DropStoreResponse, error)
+	DropCell(ctx context.Context, in *DropCellRequest, opts ...grpc.CallOption) (*DropCellResponse, error)
 	// Sets a store's capacity, the size of the disk its guest sees: a store a VM has open grows at
 	// once, the guest seeing it mounted, and shrinks if its guest's filesystem agrees, no lower than
 	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows.
-	ResizeStore(ctx context.Context, in *ResizeStoreRequest, opts ...grpc.CallOption) (*ResizeStoreResponse, error)
+	ResizeCell(ctx context.Context, in *ResizeCellRequest, opts ...grpc.CallOption) (*ResizeCellResponse, error)
 	// Places a store at a placement whose fencing token, its boot ID, is `token`: its writer takes
 	// its branch in object storage with that token from then on, which a later placement's exceeds,
 	// so that a placement cut off takes no branch back from the one after it.
-	PlaceStore(ctx context.Context, in *PlaceStoreRequest, opts ...grpc.CallOption) (*PlaceStoreResponse, error)
+	PlaceCell(ctx context.Context, in *PlaceCellRequest, opts ...grpc.CallOption) (*PlaceCellResponse, error)
 	// Makes a store a public base, and the branches it inherited from: their pages are cached once,
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(ctx context.Context, in *MakePublicRequest, opts ...grpc.CallOption) (*MakePublicResponse, error)
@@ -159,7 +159,7 @@ type CladefsdClient interface {
 	// open on it (FAILED_PRECONDITION, EBUSY, otherwise), as with its guest's filesystem frozen. It
 	// is one commit on this host, durable once this returns, and asks nothing of the daemon's
 	// bucket: the cell's head names it once its commit is uploaded, behind. Forks are made of a
-	// version on any host (ForkStore's `version`, a VM snapshot's restores).
+	// version on any host (ForkCell's `version`, a VM snapshot's restores).
 	MakeVersion(ctx context.Context, in *MakeVersionRequest, opts ...grpc.CallOption) (*MakeVersionResponse, error)
 	// Lists the versions of a store's cell: those its head names, then those made here not yet
 	// uploaded.
@@ -179,14 +179,14 @@ type CladefsdClient interface {
 	AttachBase(ctx context.Context, in *AttachBaseRequest, opts ...grpc.CallOption) (*AttachBaseResponse, error)
 	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
-	SyncStore(ctx context.Context, in *SyncStoreRequest, opts ...grpc.CallOption) (*SyncStoreResponse, error)
+	SyncCell(ctx context.Context, in *SyncCellRequest, opts ...grpc.CallOption) (*SyncCellResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
-	StatStore(ctx context.Context, in *StatStoreRequest, opts ...grpc.CallOption) (*StatStoreResponse, error)
+	StatCell(ctx context.Context, in *StatCellRequest, opts ...grpc.CallOption) (*StatCellResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
-	// with what StatStore says of each (TASK-50.5).
-	ListStores(ctx context.Context, in *ListStoresRequest, opts ...grpc.CallOption) (*ListStoresResponse, error)
+	// with what StatCell says of each (TASK-50.5).
+	ListCells(ctx context.Context, in *ListCellsRequest, opts ...grpc.CallOption) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(ctx context.Context, in *GetCountersRequest, opts ...grpc.CallOption) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
@@ -275,10 +275,10 @@ func NewCladefsdClient(cc grpc.ClientConnInterface) CladefsdClient {
 	return &cladefsdClient{cc}
 }
 
-func (c *cladefsdClient) CreateStore(ctx context.Context, in *CreateStoreRequest, opts ...grpc.CallOption) (*CreateStoreResponse, error) {
+func (c *cladefsdClient) CreateCell(ctx context.Context, in *CreateCellRequest, opts ...grpc.CallOption) (*CreateCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_CreateStore_FullMethodName, in, out, cOpts...)
+	out := new(CreateCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_CreateCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -295,50 +295,50 @@ func (c *cladefsdClient) ImportImage(ctx context.Context, in *ImportImageRequest
 	return out, nil
 }
 
-func (c *cladefsdClient) ForkStore(ctx context.Context, in *ForkStoreRequest, opts ...grpc.CallOption) (*ForkStoreResponse, error) {
+func (c *cladefsdClient) ForkCell(ctx context.Context, in *ForkCellRequest, opts ...grpc.CallOption) (*ForkCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ForkStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_ForkStore_FullMethodName, in, out, cOpts...)
+	out := new(ForkCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ForkCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) DeleteStore(ctx context.Context, in *DeleteStoreRequest, opts ...grpc.CallOption) (*DeleteStoreResponse, error) {
+func (c *cladefsdClient) DeleteCell(ctx context.Context, in *DeleteCellRequest, opts ...grpc.CallOption) (*DeleteCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DeleteStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_DeleteStore_FullMethodName, in, out, cOpts...)
+	out := new(DeleteCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_DeleteCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) DropStore(ctx context.Context, in *DropStoreRequest, opts ...grpc.CallOption) (*DropStoreResponse, error) {
+func (c *cladefsdClient) DropCell(ctx context.Context, in *DropCellRequest, opts ...grpc.CallOption) (*DropCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(DropStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_DropStore_FullMethodName, in, out, cOpts...)
+	out := new(DropCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_DropCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) ResizeStore(ctx context.Context, in *ResizeStoreRequest, opts ...grpc.CallOption) (*ResizeStoreResponse, error) {
+func (c *cladefsdClient) ResizeCell(ctx context.Context, in *ResizeCellRequest, opts ...grpc.CallOption) (*ResizeCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ResizeStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_ResizeStore_FullMethodName, in, out, cOpts...)
+	out := new(ResizeCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ResizeCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) PlaceStore(ctx context.Context, in *PlaceStoreRequest, opts ...grpc.CallOption) (*PlaceStoreResponse, error) {
+func (c *cladefsdClient) PlaceCell(ctx context.Context, in *PlaceCellRequest, opts ...grpc.CallOption) (*PlaceCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PlaceStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_PlaceStore_FullMethodName, in, out, cOpts...)
+	out := new(PlaceCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_PlaceCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -405,30 +405,30 @@ func (c *cladefsdClient) AttachBase(ctx context.Context, in *AttachBaseRequest, 
 	return out, nil
 }
 
-func (c *cladefsdClient) SyncStore(ctx context.Context, in *SyncStoreRequest, opts ...grpc.CallOption) (*SyncStoreResponse, error) {
+func (c *cladefsdClient) SyncCell(ctx context.Context, in *SyncCellRequest, opts ...grpc.CallOption) (*SyncCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SyncStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_SyncStore_FullMethodName, in, out, cOpts...)
+	out := new(SyncCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_SyncCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) StatStore(ctx context.Context, in *StatStoreRequest, opts ...grpc.CallOption) (*StatStoreResponse, error) {
+func (c *cladefsdClient) StatCell(ctx context.Context, in *StatCellRequest, opts ...grpc.CallOption) (*StatCellResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(StatStoreResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_StatStore_FullMethodName, in, out, cOpts...)
+	out := new(StatCellResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_StatCell_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *cladefsdClient) ListStores(ctx context.Context, in *ListStoresRequest, opts ...grpc.CallOption) (*ListStoresResponse, error) {
+func (c *cladefsdClient) ListCells(ctx context.Context, in *ListCellsRequest, opts ...grpc.CallOption) (*ListCellsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListStoresResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_ListStores_FullMethodName, in, out, cOpts...)
+	out := new(ListCellsResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ListCells_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -583,7 +583,7 @@ func (c *cladefsdClient) ShredTenant(ctx context.Context, in *ShredTenantRequest
 type CladefsdServer interface {
 	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
 	// takes once it opens the store (a VM on another host than the cell's).
-	CreateStore(context.Context, *CreateStoreRequest) (*CreateStoreResponse, error)
+	CreateCell(context.Context, *CreateCellRequest) (*CreateCellResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error)
 	// Forks a store to a new cell, a new store sharing its data: live, if a VM has it open, at a
@@ -591,25 +591,25 @@ type CladefsdServer interface {
 	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
 	// writer is, one host at a time; a fork of a version (`version`) is its child's record alone,
 	// made on any number of hosts at once.
-	ForkStore(context.Context, *ForkStoreRequest) (*ForkStoreResponse, error)
+	ForkCell(context.Context, *ForkCellRequest) (*ForkCellResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
 	// other cells share of it, which stays until the last of them goes. What was forked from it
 	// lives on.
-	DeleteStore(context.Context, *DeleteStoreRequest) (*DeleteStoreResponse, error)
-	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
+	DeleteCell(context.Context, *DeleteCellRequest) (*DeleteCellResponse, error)
+	// Deletes this host's copy of a store, or a fork, as DeleteCell does, but for its branch in the
 	// daemon's bucket, which stays, with what else holds it. A store whose
-	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
-	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
+	// forks live here keeps its directory, which no longer opens, and takes no CreateCell until the
+	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncCell first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
-	DropStore(context.Context, *DropStoreRequest) (*DropStoreResponse, error)
+	DropCell(context.Context, *DropCellRequest) (*DropCellResponse, error)
 	// Sets a store's capacity, the size of the disk its guest sees: a store a VM has open grows at
 	// once, the guest seeing it mounted, and shrinks if its guest's filesystem agrees, no lower than
 	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows.
-	ResizeStore(context.Context, *ResizeStoreRequest) (*ResizeStoreResponse, error)
+	ResizeCell(context.Context, *ResizeCellRequest) (*ResizeCellResponse, error)
 	// Places a store at a placement whose fencing token, its boot ID, is `token`: its writer takes
 	// its branch in object storage with that token from then on, which a later placement's exceeds,
 	// so that a placement cut off takes no branch back from the one after it.
-	PlaceStore(context.Context, *PlaceStoreRequest) (*PlaceStoreResponse, error)
+	PlaceCell(context.Context, *PlaceCellRequest) (*PlaceCellResponse, error)
 	// Makes a store a public base, and the branches it inherited from: their pages are cached once,
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(context.Context, *MakePublicRequest) (*MakePublicResponse, error)
@@ -617,7 +617,7 @@ type CladefsdServer interface {
 	// open on it (FAILED_PRECONDITION, EBUSY, otherwise), as with its guest's filesystem frozen. It
 	// is one commit on this host, durable once this returns, and asks nothing of the daemon's
 	// bucket: the cell's head names it once its commit is uploaded, behind. Forks are made of a
-	// version on any host (ForkStore's `version`, a VM snapshot's restores).
+	// version on any host (ForkCell's `version`, a VM snapshot's restores).
 	MakeVersion(context.Context, *MakeVersionRequest) (*MakeVersionResponse, error)
 	// Lists the versions of a store's cell: those its head names, then those made here not yet
 	// uploaded.
@@ -637,14 +637,14 @@ type CladefsdServer interface {
 	AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error)
 	// Returns once every commit of a store, as of the call, is uploaded: in the daemon's bucket,
 	// as before a clean stop.
-	SyncStore(context.Context, *SyncStoreRequest) (*SyncStoreResponse, error)
+	SyncCell(context.Context, *SyncCellRequest) (*SyncCellResponse, error)
 	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
 	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
 	// branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
-	StatStore(context.Context, *StatStoreRequest) (*StatStoreResponse, error)
+	StatCell(context.Context, *StatCellRequest) (*StatCellResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
-	// with what StatStore says of each (TASK-50.5).
-	ListStores(context.Context, *ListStoresRequest) (*ListStoresResponse, error)
+	// with what StatCell says of each (TASK-50.5).
+	ListCells(context.Context, *ListCellsRequest) (*ListCellsResponse, error)
 	// What the daemon did since it started: counters, which only grow.
 	GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error)
 	// What the daemon, its VM processes and their guests counted, as of one moment, each with the
@@ -733,26 +733,26 @@ type CladefsdServer interface {
 // pointer dereference when methods are called.
 type UnimplementedCladefsdServer struct{}
 
-func (UnimplementedCladefsdServer) CreateStore(context.Context, *CreateStoreRequest) (*CreateStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method CreateStore not implemented")
+func (UnimplementedCladefsdServer) CreateCell(context.Context, *CreateCellRequest) (*CreateCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateCell not implemented")
 }
 func (UnimplementedCladefsdServer) ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ImportImage not implemented")
 }
-func (UnimplementedCladefsdServer) ForkStore(context.Context, *ForkStoreRequest) (*ForkStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ForkStore not implemented")
+func (UnimplementedCladefsdServer) ForkCell(context.Context, *ForkCellRequest) (*ForkCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ForkCell not implemented")
 }
-func (UnimplementedCladefsdServer) DeleteStore(context.Context, *DeleteStoreRequest) (*DeleteStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method DeleteStore not implemented")
+func (UnimplementedCladefsdServer) DeleteCell(context.Context, *DeleteCellRequest) (*DeleteCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteCell not implemented")
 }
-func (UnimplementedCladefsdServer) DropStore(context.Context, *DropStoreRequest) (*DropStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method DropStore not implemented")
+func (UnimplementedCladefsdServer) DropCell(context.Context, *DropCellRequest) (*DropCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropCell not implemented")
 }
-func (UnimplementedCladefsdServer) ResizeStore(context.Context, *ResizeStoreRequest) (*ResizeStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ResizeStore not implemented")
+func (UnimplementedCladefsdServer) ResizeCell(context.Context, *ResizeCellRequest) (*ResizeCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResizeCell not implemented")
 }
-func (UnimplementedCladefsdServer) PlaceStore(context.Context, *PlaceStoreRequest) (*PlaceStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method PlaceStore not implemented")
+func (UnimplementedCladefsdServer) PlaceCell(context.Context, *PlaceCellRequest) (*PlaceCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PlaceCell not implemented")
 }
 func (UnimplementedCladefsdServer) MakePublic(context.Context, *MakePublicRequest) (*MakePublicResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MakePublic not implemented")
@@ -772,14 +772,14 @@ func (UnimplementedCladefsdServer) ShareVersion(context.Context, *ShareVersionRe
 func (UnimplementedCladefsdServer) AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttachBase not implemented")
 }
-func (UnimplementedCladefsdServer) SyncStore(context.Context, *SyncStoreRequest) (*SyncStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SyncStore not implemented")
+func (UnimplementedCladefsdServer) SyncCell(context.Context, *SyncCellRequest) (*SyncCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SyncCell not implemented")
 }
-func (UnimplementedCladefsdServer) StatStore(context.Context, *StatStoreRequest) (*StatStoreResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method StatStore not implemented")
+func (UnimplementedCladefsdServer) StatCell(context.Context, *StatCellRequest) (*StatCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StatCell not implemented")
 }
-func (UnimplementedCladefsdServer) ListStores(context.Context, *ListStoresRequest) (*ListStoresResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListStores not implemented")
+func (UnimplementedCladefsdServer) ListCells(context.Context, *ListCellsRequest) (*ListCellsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListCells not implemented")
 }
 func (UnimplementedCladefsdServer) GetCounters(context.Context, *GetCountersRequest) (*GetCountersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetCounters not implemented")
@@ -844,20 +844,20 @@ func RegisterCladefsdServer(s grpc.ServiceRegistrar, srv CladefsdServer) {
 	s.RegisterService(&Cladefsd_ServiceDesc, srv)
 }
 
-func _Cladefsd_CreateStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateStoreRequest)
+func _Cladefsd_CreateCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).CreateStore(ctx, in)
+		return srv.(CladefsdServer).CreateCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_CreateStore_FullMethodName,
+		FullMethod: Cladefsd_CreateCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).CreateStore(ctx, req.(*CreateStoreRequest))
+		return srv.(CladefsdServer).CreateCell(ctx, req.(*CreateCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -880,92 +880,92 @@ func _Cladefsd_ImportImage_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_ForkStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ForkStoreRequest)
+func _Cladefsd_ForkCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForkCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).ForkStore(ctx, in)
+		return srv.(CladefsdServer).ForkCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_ForkStore_FullMethodName,
+		FullMethod: Cladefsd_ForkCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).ForkStore(ctx, req.(*ForkStoreRequest))
+		return srv.(CladefsdServer).ForkCell(ctx, req.(*ForkCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_DeleteStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteStoreRequest)
+func _Cladefsd_DeleteCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).DeleteStore(ctx, in)
+		return srv.(CladefsdServer).DeleteCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_DeleteStore_FullMethodName,
+		FullMethod: Cladefsd_DeleteCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).DeleteStore(ctx, req.(*DeleteStoreRequest))
+		return srv.(CladefsdServer).DeleteCell(ctx, req.(*DeleteCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_DropStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DropStoreRequest)
+func _Cladefsd_DropCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).DropStore(ctx, in)
+		return srv.(CladefsdServer).DropCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_DropStore_FullMethodName,
+		FullMethod: Cladefsd_DropCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).DropStore(ctx, req.(*DropStoreRequest))
+		return srv.(CladefsdServer).DropCell(ctx, req.(*DropCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_ResizeStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ResizeStoreRequest)
+func _Cladefsd_ResizeCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResizeCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).ResizeStore(ctx, in)
+		return srv.(CladefsdServer).ResizeCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_ResizeStore_FullMethodName,
+		FullMethod: Cladefsd_ResizeCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).ResizeStore(ctx, req.(*ResizeStoreRequest))
+		return srv.(CladefsdServer).ResizeCell(ctx, req.(*ResizeCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_PlaceStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PlaceStoreRequest)
+func _Cladefsd_PlaceCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PlaceCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).PlaceStore(ctx, in)
+		return srv.(CladefsdServer).PlaceCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_PlaceStore_FullMethodName,
+		FullMethod: Cladefsd_PlaceCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).PlaceStore(ctx, req.(*PlaceStoreRequest))
+		return srv.(CladefsdServer).PlaceCell(ctx, req.(*PlaceCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1078,56 +1078,56 @@ func _Cladefsd_AttachBase_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_SyncStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SyncStoreRequest)
+func _Cladefsd_SyncCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).SyncStore(ctx, in)
+		return srv.(CladefsdServer).SyncCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_SyncStore_FullMethodName,
+		FullMethod: Cladefsd_SyncCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).SyncStore(ctx, req.(*SyncStoreRequest))
+		return srv.(CladefsdServer).SyncCell(ctx, req.(*SyncCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_StatStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(StatStoreRequest)
+func _Cladefsd_StatCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatCellRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).StatStore(ctx, in)
+		return srv.(CladefsdServer).StatCell(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_StatStore_FullMethodName,
+		FullMethod: Cladefsd_StatCell_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).StatStore(ctx, req.(*StatStoreRequest))
+		return srv.(CladefsdServer).StatCell(ctx, req.(*StatCellRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_ListStores_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListStoresRequest)
+func _Cladefsd_ListCells_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListCellsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).ListStores(ctx, in)
+		return srv.(CladefsdServer).ListCells(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_ListStores_FullMethodName,
+		FullMethod: Cladefsd_ListCells_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).ListStores(ctx, req.(*ListStoresRequest))
+		return srv.(CladefsdServer).ListCells(ctx, req.(*ListCellsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1392,32 +1392,32 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*CladefsdServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "CreateStore",
-			Handler:    _Cladefsd_CreateStore_Handler,
+			MethodName: "CreateCell",
+			Handler:    _Cladefsd_CreateCell_Handler,
 		},
 		{
 			MethodName: "ImportImage",
 			Handler:    _Cladefsd_ImportImage_Handler,
 		},
 		{
-			MethodName: "ForkStore",
-			Handler:    _Cladefsd_ForkStore_Handler,
+			MethodName: "ForkCell",
+			Handler:    _Cladefsd_ForkCell_Handler,
 		},
 		{
-			MethodName: "DeleteStore",
-			Handler:    _Cladefsd_DeleteStore_Handler,
+			MethodName: "DeleteCell",
+			Handler:    _Cladefsd_DeleteCell_Handler,
 		},
 		{
-			MethodName: "DropStore",
-			Handler:    _Cladefsd_DropStore_Handler,
+			MethodName: "DropCell",
+			Handler:    _Cladefsd_DropCell_Handler,
 		},
 		{
-			MethodName: "ResizeStore",
-			Handler:    _Cladefsd_ResizeStore_Handler,
+			MethodName: "ResizeCell",
+			Handler:    _Cladefsd_ResizeCell_Handler,
 		},
 		{
-			MethodName: "PlaceStore",
-			Handler:    _Cladefsd_PlaceStore_Handler,
+			MethodName: "PlaceCell",
+			Handler:    _Cladefsd_PlaceCell_Handler,
 		},
 		{
 			MethodName: "MakePublic",
@@ -1444,16 +1444,16 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Cladefsd_AttachBase_Handler,
 		},
 		{
-			MethodName: "SyncStore",
-			Handler:    _Cladefsd_SyncStore_Handler,
+			MethodName: "SyncCell",
+			Handler:    _Cladefsd_SyncCell_Handler,
 		},
 		{
-			MethodName: "StatStore",
-			Handler:    _Cladefsd_StatStore_Handler,
+			MethodName: "StatCell",
+			Handler:    _Cladefsd_StatCell_Handler,
 		},
 		{
-			MethodName: "ListStores",
-			Handler:    _Cladefsd_ListStores_Handler,
+			MethodName: "ListCells",
+			Handler:    _Cladefsd_ListCells_Handler,
 		},
 		{
 			MethodName: "GetCounters",

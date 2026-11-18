@@ -89,23 +89,23 @@ func TestDaemon(t *testing.T) {
 	ctx := t.Context()
 
 	store := filepath.Join(dir, "store")
-	if _, err := client.CreateStore(ctx, &cladefsdv1.CreateStoreRequest{Path: store, Capacity: 1 << 24}); err != nil {
+	if _, err := client.CreateCell(ctx, &cladefsdv1.CreateCellRequest{Path: store, Capacity: 1 << 24}); err != nil {
 		t.Fatal(err)
 	}
-	stat, err := client.StatStore(ctx, &cladefsdv1.StatStoreRequest{Path: store})
+	stat, err := client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: store})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stat.Capacity != 1<<24 {
-		t.Errorf("StatStore's capacity = %d, want %d", stat.Capacity, 1<<24)
+		t.Errorf("StatCell's capacity = %d, want %d", stat.Capacity, 1<<24)
 	}
 
-	_, err = client.StatStore(ctx, &cladefsdv1.StatStoreRequest{Path: filepath.Join(dir, "missing")})
+	_, err = client.StatCell(ctx, &cladefsdv1.StatCellRequest{Path: filepath.Join(dir, "missing")})
 	if !errors.Is(err, syscall.ENOENT) {
-		t.Errorf("StatStore of no store: errors.Is(%v, ENOENT) = false", err)
+		t.Errorf("StatCell of no store: errors.Is(%v, ENOENT) = false", err)
 	}
 	if code := status.Code(err); code != codes.NotFound {
-		t.Errorf("StatStore of no store: status.Code(%v) = %v, want NotFound", err, code)
+		t.Errorf("StatCell of no store: status.Code(%v) = %v, want NotFound", err, code)
 	}
 
 	stores := filepath.Join(dir, "a")

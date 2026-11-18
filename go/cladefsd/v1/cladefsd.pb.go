@@ -26,14 +26,14 @@
 // of another tenant's only while shared (ShareVersion; PERMISSION_DENIED, EACCES, otherwise); one
 // dropped since (DropVersions) fails with NOT_FOUND (ENOENT), and what was restored from it lives
 // on. A restore on another host than the snapshot's waits for nothing: the version is in the
-// bucket once SyncStore of the VM's store returns.
+// bucket once SyncCell of the VM's store returns.
 //
 // A store with a writer forks into cells of other tenants' only if it is the default tenant's, as
-// the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
+// the daemon's own stores and public bases are (TASK-395.9): a ForkCell of another tenant's into
 // another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing. A fork of a
 // store with a writer is a commit of its cell, which takes its writer: such a store forks on one
 // host at a time. A base forked on many hosts is given a version first, and its version forked on
-// each (ForkStore's `version`).
+// each (ForkCell's `version`).
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -142,7 +142,7 @@ func (CellKind) EnumDescriptor() ([]byte, []int) {
 }
 
 // Makes an empty store.
-type CreateStoreRequest struct {
+type CreateCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Where to make it: a directory that must not exist (ALREADY_EXISTS).
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -152,7 +152,7 @@ type CreateStoreRequest struct {
 	// INVALID_ARGUMENT, EINVAL, of a cell of 0); or 0, with a cell of 0, for a new cell, its ID the
 	// bucket's to give (TASK-364), which the response says.
 	Branch uint64 `protobuf:"varint,3,opt,name=branch,proto3" json:"branch,omitempty"`
-	// The fencing token to place it at (PlaceStore), if any: of a placement no earlier than the
+	// The fencing token to place it at (PlaceCell), if any: of a placement no earlier than the
 	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE).
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// The tenant whose cell's branch it is. Of a new cell in a granted tenant's
@@ -169,20 +169,20 @@ type CreateStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CreateStoreRequest) Reset() {
-	*x = CreateStoreRequest{}
+func (x *CreateCellRequest) Reset() {
+	*x = CreateCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CreateStoreRequest) String() string {
+func (x *CreateCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CreateStoreRequest) ProtoMessage() {}
+func (*CreateCellRequest) ProtoMessage() {}
 
-func (x *CreateStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *CreateCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -194,54 +194,54 @@ func (x *CreateStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CreateStoreRequest.ProtoReflect.Descriptor instead.
-func (*CreateStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use CreateCellRequest.ProtoReflect.Descriptor instead.
+func (*CreateCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *CreateStoreRequest) GetPath() string {
+func (x *CreateCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-func (x *CreateStoreRequest) GetCapacity() uint64 {
+func (x *CreateCellRequest) GetCapacity() uint64 {
 	if x != nil {
 		return x.Capacity
 	}
 	return 0
 }
 
-func (x *CreateStoreRequest) GetBranch() uint64 {
+func (x *CreateCellRequest) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *CreateStoreRequest) GetToken() uint64 {
+func (x *CreateCellRequest) GetToken() uint64 {
 	if x != nil && x.Token != nil {
 		return *x.Token
 	}
 	return 0
 }
 
-func (x *CreateStoreRequest) GetTenant() uint64 {
+func (x *CreateCellRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *CreateStoreRequest) GetCell() uint64 {
+func (x *CreateCellRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-func (x *CreateStoreRequest) GetKind() CellKind {
+func (x *CreateCellRequest) GetKind() CellKind {
 	if x != nil {
 		return x.Kind
 	}
@@ -249,7 +249,7 @@ func (x *CreateStoreRequest) GetKind() CellKind {
 }
 
 // The store made.
-type CreateStoreResponse struct {
+type CreateCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its branch: the one taken, or the new one.
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
@@ -261,20 +261,20 @@ type CreateStoreResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CreateStoreResponse) Reset() {
-	*x = CreateStoreResponse{}
+func (x *CreateCellResponse) Reset() {
+	*x = CreateCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CreateStoreResponse) String() string {
+func (x *CreateCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CreateStoreResponse) ProtoMessage() {}
+func (*CreateCellResponse) ProtoMessage() {}
 
-func (x *CreateStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *CreateCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -286,26 +286,26 @@ func (x *CreateStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CreateStoreResponse.ProtoReflect.Descriptor instead.
-func (*CreateStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use CreateCellResponse.ProtoReflect.Descriptor instead.
+func (*CreateCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *CreateStoreResponse) GetBranch() uint64 {
+func (x *CreateCellResponse) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *CreateStoreResponse) GetTenant() uint64 {
+func (x *CreateCellResponse) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *CreateStoreResponse) GetCell() uint64 {
+func (x *CreateCellResponse) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
@@ -462,7 +462,7 @@ func (x *ImportImageResponse) GetCell() uint64 {
 }
 
 // Forks a store.
-type ForkStoreRequest struct {
+type ForkCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store to fork; empty to fork `version`.
 	From string `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
@@ -471,7 +471,7 @@ type ForkStoreRequest struct {
 	// Forks): `from`'s commit naming the fork, once acknowledged there, gives the fork's branch its
 	// record, inheriting `from`'s extents rather than copies; only then is `to` made, taking the
 	// branch's state from the bucket. A fork that fails deletes `to`, and its branch in the bucket
-	// if its commit was made; its host crashing part way, `to` is left unmade, which DeleteStore of
+	// if its commit was made; its host crashing part way, `to` is left unmade, which DeleteCell of
 	// `to` deletes, and the fork stands or never was, as the bucket has it.
 	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
 	// If not 0, the version to fork, of the cell `cell` of `tenant`'s, on this host or any other: a
@@ -486,20 +486,20 @@ type ForkStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ForkStoreRequest) Reset() {
-	*x = ForkStoreRequest{}
+func (x *ForkCellRequest) Reset() {
+	*x = ForkCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ForkStoreRequest) String() string {
+func (x *ForkCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ForkStoreRequest) ProtoMessage() {}
+func (*ForkCellRequest) ProtoMessage() {}
 
-func (x *ForkStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *ForkCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -511,40 +511,40 @@ func (x *ForkStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ForkStoreRequest.ProtoReflect.Descriptor instead.
-func (*ForkStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ForkCellRequest.ProtoReflect.Descriptor instead.
+func (*ForkCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *ForkStoreRequest) GetFrom() string {
+func (x *ForkCellRequest) GetFrom() string {
 	if x != nil {
 		return x.From
 	}
 	return ""
 }
 
-func (x *ForkStoreRequest) GetTo() string {
+func (x *ForkCellRequest) GetTo() string {
 	if x != nil {
 		return x.To
 	}
 	return ""
 }
 
-func (x *ForkStoreRequest) GetVersion() uint64 {
+func (x *ForkCellRequest) GetVersion() uint64 {
 	if x != nil {
 		return x.Version
 	}
 	return 0
 }
 
-func (x *ForkStoreRequest) GetTenant() uint64 {
+func (x *ForkCellRequest) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *ForkStoreRequest) GetCell() uint64 {
+func (x *ForkCellRequest) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
@@ -552,7 +552,7 @@ func (x *ForkStoreRequest) GetCell() uint64 {
 }
 
 // The fork made.
-type ForkStoreResponse struct {
+type ForkCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its branch.
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
@@ -564,20 +564,20 @@ type ForkStoreResponse struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ForkStoreResponse) Reset() {
-	*x = ForkStoreResponse{}
+func (x *ForkCellResponse) Reset() {
+	*x = ForkCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ForkStoreResponse) String() string {
+func (x *ForkCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ForkStoreResponse) ProtoMessage() {}
+func (*ForkCellResponse) ProtoMessage() {}
 
-func (x *ForkStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *ForkCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -589,26 +589,26 @@ func (x *ForkStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ForkStoreResponse.ProtoReflect.Descriptor instead.
-func (*ForkStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ForkCellResponse.ProtoReflect.Descriptor instead.
+func (*ForkCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *ForkStoreResponse) GetBranch() uint64 {
+func (x *ForkCellResponse) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *ForkStoreResponse) GetTenant() uint64 {
+func (x *ForkCellResponse) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *ForkStoreResponse) GetCell() uint64 {
+func (x *ForkCellResponse) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
@@ -616,7 +616,7 @@ func (x *ForkStoreResponse) GetCell() uint64 {
 }
 
 // Deletes a store.
-type DeleteStoreRequest struct {
+type DeleteCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store, or the fork, to delete.
 	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -624,20 +624,20 @@ type DeleteStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DeleteStoreRequest) Reset() {
-	*x = DeleteStoreRequest{}
+func (x *DeleteCellRequest) Reset() {
+	*x = DeleteCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeleteStoreRequest) String() string {
+func (x *DeleteCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteStoreRequest) ProtoMessage() {}
+func (*DeleteCellRequest) ProtoMessage() {}
 
-func (x *DeleteStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *DeleteCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -649,12 +649,12 @@ func (x *DeleteStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteStoreRequest.ProtoReflect.Descriptor instead.
-func (*DeleteStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use DeleteCellRequest.ProtoReflect.Descriptor instead.
+func (*DeleteCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *DeleteStoreRequest) GetPath() string {
+func (x *DeleteCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
@@ -662,26 +662,26 @@ func (x *DeleteStoreRequest) GetPath() string {
 }
 
 // The store deleted.
-type DeleteStoreResponse struct {
+type DeleteCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DeleteStoreResponse) Reset() {
-	*x = DeleteStoreResponse{}
+func (x *DeleteCellResponse) Reset() {
+	*x = DeleteCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DeleteStoreResponse) String() string {
+func (x *DeleteCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DeleteStoreResponse) ProtoMessage() {}
+func (*DeleteCellResponse) ProtoMessage() {}
 
-func (x *DeleteStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *DeleteCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -693,13 +693,13 @@ func (x *DeleteStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DeleteStoreResponse.ProtoReflect.Descriptor instead.
-func (*DeleteStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use DeleteCellResponse.ProtoReflect.Descriptor instead.
+func (*DeleteCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{7}
 }
 
 // Deletes this host's copy of a store.
-type DropStoreRequest struct {
+type DropCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store, or the fork, to delete here.
 	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -707,20 +707,20 @@ type DropStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DropStoreRequest) Reset() {
-	*x = DropStoreRequest{}
+func (x *DropCellRequest) Reset() {
+	*x = DropCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DropStoreRequest) String() string {
+func (x *DropCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DropStoreRequest) ProtoMessage() {}
+func (*DropCellRequest) ProtoMessage() {}
 
-func (x *DropStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *DropCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -732,12 +732,12 @@ func (x *DropStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DropStoreRequest.ProtoReflect.Descriptor instead.
-func (*DropStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use DropCellRequest.ProtoReflect.Descriptor instead.
+func (*DropCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *DropStoreRequest) GetPath() string {
+func (x *DropCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
@@ -745,26 +745,26 @@ func (x *DropStoreRequest) GetPath() string {
 }
 
 // This host's copy deleted.
-type DropStoreResponse struct {
+type DropCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *DropStoreResponse) Reset() {
-	*x = DropStoreResponse{}
+func (x *DropCellResponse) Reset() {
+	*x = DropCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *DropStoreResponse) String() string {
+func (x *DropCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*DropStoreResponse) ProtoMessage() {}
+func (*DropCellResponse) ProtoMessage() {}
 
-func (x *DropStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *DropCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -776,13 +776,13 @@ func (x *DropStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use DropStoreResponse.ProtoReflect.Descriptor instead.
-func (*DropStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use DropCellResponse.ProtoReflect.Descriptor instead.
+func (*DropCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{9}
 }
 
 // Sets a store's capacity.
-type ResizeStoreRequest struct {
+type ResizeCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store to resize.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -792,20 +792,20 @@ type ResizeStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResizeStoreRequest) Reset() {
-	*x = ResizeStoreRequest{}
+func (x *ResizeCellRequest) Reset() {
+	*x = ResizeCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResizeStoreRequest) String() string {
+func (x *ResizeCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResizeStoreRequest) ProtoMessage() {}
+func (*ResizeCellRequest) ProtoMessage() {}
 
-func (x *ResizeStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *ResizeCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -817,19 +817,19 @@ func (x *ResizeStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResizeStoreRequest.ProtoReflect.Descriptor instead.
-func (*ResizeStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResizeCellRequest.ProtoReflect.Descriptor instead.
+func (*ResizeCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{10}
 }
 
-func (x *ResizeStoreRequest) GetPath() string {
+func (x *ResizeCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-func (x *ResizeStoreRequest) GetCapacity() uint64 {
+func (x *ResizeCellRequest) GetCapacity() uint64 {
 	if x != nil {
 		return x.Capacity
 	}
@@ -837,26 +837,26 @@ func (x *ResizeStoreRequest) GetCapacity() uint64 {
 }
 
 // The store resized.
-type ResizeStoreResponse struct {
+type ResizeCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ResizeStoreResponse) Reset() {
-	*x = ResizeStoreResponse{}
+func (x *ResizeCellResponse) Reset() {
+	*x = ResizeCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ResizeStoreResponse) String() string {
+func (x *ResizeCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ResizeStoreResponse) ProtoMessage() {}
+func (*ResizeCellResponse) ProtoMessage() {}
 
-func (x *ResizeStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *ResizeCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -868,13 +868,13 @@ func (x *ResizeStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ResizeStoreResponse.ProtoReflect.Descriptor instead.
-func (*ResizeStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ResizeCellResponse.ProtoReflect.Descriptor instead.
+func (*ResizeCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{11}
 }
 
 // Places a store.
-type PlaceStoreRequest struct {
+type PlaceCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store, or the fork, to place.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -884,20 +884,20 @@ type PlaceStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PlaceStoreRequest) Reset() {
-	*x = PlaceStoreRequest{}
+func (x *PlaceCellRequest) Reset() {
+	*x = PlaceCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PlaceStoreRequest) String() string {
+func (x *PlaceCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PlaceStoreRequest) ProtoMessage() {}
+func (*PlaceCellRequest) ProtoMessage() {}
 
-func (x *PlaceStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *PlaceCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -909,19 +909,19 @@ func (x *PlaceStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PlaceStoreRequest.ProtoReflect.Descriptor instead.
-func (*PlaceStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use PlaceCellRequest.ProtoReflect.Descriptor instead.
+func (*PlaceCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *PlaceStoreRequest) GetPath() string {
+func (x *PlaceCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-func (x *PlaceStoreRequest) GetToken() uint64 {
+func (x *PlaceCellRequest) GetToken() uint64 {
 	if x != nil {
 		return x.Token
 	}
@@ -929,26 +929,26 @@ func (x *PlaceStoreRequest) GetToken() uint64 {
 }
 
 // The store placed.
-type PlaceStoreResponse struct {
+type PlaceCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PlaceStoreResponse) Reset() {
-	*x = PlaceStoreResponse{}
+func (x *PlaceCellResponse) Reset() {
+	*x = PlaceCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PlaceStoreResponse) String() string {
+func (x *PlaceCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PlaceStoreResponse) ProtoMessage() {}
+func (*PlaceCellResponse) ProtoMessage() {}
 
-func (x *PlaceStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *PlaceCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -960,8 +960,8 @@ func (x *PlaceStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PlaceStoreResponse.ProtoReflect.Descriptor instead.
-func (*PlaceStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use PlaceCellResponse.ProtoReflect.Descriptor instead.
+func (*PlaceCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{13}
 }
 
@@ -1602,7 +1602,7 @@ func (*AttachBaseResponse) Descriptor() ([]byte, []int) {
 }
 
 // Waits for a store's commits to be in object storage.
-type SyncStoreRequest struct {
+type SyncCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store to wait for.
 	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -1610,20 +1610,20 @@ type SyncStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SyncStoreRequest) Reset() {
-	*x = SyncStoreRequest{}
+func (x *SyncCellRequest) Reset() {
+	*x = SyncCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SyncStoreRequest) String() string {
+func (x *SyncCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SyncStoreRequest) ProtoMessage() {}
+func (*SyncCellRequest) ProtoMessage() {}
 
-func (x *SyncStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *SyncCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1635,12 +1635,12 @@ func (x *SyncStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SyncStoreRequest.ProtoReflect.Descriptor instead.
-func (*SyncStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use SyncCellRequest.ProtoReflect.Descriptor instead.
+func (*SyncCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{27}
 }
 
-func (x *SyncStoreRequest) GetPath() string {
+func (x *SyncCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
@@ -1648,26 +1648,26 @@ func (x *SyncStoreRequest) GetPath() string {
 }
 
 // The store's commits, as of the call, are in object storage.
-type SyncStoreResponse struct {
+type SyncCellResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *SyncStoreResponse) Reset() {
-	*x = SyncStoreResponse{}
+func (x *SyncCellResponse) Reset() {
+	*x = SyncCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *SyncStoreResponse) String() string {
+func (x *SyncCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*SyncStoreResponse) ProtoMessage() {}
+func (*SyncCellResponse) ProtoMessage() {}
 
-func (x *SyncStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *SyncCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1679,13 +1679,13 @@ func (x *SyncStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use SyncStoreResponse.ProtoReflect.Descriptor instead.
-func (*SyncStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use SyncCellResponse.ProtoReflect.Descriptor instead.
+func (*SyncCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{28}
 }
 
 // Asks what a store is, and holds.
-type StatStoreRequest struct {
+type StatCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The store to look at.
 	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -1693,20 +1693,20 @@ type StatStoreRequest struct {
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *StatStoreRequest) Reset() {
-	*x = StatStoreRequest{}
+func (x *StatCellRequest) Reset() {
+	*x = StatCellRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *StatStoreRequest) String() string {
+func (x *StatCellRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*StatStoreRequest) ProtoMessage() {}
+func (*StatCellRequest) ProtoMessage() {}
 
-func (x *StatStoreRequest) ProtoReflect() protoreflect.Message {
+func (x *StatCellRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1718,12 +1718,12 @@ func (x *StatStoreRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use StatStoreRequest.ProtoReflect.Descriptor instead.
-func (*StatStoreRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use StatCellRequest.ProtoReflect.Descriptor instead.
+func (*StatCellRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{29}
 }
 
-func (x *StatStoreRequest) GetPath() string {
+func (x *StatCellRequest) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
@@ -1731,7 +1731,7 @@ func (x *StatStoreRequest) GetPath() string {
 }
 
 // What a store is, and holds.
-type StatStoreResponse struct {
+type StatCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The branch whose extents its guest mints.
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
@@ -1783,20 +1783,20 @@ type StatStoreResponse struct {
 	sizeCache        protoimpl.SizeCache
 }
 
-func (x *StatStoreResponse) Reset() {
-	*x = StatStoreResponse{}
+func (x *StatCellResponse) Reset() {
+	*x = StatCellResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *StatStoreResponse) String() string {
+func (x *StatCellResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*StatStoreResponse) ProtoMessage() {}
+func (*StatCellResponse) ProtoMessage() {}
 
-func (x *StatStoreResponse) ProtoReflect() protoreflect.Message {
+func (x *StatCellResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1808,145 +1808,145 @@ func (x *StatStoreResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use StatStoreResponse.ProtoReflect.Descriptor instead.
-func (*StatStoreResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use StatCellResponse.ProtoReflect.Descriptor instead.
+func (*StatCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{30}
 }
 
-func (x *StatStoreResponse) GetBranch() uint64 {
+func (x *StatCellResponse) GetBranch() uint64 {
 	if x != nil {
 		return x.Branch
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetCapacity() uint64 {
+func (x *StatCellResponse) GetCapacity() uint64 {
 	if x != nil {
 		return x.Capacity
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetUsed() uint64 {
+func (x *StatCellResponse) GetUsed() uint64 {
 	if x != nil {
 		return x.Used
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetAvailable() uint64 {
+func (x *StatCellResponse) GetAvailable() uint64 {
 	if x != nil {
 		return x.Available
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetPublic() bool {
+func (x *StatCellResponse) GetPublic() bool {
 	if x != nil {
 		return x.Public
 	}
 	return false
 }
 
-func (x *StatStoreResponse) GetOpen() bool {
+func (x *StatCellResponse) GetOpen() bool {
 	if x != nil {
 		return x.Open
 	}
 	return false
 }
 
-func (x *StatStoreResponse) GetOwn() uint64 {
+func (x *StatCellResponse) GetOwn() uint64 {
 	if x != nil {
 		return x.Own
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetInherited() uint64 {
+func (x *StatCellResponse) GetInherited() uint64 {
 	if x != nil {
 		return x.Inherited
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetCommitted() uint64 {
+func (x *StatCellResponse) GetCommitted() uint64 {
 	if x != nil {
 		return x.Committed
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetUploading() bool {
+func (x *StatCellResponse) GetUploading() bool {
 	if x != nil {
 		return x.Uploading
 	}
 	return false
 }
 
-func (x *StatStoreResponse) GetTakenToken() uint64 {
+func (x *StatCellResponse) GetTakenToken() uint64 {
 	if x != nil {
 		return x.TakenToken
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetTakenEpoch() uint64 {
+func (x *StatCellResponse) GetTakenEpoch() uint64 {
 	if x != nil {
 		return x.TakenEpoch
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetTakenUnixMs() uint64 {
+func (x *StatCellResponse) GetTakenUnixMs() uint64 {
 	if x != nil {
 		return x.TakenUnixMs
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetUploaded() uint64 {
+func (x *StatCellResponse) GetUploaded() uint64 {
 	if x != nil {
 		return x.Uploaded
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetPendingUploadBytes() uint64 {
+func (x *StatCellResponse) GetPendingUploadBytes() uint64 {
 	if x != nil {
 		return x.PendingUploadBytes
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetOldestPendingMs() uint64 {
+func (x *StatCellResponse) GetOldestPendingMs() uint64 {
 	if x != nil {
 		return x.OldestPendingMs
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetTenant() uint64 {
+func (x *StatCellResponse) GetTenant() uint64 {
 	if x != nil {
 		return x.Tenant
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetCell() uint64 {
+func (x *StatCellResponse) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetOwnExtents() uint64 {
+func (x *StatCellResponse) GetOwnExtents() uint64 {
 	if x != nil {
 		return x.OwnExtents
 	}
 	return 0
 }
 
-func (x *StatStoreResponse) GetInheritedExtents() uint64 {
+func (x *StatCellResponse) GetInheritedExtents() uint64 {
 	if x != nil {
 		return x.InheritedExtents
 	}
@@ -1954,26 +1954,26 @@ func (x *StatStoreResponse) GetInheritedExtents() uint64 {
 }
 
 // Asks for the stores the daemon serves.
-type ListStoresRequest struct {
+type ListCellsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListStoresRequest) Reset() {
-	*x = ListStoresRequest{}
+func (x *ListCellsRequest) Reset() {
+	*x = ListCellsRequest{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListStoresRequest) String() string {
+func (x *ListCellsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListStoresRequest) ProtoMessage() {}
+func (*ListCellsRequest) ProtoMessage() {}
 
-func (x *ListStoresRequest) ProtoReflect() protoreflect.Message {
+func (x *ListCellsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1985,34 +1985,34 @@ func (x *ListStoresRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListStoresRequest.ProtoReflect.Descriptor instead.
-func (*ListStoresRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListCellsRequest.ProtoReflect.Descriptor instead.
+func (*ListCellsRequest) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{31}
 }
 
 // The stores the daemon serves, in no order.
-type ListStoresResponse struct {
+type ListCellsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Each store, and what it is and holds.
-	Stores        []*ListedStore `protobuf:"bytes,1,rep,name=stores,proto3" json:"stores,omitempty"`
+	Stores        []*ListedCell `protobuf:"bytes,1,rep,name=stores,proto3" json:"stores,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListStoresResponse) Reset() {
-	*x = ListStoresResponse{}
+func (x *ListCellsResponse) Reset() {
+	*x = ListCellsResponse{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListStoresResponse) String() string {
+func (x *ListCellsResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListStoresResponse) ProtoMessage() {}
+func (*ListCellsResponse) ProtoMessage() {}
 
-func (x *ListStoresResponse) ProtoReflect() protoreflect.Message {
+func (x *ListCellsResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2024,12 +2024,12 @@ func (x *ListStoresResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListStoresResponse.ProtoReflect.Descriptor instead.
-func (*ListStoresResponse) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListCellsResponse.ProtoReflect.Descriptor instead.
+func (*ListCellsResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{32}
 }
 
-func (x *ListStoresResponse) GetStores() []*ListedStore {
+func (x *ListCellsResponse) GetStores() []*ListedCell {
 	if x != nil {
 		return x.Stores
 	}
@@ -2037,30 +2037,30 @@ func (x *ListStoresResponse) GetStores() []*ListedStore {
 }
 
 // A store the daemon serves.
-type ListedStore struct {
+type ListedCell struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its directory, as the daemon has it: without symbolic links.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
-	// What StatStore says of it.
-	Stat          *StatStoreResponse `protobuf:"bytes,2,opt,name=stat,proto3" json:"stat,omitempty"`
+	// What StatCell says of it.
+	Stat          *StatCellResponse `protobuf:"bytes,2,opt,name=stat,proto3" json:"stat,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ListedStore) Reset() {
-	*x = ListedStore{}
+func (x *ListedCell) Reset() {
+	*x = ListedCell{}
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ListedStore) String() string {
+func (x *ListedCell) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ListedStore) ProtoMessage() {}
+func (*ListedCell) ProtoMessage() {}
 
-func (x *ListedStore) ProtoReflect() protoreflect.Message {
+func (x *ListedCell) ProtoReflect() protoreflect.Message {
 	mi := &file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2072,19 +2072,19 @@ func (x *ListedStore) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ListedStore.ProtoReflect.Descriptor instead.
-func (*ListedStore) Descriptor() ([]byte, []int) {
+// Deprecated: Use ListedCell.ProtoReflect.Descriptor instead.
+func (*ListedCell) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{33}
 }
 
-func (x *ListedStore) GetPath() string {
+func (x *ListedCell) GetPath() string {
 	if x != nil {
 		return x.Path
 	}
 	return ""
 }
 
-func (x *ListedStore) GetStat() *StatStoreResponse {
+func (x *ListedCell) GetStat() *StatCellResponse {
 	if x != nil {
 		return x.Stat
 	}
@@ -3672,9 +3672,9 @@ func (x *GetTenantDiskResponse) GetLimitBytes() uint64 {
 // Shreds a cell.
 type ShredCellRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The cell's tenant, as StatStore names it.
+	// The cell's tenant, as StatCell names it.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell's ID in its tenant, as StatStore names it.
+	// The cell's ID in its tenant, as StatCell names it.
 	Cell          uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3783,7 +3783,7 @@ func (x *ShredCellResponse) GetForgotten() *Forgotten {
 // Asks the daemon to forget a tenant's keys.
 type ForgetTenantKeysRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant's ID in the bucket, as StatStore names it.
+	// The tenant's ID in the bucket, as StatCell names it.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Why, for the daemon's log: e.g. that the KEK is destroyed.
 	Why           string `protobuf:"bytes,2,opt,name=why,proto3" json:"why,omitempty"`
@@ -3884,7 +3884,7 @@ func (x *ForgetTenantKeysResponse) GetForgotten() *Forgotten {
 // Shreds a tenant.
 type ShredTenantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tenant's ID in the bucket, as StatStore names it.
+	// The tenant's ID in the bucket, as StatCell names it.
 	Tenant        uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4068,8 +4068,8 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xe6\x01\n" +
-	"\x12CreateStoreRequest\x12\x12\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xe5\x01\n" +
+	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
@@ -4077,8 +4077,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
 	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kindB\b\n" +
-	"\x06_tokenJ\x04\b\b\x10\t\"Y\n" +
-	"\x13CreateStoreResponse\x12\x16\n" +
+	"\x06_tokenJ\x04\b\b\x10\t\"X\n" +
+	"\x12CreateCellResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x90\x01\n" +
@@ -4091,31 +4091,31 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x13ImportImageResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x8e\x01\n" +
-	"\x10ForkStoreRequest\x12\x12\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x8d\x01\n" +
+	"\x0fForkCellRequest\x12\x12\n" +
 	"\x04from\x18\x01 \x01(\tR\x04from\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\tR\x02to\x12\x18\n" +
 	"\aversion\x18\x06 \x01(\x04R\aversion\x12\x16\n" +
 	"\x06tenant\x18\a \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\b \x01(\x04R\x04cellJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"W\n" +
-	"\x11ForkStoreResponse\x12\x16\n" +
+	"\x04cell\x18\b \x01(\x04R\x04cellJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"V\n" +
+	"\x10ForkCellResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"(\n" +
-	"\x12DeleteStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\x15\n" +
-	"\x13DeleteStoreResponse\"&\n" +
-	"\x10DropStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
-	"\x11DropStoreResponse\"D\n" +
-	"\x12ResizeStoreRequest\x12\x12\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cell\"'\n" +
+	"\x11DeleteCellRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x14\n" +
+	"\x12DeleteCellResponse\"%\n" +
+	"\x0fDropCellRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
+	"\x10DropCellResponse\"C\n" +
+	"\x11ResizeCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
-	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\"\x15\n" +
-	"\x13ResizeStoreResponse\"=\n" +
-	"\x11PlaceStoreRequest\x12\x12\n" +
+	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\"\x14\n" +
+	"\x12ResizeCellResponse\"<\n" +
+	"\x10PlaceCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\x04R\x05token\"\x14\n" +
-	"\x12PlaceStoreResponse\"K\n" +
+	"\x05token\x18\x02 \x01(\x04R\x05token\"\x13\n" +
+	"\x11PlaceCellResponse\"K\n" +
 	"\x12MakeVersionRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n" +
 	"\tkeep_last\x18\x02 \x01(\rR\bkeepLastJ\x04\b\x03\x10\x04\"/\n" +
@@ -4146,13 +4146,13 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x11AttachBaseRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04base\x18\x02 \x01(\tR\x04base\"\x14\n" +
-	"\x12AttachBaseResponse\"&\n" +
-	"\x10SyncStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
-	"\x11SyncStoreResponse\"&\n" +
-	"\x10StatStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xf1\x04\n" +
-	"\x11StatStoreResponse\x12\x16\n" +
+	"\x12AttachBaseResponse\"%\n" +
+	"\x0fSyncCellRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
+	"\x10SyncCellResponse\"%\n" +
+	"\x0fStatCellRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xf0\x04\n" +
+	"\x10StatCellResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -4176,13 +4176,14 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x15\x10\x16\"\x13\n" +
-	"\x11ListStoresRequest\"N\n" +
-	"\x12ListStoresResponse\x128\n" +
-	"\x06stores\x18\x01 \x03(\v2 .cladefs.cladefsd.v1.ListedStoreR\x06stores\"]\n" +
-	"\vListedStore\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x12:\n" +
-	"\x04stat\x18\x02 \x01(\v2&.cladefs.cladefsd.v1.StatStoreResponseR\x04stat\"\x14\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x15\x10\x16\"\x12\n" +
+	"\x10ListCellsRequest\"L\n" +
+	"\x11ListCellsResponse\x127\n" +
+	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"[\n" +
+	"\n" +
+	"ListedCell\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x129\n" +
+	"\x04stat\x18\x02 \x01(\v2%.cladefs.cladefsd.v1.StatCellResponseR\x04stat\"\x14\n" +
 	"\x12GetCountersRequest\"\xf9\x05\n" +
 	"\x13GetCountersResponse\x12\x12\n" +
 	"\x04maps\x18\x01 \x01(\x04R\x04maps\x12\x15\n" +
@@ -4353,16 +4354,18 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
 	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
-	"\x10CELL_KIND_MEMORY\x10\x022\xf4\x16\n" +
-	"\bCladefsd\x12`\n" +
-	"\vCreateStore\x12'.cladefs.cladefsd.v1.CreateStoreRequest\x1a(.cladefs.cladefsd.v1.CreateStoreResponse\x12`\n" +
-	"\vImportImage\x12'.cladefs.cladefsd.v1.ImportImageRequest\x1a(.cladefs.cladefsd.v1.ImportImageResponse\x12Z\n" +
-	"\tForkStore\x12%.cladefs.cladefsd.v1.ForkStoreRequest\x1a&.cladefs.cladefsd.v1.ForkStoreResponse\x12`\n" +
-	"\vDeleteStore\x12'.cladefs.cladefsd.v1.DeleteStoreRequest\x1a(.cladefs.cladefsd.v1.DeleteStoreResponse\x12Z\n" +
-	"\tDropStore\x12%.cladefs.cladefsd.v1.DropStoreRequest\x1a&.cladefs.cladefsd.v1.DropStoreResponse\x12`\n" +
-	"\vResizeStore\x12'.cladefs.cladefsd.v1.ResizeStoreRequest\x1a(.cladefs.cladefsd.v1.ResizeStoreResponse\x12]\n" +
+	"\x10CELL_KIND_MEMORY\x10\x022\xd9\x16\n" +
+	"\bCladefsd\x12]\n" +
 	"\n" +
-	"PlaceStore\x12&.cladefs.cladefsd.v1.PlaceStoreRequest\x1a'.cladefs.cladefsd.v1.PlaceStoreResponse\x12]\n" +
+	"CreateCell\x12&.cladefs.cladefsd.v1.CreateCellRequest\x1a'.cladefs.cladefsd.v1.CreateCellResponse\x12`\n" +
+	"\vImportImage\x12'.cladefs.cladefsd.v1.ImportImageRequest\x1a(.cladefs.cladefsd.v1.ImportImageResponse\x12W\n" +
+	"\bForkCell\x12$.cladefs.cladefsd.v1.ForkCellRequest\x1a%.cladefs.cladefsd.v1.ForkCellResponse\x12]\n" +
+	"\n" +
+	"DeleteCell\x12&.cladefs.cladefsd.v1.DeleteCellRequest\x1a'.cladefs.cladefsd.v1.DeleteCellResponse\x12W\n" +
+	"\bDropCell\x12$.cladefs.cladefsd.v1.DropCellRequest\x1a%.cladefs.cladefsd.v1.DropCellResponse\x12]\n" +
+	"\n" +
+	"ResizeCell\x12&.cladefs.cladefsd.v1.ResizeCellRequest\x1a'.cladefs.cladefsd.v1.ResizeCellResponse\x12Z\n" +
+	"\tPlaceCell\x12%.cladefs.cladefsd.v1.PlaceCellRequest\x1a&.cladefs.cladefsd.v1.PlaceCellResponse\x12]\n" +
 	"\n" +
 	"MakePublic\x12&.cladefs.cladefsd.v1.MakePublicRequest\x1a'.cladefs.cladefsd.v1.MakePublicResponse\x12`\n" +
 	"\vMakeVersion\x12'.cladefs.cladefsd.v1.MakeVersionRequest\x1a(.cladefs.cladefsd.v1.MakeVersionResponse\x12c\n" +
@@ -4370,11 +4373,10 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\fDropVersions\x12(.cladefs.cladefsd.v1.DropVersionsRequest\x1a).cladefs.cladefsd.v1.DropVersionsResponse\x12c\n" +
 	"\fShareVersion\x12(.cladefs.cladefsd.v1.ShareVersionRequest\x1a).cladefs.cladefsd.v1.ShareVersionResponse\x12]\n" +
 	"\n" +
-	"AttachBase\x12&.cladefs.cladefsd.v1.AttachBaseRequest\x1a'.cladefs.cladefsd.v1.AttachBaseResponse\x12Z\n" +
-	"\tSyncStore\x12%.cladefs.cladefsd.v1.SyncStoreRequest\x1a&.cladefs.cladefsd.v1.SyncStoreResponse\x12Z\n" +
-	"\tStatStore\x12%.cladefs.cladefsd.v1.StatStoreRequest\x1a&.cladefs.cladefsd.v1.StatStoreResponse\x12]\n" +
-	"\n" +
-	"ListStores\x12&.cladefs.cladefsd.v1.ListStoresRequest\x1a'.cladefs.cladefsd.v1.ListStoresResponse\x12`\n" +
+	"AttachBase\x12&.cladefs.cladefsd.v1.AttachBaseRequest\x1a'.cladefs.cladefsd.v1.AttachBaseResponse\x12W\n" +
+	"\bSyncCell\x12$.cladefs.cladefsd.v1.SyncCellRequest\x1a%.cladefs.cladefsd.v1.SyncCellResponse\x12W\n" +
+	"\bStatCell\x12$.cladefs.cladefsd.v1.StatCellRequest\x1a%.cladefs.cladefsd.v1.StatCellResponse\x12Z\n" +
+	"\tListCells\x12%.cladefs.cladefsd.v1.ListCellsRequest\x1a&.cladefs.cladefsd.v1.ListCellsResponse\x12`\n" +
 	"\vGetCounters\x12'.cladefs.cladefsd.v1.GetCountersRequest\x1a(.cladefs.cladefsd.v1.GetCountersResponse\x12W\n" +
 	"\bGetStats\x12$.cladefs.cladefsd.v1.GetStatsRequest\x1a%.cladefs.cladefsd.v1.GetStatsResponse\x12N\n" +
 	"\x05Grant\x12!.cladefs.cladefsd.v1.GrantRequest\x1a\".cladefs.cladefsd.v1.GrantResponse\x12Q\n" +
@@ -4406,20 +4408,20 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInf
 var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 77)
 var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
 	(CellKind)(0),                     // 0: cladefs.cladefsd.v1.CellKind
-	(*CreateStoreRequest)(nil),        // 1: cladefs.cladefsd.v1.CreateStoreRequest
-	(*CreateStoreResponse)(nil),       // 2: cladefs.cladefsd.v1.CreateStoreResponse
+	(*CreateCellRequest)(nil),         // 1: cladefs.cladefsd.v1.CreateCellRequest
+	(*CreateCellResponse)(nil),        // 2: cladefs.cladefsd.v1.CreateCellResponse
 	(*ImportImageRequest)(nil),        // 3: cladefs.cladefsd.v1.ImportImageRequest
 	(*ImportImageResponse)(nil),       // 4: cladefs.cladefsd.v1.ImportImageResponse
-	(*ForkStoreRequest)(nil),          // 5: cladefs.cladefsd.v1.ForkStoreRequest
-	(*ForkStoreResponse)(nil),         // 6: cladefs.cladefsd.v1.ForkStoreResponse
-	(*DeleteStoreRequest)(nil),        // 7: cladefs.cladefsd.v1.DeleteStoreRequest
-	(*DeleteStoreResponse)(nil),       // 8: cladefs.cladefsd.v1.DeleteStoreResponse
-	(*DropStoreRequest)(nil),          // 9: cladefs.cladefsd.v1.DropStoreRequest
-	(*DropStoreResponse)(nil),         // 10: cladefs.cladefsd.v1.DropStoreResponse
-	(*ResizeStoreRequest)(nil),        // 11: cladefs.cladefsd.v1.ResizeStoreRequest
-	(*ResizeStoreResponse)(nil),       // 12: cladefs.cladefsd.v1.ResizeStoreResponse
-	(*PlaceStoreRequest)(nil),         // 13: cladefs.cladefsd.v1.PlaceStoreRequest
-	(*PlaceStoreResponse)(nil),        // 14: cladefs.cladefsd.v1.PlaceStoreResponse
+	(*ForkCellRequest)(nil),           // 5: cladefs.cladefsd.v1.ForkCellRequest
+	(*ForkCellResponse)(nil),          // 6: cladefs.cladefsd.v1.ForkCellResponse
+	(*DeleteCellRequest)(nil),         // 7: cladefs.cladefsd.v1.DeleteCellRequest
+	(*DeleteCellResponse)(nil),        // 8: cladefs.cladefsd.v1.DeleteCellResponse
+	(*DropCellRequest)(nil),           // 9: cladefs.cladefsd.v1.DropCellRequest
+	(*DropCellResponse)(nil),          // 10: cladefs.cladefsd.v1.DropCellResponse
+	(*ResizeCellRequest)(nil),         // 11: cladefs.cladefsd.v1.ResizeCellRequest
+	(*ResizeCellResponse)(nil),        // 12: cladefs.cladefsd.v1.ResizeCellResponse
+	(*PlaceCellRequest)(nil),          // 13: cladefs.cladefsd.v1.PlaceCellRequest
+	(*PlaceCellResponse)(nil),         // 14: cladefs.cladefsd.v1.PlaceCellResponse
 	(*MakeVersionRequest)(nil),        // 15: cladefs.cladefsd.v1.MakeVersionRequest
 	(*MakeVersionResponse)(nil),       // 16: cladefs.cladefsd.v1.MakeVersionResponse
 	(*ListVersionsRequest)(nil),       // 17: cladefs.cladefsd.v1.ListVersionsRequest
@@ -4433,13 +4435,13 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
 	(*MakePublicResponse)(nil),        // 25: cladefs.cladefsd.v1.MakePublicResponse
 	(*AttachBaseRequest)(nil),         // 26: cladefs.cladefsd.v1.AttachBaseRequest
 	(*AttachBaseResponse)(nil),        // 27: cladefs.cladefsd.v1.AttachBaseResponse
-	(*SyncStoreRequest)(nil),          // 28: cladefs.cladefsd.v1.SyncStoreRequest
-	(*SyncStoreResponse)(nil),         // 29: cladefs.cladefsd.v1.SyncStoreResponse
-	(*StatStoreRequest)(nil),          // 30: cladefs.cladefsd.v1.StatStoreRequest
-	(*StatStoreResponse)(nil),         // 31: cladefs.cladefsd.v1.StatStoreResponse
-	(*ListStoresRequest)(nil),         // 32: cladefs.cladefsd.v1.ListStoresRequest
-	(*ListStoresResponse)(nil),        // 33: cladefs.cladefsd.v1.ListStoresResponse
-	(*ListedStore)(nil),               // 34: cladefs.cladefsd.v1.ListedStore
+	(*SyncCellRequest)(nil),           // 28: cladefs.cladefsd.v1.SyncCellRequest
+	(*SyncCellResponse)(nil),          // 29: cladefs.cladefsd.v1.SyncCellResponse
+	(*StatCellRequest)(nil),           // 30: cladefs.cladefsd.v1.StatCellRequest
+	(*StatCellResponse)(nil),          // 31: cladefs.cladefsd.v1.StatCellResponse
+	(*ListCellsRequest)(nil),          // 32: cladefs.cladefsd.v1.ListCellsRequest
+	(*ListCellsResponse)(nil),         // 33: cladefs.cladefsd.v1.ListCellsResponse
+	(*ListedCell)(nil),                // 34: cladefs.cladefsd.v1.ListedCell
 	(*GetCountersRequest)(nil),        // 35: cladefs.cladefsd.v1.GetCountersRequest
 	(*GetCountersResponse)(nil),       // 36: cladefs.cladefsd.v1.GetCountersResponse
 	(*GetStatsRequest)(nil),           // 37: cladefs.cladefsd.v1.GetStatsRequest
@@ -4485,10 +4487,10 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
 	nil,                               // 77: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
-	0,  // 0: cladefs.cladefsd.v1.CreateStoreRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
+	0,  // 0: cladefs.cladefsd.v1.CreateCellRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
 	18, // 1: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
-	34, // 2: cladefs.cladefsd.v1.ListStoresResponse.stores:type_name -> cladefs.cladefsd.v1.ListedStore
-	31, // 3: cladefs.cladefsd.v1.ListedStore.stat:type_name -> cladefs.cladefsd.v1.StatStoreResponse
+	34, // 2: cladefs.cladefsd.v1.ListCellsResponse.stores:type_name -> cladefs.cladefsd.v1.ListedCell
+	31, // 3: cladefs.cladefsd.v1.ListedCell.stat:type_name -> cladefs.cladefsd.v1.StatCellResponse
 	42, // 4: cladefs.cladefsd.v1.GetCountersResponse.object_storage:type_name -> cladefs.cladefsd.v1.ObjectStorageStats
 	68, // 5: cladefs.cladefsd.v1.GetStatsResponse.counters:type_name -> cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
 	69, // 6: cladefs.cladefsd.v1.GetStatsResponse.gauges:type_name -> cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
@@ -4506,22 +4508,22 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
 	67, // 18: cladefs.cladefsd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
 	67, // 19: cladefs.cladefsd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
 	41, // 20: cladefs.cladefsd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.cladefsd.v1.Histogram
-	1,  // 21: cladefs.cladefsd.v1.Cladefsd.CreateStore:input_type -> cladefs.cladefsd.v1.CreateStoreRequest
+	1,  // 21: cladefs.cladefsd.v1.Cladefsd.CreateCell:input_type -> cladefs.cladefsd.v1.CreateCellRequest
 	3,  // 22: cladefs.cladefsd.v1.Cladefsd.ImportImage:input_type -> cladefs.cladefsd.v1.ImportImageRequest
-	5,  // 23: cladefs.cladefsd.v1.Cladefsd.ForkStore:input_type -> cladefs.cladefsd.v1.ForkStoreRequest
-	7,  // 24: cladefs.cladefsd.v1.Cladefsd.DeleteStore:input_type -> cladefs.cladefsd.v1.DeleteStoreRequest
-	9,  // 25: cladefs.cladefsd.v1.Cladefsd.DropStore:input_type -> cladefs.cladefsd.v1.DropStoreRequest
-	11, // 26: cladefs.cladefsd.v1.Cladefsd.ResizeStore:input_type -> cladefs.cladefsd.v1.ResizeStoreRequest
-	13, // 27: cladefs.cladefsd.v1.Cladefsd.PlaceStore:input_type -> cladefs.cladefsd.v1.PlaceStoreRequest
+	5,  // 23: cladefs.cladefsd.v1.Cladefsd.ForkCell:input_type -> cladefs.cladefsd.v1.ForkCellRequest
+	7,  // 24: cladefs.cladefsd.v1.Cladefsd.DeleteCell:input_type -> cladefs.cladefsd.v1.DeleteCellRequest
+	9,  // 25: cladefs.cladefsd.v1.Cladefsd.DropCell:input_type -> cladefs.cladefsd.v1.DropCellRequest
+	11, // 26: cladefs.cladefsd.v1.Cladefsd.ResizeCell:input_type -> cladefs.cladefsd.v1.ResizeCellRequest
+	13, // 27: cladefs.cladefsd.v1.Cladefsd.PlaceCell:input_type -> cladefs.cladefsd.v1.PlaceCellRequest
 	24, // 28: cladefs.cladefsd.v1.Cladefsd.MakePublic:input_type -> cladefs.cladefsd.v1.MakePublicRequest
 	15, // 29: cladefs.cladefsd.v1.Cladefsd.MakeVersion:input_type -> cladefs.cladefsd.v1.MakeVersionRequest
 	17, // 30: cladefs.cladefsd.v1.Cladefsd.ListVersions:input_type -> cladefs.cladefsd.v1.ListVersionsRequest
 	20, // 31: cladefs.cladefsd.v1.Cladefsd.DropVersions:input_type -> cladefs.cladefsd.v1.DropVersionsRequest
 	22, // 32: cladefs.cladefsd.v1.Cladefsd.ShareVersion:input_type -> cladefs.cladefsd.v1.ShareVersionRequest
 	26, // 33: cladefs.cladefsd.v1.Cladefsd.AttachBase:input_type -> cladefs.cladefsd.v1.AttachBaseRequest
-	28, // 34: cladefs.cladefsd.v1.Cladefsd.SyncStore:input_type -> cladefs.cladefsd.v1.SyncStoreRequest
-	30, // 35: cladefs.cladefsd.v1.Cladefsd.StatStore:input_type -> cladefs.cladefsd.v1.StatStoreRequest
-	32, // 36: cladefs.cladefsd.v1.Cladefsd.ListStores:input_type -> cladefs.cladefsd.v1.ListStoresRequest
+	28, // 34: cladefs.cladefsd.v1.Cladefsd.SyncCell:input_type -> cladefs.cladefsd.v1.SyncCellRequest
+	30, // 35: cladefs.cladefsd.v1.Cladefsd.StatCell:input_type -> cladefs.cladefsd.v1.StatCellRequest
+	32, // 36: cladefs.cladefsd.v1.Cladefsd.ListCells:input_type -> cladefs.cladefsd.v1.ListCellsRequest
 	35, // 37: cladefs.cladefsd.v1.Cladefsd.GetCounters:input_type -> cladefs.cladefsd.v1.GetCountersRequest
 	37, // 38: cladefs.cladefsd.v1.Cladefsd.GetStats:input_type -> cladefs.cladefsd.v1.GetStatsRequest
 	43, // 39: cladefs.cladefsd.v1.Cladefsd.Grant:input_type -> cladefs.cladefsd.v1.GrantRequest
@@ -4536,22 +4538,22 @@ var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
 	61, // 48: cladefs.cladefsd.v1.Cladefsd.ShredCell:input_type -> cladefs.cladefsd.v1.ShredCellRequest
 	63, // 49: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:input_type -> cladefs.cladefsd.v1.ForgetTenantKeysRequest
 	65, // 50: cladefs.cladefsd.v1.Cladefsd.ShredTenant:input_type -> cladefs.cladefsd.v1.ShredTenantRequest
-	2,  // 51: cladefs.cladefsd.v1.Cladefsd.CreateStore:output_type -> cladefs.cladefsd.v1.CreateStoreResponse
+	2,  // 51: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
 	4,  // 52: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
-	6,  // 53: cladefs.cladefsd.v1.Cladefsd.ForkStore:output_type -> cladefs.cladefsd.v1.ForkStoreResponse
-	8,  // 54: cladefs.cladefsd.v1.Cladefsd.DeleteStore:output_type -> cladefs.cladefsd.v1.DeleteStoreResponse
-	10, // 55: cladefs.cladefsd.v1.Cladefsd.DropStore:output_type -> cladefs.cladefsd.v1.DropStoreResponse
-	12, // 56: cladefs.cladefsd.v1.Cladefsd.ResizeStore:output_type -> cladefs.cladefsd.v1.ResizeStoreResponse
-	14, // 57: cladefs.cladefsd.v1.Cladefsd.PlaceStore:output_type -> cladefs.cladefsd.v1.PlaceStoreResponse
+	6,  // 53: cladefs.cladefsd.v1.Cladefsd.ForkCell:output_type -> cladefs.cladefsd.v1.ForkCellResponse
+	8,  // 54: cladefs.cladefsd.v1.Cladefsd.DeleteCell:output_type -> cladefs.cladefsd.v1.DeleteCellResponse
+	10, // 55: cladefs.cladefsd.v1.Cladefsd.DropCell:output_type -> cladefs.cladefsd.v1.DropCellResponse
+	12, // 56: cladefs.cladefsd.v1.Cladefsd.ResizeCell:output_type -> cladefs.cladefsd.v1.ResizeCellResponse
+	14, // 57: cladefs.cladefsd.v1.Cladefsd.PlaceCell:output_type -> cladefs.cladefsd.v1.PlaceCellResponse
 	25, // 58: cladefs.cladefsd.v1.Cladefsd.MakePublic:output_type -> cladefs.cladefsd.v1.MakePublicResponse
 	16, // 59: cladefs.cladefsd.v1.Cladefsd.MakeVersion:output_type -> cladefs.cladefsd.v1.MakeVersionResponse
 	19, // 60: cladefs.cladefsd.v1.Cladefsd.ListVersions:output_type -> cladefs.cladefsd.v1.ListVersionsResponse
 	21, // 61: cladefs.cladefsd.v1.Cladefsd.DropVersions:output_type -> cladefs.cladefsd.v1.DropVersionsResponse
 	23, // 62: cladefs.cladefsd.v1.Cladefsd.ShareVersion:output_type -> cladefs.cladefsd.v1.ShareVersionResponse
 	27, // 63: cladefs.cladefsd.v1.Cladefsd.AttachBase:output_type -> cladefs.cladefsd.v1.AttachBaseResponse
-	29, // 64: cladefs.cladefsd.v1.Cladefsd.SyncStore:output_type -> cladefs.cladefsd.v1.SyncStoreResponse
-	31, // 65: cladefs.cladefsd.v1.Cladefsd.StatStore:output_type -> cladefs.cladefsd.v1.StatStoreResponse
-	33, // 66: cladefs.cladefsd.v1.Cladefsd.ListStores:output_type -> cladefs.cladefsd.v1.ListStoresResponse
+	29, // 64: cladefs.cladefsd.v1.Cladefsd.SyncCell:output_type -> cladefs.cladefsd.v1.SyncCellResponse
+	31, // 65: cladefs.cladefsd.v1.Cladefsd.StatCell:output_type -> cladefs.cladefsd.v1.StatCellResponse
+	33, // 66: cladefs.cladefsd.v1.Cladefsd.ListCells:output_type -> cladefs.cladefsd.v1.ListCellsResponse
 	36, // 67: cladefs.cladefsd.v1.Cladefsd.GetCounters:output_type -> cladefs.cladefsd.v1.GetCountersResponse
 	38, // 68: cladefs.cladefsd.v1.Cladefsd.GetStats:output_type -> cladefs.cladefsd.v1.GetStatsResponse
 	44, // 69: cladefs.cladefsd.v1.Cladefsd.Grant:output_type -> cladefs.cladefsd.v1.GrantResponse

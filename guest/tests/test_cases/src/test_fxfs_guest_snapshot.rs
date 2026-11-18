@@ -572,7 +572,7 @@ mod host {
         let control = crate::common::control(cladefsd)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            match control.resize_store(path, GROWN) {
+            match control.resize_cell(path, GROWN) {
                 Err(error)
                     if error.errno() == Some(cladefs::Errno::EBUSY)
                         && std::time::Instant::now() < deadline =>
@@ -626,7 +626,7 @@ mod host {
                 let mut version = test_setup.tmp_dir.join("snapshot").into_os_string();
                 version.push(".extent-extents");
                 let control = crate::common::control(Path::new(&cladefsd)).expect("control API");
-                control.stat_store(Path::new(&version)).expect("the snapshot's version");
+                control.stat_cell(Path::new(&version)).expect("the snapshot's version");
             }
             for (name, path) in stores {
                 let storage = Storage::open(path).expect("open store");

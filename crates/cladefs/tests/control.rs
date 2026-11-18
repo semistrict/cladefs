@@ -43,7 +43,7 @@ fn stores_through_the_control_api() {
     let stat = daemon.stat(&base).unwrap();
     assert_eq!(
         stat,
-        StatStoreResponse {
+        StatCellResponse {
             branch: branch.id,
             tenant: branch.tenant,
             cell: branch.id,
@@ -140,7 +140,7 @@ fn open_stores_are_listed_with_their_takings_and_uploads() {
     drop((one, two));
 }
 
-/// TASK-454: StatStore and ListStores say how many extents a store holds, its own and those it
+/// TASK-454: StatCell and ListCells say how many extents a store holds, its own and those it
 /// inherited, as its VM writes and frees them, open and closed, and of its fork.
 #[test]
 fn extents_are_counted_through_the_control_api() {
@@ -152,7 +152,7 @@ fn extents_are_counted_through_the_control_api() {
         vm.write(extent, 0, &[cladefs::VolatileSlice::from(&pattern(sequence)[..4096])]).unwrap();
         extent
     };
-    let counts = |stat: &StatStoreResponse| (stat.own_extents, stat.inherited_extents);
+    let counts = |stat: &StatCellResponse| (stat.own_extents, stat.inherited_extents);
 
     let vm = daemon.open(&base, CAPACITY);
     assert_eq!(counts(&daemon.stat(&base).unwrap()), (0, 0));
@@ -269,7 +269,7 @@ fn imports_that_fail_leave_no_store() {
 }
 
 /// A fork of a branch this host never had: the branch's store taken from object storage
-/// (CreateStore of its branch, placed after the host that wrote it), then forked (ForkStore), whose
+/// (CreateCell of its branch, placed after the host that wrote it), then forked (ForkCell), whose
 /// VM reads what the branch held, its data fetched as read.
 #[test]
 fn forks_of_branches_never_had_here() {
@@ -333,8 +333,8 @@ fn shrinks_waiting_for_their_guests_hold_no_threads() {
     let shrinks: Vec<_> = (paths.iter())
         .map(|path| {
             let mut client = daemon.client.clone();
-            let request = ResizeStoreRequest { path: name(path), capacity: CAPACITY / 2 };
-            daemon.runtime.spawn(async move { client.resize_store(request).await })
+            let request = ResizeCellRequest { path: name(path), capacity: CAPACITY / 2 };
+            daemon.runtime.spawn(async move { client.resize_cell(request).await })
         })
         .collect();
     daemon.runtime.block_on(async {

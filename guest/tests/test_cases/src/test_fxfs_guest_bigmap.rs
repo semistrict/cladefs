@@ -121,7 +121,7 @@ mod host {
             let base = dir.join("base");
             wait(boot(test_setup, &root, "base", machine("base", &base, &socket, capacity, 0)?)?)?;
             let fork = dir.join("fork");
-            crate::common::control(&socket)?.fork_store(&base, &fork)?;
+            crate::common::control(&socket)?.fork_cell(&base, &fork)?;
             // Room for the file twice over, which window reclaim then needn't take back.
             let window = if self.dax { 2 * bytes } else { 0 };
             let mut machine = machine("map", &fork, &socket, capacity, window)?;

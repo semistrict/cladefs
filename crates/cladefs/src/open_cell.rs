@@ -1093,7 +1093,7 @@ impl OpenCell {
     /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the branch
     /// `of` says, a cell of `kind` (TASK-364), its uploader as `keeping`
     /// says, placed at `token`'s placement if given, closes it, and returns its branch: what
-    /// [`OpenCell::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its
+    /// [`OpenCell::take_with`] takes a branch into, and the daemon's `CreateCell` makes. Its
     /// cell, and so its head, is taken as it is made with the token of the placement it is given,
     /// not `keeping`'s, this host's: a new copy placed later
     /// took no branch from an earlier placement (`ESTALE`), the head taken before the placement

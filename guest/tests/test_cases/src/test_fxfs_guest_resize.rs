@@ -53,7 +53,7 @@ mod host {
             let Some(line) = asked.next() else { return Ok(()) };
             assert_eq!(line?, step, "the steps in order");
             let resized = crate::common::control(cladefsd)
-                .and_then(|daemon| daemon.resize_store(store, capacity));
+                .and_then(|daemon| daemon.resize_cell(store, capacity));
             let outcome = match resized {
                 Ok(()) => "ok".to_owned(),
                 Err(err) => {

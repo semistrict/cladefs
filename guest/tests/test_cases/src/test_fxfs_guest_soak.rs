@@ -537,7 +537,7 @@ mod host {
                 "the base's VM exited {status}, saying {said:?}"
             );
             let control = control(&self.paths.socket)?;
-            control.sync_store(&base)?;
+            control.sync_cell(&base)?;
             let branch = control.branch(&base)?;
             self.ledger.base = Some(branch);
             self.say(format_args!("the base made: branch {branch}"));
@@ -552,11 +552,11 @@ mod host {
                 let path = self.paths.slot(slot);
                 let state = &mut self.ledger.slots[slot];
                 if self.plan.slots[slot].refork && state.branch.is_some() {
-                    control.delete_store(&path).with_context(|| format!("deleting slot {slot}"))?;
+                    control.delete_cell(&path).with_context(|| format!("deleting slot {slot}"))?;
                     *state = SlotState { generation: state.generation + 1, ..Default::default() };
                 }
                 if state.branch.is_none() {
-                    let branch = control.fork_store(&self.paths.base(), &path)?;
+                    let branch = control.fork_cell(&self.paths.base(), &path)?;
                     state.branch = Some(branch);
                     let generation = state.generation;
                     self.say(format_args!(
@@ -723,10 +723,10 @@ mod host {
             if happened.host_lost {
                 // As another host takes what was the lost host's, from the bucket alone.
                 let base = self.ledger.base.context("no base")?;
-                control.create_store(&self.paths.base(), CAPACITY, base, token)?;
+                control.create_cell(&self.paths.base(), CAPACITY, base, token)?;
                 for slot in 0..SLOTS {
                     let branch = self.ledger.slots[slot].branch.context("a slot with no store")?;
-                    control.create_store(&self.paths.slot(slot), CAPACITY, branch, token)?;
+                    control.create_cell(&self.paths.slot(slot), CAPACITY, branch, token)?;
                 }
                 self.say("every branch taken again from the bucket");
             }

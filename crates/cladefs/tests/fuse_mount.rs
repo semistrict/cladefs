@@ -612,12 +612,12 @@ fn a_cell_mounted_is_the_mounts_alone() {
     let vm = cladefs::CellClient::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let control = cladefs::cladefsd::control::Client::connect(socket).unwrap();
-    let forked = control.fork_store(&store, &dir.path().join("fork"));
+    let forked = control.fork_cell(&store, &dir.path().join("fork"));
     assert_eq!(forked.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let waited = started.elapsed();
     assert!(waited < std::time::Duration::from_secs(5), "refused after {waited:?}");
 
     cladefsctl_mount(socket, &["detach", "1", &cell]);
-    control.fork_store(&store, &dir.path().join("fork")).unwrap();
+    control.fork_cell(&store, &dir.path().join("fork")).unwrap();
     terminate(child, &m);
 }

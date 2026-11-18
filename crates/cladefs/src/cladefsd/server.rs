@@ -1672,7 +1672,7 @@ impl Connection {
 }
 
 impl Resizes for Connection {
-    /// Sets its store's capacity to `capacity` bytes (the control API's `ResizeStore`): grows it,
+    /// Sets its store's capacity to `capacity` bytes (the control API's `ResizeCell`): grows it,
     /// and tells the guest; or asks the guest to shrink, and shrinks it if the guest does, holding
     /// no thread while it waits for the guest's answer (TASK-43.6). The store's I/O runs on a
     /// blocking thread.

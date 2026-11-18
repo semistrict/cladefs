@@ -804,7 +804,7 @@ pub(super) async fn fork_version(
 
 /// cladefs: forks the version `version` of `cell` to a new store at `to`, a new cell of `tenant`'s
 /// if given, else of `cell`'s tenant's, as [`fork_version`] does, the store at `to` held throughout
-/// (`ForkStore`'s `version`): returns its branch.
+/// (`ForkCell`'s `version`): returns its branch.
 pub(super) async fn fork_of_version(
     cell: CellId,
     version: u64,

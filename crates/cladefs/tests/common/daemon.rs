@@ -50,7 +50,7 @@ impl Daemon {
         branch: cladefs::CellId,
         token: Option<u64>,
     ) -> Result<cladefs::CellId, tonic::Status> {
-        let request = CreateStoreRequest {
+        let request = CreateCellRequest {
             path: name(path),
             capacity: CAPACITY,
             branch: branch.id,
@@ -59,27 +59,27 @@ impl Daemon {
             cell: branch.id,
             kind: 0,
         };
-        let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
+        let response = self.runtime.block_on(self.client.create_cell(request))?.into_inner();
         let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
         Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
 
-    /// The branch of the store at `path`, in its cell, as StatStore says it (TASK-364).
+    /// The branch of the store at `path`, in its cell, as StatCell says it (TASK-364).
     pub fn branch(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let stat = self.stat(path)?;
         let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
         Ok(cladefs::CellId { tenant: cell.tenant, id: stat.branch })
     }
 
-    pub fn stat(&mut self, path: &Path) -> Result<StatStoreResponse, tonic::Status> {
-        let request = StatStoreRequest { path: name(path) };
-        Ok(self.runtime.block_on(self.client.stat_store(request))?.into_inner())
+    pub fn stat(&mut self, path: &Path) -> Result<StatCellResponse, tonic::Status> {
+        let request = StatCellRequest { path: name(path) };
+        Ok(self.runtime.block_on(self.client.stat_cell(request))?.into_inner())
     }
 
-    /// Forks the store at `from` to `to` (ForkStore).
+    /// Forks the store at `from` to `to` (ForkCell).
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
-        let request = ForkStoreRequest { from: name(from), to: name(to), ..Default::default() };
-        let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
+        let request = ForkCellRequest { from: name(from), to: name(to), ..Default::default() };
+        let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
         let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
         Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
@@ -92,16 +92,15 @@ impl Daemon {
         Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version: version.version })
     }
 
-    /// Forks the version `from` to `to`, on this host, whichever made it (ForkStore's `version`).
+    /// Forks the version `from` to `to`, on this host, whichever made it (ForkCell's `version`).
     pub fn fork_version(
         &mut self,
         from: cladefs::CellVersion,
         to: &Path,
     ) -> Result<cladefs::CellId, tonic::Status> {
         let cladefs::CellVersion { tenant, cell, version } = from;
-        let request =
-            ForkStoreRequest { to: name(to), version, tenant, cell, ..Default::default() };
-        let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
+        let request = ForkCellRequest { to: name(to), version, tenant, cell, ..Default::default() };
+        let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
         let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
         Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
@@ -113,13 +112,13 @@ impl Daemon {
     }
 
     pub fn resize(&mut self, path: &Path, capacity: u64) -> Result<(), tonic::Status> {
-        let request = ResizeStoreRequest { path: name(path), capacity };
-        self.runtime.block_on(self.client.resize_store(request)).map(drop)
+        let request = ResizeCellRequest { path: name(path), capacity };
+        self.runtime.block_on(self.client.resize_cell(request)).map(drop)
     }
 
     pub fn place(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
-        let request = PlaceStoreRequest { path: name(path), token };
-        self.runtime.block_on(self.client.place_store(request)).map(drop)
+        let request = PlaceCellRequest { path: name(path), token };
+        self.runtime.block_on(self.client.place_cell(request)).map(drop)
     }
 
     /// Shares the version `version` of the cell of the store at `path`, or no longer
@@ -135,18 +134,18 @@ impl Daemon {
     }
 
     pub fn sync(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = SyncStoreRequest { path: name(path) };
-        self.runtime.block_on(self.client.sync_store(request)).map(drop)
+        let request = SyncCellRequest { path: name(path) };
+        self.runtime.block_on(self.client.sync_cell(request)).map(drop)
     }
 
     pub fn delete(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = DeleteStoreRequest { path: name(path) };
-        self.runtime.block_on(self.client.delete_store(request)).map(drop)
+        let request = DeleteCellRequest { path: name(path) };
+        self.runtime.block_on(self.client.delete_cell(request)).map(drop)
     }
 
-    pub fn drop_store(&mut self, path: &Path) -> Result<(), tonic::Status> {
-        let request = DropStoreRequest { path: name(path) };
-        self.runtime.block_on(self.client.drop_store(request)).map(drop)
+    pub fn drop_cell(&mut self, path: &Path) -> Result<(), tonic::Status> {
+        let request = DropCellRequest { path: name(path) };
+        self.runtime.block_on(self.client.drop_cell(request)).map(drop)
     }
 
     pub fn import(&mut self, path: &Path, image: &Path) -> Result<cladefs::CellId, tonic::Status> {
@@ -180,8 +179,8 @@ impl Daemon {
     }
 
     /// The stores the daemon serves, by their paths, in order.
-    pub fn list(&mut self) -> Vec<(PathBuf, StatStoreResponse)> {
-        let listed = self.runtime.block_on(self.client.list_stores(ListStoresRequest {}));
+    pub fn list(&mut self) -> Vec<(PathBuf, StatCellResponse)> {
+        let listed = self.runtime.block_on(self.client.list_cells(ListCellsRequest {}));
         let mut stores: Vec<_> = (listed.unwrap().into_inner().stores.into_iter())
             .map(|store| (PathBuf::from(store.path), store.stat.unwrap()))
             .collect();

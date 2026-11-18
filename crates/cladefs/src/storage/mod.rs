@@ -105,7 +105,7 @@ impl Storage {
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         // What a making that died part way left is no store: its directory goes, not the branch,
-        // which may be another's, as the extent daemon's `CreateStore` has it (TASK-196).
+        // which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         if host_cell::unmade(path) {
             std::fs::remove_dir_all(path)
                 .with_context(|| format!("removing {}, a store unmade", path.display()))
@@ -118,7 +118,7 @@ impl Storage {
             let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
             let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
             opened.made().map_err(Error::new)?;
-            // Closed before it is placed, as `CreateStore` places a store, and opened again.
+            // Closed before it is placed, as `CreateCell` places a store, and opened again.
             drop(opened);
             if let Some(token) = token {
                 local_cell::place_host(path, token).map_err(Error::new)?;

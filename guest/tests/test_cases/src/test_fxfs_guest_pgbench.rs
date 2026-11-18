@@ -339,7 +339,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let started = Instant::now();
             while !stop.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_secs(2));
-                let stat = control.stat_store(&store)?;
+                let stat = control.stat_cell(&store)?;
                 writeln!(
                     out,
                     "t={} pending_upload_bytes={} oldest_pending_ms={}",
@@ -713,7 +713,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         ) -> anyhow::Result<Running> {
             let dir = &served.test_setup.tmp_dir;
             let fork = dir.join(nth("fork", vm));
-            crate::common::control(&served.socket)?.fork_store(&served.base, &fork)?;
+            crate::common::control(&served.socket)?.fork_cell(&served.base, &fork)?;
             let device =
                 Device::Store { store: &fork, cladefsd: &served.socket, window: served.window };
             let mut machine = machine(role, device, memory)?;

@@ -85,7 +85,7 @@ mod host {
             let mut answers = stream.try_clone()?;
             BufReader::new(stream).read_line(&mut said)?;
             anyhow::ensure!(said == "frozen\n", "the guest said {said:?}");
-            crate::common::control(&cladefsd)?.fork_store(&store, &fork)?;
+            crate::common::control(&cladefsd)?.fork_cell(&store, &fork)?;
             writeln!(answers, "forked")?;
             // One after the other: they boot from the same root filesystem's image.
             wait(source)?;

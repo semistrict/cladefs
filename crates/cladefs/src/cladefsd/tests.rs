@@ -391,24 +391,24 @@ fn control<T>(call: impl std::future::Future<Output = T>) -> T {
     runtime.block_on(call)
 }
 
-/// Resizes the store at `path`, as the control API does (`ResizeStore`).
+/// Resizes the store at `path`, as the control API does (`ResizeCell`).
 fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
     control(super::cells::resize(path.to_owned(), capacity))
 }
 
-/// Forks the store at `from` to a new branch at `to`, as the control API does (`ForkStore`), and
+/// Forks the store at `from` to a new branch at `to`, as the control API does (`ForkCell`), and
 /// returns the branch.
-fn fork_store(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
+fn fork_cell(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
     let forked = control(super::cells::fork(from.to_owned(), to.to_owned(), None));
     forked.map_err(crate::Error::from)
 }
 
-/// Deletes the store at `path`, as the control API does (`DeleteStore`).
-fn delete_store(path: &Path) -> Result<(), crate::Error> {
+/// Deletes the store at `path`, as the control API does (`DeleteCell`).
+fn delete_cell(path: &Path) -> Result<(), crate::Error> {
     Ok(control(super::cells::delete(path.to_owned()))?)
 }
 
-/// Waits for the store at `path` to be uploaded, as the control API does (`SyncStore`).
+/// Waits for the store at `path` to be uploaded, as the control API does (`SyncCell`).
 fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
     Ok(control(super::cells::sync(path.to_owned()))?)
 }
@@ -454,11 +454,11 @@ fn resizes_open_stores() {
     assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
 }
 
-/// A shrink whose caller drops its `ResizeStore` stops waiting for the guest (TASK-43.6): the
+/// A shrink whose caller drops its `ResizeCell` stops waiting for the guest (TASK-43.6): the
 /// guest's answer, coming after, shrinks nothing.
 #[test]
 fn shrinks_dropped_by_their_callers_stop_waiting() {
-    use super::control::proto::ResizeStoreRequest;
+    use super::control::proto::ResizeCellRequest;
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
@@ -475,10 +475,10 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     control(async {
         let mut client = super::control::connect(&socket).await.unwrap();
         let request =
-            ResizeStoreRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
+            ResizeCellRequest { path: path.to_str().unwrap().to_owned(), capacity: 1 << 20 };
         let asking = tokio::task::spawn_blocking(move || (asked.recv().unwrap(), asked));
         let asked = tokio::select! {
-            shrunk = client.resize_store(request) => panic!("{shrunk:?}"),
+            shrunk = client.resize_cell(request) => panic!("{shrunk:?}"),
             asked = asking => asked.unwrap(),
         };
         assert_eq!(asked.0, (1 << 20, true));
@@ -2364,10 +2364,10 @@ fn stores_fork_live_once_nothing_is_open() {
     store.commit(Some(b"before")).unwrap();
     write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
 
-    let busy = fork_store(&path, &fork);
+    let busy = fork_cell(&path, &fork);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     store.commit(Some(b"at the fork")).unwrap();
-    let branch = fork_store(&path, &fork).unwrap();
+    let branch = fork_cell(&path, &fork).unwrap();
     // The store goes on, its writes its own.
     write(&store, extent(3), 0, &pattern(3, BLOCK)).unwrap();
     store.commit(Some(b"after")).unwrap();
@@ -2396,29 +2396,29 @@ fn stores_are_deleted_while_their_forks_are_open() {
     let base = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, base, 0, &pattern(1, BLOCK)).unwrap();
     store.commit(Some(b"base")).unwrap();
-    fork_store(&path, &fork).unwrap();
+    fork_cell(&path, &fork).unwrap();
     let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
 
-    let busy = delete_store(&path);
+    let busy = delete_cell(&path);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     drop(store);
-    delete_store(&path).unwrap();
+    delete_cell(&path).unwrap();
     assert!(!path.exists(), "the store's directory stayed");
     assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
     let own = ExtentId { branch: forked.branch(), sequence: 1 };
     write(&forked, own, 0, &pattern(2, BLOCK)).unwrap();
     forked.commit(Some(b"fork")).unwrap();
 
-    let busy = delete_store(&fork);
+    let busy = delete_cell(&fork);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     drop(forked);
     let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
     assert_eq!(forked.root().unwrap(), b"fork");
     assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
     drop(forked);
-    delete_store(&fork).unwrap();
+    delete_cell(&fork).unwrap();
     assert!(!fork.exists());
-    let missing = delete_store(&fork);
+    let missing = delete_cell(&fork);
     assert_eq!(missing.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
 }
 
@@ -2621,10 +2621,10 @@ fn deleted_stores_branches_keep_what_their_forks_need() {
     let base = ExtentId { branch: base_branch, sequence: 1 };
     write(&store, base, 0, &pattern(3, 2 * BLOCK)).unwrap();
     store.commit(Some(b"base")).unwrap();
-    let fork_branch = fork_store(&path, &fork).unwrap();
+    let fork_branch = fork_cell(&path, &fork).unwrap();
     let base_branch = branch_at(&path);
     drop(store);
-    delete_store(&path).unwrap();
+    delete_cell(&path).unwrap();
 
     let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
@@ -2676,7 +2676,7 @@ fn earlier_placements_open_no_stores() {
     assert_eq!(later.root().unwrap(), b"placed at 5");
 }
 
-/// TASK-266: a store the control API makes of a branch, at a placement (`CreateStore`, as
+/// TASK-266: a store the control API makes of a branch, at a placement (`CreateCell`, as
 /// `cladefsctl take` through the daemon's), takes the branch's cell, and so its head, with that
 /// placement's token as it is made, not the daemon's: a copy placed later than the one that took
 /// the branch last, on another host, takes it over, in a file bucket as in any.
@@ -2761,8 +2761,8 @@ fn free_extents(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
 
 /// Waits for the uploader of the store at `path`, which a connection has open, to have uploaded
 /// its latest commit as its interval ran out, and let go of what the commits up to it freed: as
-/// the daemon's control API says (`StatStore`), which makes nothing durable, as waiting for the
-/// uploads would (`SyncStore`).
+/// the daemon's control API says (`StatCell`), which makes nothing durable, as waiting for the
+/// uploads would (`SyncCell`).
 fn wait_for_uploader(path: &Path) {
     control(async {
         loop {
@@ -3069,8 +3069,8 @@ fn stores_followed_are_worked_on_as_they_are() {
     assert_eq!(resize(&path, 1 << 20), Err(Errno::EBUSY));
     assert_eq!(follower.info().unwrap().capacity, 2 << 20);
     let fork = dir.path().join("fork");
-    fork_store(&path, &fork).unwrap();
-    assert_eq!(delete_store(&path).err().and_then(|error| error.errno()), Some(Errno::EBUSY));
+    fork_cell(&path, &fork).unwrap();
+    assert_eq!(delete_cell(&path).err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     assert_eq!(control(super::cells::place(path.clone(), 2)), Err(Errno::EBUSY));
     assert_eq!(control(super::cells::make_public(path.clone(), false)), Err(Errno::EBUSY));
     drop(follower);
@@ -3079,7 +3079,7 @@ fn stores_followed_are_worked_on_as_they_are() {
     let mut data = vec![0; BLOCK];
     forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     assert_eq!(data, pattern(1, BLOCK));
-    delete_store(&path).unwrap();
+    delete_cell(&path).unwrap();
 }
 
 /// What this process holds, as Linux counts it: the daemon's threads (but for its clients'), its
@@ -3153,7 +3153,7 @@ fn serves_hundreds_of_forks_of_a_base() {
     let forks: Vec<_> = (0..FORKS)
         .map(|n| {
             let fork = dir.path().join(format!("fork-{n}"));
-            fork_store(&base, &fork).unwrap();
+            fork_cell(&base, &fork).unwrap();
             fork
         })
         .collect();
@@ -3580,8 +3580,8 @@ fn the_daemon_accepts_on_after_failing_to() {
     assert!(matches!(opened, Ok(Ok(_))), "the daemon accepts no more: {opened:?}");
 }
 
-/// TASK-79.83: a fork of a store, as the control API makes it (`ForkStore`), to a path a store is
-/// at already, fails with `EEXIST`, as making a store there does (`CreateStore`).
+/// TASK-79.83: a fork of a store, as the control API makes it (`ForkCell`), to a path a store is
+/// at already, fails with `EEXIST`, as making a store there does (`CreateCell`).
 #[test]
 fn forks_to_stores_there_already_fail_with_eexist() {
     host();
@@ -3590,8 +3590,8 @@ fn forks_to_stores_there_already_fail_with_eexist() {
     let store = OpenCell::create(&path, 1 << 20).unwrap();
     store.commit(None).unwrap();
     drop(store);
-    fork_store(&path, &fork).unwrap();
-    let again = fork_store(&path, &fork);
+    fork_cell(&path, &fork).unwrap();
+    let again = fork_cell(&path, &fork);
     assert_eq!(again.err().and_then(|error| error.errno()), Some(Errno::EEXIST));
 }
 
@@ -3670,7 +3670,7 @@ fn stores_synced_here_are_closed_before_they_are_let_go() {
         store.commit(None).unwrap();
         drop(store);
         wait_uploaded(&path).unwrap();
-        let deleted = delete_store(&path).map_err(|error| error.errno());
+        let deleted = delete_cell(&path).map_err(|error| error.errno());
         assert_eq!(deleted, Ok(()), "round {round}");
     }
 }
@@ -4334,7 +4334,7 @@ fn forks_whose_answers_are_lost_stand() {
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
     drop(forked);
     let deleted = loop {
-        match delete_store(&child) {
+        match delete_cell(&child) {
             Err(error) if error.errno() == Some(Errno::EBUSY) => std::thread::yield_now(),
             deleted => break deleted,
         }
@@ -4360,10 +4360,10 @@ fn control_forks_failing_fork_again() {
     served.join().unwrap();
 
     let failing = fail::FailGuard::new("cladefsd::fork_uploaded", "1*return").unwrap();
-    let failed = fork_store(&base, &fork).map_err(|err| err.errno());
+    let failed = fork_cell(&base, &fork).map_err(|err| err.errno());
     drop(failing);
     assert_eq!((failed, fork.exists()), (Err(Some(Errno::EIO)), false));
-    fork_store(&base, &fork).unwrap();
+    fork_cell(&base, &fork).unwrap();
 
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
     let branch = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
@@ -5350,7 +5350,7 @@ fn stores_held_through_their_connections_are_let_go_once_they_are() {
     // Its VM process goes, answering nothing.
     drop(store);
     served.join().unwrap();
-    assert_eq!(delete_store(&path).map_err(|error| error.errno()), Ok(()));
+    assert_eq!(delete_cell(&path).map_err(|error| error.errno()), Ok(()));
     assert_eq!(resizing.join().unwrap(), Err(Errno::ETIMEDOUT));
 }
 

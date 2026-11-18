@@ -477,30 +477,30 @@ impl Command {
         match self {
             Self::Create { dir, capacity } => {
                 let new = cladefs::CellId { tenant: 0, id: 0 };
-                println!("{}", daemon.create_store(&dir, capacity, new, None)?);
+                println!("{}", daemon.create_cell(&dir, capacity, new, None)?);
             }
             Self::Take { dir, capacity, branch, token } => {
-                daemon.create_store(&dir, capacity, branch, token)?;
+                daemon.create_cell(&dir, capacity, branch, token)?;
             }
-            Self::Place { dir, token } => daemon.place_store(&dir, token)?,
-            Self::Sync { dir } => daemon.sync_store(&dir)?,
+            Self::Place { dir, token } => daemon.place_cell(&dir, token)?,
+            Self::Sync { dir } => daemon.sync_cell(&dir)?,
             Self::Import { dir, capacity, image, reference } => {
                 daemon.import_image(&dir, capacity, &image, reference.as_deref())?;
             }
-            Self::Fork { src, dst } => println!("{}", daemon.fork_store(&src, &dst)?),
+            Self::Fork { src, dst } => println!("{}", daemon.fork_cell(&src, &dst)?),
             Self::Version { dir } => println!("{:x}", daemon.make_version(&dir, None)?),
             Self::Versions { dir } => print_versions(&daemon.list_versions(&dir)?),
             Self::DropVersions { dir, versions } => daemon.drop_versions(&dir, &versions)?,
             Self::Share { dir, version, shared } => daemon.share_version(&dir, version, shared)?,
             Self::ForkVersion { from, dst } => println!("{}", daemon.fork_version(from, &dst)?),
-            Self::Delete { dir } => daemon.delete_store(&dir)?,
-            Self::Drop { dir } => daemon.drop_store(&dir)?,
-            Self::Resize { dir, capacity } => daemon.resize_store(&dir, capacity)?,
+            Self::Delete { dir } => daemon.delete_cell(&dir)?,
+            Self::Drop { dir } => daemon.drop_cell(&dir)?,
+            Self::Resize { dir, capacity } => daemon.resize_cell(&dir, capacity)?,
             Self::Public { dir } => daemon.make_public(&dir)?,
             Self::PublicAttachOnly { dir } => daemon.make_public_attach_only(&dir)?,
             Self::Attach { dir, base } => daemon.attach_base(&dir, &base)?,
             Self::Stat { dir } => {
-                let stat = daemon.stat_store(&dir)?;
+                let stat = daemon.stat_cell(&dir)?;
                 let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
                 let whose = |own, inherited| cladefs::Whose { own, inherited };
                 print!(

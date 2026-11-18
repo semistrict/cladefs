@@ -226,7 +226,7 @@ fn a_database_is_fenced_with_its_cell() {
             .unwrap();
     connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)").unwrap();
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
-    control.sync_store(&store).unwrap();
+    control.sync_cell(&store).unwrap();
     let ours = control.branch(&store).unwrap();
     let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
@@ -246,7 +246,7 @@ fn a_database_is_fenced_with_its_cell() {
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
-    let fenced = control.sync_store(&store).unwrap_err();
+    let fenced = control.sync_cell(&store).unwrap_err();
     assert_eq!(fenced.errno(), Some(cladefs::Errno::EROFS), "{fenced:#}");
     let refused = connection.execute("INSERT INTO t VALUES (3, 'refused')", []).unwrap_err();
     assert_eq!(

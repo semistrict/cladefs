@@ -224,7 +224,7 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     assert_eq!(failure(unnamed), (Code::NotFound, Errno::ENOENT));
 }
 
-/// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory (ForkStore),
+/// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory (ForkCell),
 /// refused with EACCES, making nothing; into its own tenant's it forks. A store
 /// of the default tenant's (0) forks into both tenants' directories, a cell of each's.
 #[test]
@@ -575,7 +575,7 @@ fn versions_restore_whatever_placement_took_them() {
 }
 
 /// TASK-158: a version of a base, as of any store, forks on several hosts at once, as a
-/// snapshot's restores do (ForkStore's `version`): into cells of their own, which read the base
+/// snapshot's restores do (ForkCell's `version`): into cells of their own, which read the base
 /// and write on their own. The base is its writer's still: what it writes after reaches no fork of
 /// the version.
 #[test]

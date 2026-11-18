@@ -59,10 +59,10 @@ tenants' cells only while those are shared (`ShareVersion`); any other restore f
 ### 1. Before restoring on another host than the snapshot's
 
 ```
-SyncStore(<the snapshotted VM's store>)
+SyncCell(<the snapshotted VM's store>)
 ```
 
-A version is made locally and uploaded behind. Once `SyncStore` returns, it is in the bucket for
+A version is made locally and uploaded behind. Once `SyncCell` returns, it is in the bucket for
 every host.
 
 ### 2. Load the snapshot
@@ -133,9 +133,9 @@ then fork the version, as a snapshot's is restored:
 ```
 # On the base's host, once nothing has it open:
 version = MakeVersion(<base>).version
-SyncStore(<base>)
+SyncCell(<base>)
 # Then, as often as you like, on every host at the same time:
-ForkStore(to = <VM's store>, version, tenant, cell)
+ForkCell(to = <VM's store>, version, tenant, cell)
 ```
 
 The base stays writable on its host. What it writes after reaches no fork of the version: make a new
@@ -169,9 +169,9 @@ device naming that field is refused.
 
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
 own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
-whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it). StatStore says
+whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it). StatCell says
 how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
-open, StatStore reads the count kept as it changes, at no cost; of one none has, it opens the store
+open, StatCell reads the count kept as it changes, at no cost; of one none has, it opens the store
 as a VM's would (its state read, its branch's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.

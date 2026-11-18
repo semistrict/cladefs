@@ -199,7 +199,7 @@ impl CellClient {
         self.client.request(&Request::Unpin(extent)).await.map(drop)
     }
 
-    /// Calls `changed` with the store's capacity each time the daemon resizes it (the control API's `ResizeStore`), and
+    /// Calls `changed` with the store's capacity each time the daemon resizes it (the control API's `ResizeCell`), and
     /// whether the guest is asked to shrink to it, which it answers
     /// ([`CellClient::resized`]). Unless something is called so, the guest refuses every
     /// shrink.

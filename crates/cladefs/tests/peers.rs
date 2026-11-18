@@ -138,10 +138,10 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     }
     store.commit(None).unwrap();
     drop(store);
-    first.control.sync_store(&base).unwrap();
+    first.control.sync_cell(&base).unwrap();
     let version = first.control.make_version(&base, None).unwrap();
-    first.control.sync_store(&base).unwrap();
-    let stated = first.control.stat_store(&base).unwrap();
+    first.control.sync_cell(&base).unwrap();
+    let stated = first.control.stat_cell(&base).unwrap();
     let from = cladefs::CellVersion { tenant: stated.tenant, cell: stated.cell, version };
 
     let fork = hosts[1].join("fork");

@@ -491,7 +491,7 @@ code does not have yet are said so.
 - **snapshot**: VMs' (Firecracker's) and Fxfs's alone. A cell's named state is a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**.
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
-  StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
+  StatCell's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; writers have none since TASK-407.
 - **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,

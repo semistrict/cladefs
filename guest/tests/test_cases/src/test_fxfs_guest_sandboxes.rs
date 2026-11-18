@@ -331,7 +331,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         let host = &hosts[sandbox.host];
         let name = sandbox.name();
         let fork = dir.join(format!("{name}.root"));
-        control(&host.socket)?.fork_store(&host.base, &fork)?;
+        control(&host.socket)?.fork_cell(&host.base, &fork)?;
         let (vcpus, memory) = (mode.shape)(sandbox.role);
         let mut machine = Vm::new(vcpus, memory)?;
         machine.guest_kernel()?;

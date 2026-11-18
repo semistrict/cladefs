@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// fake serves the control API as the daemon answers it: Grant a socket, StatStore failing as the
+// fake serves the control API as the daemon answers it: Grant a socket, StatCell failing as the
 // daemon fails a call, with a status and its errno, or with an errno entry that is none.
 type fake struct {
 	cladefsdv1.UnimplementedCladefsdServer
@@ -43,7 +43,7 @@ func (fake) Grant(_ context.Context, req *cladefsdv1.GrantRequest) (*cladefsdv1.
 	return &cladefsdv1.GrantResponse{Socket: "/run/tenants/" + base32(req.Tenant) + ".sock"}, nil
 }
 
-func (fake) StatStore(ctx context.Context, req *cladefsdv1.StatStoreRequest) (*cladefsdv1.StatStoreResponse, error) {
+func (fake) StatCell(ctx context.Context, req *cladefsdv1.StatCellRequest) (*cladefsdv1.StatCellResponse, error) {
 	errno := map[string]string{"missing": "2", "garbled": "ENOENT"}[req.Path]
 	if err := grpc.SetTrailer(ctx, metadata.Pairs(cladefsdv1.ErrnoKey, errno)); err != nil {
 		return nil, err
@@ -104,7 +104,7 @@ func TestCalls(t *testing.T) {
 // A failed call's error is its status, and the errno the daemon failed with.
 func TestErrno(t *testing.T) {
 	client := client(t, serve(t))
-	_, err := client.StatStore(t.Context(), &cladefsdv1.StatStoreRequest{Path: "missing"})
+	_, err := client.StatCell(t.Context(), &cladefsdv1.StatCellRequest{Path: "missing"})
 	if !errors.Is(err, syscall.ENOENT) {
 		t.Errorf("errors.Is(%v, ENOENT) = false", err)
 	}
@@ -123,7 +123,7 @@ func TestErrno(t *testing.T) {
 // A call failed without an errno is its status alone.
 func TestNoErrno(t *testing.T) {
 	client := client(t, serve(t))
-	_, err := client.SyncStore(t.Context(), &cladefsdv1.SyncStoreRequest{Path: "store"})
+	_, err := client.SyncCell(t.Context(), &cladefsdv1.SyncCellRequest{Path: "store"})
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		t.Errorf("errors.As(%v) found errno %v, want none", err, errno)
@@ -136,7 +136,7 @@ func TestNoErrno(t *testing.T) {
 // An errno entry that is no number is said, and no errno taken from it.
 func TestGarbledErrno(t *testing.T) {
 	client := client(t, serve(t))
-	_, err := client.StatStore(t.Context(), &cladefsdv1.StatStoreRequest{Path: "garbled"})
+	_, err := client.StatCell(t.Context(), &cladefsdv1.StatCellRequest{Path: "garbled"})
 	want := `rpc error: code = NotFound desc = ENOENT (its cladefs-errno ["ENOENT"] is no errno)`
 	if err.Error() != want {
 		t.Errorf("err = %q, want %q", err, want)
