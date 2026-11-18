@@ -30,6 +30,9 @@
 //! which writes to the store: to look at a VM's store and leave it be, mount a fork of it
 //! (`cladefsctl fork`).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 const USAGE: &str = "usage: cladefs-mount [--allow-other] [--new CAPACITY] STORE MOUNTPOINT";
 

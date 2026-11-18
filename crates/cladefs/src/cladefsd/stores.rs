@@ -1610,6 +1610,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: as above.
         unsafe { std::env::remove_var("CLADEFSD_PART_CACHE") };
+        // SAFETY: as above: no other thread of this test's process runs.
         let set = |bytes: &str| unsafe { std::env::set_var("CLADEFSD_PART_CACHE_BYTES", bytes) };
         set("1");
         assert_eq!(

@@ -111,6 +111,8 @@
 //! whatever it holds, and its branch in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 // cladefs: `tests-kms` has a host given no KMS encrypt under the tests' KMS, its KEKs known to all
 // (`bucket::testing`, TASK-411.28): this crate's tests' and sqlite_extents', which their

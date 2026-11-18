@@ -20,37 +20,46 @@ use anyhow::{Error, bail};
 use extent_files::{Failed, NotFound};
 use rusqlite::ffi;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::sync::{Arc, Mutex};
+use std::ptr::NonNull;
+use std::sync::{Arc, Mutex, Weak};
 
 /// The longest name a file of a file set has.
 const MAX_PATHNAME: c_int = 512;
 
 /// What the VFS's functions find in it.
 struct App {
-    file_set: Arc<FileSet>,
+    /// The file set, while anything holds it: its registration does, until dropped.
+    file_set: Weak<FileSet>,
     /// The default VFS, which randomness, sleeping and the time are of.
     default: *mut ffi::sqlite3_vfs,
 }
 
 /// A file set registered as a SQLite VFS, until dropped, which only a file set none of whose files
 /// is open may be.
+///
+/// What SQLite is given of it, the VFS's struct, its name and its app, a few hundred bytes, it
+/// keeps as long as the process: a connection SQLite opened on the VFS with none of its files open,
+/// an in-memory database's, keeps calling the VFS once unregistered, as its clock (TASK-444.14).
+/// Its file set it holds only while the registration does, or a file open of it: a connection's
+/// opens of files once the file set went are refused.
 pub struct Registration {
-    vfs: Box<ffi::sqlite3_vfs>,
-    _name: CString,
-    app: Box<App>,
+    vfs: NonNull<ffi::sqlite3_vfs>,
+    file_set: Arc<FileSet>,
 }
 
-// SAFETY: SQLite's VFS functions may be called from any thread; what they share is the file set's,
-// behind its lock.
+// SAFETY: `vfs` points to a struct of the process's life that nothing changes once registered,
+// SQLite's lock aside, which `sqlite3_vfs_unregister` takes: any thread may unregister it.
 unsafe impl Send for Registration {}
+// SAFETY: a shared registration gives nothing of `vfs` to any thread.
 unsafe impl Sync for Registration {}
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        let opens = self.app.file_set.opens();
+        let opens = self.file_set.opens();
         assert_eq!(opens, 0, "unregistering a file set whose files are open");
-        // SAFETY: registered, and no connection uses it.
-        unsafe { ffi::sqlite3_vfs_unregister(&mut *self.vfs) };
+        // SAFETY: registered by `register`, and of the process's life; a connection still
+        // holding it keeps calling it, which it then still serves.
+        unsafe { ffi::sqlite3_vfs_unregister(self.vfs.as_ptr()) };
     }
 }
 
@@ -63,19 +72,23 @@ pub fn register(name: &str, file_set: Arc<FileSet>) -> Result<Registration, Erro
     if initialized != ffi::SQLITE_OK {
         bail!("initializing SQLite: {initialized}");
     }
-    // SAFETY: a lookup; the default's, and `name`'s, which must not be.
+    // SAFETY: a lookup of the default VFS, SQLite initialized.
     let default = unsafe { ffi::sqlite3_vfs_find(std::ptr::null()) };
+    // SAFETY: a lookup of `name`'s, a C string, which must not be registered.
     if unsafe { !ffi::sqlite3_vfs_find(name.as_ptr()).is_null() } {
         bail!("a SQLite VFS named {name:?} is registered already");
     }
-    let mut app = Box::new(App { file_set, default });
-    let mut vfs = Box::new(ffi::sqlite3_vfs {
+    // The process's, as a connection may keep calling the VFS after it is unregistered.
+    let app: &'static App =
+        Box::leak(Box::new(App { file_set: Arc::downgrade(&file_set), default }));
+    let name: &'static CStr = Box::leak(name.into_boxed_c_str());
+    let vfs = Box::leak(Box::new(ffi::sqlite3_vfs {
         iVersion: 2,
         szOsFile: size_of::<Handle>() as c_int,
         mxPathname: MAX_PATHNAME,
         pNext: std::ptr::null_mut(),
         zName: name.as_ptr(),
-        pAppData: &mut *app as *mut App as *mut c_void,
+        pAppData: app as *const App as *mut c_void,
         xOpen: Some(x_open),
         xDelete: Some(x_delete),
         xAccess: Some(x_access),
@@ -92,14 +105,13 @@ pub fn register(name: &str, file_set: Arc<FileSet>) -> Result<Registration, Erro
         xSetSystemCall: None,
         xGetSystemCall: None,
         xNextSystemCall: None,
-    });
-    // SAFETY: `vfs`, its name and its app live until it is unregistered, as the registration
-    // holds them.
-    let registered = unsafe { ffi::sqlite3_vfs_register(&mut *vfs, 0) };
+    }));
+    // SAFETY: `vfs`, its name and its app are the process's, unchanged once registered.
+    let registered = unsafe { ffi::sqlite3_vfs_register(vfs, 0) };
     if registered != ffi::SQLITE_OK {
         bail!("registering the SQLite VFS {name:?}: {registered}");
     }
-    Ok(Registration { vfs, _name: name, app })
+    Ok(Registration { vfs: NonNull::from(vfs), file_set })
 }
 
 /// What a connection has open.
@@ -144,6 +156,7 @@ static METHODS: ffi::sqlite3_io_methods = ffi::sqlite3_io_methods {
 ///
 /// `vfs` must be one [`register`] made.
 unsafe fn app<'a>(vfs: *mut ffi::sqlite3_vfs) -> &'a App {
+    // SAFETY: register set pAppData to an App of the process's life, which nothing changes.
     unsafe { &*((*vfs).pAppData as *const App) }
 }
 
@@ -153,6 +166,8 @@ unsafe fn app<'a>(vfs: *mut ffi::sqlite3_vfs) -> &'a App {
 ///
 /// `file` must be one `x_open` opened, not closed.
 unsafe fn open<'a>(file: *mut ffi::sqlite3_file) -> &'a mut Open {
+    // SAFETY: x_open made `file` a Handle; SQLite calls one file's methods one at a time, from the
+    // connection holding it (its mutex, in serialized mode), so the reference is the only one.
     unsafe { &mut (*(file as *mut Handle)).open }
 }
 
@@ -164,6 +179,7 @@ unsafe fn open<'a>(file: *mut ffi::sqlite3_file) -> &'a mut Open {
 unsafe fn name_of(name: *const c_char) -> Option<String> {
     match name.is_null() {
         true => None,
+        // SAFETY: a C string, as the caller's contract says, not null.
         false => Some(unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned()),
     }
 }
@@ -192,6 +208,7 @@ unsafe extern "C" fn x_open(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let (app, name) = unsafe { (app(vfs), name_of(name)) };
+    // SAFETY: `file`, room of szOsFile bytes SQLite gives x_open: no methods until it opens.
     unsafe { (*file).pMethods = std::ptr::null() };
     let opened = match name {
         _ if flags & ffi::SQLITE_OPEN_WAL != 0 => {
@@ -200,7 +217,7 @@ unsafe extern "C" fn x_open(
         }
         Some(name) if flags & ffi::SQLITE_OPEN_MAIN_DB != 0 => {
             let create = flags & ffi::SQLITE_OPEN_CREATE != 0;
-            let file_set = app.file_set.clone();
+            let Some(file_set) = app.file_set.upgrade() else { return ffi::SQLITE_CANTOPEN };
             file_set.open_file(&name, create).map(|()| Open::Database {
                 file_set,
                 name,
@@ -209,7 +226,8 @@ unsafe extern "C" fn x_open(
         }
         Some(name) if flags & ffi::SQLITE_OPEN_DELETEONCLOSE == 0 => {
             let create = flags & ffi::SQLITE_OPEN_CREATE != 0;
-            app.file_set.memory_file(&name, create).map(Open::Memory)
+            let Some(file_set) = app.file_set.upgrade() else { return ffi::SQLITE_CANTOPEN };
+            file_set.memory_file(&name, create).map(Open::Memory)
         }
         _ => Ok(Open::Memory(Arc::new(Mutex::new(Vec::new())))),
     };
@@ -238,7 +256,8 @@ unsafe extern "C" fn x_delete(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let (app, name) = unsafe { (app(vfs), name_of(name).unwrap_or_default()) };
-    match app.file_set.delete(&name) {
+    let Some(file_set) = app.file_set.upgrade() else { return ffi::SQLITE_IOERR_DELETE };
+    match file_set.delete(&name) {
         Ok(true) => ffi::SQLITE_OK,
         Ok(false) => ffi::SQLITE_IOERR_DELETE_NOENT,
         Err(error) => code_of(Err(error), ffi::SQLITE_IOERR_DELETE),
@@ -253,8 +272,10 @@ unsafe extern "C" fn x_access(
 ) -> c_int {
     // SAFETY: as SQLite calls it.
     let (app, name) = unsafe { (app(vfs), name_of(name).unwrap_or_default()) };
-    match app.file_set.exists(&name) {
+    let Some(file_set) = app.file_set.upgrade() else { return ffi::SQLITE_IOERR_ACCESS };
+    match file_set.exists(&name) {
         Ok(exists) => {
+            // SAFETY: as SQLite calls it: `out` is its int.
             unsafe { *out = exists as c_int };
             ffi::SQLITE_OK
         }
@@ -273,6 +294,8 @@ unsafe extern "C" fn x_full_pathname(
     if name.len() > size as usize {
         return ffi::SQLITE_CANTOPEN;
     }
+    // SAFETY: `name.len()` bytes, no more than `out`'s `size`; SQLite's buffer and the name don't
+    // overlap.
     unsafe { std::ptr::copy_nonoverlapping(name.as_ptr() as *const c_char, out, name.len()) };
     ffi::SQLITE_OK
 }
@@ -346,8 +369,14 @@ unsafe extern "C" fn x_read(
     len: c_int,
     offset: ffi::sqlite3_int64,
 ) -> c_int {
-    // SAFETY: as SQLite calls it: `buf` holds `len` bytes.
-    let buf = unsafe { std::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
+    // SAFETY: as SQLite calls it, `buf` holds `len` bytes, its own, which no other thread touches
+    // meanwhile, and which may be uninitialized, as a page its cache just allocated: zeroed first,
+    // as a slice's bytes must be initialized (TASK-444.4).
+    let buf = unsafe {
+        std::ptr::write_bytes(buf as *mut u8, 0, len as usize);
+        std::slice::from_raw_parts_mut(buf as *mut u8, len as usize)
+    };
+    // SAFETY: as SQLite calls it: a file x_open opened.
     let read = match unsafe { open(file) } {
         Open::Database { file_set, name, .. } => file_set.read(name, offset as u64, buf),
         Open::Memory(data) => {
@@ -376,6 +405,7 @@ unsafe extern "C" fn x_write(
 ) -> c_int {
     // SAFETY: as SQLite calls it: `data` holds `len` bytes.
     let data = unsafe { std::slice::from_raw_parts(data as *const u8, len as usize) };
+    // SAFETY: as SQLite calls it: a file x_open opened.
     let written = match unsafe { open(file) } {
         Open::Database { file_set, name, .. } => file_set.write(name, offset as u64, data),
         Open::Memory(file) => {
@@ -424,6 +454,7 @@ unsafe extern "C" fn x_file_size(
     };
     match size {
         Ok(size) => {
+            // SAFETY: as SQLite calls it: `out` is its integer.
             unsafe { *out = size as ffi::sqlite3_int64 };
             ffi::SQLITE_OK
         }
@@ -463,6 +494,7 @@ unsafe extern "C" fn x_check_reserved_lock(file: *mut ffi::sqlite3_file, out: *m
     };
     match reserved {
         Ok(reserved) => {
+            // SAFETY: as SQLite calls it: `out` is its int.
             unsafe { *out = reserved as c_int };
             ffi::SQLITE_OK
         }
@@ -509,10 +541,12 @@ unsafe extern "C" fn x_fetch(
         Ok(fetched) => {
             // Read-only, as SQLite reads what it fetches, and copies what it changes.
             let at = fetched.map_or(std::ptr::null_mut(), |at| at as *mut c_void);
+            // SAFETY: as SQLite calls it: `out` is its pointer.
             unsafe { *out = at };
             ffi::SQLITE_OK
         }
         Err(error) => {
+            // SAFETY: as SQLite calls it: `out` is its pointer.
             unsafe { *out = std::ptr::null_mut() };
             code_of(Err(error), ffi::SQLITE_IOERR_MMAP)
         }

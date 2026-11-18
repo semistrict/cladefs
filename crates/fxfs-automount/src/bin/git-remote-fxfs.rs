@@ -5,6 +5,9 @@
 //! Git's remote helper for repos kept as shared volumes (backlog doc-10, TASK-136.7): see the
 //! library's `git` module.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     fxfs_automount::git_main(std::env::args().skip(1))

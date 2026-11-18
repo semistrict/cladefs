@@ -13,6 +13,9 @@
 //! mounted at FILESYSTEM once the sandbox manager attached them, asked over vsock at the host's
 //! PORT (5054). Idle for SECONDS (600), a mount expires.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     fxfs_automount::main(std::env::args().skip(1))

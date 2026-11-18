@@ -145,6 +145,9 @@
 //! from then on. `list` prints the cells attached, a line each, `TENANT CELL`, and under each its
 //! vdisks, `NAME BRANCH`, and `detaching` for one being detached.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Context as _, bail};
 use cladefs::ExtentStore;
 use std::path::{Path, PathBuf};

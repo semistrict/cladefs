@@ -477,9 +477,10 @@ fn based(
 
 /// Has `bucket` be the measured host's, as the daemon's stores are made in it, and does what a
 /// host does once, not for each restore: its conditional writes probed, a block of object IDs
-/// taken.
+/// taken. Made so without the environment, which the base's stores' threads, and the S3 server's,
+/// may read meanwhile (TASK-444.16).
 fn host(bucket: &Arc<ObjectBucket>) {
-    unsafe { std::env::set_var("CLADEFSD_BUCKET", url_of(bucket)) };
+    crate::host_store::use_host_bucket(url_of(bucket));
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
     host_store::new_branch(bucket, new_cell(DEFAULT_TENANT)).unwrap();
 }

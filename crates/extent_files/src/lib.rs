@@ -15,6 +15,9 @@
 //! A file set may map its files into a window of memory ([`FileSet::open_mapped`], `window`): reads
 //! copy from it, and fetches read pages there in place.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod file_set;
 mod format;
 mod pages;

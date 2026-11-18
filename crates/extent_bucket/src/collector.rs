@@ -4451,6 +4451,7 @@ mod tests {
         let started = std::time::Instant::now();
         let report = block_on(collect(&*bucket, 1, &KEEP)).unwrap();
         let took = started.elapsed();
+        // SAFETY: rusage is plain data, valid all zeros.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         // SAFETY: a getrusage of this process, into `usage`.
         assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);

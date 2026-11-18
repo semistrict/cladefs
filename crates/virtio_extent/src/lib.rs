@@ -29,6 +29,9 @@
 //!
 //! README.md lists what a VMM's adapter does.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod backend;
 mod buffers;
 mod config;

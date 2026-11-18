@@ -19,6 +19,9 @@
 //! opens a file set on a store the host's extent daemon serves, whose window holds the daemon's
 //! cache's pages themselves, one copy for every store and VM on the host (TASK-300).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 pub mod daemon;
 mod file_set;

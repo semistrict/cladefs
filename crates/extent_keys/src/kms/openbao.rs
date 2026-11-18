@@ -1427,6 +1427,7 @@ mod tests {
         let url = bao.server.url(MOUNT, QUERY);
         // SAFETY: nextest runs each test in a process of its own, this thread its only one.
         unsafe { std::env::remove_var(TOKEN_FILE_ENV) };
+        // SAFETY: as above.
         unsafe { std::env::remove_var(TOKEN_ENV) };
         assert_eq!(
             crate::kms::from_url(&url).map(|_| ()).unwrap_err(),
@@ -1435,6 +1436,8 @@ mod tests {
                  CLADEFS_KMS_OPENBAO_TOKEN_FILE"
             )
         );
+        // SAFETY: as above: the dev server is a child process, and `from_url` refused the URL
+        // before starting anything, no token found.
         unsafe { std::env::set_var(TOKEN_ENV, &bao.token) };
         let shared = crate::kms::from_url(&url).unwrap();
         let key = Secret::random();

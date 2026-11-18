@@ -8,6 +8,9 @@
 //! operations, and compares what each file comes to (`diff_tests`), so that a drift shows as it is
 //! made, not as a sim failure hours of reducing later (TASK-149.29).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod model;
 
 #[cfg(test)]

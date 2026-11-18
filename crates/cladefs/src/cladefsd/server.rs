@@ -1084,7 +1084,7 @@ fn refuse_version(header: &Header, answer: Answer) {
 
 /// cladefs: the failpoint of requests of `kind`, if they have one (TASK-44.10).
 #[cfg(feature = "failpoints")]
-fn failpoint(kind: u32) -> Option<&'static str> {
+pub(super) fn failpoint(kind: u32) -> Option<&'static str> {
     Some(match kind {
         READ => "cladefsd::read",
         WRITE => "cladefsd::write",
@@ -1705,6 +1705,8 @@ struct TransferArea {
 
 // SAFETY: Shared memory mapped for the area's life, accessed as volatile memory alone.
 unsafe impl Send for TransferArea {}
+// SAFETY: as Send's: shared, it is only read and written volatile, through VolatileSlice(Mut),
+// as memory another process writes too.
 unsafe impl Sync for TransferArea {}
 
 impl TransferArea {

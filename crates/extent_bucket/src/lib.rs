@@ -17,6 +17,9 @@
 //! a directory of the host's ([`local`]), and in tests a simulation that delays, reorders and fails
 //! requests.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 /// cladefs: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
 /// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
