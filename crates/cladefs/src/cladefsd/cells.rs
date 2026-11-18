@@ -1393,6 +1393,7 @@ fn watch_stats(bucket: std::sync::Weak<bucket_cell::object_bucket::ObjectBucket>
                     super::metrics::requests_line(),
                     uploads_line(),
                     cache_line(),
+                    super::disk::line(),
                     super::peers::line().unwrap_or_else(|| "peers: none".to_owned()),
                     super::process::line(),
                 ];
