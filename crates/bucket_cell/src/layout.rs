@@ -64,8 +64,10 @@ pub struct Child {
 /// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
 /// 16's. 18: no writable forks: a record is its kind, not flags, and a footer names no forks
 /// (TASK-508.3); nothing reads 17's. 19: a cell's head is its one swapped object, holding what its
-/// record and its cell's object held (TASK-515); nothing reads 18's.
-pub const FORMAT: u32 = 19;
+/// record and its cell's object held (TASK-515); nothing reads 18's. 20: a bucket has a number, in
+/// its identity object ([`IDENTITY`]), which the high bits of every cell ID it gives carry
+/// ([`crate::identity`], doc-23, TASK-633.9); nothing reads 19's.
+pub const FORMAT: u32 = 20;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -82,6 +84,12 @@ const REFS: &str = "refs/";
 const RETIRED: &str = "retired/";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
+/// cladefs: the bucket's identity object: its format and its number, written once by its formatting
+/// ([`crate::identity`], TASK-633.9). No cell's, and no candidate of any pass.
+pub const IDENTITY: &str = "identity";
+/// cladefs: the record of every bucket, the root bucket's own or a copy of it ([`crate::identity`],
+/// TASK-633.9). No cell's, and no candidate of any pass.
+pub const BUCKETS: &str = "buckets";
 /// cladefs: there while a mark-only pass marks the bucket, which it writes and an operator removes
 /// with the marks: the one thing readers read to know whether to watch any cell's marks
 /// ([`crate::marks`], TASK-395.4's review). No cell's, and no candidate of any pass.
@@ -342,6 +350,10 @@ pub enum Kind<'a> {
     ObjectIds {
         block: u64,
     },
+    /// cladefs: the bucket's identity ([`IDENTITY`]): kept for good.
+    Identity,
+    /// cladefs: the record of every bucket ([`BUCKETS`]): kept for good.
+    Buckets,
     /// cladefs: a tenant's KEK object under the bucket KMS ([`kek`], TASK-411.27): no cell's, kept
     /// for good.
     Kek {
@@ -391,6 +403,8 @@ impl Kind<'_> {
             Self::Checkpoint { .. } => "checkpoint",
             Self::Head { .. } => "head",
             Self::ObjectIds { .. } => "objectid",
+            Self::Identity => "identity",
+            Self::Buckets => "buckets",
             Self::Kek { .. } => "kek",
             Self::CollectorLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
@@ -416,7 +430,12 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Retired { parent: cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
-        Kind::ObjectIds { .. } | Kind::Kek { .. } | Kind::Marking | Kind::Unknown => None,
+        Kind::ObjectIds { .. }
+        | Kind::Identity
+        | Kind::Buckets
+        | Kind::Kek { .. }
+        | Kind::Marking
+        | Kind::Unknown => None,
     }
 }
 
@@ -429,6 +448,12 @@ pub fn kind(key: &str) -> Kind<'_> {
     let parsed = || -> Option<Kind<'_>> {
         if key == MARKING {
             return Some(Kind::Marking);
+        }
+        if key == IDENTITY {
+            return Some(Kind::Identity);
+        }
+        if key == BUCKETS {
+            return Some(Kind::Buckets);
         }
         if let Some(block) = key.strip_prefix(OBJECTIDS) {
             return Some(Kind::ObjectIds { block: number(block)? });
@@ -1001,6 +1026,9 @@ mod tests {
         assert_eq!(objectid_block(0x2a), "objectid/000000000001a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
+        assert_eq!((kind(IDENTITY), kind(IDENTITY).name()), (Kind::Identity, "identity"));
+        assert_eq!(kind("identity/1"), Kind::Unknown);
+        assert_eq!((kind(BUCKETS), kind(BUCKETS).name()), (Kind::Buckets, "buckets"));
         assert_eq!(kind("tenants/2a/encrypted"), Kind::Unknown);
         assert_eq!(kek(0x2a), "tenants/000000000001a/kek");
         assert_eq!(kind(&kek(0x2a)), Kind::Kek { tenant: 0x2a });
@@ -1076,6 +1104,8 @@ mod tests {
             "gc/lease".to_owned(),
             "gc/marks/0000000000001".to_owned(),
             objectid_block(1),
+            IDENTITY.to_owned(),
+            BUCKETS.to_owned(),
             "probe/0000000000001".to_owned(),
             "moves/probe/0000000000001".to_owned(),
             format!("{}heads/3", cell.prefix()),

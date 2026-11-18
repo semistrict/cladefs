@@ -1,16 +1,18 @@
 ---
 id: TASK-633.3
 title: >-
-  Bucket numbers: cell IDs unique across buckets, a bucket identity object, the
-  operator registry
+  Hosts find buckets by number: the registry in their bucket's root, credentials
+  per bucket
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:03'
+updated_date: '2026-11-18 20:24'
 labels:
   - bucket
   - multi-region
 dependencies:
   - TASK-633.2
+  - TASK-633.9
 documentation:
   - >-
     backlog/docs/doc-23 -
@@ -24,15 +26,15 @@ ordinal: 934000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Cell IDs are unique only in their bucket (`objectid.rs`: an ID is `block << 24 | n`), and Origin, Location, ExtentId, KeyId, reference keys and the extent cache name cells by that bare ID, so two buckets may name different cells alike and the extent cache would serve one's pages for the other's silently. The user chose (2026-11-18) a 16-bit bucket number in a cell ID's high bits, given by the operator in a registry in each host's configuration. A bucket URL is no identity (`s3://b` and its regional https form are one bucket). Format bump, no migration.
+With TASK-633.9 every bucket has a sequential number and every bucket's root holds the registry of every bucket (the root bucket's the authority). A host that reaches another bucket than its own, for a parent's extents or a fork across buckets, needs that bucket by number: its URL and details from the registry copy in its own bucket's root, or from the root bucket's for a number the copy lacks; and its credentials and per-host options, which the registry never holds, from the host's configuration by bucket number.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cell ID is bucket << 48 | block << 24 | n; the allocator takes blocks within its bucket's number; number 0 is never given
-- [ ] #2 Every bucket holds a create-only identity object (format, number, random ID, cloud, cloud region), made on first use; a host refuses a bucket whose object disagrees with its registry
-- [ ] #3 The registry maps each bucket number to its URL and options; CLADEFSD_BUCKET names the home bucket by number; operating-a-host.md and CONTEXT.md (bucket number, home bucket, registry) say so
-- [ ] #4 Tests: two buckets' allocators never give one ID; a mismatched identity object is refused
+- [ ] #1 A host resolves a bucket number to its bucket from its own root's copy, reading the root bucket's registry for a number the copy lacks
+- [ ] #2 Credentials and options per bucket come from the host's configuration by number, none from the registry
+- [ ] #3 A bucket whose identity disagrees with the registry's entry for its number is refused
+- [ ] #4 operating-a-host.md says how a host is configured for several buckets
 <!-- AC:END -->
 
 ## Definition of Done

@@ -34,6 +34,9 @@
 //! cladefsctl mount create TENANT CAPACITY [TOKEN]
 //! cladefsctl mount detach [--force] TENANT CELL
 //! cladefsctl mount list
+//! cladefsctl format-bucket URL [DETAILS]
+//! cladefsctl add-bucket ROOT URL [DETAILS]
+//! cladefsctl buckets URL
 //! cladefsctl --version
 //! ```
 //!
@@ -136,6 +139,20 @@
 //! the tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
 //! value` a line.
 //!
+//! `format-bucket`, `add-bucket` and `buckets` act on buckets themselves, with or without the daemon
+//! (TASK-633.9, backlog doc-23). A bucket's number is in the high bits of every cell ID it gives,
+//! so that no two buckets give one ID. `format-bucket` makes the bucket at URL, unless it was
+//! formatted or added, the root of buckets of its own, number 1, and prints its number; a bucket
+//! never formatted is made a root so by the first host that makes a cell in it. `add-bucket` adds
+//! the bucket at URL, never formatted, to the buckets of the root bucket at ROOT: the next number,
+//! which it prints, given by a conditional write of the root's record of every bucket, which then
+//! goes to the root of every bucket. Refused if URL is a bucket already (`EEXIST`), or ROOT is not
+//! the root (`EINVAL`). DETAILS, recorded of the bucket, are any of `--region REGION`, `--endpoint
+//! URL`, `--kms URI` (its `CLADEFS_KMS`) and `--master-key-id ID` (under the bucket KMS): never a
+//! key or a credential. Its provider and URL are recorded too. `buckets` prints the record in
+//! the root of the bucket at URL: its version, then each bucket, a line each, its number and its
+//! details, `name=value`.
+//!
 //! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
 //! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in base 32
 //! (`base32_id`).
@@ -191,7 +208,8 @@ fn usage() -> anyhow::Error {
          cladefsctl mount attach TENANT CELL [TOKEN] | \
          cladefsctl mount create TENANT CAPACITY [TOKEN] | \
          cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
-         cladefsctl --version"
+         cladefsctl format-bucket URL [DETAILS] | cladefsctl add-bucket ROOT URL [DETAILS] | \
+         cladefsctl buckets URL | cladefsctl --version"
     )
 }
 
@@ -320,6 +338,21 @@ enum Command {
     /// cladefs: the daemon's FUSE mount of cells (TASK-475.2).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Mount(Mount),
+    /// cladefs: a bucket formatted, a root of its own unless formatted or added (TASK-633.9).
+    FormatBucket {
+        url: String,
+        details: bucket_cell::identity::Details,
+    },
+    /// cladefs: a bucket added to a root bucket's (TASK-633.9).
+    AddBucket {
+        root: String,
+        url: String,
+        details: bucket_cell::identity::Details,
+    },
+    /// cladefs: the record of every bucket in a bucket's root (TASK-633.9).
+    Buckets {
+        url: String,
+    },
 }
 
 /// What cladefsctl was asked to do with the daemon's FUSE mount of cells (`cladefsctl mount`,
@@ -462,6 +495,15 @@ impl Command {
             ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
             ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
             ["mount", ref rest @ ..] => Self::Mount(Mount::parse(rest)?),
+            ["format-bucket", url, ref rest @ ..] => {
+                Self::FormatBucket { url: url.to_owned(), details: details(rest)? }
+            }
+            ["add-bucket", root, url, ref rest @ ..] => Self::AddBucket {
+                root: root.to_owned(),
+                url: url.to_owned(),
+                details: details(rest)?,
+            },
+            ["buckets", url] => Self::Buckets { url: url.to_owned() },
             _ => bail!(usage()),
         })
     }
@@ -469,6 +511,9 @@ impl Command {
     /// Does it through the control API of the daemon whose control socket is at `socket`.
     #[cfg(target_os = "linux")]
     fn through(self, socket: &Path) -> anyhow::Result<()> {
+        if self.is_on_buckets() {
+            return self.on_buckets();
+        }
         if let Self::Mount(mount) = self {
             return mount.through(socket);
         }
@@ -542,19 +587,58 @@ impl Command {
                 let (now, forgotten) = daemon.shred_tenant(tenant)?;
                 print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
             }
-            Self::Mount(_) => unreachable!("served above"),
+            Self::Mount(_)
+            | Self::FormatBucket { .. }
+            | Self::AddBucket { .. }
+            | Self::Buckets { .. } => unreachable!("served above"),
         }
         Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
     fn through(self, _socket: &Path) -> anyhow::Result<()> {
+        if self.is_on_buckets() {
+            return self.on_buckets();
+        }
         bail!("the extent daemon runs on Linux only")
+    }
+
+    /// cladefs: whether it acts on buckets themselves, with or without the daemon (TASK-633.9).
+    fn is_on_buckets(&self) -> bool {
+        matches!(self, Self::FormatBucket { .. } | Self::AddBucket { .. } | Self::Buckets { .. })
+    }
+
+    /// cladefs: does what it does to buckets, and prints what it says (TASK-633.9).
+    fn on_buckets(self) -> anyhow::Result<()> {
+        let printable = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
+        match self {
+            Self::FormatBucket { url, details } => {
+                let identity = cladefs::bucket::format_bucket(&url, details).map_err(printable);
+                println!("{}", identity.with_context(|| format!("formatting {url}"))?.number);
+            }
+            Self::AddBucket { root, url, details } => {
+                let identity = cladefs::bucket::add_bucket(&root, &url, details).map_err(printable);
+                let added =
+                    identity.with_context(|| format!("adding {url} to {root}'s buckets"))?;
+                println!("{}", added.number);
+            }
+            Self::Buckets { url } => {
+                let registry = cladefs::bucket::bucket_registry(&url).map_err(printable);
+                let registry = registry.with_context(|| format!("reading {url}'s buckets"))?;
+                let registry = registry.with_context(|| format!("{url} records no buckets"))?;
+                print!("{}", buckets_lines(&registry));
+            }
+            _ => unreachable!("acts on no bucket"),
+        }
+        Ok(())
     }
 
     /// Does it here, on stores nothing has open: new ones anywhere; existing ones with the bucket
     /// and a placement token.
     fn locally(self) -> anyhow::Result<()> {
+        if self.is_on_buckets() {
+            return self.on_buckets();
+        }
         let daemons = match self {
             Self::Stats { .. } => Some("stats are"),
             Self::Grant { .. } | Self::Revoke { .. } => Some("tenants' grants are"),
@@ -651,7 +735,10 @@ impl Command {
             | Self::ShredCell { .. }
             | Self::ForgetTenantKeys { .. }
             | Self::ShredTenant { .. }
-            | Self::Mount(_) => unreachable!("refused above"),
+            | Self::Mount(_)
+            | Self::FormatBucket { .. }
+            | Self::AddBucket { .. }
+            | Self::Buckets { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
                 let store = OpenCell::open(&dir)?;
                 let info = store.info()?;
@@ -671,6 +758,50 @@ impl Command {
         }
         Ok(())
     }
+}
+
+/// cladefs: the details `args` say of a bucket, `--region`, `--endpoint`, `--kms` and
+/// `--master-key-id`, each with its value (TASK-633.9).
+fn details(args: &[&str]) -> anyhow::Result<bucket_cell::identity::Details> {
+    let mut details = bucket_cell::identity::Details::default();
+    let mut args = args.iter();
+    while let Some(&name) = args.next() {
+        let value = Some(args.next().with_context(|| format!("{name} takes a value"))?.to_string());
+        match name {
+            "--region" => details.region = value,
+            "--endpoint" => details.endpoint = value,
+            "--kms" => details.kms = value,
+            "--master-key-id" => details.master_key_id = value,
+            _ => bail!(usage()),
+        }
+    }
+    Ok(details)
+}
+
+/// cladefs: what `buckets` prints of `registry`: `version VERSION`, then each bucket, a line each,
+/// its number and the details recorded, `name=value` (TASK-633.9).
+fn buckets_lines(registry: &bucket_cell::identity::Registry) -> String {
+    let mut lines = format!("version {}\n", registry.version);
+    for entry in &registry.buckets {
+        let bucket_cell::identity::Details { provider, region, url, endpoint, kms, master_key_id } =
+            &entry.details;
+        let named = [
+            ("provider", provider),
+            ("region", region),
+            ("url", url),
+            ("endpoint", endpoint),
+            ("kms", kms),
+            ("master_key_id", master_key_id),
+        ];
+        lines += &entry.number.to_string();
+        for (name, value) in named {
+            if let Some(value) = value {
+                lines += &format!(" {name}={value}");
+            }
+        }
+        lines += "\n";
+    }
+    lines
 }
 
 /// What `stat` says of a store, which it prints one `name value` a line.

@@ -947,7 +947,8 @@ mod tests {
             block_on(async {
                 for id in 1..=n {
                     let cell = CellId { tenant: 1, id };
-                    let cell = CellId { tenant: cell.tenant, id: ids.next(&*bucket).await };
+                    let cell =
+                        CellId { tenant: cell.tenant, id: ids.next(&*bucket).await.unwrap() };
                     lifecycle::create(&*bucket, cell, 0).await.unwrap();
                     let writer = Writer::open(bucket.clone(), cell, 10, 1).await.unwrap();
                     let extent = ExtentId::new(cell.id, writer.chain().next_sequence());

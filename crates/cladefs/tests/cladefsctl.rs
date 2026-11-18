@@ -293,6 +293,55 @@ fn stores_open_elsewhere_are_left_alone_through_the_daemon() {
     stores_open_elsewhere_are_left_alone(cladefsctl, dir.path(), "EBUSY (errno 16)");
 }
 
+/// TASK-633.9: `cladefsctl format-bucket` makes a bucket the root of buckets of its own, number 1;
+/// `add-bucket` gives each bucket added the next number, which the cells made in it carry in their
+/// IDs' high bits, and records every bucket, with its details, in every bucket's root, which
+/// `buckets` prints. Adding a bucket again keeps its number; a bucket already formatted is no
+/// bucket to add (`EEXIST`), and a bucket not the root adds none (`EINVAL`).
+#[test]
+fn buckets_are_added_in_turn_and_recorded_in_every_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = |name: &str| {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+        format!("file://{}", dir.path().join(name).display())
+    };
+    let (root, east, west, other) = (url("root"), url("east"), url("west"), url("other"));
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &east), ("CLADEFSD_TOKEN", "1")]);
+    let run = |args: &[&str]| {
+        let args: Vec<&Path> = args.iter().map(Path::new).collect();
+        cladefsctl.run(&args)
+    };
+    let root_details = ["--region", "home", "--master-key-id", "mk1"];
+    let formatted = run(&[&["format-bucket", root.as_str()][..], &root_details].concat());
+    assert_eq!(formatted, Ok("1\n".to_owned()));
+    let east_details = ["--region", "us-east-1", "--kms", "aws-kms://us-east-1"];
+    let added = run(&[&["add-bucket", root.as_str(), east.as_str()][..], &east_details].concat());
+    assert_eq!(added, Ok("2\n".to_owned()));
+    let added =
+        run(&["add-bucket", &root, &west, "--region", "eu-west-1", "--endpoint", "https://e"]);
+    assert_eq!(added, Ok("3\n".to_owned()));
+    assert_eq!(run(&["add-bucket", &root, &east]), Ok("2\n".to_owned()));
+    run(&["format-bucket", &other]).unwrap();
+    let refused = run(&["add-bucket", &root, &other]).unwrap_err();
+    assert!(refused.contains("the bucket is bucket 1 already"), "{refused}");
+    assert!(refused.contains("EEXIST (errno 17)"), "{refused}");
+    let refused = run(&["add-bucket", &east, &url("more")]).unwrap_err();
+    assert!(refused.contains("bucket 2 is not the root bucket"), "{refused}");
+    assert!(refused.contains("EINVAL (errno 22)"), "{refused}");
+    let expected = format!(
+        "version 3\n\
+         1 provider=file region=home url={root} master_key_id=mk1\n\
+         2 provider=file region=us-east-1 url={east} kms=aws-kms://us-east-1\n\
+         3 provider=file region=eu-west-1 url={west} endpoint=https://e\n"
+    );
+    for bucket in [&root, &east, &west] {
+        assert_eq!(run(&["buckets", bucket]), Ok(expected.clone()), "{bucket}");
+    }
+    let made = run(&["create", dir.path().join("store").to_str().unwrap(), "16777216"]);
+    let cell: cladefs::CellId = made.unwrap().trim().parse().unwrap();
+    assert_eq!(cell.id >> 48, 2, "{cell}");
+}
+
 /// cladefsctl imports an image where no daemon is, into a store keeping its cell in the host's
 /// bucket, and forks it there too, as fxfs-guest-import forks the base it imports for its guest:
 /// the fork is the bucket's (TASK-165.7), made by the uploader the store, opened there, keeps its

@@ -1894,8 +1894,8 @@ impl Pass {
                 // which a mark-only pass never deletes, and an operator removes (TASK-264); and
                 // references, which the passes of their children's cells retire (TASK-395.4), and
                 // their marks, kept for good (TASK-395.13). cladefs: a block of object IDs taken for
-                // good (TASK-364); a tenant's KEK object, no cell's, which no pass lists, for good
-                // too (TASK-411.27).
+                // good (TASK-364), and the bucket's identity (TASK-633.9); a tenant's KEK object, no
+                // cell's, which no pass lists, for good too (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
@@ -1903,6 +1903,8 @@ impl Pass {
                 | Kind::Reference { .. }
                 | Kind::Retired { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Identity
+                | Kind::Buckets
                 | Kind::Kek { .. }
                 | Kind::Unknown => Fate::Stays,
             };
@@ -2563,7 +2565,7 @@ mod tests {
         let ids = crate::objectid::Allocator::new();
         let mut cells = Vec::new();
         for n in 0..clones {
-            let clone = CellId { tenant: 1, id: ids.next(&*bucket).await };
+            let clone = CellId { tenant: 1, id: ids.next(&*bucket).await.unwrap() };
             fork_version(&*bucket, clone, VERSION, origin, 0x40 + n).await.unwrap();
             lifecycle::delete(&*bucket, clone, 20, u64::MAX).await.unwrap();
             cells.push(clone);
@@ -2626,7 +2628,7 @@ mod tests {
     -> (Vec<String>, Result<(), Error>, usize, String) {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (_writer, _, origin) = versioned_base(direct.clone()).await;
-        let id = crate::objectid::Allocator::new().next(&*direct).await;
+        let id = crate::objectid::Allocator::new().next(&*direct).await.unwrap();
         let clone = CellId { tenant: 1, id };
         let reference = layout::reference(origin.parent, origin.at, clone);
         let (slow, open) = Gated::new(direct.clone(), Gate::Put(reference.clone()));

@@ -125,9 +125,10 @@ mod tests {
         // 14's, whose keys' numbers are in hexadecimal (TASK-504); 15's, whose cells name maps
         // of cells (TASK-508.1); 16's, whose records name versions (TASK-508.2); 17's, whose
         // records are flags, of writable forks too (TASK-508.3); and 18's, whose cells have a
-        // record and an object beside their heads (TASK-515).
-        assert_eq!(FORMAT, 19);
-        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] {
+        // record and an object beside their heads (TASK-515); and 19's, whose buckets have no
+        // number, their cells' IDs unique in them alone (TASK-633.9).
+        assert_eq!(FORMAT, 20);
+        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(
