@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 04:32'
+updated_date: '2026-11-18 04:33'
 labels:
   - bug
   - flaky
@@ -17,7 +18,7 @@ ordinal: 898000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-CI run on main 558c354e2 (test (workspace)): assertion at crates/cladefs/src/cladefsd/tests/hostile.rs:2204: MiB held past the credit's 272 MiB and a reply's: roots 0, reads 322, reads into the area 8, writes from the area 280, writes 359 (false). On ubu1, alone under nextest, it passed 3 of 3 on 073feb370 (before), 0559585cb (with TASK-444.13's heap counting) and a variant of the heap counting: load-dependent. The heap's peak (heap::peak_while) counts the whole process's allocations, so what a busy runner's other threads of the test hold, or allocator timing, lands in it; reads at 322 MiB is past the bound too yet counted within (true), so the bound's margin is thin under load.
+CI run on main 558c354e2 (test (workspace)): assertion at crates/cladefs/src/cladefsd/tests/hostile.rs:2204: MiB held past the credit's 272 MiB and a reply's: roots 0, reads 322, reads into the area 8, writes from the area 280 (all within the bound, credit(0) + MAX_PAYLOAD), writes 359 (past it). On ubu1, alone under nextest, it passed 3 of 3 on 073feb370 (before), 0559585cb (with TASK-444.13's heap counting) and a variant of the heap counting: load-dependent. The heap's peak (heap::peak_while) counts the whole process's allocations, so what else of the test's process holds meanwhile, or allocator timing, lands in it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
