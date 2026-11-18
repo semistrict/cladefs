@@ -170,7 +170,32 @@ Eviction of cached pages for an arena starved at its cap.
 Where a freed page waits until no VM process may still map it.
 
 **Governor**:
-What bounds the daemon's one memory budget, which every cache of its holds under.
+What bounds the daemon's one memory budget, which every cache of its holds under; and, the disk
+governor, what bounds each host disk's: the stores first, the part cache what they leave.
+
+**Host disk**:
+A filesystem the daemon keeps stores or the part cache on, one however many of its directories are
+opened: what its stores and part cache hold, counted, and what the disk governor allows them.
+_Avoid_: volume, device (but for its `MAJOR:MINOR` label)
+
+**Footprint**:
+What a store's files take of its host disk, counted as the store writes them: each file's length in
+4 KiB granules, once however many names it has.
+
+**Allotment**:
+A granted tenant directory's footprints summed, with the tenant's disk limit, weight and share.
+
+**Reserve**:
+What a store's own work may still add for what was written, never refused: its commits copying it,
+its logs holding it, its framings copying it. Admission weighs a write with it.
+
+**Headroom**:
+What a governor leaves free of the memory, or of a host disk: room for others between its looks.
+
+**Spare**:
+What a host disk's stores leave of its allowance, taken, reserved and admitted: what the part cache
+keeps of it, and what new writes are admitted into.
+_Avoid_: room (a segment's free space alone)
 
 **Extent cache**:
 The daemon's pages of sealed extents, in physical memory, shared by every window that maps them.

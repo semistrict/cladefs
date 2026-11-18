@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-16 22:52'
+updated_date: '2026-11-18 17:17'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -79,8 +79,8 @@ to it, what it was forked from (`ancestry`), the branches marked public (`public
 profiles, each written whole and synced. An image's own file bucket is beside its directory,
 `<image>.bucket`, which its forks share and which outlives it (Decisions).
 
-Per host (`CLADEFSD_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
-(`extent_bucket::cache`), kept across restarts and taking whole objects in (`Cache::adopt`).
+Per host (`CLADEFSD_PART_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
+(`bucket_cell::cache`), kept across restarts and taking whole objects in (`Cache::adopt`).
 
 Gone from a store's directory: `branches/`, `segments/`, `extents/`, `index/`, `open-segments/`,
 handles naming another store's directory, `store.new`/`store.deleted`, and remote.rs's
@@ -88,7 +88,9 @@ handles naming another store's directory, `store.new`/`store.deleted`, and remot
 
 The host's disk is bounded by the lag bound (`Options::max_lag_bytes`, what the WAL holds: commits
 stall there, doc-7 decision 3), the open segment's room (the store's capacity plus what rewrites
-before a commit waste, the rule `state::Space` keeps), and the cache's capacity and floor.
+before a commit waste, the rule `state::Space` keeps), and the cache's capacity; cladefs: and, since
+doc-22, the disk governor, which admits each write with what the store's own work may add for it,
+and sizes the cache to what the stores leave.
 Local dead space no longer exists, so the bound of three times the capacity (TASK-79.89) and local
 cleaning go.
 

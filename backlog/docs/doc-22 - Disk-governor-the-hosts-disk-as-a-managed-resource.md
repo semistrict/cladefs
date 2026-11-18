@@ -3,7 +3,7 @@ id: doc-22
 title: 'Disk governor: the host''s disk as a managed resource'
 type: specification
 created_date: '2026-11-18 14:14'
-updated_date: '2026-11-18 14:18'
+updated_date: '2026-11-18 17:17'
 ---
 # Disk governor: the host's disk as a managed resource
 
@@ -362,3 +362,40 @@ TASK-539 is the parent task. The design's T numbers map to these tasks:
 | T13 | TASK-539.12 hardening |
 | T14 | TASK-539.13 end to end on ubu1 |
 | T11 | TASK-539.14 docs |
+## As built (2026-11-18)
+
+What was built differs from the design above where the code or a measurement said it should. The
+tasks' notes say why each time.
+
+- **The layer is `local_cell::Metered`, not `Counted`.** tests/cell.rs already has a `CountedFile`.
+  `Dir::files` is `Dir::entries`: `MemDir::files` already names a directory's contents.
+- **A store's first taking in this process lists its directory again** (`Footprint::taken`), as
+  well as its first opening. Another process may have changed the directory while it held it;
+  cladefs::handover found this on Linux.
+- **`Dir::replace` makes the change but not its durability.** As `Dir::rename`, it is durable once
+  the caller syncs the directory. Failing, it has changed nothing, so its footprint stays exact.
+- **The reserve is 3 × (unframed + open extents' full lengths) + 64 KiB per store open**, not 3 ×
+  unframed. A commit copies a sparse extent whole, holes and all, so open extents count at their
+  full length. The store reports their lengths (`Uncommitted::open_bytes`). Measured
+  (local_cell/tests/reserve.rs): a store's own work took at most 2.5× its unframed and open
+  bytes, or 1.08× once the 64 KiB per store is counted, and every drain stayed within the
+  footprint's own reserve (56% of it at most). A write is admitted as len + 3·(len + grows).
+- **Commits' records, about 115 bytes each, are not admitted** (TASK-539.15). The headroom absorbs
+  them; tenant limits can be passed by them while full.
+- **Admission order:** tenant limit, every tenant's limit, the tenant's share under pressure, then
+  the disk's allowance with one band of cache.
+- **The part cache's tails are counted exactly**, not rounded to 4 KiB.
+- **The hardening (T13)** was done in TASK-539.12 itself:
+  - a writer held at the bound gets the write-back's failure (TASK-517);
+  - syncs fail only if writing back again fails;
+  - acknowledgements the disk refuses wait for room;
+  - the host's ENOSPC reaches the guest as ENOSPC.
+
+  Two items were filed as follow-ups: TASK-539.16 (framings in a copy re-queued) and TASK-539.17
+  (failed stores' backlog).
+- **Mutants** retargeted at admission inside the store: tenants-disks-unlimited,
+  a-stores-reserve-forgotten (was walks-forget-writes-in-flight) and writes-admitted-as-nothing.
+- **The bypass guard (T3 #4)** is a debug assertion: a store that opens a file it never made fails
+  its test.
+- **Cost:** a cell-bench A/B on ubu1, RAM-backed loop ext4, interleaved rounds (B/A of medians):
+  durable flush 0.993, burst writes 0.992, burst durable 0.908 (scripts/cell-bench-ab.sh).

@@ -36,31 +36,72 @@ lower `MEMORY_BYTES` or the total limit instead.
 
 ## The host's disk
 
-A tenant takes what is in its directory, the one its VM
-processes name stores in: its stores' open segments and their logs, their
-write-ahead logs' segments not yet acknowledged in the bucket, their own
-extents, each file's blocks once, as `du -sx` counts them (TASK-94). One rule
-for what is shared: a file is the tenant's whose directory holds it, and one in
-no tenant's directory is no tenant's. A fork's directory holds what the fork
-wrote, its base's data being in the bucket, read through the host's part cache
-(`CLADEFSD_PART_CACHE`), which is no tenant's: copies of objects any tenant
-reads, bounded by its own capacity and floor, evicting to keep within them. The
-daemon walks a tenant's directory as it is granted, every 10 s, soon after a
-write of it is refused, and as `GetTenantDisk` asks, and counts each write it
-admits between walks. The control API limits, at runtime, the disk of each
-tenant and of every tenant together (`SetDiskLimit`, none by default): past a
-tenant's limit its VMs' writes, and the stores they make, fail with `ENOSPC`,
-which the guest sees as a full disk; the daemon goes on, and other tenants'
-writes do. Its commits go on, and what leaves its disk, uploaded or freed, or a
-store deleted, lets it write again. `/metrics` shows each tenant's disk, by its
-ID, as memory. A filesystem's directory quota would not do it: it
-refuses whichever write of the directory comes past it, a store framing a closed
-segment, which fails the store, or a flush appending a commit's record, rather
-than the guest's next write, which the daemon refuses before the store takes
-any of it; and it is the host's setup, of a filesystem that has them, which the
-daemon can't make as it grants tenants. Set a tenant's limit above what its
-stores need at once: each holds about the lag bound (1 GiB) not yet uploaded,
-and its open segment.
+Governed as the memory is (backlog doc-22): every filesystem the daemon keeps
+stores or its part cache on is the daemon's but for a headroom
+(`CLADEFSD_DISK_HEADROOM`, bytes or `N%`; by default a twentieth of the
+filesystem, 4 GiB at least, half of it at most), and, if `CLADEFSD_DISK_BYTES`
+is set, no more than that on all of them together. A disk governor looks at
+each filesystem every 100 ms (`fstatvfs`), and at once when a write is refused:
+what the daemon may keep there, its allowance, is what it holds and what is
+free, less the headroom and what it holds not yet on the disk. A machine given
+to cladefs alone needs nothing set.
+
+What is counted is lengths: each file of a store's, rounded up to 4 KiB, once
+however many names it has, and its directories, counted as the store writes
+them, as its page cache takes a write, not when the write reaches the disk; and
+what the part cache keeps. Nothing walks a directory to count it but once, as a
+tenant is granted, and as a store is opened by this process after another had it
+(TASK-539.5). `GetTenantDisk` and `/metrics` read those counts.
+
+The stores come first. The part cache (`CLADEFSD_PART_CACHE`), copies of the
+bucket's objects that any tenant's stores read, which is no tenant's, keeps what
+the stores leave of the allowance, `CLADEFSD_PART_CACHE_BYTES` at most if set,
+and gives it back at once as they need it, least recently read first. Their
+stores near the allowance, within the headroom of it, the disk is under
+pressure: their uploaders are urged, closing and uploading their open segments
+at once, and each tenant's writes are refused past its share, by its weight
+(`SetDiskWeight`, 1 each by default), of what the allowance leaves the tenants.
+Past the allowance, writes are refused with `ENOSPC`, which the guest sees as a
+full disk; the daemon and every store go on.
+
+Each write is admitted by its store before it takes any of the disk: what it
+writes, and what the store's own work may still add for it, its commit copying
+it, its log holding it, its framing copying it, which nothing refuses; three
+times what is written and not framed, and what open extents hold, holes and all,
+and 64 KiB a store open (measured, `local_cell/tests/reserve.rs`). So data
+written and not committed costs seven times its size against a limit until its
+commit, four times until it is framed, and its size until it uploads, when it
+leaves the store's directory. Guests that commit as they write, as filesystems
+do, see the difference only near a limit. Commits go on, whatever is full:
+what was written commits, uploads, and leaves the disk, as do frees; a commit's
+own records, some 115 bytes each, are not admitted (TASK-539.15), and the
+headroom absorbs them.
+
+The control API limits, at runtime, the disk of each tenant and of every tenant
+together (`SetDiskLimit`, none by default), which admission holds as hard
+bounds: what a tenant's stores take, reserve and have admitted. A tenant takes
+what its stores' files do, the stores in its directory, the one its VM processes
+name stores in; a store in no granted directory is no tenant's, counted on its
+disk alone. A fork's directory holds what the fork wrote, its base's data being
+in the bucket. Set a tenant's limit above what its stores need at once: each
+holds about the lag bound (1 GiB) not yet uploaded, and its open segment, each
+with its reserve.
+
+`/metrics` shows, for each disk by its device (`MAJOR:MINOR`), its size, free
+bytes, headroom, allowance, what its stores take, of that unframed, their
+reserves and writes admitted, the cache, the spare the stores leave of the
+allowance, what the filesystem holds that the daemon counts as none of its own
+(`cladefsd_host_disk_other_bytes`: on a dedicated disk, its metadata; more, an
+uncounted writer), and whether it is under pressure; and each tenant's bytes,
+reserve, limit, weight and, under pressure, share, by its ID. The stats file
+says the disks on a `disks:` line.
+
+A filesystem's directory quota would not do it: it refuses whichever write of
+the directory comes past it, a store framing a closed segment, which fails the
+store, or a flush appending a commit's record, rather than the guest's next
+write, which the daemon refuses before the store takes any of it; and it is the
+host's setup, of a filesystem that has them, which the daemon can't make as it
+grants tenants.
 
 ## Multi-node only
 

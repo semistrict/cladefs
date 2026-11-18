@@ -174,7 +174,8 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     });
     assert!(took.elapsed() <= 2 * INTERVAL + Duration::from_millis(50), "{:?}", took.elapsed());
 
-    // The bucket out of reach: a VM writes until refused, committing as it goes.
+    // The bucket out of reach: a VM writes until refused, committing as it goes, as a guest's
+    // fsyncs do, ordered: a commit waiting for its upload would wait for the bucket.
     std::fs::write(&faults, "failing=unavailable").unwrap();
     let store = tenant.join("vm");
     let vm = CellClient::connect(&socket, &store, CAPACITY).unwrap();
@@ -188,7 +189,7 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
             }
         }
         if written % 16 == 0 {
-            vm.commit(None).unwrap();
+            vm.commit_ordered(None).unwrap();
         }
     };
     assert_eq!(refused, Errno::ENOSPC, "after {written} MiB");
@@ -197,9 +198,9 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     let cache = cache_at_refusal.unwrap();
     assert!(cache <= HEADROOM / 4, "{cache} bytes cached as the first write was refused");
     // Refused, its store commits, and refuses its writes, not failed.
-    vm.commit(None).unwrap();
+    vm.commit_ordered(None).unwrap();
     assert_eq!(write(&vm, 1 + written, 1), Err(Errno::ENOSPC));
-    vm.commit(None).unwrap();
+    vm.commit_ordered(None).unwrap();
 
     // The bucket back: what waited uploads and leaves the disk; the VM writes again.
     std::fs::write(&faults, "failing=not").unwrap();

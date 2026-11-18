@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-17 02:06'
+updated_date: '2026-11-18 17:17'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -70,8 +70,9 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
 - **Reading** (TASK-28.9): by 1 MiB parts of objects, each checked against the CRC its object
   carries; one GET per part however many reads want it; a host's GETs bounded (64 requests,
   64 MiB), demand before read-ahead; parts kept in the host's part cache
-  (`CLADEFSD_CACHE`, within `CLADEFSD_CACHE_BYTES`), across restarts, read least
-  recently evicted first by punching holes, with a floor of free space; read-ahead doubling along
+  (`CLADEFSD_PART_CACHE`, within `CLADEFSD_PART_CACHE_BYTES` and what the disk governor leaves
+  it, doc-22), across restarts, read least recently evicted first by punching holes; read-ahead
+  doubling along
   sequential reads, to 16 parts; a part another host owns asked of it before the bucket
   (Reading).
 - **Compression** (TASK-29, settled with the user on 2026-10-17): every object holding data, a
@@ -902,16 +903,17 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
   read where it went. Every part is checked against its CRC; one that fails is corrupt, `EIO`
   (TASK-407.4: a key names one object for good, so a part failing its tail's CRC is no other
   object's; until then, it was read again, once, by its object's tail fetched anew).
-- **The part cache** (`extent_bucket::cache`, `CLADEFSD_CACHE`), one per host, shared by its
+- **The part cache** (`bucket_cell::cache`, `CLADEFSD_PART_CACHE`), one per host, shared by its
   stores: sparse copies of objects at their keys (`cladefs-parts/<key>`), their tails and the parts
   kept, as stored (compressed), at their real offsets, filled by fetches and by acknowledged WAL
   files moved in whole (`Cache::adopt`), and emptied by punching holes. It keeps no index file:
   opening it rebuilds what it keeps from its files' tails, each checked, so a host's restart
   refetches nothing it had (TASK-165.4). The parts read least recently go first (a clock of uses,
-  `by_use`), an object's tail with its last part, to keep within its capacity (cladefsd:
-  `CLADEFSD_CACHE_BYTES`, unbounded if unset, TASK-406.1) and a floor of the filesystem's
-  space free (cladefsd: 4 GiB, `CACHE_FLOOR`). It holds copies of
-  what the bucket has, never data the bucket lacks. Without a cache (`CLADEFSD_CACHE` empty),
+  `by_use`), an object's tail with its last part, to keep within its limit: its budget (cladefsd:
+  `CLADEFSD_PART_CACHE_BYTES`, unbounded if unset, TASK-406.1) and what the disk governor leaves it
+  of its filesystem, the stores first (doc-22; until TASK-539.6, a floor of 4 GiB free,
+  `CACHE_FLOOR`). It holds copies of what the bucket has, never data the bucket lacks. Without a
+  cache (`CLADEFSD_PART_CACHE` empty),
   every page-in of an extent in the bucket is a GET.
 - **Peers** (TASK-406.2, `extent_bucket::peer`, `cladefs::bucket::peers`, `cladefs::cladefsd::peers`):
   hosts sharing a bucket serve each other parts, so that a part many hosts read, as a popular base
