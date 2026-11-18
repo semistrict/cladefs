@@ -528,7 +528,7 @@ fn forks_take_their_steps_in_order() {
         Arc::try_unwrap(steps).unwrap().into_inner().unwrap()
     };
     assert_eq!(traced(&[]), FORK_STEPS);
-    let cleanup = traced(&[Fault::Fails("writer::acknowledge")]);
+    let cleanup = traced(&[Fault::Fails("upload::forked")]);
     let cleaned: Vec<_> = cleanup.into_iter().filter(|step| !FORK_STEPS.contains(step)).collect();
     assert_eq!(cleaned, ["lifecycle::claimed", "lifecycle::claim_head_ended"]);
 }
@@ -635,18 +635,18 @@ fn each_write_of_a_failed_forks_cleanup_going_wrong() {
     }));
 }
 
-/// TASK-79.78: a fork its parent's head names, its host lost with its disk before anything else
-/// came of it, is an orphan: a live cell no host holds, once the parent's next writer, elsewhere, gives
-/// it its record. The collector keeps what it inherited, though its parent freed it, as it cannot
+/// TASK-79.78: a fork whose host was lost with its disk once its child's record was made, before
+/// anything else came of it, is an orphan: a live cell no host holds. The collector keeps what it
+/// inherited, though its parent freed it, as it cannot
 /// tell it from a cell held idle; an operator finds it among the live cells, as `cladefs-gc
 /// --cells` does, and deletes it, whichever placement took it last, as `--delete-cell` does;
-/// and the next pass frees what only it held.
+/// and once the version it was forked from is dropped too, the next pass frees what only they held.
 #[test]
 fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     host();
     let mut world = World::new();
     let large = world.held.last().unwrap().0;
-    let _ = world.fork(&[Fault::Dies("writer::acknowledged")]);
+    let _ = world.fork(&[Fault::Dies("fork::recorded")]);
     assert!(world.dead.load(Ordering::SeqCst), "the host lives");
 
     let moved = world.temp.path().join("moved");
@@ -673,15 +673,16 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let orphans: Vec<_> = world.live().into_iter().filter(|live| !held.contains(live)).collect();
     assert_eq!(orphans, [world.child]);
     assert_eq!(block_on(lifecycle::delete(&*world.bucket, world.child, 9, u64::MAX)), Ok(()));
-    // TASK-395.4: the fork in a cell of its own, the parent's cell keeps the origin while the
-    // parent's state names the fork, as the fork may lack its reference yet: until the parent's
-    // writer checkpoints, which drops the fork, its child deleted.
+    // The version the fork was made from, its host dead before dropping it, keeps the origin
+    // until it is dropped.
     world.collect("deleted");
-    assert!(stored(), "the origin went while the parent's state names the fork");
+    assert!(stored(), "the origin went while the fork's version names it");
     let parent = world.open(&reopen).unwrap();
+    let versions = parent.versions().into_iter().map(|version| version.id).collect();
+    parent.drop_versions(&versions).unwrap();
     crate::test_checkpoints::checkpointed(&parent, &world.bucket);
     drop(parent);
-    world.collect("checkpointed");
+    world.collect("dropped");
     assert!(!stored(), "what the fork inherited stayed once it was deleted");
 }
 

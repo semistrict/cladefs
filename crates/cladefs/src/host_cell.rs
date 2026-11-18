@@ -30,7 +30,7 @@ use bucket_cell::{cell, lifecycle};
 use local_cell::upload::{self, Failure, Uploader};
 use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// The size of the blocks stores' extents are read and written in. Their capacities are multiples
@@ -428,8 +428,19 @@ pub(crate) fn fork(
     Err(Error::new(err))
 }
 
+/// cladefs: where a store at the version `version` of `cell` is kept for forks of it: a directory of
+/// its own, in the process's temporary directory, gone with the process, as such a store holds
+/// nothing of its own.
+pub(crate) fn version_dir(cell: CellId, version: u64) -> PathBuf {
+    static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("cladefs-versions-{}", std::process::id()))
+    });
+    root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
+}
+
 /// Forks `store`, its cell's version `version` made and uploaded, to `child` as [`fork`] does:
-/// from a store at the version beside `path`, made, then deleted, and the version dropped, the
+/// from a store at the version ([`version_dir`]), made, then deleted, and the version dropped, the
 /// child keeping what it inherits by its reference. So a store with a writer forks: forks are of
 /// versions alone (TASK-508.3).
 pub(crate) fn fork_through(
@@ -440,10 +451,16 @@ pub(crate) fn fork_through(
     child: Child,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> Result<(), Error> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let at = path.with_file_name(format!(".{name}.{}", base32_id::Padded(version)));
+    let cell = store.description().cell;
+    // A fork into another tenant's cell, which `may_fork_into` let through, is of a shared version.
+    if child.cell.tenant != cell.tenant {
+        uploader.share_version(version, true)?;
+    }
+    let at = version_dir(cell, version);
     let (kind, url) = (store.kind().ok_or(Errno::EINVAL)?, store.bucket().ok_or(Errno::EINVAL)?);
-    std::fs::create_dir(&at).map_err(|err| {
+    let made =
+        at.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::create_dir(&at));
+    made.map_err(|err| {
         Error::new(anyhow::Error::new(err).context(format!("making {}", at.display())))
     })?;
     let forked = local_cell::create_host_at_version(&at, store.description(), url, kind, version)
@@ -644,7 +661,7 @@ mod tests {
         assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
         // cladefs: under its cell's prefix (TASK-364).
         let cell = own.join(store.description().cell.prefix());
-        assert!(cell.join("cells").exists(), "{:?}", std::fs::read_dir(&own).unwrap());
+        assert!(cell.join("record").exists(), "{:?}", std::fs::read_dir(&cell).unwrap());
         // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);

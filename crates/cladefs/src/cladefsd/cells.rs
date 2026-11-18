@@ -733,14 +733,10 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
 }
 
 /// cladefs: where the daemon keeps the version `version` of `cell`'s cell open for the forks of it
-/// made here: a directory of its own, in the process's temporary directory, made from the bucket
-/// the first time the version is forked here ([`opened_version`]), gone with the process.
+/// made here ([`host_cell::version_dir`]), made from the bucket the first time the version is
+/// forked here ([`opened_version`]).
 fn version_dir(cell: CellId, version: u64) -> PathBuf {
-    static ROOT: OnceLock<PathBuf> = OnceLock::new();
-    let root = ROOT.get_or_init(|| {
-        std::env::temp_dir().join(format!("cladefsd-versions-{}", std::process::id()))
-    });
-    root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
+    crate::host_cell::version_dir(cell, version)
 }
 
 /// cladefs: the directory the version `version` of `cell` is kept open in for forks here

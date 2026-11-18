@@ -569,7 +569,7 @@ mod tests {
         assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\ncell 1\n")).is_err());
         // cladefs: its cell is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
-        assert!(text.contains("\ncell a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
+        assert!(text.contains("\ncell a/fzzzzzzzzzzzz\n"), "{text}");
         let bare = format!("{FORMAT}\nblock_size 4096\ncell 1\n{capacity}");
         let refused = CellFile::parse(&bare).unwrap_err().to_string();
         assert_eq!(refused, "bad cell: no cell, TENANT/CELL in base 32: 1");

@@ -26,6 +26,9 @@ use storage_device::ExtentId;
 /// The tenant of [`TEST_CELL`], whose KEK the tests' KMS keeps.
 const TENANT: u64 = TEST_CELL.tenant;
 
+/// The cell most tests write.
+const CELL: CellId = test_cell(7);
+
 /// Another tenant, whose KEK tests that fork across tenants have the KMS keep (TASK-411.4).
 const OTHER: u64 = 2;
 
@@ -134,9 +137,9 @@ impl<K: Kms> World<K> {
         self.runtime.block_on(lifecycle::record(&*self.bucket, cell)).unwrap().unwrap()
     }
 
-    /// The cell's object.
+    /// [`CELL`]'s object.
     fn cell(&self) -> cell::Object {
-        self.cell_of(TEST_CELL).unwrap()
+        self.cell_of(CELL).unwrap()
     }
 
     /// `cell`'s object, if it has one.
@@ -278,11 +281,10 @@ fn segment_key(key: &str, bytes: &[u8]) -> KeyId {
     }
 }
 
-/// AC #1, #2: three volumes of a cell opened by a host, the first making it: the cell's KEK
-/// wrapped by its tenant's in the KMS, its cells' DEKs by it, each kept only so, no plaintext
-/// of either nor of their data in any object; their segments encrypted under their own cell's DEK,
-/// their checkpoints authenticated. A host making the cell unwraps nothing; one taking it after
-/// unwraps its KEK once for the three, and reads what the first wrote.
+/// AC #1, #2: three cells made by a host: each cell's KEK wrapped by its tenant's in the KMS, its
+/// DEK by it, each kept only so, no plaintext of either nor of their data in any object; their
+/// segments encrypted under their own cell's DEK, their checkpoints authenticated. A host making a
+/// cell unwraps nothing; one taking it after unwraps its KEK once, and reads what the first wrote.
 #[test]
 fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let world = World::new();
@@ -301,17 +303,18 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
         deks.push(Secret::from_bytes(dek.expose()));
         data.push(written_data);
     }
-    // One wrap for the cell made, one more for the second store's opening, its pool empty, whose
-    // KEK the third took and gave back; none unwrapped: the cell was made here.
-    assert_eq!(world.calls(), (2, 0));
+    // One wrap a cell made; none unwrapped: the cells were made here.
+    assert_eq!(world.calls(), (3, 0));
 
-    let object = world.cell();
-    let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    assert_eq!(kek.generation, 1);
-    let unwrapped = futures::executor::block_on(world.kms.inner().unwrap(TENANT, &kek.wrapped));
-    let kek_bytes = *unwrapped.unwrap().expose();
     let objects = world.objects();
+    let mut keks = Vec::new();
     for ((cell, _), dek) in cells.iter().zip(&deks) {
+        let object = world.cell_of(*cell).unwrap();
+        let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
+        assert_eq!(kek.generation, 1);
+        let unwrapped = futures::executor::block_on(world.kms.inner().unwrap(TENANT, &kek.wrapped));
+        let kek_bytes = *unwrapped.unwrap().expose();
+        keks.push(kek_bytes);
         let record = world.record(*cell);
         let [wrapped] = &record.deks[..] else { panic!("{:?}", record.deks) };
         assert_eq!((wrapped.generation, wrapped.kek), (1, 1));
@@ -324,7 +327,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     for ((key, bytes), (at, (cell, _))) in
         objects.iter().flat_map(|object| cells.iter().enumerate().map(move |v| (object, v)))
     {
-        assert!(!holds(bytes, &kek_bytes), "{key} holds the cell's KEK");
+        assert!(!holds(bytes, &keks[at]), "{key} holds {cell}'s KEK");
         assert!(!holds(bytes, &data[at][..64]), "{key} holds {cell}'s data");
     }
     let mut kinds = std::collections::BTreeMap::new();
@@ -348,20 +351,20 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     }
     assert!(kinds["segment"] >= 3 && kinds["checkpoint"] >= 3, "{kinds:?}");
 
-    // Another placement takes the cell: one unwrap for the three, none wrapped.
+    // Another placement takes the cells: one unwrap a cell, none wrapped.
     world.kms.reset();
     let second = world.host(6);
     let mut opened = Vec::new();
-    for dir in &dirs {
+    for (dir, (cell, _)) in dirs.iter().zip(&cells) {
         opened.push(open_on(&world, &second, &dir.crash(0)).unwrap());
+        assert_eq!(world.cell_of(*cell).unwrap().epoch, 2);
     }
-    assert_eq!(world.calls(), (0, 1));
-    assert_eq!(world.cell().epoch, 2);
+    assert_eq!(world.calls(), (0, 3));
     for (at, (store, _)) in opened.iter().enumerate() {
         let extent = ExtentId::new(cells[at].0.id, 1);
         assert_eq!(read(&world, &second, store, extent, 4 * 4096), Ok(data[at].clone()));
     }
-    assert_eq!(world.calls(), (0, 1));
+    assert_eq!(world.calls(), (0, 3));
 }
 
 /// TASK-411.28, AC #3: a store of a tenant the host's KMS has no KEK of opens not, refused as
@@ -404,24 +407,22 @@ fn stores_of_revoked_tenants_open_not() {
 
 /// AC #4: a generation of a cell's DEK added, the store's next opening encrypts its new objects
 /// under it, what was encrypted under the one before read as before. The cell's KEK rotated, its
-/// records' DEKs are rewrapped under the new one, the same DEKs, by one conditional update each,
-/// and its stores open and read as before.
+/// record's DEKs are rewrapped under the new one, the same DEKs, by one conditional update, and its
+/// store opens and reads as before.
 #[test]
 fn generations_encrypt_new_objects_and_rotations_rewrap() {
     let world = World::new();
     let host = world.host(5);
-    let cells = [test_cell(7), test_cell(8)];
-    let dirs = [made(cells[0]), made(cells[1])];
-    let (store, uploader) = open_on(&world, &host, &dirs[0]).unwrap();
+    let dir = made(CELL);
+    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
-    drop(open_on(&world, &host, &dirs[1]).unwrap());
     let kms = host.runtime.keys.kms.clone();
-    let cell_keys = CellKeys::of(TEST_CELL, &world.cell(), kms.clone());
-    let added = world.runtime.block_on(keys::add_generation(&*world.bucket, &cell_keys, cells[0]));
+    let cell_keys = CellKeys::of(CELL, &world.cell(), kms.clone());
+    let added = world.runtime.block_on(keys::add_generation(&*world.bucket, &cell_keys, CELL));
     assert_eq!(added, Ok(2));
     assert_eq!(store.keys().generations(7), [1]);
     drop((store, uploader));
-    let (store, uploader) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
+    let (store, uploader) = open_on(&world, &host, &dir.crash(0)).unwrap();
     assert_eq!(store.keys().generations(7), [1, 2]);
     assert_eq!(store.keys().encrypting().1, KeyId { cell: 7, generation: 2 });
     written(&store, &uploader, ExtentId::new(7, 2), &noise(2, 4096));
@@ -429,13 +430,13 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
     assert_eq!(segment_key(&first, &world.object(&first)), KeyId { cell: 7, generation: 2 });
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
-    let deks_before: Vec<_> = cells.iter().map(|&cell| world.record(cell).deks).collect();
+    let before = world.record(CELL).deks;
     drop((store, uploader));
 
     // The cell's KEK rotated by its holder.
-    let held = cell::Held { cell: TEST_CELL, epoch: world.cell().epoch, holder: 5 };
+    let held = cell::Held { cell: CELL, epoch: world.cell().epoch, holder: 5 };
     let rotated = world.runtime.block_on(keys::rotate(&*world.bucket, &kms, held, world.cell()));
-    assert_eq!(rotated, Ok((2, 2)));
+    assert_eq!(rotated, Ok((2, 1)));
     assert_eq!(world.cell().keks.iter().map(|kek| kek.generation).collect::<Vec<_>>(), [1, 2]);
     let new = futures::executor::block_on(
         world.kms.inner().unwrap(TENANT, &world.cell().keks[1].wrapped),
@@ -447,21 +448,19 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
         .unwrap(),
         new.unwrap(),
     );
-    for (cell, before) in cells.iter().zip(deks_before) {
-        let after = world.record(*cell).deks;
-        assert_eq!(after.len(), before.len(), "{cell}");
-        for (before, after) in before.iter().zip(&after) {
-            assert_eq!((after.generation, after.kek), (before.generation, 2), "{cell}");
-            assert_ne!(after.wrapped, before.wrapped, "{cell}");
-            let was = keys::unwrap_dek(&old, *cell, before).unwrap();
-            let is = keys::unwrap_dek(&new, *cell, after).unwrap();
-            assert_eq!(was.expose(), is.expose(), "{cell}");
-        }
+    let after = world.record(CELL).deks;
+    assert_eq!(after.len(), before.len());
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!((after.generation, after.kek), (before.generation, 2));
+        assert_ne!(after.wrapped, before.wrapped);
+        let was = keys::unwrap_dek(&old, CELL, before).unwrap();
+        let is = keys::unwrap_dek(&new, CELL, after).unwrap();
+        assert_eq!(was.expose(), is.expose());
     }
     // Another placement takes the cell after the rotation, unwrapping the new KEK: both
     // generations read.
     let other = world.host(6);
-    let (store, _uploader) = open_on(&world, &other, &dirs[0].crash(0)).unwrap();
+    let (store, _uploader) = open_on(&world, &other, &dir.crash(0)).unwrap();
     assert_eq!(read(&world, &other, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
     assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
 }
@@ -585,40 +584,10 @@ fn forked<K: Kms>(
     let id = rand::random::<u64>().max(1);
     let version = extent_frame::segment::NewVersion { id, keep_last: None };
     uploader.wait_uploaded(store.commit_version(version, false).unwrap())?;
+    uploader.share_version(id, true)?;
     let dir = made_at_version(store.description().cell, id);
     let (_at, at_version) = open_on(world, host, &dir)?;
     at_version.forked(child, inheriting)
-}
-
-/// TASK-411.3: a fork within an encrypted cell, and a version there, read what they inherit under
-/// their parent's DEK, which their rings hold, their parent's record's, unwrapped under the cell's
-/// KEK; a fork's child gets a DEK of its own from its first writer, its records' writers before
-/// naming none, and encrypts its own objects under it. Forks into other cells: below (TASK-411.4).
-#[test]
-fn forks_and_versions_within_an_encrypted_cell_read_what_they_inherit() {
-    let world = World::new();
-    let host = world.host(5);
-    let parent = test_cell(7);
-    let dir = made(parent);
-    let (store, uploader) = open_on(&world, &host, &dir).unwrap();
-    let inherited = ExtentId::new(7, 1);
-    written(&store, &uploader, inherited, &noise(1, 4096));
-
-    // A fork's child, of the parent's cell.
-    let child = Child { cell: test_cell(8), owner: 0x81 };
-    forked((&world, &host), &store, &uploader, child).unwrap();
-    assert_eq!(world.record(child.cell).deks, Vec::new());
-    let (forked_store, forked_uploader) = open_on(&world, &host, &made(child.cell)).unwrap();
-    assert_eq!(world.record(child.cell).deks.len(), 1);
-    let keys = forked_store.keys();
-    assert_eq!((keys.generations(7), keys.generations(8)), (vec![1], vec![1]));
-    assert_eq!(keys.encrypting().1, KeyId { cell: 8, generation: 1 });
-    assert_eq!(read(&world, &host, &forked_store, inherited, 4096), Ok(noise(1, 4096)));
-    let own = ExtentId::new(8, forked_uploader.next_sequence().max(1));
-    written(&forked_store, &forked_uploader, own, &noise(2, 4096));
-    let at = location(&forked_store, own).key;
-    assert_eq!(segment_key(&at, &world.object(&at)), KeyId { cell: 8, generation: 1 });
-    assert_eq!(read(&world, &host, &forked_store, own, 4096), Ok(noise(2, 4096)));
 }
 
 /// TASK-411.4 AC #2, #3, #4: a fork into a cell of another tenant's, and its fork into a third
@@ -1524,7 +1493,7 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     drop((store, uploader));
 }
 
-/// TASK-411.7, AC #2: a cell shredded, its wrapped KEK taken out of its object, leaves its cells
+/// TASK-411.7, AC #2: a cell shredded, its wrapped KEK taken out of its object, leaves it
 /// unreadable, and the tenant's other cell readable. A host told nothing opens no store of it
 /// afresh, the cell taken by no one, the error naming the cell; hosts told forget its KEK and their
 /// fetchers its store's ring, opening nothing more of what they cached of it, and the other cell's
@@ -1561,20 +1530,20 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     }
     let held: Vec<_> =
         opened.iter().map(|(store, _)| reader.memory.keys().hold(store.keys().clone())).collect();
-    let cell_key = layout::cell(TEST_CELL);
+    let cell_key = layout::cell(ours);
     let before = world.object(&cell_key);
 
-    assert_eq!(world.runtime.block_on(cell::shred(&*world.bucket, TEST_CELL)), Ok(1));
+    assert_eq!(world.runtime.block_on(cell::shred(&*world.bucket, ours)), Ok(1));
     let object = world.cell();
     assert_eq!((object.keks, object.shredded), (Vec::new(), true));
-    let why = "tenant 1: cell 1/1 is shredded, its KEK gone";
+    let why = "tenant 1: cell 1/7 is shredded, its KEK gone";
     let untold = world.host(7);
     let refused = open_on(&world, &untold, &dirs[0].crash(0)).map(drop).unwrap_err();
     assert_eq!(refused, Failure::Bucket(bucket_cell::Error::Kms(why.into())));
 
     for host in [&writer, &reader] {
-        assert_eq!(host.runtime.keys.forget(keys::Scope::Cell(TEST_CELL), why), 1);
-        host.memory.forget_kept(keys::Scope::Cell(TEST_CELL));
+        assert_eq!(host.runtime.keys.forget(keys::Scope::Cell(ours), why), 1);
+        host.memory.forget_kept(keys::Scope::Cell(ours));
         assert_eq!(host.memory.keys().ring().cells(), BTreeSet::from([8]));
     }
     let (ours_extent, ours_at) = &at[0];
@@ -1599,7 +1568,7 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     let options = bucket_cell::collector::Options { compact_below: 1.0, grace: 0 };
     let kms: extent_keys::kms::Shared = world.kms.clone();
     let mut collector = bucket_cell::collector::Collector::new(options).kms(Some(kms));
-    let pass = collector.collect_cell(&*world.bucket, TEST_CELL, 0x51);
+    let pass = collector.collect_cell(&*world.bucket, ours, 0x51);
     let report = world.runtime.block_on(pass).unwrap();
     assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");
 

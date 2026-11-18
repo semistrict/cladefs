@@ -379,10 +379,10 @@ mod tests {
     #[test]
     fn cells_parse_as_they_display() {
         let cell = CellId { tenant: 10, id: 33 };
-        assert_eq!(cell.to_string(), "a/bp/11");
-        assert_eq!("a/bp/11".parse(), Ok(cell));
-        assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(cell));
-        for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
+        assert_eq!(cell.to_string(), "a/11");
+        assert_eq!("a/11".parse(), Ok(cell));
+        assert_eq!("000000000000a/0000000000011".parse(), Ok(cell));
+        for wrong in ["11", "a/bp/11", "a/xu", "a/B", "a/", ""] {
             let refused = format!("no cell, TENANT/CELL in base 32: {wrong}");
             assert_eq!(wrong.parse::<CellId>(), Err(refused));
         }

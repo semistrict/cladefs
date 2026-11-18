@@ -171,9 +171,9 @@ fn versions_are_shared_and_unshared_locally() {
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
     let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
-    let (base, copy) = (dir.path().join("base"), dir.path().join("copy"));
+    let base = dir.path().join("base");
     cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
-    let printed = cladefsctl.run(&[Path::new("version"), &base, &copy]).unwrap();
+    let printed = cladefsctl.run(&[Path::new("version"), &base]).unwrap();
     let version = printed.trim().to_owned();
     let listed = || cladefsctl.run(&[Path::new("versions"), &base]).unwrap();
     assert_eq!(listed(), format!("{version} uploaded\n"));
@@ -182,8 +182,6 @@ fn versions_are_shared_and_unshared_locally() {
     assert_eq!(listed(), format!("{version} uploaded shared\n"));
     cladefsctl.run(&[Path::new("unshare"), &base, id]).unwrap();
     assert_eq!(listed(), format!("{version} uploaded\n"));
-    let forked = cladefsctl.run(&[Path::new("fork"), &copy, &dir.path().join("fork")]);
-    assert!(forked.is_ok(), "{forked:?}");
     cladefsctl.run(&[Path::new("drop-versions"), &base, id]).unwrap();
     assert_eq!(listed(), "");
 }

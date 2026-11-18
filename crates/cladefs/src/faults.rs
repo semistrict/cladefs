@@ -54,8 +54,7 @@ pub const FORK_STEPS: [&str; 17] = [
 /// (TASK-395.3, after the record since TASK-395.10), a read of the version's, and the record made;
 /// then the child's store. No upload, as it commits nothing; and no look for its child's ID first,
 /// its record's create refusing one taken alike (TASK-449).
-pub const RESTORE_STEPS: [&str; 9] = [
-    "fork::uploaded",
+pub const RESTORE_STEPS: [&str; 8] = [
     "upload::forked",
     "version::record",
     "version::recorded",

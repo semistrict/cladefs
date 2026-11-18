@@ -2038,8 +2038,6 @@ mod tests {
         hold: tokio::sync::watch::Sender<Hold>,
         /// The writes waiting.
         held: std::sync::atomic::AtomicUsize,
-        /// The writes held that went since, landing or failing.
-        went: std::sync::atomic::AtomicUsize,
         /// The objects it reaches, once severed ([`Gated::sever`]).
         severed: Mutex<Option<Arc<dyn object_store::ObjectStore>>>,
         /// The writes that went since it was armed.
@@ -2071,7 +2069,6 @@ mod tests {
                 full: Default::default(),
                 hold: tokio::sync::watch::channel(Hold::Nothing).0,
                 held: Default::default(),
-                went: Default::default(),
                 severed: Default::default(),
                 writes: Default::default(),
                 armed: Default::default(),
@@ -2180,12 +2177,6 @@ mod tests {
             Self::wait_for(&self.held, count);
         }
 
-        /// Waits until `count` writes held went, landing or failing, as they go in other threads,
-        /// and fails if they don't within 30 s.
-        fn wait_went(&self, count: usize) {
-            Self::wait_for(&self.went, count);
-        }
-
         /// Waits until `counter` counts `count`, as it counts up in other threads, and fails if it
         /// doesn't within 30 s.
         fn wait_for(counter: &std::sync::atomic::AtomicUsize, count: usize) {
@@ -2223,9 +2214,7 @@ mod tests {
             self.held.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let _ = hold.wait_for(|hold| !hold.holds(key)).await;
             self.held.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            let put = self.reached().put_opts(location, payload, opts).await;
-            self.went.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            put
+            self.reached().put_opts(location, payload, opts).await
         }
 
         async fn put_multipart_opts(
@@ -3758,61 +3747,6 @@ mod tests {
         reopened(dir.path().join("parent"), idle()).unwrap();
     }
 
-    /// TASK-165.7: a fork whose host crashed as its parent's head swapped to name its segment
-    /// leaves no store of its child here, the store being made only once the bucket has the
-    /// child's record: the directory it began at the fork's path is no store, and goes as one left
-    /// unmade. The swap, landing late, is the fork, which stands (doc-14): the parent's next writer gives the child its
-    /// record, and a store naming the child, made anywhere, takes what it inherited. Before, the
-    /// fork's handle, a store of the child's at once, took no cell of its own while the segment
-    /// might land, but took its parent's cell itself, through markers naming the fork
-    /// (TASK-79.72), and gave the child its record from the parent's state (TASK-79.20).
-    #[test]
-    fn forks_whose_host_crashed_stand_once_their_heads_swap_lands() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(ObjectBucket::new(memory, ""));
-        let path = dir.path().join("child");
-        let (cell, child, fork) = forking_held(dir.path(), &gated, &path);
-        // The host gone: what it has in flight may land still.
-        gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(crate::host_cell::unmade(&path), "the fork's directory is a store already");
-        assert!(OpenCell::open(&path).is_err(), "the fork's directory opens");
-        crate::OpenCell::delete(&path, None).unwrap();
-        assert!(!path.exists());
-
-        gated.hold.send_replace(Hold::Nothing);
-        gated.wait_went(1);
-        // Its fork goes on unseen, in a copy of the bucket only it reaches, as a dead host's.
-        gated.sever();
-        gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        let next =
-            bucket_cell::Writer::open(bucket.clone(), cell, 3, crate::host_cell::token().unwrap());
-        futures::executor::block_on(next).unwrap();
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        let origin = bucket_cell::layout::Origin { parent: cell, at: 1 };
-        assert_eq!(record.map(|record| record.origin()), Some(Some(origin)));
-        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(child)), &bucket, idle());
-        let taken = taken.unwrap();
-        assert_eq!(taken.root(), Ok(b"root".to_vec()));
-        let mut data = vec![0; BLOCK];
-        let extent = ExtentId { cell: cell.id, sequence: 1 };
-        taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
-        assert_eq!(data, pattern(1, BLOCK));
-        // The crashed host's fork, its writer reaching the bucket no more, fails, its next swap of
-        // the head refused, as a dead host's finds the cell taken (its copy holds the head at
-        // another version), and deletes nothing there.
-        let forked = fork.join().unwrap().map_err(|err| err.to_string());
-        assert_eq!((forked, path.exists()), (taken_over(child), false));
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        assert_eq!(record.map(|record| record.deleted), Some(false));
-    }
-
-    /// Why a fork to `child` fails, its writer finding its cell taken.
-    fn taken_over(child: crate::CellId) -> Result<(), String> {
-        Err(format!("forking to cell {child}: another writer took the cell"))
-    }
-
     /// The host whose disk is at `from`, crashed, restarted with its disk as the crash left it at
     /// `to`: its stores copied there, no store of them open. What the crashed host's writes
     /// had in flight may land still, as a dead host's PUTs may.
@@ -3851,39 +3785,6 @@ mod tests {
 
     /// A fork, waiting in a thread of its own: what it gives.
     type Forking = std::thread::JoinHandle<Result<(), crate::Error>>;
-
-    /// TASK-79.78: a fork that failed whose deletion in object storage is refused changes nothing
-    /// there, and leaves nothing here. Here its parent's head names it, and its child has its
-    /// record, live, when its store is not made, its path gone; and a later placement takes the
-    /// child's cell as the deletion's first write, of the child's head, goes, so that the
-    /// deletion, as this host's placement, refuses (`ESTALE`): the child's record stays live, the
-    /// later placement's. Before, the fork's handle stayed, naming the cell, and its store held
-    /// it here; now a child's store is made only once its fork is (TASK-165.7).
-    #[test]
-    fn forks_failed_whose_deletion_is_refused_leave_their_cell_to_its_placement() {
-        let dir = tempfile::tempdir().unwrap();
-        let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(ObjectBucket::new(memory, ""));
-        let path = dir.path().join("child");
-        let (cell, child, fork) = forking_held(dir.path(), &gated, &path);
-        crate::OpenCell::delete(&path, None).unwrap();
-        gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(child)));
-        gated.wait_went(1);
-        gated.wait_held(1);
-        let later = futures::executor::block_on(bucket_cell::head::take(&*bucket, child, 5, 5));
-        assert_eq!(later.map(|held| held.head.epoch), Ok(1));
-        gated.hold.send_replace(Hold::Nothing);
-        let forked = fork.join().unwrap().map_err(|err| err.to_string());
-        let unmade = format!("forking to cell {child}: making its store");
-        assert_eq!((forked, path.exists()), (Err(unmade), false));
-
-        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
-        let record = record.unwrap();
-        let of_cell =
-            |kind| matches!(kind, bucket_cell::record::Kind::Clone(o) if o.parent == cell);
-        assert!(of_cell(record.kind) && !record.deleted, "{record:?}");
-    }
 
     /// The record of a cell no fork made, its store's own, of no parent, but for its owner
     /// ([`unowned`]).

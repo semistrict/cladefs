@@ -1037,6 +1037,8 @@ impl OpenCell {
         let inherited = |to: &Path| -> anyhow::Result<()> {
             Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
         };
+        // Refused before anything is made, the version among it.
+        host_cell::may_fork_into(self.cell(), uploader, cell.tenant)?;
         if uploader.is_at_version() {
             return host_cell::fork(&self.store, uploader, path, child, inherited);
         }
