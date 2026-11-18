@@ -5,6 +5,7 @@
 # rule, or here.
 a-panic-under-a-shared-lock-unwinds: a condition forced false (whether a panic holds the shared lock)
 a-second-open-holds-its-path: a connection's second open handled instead of asserted: one protocol's rule, which its assertion states
+a-stores-reserve-forgotten: arithmetic (a term left out: the reserve)
 a-tenant-shares-no-room: one call for another (add for take().await): which is right is the budget's
 arenas-shrink: a seal of a memfd not made (F_SEAL_SHRINK): one call's effect, a value left in its place
 bucket-failures-dropped: the counting of a failure taken out whole
@@ -18,7 +19,6 @@ tenants-disks-unlimited: a limit replaced by none: a value
 tenants-given-the-default-memory: the tenant's budget replaced by the default's: which budget is the server's
 tenants-name-any-store: a check replaced by true
 tenants-name-branches: a policy's flag replaced by false
-walks-forget-writes-in-flight: arithmetic (a term left out)
 windows-of-any-size: a bound's check and an assertion taken out whole
 writes-admitted-as-nothing: a value (the bytes admitted)
 writes-retried-at-once: a wait for its turn taken out whole
