@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// How many hosts hold a copy of the version: its cell's own, then others.
+/// How many hosts hold a copy of the version, none of them its cell's writer.
 const HOSTS: usize = 3;
 
 /// What goes wrong in a restore on one of the hosts.
@@ -71,8 +71,8 @@ struct Hosts {
 }
 
 /// Where a host's copy of the version is on its disk.
-fn copy_at(host: usize, disk: &Path) -> PathBuf {
-    disk.join(if host == 0 { "copy" } else { "parent" })
+fn copy_at(disk: &Path) -> PathBuf {
+    disk.join("copy")
 }
 
 /// The keys of the segments of `branch` in `bucket`.
@@ -137,11 +137,12 @@ impl Hosts {
         for disk in &disks {
             std::fs::create_dir(disk).unwrap();
         }
-        let source = kept_in(disks[0].join("parent"), (1 << 30, None), &reached(0), options());
+        // The version's cell is written on no host restoring it: no host's death takes its writer.
+        let source = kept_in(temp.path().join("source"), (1 << 30, None), &bucket, options());
         let source = source.unwrap();
         let lens = [fork_faults::BLOCK, 4 << 20];
         let held = commit(&source, 1, &lens, b"root");
-        let version = source.copy_uploaded(disks[0].join("copy")).unwrap();
+        let version = source.make_version(None).unwrap();
         for (extent, _) in &held {
             source.free(*extent).unwrap();
         }
@@ -156,8 +157,8 @@ impl Hosts {
         source.wait_uploaded().unwrap();
         let mut copies = Vec::new();
         for (host, disk) in disks.iter().enumerate() {
-            let path = copy_at(host, disk);
-            if host > 0 {
+            let path = copy_at(disk);
+            {
                 let url = super::tests::url_of(&reached(host));
                 let description = extent_store::Description {
                     block_size: ExtentStore::BLOCK_SIZE,
@@ -340,7 +341,7 @@ impl Hosts {
         if dead {
             self.copies[host] = None;
             self.disks[host] = self.restarted();
-            let path = copy_at(host, &self.disks[host]);
+            let path = copy_at(&self.disks[host]);
             naming(&path, &self.bucket);
             match reopened(&path, options()) {
                 Ok(copy) => self.copies[host] = Some(Arc::new(copy)),
@@ -433,7 +434,7 @@ impl Hosts {
         let branch = source.branch();
         drop(source);
         for (host, disk) in self.disks.iter().enumerate() {
-            let copy = copy_at(host, disk);
+            let copy = copy_at(disk);
             if copy.exists() {
                 ExtentStore::delete(&copy, None).unwrap();
             }
