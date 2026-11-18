@@ -1993,7 +1993,7 @@ impl OpenCell {
         let made = local_cell::create_host_at_version(path, description, url, kind, id)
             .and_then(|()| local_cell::made_host(path));
         if let Err(err) = made {
-            let _ = std::fs::remove_dir_all(path);
+            crate::host_cell::discard(path);
             return Err(Error::new(err));
         }
         Ok(())

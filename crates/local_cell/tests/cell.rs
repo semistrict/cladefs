@@ -2194,6 +2194,10 @@ impl Dir for Counting {
         self.dir.link(from, to)
     }
 
+    fn replace(&self, path: &str, bytes: &[u8]) -> std::io::Result<()> {
+        self.dir.replace(path, bytes)
+    }
+
     fn create_dir(&self, path: &str) -> std::io::Result<()> {
         self.dir.create_dir(path)
     }

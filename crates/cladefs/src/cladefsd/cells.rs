@@ -726,8 +726,8 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
     if !crate::host_cell::unmade(path) {
         return Ok(());
     }
-    std::fs::remove_dir_all(path).map_err(|err| {
-        log::warn!("cladefsd: removing {}, a store unmade: {err}", path.display());
+    local_cell::remove_store_dir(path).map_err(|err| {
+        log::warn!("cladefsd: removing {}, a store unmade: {err:#}", path.display());
         Errno::EIO
     })
 }

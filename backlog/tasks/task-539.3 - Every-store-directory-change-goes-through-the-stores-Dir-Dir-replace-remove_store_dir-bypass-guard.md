@@ -3,9 +3,11 @@ id: TASK-539.3
 title: >-
   Every store-directory change goes through the store's Dir (Dir::replace,
   remove_store_dir, bypass guard)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 14:16'
+updated_date: '2026-11-18 14:50'
 labels:
   - extentd
   - disk
@@ -38,3 +40,9 @@ Exact counting needs no path around the layer. Today place_host, made_host, cell
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Records beside a store (description placing, made marker, cladefs's attached-bases/ancestry/public markers/profiles) go through HostDir: Dir::replace (DiskDir: .new written direct, synced, renamed, dir synced; MemDisk: DirChange::Replace that a crash keeps or not; CachedDir forgets a replaced data file's pages). Every removal of a store's directory goes through local_cell::remove_store_dir (host_cell::discard logs failures of a failed making's cleanup). Deviation: AC #4's grep guard is replaced by a behavioral one in TASK-539.4/539.5 (a store's footprint equals a fresh listing after cladefs's record writes), since a file allowlist can't tell a store directory's writes from the many legitimate std::fs writes elsewhere (bucket file://, cache, stats, sockets).
+<!-- SECTION:NOTES:END -->

@@ -12,6 +12,7 @@
 
 use crate::error::{Errno, Result};
 use base32_id::{Padded, Short};
+use local_cell::{Dir as _, File as _};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,20 +31,23 @@ const PUBLIC: &str = "public-";
 
 /// Writes `text` as the record `name` in `dir`, durably: whole or not at all, by a file written
 /// and synced beside it, renamed over it, the directory synced after.
+/// cladefs: through the store's directory, as every change to it is (`Dir::replace`, TASK-539.3).
 pub(crate) fn write(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    let new = dir.join(format!("{name}.new"));
-    std::fs::write(&new, text)?;
-    std::fs::File::open(&new)?.sync_all()?;
-    std::fs::rename(&new, dir.join(name))?;
-    std::fs::File::open(dir)?.sync_all()
+    local_cell::HostDir::new(dir)?.replace(name, text.as_bytes())
 }
 
-/// Makes the empty records `names` in `dir`, durably: each synced, then the directory.
+/// Makes the empty records `names` in `dir`, durably: each synced, then the directory; one there
+/// already is left as it is. Through the store's directory, as every change to it is.
 fn mark(dir: &Path, names: impl IntoIterator<Item = String>) -> io::Result<()> {
+    let dir = local_cell::HostDir::new(dir)?;
     for name in names {
-        std::fs::File::create(dir.join(name))?.sync_all()?;
+        match dir.create(&name, false) {
+            Ok(file) => file.sync()?,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
     }
-    std::fs::File::open(dir)?.sync_all()
+    dir.sync_dir("")
 }
 
 /// The record `name` in `dir`: none if it isn't there; `EIO`, logged, saying what it is (`what`),

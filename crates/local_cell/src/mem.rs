@@ -106,6 +106,8 @@ enum DirChange {
     Remove(String),
     /// cladefs: a file renamed, at once ([`Dir::rename`]).
     Rename(String, String, u64),
+    /// cladefs: a file written whole, synced, put at a name over any there ([`Dir::replace`]).
+    Replace(String, u64),
 }
 
 fn not_found(path: &str) -> io::Error {
@@ -184,6 +186,9 @@ impl Fs {
             DirChange::Rename(from, to, inode) => {
                 entries.remove(from).ok_or_else(|| not_found(path))?;
                 entries.insert(to.clone(), *inode);
+            }
+            DirChange::Replace(name, inode) => {
+                entries.insert(name.clone(), *inode);
             }
         }
         self.dir_changes.entry(dir.to_owned()).or_default().push(change);
@@ -298,6 +303,9 @@ impl MemDisk {
                             if entries.remove(from).is_some() {
                                 entries.insert(to.clone(), *inode);
                             }
+                        }
+                        DirChange::Replace(name, inode) => {
+                            entries.insert(name.clone(), *inode);
                         }
                     }
                 }
@@ -479,6 +487,24 @@ impl Dir for MemDisk {
         fs.spend()?;
         let inode = fs.lookup(from)?;
         fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))
+    }
+
+    /// cladefs: its file written and synced, then put at `path`, which a crash keeps or not, then
+    /// its directory synced: two operations, either of which may fail, as a crash would stop it.
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut fs = self.fs.lock().unwrap();
+        fs.fits(host_disk::counted(bytes.len() as u64))?;
+        fs.spend()?;
+        let inode = fs.next_inode;
+        let (dir, name) = split(path);
+        fs.change_dir(path, DirChange::Replace(name.to_owned(), inode))?;
+        fs.next_inode += 1;
+        let data = bytes.to_vec();
+        fs.inodes.insert(inode, Inode { durable: data.clone(), data, ..Inode::default() });
+        fs.io.written += bytes.len() as u64;
+        fs.io.synced_files += 1;
+        drop(fs);
+        self.sync_dir(dir)
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
@@ -691,6 +717,31 @@ mod tests {
         assert_eq!(sample(), Sample { size: 4 * G, free: 3 * G, used: G });
         // A crash keeps its capacity.
         assert_eq!(dir.crash(0).disk().sample().unwrap().size, 4 * G);
+    }
+
+    /// TASK-539.3: a file replaced is there whole, its old one or its new, after any crash, and
+    /// the new one durably once it returns; one stopped part way, as a crash stops it, leaves
+    /// either. A rename still refuses to go over a file there.
+    #[test]
+    fn replacing_leaves_the_old_file_or_the_new() {
+        let dir = MemDisk::new();
+        dir.replace("r", b"old").unwrap();
+        dir.replace("r", b"new").unwrap();
+        for seed in 0..16 {
+            assert_eq!(read(&dir.crash(seed).open("r", false).unwrap()), b"new", "seed {seed}");
+        }
+        // Its directory's sync stopped: the rename is not durable.
+        dir.fail_after(Some(1));
+        assert!(dir.replace("r", b"newer").is_err());
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..64 {
+            seen.insert(read(&dir.crash(seed).open("r", false).unwrap()));
+        }
+        assert_eq!(seen, [b"new".to_vec(), b"newer".to_vec()].into());
+        dir.fail_after(None);
+        dir.create("s", false).unwrap();
+        let refused = dir.rename("s", "r").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
     }
 
     /// cladefs: it says whether the first operation it failed, since its budget was set, was another

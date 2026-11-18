@@ -107,7 +107,7 @@ impl Storage {
         // What a making that died part way left is no store: its directory goes, not the cell,
         // which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         if host_cell::unmade(path) {
-            std::fs::remove_dir_all(path)
+            local_cell::remove_store_dir(path)
                 .with_context(|| format!("removing {}, a store unmade", path.display()))
                 .map_err(Error::new)?;
         }

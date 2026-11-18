@@ -115,6 +115,10 @@ impl Dir for Stalling {
         self.dir.link(from, to)
     }
 
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        self.dir.replace(path, bytes)
+    }
+
     fn create_dir(&self, path: &str) -> io::Result<()> {
         self.dir.create_dir(path)
     }

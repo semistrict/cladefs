@@ -650,6 +650,10 @@ mod tests {
                 unreachable!("a flush syncs")
             }
 
+            fn replace(&self, _: &str, _: &[u8]) -> io::Result<()> {
+                unreachable!("a flush syncs")
+            }
+
             fn create_dir(&self, _: &str) -> io::Result<()> {
                 unreachable!("a flush syncs")
             }

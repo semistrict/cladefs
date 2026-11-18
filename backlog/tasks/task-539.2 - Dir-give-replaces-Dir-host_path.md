@@ -1,9 +1,11 @@
 ---
 id: TASK-539.2
 title: 'Dir::give replaces Dir::host_path'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 14:16'
+updated_date: '2026-11-18 14:50'
 labels:
   - extentd
   - disk

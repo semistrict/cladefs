@@ -103,6 +103,12 @@ pub trait Dir: Send + Sync + 'static {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
+    /// cladefs: writes `bytes` as the file at `path`, whole or not at all, and durably: a file
+    /// written and synced beside it, renamed over any there, its directory synced after, so that a
+    /// crash leaves the one there before or this, never neither (TASK-539.3). What the records
+    /// beside a store's files are written by: its description, and cladefs's own.
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()>;
+
     /// Creates the directory at `path`.
     fn create_dir(&self, path: &str) -> io::Result<()>;
 
@@ -288,6 +294,20 @@ impl Dir for DiskDir {
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
         std::fs::hard_link(self.path.join(from), self.path.join(to))
+    }
+
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        let new = format!("{path}.new");
+        // One a write that stopped left.
+        match std::fs::remove_file(self.path.join(&new)) {
+            Err(err) if !not_found(&err) => return Err(err),
+            _ => {}
+        }
+        let file = self.create(&new, false)?;
+        file.write_at(bytes, 0)?;
+        file.sync()?;
+        std::fs::rename(self.path.join(&new), self.path.join(path))?;
+        self.sync_dir(path.rsplit_once('/').map_or("", |(dir, _)| dir))
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {

@@ -47,14 +47,12 @@ pub fn create_host_at_version(
 /// cladefs: the store at `path` is whole, as its maker made it ([`LocalCell::made`], TASK-196): the file
 /// saying it is not goes, durably, its maker having let it go.
 pub fn made_host(path: &Path) -> Result<(), Error> {
-    match std::fs::remove_file(path.join(UNMADE)) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            return Err(Error::new(err).context(format!("making {} whole", path.display())));
-        }
-        _ => {}
-    }
-    std::fs::File::open(path)?.sync_all()?;
-    Ok(())
+    let dir = HostDir::new(path)?;
+    let made = match dir.remove(UNMADE) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    };
+    made.and_then(|()| dir.sync_dir("")).with_context(|| format!("making {} whole", path.display()))
 }
 
 /// cladefs: whether `path` is a directory a store's making left unmade, its maker stopping part
@@ -73,15 +71,8 @@ pub fn unmade_host(path: &Path) -> bool {
 pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     let mut file = store_file(path)?;
     file.token = Some(token);
-    let new = path.join(format!("{DESCRIPTION}.new"));
-    let written = || -> std::io::Result<()> {
-        let mut new_file = std::fs::File::create(&new)?;
-        std::io::Write::write_all(&mut new_file, file.text().as_bytes())?;
-        new_file.sync_all()?;
-        std::fs::rename(&new, path.join(DESCRIPTION))?;
-        std::fs::File::open(path)?.sync_all()
-    };
-    written().with_context(|| format!("placing {}", path.display()))
+    let written = HostDir::new(path).and_then(|dir| dir.replace(DESCRIPTION, file.text().as_bytes()));
+    written.with_context(|| format!("placing {}", path.display()))
 }
 
 /// cladefs: the fencing token of the placement of the store at `path`, if it was placed
@@ -101,7 +92,7 @@ pub fn delete_host(
     before: impl FnOnce(CellId) -> Result<(), Error>,
 ) -> Result<(), Error> {
     if !path.join(DESCRIPTION).exists() {
-        return remove_store(path);
+        return remove_store_dir(path);
     }
     let cell = host_cell(path)?;
     let dir = HostDir::new(path)?;
@@ -109,7 +100,7 @@ pub fn delete_host(
     let removed = dir.claim().context("taking the store's directory").and_then(|()| {
         let removed = before(cell).and_then(|()| {
             failpoint!("delete::cell");
-            remove_store(path)
+            remove_store_dir(path)
         });
         dir.unclaim();
         removed
@@ -118,7 +109,7 @@ pub fn delete_host(
     removed
 }
 
-/// The name a store's description goes by as its directory goes ([`remove_store`]).
+/// The name a store's description goes by as its directory goes ([`remove_store_dir`]).
 fn deleted_description() -> String {
     format!("{DESCRIPTION}.deleted")
 }
@@ -127,8 +118,10 @@ fn deleted_description() -> String {
 /// removing it again finishes it. Its description goes first, renamed to [`deleted_description`],
 /// durably, so that the directory is no store from then on, but one going, which a deletion resumed
 /// finds so; then the rest, then that, then the directory. Then the directory it was in is synced,
-/// so that it is gone durably (TASK-79.77).
-fn remove_store(store: &Path) -> Result<(), Error> {
+/// so that it is gone durably (TASK-79.77). cladefs: the one way a store's directory goes, whether
+/// it held a store or what a making left of one, so that what its files took of the host's disk
+/// goes with them (TASK-539.3); the store opened nowhere.
+pub fn remove_store_dir(store: &Path) -> Result<(), Error> {
     let name = deleted_description();
     let deleted = store.join(&name);
     let removing = || -> std::io::Result<()> {
@@ -169,7 +162,7 @@ fn parent(path: &Path) -> &Path {
 }
 
 /// The changes a deletion makes to the host's file system as it removes a store's directory
-/// ([`remove_store`]): std's, each a step, which a test records, and stops after a number of, as a
+/// ([`remove_store_dir`]): std's, each a step, which a test records, and stops after a number of, as a
 /// crash would stop them (TASK-79.77).
 mod removals {
     use std::io;

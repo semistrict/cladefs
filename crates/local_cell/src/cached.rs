@@ -132,6 +132,15 @@ impl<D: Dir> Dir for CachedDir<D> {
         Ok(())
     }
 
+    /// A file it replaces is unlinked, unless it is at another name still.
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        self.shared.dir.replace(path, bytes)?;
+        let mut files = self.shared.files.lock().unwrap();
+        let replaced = files.remove(path);
+        Self::forget(&files, replaced);
+        Ok(())
+    }
+
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
         self.shared.dir.link(from, to)?;
         let mut files = self.shared.files.lock().unwrap();
@@ -342,6 +351,22 @@ mod tests {
         dir.open("kept", true).unwrap().read_at(&mut read, 0).unwrap();
         assert_eq!(read, [8; PAGE]);
         assert!(dir.list("").unwrap().contains(&"kept".to_owned()));
+    }
+
+    /// TASK-539.3: a file of the host's replaced holds what replaced it, and leaves nothing of the
+    /// write beside it; a data file's pages there before go.
+    #[test]
+    fn files_of_the_hosts_replaced_hold_what_replaced_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = host_dir(temp.path());
+        dir.create_dir("d").unwrap();
+        dir.create("d/r", true).unwrap().write_at(&[1; PAGE], 0).unwrap();
+        // One a write that stopped left beside it.
+        std::fs::write(temp.path().join("d/r.new"), "stopped").unwrap();
+        dir.replace("d/r", b"replaced").unwrap();
+        assert_eq!(std::fs::read(temp.path().join("d/r")).unwrap(), b"replaced");
+        assert_eq!(dir.list("d").unwrap(), ["r"]);
+        assert_eq!(dir.cache().usage().held, 0);
     }
 
     /// A directory in memory gives nothing: none of its files is on the host's filesystem.

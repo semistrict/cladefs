@@ -342,10 +342,8 @@ pub(crate) fn create_unmade(
         let recovering = LocalCell::recover_unmade(host_dir(path)?)?;
         opened(recovering, keeping)
     };
-    made().inspect_err(|_| {
-        // Leave nothing half made behind.
-        let _ = std::fs::remove_dir_all(path);
-    })
+    // Leave nothing half made behind.
+    made().inspect_err(|_| discard(path))
 }
 
 /// Opens the store at `path` as of its last commit, with the bucket it names: its uploader, as
@@ -407,6 +405,17 @@ pub(crate) fn unmade(path: &Path) -> bool {
     local_cell::unmade_host(path)
 }
 
+/// Removes what a making that failed left at `path`, if anything, as a store's directory goes
+/// (`local_cell::remove_store_dir`): logged if it can't, as the failure the caller returns is
+/// the making's.
+pub(crate) fn discard(path: &Path) {
+    if path.exists()
+        && let Err(err) = local_cell::remove_store_dir(path)
+    {
+        log::warn!("cladefs: removing {}, which a making left: {err:#}", path.display());
+    }
+}
+
 /// Forks `store`, a store at a version (`uploader.is_at_version`), to `child`, a new cell holding
 /// what the version holds, whose store is a new directory at `path`, which [`open`] opens:
 /// `EEXIST` if anything is at `path`. The fork is the child's record alone (doc-7, Forks;
@@ -464,7 +473,7 @@ pub(crate) fn fork(
     });
     let Err(err) = made else { return Ok(()) };
     // Leave nothing half made behind: no store, and no fork whose store went.
-    let _ = std::fs::remove_dir_all(path);
+    discard(path);
     if let Err(why) = uploader.unfork(child) {
         log::warn!("cladefs: leaving cell {cell}, whose fork failed: {why}");
     }
@@ -523,7 +532,7 @@ pub(crate) fn fork_through(
         .map_err(Error::new)
         .and_then(|()| open(&at, uploader.options().clone()).map_err(Error::from))
         .and_then(|at| fork(&at.store, &at.uploader, path, child, prepare));
-    let _ = std::fs::remove_dir_all(&at);
+    discard(&at);
     let dropped = uploader.drop_versions(&std::collections::BTreeSet::from([version]));
     forked?;
     Ok(dropped?)
