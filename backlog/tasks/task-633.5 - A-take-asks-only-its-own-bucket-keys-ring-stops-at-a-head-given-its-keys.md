@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-18 22:44'
+updated_date: '2026-11-18 23:44'
 labels:
   - bucket
   - multi-region
@@ -45,4 +45,6 @@ ordinal: 936000
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: keys::ring no longer reads any ancestor's head for a head given its keys: it checks its parent's keys are held (Error::Inherited otherwise) and returns; a head without keys still walks. Test: rings_cross_cells_until_heads_hold_what_they_inherit deletes the parent's head before the given child's ring; a hand mutant walking anyway fails with Lost. Left: a writer's checkpoint reading inherited objects' moves in their own bucket, which needs TASK-633.4's routing, and the failing-bucket test of AC #2.
+
+2026-11-18, with TASK-633.4's routing in: a child's writer reads the moves of inherited objects through the router, so in the parent's bucket. AC #2's "checkpoints with its parent's bucket failing" does not hold before the version is mirrored: write_checkpoint follows moves under the parent's prefix (maps.read, maps.follow), and a child with no checkpoint of its own recovers through its origin's state. Taking, committing and uploading a child with a checkpoint of its own need only its bucket. doc-23's outage table corrected. The rest of AC #2 waits for TASK-633.8, whose mirror would route the parent's version's keys to the child's bucket.
 <!-- SECTION:NOTES:END -->

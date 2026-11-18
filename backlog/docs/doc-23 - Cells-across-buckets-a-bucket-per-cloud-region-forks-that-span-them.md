@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 22:52'
+updated_date: '2026-11-18 23:44'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -159,7 +159,9 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 
 | | Before its mirror | After its mirror |
 |---|---|---|
-| Taking, committing, uploading, checkpointing a child | works (once a take asks only its own bucket) | works |
+| Taking, committing, uploading a child that has a checkpoint of its own | works (a take asks only its own bucket, TASK-633.5) | works |
+| A child's checkpoint | waits for A: it follows the moves A's collector made of the objects it inherited, under the parent's prefix, in A | works once its mirror routes the parent's version's keys to B (TASK-633.8) |
+| Opening a child with no checkpoint of its own | waits for A: it recovers through its origin's state | works once mirrored |
 | Reads of inherited extents cached in memory or the part cache | work | work |
 | Cold reads of inherited extents | wait for A | work |
 | New forks of P's versions | wait for A | wait for A: a fork reads P's head |
