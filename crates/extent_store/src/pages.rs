@@ -883,6 +883,7 @@ impl<F: File> File for Cached<F> {
         let end = offset + buf.len() as u64;
         let mut at = offset;
         let (mut added, mut dirtied) = (0, 0);
+        let mut failed = None;
         while at < end {
             let index = at / PAGE;
             let within = (at % PAGE) as usize;
@@ -903,8 +904,11 @@ impl<F: File> File for Cached<F> {
                         shared.cache.frames.copied(written)
                     } else {
                         let mut bytes = shared.cache.frames.zeroed();
-                        if index * PAGE < size {
-                            shared.file.read_at(&mut bytes, index * PAGE)?;
+                        if index * PAGE < size
+                            && let Err(err) = shared.file.read_at(&mut bytes, index * PAGE)
+                        {
+                            failed = Some(err);
+                            break;
                         }
                         bytes[within..within + take].copy_from_slice(written);
                         bytes
@@ -920,8 +924,12 @@ impl<F: File> File for Cached<F> {
             page.last = number;
             at += take as u64;
         }
-        pages.size = pages.size.max(end);
-        pages.dirtied.get_or_insert_with(Instant::now);
+        // cladefs: what it wrote before a read failed counted as what it wrote whole is: the pages
+        // it holds go uncounted no more, to be taken off the counts as they go (TASK-433.10).
+        pages.size = pages.size.max(at);
+        if at > offset {
+            pages.dirtied.get_or_insert_with(Instant::now);
+        }
         let held = shared.cache.held.fetch_add(added * PAGE, Ordering::Relaxed) + added * PAGE;
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
         let dirty =
@@ -929,7 +937,7 @@ impl<F: File> File for Cached<F> {
         shared.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
         drop(pages);
         shared.cache.dirtied();
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// The pages in the range written back, and the file told to write them back too, as one
@@ -1048,6 +1056,52 @@ mod tests {
         model.resize(PAGE as usize, 0);
         assert_eq!(read, model, "zeros but what was written, in a frame that held another file's");
         assert_eq!(cache.bytes(), PAGE);
+    }
+
+    /// cladefs: a file whose reads fail, its writes and the rest as `F`'s.
+    struct FailingReads<F>(F);
+
+    impl<F: File> File for FailingReads<F> {
+        fn read_at(&self, _buf: &mut [u8], _offset: u64) -> io::Result<()> {
+            Err(io::Error::other("a read refused"))
+        }
+
+        fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+            self.0.write_at(buf, offset)
+        }
+
+        fn size(&self) -> io::Result<u64> {
+            self.0.size()
+        }
+
+        fn sync(&self) -> io::Result<()> {
+            self.0.sync()
+        }
+
+        fn sync_cached(&self) -> io::Result<()> {
+            self.0.sync_cached()
+        }
+    }
+
+    /// cladefs: a write whose read of what the file holds of a partial page fails counts the pages
+    /// it held and dirtied before, which their going takes off the counts after, none wrapping
+    /// (TASK-433.10).
+    #[test]
+    fn a_write_failing_its_read_counts_what_it_held() {
+        let dir = MemDisk::new();
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let raw = dir.create("f", true).unwrap();
+        raw.write_at(&pattern(7, 3 * PAGE as usize), 0).unwrap();
+        let file = Cached::new(FailingReads(raw), &cache).unwrap();
+        // Two whole pages, then part of a third, which the file holds: its read fails.
+        let err = file.write_at(&pattern(8, 2 * PAGE as usize + 10), 0).unwrap_err();
+        assert_eq!(err.to_string(), "a read refused");
+        assert_eq!(cache.usage().held, 2 * PAGE);
+        assert_eq!(cache.usage().dirty, 2 * PAGE);
+        file.sync().unwrap();
+        assert_eq!(cache.usage().dirty, 0);
+        assert_eq!(cache.evict_to(0), 0);
+        assert_eq!(cache.usage().held, 0);
     }
 
     /// A write over part of a page keeps the rest as the file holds it; one past the end, zeros
