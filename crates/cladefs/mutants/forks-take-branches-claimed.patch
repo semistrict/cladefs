@@ -19,8 +19,8 @@
      }
      let made = match uploader.is_copy() {
          true => {
---- a/crates/extent_bucket/src/branch.rs
-+++ b/crates/extent_bucket/src/branch.rs
+--- a/crates/bucket_cell/src/branch.rs
++++ b/crates/bucket_cell/src/branch.rs
 @@ -365,7 +365,7 @@
          let read =
              found.as_ref().map(|found| Record::decode(child.branch, &found.bytes)).transpose()?;

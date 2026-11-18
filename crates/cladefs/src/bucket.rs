@@ -5,24 +5,24 @@
 //! cladefs's own: what a host keeps its stores' branches in object storage with (backlog doc-7;
 //! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its stores' uploaders and
 //! fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each failure
-//! ([`errno`]). The uploader is extent_store's (`extent_store::upload`, TASK-165.9).
+//! ([`errno`]). The uploader is local_cell's (`local_cell::upload`, TASK-165.9).
 //!
 //! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
 //! chooses alike, the extent daemon, the cladefs CLI's mounts and `cladefsctl`
-//! (`extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
+//! (`bucket_cell::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
 //! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
 //! (`CLADEFSD_BUCKET`), made on each tenant's first use (TASK-411.27); else none, which every
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use extent_bucket::bucket_kms::BucketKms;
-use extent_bucket::cache::Cache;
-use extent_bucket::fetch::{self, Budget, Limits, Priority};
-use extent_bucket::keys;
-use extent_bucket::layout::Location;
-use extent_bucket::object_bucket::ObjectBucket;
-use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
+use bucket_cell::bucket_kms::BucketKms;
+use bucket_cell::cache::Cache;
+use bucket_cell::fetch::{self, Budget, Limits, Priority};
+use bucket_cell::keys;
+use bucket_cell::layout::Location;
+use bucket_cell::object_bucket::ObjectBucket;
+use local_cell::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
 
@@ -85,7 +85,7 @@ impl Host {
 /// logged.
 pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
-    use extent_bucket::Error;
+    use bucket_cell::Error;
     match failure {
         Failure::Bucket(Error::Fenced | Error::Deleted) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
@@ -125,15 +125,15 @@ pub fn runtime() -> Result<Runtime, Failure> {
 }
 
 /// The runtime every store's uploader, and its fetches, run on, and the calls from no runtime's
-/// task (`extent_store::upload::bucket_runtime`, TASK-34, TASK-449's review): one for the process, so
+/// task (`local_cell::upload::bucket_runtime`, TASK-34, TASK-449's review): one for the process, so
 /// that one runtime serves the connections to the host's buckets, whichever opened them. Fails if
 /// it can't be made, a later call making it anew.
 pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
-    Ok(extent_store::upload::bucket_runtime()?.handle().clone())
+    Ok(local_cell::upload::bucket_runtime()?.handle().clone())
 }
 
 /// cladefs: the host's KMS, as its environment chooses it the first time it is asked for
-/// (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, else the bucket KMS over the host's
+/// (`bucket_cell::bucket_kms::from_env`: `CLADEFS_KMS`'s, else the bucket KMS over the host's
 /// bucket given a master key, TASK-411.27), or [`set_kms`] set it before (TASK-411.3), its pools of
 /// new cell KEKs refilled on the bucket runtime. None chosen, or one that can't be had (a bad
 /// `CLADEFS_KMS`, a master key unreadable, or given with no host's bucket to keep tenants' KEKs
@@ -172,19 +172,19 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
-    KMS.get_or_init(|| match extent_bucket::bucket_kms::from_env(host_bucket) {
+    KMS.get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
         Ok(chosen) => Ok(HostKeys { kms: chosen.shared(), bucket: chosen.bucket().cloned() }),
         // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
         // tenant's KEK made on its first use, which the tests' readers share
-        // (`extent_bucket::keys::testing`, TASK-411.28).
+        // (`bucket_cell::keys::testing`, TASK-411.28).
         #[cfg(test)]
-        Err(why) if why == extent_bucket::bucket_kms::no_kms() => {
-            Ok(HostKeys { kms: extent_bucket::keys::testing::kms(), bucket: None })
+        Err(why) if why == bucket_cell::bucket_kms::no_kms() => {
+            Ok(HostKeys { kms: bucket_cell::keys::testing::kms(), bucket: None })
         }
         // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
         // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
         #[cfg(all(feature = "tests-kms", not(test)))]
-        Err(why) if why == extent_bucket::bucket_kms::no_kms() => Ok(testing::host_keys()),
+        Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(testing::host_keys()),
         Err(why) => {
             log::error!("cladefs: the host's KMS: {why}");
             Err(why)
@@ -196,7 +196,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
 fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
     let url = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
     let url = url.ok_or("CLADEFSD_BUCKET names none")?;
-    crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
+    crate::host_cell::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 
 /// cladefs: the host's KMS, as its environment chose it, and the bucket KMS it is over, if it is
@@ -298,7 +298,7 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     forgotten
 }
 
-/// cladefs: shreds `cell` in `bucket` ([`extent_bucket::cell::shred`]): its wrapped KEKs taken out of
+/// cladefs: shreds `cell` in `bucket` ([`bucket_cell::cell::shred`]): its wrapped KEKs taken out of
 /// its object, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
 /// already, its object stays as it is, and the host forgets them all the same: what each host told
 /// of the shredding does. Returns how many generations of its KEK it took out, and what the host
@@ -306,22 +306,22 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
 pub async fn shred_cell(
     bucket: &ObjectBucket,
     cell: crate::CellId,
-) -> Result<(usize, Forgotten), extent_bucket::Error> {
-    let removed = extent_bucket::cell::shred(bucket, cell).await?;
-    let why = extent_bucket::cell::shredded(cell).to_string();
+) -> Result<(usize, Forgotten), bucket_cell::Error> {
+    let removed = bucket_cell::cell::shred(bucket, cell).await?;
+    let why = bucket_cell::cell::shredded(cell).to_string();
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
 /// cladefs: shreds `tenant` under the host's bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
 /// KEK object in the host's bucket replaced by a tombstone, so that no key its KEK wrapped unwraps
-/// anywhere and none is made it again ([`extent_bucket::bucket_kms::destroy`]); then has this host
+/// anywhere and none is made it again ([`bucket_cell::bucket_kms::destroy`]); then has this host
 /// forget its keys ([`forget`]). Shredded already, it finds it so, and the host forgets them all
 /// the same: what each host told does. Refused, changing nothing, if the host's KMS is not the
 /// bucket KMS: another KMS's tenant is shredded by destroying its KEK there, then
 /// `ForgetTenantKeys`. Only as strong as the bucket keeps no older version of the KEK object.
 pub async fn shred_tenant(
     tenant: u64,
-) -> Result<(extent_bucket::bucket_kms::Destroyed, Forgotten), String> {
+) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), String> {
     let Some(kms) = bucket_kms() else {
         return Err(format!(
             "tenant {tenant}: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no \
@@ -369,7 +369,7 @@ impl Unreached {
 /// drain waits to see none of (TASK-141.4): Linux's alone, as the daemon is.
 #[cfg(target_os = "linux")]
 pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
-    extent_store::upload::uploaders()
+    local_cell::upload::uploaders()
 }
 
 /// The GETs of extents' data a host has in flight: one connection to object storage gives roughly
@@ -402,10 +402,10 @@ static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 /// memory is what this lets upload at once. Before any store opens; no less than the largest
 /// object a store uploads, an extent's of 64 MiB, which goes alone.
 pub fn set_upload_memory(bytes: u64) -> Result<(), String> {
-    if bytes < crate::ExtentStore::MAX_EXTENT {
+    if bytes < crate::OpenCell::MAX_EXTENT {
         return Err(format!(
             "an upload memory of {bytes} bytes: less than an extent's {}",
-            crate::ExtentStore::MAX_EXTENT
+            crate::OpenCell::MAX_EXTENT
         ));
     }
     match UPLOAD_MEMORY.set(bytes) {
@@ -432,8 +432,8 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.limits().bytes }
 }
 
-/// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`),
-/// at their locations there, as the store names them: a fetcher (`extent_bucket::fetch::Fetcher`)
+/// Reads the extents a store holds whose data is in object storage (`local_cell::LocalCell::adopt`),
+/// at their locations there, as the store names them: a fetcher (`bucket_cell::fetch::Fetcher`)
 /// that is the host's, its reads on the bucket runtime, which their uploads use too, under the
 /// host's budget of GETs and memory, asking the host's peers first if it has any.
 pub struct HostFetcher {
@@ -547,22 +547,22 @@ mod write_budgets;
 mod tests {
     use crate::test_checkpoints::checkpointed;
     use crate::test_data::noise;
-    use crate::{ExtentId, ExtentStore, VolatileSlice};
-    use extent_bucket::cache::Cache;
-    use extent_bucket::object_bucket::ObjectBucket;
-    use extent_bucket::testing::read;
-    use extent_bucket::{branch, recover};
+    use crate::{ExtentId, OpenCell, VolatileSlice};
+    use bucket_cell::cache::Cache;
+    use bucket_cell::object_bucket::ObjectBucket;
+    use bucket_cell::testing::read;
+    use bucket_cell::{branch, recover};
     use object_store::memory::InMemory;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+    const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
     /// The URL `bucket` is this process's by, made so if it is none's yet: a memory bucket of its
     /// own, by its address, which the stores the tests make in it name (TASK-165.9).
     pub(super) fn url_of(bucket: &Arc<ObjectBucket>) -> String {
         let url = format!("memory:///bucket-tests-{:p}", Arc::as_ptr(bucket));
-        crate::host_store::use_bucket(&url, bucket.clone());
+        crate::host_cell::use_bucket(&url, bucket.clone());
         url
     }
 
@@ -572,10 +572,10 @@ mod tests {
         path: impl AsRef<std::path::Path>,
         (capacity, branch): (u64, Option<crate::CellId>),
         bucket: &Arc<ObjectBucket>,
-        keeping: extent_store::upload::Options,
-    ) -> Result<ExtentStore, crate::Error> {
-        let branch = branch.unwrap_or_else(crate::host_store::new_alone);
-        ExtentStore::create_kept_with(path, capacity, branch, &url_of(bucket), keeping)
+        keeping: local_cell::upload::Options,
+    ) -> Result<OpenCell, crate::Error> {
+        let branch = branch.unwrap_or_else(crate::host_cell::new_alone);
+        OpenCell::create_kept_with(path, capacity, branch, &url_of(bucket), keeping)
     }
 
     /// Has the store at `path` name `bucket` as the bucket its branch is kept in: a host restarted
@@ -599,27 +599,27 @@ mod tests {
     /// The store at `path`, opened, its uploader uploading as `keeping` says.
     pub(super) fn reopened(
         path: impl AsRef<std::path::Path>,
-        keeping: extent_store::upload::Options,
-    ) -> Result<ExtentStore, crate::Error> {
-        ExtentStore::open_with(
+        keeping: local_cell::upload::Options,
+    ) -> Result<OpenCell, crate::Error> {
+        OpenCell::open_with(
             path,
-            crate::extents::Opening { keeping, ..crate::extents::Opening::here()? },
+            crate::open_cell::Opening { keeping, ..crate::open_cell::Opening::here()? },
         )
     }
 
     /// Uploads only when a commit waits.
-    /// How this process's stores keep their branches ([`crate::host_store::keeping`]), but
+    /// How this process's stores keep their branches ([`crate::host_cell::keeping`]), but
     /// uploading nothing until a commit waits for it, or the hour is up.
-    pub(super) fn idle() -> extent_store::upload::Options {
-        let keeping = crate::host_store::keeping().unwrap();
-        extent_store::upload::Options { interval: Duration::from_secs(3600), ..keeping }
+    pub(super) fn idle() -> local_cell::upload::Options {
+        let keeping = crate::host_cell::keeping().unwrap();
+        local_cell::upload::Options { interval: Duration::from_secs(3600), ..keeping }
     }
 
     pub(super) fn pattern(seed: u8, len: usize) -> Vec<u8> {
         (0..len).map(|i| seed ^ (i % 251) as u8).collect()
     }
 
-    fn write(store: &ExtentStore, sequence: u64, data: &[u8]) -> ExtentId {
+    fn write(store: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
         let extent = ExtentId { branch: store.branch().id, sequence };
         store.write(extent, 0, &[VolatileSlice::from(data)]).unwrap();
         extent
@@ -670,12 +670,12 @@ mod tests {
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
         );
         // Extent 4, written and freed between two uploads, never was.
-        let keys = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, "")).unwrap();
+        let keys = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
-                    extent_bucket::layout::kind(&meta.key),
-                    extent_bucket::layout::Kind::Extent { .. }
+                    bucket_cell::layout::kind(&meta.key),
+                    bucket_cell::layout::Kind::Extent { .. }
                 ))
                 .count(),
             1
@@ -684,8 +684,8 @@ mod tests {
             .iter()
             .filter(|meta| {
                 matches!(
-                    extent_bucket::layout::kind(&meta.key),
-                    extent_bucket::layout::Kind::Segment { .. }
+                    bucket_cell::layout::kind(&meta.key),
+                    bucket_cell::layout::Kind::Segment { .. }
                 )
             })
             .count();
@@ -695,16 +695,16 @@ mod tests {
         let store = reopened(dir.path().join("store"), idle()).unwrap();
         // Its guest mints from the second writer's range.
         let info = store.info().unwrap();
-        assert_eq!(info.sequence_floor, 2 << extent_bucket::EPOCH_SHIFT);
+        assert_eq!(info.sequence_floor, 2 << bucket_cell::EPOCH_SHIFT);
         // What the store holds ends far below: the guest looks for what a crash left there only.
-        assert!(info.next_sequence < 1 << extent_bucket::EPOCH_SHIFT, "{info:?}");
-        let keys = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, "")).unwrap();
+        assert!(info.next_sequence < 1 << bucket_cell::EPOCH_SHIFT, "{info:?}");
+        let keys = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
         // No segment more: the store takes the branch by its head alone.
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
-                    extent_bucket::layout::kind(&meta.key),
-                    extent_bucket::layout::Kind::Segment { .. }
+                    bucket_cell::layout::kind(&meta.key),
+                    bucket_cell::layout::Kind::Segment { .. }
                 ))
                 .count(),
             segments
@@ -723,10 +723,10 @@ mod tests {
     /// went, and the store took the branch again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
-        use extent_bucket::{Commit, SegmentBuilder, Writer};
+        use bucket_cell::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let (branch, token) = (crate::host_store::new_alone(), crate::host_store::token().unwrap());
+        let (branch, token) = (crate::host_cell::new_alone(), crate::host_cell::token().unwrap());
         // The writer before, its two segments in flight.
         let before = futures::executor::block_on(async {
             branch::create(&*bucket, branch, 1).await.unwrap();
@@ -748,7 +748,7 @@ mod tests {
         futures::executor::block_on(async {
             before.upload(segments[1]).await.unwrap();
             before.upload(segments[0]).await.unwrap();
-            assert_eq!(before.acknowledge().await, Err(extent_bucket::Error::Fenced));
+            assert_eq!(before.acknowledge().await, Err(bucket_cell::Error::Fenced));
         });
         // The store's commit is the branch's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
@@ -792,13 +792,13 @@ mod tests {
         let gated = Arc::new(Gated::over(objects.clone()));
         let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let bucket = Arc::new(ObjectBucket::new(objects, ""));
-        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap()));
-        let keeping = extent_store::upload::Options { cache, ..idle() };
+        let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).unwrap();
         let branch = store.branch();
@@ -816,14 +816,14 @@ mod tests {
         checkpointed(&store, &bucket);
         collect(2);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .collect();
         let moves =
-            extent_bucket::layout::moves_under(&extent_bucket::layout::segments(branch)).unwrap();
-        let first = extent_bucket::layout::segment(branch, 0, 1);
+            bucket_cell::layout::moves_under(&bucket_cell::layout::segments(branch)).unwrap();
+        let first = bucket_cell::layout::segment(branch, 0, 1);
         assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
         assert!(!keys.contains(&first), "{keys:?}");
         // The host dies: its disk copied as it is, its cache not, its store cut off.
@@ -872,9 +872,9 @@ mod tests {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         // The parent's segment, of extents 1 to 16, which don't compress, freed but 1 to 3; its
@@ -891,11 +891,11 @@ mod tests {
         }
         parent.commit(None).unwrap();
         let child = dir.path().join("child");
-        let forked = crate::host_store::fork_child(branch);
+        let forked = crate::host_cell::fork_child(branch);
         assert_ne!(forked, branch, "a fork in a cell of its own");
         parent.fork_to(&child, forked).unwrap();
         drop(parent);
-        crate::host_store::delete(&path, Some(&bucket), crate::host_store::token).unwrap();
+        crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).unwrap();
         // The fork's store, open all along: the segment compacted, 1 to 3 in its moves.
         let child = reopened(&child, idle()).unwrap();
         assert_eq!(collect(1).compacted, 1);
@@ -908,24 +908,24 @@ mod tests {
         collect(3);
         collect(4);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .filter(|key| {
                     matches!(
-                        extent_bucket::layout::kind(key),
-                        extent_bucket::layout::Kind::Moves { .. }
-                            | extent_bucket::layout::Kind::Segment { .. }
+                        bucket_cell::layout::kind(key),
+                        bucket_cell::layout::Kind::Moves { .. }
+                            | bucket_cell::layout::Kind::Segment { .. }
                     ) && key.starts_with(&branch.prefix())
                 })
                 .collect();
-        let sealed = extent_bucket::layout::segments(branch);
-        let once = extent_bucket::layout::moves_under(&sealed).unwrap();
-        let twice = extent_bucket::layout::moves_under(&once).unwrap();
+        let sealed = bucket_cell::layout::segments(branch);
+        let once = bucket_cell::layout::moves_under(&sealed).unwrap();
+        let twice = bucket_cell::layout::moves_under(&once).unwrap();
         let compacted: Vec<String> = (keys.iter())
             .filter(|key| key.starts_with(&once))
-            .filter_map(|key| extent_bucket::layout::moved_from(key))
+            .filter_map(|key| bucket_cell::layout::moved_from(key))
             .collect();
         assert_eq!(compacted.len(), 1, "{keys:?}");
         assert!(!keys.contains(&compacted[0]), "{keys:?}");
@@ -943,14 +943,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         let cache =
             cached.then(|| Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap()));
-        let keeping = extent_store::upload::Options { cache, ..idle() };
+        let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).unwrap();
         let store = Arc::new(store);
@@ -977,26 +977,26 @@ mod tests {
         collect(3);
         collect(4);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .filter(|key| {
                     matches!(
-                        extent_bucket::layout::kind(key),
-                        extent_bucket::layout::Kind::Moves { .. }
-                            | extent_bucket::layout::Kind::Segment { .. }
+                        bucket_cell::layout::kind(key),
+                        bucket_cell::layout::Kind::Moves { .. }
+                            | bucket_cell::layout::Kind::Segment { .. }
                     )
                 })
                 .collect();
         let once =
-            extent_bucket::layout::moves_under(&extent_bucket::layout::segments(branch)).unwrap();
-        let twice = extent_bucket::layout::moves_under(&once).unwrap();
+            bucket_cell::layout::moves_under(&bucket_cell::layout::segments(branch)).unwrap();
+        let twice = bucket_cell::layout::moves_under(&once).unwrap();
         assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
         // The store, open all along, reads it there, and so does its follower.
         let extent = ExtentId { branch: branch.id, sequence: 1 };
-        let reads = |store: &ExtentStore| {
+        let reads = |store: &OpenCell| {
             let mut data = vec![0; EXTENT];
             let read = store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
             read.map(|()| data == noise(1, EXTENT))
@@ -1005,13 +1005,13 @@ mod tests {
     }
 
     /// The footers of `branch`'s segments in `bucket`, in order.
-    fn footers(bucket: &ObjectBucket, branch: crate::CellId) -> Vec<extent_bucket::layout::Footer> {
-        use extent_bucket::layout;
+    fn footers(bucket: &ObjectBucket, branch: crate::CellId) -> Vec<bucket_cell::layout::Footer> {
+        use bucket_cell::layout;
         futures::executor::block_on(async {
-            let listed = extent_bucket::Bucket::list(bucket, &layout::segments(branch)).await;
+            let listed = bucket_cell::Bucket::list(bucket, &layout::segments(branch)).await;
             let mut footers = Vec::new();
             for meta in listed.unwrap() {
-                let object = extent_bucket::Bucket::get(bucket, &meta.key).await.unwrap();
+                let object = bucket_cell::Bucket::get(bucket, &meta.key).await.unwrap();
                 footers.push(layout::footer(&object.bytes).unwrap());
             }
             footers
@@ -1052,17 +1052,17 @@ mod tests {
     /// of room, as a closing that beats the uploader leaves it: with no commit to come, as one in
     /// the lag's wait holds its guest's seal, and holds back every other. And the commit's epoch.
     fn closed_for_room(
-        options: extent_store::upload::Options,
-    ) -> (tempfile::TempDir, crate::host_store::Opened, u64) {
+        options: local_cell::upload::Options,
+    ) -> (tempfile::TempDir, crate::host_cell::Opened, u64) {
         const EXTENT: usize = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
-        let opened = crate::host_store::create_unmade(
+        let opened = crate::host_cell::create_unmade(
             &path,
             1 << 30,
-            crate::host_store::BranchOf::Named(extent_bucket::layout::test_branch(7)),
-            extent_bucket::cell::Kind::Fxfs,
+            crate::host_cell::BranchOf::Named(bucket_cell::layout::test_branch(7)),
+            bucket_cell::cell::Kind::Fxfs,
             Some(&url_of(&bucket)),
             options,
         );
@@ -1084,8 +1084,8 @@ mod tests {
     /// end, as the commit, or its guest, have none to come: an uploader's own flush ends it.
     #[test]
     fn commits_stalled_on_the_lag_end_with_their_segment_closed_for_room() {
-        let lag = extent_store::upload::Options { max_lag_bytes: BLOCK as u64, ..idle() };
-        let (_dir, crate::host_store::Opened { store, uploader, .. }, epoch) = closed_for_room(lag);
+        let lag = local_cell::upload::Options { max_lag_bytes: BLOCK as u64, ..idle() };
+        let (_dir, crate::host_cell::Opened { store, uploader, .. }, epoch) = closed_for_room(lag);
         let stalled = std::sync::Arc::new(uploader);
         let waiting = stalled.clone();
         let (ended, end) = std::sync::mpsc::channel();
@@ -1097,7 +1097,7 @@ mod tests {
     /// TASK-150.2: so does a sync of the store's commits, or anything else waiting for their upload.
     #[test]
     fn uploads_waited_for_end_with_their_segment_closed_for_room() {
-        let (_dir, crate::host_store::Opened { uploader, .. }, epoch) = closed_for_room(idle());
+        let (_dir, crate::host_cell::Opened { uploader, .. }, epoch) = closed_for_room(idle());
         let (ended, end) = std::sync::mpsc::channel();
         std::thread::spawn(move || ended.send(uploader.wait_uploaded(epoch)).unwrap());
         assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
@@ -1119,16 +1119,16 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let branch = crate::host_store::new_alone();
-        let opened = crate::host_store::create(
+        let branch = crate::host_cell::new_alone();
+        let opened = crate::host_cell::create(
             &path,
             1 << 30,
-            crate::host_store::BranchOf::Named(branch),
-            extent_bucket::cell::Kind::Fxfs,
+            crate::host_cell::BranchOf::Named(branch),
+            bucket_cell::cell::Kind::Fxfs,
             idle(),
         )
         .unwrap();
-        let crate::host_store::Opened { store, uploader, .. } = opened;
+        let crate::host_cell::Opened { store, uploader, .. } = opened;
         assert!(!free(&path), "taken while the store is open");
         store.close().unwrap();
         assert!(!free(&path), "taken while its uploader runs");
@@ -1157,7 +1157,7 @@ mod tests {
             dir.path().join("store"),
             (2 * WRITTEN, None),
             &bucket,
-            extent_store::upload::Options::default(),
+            local_cell::upload::Options::default(),
         )
         .unwrap();
         let data = noise(1, EXTENT);
@@ -1231,8 +1231,8 @@ mod tests {
     /// What the stores' maps of their extents hold now, as the extent daemon counts it
     /// (`cladefsd::process::extents_held`, Linux's): what the stores hold of their own, and the
     /// decoded states they share, each once.
-    fn extents_counted() -> (extent_store::Own, extent_bucket::recovery::Held) {
-        (extent_store::own_held(), crate::host_store::decoded_held())
+    fn extents_counted() -> (local_cell::Own, bucket_cell::recovery::Held) {
+        (local_cell::own_held(), crate::host_cell::decoded_held())
     }
 
     /// Opens `forks` forks of a base of `extents` extents, forked from a version of it if `version`,
@@ -1240,21 +1240,21 @@ mod tests {
     /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
     /// (marginal), and that for each extent of the base; and how long each of those took to open.
     /// TASK-453: each past the first holds [`IDLE_FORK_BYTES`] at most, the decoded state they
-    /// share one, of the base's extents, counted at [`extent_bucket::recovery::ENTRY_BYTES`] an
+    /// share one, of the base's extents, counted at [`bucket_cell::recovery::ENTRY_BYTES`] an
     /// entry, which covers what the first held more than the others, and a map of them built
     /// sharing nothing, as the writer's of a base written live is. Then what closing them all
     /// leaves held over the heap before them; opened and closed again, the heap is to the byte
     /// what the first closing left (TASK-471: not always, by 80 to 2,048 bytes), checked last.
     /// Then one fork more writes, commits and uploads a block for every extent of the base, up to
     /// 4,096: what it holds more, what closing it lets go of more than closing an idle one does,
-    /// what it holds of its own, counted ([`extent_store::Own::bytes`]), covers. And one more frees
+    /// what it holds of its own, counted ([`local_cell::Own::bytes`]), covers. And one more frees
     /// every 32nd extent it inherited, each its writer's map's change apart, a path of its nodes
-    /// copied ([`extent_bucket::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
+    /// copied ([`bucket_cell::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
     /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
     /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
     /// more.
     fn fork_extent_memory(extents: u64, forks: usize, version: bool) {
-        use crate::host_store::fork_child;
+        use crate::host_cell::fork_child;
         let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
@@ -1289,8 +1289,9 @@ mod tests {
         let (freeing, writing) = (paths.pop().unwrap(), paths.pop().unwrap());
         drop(parent);
         let open = |path: &std::path::PathBuf| {
-            let opening = crate::extents::Opening { arena: None, profiled: false, keeping: idle() };
-            ExtentStore::open_with(path, opening).unwrap()
+            let opening =
+                crate::open_cell::Opening { arena: None, profiled: false, keeping: idle() };
+            OpenCell::open_with(path, opening).unwrap()
         };
         let name = if version { "version" } else { "live" };
         // The heap once the page cache has let go of the files closed, and of the pages it holds:
@@ -1300,9 +1301,9 @@ mod tests {
         // And once the bucket's decoded states let go of what they knew of those no one holds
         // (`Decoded::held`, TASK-453).
         let settled = || {
-            extent_store::pages::shared().write_back_all().unwrap();
-            extent_store::pages::shared().evict_to(0);
-            extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
+            local_cell::pages::shared().write_back_all().unwrap();
+            local_cell::pages::shared().evict_to(0);
+            bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
             held()
         };
 
@@ -1322,7 +1323,7 @@ mod tests {
         let (layers, entries) =
             (decoded.states - decoded_before.states, decoded.entries - decoded_before.entries);
         // What this base's bucket holds decoded, whenever it decoded it.
-        let shared = extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
+        let shared = bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
         let (mut last, mut last_held, mut last_took) = (0, 0, Duration::ZERO);
         let first = samples[0].1;
         for &(open, held, took) in &samples {
@@ -1362,13 +1363,13 @@ mod tests {
         });
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
         let weighed = held();
-        let mut rebuilt = extent_bucket::State::new(branch).extents;
+        let mut rebuilt = bucket_cell::State::new(branch).extents;
         for (extent, at) in &state.extents {
             rebuilt.insert(*extent, at.clone());
         }
         let unshared = held() - weighed;
         drop(rebuilt);
-        let bound = state.extents.len() as u64 * extent_bucket::recovery::ENTRY_BYTES;
+        let bound = state.extents.len() as u64 * bucket_cell::recovery::ENTRY_BYTES;
         assert!(unshared <= bound, "a map of the extents unshared: {unshared} bytes, of {bound}");
 
         // Closed, opened and closed again.
@@ -1387,7 +1388,7 @@ mod tests {
         let (idle, opened) = (open(&paths[0]), open(&writing));
         let writer = &opened;
         let floor = writer.info().unwrap().next_sequence.max(writer.info().unwrap().sequence_floor);
-        let own_before = extent_store::own_held();
+        let own_before = local_cell::own_held();
         for sequence in floor..floor + writes {
             write(writer, sequence, &data);
             if (sequence - floor + 1) % 1024 == 0 {
@@ -1396,13 +1397,13 @@ mod tests {
         }
         writer.commit(None).unwrap();
         writer.wait_uploaded().unwrap();
-        let own_after = extent_store::own_held();
+        let own_after = local_cell::own_held();
         let own_written = own_after.entries - own_before.entries;
         assert!(idle.shares_extents_with(writer), "its bucket's layer, written over");
         // What its writes hold, once its uploader is done with them: what closing it lets go of,
         // more than closing an idle fork does. Not what the heap holds more meanwhile, which
         // its uploader's work in flight swings by megabytes.
-        let closing = |store: ExtentStore| {
+        let closing = |store: OpenCell| {
             let open = settled();
             drop(store);
             open - settled()
@@ -1447,7 +1448,7 @@ mod tests {
         // Opened again, from its checkpoint, beside an idle fork holding the base's map: what
         // the heap holds more than an idle fork, its map made of the base's, counted.
         let idle = open(&paths[0]);
-        let decoded = || extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
+        let decoded = || bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
         let (heap_before, decoded_before) = (settled(), decoded());
         let reopened = open(&freeing);
         let (heap_after, decoded_after) = (settled(), decoded());
@@ -1474,7 +1475,7 @@ mod tests {
     /// share its map still.
     #[test]
     fn forks_open_at_once_share_what_they_inherited() {
-        use crate::host_store::fork_child;
+        use crate::host_cell::fork_child;
         const EXTENTS: u64 = 64;
         const FORKS: usize = 4;
         for version in [false, true] {
@@ -1507,11 +1508,10 @@ mod tests {
             for other in &forks[1..] {
                 assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
             }
-            let one =
-                extent_bucket::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
-            let decoded = || extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
+            let one = bucket_cell::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
+            let decoded = || bucket_cell::Bucket::decoded(&*bucket).unwrap().held();
             assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
-            let read = |store: &ExtentStore, extent: ExtentId| {
+            let read = |store: &OpenCell, extent: ExtentId| {
                 let mut data = vec![0; BLOCK];
                 let read =
                     store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
@@ -1556,7 +1556,7 @@ mod tests {
     #[test]
     fn reads_of_inherited_extents_allocate_nothing() {
         use crate::heap::allocations_while;
-        use crate::host_store::fork_child;
+        use crate::host_cell::fork_child;
         const EXTENTS: u64 = 4160;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
@@ -1597,7 +1597,7 @@ mod tests {
     }
 
     /// TASK-453: a benchmark of a read's hit in the extent cache of an extent a fork inherited
-    /// (`ExtentStore::read_cached`): a base of `CLADEFS_BENCH_EXTENTS` extents (32,768 unless set)
+    /// (`OpenCell::read_cached`): a base of `CLADEFS_BENCH_EXTENTS` extents (32,768 unless set)
     /// of a block each, forked, each of them read once into the cache, then all of them read
     /// `CLADEFS_BENCH_ROUNDS` times (20 unless set), a block each: the time a read, and the
     /// allocations. In the sim profile: `cargo nextest run -p cladefs --cargo-profile sim
@@ -1605,7 +1605,7 @@ mod tests {
     #[test]
     #[ignore = "a benchmark (TASK-453): --run-ignored only, in the sim profile"]
     fn bench_inherited_cached_reads() {
-        use crate::host_store::fork_child;
+        use crate::host_cell::fork_child;
         let count = |name: &str, default: u64| -> u64 {
             std::env::var(name).map_or(default, |count| count.parse().expect("a count"))
         };
@@ -1652,7 +1652,7 @@ mod tests {
         );
     }
 
-    /// Has the bucket runtime (`extent_store::upload::bucket_runtime`) lock each shard of its list of
+    /// Has the bucket runtime (`local_cell::upload::bucket_runtime`) lock each shard of its list of
     /// tasks once, so that none allocates after: on macOS, a `std::sync::Mutex` allocates its
     /// pthread mutex, 64 bytes, as it is first locked, and the runtime locks the shard of a task's
     /// id, numbered across the process, as it spawns the task and as it ends. Its shards are
@@ -1661,9 +1661,9 @@ mod tests {
     /// uploaders, so a heap counted to the byte grew by 64 bytes now and then as they reached
     /// shards none had (32 at most on this runtime): nothing of the stores'. The other such holder,
     /// each of its threads' list of the shared locks it holds, it makes as each starts
-    /// (`extent_store::shared::prepare_thread`).
+    /// (`local_cell::shared::prepare_thread`).
     fn every_task_shard_locked() {
-        let runtime = extent_store::upload::bucket_runtime().unwrap();
+        let runtime = local_cell::upload::bucket_runtime().unwrap();
         let shards = runtime.metrics().num_workers().next_power_of_two() * 4;
         let mut locked = std::collections::HashSet::new();
         while locked.len() < shards {
@@ -1680,12 +1680,12 @@ mod tests {
     /// as those objects, which the store's reads read there with the bucket's gone (TASK-165.8).
     #[test]
     fn uploaded_segments_are_the_stores_files() {
-        use extent_bucket::layout::{self, Footer};
+        use bucket_cell::layout::{self, Footer};
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
-        let options = extent_store::upload::Options { cache: Some(cache.clone()), ..idle() };
+        let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
         let branch = store.branch();
@@ -1709,10 +1709,10 @@ mod tests {
         // The bucket's objects under `prefix`.
         let objects = |prefix: String| -> Vec<Vec<u8>> {
             futures::executor::block_on(async {
-                let listed = extent_bucket::Bucket::list(&*bucket, &prefix).await.unwrap();
+                let listed = bucket_cell::Bucket::list(&*bucket, &prefix).await.unwrap();
                 let mut objects = Vec::new();
                 for meta in listed {
-                    let object = extent_bucket::Bucket::get(&*bucket, &meta.key).await.unwrap();
+                    let object = bucket_cell::Bucket::get(&*bucket, &meta.key).await.unwrap();
                     objects.push(object.bytes);
                 }
                 objects
@@ -1761,7 +1761,7 @@ mod tests {
     /// storage under the CRC it fails (TASK-153.11).
     #[test]
     fn files_with_flipped_bytes_are_not_uploaded() {
-        use extent_bucket::layout;
+        use bucket_cell::layout;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
@@ -1771,7 +1771,7 @@ mod tests {
         let extent = write(&store, 1, &noise(1, 4 << 20));
         store.commit_ordered(None).unwrap();
         // On the disk, as the store's page cache holds it written (TASK-433).
-        extent_store::pages::shared().write_back_all().unwrap();
+        local_cell::pages::shared().write_back_all().unwrap();
         let path = dir.path().join(format!(
             "store/extents/{}/{}",
             base32_id::Padded(branch.id),
@@ -1784,10 +1784,10 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
         // so that its reads read the disk (TASK-433).
-        extent_store::pages::shared().evict_to(0);
+        local_cell::pages::shared().evict_to(0);
         assert_eq!(store.commit(None), Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
-            let listed = extent_bucket::Bucket::list(&*bucket, &prefix);
+            let listed = bucket_cell::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
         };
         assert_eq!(listed(layout::extents(branch)), Vec::<String>::new());
@@ -1803,11 +1803,11 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
         store.commit(None).unwrap();
-        let other = extent_bucket::Writer::open(
+        let other = bucket_cell::Writer::open(
             bucket.clone(),
             store.branch(),
             2,
-            crate::host_store::token().unwrap(),
+            crate::host_cell::token().unwrap(),
         );
         futures::executor::block_on(other).unwrap();
         write(&store, 2, &pattern(2, BLOCK));
@@ -1824,13 +1824,13 @@ mod tests {
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
-        ExtentStore::place(&first_path, 1).unwrap();
+        OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"first")).unwrap();
 
         // The branch moves to another host, a later placement, while the first still runs.
         drop(kept_in(&second_path, (1 << 30, Some(branch)), &bucket, idle()).unwrap());
-        ExtentStore::place(&second_path, 2).unwrap();
+        OpenCell::place(&second_path, 2).unwrap();
         let second = reopened(&second_path, idle()).unwrap();
         assert_eq!(second.root(), Ok(b"first".to_vec()));
         write(&first, 2, &pattern(2, BLOCK));
@@ -1840,11 +1840,11 @@ mod tests {
         // The first, restarted, takes it back no more: its token is the earlier.
         let refused = reopened(&first_path, idle()).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ESTALE));
-        let head = futures::executor::block_on(extent_bucket::head::get(&*bucket, branch));
+        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, branch));
         assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
-        ExtentStore::place(&first_path, 3).unwrap();
+        OpenCell::place(&first_path, 3).unwrap();
         let later = reopened(&first_path, idle()).unwrap();
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
@@ -1859,27 +1859,27 @@ mod tests {
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
-        ExtentStore::place(&first_path, 1).unwrap();
+        OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"first")).unwrap();
         drop(first);
         // The branch moves to another host, a later placement.
         drop(kept_in(&second_path, (1 << 30, Some(branch)), &bucket, idle()).unwrap());
-        ExtentStore::place(&second_path, 2).unwrap();
+        OpenCell::place(&second_path, 2).unwrap();
         let second = reopened(&second_path, idle()).unwrap();
 
-        let refused = ExtentStore::delete(&first_path, Some(&bucket));
+        let refused = OpenCell::delete(&first_path, Some(&bucket));
         assert_eq!(refused.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
         write(&second, 2, &pattern(2, BLOCK));
         second.commit(Some(b"second")).unwrap();
         drop(second);
-        let state = futures::executor::block_on(extent_bucket::recover(&*bucket, branch, None))
+        let state = futures::executor::block_on(bucket_cell::recover(&*bucket, branch, None))
             .unwrap()
             .state;
         assert_eq!(state.root, Some(b"second".to_vec()));
 
-        ExtentStore::delete(&second_path, Some(&bucket)).unwrap();
-        let deleted = futures::executor::block_on(extent_bucket::branch::record(&*bucket, branch));
+        OpenCell::delete(&second_path, Some(&bucket)).unwrap();
+        let deleted = futures::executor::block_on(bucket_cell::branch::record(&*bucket, branch));
         assert!(deleted.unwrap().unwrap().deleted, "the branch lives");
     }
 
@@ -1889,14 +1889,14 @@ mod tests {
     fn unplaced_copies_take_their_hosts_token() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let options = extent_store::upload::Options { token: 9, ..idle() };
+        let options = local_cell::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let head = futures::executor::block_on(extent_bucket::head::get(&*bucket, store.branch()));
+        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.branch()));
         let head = head.unwrap().unwrap();
         // cladefs: its cell taken with the host's token, its branch's head with the cell's epoch
         // (TASK-364).
-        let cell = extent_bucket::cell::read(&*bucket, store.branch());
+        let cell = bucket_cell::cell::read(&*bucket, store.branch());
         let cell = futures::executor::block_on(cell).unwrap().unwrap();
         assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
     }
@@ -1923,7 +1923,7 @@ mod tests {
     }
 
     /// TASK-192: a store dropped uploads what it committed, its open segment's commits too, as
-    /// `extent_store::upload`'s docs say: its uploader closes the open segment, uploads it and
+    /// `local_cell::upload`'s docs say: its uploader closes the open segment, uploads it and
     /// stops, before the store closes. Before, the store closed first, and its uploader found the
     /// open segment's commits it could no longer close.
     #[test]
@@ -1979,13 +1979,13 @@ mod tests {
 
     impl Hold {
         fn holds(&self, key: &str) -> bool {
-            use extent_bucket::layout::{Kind, kind};
+            use bucket_cell::layout::{Kind, kind};
             match self {
                 Hold::Nothing => false,
                 Hold::Segments => {
                     matches!(
-                        extent_bucket::layout::kind(key),
-                        extent_bucket::layout::Kind::Segment { .. }
+                        bucket_cell::layout::kind(key),
+                        bucket_cell::layout::Kind::Segment { .. }
                     )
                 }
                 Hold::SegmentsFrom(from) => {
@@ -2293,10 +2293,10 @@ mod tests {
     /// nothing, the bucket's failures counted (TASK-314): the third, of two blocks; they go on once
     /// it answers again, and every commit is uploaded.
     fn waits_at_the_lag_bound(
-        options: extent_store::upload::Options,
+        options: local_cell::upload::Options,
         failing: fn(&Gated) -> &std::sync::atomic::AtomicBool,
     ) {
-        use extent_bucket::object_bucket::Request;
+        use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
@@ -2339,7 +2339,7 @@ mod tests {
         // Seven segments' room, of 32 MiB and their tails each: more than a framing holds.
         const BUDGET: u64 = 256 << 20;
         // What a store's framing holds besides, one segment at a time: its data, and its framed
-        // bytes, twice as they grow (`extent_store::segments`, TASK-325).
+        // bytes, twice as they grow (`local_cell::segments`, TASK-325).
         const FRAMING: u64 = 4 * (32 << 20);
         // And the heap's own: the store's and the bucket's, and a commit's buffers.
         const SLACK: u64 = 16 << 20;
@@ -2348,13 +2348,13 @@ mod tests {
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let options =
-            extent_store::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
+            local_cell::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
         let store = Arc::new(
             kept_in(dir.path().join("store"), (8 << 30, None), &bucket.clone(), options).unwrap(),
         );
         // The writer's fence is in; the commits' segments are held.
         gated.hold.send_replace(Hold::Segments);
-        let segments = 2 * extent_store::upload::IN_FLIGHT;
+        let segments = 2 * local_cell::upload::IN_FLIGHT;
         let mut waiting = Vec::new();
         let data = noise(1, 1 << 20);
         let heap = crate::heap::peak_while(|| {
@@ -2389,7 +2389,7 @@ mod tests {
         assert!(memory.max_held <= BUDGET, "{memory:?}");
         // cladefs: and the stores' page cache's, which a backlog holds no more of than its bound
         // (TASK-433): the backlog is on the disk.
-        let pages = extent_store::pages::shared().options().most;
+        let pages = local_cell::pages::shared().options().most;
         assert!(heap <= BUDGET + FRAMING + SLACK + pages, "{} MiB held", heap >> 20);
     }
 
@@ -2439,7 +2439,7 @@ mod tests {
         let branch = store.branch();
         // The commits' segments are 0 to 3.
         gated.hold.send_replace(Hold::Segments);
-        let waiting: Vec<_> = (1..=extent_store::upload::IN_FLIGHT as u64)
+        let waiting: Vec<_> = (1..=local_cell::upload::IN_FLIGHT as u64)
             .map(|sequence| {
                 let committing = store.clone();
                 let commit = std::thread::spawn(move || {
@@ -2450,7 +2450,7 @@ mod tests {
                 commit
             })
             .collect();
-        let ordered = extent_store::upload::IN_FLIGHT as u64 + 1;
+        let ordered = local_cell::upload::IN_FLIGHT as u64 + 1;
         write(&store, ordered, &pattern(ordered as u8, BLOCK));
         store.commit_ordered(None).unwrap();
         // The first lands alone: its commit is acknowledged; then the rest.
@@ -2462,10 +2462,10 @@ mod tests {
             assert_eq!(commit.join().unwrap(), Ok(()));
         }
         // The store's segments closed, in the bucket: those of the commits waiting.
-        let prefix = extent_bucket::layout::segments(branch);
-        let closed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix));
+        let prefix = bucket_cell::layout::segments(branch);
+        let closed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
-        assert_eq!(closed.len(), extent_store::upload::IN_FLIGHT);
+        assert_eq!(closed.len(), local_cell::upload::IN_FLIGHT);
         store.wait_uploaded().unwrap();
         let (extents, _) = uploaded(&bucket, branch);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
@@ -2478,12 +2478,12 @@ mod tests {
     /// their uploads, are all in the branch, which another host's empty store takes, losing the
     /// lag's commits at most; and writes on. In the objects of `store` under `prefix`.
     fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
-        use extent_bucket::layout;
+        use bucket_cell::layout;
         use std::sync::atomic::Ordering::Relaxed;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::over(store.clone()));
         let max_lag = 2;
-        let options = extent_store::upload::Options {
+        let options = local_cell::upload::Options {
             interval: Duration::from_millis(1),
             max_lag,
             ..Default::default()
@@ -2531,7 +2531,7 @@ mod tests {
             let footers = bytes.filter_map(|bytes| layout::footer::<layout::Footer>(&bytes).ok());
             footers.flat_map(|footer| footer.contents.commits).collect()
         };
-        while !framed().iter().any(|&tag| extent_bucket::layout::epoch_of(tag) == last) {
+        while !framed().iter().any(|&tag| bucket_cell::layout::epoch_of(tag) == last) {
             // Returned, the commit waiting says the uploader failed, which never framed it.
             assert!(!waiting.is_finished(), "the commit waiting returned, its segment not framed");
             std::thread::yield_now();
@@ -2614,11 +2614,11 @@ mod tests {
     #[test]
     #[ignore = "a measurement against CLADEFS_PHASES_BUCKET's bucket"]
     fn bucket_round_trips_by_phase() {
-        use extent_bucket::object_bucket::Request;
+        use bucket_cell::object_bucket::Request;
         let url =
             std::env::var("CLADEFS_PHASES_BUCKET").expect("CLADEFS_PHASES_BUCKET names a bucket");
         let url = format!("{}/phases-{:016x}/", url.trim_end_matches('/'), rand::random::<u64>());
-        let bucket = crate::host_store::bucket(&url).unwrap();
+        let bucket = crate::host_cell::bucket(&url).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut phases: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
         // Runs `operation`, a `phase`, and says what it took and asked of the bucket.
@@ -2641,10 +2641,10 @@ mod tests {
             phases.entry(phase).or_default().push(took);
         };
         let base = dir.path().join("base");
-        let branch = crate::host_store::new_alone();
+        let branch = crate::host_cell::new_alone();
         let mut store = None;
         measure("create", &mut || {
-            let made = ExtentStore::create_kept_with(&base, 1 << 30, branch, &url, idle());
+            let made = OpenCell::create_kept_with(&base, 1 << 30, branch, &url, idle());
             store = Some(made.unwrap());
         });
         let store = store.unwrap();
@@ -2659,7 +2659,7 @@ mod tests {
         let store = reopened(&base, idle()).unwrap();
         let forks: Vec<_> = (0..10).map(|fork| dir.path().join(format!("fork-{fork}"))).collect();
         for fork in &forks {
-            let child = crate::host_store::new_alone();
+            let child = crate::host_cell::new_alone();
             measure("fork", &mut || store.fork_to(fork, child).unwrap());
         }
         drop(store);
@@ -2685,7 +2685,7 @@ mod tests {
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
     fn durable_commits_cost_a_create_and_a_head_swap() {
-        use extent_bucket::object_bucket::Request;
+        use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
@@ -2718,8 +2718,8 @@ mod tests {
 
     #[test]
     fn takes_recover_their_branches_once_by_their_segments_tails() {
-        use extent_bucket::layout;
-        use extent_bucket::object_bucket::Request;
+        use bucket_cell::layout;
+        use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
@@ -2742,14 +2742,14 @@ mod tests {
             .map(|&request| (request.name(), after.requests(request) - before.requests(request)))
             .collect();
         let sizes: std::collections::BTreeMap<_, _> =
-            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| (meta.key, meta.size))
                 .collect();
         let tails: u64 = (0..4)
             .map(|segment| {
-                sizes[&layout::segment(branch, segment, 1)].min(extent_bucket::object::TAIL)
+                sizes[&layout::segment(branch, segment, 1)].min(bucket_cell::object::TAIL)
             })
             .sum();
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
@@ -2790,7 +2790,7 @@ mod tests {
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs_branches_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
-        let (store, prefix) = extent_bucket::object_bucket::object_store_at(&url).unwrap();
+        let (store, prefix) = bucket_cell::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
         let prefix = format!("{prefix}/{:016x}", rand::random::<u64>());
         survives_its_hosts_loss(store, prefix.trim_start_matches('/'));
@@ -2799,7 +2799,7 @@ mod tests {
     #[test]
     fn commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
-        let options = extent_store::upload::Options { interval, max_lag: 2, ..Default::default() };
+        let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
         waits_at_the_lag_bound(options, |gated| &gated.shut);
     }
 
@@ -2811,7 +2811,7 @@ mod tests {
     /// closing segments sooner, as it no longer waits for their framed files durable (TASK-384).
     fn commits_wait_at_the_lag_bound_in_bytes() {
         let interval = Duration::from_millis(1);
-        let options = extent_store::upload::Options {
+        let options = local_cell::upload::Options {
             interval,
             max_lag_bytes: 3 * BLOCK as u64,
             ..Default::default()
@@ -2825,7 +2825,7 @@ mod tests {
     #[test]
     fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
         let interval = Duration::from_millis(1);
-        let options = extent_store::upload::Options { interval, max_lag: 2, ..Default::default() };
+        let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
         waits_at_the_lag_bound(options, |gated| &gated.full);
     }
 
@@ -2907,7 +2907,7 @@ mod tests {
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
             .filter_map(|line| {
-                line.strip_prefix("DEBUG extent_bucket::object_bucket: object storage: ")
+                line.strip_prefix("DEBUG bucket_cell::object_bucket: object storage: ")
             })
             .map(|line| {
                 let kind = line.split(' ').next().unwrap().to_owned();
@@ -2926,8 +2926,8 @@ mod tests {
         gated: &Arc<Gated>,
         branch: crate::CellId,
         meanwhile: impl FnOnce(),
-    ) -> Result<ExtentStore, crate::Error> {
-        gated.hold.send_replace(Hold::First(extent_bucket::layout::head(branch)));
+    ) -> Result<OpenCell, crate::Error> {
+        gated.hold.send_replace(Hold::First(bucket_cell::layout::head(branch)));
         let opening = std::thread::spawn(move || reopened(path, idle()));
         gated.wait_held(1);
         meanwhile();
@@ -2940,10 +2940,10 @@ mod tests {
     fn made_for(path: &std::path::Path, branch: crate::CellId, bucket: &Arc<ObjectBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
-            extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
-        let kind = extent_bucket::cell::Kind::Fxfs;
-        extent_store::create_host(path, description, &url_of(bucket), kind).unwrap();
-        extent_store::made_host(path).unwrap();
+            local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
+        let kind = bucket_cell::cell::Kind::Fxfs;
+        local_cell::create_host(path, description, &url_of(bucket), kind).unwrap();
+        local_cell::made_host(path).unwrap();
     }
 
     /// TASK-79.4: a store opening takes the branch as of its taking of the head, not as of what it
@@ -2981,7 +2981,7 @@ mod tests {
     /// refuses to open (`ESTALE`), those commits never acknowledged: before its head is taken, its
     /// log diverged as recovery first finds the branch; and once it holds it, another writer having
     /// committed between the two (`wal_follows`), having fenced that writer, whose commits stay the
-    /// branch's. `ExtentStore::take` drops the log, and opens the store as the branch is.
+    /// branch's. `OpenCell::take` drops the log, and opens the store as the branch is.
     #[test]
     fn stores_whose_branch_moved_on_before_their_taking_refuse() {
         let dir = tempfile::tempdir().unwrap();
@@ -3035,7 +3035,7 @@ mod tests {
             Some(crate::Errno::ESTALE)
         );
         // Taken, its log dropped: the store holds the branch as it is, its local commit lost.
-        ExtentStore::take(&path, 1 << 30, branch, None).unwrap();
+        OpenCell::take(&path, 1 << 30, branch, None).unwrap();
         let first = reopened(&path, idle()).unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
@@ -3059,7 +3059,7 @@ mod tests {
         drop(source);
 
         let version = reopened(&path, idle()).unwrap();
-        assert_eq!(version.access().role, crate::StoreRole::Version);
+        assert_eq!(version.access().role, crate::CellRole::Version);
         let capacity = version.info().unwrap().capacity;
         let own = ExtentId { branch: version.branch().id, sequence: 2 };
         let refused = [
@@ -3076,7 +3076,7 @@ mod tests {
         assert_eq!(version.info().unwrap().capacity, capacity);
         assert_eq!(version.root().unwrap(), b"root");
         version
-            .fork_to(dir.path().join("fork"), crate::host_store::fork_child(version.branch()))
+            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.branch()))
             .unwrap();
         version.make_public().unwrap();
     }
@@ -3091,7 +3091,7 @@ mod tests {
     fn versions_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
@@ -3104,10 +3104,10 @@ mod tests {
         // forks, keep what it names.
         // Deleted as this process, no host, deletes them, of the first placement.
         let delete = |path: &std::path::Path| {
-            crate::host_store::delete(path, Some(&bucket), crate::host_store::token).unwrap()
+            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
         };
         let later = dir.path().join("later");
-        source.fork_to(&later, crate::host_store::fork_child(source.branch())).unwrap();
+        source.fork_to(&later, crate::host_cell::fork_child(source.branch())).unwrap();
         delete(&later);
         let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
@@ -3129,9 +3129,9 @@ mod tests {
         delete(&dir.path().join("ours"));
         delete(&path);
         source.drop_versions(&[version].into()).unwrap();
-        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
-            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap();
         }
         // What this process cached of the extents goes: the fork reads them from the bucket.
@@ -3159,7 +3159,7 @@ mod tests {
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
@@ -3169,7 +3169,7 @@ mod tests {
         source.free(extent).unwrap();
         source.commit(Some(b"later")).unwrap();
         let delete = |path: &std::path::Path| {
-            crate::host_store::delete(path, Some(&bucket), crate::host_store::token).unwrap()
+            crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
         };
         let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
@@ -3192,9 +3192,9 @@ mod tests {
         delete(&dir.path().join("ours"));
         delete(&path);
         source.drop_versions(&[version].into()).unwrap();
-        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
+        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
-            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
+            let pass = bucket_cell::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
@@ -3221,13 +3221,13 @@ mod tests {
         crate::bucket::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         for (name, tenant) in [("forgotten", 1), ("never", 2)] {
             let branch = of(tenant);
             let refused = kept_in(dir.path().join(name), (1 << 30, Some(branch)), &bucket, idle());
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
-            let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, branch));
+            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, branch));
             assert_eq!(cell, Ok(None), "{name}");
         }
     }
@@ -3247,9 +3247,9 @@ mod tests {
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "sibling", "theirs"];
-        let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 1, 2]))
+        let stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = (names.iter().zip([1, 1, 2]))
             .enumerate()
             .map(|(at, (name, tenant))| {
                 let store =
@@ -3297,7 +3297,7 @@ mod tests {
 
         kms.destroy(1).unwrap();
         let why = "tenant 1: its KEK is destroyed";
-        let forgotten = crate::bucket::forget(extent_bucket::keys::Scope::Tenant(1), why);
+        let forgotten = crate::bucket::forget(bucket_cell::keys::Scope::Tenant(1), why);
         assert_eq!(
             (forgotten.stores, forgotten.rings, forgotten.extents),
             (1, 1, 1),
@@ -3329,8 +3329,8 @@ mod tests {
     /// tenant's reads on. Shredding it again finds it so.
     #[test]
     fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
-        use extent_bucket::bucket_kms::Destroyed;
-        use extent_bucket::layout;
+        use bucket_cell::bucket_kms::Destroyed;
+        use bucket_cell::layout;
         let url = "memory:///bucket-kms";
         let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
         // SAFETY: this test's process is its own (nextest), no store open yet.
@@ -3339,11 +3339,11 @@ mod tests {
             std::env::set_var("CLADEFSD_BUCKET", url);
             std::env::set_var("CLADEFS_MASTER_KEY", &master);
         }
-        let bucket = crate::host_store::bucket(url).unwrap();
+        let bucket = crate::host_cell::bucket(url).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         let names = ["ours", "theirs"];
-        let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
+        let stores: Vec<(OpenCell, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
             .enumerate()
             .map(|(at, (name, tenant))| {
                 let store =
@@ -3361,12 +3361,12 @@ mod tests {
             let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
             let cell =
-                futures::executor::block_on(extent_bucket::cell::read(&*bucket, store.branch()));
+                futures::executor::block_on(bucket_cell::cell::read(&*bucket, store.branch()));
             assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
         }
         let kek = |tenant| {
             let key = layout::kek(tenant);
-            let got = futures::executor::block_on(extent_bucket::bucket::get(&*bucket, &key));
+            let got = futures::executor::block_on(bucket_cell::bucket::get(&*bucket, &key));
             got.map(|object| object.bytes)
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
@@ -3391,7 +3391,7 @@ mod tests {
         let new = of(1);
         let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
-        let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, new));
+        let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, new));
         assert_eq!(cell, Ok(None));
         let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
         assert_eq!(again.0, Destroyed::Already);
@@ -3422,9 +3422,9 @@ mod tests {
     fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::host_store::named(tenant);
+        let of = |tenant| crate::host_cell::named(tenant);
         let listed = || {
-            let listed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""));
+            let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, ""));
             listed.unwrap()
         };
         let store = |name: &str, tenant| {
@@ -3440,7 +3440,7 @@ mod tests {
         let acme = store("acme", 1);
         let before = listed();
         let errno = |forked: Result<(), crate::Error>| forked.map_err(|err| err.errno());
-        for tenant in [2, crate::host_store::DEFAULT_TENANT] {
+        for tenant in [2, crate::host_cell::DEFAULT_TENANT] {
             let to = dir.path().join(format!("refused-{tenant}"));
             let refused = [
                 ("fork", errno(acme.fork(&to, tenant).map(drop))),
@@ -3457,7 +3457,7 @@ mod tests {
         assert_eq!(acme.fork(&ours, 1).unwrap().tenant, 1);
         assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
 
-        let base = store("base", crate::host_store::DEFAULT_TENANT);
+        let base = store("base", crate::host_cell::DEFAULT_TENANT);
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
             assert_eq!(base.fork(&to, tenant).unwrap().tenant, tenant);
@@ -3481,10 +3481,10 @@ mod tests {
         let own = write(&parent, 2, &large);
         // Committed, not yet durable: the fork makes it so, and uploads it, first.
         parent.commit_ordered(Some(b"root")).unwrap();
-        let child = crate::host_store::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.branch());
         let checkpoints = || {
-            let prefix = extent_bucket::layout::checkpoints(parent.branch());
-            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix)).unwrap()
+            let prefix = bucket_cell::layout::checkpoints(parent.branch());
+            futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix)).unwrap()
         };
         assert_eq!(checkpoints().len(), 0);
         parent.fork_to(dir.path().join("child"), child).unwrap();
@@ -3497,10 +3497,10 @@ mod tests {
         let origin = record.origin().unwrap();
 
         assert_eq!(origin.parent, parent.branch());
-        let inherited = |state: &extent_bucket::State| {
+        let inherited = |state: &bucket_cell::State| {
             let parents = [
-                extent_bucket::layout::segments(parent.branch()),
-                extent_bucket::layout::extents(parent.branch()),
+                bucket_cell::layout::segments(parent.branch()),
+                bucket_cell::layout::extents(parent.branch()),
             ];
             state
                 .extents
@@ -3533,8 +3533,8 @@ mod tests {
         // And one when the parent's uploader stops, the store closing.
         let parent_branch = parent.branch();
         drop(parent);
-        let prefix = extent_bucket::layout::checkpoints(parent_branch);
-        let listed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix));
+        let prefix = bucket_cell::layout::checkpoints(parent_branch);
+        let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         assert_eq!(listed.unwrap().len(), 2);
     }
 
@@ -3553,10 +3553,10 @@ mod tests {
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         // The fork's segment, after the commit's, lands after the next.
-        let segment = |number| extent_bucket::layout::segment(branch, number, 1);
+        let segment = |number| bucket_cell::layout::segment(branch, number, 1);
         let (forking, next) = (segment(1), segment(2));
         gated.hold.send_replace(Hold::Key(forking));
-        let child = crate::host_store::fork_child(branch);
+        let child = crate::host_cell::fork_child(branch);
         let fork = {
             let (parent, path) = (parent.clone(), dir.path().join("child"));
             std::thread::spawn(move || parent.fork_to(path, child))
@@ -3571,7 +3571,7 @@ mod tests {
             })
         };
         let landed =
-            || futures::executor::block_on(extent_bucket::Bucket::head(&*bucket, &next)).is_ok();
+            || futures::executor::block_on(bucket_cell::Bucket::head(&*bucket, &next)).is_ok();
         while !landed() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
@@ -3693,8 +3693,8 @@ mod tests {
     /// head is as it was, and no segment of it is written.
     #[test]
     fn branches_of_newer_formats_are_refused() {
-        use extent_bucket::Bucket as _;
-        use extent_bucket::bucket::PutMode;
+        use bucket_cell::Bucket as _;
+        use bucket_cell::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
@@ -3705,9 +3705,9 @@ mod tests {
         drop(first);
         // A later release's record, whose format says first what follows, which this one can't
         // read.
-        let mut newer = (extent_bucket::layout::FORMAT + 1).to_le_bytes().to_vec();
+        let mut newer = (bucket_cell::layout::FORMAT + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
-        let (key, overwrite) = (extent_bucket::layout::record(branch), PutMode::Overwrite);
+        let (key, overwrite) = (bucket_cell::layout::record(branch), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
         let listed = || {
             let listed = futures::executor::block_on(bucket.list("")).unwrap();
@@ -3717,7 +3717,7 @@ mod tests {
 
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle());
         let refused = taken.err().unwrap();
-        let format = extent_bucket::layout::FORMAT;
+        let format = bucket_cell::layout::FORMAT;
         let named = format!(
             "branch {branch} is of format {}, which this reader, of format {format}, doesn't \
              read",
@@ -3731,11 +3731,11 @@ mod tests {
     /// Forks `parent`, attached to `bucket`, to `child`, whose handle is at `path`, the parent
     /// holding an extent and a root: returns the child's record.
     fn forked(
-        parent: &ExtentStore,
+        parent: &OpenCell,
         bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
         child: crate::CellId,
-    ) -> extent_bucket::record::Record {
+    ) -> bucket_cell::record::Record {
         write(parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         parent.fork_to(path, child).unwrap();
@@ -3752,7 +3752,7 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let child = crate::host_store::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.branch());
         forked(&parent, &bucket, &dir.path().join("child"), child);
         let again = dir.path().join("again");
         let forked = parent.fork_to(&again, child);
@@ -3787,9 +3787,9 @@ mod tests {
         let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
         // The host gone: what it has in flight may land still.
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(crate::host_store::unmade(&path), "the fork's directory is a store already");
-        assert!(ExtentStore::open(&path).is_err(), "the fork's directory opens");
-        crate::ExtentStore::delete(&path, None).unwrap();
+        assert!(crate::host_cell::unmade(&path), "the fork's directory is a store already");
+        assert!(OpenCell::open(&path).is_err(), "the fork's directory opens");
+        crate::OpenCell::delete(&path, None).unwrap();
         assert!(!path.exists());
 
         gated.hold.send_replace(Hold::Nothing);
@@ -3797,15 +3797,15 @@ mod tests {
         // Its fork goes on unseen, in a copy of the bucket only it reaches, as a dead host's.
         gated.sever();
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        let next = extent_bucket::Writer::open(
+        let next = bucket_cell::Writer::open(
             bucket.clone(),
             branch,
             3,
-            crate::host_store::token().unwrap(),
+            crate::host_cell::token().unwrap(),
         );
         futures::executor::block_on(next).unwrap();
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
-        let origin = extent_bucket::layout::Origin { parent: branch, at: 1 };
+        let origin = bucket_cell::layout::Origin { parent: branch, at: 1 };
         assert_eq!(record.map(|record| record.origin()), Some(Some(origin)));
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(child)), &bucket, idle());
         let taken = taken.unwrap();
@@ -3902,17 +3902,17 @@ mod tests {
             write(&parent, 1, &pattern(1, BLOCK));
             write(&parent, Self::OWN, &pattern(2, (4 << 20) as usize));
             parent.commit(Some(b"root")).unwrap();
-            let forking = extent_bucket::layout::segment(branch, 1, 1);
+            let forking = bucket_cell::layout::segment(branch, 1, 1);
             gated.hold.send_replace(Hold::Key(forking));
-            let child = crate::host_store::fork_child(branch);
+            let child = crate::host_cell::fork_child(branch);
             let fork = {
                 let path = dir.join("child");
                 std::thread::spawn(move || parent.fork_to(path, child))
             };
             gated.wait_held(1);
             let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
-            let token = crate::host_store::token().unwrap();
-            futures::executor::block_on(extent_bucket::Writer::open(bucket, branch, 3, token))
+            let token = crate::host_cell::token().unwrap();
+            futures::executor::block_on(bucket_cell::Writer::open(bucket, branch, 3, token))
                 .unwrap();
             (Self { memory, gated, branch, child }, fork)
         }
@@ -3930,7 +3930,7 @@ mod tests {
         }
 
         /// The child's record.
-        fn record(&self) -> Option<extent_bucket::record::Record> {
+        fn record(&self) -> Option<bucket_cell::record::Record> {
             futures::executor::block_on(branch::record(&*self.bucket(), self.child)).unwrap()
         }
     }
@@ -3950,12 +3950,12 @@ mod tests {
 
         // TASK-79.82: its deletion gave it the record its fork would first, naming the fork:
         // deleted, as its parent's branch holds no fork.
-        let origin = extent_bucket::layout::Origin { parent: failed.branch, at: 1 };
+        let origin = bucket_cell::layout::Origin { parent: failed.branch, at: 1 };
         // Of the fork's owner, which its footer names.
         let owner = failed.record().unwrap().owner;
-        let deleted = extent_bucket::record::Record {
+        let deleted = bucket_cell::record::Record {
             deleted: true,
-            ..extent_bucket::record::Kind::Fork(origin).of(owner)
+            ..bucket_cell::record::Kind::Fork(origin).of(owner)
         };
         assert_eq!(failed.record(), Some(deleted));
         let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.branch, None));
@@ -3977,39 +3977,34 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
         let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
-        crate::ExtentStore::delete(&path, None).unwrap();
-        gated.hold.send_replace(Hold::Key(extent_bucket::layout::head(child)));
+        crate::OpenCell::delete(&path, None).unwrap();
+        gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(child)));
         gated.wait_went(1);
         gated.wait_held(1);
-        let later = futures::executor::block_on(extent_bucket::head::take(&*bucket, child, 5, 5));
+        let later = futures::executor::block_on(bucket_cell::head::take(&*bucket, child, 5, 5));
         assert_eq!(later.map(|held| held.head.epoch), Ok(1));
         gated.hold.send_replace(Hold::Nothing);
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
         let unmade = format!("forking to branch {child}: making its store");
         assert_eq!((forked, path.exists()), (Err(unmade), false));
 
-        let origin = extent_bucket::layout::Origin { parent: branch, at: 1 };
-        let live = extent_bucket::record::Kind::Fork(origin).of(0);
+        let origin = bucket_cell::layout::Origin { parent: branch, at: 1 };
+        let live = bucket_cell::record::Kind::Fork(origin).of(0);
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(live));
     }
 
     /// The record of a branch no fork made, its store's own, of no parent, but for its owner
     /// ([`unowned`]).
-    fn own_record() -> extent_bucket::record::Record {
-        extent_bucket::record::Kind::Root.of(0)
+    fn own_record() -> bucket_cell::record::Record {
+        bucket_cell::record::Kind::Root.of(0)
     }
 
     /// `record`, but for its owner, which its maker chose at random, and its keys, wrapped under
     /// keys made at random (TASK-411.28): as the tests that are not of owners or keys compare
     /// records.
-    fn unowned(record: extent_bucket::record::Record) -> extent_bucket::record::Record {
-        extent_bucket::record::Record {
-            owner: 0,
-            deks: Vec::new(),
-            inherited: Vec::new(),
-            ..record
-        }
+    fn unowned(record: bucket_cell::record::Record) -> bucket_cell::record::Record {
+        bucket_cell::record::Record { owner: 0, deks: Vec::new(), inherited: Vec::new(), ..record }
     }
 
     /// The store of another branch, `branch`, at `path`, attached to `bucket`, holding an extent
@@ -4018,7 +4013,7 @@ mod tests {
         path: &std::path::Path,
         bucket: &Arc<ObjectBucket>,
         branch: crate::CellId,
-    ) -> ExtentStore {
+    ) -> OpenCell {
         let others = kept_in(path, (1 << 30, Some(branch)), &bucket.clone(), idle()).unwrap();
         write(&others, 1, &pattern(3, BLOCK));
         others.commit(Some(b"other")).unwrap();
@@ -4030,7 +4025,7 @@ mod tests {
 
     /// Whether the branch of `others`, its store, is live still: it commits, and uploads its
     /// commits.
-    fn live(others: &ExtentStore, bucket: &Arc<ObjectBucket>) -> Committed {
+    fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK));
         let committed = others.commit(Some(b"again"));
         (committed, others.wait_uploaded(), uploaded(bucket, others.branch()))
@@ -4052,7 +4047,7 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let other = crate::host_store::fork_child(parent.branch());
+        let other = crate::host_cell::fork_child(parent.branch());
         let others = others(&dir.path().join("other"), &bucket, other);
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
@@ -4090,8 +4085,8 @@ mod tests {
         let branch = parent.branch();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        gated.hold.send_replace(Hold::Key(extent_bucket::layout::head(branch)));
-        let child = crate::host_store::fork_child(branch);
+        gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(branch)));
+        let child = crate::host_cell::fork_child(branch);
         let fork = {
             let path = path.to_owned();
             std::thread::spawn(move || parent.fork_to(path, child))
@@ -4148,7 +4143,7 @@ mod tests {
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        let child = crate::host_store::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.branch());
         let path = dir.path().join("child");
         let flushed = fail::FailGuard::new("fork::flushed", "return").unwrap();
         let forked = parent.fork_to(&path, child).map_err(|err| format!("{err:#}"));
@@ -4157,10 +4152,8 @@ mod tests {
 
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-        let deleted = extent_bucket::record::Record {
-            deleted: true,
-            ..extent_bucket::record::Kind::Own.of(0)
-        };
+        let deleted =
+            bucket_cell::record::Record { deleted: true, ..bucket_cell::record::Kind::Own.of(0) };
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(deleted));
         // The checkpoint at the fork, its child deleted, names it no more.
@@ -4181,7 +4174,7 @@ mod tests {
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
-        let options = extent_store::upload::Options { cache: Some(cache.clone()), ..idle() };
+        let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();

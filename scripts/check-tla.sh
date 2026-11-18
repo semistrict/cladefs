@@ -12,7 +12,7 @@
 #   doc-13, TASK-164.4). Writable DAX's specs (dax, dax-region, extent-open) went with it
 #   (dead-ends/writable-dax.md);
 # - specs/bucket: branches in object storage with the host's WAL (doc-7, doc-14, TASK-165.2): its
-#   mutations, one per rule of extent_bucket's Rules (two of newest_checkpoint), of branch::delete
+#   mutations, one per rule of bucket_cell's Rules (two of newest_checkpoint), of branch::delete
 #   and of the WAL;
 # - specs/journal: Fxfs's journal, objects' flushes, device flushes and the super-block
 #   (crates/fxfs's write_super_block, TASK-149.11): a super-block claims only what its journal

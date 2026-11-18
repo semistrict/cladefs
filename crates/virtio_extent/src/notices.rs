@@ -42,7 +42,7 @@ fn raise(interrupt: &Mutex<Option<Arc<dyn ConfigInterrupt>>>) -> bool {
 }
 
 /// cladefs: what the device knows of its store's capacity, which the daemon changes
-/// (`DaemonExtentStore::on_capacity`): the capacity, the shrink the guest is asked to take, if any
+/// (`CellClient::on_capacity`): the capacity, the shrink the guest is asked to take, if any
 /// (0 if none), and how the guest is told, once the driver activates the device. The daemon's
 /// changes and the guest's answers are made one at a time (`changing`), so that an answer to a
 /// shrink no longer asked changes nothing (TASK-79.41); the driver reads the fields as they are.
@@ -126,7 +126,7 @@ impl Resizing {
 }
 
 /// cladefs: what a follower's device knows of its writer's commits (`VIRTIO_EXTENT_F_READ_ONLY`,
-/// `DaemonExtentStore::on_committed`): the latest commit's number, and how the guest is told, once
+/// `CellClient::on_committed`): the latest commit's number, and how the guest is told, once
 /// the driver activates the device.
 #[derive(Default)]
 pub struct Following {

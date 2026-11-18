@@ -29,8 +29,8 @@
 
 use crate::error::{Errno, Error};
 use crate::{
-    CellVersion, DaemonConnection, DaemonDevice, DaemonExtentStore, MappingContents, Prefault,
-    Unmapped, WindowMapping,
+    CellClient, CellVersion, DaemonConnection, DaemonDevice, MappingContents, Prefault, Unmapped,
+    WindowMapping,
 };
 use extent_files::{Contents, FileSet, Options};
 use futures::channel::oneshot;
@@ -53,7 +53,7 @@ pub fn capacity(size: u64) -> u64 {
 
 /// A VM's memory, a cell of its own. See the module docs.
 pub struct MemoryCell {
-    store: Arc<DaemonExtentStore>,
+    store: Arc<CellClient>,
     files: Arc<FileSet>,
     size: u64,
 }
@@ -80,7 +80,7 @@ impl MemoryCell {
     }
 
     /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
-    fn over(opened: DaemonExtentStore, size: u64) -> Result<Self, Error> {
+    fn over(opened: CellClient, size: u64) -> Result<Self, Error> {
         let store = Arc::new(opened);
         let device = DeviceHolder::new(DaemonDevice::new(store.clone()).map_err(Error::new)?);
         let files = FileSet::open(device, Options::default()).map_err(Error::new)?;
@@ -346,7 +346,7 @@ impl Unmapped for Reach {
 struct Mapper {
     nodes: Arc<Nodes>,
     files: Weak<FileSet>,
-    store: Weak<DaemonExtentStore>,
+    store: Weak<CellClient>,
 }
 
 impl Mapper {

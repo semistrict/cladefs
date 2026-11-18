@@ -28,7 +28,7 @@
 mod common;
 
 use cladefs::pages::page_size;
-use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice};
+use cladefs::{CellClient, ExtentId, VolatileSlice};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -353,7 +353,7 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     cladefs::thread::set_spawner(Confining::new(filter("vmm")));
     // As Firecracker makes its device, before its VMM thread is confined, the client's thread
     // confined as it starts.
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let memory = common::memory(4);
     let base = memory.as_ptr() as usize;
     on_vmm("fc_extent_activate", || {

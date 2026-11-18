@@ -26,7 +26,7 @@
 # object store's URL the test host reaches), and CLADEFSD_PART_CACHE the directory it keeps what it reads
 # from there in. CLADEFS_ZSTD_LEVEL is the zstd level stores compress their parts at (default 1; 0
 # stores them raw), to measure others. CLADEFS_BUCKET_LATENCY_MS adds that many milliseconds to each
-# of the bucket's requests (extent_bucket's object_store_at), as a farther object store would.
+# of the bucket's requests (bucket_cell's object_store_at), as a farther object store would.
 # CLADEFS_GUEST_CMDLINE adds to the guest kernel's arguments (such as cpuidle_haltpoll.force=1), to
 # measure them. CLADEFS_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from the
 # source on the test host. CLADEFS_TEST_HOST_LIMIT caps the run's time there (timeout's DURATION,

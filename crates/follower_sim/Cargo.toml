@@ -15,7 +15,7 @@ shuttle = [
     "dep:shuttle",
     "fuchsia-async/shuttle",
     "fuchsia-sync/shuttle",
-    "extent_store/shuttle",
+    "local_cell/shuttle",
     "fxfs/shuttle",
     "follower/shuttle",
 ]
@@ -24,7 +24,7 @@ shuttle = [
 anyhow.workspace = true
 async-trait.workspace = true
 # cladefs: stores kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
-extent_store = { workspace = true, features = ["unkept"] }
+local_cell = { workspace = true, features = ["unkept"] }
 follower.workspace = true
 follower_history.workspace = true
 fuchsia-async.workspace = true

@@ -184,7 +184,7 @@ pub(crate) async fn take(wait: Duration) -> HostStats {
 fn of_daemon(vms: Vec<Vm>) -> HostStats {
     let counters = (crate::stats::stats().named().into_iter())
         .map(|(name, value)| (name.replace('-', "_"), value))
-        .chain([("window_open_maps_refused".to_owned(), crate::extents::open_maps_refused())])
+        .chain([("window_open_maps_refused".to_owned(), crate::open_cell::open_maps_refused())])
         .collect();
     let gauges = super::metrics::gauges().into_iter().map(|(name, _, value)| (name, value));
     HostStats {

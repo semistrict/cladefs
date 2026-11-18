@@ -17,7 +17,7 @@ reads them.
 
 When the extent daemon kept stores in a bucket (CLADEFSD_BUCKET), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
-from the stats it kept in logs/cladefsd-stats.txt (extent_bucket::object_bucket::Stats::line). Another
+from the stats it kept in logs/cladefsd-stats.txt (bucket_cell::object_bucket::Stats::line). Another
 says what the VM processes' requests took the daemon, by kind, and its commits, by phase.
 
 Usage: scripts/bench-report.py RESULTS_DIR

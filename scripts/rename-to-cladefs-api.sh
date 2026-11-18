@@ -31,7 +31,7 @@
 # VmmAction::InsertCladefsDevice, CladefsOverride, vmm_config::cladefs, request::cladefs), as
 # upstream names `/drives`' parser and module for its API. The device keeps its own: the extent
 # store device (devices/virtio/extent, its Extent, ExtentState and the snapshot's extent_devices),
-# as do the domain's extent words (extent_store, ExtentId, virtio_extent).
+# as do the domain's extent words (local_cell, ExtentId, virtio_extent).
 #
 # The guest kernel's module, fs/fxfs, is cladefs: its directory (guest/linux/fs/cladefs), the
 # filesystem's type (mount -t cladefs), CONFIG_CLADEFS_FS, its parameters (cladefs.dax_delay_us,

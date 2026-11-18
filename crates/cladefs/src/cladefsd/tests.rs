@@ -2,24 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::client::{DaemonExtentStore, Opening};
+use super::client::{CellClient, Opening};
 use super::server::{default_tenant, serve, serve_connection};
 use crate::pages::page_size;
-use crate::{Commit, Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut, WriteBarriers};
-use extent_bucket::cell::Kind;
+use crate::{Commit, Errno, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut, WriteBarriers};
+use bucket_cell::cell::Kind;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::thread::JoinHandle;
 
-const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 /// Makes this process a host of the multi-node system, as the daemon's must be: its stores'
 /// branches in a bucket in its memory, as of placement 1; its log on standard error.
 /// The branch of the store at `path`, in its cell, as its description names it (TASK-364): what a
 /// VM process's store, which names its branch's ID alone, is in the bucket.
 fn branch_at(path: &std::path::Path) -> crate::CellId {
-    extent_store::host_branch(path).unwrap()
+    local_cell::host_branch(path).unwrap()
 }
 
 fn host() {
@@ -33,18 +33,18 @@ fn host() {
 }
 
 /// A daemon serving one connection, on a thread, and its client, of the store at `path`.
-fn connect(path: &Path, capacity: u64) -> (DaemonExtentStore, JoinHandle<()>) {
+fn connect(path: &Path, capacity: u64) -> (CellClient, JoinHandle<()>) {
     let (client, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    (DaemonExtentStore::over(client, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
+    (CellClient::over(client, path, Opening::Create(capacity, Kind::Fxfs)).unwrap(), served)
 }
 
 /// cladefs: a daemon serving one connection, on a thread, and its client, a follower of the store
 /// at `path` (backlog doc-8).
-fn follow(path: &Path) -> Result<(DaemonExtentStore, JoinHandle<()>), Option<Errno>> {
+fn follow(path: &Path) -> Result<(CellClient, JoinHandle<()>), Option<Errno>> {
     let (client, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    match DaemonExtentStore::over(client, path, Opening::ReadOnly) {
+    match CellClient::over(client, path, Opening::ReadOnly) {
         Ok(store) => Ok((store, served)),
         Err(error) => {
             served.join().unwrap();
@@ -53,8 +53,8 @@ fn follow(path: &Path) -> Result<(DaemonExtentStore, JoinHandle<()>), Option<Err
     }
 }
 
-/// cladefs: the commits a follower hears of ([`DaemonExtentStore::on_committed`]).
-fn commits_heard(follower: &DaemonExtentStore) -> std::sync::mpsc::Receiver<u64> {
+/// cladefs: the commits a follower hears of ([`CellClient::on_committed`]).
+fn commits_heard(follower: &CellClient) -> std::sync::mpsc::Receiver<u64> {
     let (heard, commits) = std::sync::mpsc::channel();
     follower.on_committed(move |commit| {
         // Unheard once the test stops listening.
@@ -68,23 +68,13 @@ fn pattern(byte: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| byte ^ (i % 251) as u8).collect()
 }
 
-fn write(
-    store: &DaemonExtentStore,
-    extent: ExtentId,
-    offset: u64,
-    data: &[u8],
-) -> Result<(), Errno> {
+fn write(store: &CellClient, extent: ExtentId, offset: u64, data: &[u8]) -> Result<(), Errno> {
     // In two buffers, as a request's descriptors may hold it.
     let (first, second) = data.split_at(data.len() / 2);
     store.write(extent, offset, &[VolatileSlice::from(first), VolatileSlice::from(second)])
 }
 
-fn read(
-    store: &DaemonExtentStore,
-    extent: ExtentId,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<u8>, Errno> {
+fn read(store: &CellClient, extent: ExtentId, offset: u64, len: usize) -> Result<Vec<u8>, Errno> {
     let mut data = vec![0; len];
     let (first, second) = data.split_at_mut(len / 2);
     store.read(
@@ -216,13 +206,13 @@ fn keeps_branches_in_object_storage() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         let branch = branch_at(&dir.path().join("store"));
-        let state = extent_bucket::recover(&*bucket, branch, None).await.unwrap().state;
+        let state = bucket_cell::recover(&*bucket, branch, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
         let data =
-            extent_bucket::testing::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
+            bucket_cell::testing::read(&bucket, extent, &state.extents[&extent]).await.unwrap();
         assert_eq!(data, pattern(1, 2 * BLOCK));
     });
     drop(store);
@@ -238,23 +228,22 @@ fn keeps_branches_in_the_buckets_their_stores_name() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let branch = crate::host_store::new_alone();
-    let (of, keeping) = (crate::BranchOf::Named(branch), crate::host_store::keeping().unwrap());
-    let made =
-        crate::host_store::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
-            .unwrap();
+    let branch = crate::host_cell::new_alone();
+    let (of, keeping) = (crate::BranchOf::Named(branch), crate::host_cell::keeping().unwrap());
+    let made = crate::host_cell::create_unmade(&path, 1 << 20, of, Kind::Fxfs, Some(&url), keeping)
+        .unwrap();
     made.made().unwrap();
     drop(made);
     let (store, served) = connect(&path, 1 << 20);
     let extent = ExtentId { branch: branch.id, sequence: 1 };
     write(&store, extent, 0, &pattern(1, 2 * BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let image = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
-    let daemons = super::stores::daemon_bucket().unwrap();
+    let image = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let daemons = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
-        let state = extent_bucket::recover(&image, branch, None).await.unwrap().state;
+        let state = bucket_cell::recover(&image, branch, None).await.unwrap().state;
         assert_eq!(state.root, Some(b"root".to_vec()));
-        let record = extent_bucket::branch::record(&*daemons, branch).await.unwrap();
+        let record = bucket_cell::branch::record(&*daemons, branch).await.unwrap();
         assert_eq!(record, None, "the daemon's bucket has the image's branch");
     });
     drop(store);
@@ -278,8 +267,8 @@ fn keeps_object_storage_and_follower_stats() {
     let extent = move |sequence| ExtentId { branch, sequence };
     write(&store, extent(1), 0, &pattern(1, 2 * BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let bucket = super::stores::daemon_bucket().unwrap();
-    assert!(bucket.stats().uploaded(extent_bucket::object_bucket::Upload::Segments) > 0);
+    let bucket = super::cells::daemon_bucket().unwrap();
+    assert!(bucket.stats().uploaded(bucket_cell::object_bucket::Upload::Segments) > 0);
     // A follower two commits behind, keeping what the writer freed.
     let (follower, followed) = follow(&path).unwrap();
     store.free(extent(1)).unwrap();
@@ -404,24 +393,24 @@ fn control<T>(call: impl std::future::Future<Output = T>) -> T {
 
 /// Resizes the store at `path`, as the control API does (`ResizeStore`).
 fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
-    control(super::stores::resize(path.to_owned(), capacity))
+    control(super::cells::resize(path.to_owned(), capacity))
 }
 
 /// Forks the store at `from` to a new branch at `to`, as the control API does (`ForkStore`), and
 /// returns the branch.
 fn fork_store(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
-    let forked = control(super::stores::fork(from.to_owned(), to.to_owned(), None));
+    let forked = control(super::cells::fork(from.to_owned(), to.to_owned(), None));
     forked.map_err(crate::Error::from)
 }
 
 /// Deletes the store at `path`, as the control API does (`DeleteStore`).
 fn delete_store(path: &Path) -> Result<(), crate::Error> {
-    Ok(control(super::stores::delete(path.to_owned()))?)
+    Ok(control(super::cells::delete(path.to_owned()))?)
 }
 
 /// Waits for the store at `path` to be uploaded, as the control API does (`SyncStore`).
 fn wait_uploaded(path: &Path) -> Result<(), crate::Error> {
-    Ok(control(super::stores::sync(path.to_owned()))?)
+    Ok(control(super::cells::sync(path.to_owned()))?)
 }
 
 /// A store a VM has open grows at once, and its VM process is told the new capacity; it shrinks
@@ -461,7 +450,7 @@ fn resizes_open_stores() {
 
     drop(store);
     served.join().unwrap();
-    let reopened = ExtentStore::open(&path).unwrap();
+    let reopened = OpenCell::open(&path).unwrap();
     assert_eq!(reopened.info().unwrap().capacity, 2 << 20);
 }
 
@@ -481,7 +470,7 @@ fn shrinks_dropped_by_their_callers_stop_waiting() {
     let tenants = dir.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
     std::thread::spawn(move || super::control::serve_control(listener, tenants));
-    let connection = super::stores::table().writer(&super::stores::store_key(&path)).unwrap();
+    let connection = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
 
     control(async {
         let mut client = super::control::connect(&socket).await.unwrap();
@@ -517,7 +506,7 @@ fn resizes_closed_stores() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    drop(ExtentStore::create(&path, 1 << 20).unwrap());
+    drop(OpenCell::create(&path, 1 << 20).unwrap());
     resize(&path, 3 << 20).unwrap();
     assert_eq!(resize(&path, 2 << 20), Err(Errno::EBUSY));
     assert_eq!(resize(&dir.path().join("none"), 2 << 20), Err(Errno::ENOENT));
@@ -546,7 +535,7 @@ fn serves_a_store() {
     let (other, other_server) = UnixStream::pair().unwrap();
     let other_served =
         std::thread::spawn(move || serve_connection(other_server, default_tenant().unwrap()));
-    let error = DaemonExtentStore::over(other, &path, Opening::Create(1 << 20, Kind::Fxfs))
+    let error = CellClient::over(other, &path, Opening::Create(1 << 20, Kind::Fxfs))
         .err()
         .expect("opened it twice");
     assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
@@ -555,7 +544,7 @@ fn serves_a_store() {
     drop(store);
     served.join().unwrap();
     let mut data = vec![0; 2 * BLOCK];
-    let local = ExtentStore::open(&path).unwrap();
+    let local = OpenCell::open(&path).unwrap();
     local.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     assert_eq!(data, pattern(1, 2 * BLOCK));
 }
@@ -1389,10 +1378,10 @@ const CHILD_CLOSES: &str = "CLADEFSD_TEST_CLOSES";
 
 /// Opens the store at `store` through the daemon at `socket`, once the daemon has seen a connection
 /// that had it open go.
-fn connect_once_free(socket: &Path, store: &Path) -> DaemonExtentStore {
+fn connect_once_free(socket: &Path, store: &Path) -> CellClient {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match DaemonExtentStore::connect(socket, store, 1 << 24) {
+        match CellClient::connect(socket, store, 1 << 24) {
             Ok(store) => return store,
             Err(error)
                 if error.errno() == Some(Errno::EBUSY) && std::time::Instant::now() < deadline =>
@@ -1407,7 +1396,7 @@ fn connect_once_free(socket: &Path, store: &Path) -> DaemonExtentStore {
 /// Maps `extent`'s first page into a new window of the store at `store` the daemon at `socket`
 /// serves, checks it holds the pattern written, and returns the store, mapping it still, and the
 /// page's address.
-fn map_first_page(socket: &Path, store: &Path, extent: ExtentId) -> (DaemonExtentStore, usize) {
+fn map_first_page(socket: &Path, store: &Path, extent: ExtentId) -> (CellClient, usize) {
     let ps = page_size() as usize;
     let store = connect_once_free(socket, store);
     let memory = memory(1);
@@ -1460,11 +1449,11 @@ fn two_processes_map_the_same_pages() {
     let dir = tempfile::tempdir().unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
-        let store = ExtentStore::create(&parent, 1 << 24).unwrap();
+        let store = OpenCell::create(&parent, 1 << 24).unwrap();
         let extent = ExtentId { branch: store.branch().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
         store.commit(None).unwrap();
-        store.fork_to(&child, crate::host_store::fork_child(store.branch())).unwrap();
+        store.fork_to(&child, crate::host_cell::fork_child(store.branch())).unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1493,7 +1482,7 @@ fn two_processes_map_the_same_pages() {
     // go.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match DaemonExtentStore::connect(&socket, &child, 1 << 24) {
+        match CellClient::connect(&socket, &child, 1 << 24) {
             Ok(_) => break,
             Err(error) if std::time::Instant::now() < deadline => {
                 assert!(format!("{error:#}").contains(&Errno::EBUSY.to_string()), "{error:#}");
@@ -1521,8 +1510,7 @@ fn child_changes_its_window() {
     // SAFETY: The connection the parent left this process, which nothing else here owns.
     let stream =
         unsafe { <UnixStream as std::os::fd::FromRawFd>::from_raw_fd(connection.parse().unwrap()) };
-    let store =
-        DaemonExtentStore::over(stream, Path::new(&store), Opening::Create(1 << 24, Kind::Fxfs));
+    let store = CellClient::over(stream, Path::new(&store), Opening::Create(1 << 24, Kind::Fxfs));
     let store = store.unwrap();
     let memory = memory(1);
     // SAFETY: The memory is this function's, and outlives the store.
@@ -1740,7 +1728,7 @@ struct TwoVmProcesses {
     tenant: std::sync::Arc<super::server::Tenant>,
     socket: std::path::PathBuf,
     extent: ExtentId,
-    ours: DaemonExtentStore,
+    ours: CellClient,
     page: usize,
     theirs: Reaped,
     stdout: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
@@ -1759,11 +1747,11 @@ fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A cell of the tenant's (TASK-364).
-        let store = ExtentStore::create_in(&parent, 1 << 24, tenant.id()).unwrap();
+        let store = OpenCell::create_in(&parent, 1 << 24, tenant.id()).unwrap();
         let extent = ExtentId { branch: store.branch().id, sequence: 1 };
         store.write(extent, 0, &[VolatileSlice::from(&pattern(9, ps)[..])]).unwrap();
         store.commit(None).unwrap();
-        store.fork_to(&child, crate::host_store::fork_child(store.branch())).unwrap();
+        store.fork_to(&child, crate::host_cell::fork_child(store.branch())).unwrap();
         extent
     };
     let socket = dir.path().join("cladefsd.sock");
@@ -1826,7 +1814,7 @@ fn frozen_vm_processes_are_killed() {
     // Its store goes with it, for another VM process to open once the daemon lets it go, which
     // the opening waits for (`CLOSING_WAIT`); and its page, free by then.
     let child = dir.path().join("child");
-    let reopened = DaemonExtentStore::connect(&socket, &child, 1 << 24).map(|store| store.branch());
+    let reopened = CellClient::connect(&socket, &child, 1 << 24).map(|store| store.branch());
     assert_eq!(reopened.map_err(|error| error.errno()), Ok(branch_at(&child).id));
     assert!(
         page_is_free(arena, offset),
@@ -1880,7 +1868,7 @@ fn child_leaves_its_socket_to_a_child() {
     let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
         return;
     };
-    let _store = DaemonExtentStore::connect(socket, store, 1 << 24).unwrap();
+    let _store = CellClient::connect(socket, store, 1 << 24).unwrap();
     // SAFETY: The child calls only what is safe in a child of a process with threads.
     let child = unsafe { libc::fork() };
     assert!(child >= 0, "{}", std::io::Error::last_os_error());
@@ -1943,7 +1931,7 @@ fn child_opens_a_store() {
     let (Ok(socket), Ok(store)) = (std::env::var(CHILD_SOCKET), std::env::var(CHILD_STORE)) else {
         return;
     };
-    match DaemonExtentStore::connect(socket, store, 1 << 24) {
+    match CellClient::connect(socket, store, 1 << 24) {
         Ok(_) => println!("OPENED"),
         Err(error) => println!("REFUSED {:?}", error.errno()),
     }
@@ -1989,7 +1977,7 @@ fn the_daemon_forks_stores_it_serves() {
     std::thread::spawn(move || serve(listener));
 
     let before = crate::stats::stats();
-    let store = DaemonExtentStore::connect(&socket, &parent, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &parent, 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(9, ps)).unwrap();
     store.commit(None).unwrap();
@@ -2022,7 +2010,7 @@ fn snapshots_restore_into_forks_of_their_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let ours = memory(4);
     // SAFETY: The memory is the test's, and outlives the store.
     unsafe { store.create_dax_window_in_host_memory(ours, 4 * ps as u64, None, 1) }.unwrap();
@@ -2063,12 +2051,11 @@ fn snapshots_restore_into_forks_of_their_version() {
         |memory: NonNull<u8>| unsafe { std::slice::from_raw_parts(memory.as_ptr(), 4 * ps) };
     let snapshotted = [0, 2, 3].map(|page| window(ours)[page * ps..][..ps].to_vec());
 
-    let restored: Vec<DaemonExtentStore> = ["a", "b"]
+    let restored: Vec<CellClient> = ["a", "b"]
         .into_iter()
         .map(|name| {
             let restored =
-                DaemonExtentStore::connect_forked(&socket, dir.path().join(name), version, 0)
-                    .unwrap();
+                CellClient::connect_forked(&socket, dir.path().join(name), version, 0).unwrap();
             assert_eq!(restored.root().unwrap(), b"root");
             let memory = memory(4);
             // SAFETY: As above.
@@ -2082,7 +2069,7 @@ fn snapshots_restore_into_forks_of_their_version() {
             restored
         })
         .collect();
-    let branches: Vec<u64> = restored.iter().map(DaemonExtentStore::branch).collect();
+    let branches: Vec<u64> = restored.iter().map(CellClient::branch).collect();
     assert!(!branches.contains(&store.branch()) && branches[0] != branches[1], "{branches:x?}");
     // Each writes on its own.
     let theirs = ExtentId { branch: branches[0], sequence: 1 };
@@ -2091,7 +2078,7 @@ fn snapshots_restore_into_forks_of_their_version() {
     assert!(read(&restored[1], theirs, 0, BLOCK).is_err());
     assert_eq!(read(&restored[1], open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
-    let forked = DaemonExtentStore::connect_forked(&socket, dir.path().join("c"), version, 0);
+    let forked = CellClient::connect_forked(&socket, dir.path().join("c"), version, 0);
     let root = forked.map(|store| store.root()).map_err(|error| error.errno());
     assert_eq!(root, Ok(Ok(b"root".to_vec())));
 }
@@ -2112,7 +2099,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 26).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 26).unwrap();
     let memory = memory(window_pages);
     // SAFETY: The memory is the test's, and outlives the store.
     unsafe { store.create_dax_window_in_host_memory(memory, (window_pages * ps) as u64, None, 1) }
@@ -2162,7 +2149,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
 
     let restore = |name: &str, each: bool| {
         let restored =
-            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), version, 0).unwrap();
+            CellClient::connect_forked(&socket, dir.path().join(name), version, 0).unwrap();
         let memory = super::tests::memory(window_pages);
         // SAFETY: As above.
         unsafe {
@@ -2224,7 +2211,7 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let memory = memory(PAGES);
     let size = (PAGES * ps) as u64;
     // SAFETY: The memory is the test's, and outlives the store.
@@ -2276,8 +2263,7 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     assert_eq!(mappings.len(), PAGES);
 
     let restored =
-        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), version, 0)
-            .unwrap();
+        CellClient::connect_forked(&socket, dir.path().join("restored"), version, 0).unwrap();
     let restored_memory = super::tests::memory(PAGES);
     // SAFETY: As above.
     unsafe { restored.create_dax_window_in_host_memory(restored_memory, size, None, PAGES as u64) }
@@ -2302,7 +2288,7 @@ fn snapshot_versions_restore_from_the_bucket() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
@@ -2312,7 +2298,7 @@ fn snapshot_versions_restore_from_the_bucket() {
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let moved = elsewhere.join("store");
-    let restored = DaemonExtentStore::connect_forked(&socket, &moved, version, 1 << 24).unwrap();
+    let restored = CellClient::connect_forked(&socket, &moved, version, 1 << 24).unwrap();
     assert_eq!(restored.root().unwrap(), b"root");
     assert_eq!(read(&restored, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
     assert_ne!(restored.branch(), version.cell);
@@ -2329,13 +2315,13 @@ fn stores_open_once_their_vm_process_goes() {
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
     for round in 0..20 {
-        let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+        let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
         let extent = ExtentId { branch: store.branch(), sequence: round + 1 };
         write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
         store.commit_ordered(None).unwrap();
         drop(store);
     }
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     assert_eq!(store.info().unwrap().next_sequence, 21);
 }
 
@@ -2353,9 +2339,9 @@ fn daemons_with_roots_serve_no_stores_outside_them() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
 
-    let refused = DaemonExtentStore::connect(&socket, theirs.join("store"), 1 << 24);
+    let refused = CellClient::connect(&socket, theirs.join("store"), 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
-    let store = DaemonExtentStore::connect(&socket, ours.join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, ours.join("store"), 1 << 24).unwrap();
     store.commit(None).unwrap();
     assert_eq!(store.fork(&theirs.join("fork")), Err(Errno::EACCES));
     store.fork(&ours.join("fork")).unwrap();
@@ -2372,7 +2358,7 @@ fn stores_fork_live_once_nothing_is_open() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
     write(&store, extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(Some(b"before")).unwrap();
@@ -2387,7 +2373,7 @@ fn stores_fork_live_once_nothing_is_open() {
     store.commit(Some(b"after")).unwrap();
     assert_eq!(read(&store, extent(3), 0, BLOCK), Ok(pattern(3, BLOCK)));
 
-    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
     assert_eq!(forked.branch(), branch.id);
     assert_eq!(forked.root().unwrap(), b"at the fork");
     assert_eq!(read(&forked, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
@@ -2406,12 +2392,12 @@ fn stores_are_deleted_while_their_forks_are_open() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let base = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, base, 0, &pattern(1, BLOCK)).unwrap();
     store.commit(Some(b"base")).unwrap();
     fork_store(&path, &fork).unwrap();
-    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
 
     let busy = delete_store(&path);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
@@ -2426,7 +2412,7 @@ fn stores_are_deleted_while_their_forks_are_open() {
     let busy = delete_store(&fork);
     assert_eq!(busy.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     drop(forked);
-    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
     assert_eq!(forked.root().unwrap(), b"fork");
     assert_eq!(read(&forked, base, 0, BLOCK), Ok(pattern(1, BLOCK)));
     drop(forked);
@@ -2449,7 +2435,7 @@ fn stores_made_are_cells_of_their_kinds() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (disk, db) = (dir.path().join("disk"), dir.path().join("db.sqlite"));
-    let fxfs = DaemonExtentStore::connect(&socket, &disk, 1 << 24).unwrap();
+    let fxfs = CellClient::connect(&socket, &disk, 1 << 24).unwrap();
     let daemon = crate::DaemonConnection::connect(&socket).unwrap();
     let sqlite = daemon.open_sqlite(&db, 1 << 24).unwrap();
     let memory = dir.path().join("memory");
@@ -2460,17 +2446,17 @@ fn stores_made_are_cells_of_their_kinds() {
     assert_eq!((fxfs.branch(), sqlite.branch()), (disk_branch.id, db_branch.id));
     assert_eq!(memory_store.branch(), memory_branch.id);
     assert_ne!(disk_branch, db_branch, "each made alone, in a cell of its own");
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         for (branch, name, kind) in [
             (disk_branch, "disk", Kind::Fxfs),
             (db_branch, "db.sqlite", Kind::Sqlite),
             (memory_branch, "memory", Kind::Memory),
         ] {
-            let cell = extent_bucket::cell::read(&*bucket, branch).await.unwrap().unwrap();
+            let cell = bucket_cell::cell::read(&*bucket, branch).await.unwrap().unwrap();
             let made = (cell.branch, cell.kind, cell.deleted);
             assert_eq!(made, (Some(branch.id), Some(kind), false), "{name}");
-            let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
+            let head = bucket_cell::head::get(&*bucket, branch).await.unwrap().unwrap();
             assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
@@ -2630,7 +2616,7 @@ fn deleted_stores_branches_keep_what_their_forks_need() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let base_branch = store.branch();
     let base = ExtentId { branch: base_branch, sequence: 1 };
     write(&store, base, 0, &pattern(3, 2 * BLOCK)).unwrap();
@@ -2640,21 +2626,21 @@ fn deleted_stores_branches_keep_what_their_forks_need() {
     drop(store);
     delete_store(&path).unwrap();
 
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
-        use extent_bucket::branch;
+        use bucket_cell::branch;
         let deleted = branch::record(&*bucket, base_branch).await.unwrap().unwrap();
         assert!(deleted.deleted);
         let record = branch::record(&*bucket, fork_branch).await.unwrap().unwrap();
         assert!(!record.deleted);
-        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
-        extent_bucket::collector::collect(&*bucket, 1, &options).await.unwrap();
-        let state = extent_bucket::recover(&*bucket, fork_branch, record.origin()).await.unwrap();
+        let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
+        bucket_cell::collector::collect(&*bucket, 1, &options).await.unwrap();
+        let state = bucket_cell::recover(&*bucket, fork_branch, record.origin()).await.unwrap();
         let data =
-            extent_bucket::testing::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
+            bucket_cell::testing::read(&bucket, base, &state.state.extents[&base]).await.unwrap();
         assert_eq!(data, pattern(3, 2 * BLOCK));
     });
-    let forked = DaemonExtentStore::connect(&socket, &fork, 1 << 24).unwrap();
+    let forked = CellClient::connect(&socket, &fork, 1 << 24).unwrap();
     assert_eq!(forked.root().unwrap(), b"base");
     assert_eq!(read(&forked, base, 0, 2 * BLOCK), Ok(pattern(3, 2 * BLOCK)));
 }
@@ -2669,9 +2655,9 @@ fn earlier_placements_open_no_stores() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (path, earlier) = (dir.path().join("store"), dir.path().join("earlier"));
-    let branch = ExtentStore::create(&path, 1 << 24).unwrap().branch();
-    ExtentStore::place(&path, 5).unwrap();
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let branch = OpenCell::create(&path, 1 << 24).unwrap().branch();
+    OpenCell::place(&path, 5).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     write(&store, ExtentId { branch: branch.id, sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
     store.commit(Some(b"placed at 5")).unwrap();
     drop(store);
@@ -2679,14 +2665,14 @@ fn earlier_placements_open_no_stores() {
     // A copy of the branch's made here, not opened, which would take its head: placed before.
     std::fs::create_dir(&earlier).unwrap();
     let description =
-        extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
-    extent_store::create_host(&earlier, description, "memory:///branches", Kind::Fxfs).unwrap();
-    extent_store::made_host(&earlier).unwrap();
-    ExtentStore::place(&earlier, 3).unwrap();
-    let refused = DaemonExtentStore::connect(&socket, &earlier, 1 << 24);
+        local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
+    local_cell::create_host(&earlier, description, "memory:///branches", Kind::Fxfs).unwrap();
+    local_cell::made_host(&earlier).unwrap();
+    OpenCell::place(&earlier, 3).unwrap();
+    let refused = CellClient::connect(&socket, &earlier, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::ESTALE));
-    ExtentStore::place(&earlier, 6).unwrap();
-    let later = DaemonExtentStore::connect(&socket, &earlier, 1 << 24).unwrap();
+    OpenCell::place(&earlier, 6).unwrap();
+    let later = CellClient::connect(&socket, &earlier, 1 << 24).unwrap();
     assert_eq!(later.root().unwrap(), b"placed at 5");
 }
 
@@ -2707,20 +2693,20 @@ fn control_takes_branches_at_the_placements_given() {
     let path = |name: &str| dir.path().join(name);
     // Host 1's copy, of a new branch the bucket names, placed at 5, its commit synced.
     let new = crate::CellId { tenant: 0, id: 0 };
-    let made = super::stores::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs));
+    let made = super::cells::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs));
     let branch = control(made).unwrap();
     let extent = ExtentId { branch: branch.id, sequence: 1 };
-    let first = DaemonExtentStore::connect(&socket, path("first"), 1 << 24).unwrap();
+    let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
     write(&first, extent, 0, &pattern(7, BLOCK)).unwrap();
     first.commit(Some(b"placed at 5")).unwrap();
     drop(first);
-    assert_eq!(control(super::stores::sync(path("first"))), Ok(()));
+    assert_eq!(control(super::cells::sync(path("first"))), Ok(()));
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
-    ExtentStore::take(path("second"), 1 << 24, branch, Some(6)).unwrap();
+    OpenCell::take(path("second"), 1 << 24, branch, Some(6)).unwrap();
     // One through the daemon, placed at 7.
-    let taken = super::stores::create(path("third"), 1 << 24, branch, (Some(7), Kind::Fxfs));
+    let taken = super::cells::create(path("third"), 1 << 24, branch, (Some(7), Kind::Fxfs));
     assert_eq!(control(taken), Ok(branch));
-    let third = DaemonExtentStore::connect(&socket, path("third"), 1 << 24).unwrap();
+    let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
     assert_eq!(third.root().unwrap(), b"placed at 5");
     assert_eq!(read(&third, extent, 0, BLOCK), Ok(pattern(7, BLOCK)));
 }
@@ -2735,14 +2721,14 @@ fn the_daemon_waits_for_uploads() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
     store.commit_ordered(Some(b"ordered")).unwrap();
     wait_uploaded(&path).unwrap();
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     let uploaded = || {
-        futures::executor::block_on(extent_bucket::recover(&*bucket, branch_at(&path), None))
+        futures::executor::block_on(bucket_cell::recover(&*bucket, branch_at(&path), None))
             .unwrap()
             .state
             .root
@@ -2759,7 +2745,7 @@ const EXTENT: usize = 64 * BLOCK;
 
 /// Writes `store`'s extents `sequences`, of `EXTENT` bytes each, their own data, which does not
 /// compress: what of it no extent is in takes as much of the host's disk as it is (TASK-79.2).
-fn write_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<u64>) {
+fn write_extents(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
     for sequence in sequences {
         let extent = ExtentId { branch: store.branch(), sequence };
         write(store, extent, 0, &crate::test_data::noise(sequence, EXTENT)).unwrap();
@@ -2767,7 +2753,7 @@ fn write_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<
 }
 
 /// Frees `store`'s extents `sequences`.
-fn free_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<u64>) {
+fn free_extents(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
     for sequence in sequences {
         store.free(ExtentId { branch: store.branch(), sequence }).unwrap();
     }
@@ -2780,7 +2766,7 @@ fn free_extents(store: &DaemonExtentStore, sequences: std::ops::RangeInclusive<u
 fn wait_for_uploader(path: &Path) {
     control(async {
         loop {
-            let state = super::stores::stat(path.to_owned()).await.unwrap();
+            let state = super::cells::stat(path.to_owned()).await.unwrap();
             if state.upload.unwrap().uploaded == state.committed {
                 break;
             }
@@ -2822,13 +2808,12 @@ fn what_guests_free_the_collector_compacts() {
     drop(store);
     served.join().unwrap();
 
-    let bucket = super::stores::daemon_bucket().unwrap();
-    let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
-    let collected = extent_bucket::collector::collect(&*bucket, 1, &options);
+    let bucket = super::cells::daemon_bucket().unwrap();
+    let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
+    let collected = bucket_cell::collector::collect(&*bucket, 1, &options);
     let report = futures::executor::block_on(collected).unwrap();
     // The writer's fence, which no extent is in, is kept (TASK-371).
-    let counted =
-        extent_bucket::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
+    let counted = bucket_cell::collector::Report { deleted: 1, compacted: 2, retired: 0, ..report };
     assert_eq!(report, counted);
     let (store, served) = connect(&path, 16 * extent_bytes);
     for sequence in [1, 17] {
@@ -2849,7 +2834,7 @@ fn stores_open_only_with_a_bucket() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let refused = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24);
+    let refused = CellClient::connect(&socket, dir.path().join("store"), 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EIO));
 }
 
@@ -2864,12 +2849,9 @@ fn tenants_arenas_go_with_them() {
     let arena = tenant.arena();
     let (client, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, tenant));
-    let store = DaemonExtentStore::over(
-        client,
-        &dir.path().join("store"),
-        Opening::Create(1 << 24, Kind::Fxfs),
-    )
-    .unwrap();
+    let store =
+        CellClient::over(client, &dir.path().join("store"), Opening::Create(1 << 24, Kind::Fxfs))
+            .unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(4, ps)[..])]).unwrap();
     store.commit(None).unwrap();
@@ -3019,7 +3001,7 @@ fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
     assert_eq!(follow(&path).err(), Some(Some(Errno::EBUSY)));
     let (client, server) = UnixStream::pair().unwrap();
     let busy = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
-    let opened = DaemonExtentStore::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs));
+    let opened = CellClient::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs));
     assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
     busy.join().unwrap();
 
@@ -3046,7 +3028,7 @@ fn stores_open_in_another_arena_are_busy() {
         let (client, server) = UnixStream::pair().unwrap();
         let tenant = tenant.clone();
         let served = std::thread::spawn(move || serve_connection(server, tenant));
-        (DaemonExtentStore::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
+        (CellClient::over(client, &path, Opening::Create(1 << 20, Kind::Fxfs)), served)
     };
     let (store, served) = open_as_tenant();
     let store = store.unwrap();
@@ -3089,11 +3071,11 @@ fn stores_followed_are_worked_on_as_they_are() {
     let fork = dir.path().join("fork");
     fork_store(&path, &fork).unwrap();
     assert_eq!(delete_store(&path).err().and_then(|error| error.errno()), Some(Errno::EBUSY));
-    assert_eq!(control(super::stores::place(path.clone(), 2)), Err(Errno::EBUSY));
-    assert_eq!(control(super::stores::make_public(path.clone(), false)), Err(Errno::EBUSY));
+    assert_eq!(control(super::cells::place(path.clone(), 2)), Err(Errno::EBUSY));
+    assert_eq!(control(super::cells::make_public(path.clone(), false)), Err(Errno::EBUSY));
     drop(follower);
     followed.join().unwrap();
-    let forked = ExtentStore::open(&fork).unwrap();
+    let forked = OpenCell::open(&fork).unwrap();
     let mut data = vec![0; BLOCK];
     forked.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     assert_eq!(data, pattern(1, BLOCK));
@@ -3126,7 +3108,7 @@ impl Held {
 /// The names of this process's threads alive as they are read: one that ends between the listing of
 /// `/proc/self/task` and the read of its name, as an idle blocking thread of the daemon's runtimes
 /// does, is gone, and holds nothing: its name not found, or, as it exits, its process no more
-/// (`ESRCH`), as for the threads a store's flush syncs its files on (`extent_store`'s `AT_ONCE`).
+/// (`ESRCH`), as for the threads a store's flush syncs its files on (`local_cell`'s `AT_ONCE`).
 fn thread_comms() -> impl Iterator<Item = String> {
     std::fs::read_dir("/proc/self/task").unwrap().filter_map(|task| {
         match std::fs::read_to_string(task.unwrap().path().join("comm")) {
@@ -3180,9 +3162,8 @@ fn serves_hundreds_of_forks_of_a_base() {
     std::thread::spawn(move || serve(listener));
 
     let before = Held::now();
-    let stores: Vec<_> = (forks.iter())
-        .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
-        .collect();
+    let stores: Vec<_> =
+        (forks.iter()).map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap()).collect();
     for (n, store) in stores.iter().enumerate() {
         let sequence = n as u64 % EXTENTS;
         let extent = ExtentId { branch, sequence };
@@ -3225,8 +3206,7 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
     // Forks of a base of `extents` extents, opened: how long their opening took, and what it
     // unpacked and read from the stores.
     let opened = |extents: u64| {
-        let base =
-            ExtentStore::create(dir.path().join(format!("base-{extents}")), 1 << 30).unwrap();
+        let base = OpenCell::create(dir.path().join(format!("base-{extents}")), 1 << 30).unwrap();
         let branch = base.branch();
         for sequence in 1..=extents {
             let data = pattern(sequence as u8, BLOCK);
@@ -3243,7 +3223,7 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
         let forks: Vec<_> = (1..=FORKS)
             .map(|n| {
                 let fork = dir.path().join(format!("fork-{extents}-{n}"));
-                base.fork_to(&fork, crate::host_store::fork_child(branch)).unwrap();
+                base.fork_to(&fork, crate::host_cell::fork_child(branch)).unwrap();
                 fork
             })
             .collect();
@@ -3251,7 +3231,7 @@ fn forks_opening_reads_nothing_more_of_a_larger_base() {
         let before = crate::stats::stats();
         let start = std::time::Instant::now();
         let stores: Vec<_> = (forks.iter())
-            .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
+            .map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap())
             .collect();
         let took = start.elapsed() / FORKS as u32;
         let after = crate::stats::stats();
@@ -3281,7 +3261,7 @@ fn counting_followers_walks_no_extents() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let base = ExtentStore::create(dir.path().join("base"), 1 << 30).unwrap();
+    let base = OpenCell::create(dir.path().join("base"), 1 << 30).unwrap();
     let branch = base.branch();
     for sequence in 1..=EXTENTS {
         let data = pattern(sequence as u8, BLOCK);
@@ -3294,19 +3274,18 @@ fn counting_followers_walks_no_extents() {
     let forks: Vec<_> = (1..=FORKS)
         .map(|n| {
             let fork = dir.path().join(format!("fork-{n}"));
-            base.fork_to(&fork, crate::host_store::fork_child(branch)).unwrap();
+            base.fork_to(&fork, crate::host_cell::fork_child(branch)).unwrap();
             fork
         })
         .collect();
     drop(base);
-    let stores: Vec<_> = (forks.iter())
-        .map(|fork| DaemonExtentStore::connect(&socket, fork, 1 << 30).unwrap())
-        .collect();
+    let stores: Vec<_> =
+        (forks.iter()).map(|fork| CellClient::connect(&socket, fork, 1 << 30).unwrap()).collect();
     // The quickest of a few counts: what counting itself costs.
     let took = (0..5)
         .map(|_| {
             let start = std::time::Instant::now();
-            assert_eq!(super::stores::follower_views(), 0);
+            assert_eq!(super::cells::follower_views(), 0);
             start.elapsed()
         })
         .min()
@@ -3321,7 +3300,7 @@ fn counting_followers_walks_no_extents() {
 /// its turn, which hundreds of guests committing together kept as many of as their syncs' waits
 /// took, each idle 10 s after: here each guest commits, ordered, again and again for a second.
 /// At once, the stores' flushes run on `FLUSHES` threads at most, and the 15 they share to sync
-/// their files on beside their own (`extent_store`'s `HELPERS`, which count as theirs, named as
+/// their files on beside their own (`local_cell`'s `HELPERS`, which count as theirs, named as
 /// they are): the most seen at once, looking every millisecond, is no more. Once their commits are durable, the runtime keeps threads for
 /// the requests that ran at once, not for the stores: 2 and a little over 2 for each guest
 /// committing (8 to 9 for 3 guests, 18 to 25 for 9, 58 to 70 for 33, whether 150, 300 or 600 stores
@@ -3329,7 +3308,7 @@ fn counting_followers_walks_no_extents() {
 /// idle when the next request comes for one (40 beside the full workspace's tests); a thread for
 /// each store would be 297. One guest's commits are durable within a few of its
 /// store's turns, of 50 ms each and the flushes' time: told in turns, which the daemon counts
-/// ([`ExtentStore::flush_turns`]), as the full workspace's tests beside it stretch each turn's
+/// ([`OpenCell::flush_turns`]), as the full workspace's tests beside it stretch each turn's
 /// flushes to hundreds of milliseconds (TASK-110); the most one waited in time, its lag, is
 /// reported. The stores are on
 /// a disk, in `/var/tmp`, as a host's are: `/tmp` may be memory (tmpfs), whose syncs cost nothing.
@@ -3349,14 +3328,14 @@ fn hundreds_of_writers_flush_on_threads_they_share() {
     std::thread::spawn(move || serve(listener));
     let paths: Vec<_> = (0..STORES).map(|n| dir.path().join(format!("store-{n}"))).collect();
     let stores: Vec<_> = (paths.iter())
-        .map(|path| Arc::new(DaemonExtentStore::connect(&socket, path, 1 << 30).unwrap()))
+        .map(|path| Arc::new(CellClient::connect(&socket, path, 1 << 30).unwrap()))
         .collect();
     // The daemon's side of each store, which says whether its commits wait to be made durable;
     // and the guest whose commits' lag is measured.
     let theirs: Vec<_> = (paths.iter())
         .map(|path| {
-            let key = super::stores::store_key(path);
-            super::stores::table().writer(&key).unwrap().store().unwrap().clone()
+            let key = super::cells::store_key(path);
+            super::cells::table().writer(&key).unwrap().store().unwrap().clone()
         })
         .collect();
     let ((probe, others), probed) = (stores.split_first().unwrap(), theirs[0].clone());
@@ -3596,7 +3575,7 @@ fn the_daemon_accepts_on_after_failing_to() {
     assert_eq!(served, Err(std::sync::mpsc::RecvTimeoutError::Timeout), "serving stopped");
     let path = dir.path().join("store");
     let opened = within(std::time::Duration::from_secs(10), move || {
-        DaemonExtentStore::connect(&socket, path, 1 << 20).map(|store| store.branch())
+        CellClient::connect(&socket, path, 1 << 20).map(|store| store.branch())
     });
     assert!(matches!(opened, Ok(Ok(_))), "the daemon accepts no more: {opened:?}");
 }
@@ -3608,7 +3587,7 @@ fn forks_to_stores_there_already_fail_with_eexist() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let (path, fork) = (dir.path().join("store"), dir.path().join("fork"));
-    let store = ExtentStore::create(&path, 1 << 20).unwrap();
+    let store = OpenCell::create(&path, 1 << 20).unwrap();
     store.commit(None).unwrap();
     drop(store);
     fork_store(&path, &fork).unwrap();
@@ -3628,12 +3607,12 @@ fn requests_attach_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let base = dir.path().join("base");
-    let store = ExtentStore::create(&base, 1 << 20).unwrap();
+    let store = OpenCell::create(&base, 1 << 20).unwrap();
     let extent = ExtentId { branch: store.branch().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])]).unwrap();
     store.commit(None).unwrap();
     drop(store);
-    let vm = DaemonExtentStore::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
+    let vm = CellClient::connect(&socket, dir.path().join("vm"), 1 << 20).unwrap();
     // But those nothing replies to.
     for kind in (0..REPLY).filter(|kind| ![ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(kind))
     {
@@ -3657,11 +3636,11 @@ fn stores_worked_on_here_read_no_boot_profile() {
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = ExtentStore::create(&base, 1 << 24).unwrap();
+    let store = OpenCell::create(&base, 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(7, ps)[..])]).unwrap();
     store.commit(None).unwrap();
-    store.fork_to(&fork, crate::host_store::fork_child(store.branch())).unwrap();
+    store.fork_to(&fork, crate::host_cell::fork_child(store.branch())).unwrap();
     drop(store);
     // The base's profile, as its first fork to boot recorded it.
     let profile = crate::profile::path(&base.canonicalize().unwrap(), extent.branch);
@@ -3687,7 +3666,7 @@ fn stores_synced_here_are_closed_before_they_are_let_go() {
     let dir = tempfile::tempdir().unwrap();
     for round in 0..20 {
         let path = dir.path().join(format!("store-{round}"));
-        let store = ExtentStore::create(&path, 1 << 20).unwrap();
+        let store = OpenCell::create(&path, 1 << 20).unwrap();
         store.commit(None).unwrap();
         drop(store);
         wait_uploaded(&path).unwrap();
@@ -3745,8 +3724,7 @@ fn window_mappings_past_a_messages_payload_arrive() {
             sender.send(reply, &payload, &fds).unwrap();
         }
     });
-    let store =
-        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let store = CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
     let store = store.unwrap();
     let size = count * ps;
     // SAFETY: Reserves the window's memory, which the test leaks: the window maps it while the
@@ -3807,8 +3785,7 @@ fn requests_failed_by_the_daemons_going_find_it_gone() {
             sender.send(reply, &[], &fds).unwrap();
         }
     });
-    let store =
-        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+    let store = CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
     let store = store.unwrap();
     // What the failed request does comes before the rest of the connection's end.
     let _slow = fail::FailGuard::new("client::requests_failed", "sleep(200)").unwrap();
@@ -3949,12 +3926,12 @@ fn vm_processes_that_stop_reading_hold_up_no_other() {
     let opening = path.clone();
     let (busy_socket, other_socket) = (socket.clone(), socket.clone());
     let busy = within(wait, move || {
-        DaemonExtentStore::connect(&busy_socket, &opening, 1 << 24).err().and_then(|e| e.errno())
+        CellClient::connect(&busy_socket, &opening, 1 << 24).err().and_then(|e| e.errno())
     });
     assert_eq!(busy, Ok(Some(Errno::EBUSY)), "opening the store waited for its VM process");
     let other = dir.path().join("other");
     let opened = within(wait, move || {
-        DaemonExtentStore::connect(&other_socket, &other, 1 << 24).map(|store| store.branch())
+        CellClient::connect(&other_socket, &other, 1 << 24).map(|store| store.branch())
     });
     assert!(matches!(opened, Ok(Ok(_))), "another store's opening waited: {opened:?}");
     drop((sender, receiver, stream));
@@ -4046,14 +4023,14 @@ fn tenants_take_no_branch_by_naming_it() {
     };
     let (ours, our_socket) = tenant("ours", 1);
     let (theirs, their_socket) = tenant("theirs", 2);
-    let store = DaemonExtentStore::connect(&their_socket, theirs.join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&their_socket, theirs.join("store"), 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
     store.commit(Some(b"theirs")).unwrap();
 
     let version = store.make_version().unwrap();
     let restored = ours.join("restored");
-    let opened = DaemonExtentStore::connect_forked(&our_socket, &restored, version, 1 << 24);
+    let opened = CellClient::connect_forked(&our_socket, &restored, version, 1 << 24);
     assert_eq!(opened.map(drop).map_err(|error| error.errno()), Err(Some(Errno::EACCES)));
     assert!(!restored.exists(), "a restore of another tenant's version not shared made a store");
     let later = ExtentId { branch: store.branch(), sequence: 2 };
@@ -4067,7 +4044,7 @@ fn tenants_take_no_branch_by_naming_it() {
 /// nothing, and both stores open for others once the connection goes.
 #[test]
 fn connections_open_one_store_at_a_time() {
-    use super::stores::{store_key, table};
+    use super::cells::{store_key, table};
     use super::wire::*;
     use std::os::unix::ffi::OsStrExt as _;
     host();
@@ -4121,11 +4098,8 @@ fn tenants_connections_are_bounded() {
     // Served once its store is open.
     let (ours, theirs) = UnixStream::pair().unwrap();
     let serving = std::thread::spawn(move || serve_connection(theirs, default_tenant().unwrap()));
-    let first = DaemonExtentStore::over(
-        ours,
-        &dir.path().join("first"),
-        Opening::Create(1 << 20, Kind::Fxfs),
-    );
+    let first =
+        CellClient::over(ours, &dir.path().join("first"), Opening::Create(1 << 20, Kind::Fxfs));
     let first = first.unwrap();
     let connected: Vec<UnixStream> = (1..super::server::MAX_CONNECTIONS)
         .map(|_| UnixStream::connect(&socket).unwrap())
@@ -4138,14 +4112,14 @@ fn tenants_connections_are_bounded() {
 
     drop(first);
     serving.join().unwrap();
-    let opened = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 20);
+    let opened = CellClient::connect(&socket, dir.path().join("store"), 1 << 20);
     assert_eq!(opened.map(drop).map_err(|error| error.errno()), Ok(()), "no connection served");
     drop(connected);
 }
 
 /// TASK-79.84: a VM restored from a snapshot to where a fork of its version was left unmade, its host
 /// crashing as it made the child's store, gets a fork made anew, of a branch of its own, holding
-/// what the version holds: what was left goes (`host_store::unmade`, TASK-165.7).
+/// what the version holds: what was left goes (`host_cell::unmade`, TASK-165.7).
 #[test]
 fn restores_fork_anew_over_forks_left_unmade() {
     host();
@@ -4153,7 +4127,7 @@ fn restores_fork_anew_over_forks_left_unmade() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
@@ -4164,10 +4138,10 @@ fn restores_fork_anew_over_forks_left_unmade() {
     let restored = dir.path().join("restored");
     std::fs::create_dir_all(restored.join("segments")).unwrap();
     std::fs::write(restored.join("ancestry"), "1 /elsewhere\n").unwrap();
-    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 0).unwrap();
+    let ours = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(ours.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));
-    assert!(!crate::host_store::unmade(&restored), "the new fork is no store");
+    assert!(!crate::host_cell::unmade(&restored), "the new fork is no store");
 }
 
 /// TASK-194: a restore into a store written since its snapshot's version, as the snapshotted VM's
@@ -4181,7 +4155,7 @@ fn restores_refuse_a_store_written_since_its_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
@@ -4191,10 +4165,10 @@ fn restores_refuse_a_store_written_since_its_version() {
     store.commit(Some(b"later")).unwrap();
     drop(store);
 
-    let restored = DaemonExtentStore::connect_forked(&socket, &path, version, 0);
+    let restored = CellClient::connect_forked(&socket, &path, version, 0);
     assert_eq!(restored.err().and_then(|err| err.errno()), Some(Errno::EEXIST));
     // Nothing of it changed: opened, it is as the VM left it.
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     assert_eq!((store.root(), read(&store, extent, 0, BLOCK).ok()), (Ok(b"later".to_vec()), None));
 }
 
@@ -4210,15 +4184,14 @@ fn restores_open_stores_still_at_their_version() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
     let version = store.make_version().unwrap();
     drop(store);
-    let restore = |into: &Path| DaemonExtentStore::connect_forked(&socket, into, version, 0);
-    let at_point =
-        |store: &DaemonExtentStore| (store.root().ok(), read(store, extent, 0, BLOCK).ok());
+    let restore = |into: &Path| CellClient::connect_forked(&socket, into, version, 0);
+    let at_point = |store: &CellClient| (store.root().ok(), read(store, extent, 0, BLOCK).ok());
     let state = (Some(b"root".to_vec()), Some(pattern(8, BLOCK)));
 
     // The snapshotted VM's own store, written nothing since its version.
@@ -4242,16 +4215,16 @@ fn restores_open_stores_still_at_their_version() {
 
 /// What a store of the daemon's at `path` mints next, as its guest mints: from its writer's floor,
 /// or past what it minted.
-fn minted(store: &DaemonExtentStore) -> ExtentId {
+fn minted(store: &CellClient) -> ExtentId {
     let info = store.info().unwrap();
-    assert!(info.sequence_floor >= 1 << extent_bucket::EPOCH_SHIFT, "{info:?}");
+    assert!(info.sequence_floor >= 1 << bucket_cell::EPOCH_SHIFT, "{info:?}");
     ExtentId { branch: store.branch(), sequence: info.next_sequence.max(info.sequence_floor) }
 }
 
 /// The store at `path`, once the connection that had it open let it go.
-fn reopened(socket: &Path, path: &Path) -> DaemonExtentStore {
+fn reopened(socket: &Path, path: &Path) -> CellClient {
     loop {
-        match DaemonExtentStore::connect(socket, path, 1 << 24) {
+        match CellClient::connect(socket, path, 1 << 24) {
             Err(error) if error.errno() == Some(Errno::EBUSY) => std::thread::yield_now(),
             opened => break opened.unwrap(),
         }
@@ -4261,7 +4234,7 @@ fn reopened(socket: &Path, path: &Path) -> DaemonExtentStore {
 /// Waits for the daemon to have let go of the store at `path`, whose connection went: closed, its
 /// uploader done with what closing uploads, as another connection may open it then.
 fn let_go(path: &Path) {
-    let (table, key) = (super::stores::table(), super::stores::store_key(path));
+    let (table, key) = (super::cells::table(), super::cells::store_key(path));
     // `EBUSY` until the daemon sees the connection going; then the wait is for it to let go.
     let hold = loop {
         match table.hold(&key, None) {
@@ -4287,19 +4260,19 @@ fn let_go(path: &Path) {
 #[test]
 fn guests_forks_failing_at_each_step_harm_nothing() {
     host();
-    super::stores::uploads_when_asked();
+    super::cells::uploads_when_asked();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let other = DaemonExtentStore::connect(&socket, &dir.path().join("other"), 1 << 24).unwrap();
+    let other = CellClient::connect(&socket, &dir.path().join("other"), 1 << 24).unwrap();
     let kept = minted(&other);
     write(&other, kept, 0, &pattern(9, BLOCK)).unwrap();
     other.commit(None).unwrap();
 
     for (case, step) in crate::faults::FORK_STEPS.into_iter().enumerate() {
         let path = dir.path().join(format!("store-{case}"));
-        let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+        let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
         let extent = minted(&store);
         write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
         store.commit(Some(b"root")).unwrap();
@@ -4315,7 +4288,7 @@ fn guests_forks_failing_at_each_step_harm_nothing() {
         assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         let retried = dir.path().join(format!("retried-{case}"));
         assert_eq!(store.fork(&retried).map(drop), Ok(()), "{step}");
-        let forked = DaemonExtentStore::connect(&socket, &retried, 1 << 24).unwrap();
+        let forked = CellClient::connect(&socket, &retried, 1 << 24).unwrap();
         assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(1, BLOCK)), "{step}");
         forked.commit(Some(b"fork")).unwrap();
 
@@ -4337,7 +4310,7 @@ fn forks_whose_answers_are_lost_stand() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let extent = minted(&store);
     write(&store, extent, 0, &pattern(2, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
@@ -4356,7 +4329,7 @@ fn forks_whose_answers_are_lost_stand() {
     assert_eq!(store.fork(&child), Err(Errno::EEXIST));
     assert_eq!(store.fork(&dir.path().join("again")).map(drop), Ok(()));
     assert_eq!(store.commit(Some(b"later")), Ok(()));
-    let forked = DaemonExtentStore::connect(&socket, &child, 1 << 24).unwrap();
+    let forked = CellClient::connect(&socket, &child, 1 << 24).unwrap();
     assert_eq!(forked.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(2, BLOCK)));
     drop(forked);
@@ -4393,9 +4366,9 @@ fn control_forks_failing_fork_again() {
     fork_store(&base, &fork).unwrap();
 
     let failing = fail::FailGuard::new("upload::forked", "1*return").unwrap();
-    let branch = control(super::stores::fork(base.clone(), again.clone(), None)).unwrap();
+    let branch = control(super::cells::fork(base.clone(), again.clone(), None)).unwrap();
     drop(failing);
-    assert_eq!(ExtentStore::open(&again).map(|store| store.branch()).map_err(drop), Ok(branch));
+    assert_eq!(OpenCell::open(&again).map(|store| store.branch()).map_err(drop), Ok(branch));
     let (forked, served) = connect(&again, 1 << 24);
     assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(3, BLOCK)));
     drop(forked);
@@ -4414,7 +4387,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
-    let made = DaemonExtentStore::connect(&socket, &store, 1 << 24).unwrap();
+    let made = CellClient::connect(&socket, &store, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(4, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
@@ -4423,7 +4396,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
 
     let left = ["fork::made", "branch::head_ended"];
     let failing = left.map(|step| fail::FailGuard::new(step, "1*return").unwrap());
-    let forked = control(super::stores::fork_of_version(
+    let forked = control(super::cells::fork_of_version(
         version_branch(version),
         version.version,
         restored.clone(),
@@ -4433,7 +4406,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     .map_err(Some);
     drop(failing);
     assert_eq!((forked, restored.exists()), (Err(Some(Errno::EIO)), false));
-    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 0).unwrap();
+    let ours = CellClient::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
 }
 
@@ -4503,7 +4476,7 @@ fn daemons_of_other_wire_versions_are_refused() {
         served
     });
     let refused =
-        DaemonExtentStore::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
+        CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
     let refused = refused.err().expect("a daemon of another wire version refused");
     assert_eq!(refused.errno(), Some(Errno::EPROTONOSUPPORT));
     assert_eq!(
@@ -4585,11 +4558,8 @@ fn openings_fail_on_refusals_of_what_they_ask() {
             }
             served
         });
-        let opened = DaemonExtentStore::over(
-            client,
-            Path::new("store"),
-            Opening::Create(1 << 20, Kind::Fxfs),
-        );
+        let opened =
+            CellClient::over(client, Path::new("store"), Opening::Create(1 << 20, Kind::Fxfs));
         let refused = opened.err().expect("opening failed");
         assert_eq!(refused.errno(), Some(Errno::EINVAL), "{refused:#}");
         let asked = match refusing {
@@ -4620,7 +4590,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+    super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4630,7 +4600,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     std::thread::spawn(move || serve(listener));
     let (path, child) = (dir.path().join("store"), dir.path().join("child"));
     let parent = {
-        let store = ExtentStore::create(&path, 1 << 24).unwrap();
+        let store = OpenCell::create(&path, 1 << 24).unwrap();
         let branch = store.branch();
         let data = pattern(1, ps);
         let extent = ExtentId { branch: branch.id, sequence: 1 };
@@ -4638,14 +4608,14 @@ fn childs_opened_during_their_forks_wait_for_them() {
         store.commit(None).unwrap();
         branch
     };
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     wait_uploaded(&path).unwrap();
     // The parent's segments, the fork's among them, which records the fork, held.
-    let segments = format!("branches/{}", extent_bucket::layout::segments(parent));
+    let segments = format!("branches/{}", bucket_cell::layout::segments(parent));
     gated.hold_writes(Some(segments));
     let forking = {
         let (path, child) = (path.clone(), child.clone());
-        std::thread::spawn(move || control(super::stores::fork(path, child, None)))
+        std::thread::spawn(move || control(super::cells::fork(path, child, None)))
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while gated.writes_waiting() == 0 || !child.exists() {
@@ -4657,7 +4627,7 @@ fn childs_opened_during_their_forks_wait_for_them() {
     let opening = {
         let (socket, child, opened) = (socket.clone(), child.clone(), opened.clone());
         std::thread::spawn(move || {
-            let store = DaemonExtentStore::connect(&socket, &child, 1 << 24)?;
+            let store = CellClient::connect(&socket, &child, 1 << 24)?;
             opened.store(true, std::sync::atomic::Ordering::Relaxed);
             let data = pattern(2, ps);
             let extent = ExtentId { branch: store.branch(), sequence: 1 };
@@ -4666,9 +4636,9 @@ fn childs_opened_during_their_forks_wait_for_them() {
             Ok::<_, crate::Error>(store)
         })
     };
-    let key = super::stores::store_key(&child);
+    let key = super::cells::store_key(&child);
     let opened_now = || opened.load(std::sync::atomic::Ordering::Relaxed);
-    let waiting = || super::stores::table().is_waited_for(&key);
+    let waiting = || super::cells::table().is_waited_for(&key);
     while !waiting() && !opened_now() && !opening.is_finished() {
         let late = std::time::Instant::now() >= deadline;
         assert!(!late, "the child's opening neither waited nor ended");
@@ -4684,8 +4654,8 @@ fn childs_opened_during_their_forks_wait_for_them() {
     let child_store = opening.join().unwrap();
     assert!(child_store.is_ok(), "opening the child: {:?}", child_store.err());
     assert_eq!(child_store.as_ref().map(|store| store.branch()).ok(), Some(forked.id));
-    let records = extent_bucket::object_bucket::ObjectBucket::new(gated.clone(), "branches");
-    let record = control(extent_bucket::branch::record(&records, branch_at(&child))).unwrap();
+    let records = bucket_cell::object_bucket::ObjectBucket::new(gated.clone(), "branches");
+    let record = control(bucket_cell::branch::record(&records, branch_at(&child))).unwrap();
     let origin = record.and_then(|record| record.origin()).map(|origin| origin.parent);
     assert_eq!(origin, Some(parent));
     drop((child_store, store));
@@ -4704,7 +4674,7 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+    super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4713,9 +4683,9 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let branch = store.branch();
-    let write = |store: &DaemonExtentStore, sequence: u64| {
+    let write = |store: &CellClient, sequence: u64| {
         let extent = ExtentId { branch, sequence };
         let data = pattern(sequence as u8, ps);
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
@@ -4724,7 +4694,7 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     store.commit(None).unwrap();
     wait_uploaded(&path).unwrap();
     // The next segment's upload, held: the bucket out of reach for what the store has in flight.
-    let segments = format!("branches/{}", extent_bucket::layout::segments(branch_at(&path)));
+    let segments = format!("branches/{}", bucket_cell::layout::segments(branch_at(&path)));
     gated.hold_next_write(&segments);
     write(&store, 2);
     store.commit_ordered(None).unwrap();
@@ -4737,10 +4707,10 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
     }
     // A VM booted again opens it, at once, and reads what the first committed.
     let asked = std::time::Instant::now();
-    let again = DaemonExtentStore::connect(&socket, &path, 1 << 24);
+    let again = CellClient::connect(&socket, &path, 1 << 24);
     let took = asked.elapsed();
     let again = again.unwrap_or_else(|err| panic!("opening again, after {took:?}: {err:#}"));
-    assert!(took < super::stores::CLOSING_WAIT / 2, "opening again took {took:?}");
+    assert!(took < super::cells::CLOSING_WAIT / 2, "opening again took {took:?}");
     let mut data = vec![0; ps];
     let extent = ExtentId { branch, sequence: 2 };
     again.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
@@ -4921,7 +4891,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     host();
     let ps = page_size() as usize;
     let gated = Arc::new(GatedReads::new());
-    super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+    super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -4934,7 +4904,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     // branch in the bucket.
     let path = dir.path().join("store");
     let branch = {
-        let store = ExtentStore::create(&path, 1 << 24).unwrap();
+        let store = OpenCell::create(&path, 1 << 24).unwrap();
         let branch = store.branch();
         for sequence in 1..=FAULTS as u64 {
             let data = pattern(sequence as u8, ps);
@@ -4949,14 +4919,14 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
         store.commit(None).unwrap();
         branch
     };
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     let version = store.make_version().unwrap();
     drop(store);
     // Its VM restored on another host, which has the version's extents in the bucket alone.
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let restored = elsewhere.join("store");
-    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 1 << 24).unwrap();
+    let ours = CellClient::connect_forked(&socket, &restored, version, 1 << 24).unwrap();
     let memory = memory(FAULTS);
     // SAFETY: The memory is the test's, and outlives the store.
     unsafe { ours.create_dax_window_in_host_memory(memory, (FAULTS * ps) as u64, None, 1) }
@@ -4976,7 +4946,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
         })
         .collect();
     // Every fault received, each waiting for a fetch.
-    let connection = super::stores::table().writer(&super::stores::store_key(&restored)).unwrap();
+    let connection = super::cells::table().writer(&super::cells::store_key(&restored)).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while connection.unanswered() < FAULTS || gated.waiting() == 0 {
         assert!(std::time::Instant::now() < deadline, "{} faults", connection.unanswered());
@@ -5013,16 +4983,16 @@ fn a_zygotes_restores_open_its_copy_once() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
     store.commit(Some(b"zygote")).unwrap();
     let version = store.make_version().unwrap();
     drop(store);
     // How many writers took the version's branch: its head's epoch.
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     let branch = version_branch(version);
-    let takings = || control(extent_bucket::head::epoch(&*bucket, branch)).unwrap();
+    let takings = || control(bucket_cell::head::epoch(&*bucket, branch)).unwrap();
     let taken = takings();
 
     let restoring: Vec<_> = (0..RESTORES)
@@ -5031,7 +5001,7 @@ fn a_zygotes_restores_open_its_copy_once() {
             let to = dir.path().join(format!("restore-{n}"));
             std::thread::spawn(move || {
                 let start = std::time::Instant::now();
-                let restored = DaemonExtentStore::connect_forked(&socket, to, version, 0);
+                let restored = CellClient::connect_forked(&socket, to, version, 0);
                 let root = restored.map_err(|error| error.errno()).and_then(|store| {
                     assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
                     store.root().map_err(Some)
@@ -5064,7 +5034,7 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let path = dir.path().join("store");
-    let writer = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
+    let writer = CellClient::connect(&socket, &path, 1 << 24).unwrap();
     // The follower's VM process, by hand, which reads its opening's reply, and nothing more until
     // its writer is done.
     let stream = UnixStream::connect(&socket).unwrap();
@@ -5088,8 +5058,8 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
         let queued = super::server::most_queued();
         assert!(queued <= size_of::<Header>() as u64, "{queued} bytes queued for VM processes");
     }
-    let key = super::stores::store_key(&path);
-    let holder = super::stores::table().writer(&key).unwrap();
+    let key = super::cells::store_key(&path);
+    let holder = super::cells::table().writer(&key).unwrap();
     let latest = holder.store().unwrap().committed().unwrap();
     // Each commit it is told of after the last, the latest last.
     let told = within(std::time::Duration::from_secs(10), move || {
@@ -5343,17 +5313,17 @@ fn vm_processes_of_any_tenant_write_no_public_base() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let store = ExtentStore::create(&base, 1 << 24).unwrap();
+    let store = OpenCell::create(&base, 1 << 24).unwrap();
     store.commit(None).unwrap();
     store.make_public().unwrap();
-    let forked = crate::host_store::fork_child(store.branch());
+    let forked = crate::host_cell::fork_child(store.branch());
     drop(store);
-    let opened = ExtentStore::open(&base).unwrap();
+    let opened = OpenCell::open(&base).unwrap();
     opened.fork_to(&fork, forked).unwrap();
     drop(opened);
-    let refused = DaemonExtentStore::connect(&socket, &base, 1 << 24);
+    let refused = CellClient::connect(&socket, &base, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
-    let opened = DaemonExtentStore::connect(&socket, &fork, 1 << 24).map(|store| store.branch());
+    let opened = CellClient::connect(&socket, &fork, 1 << 24).map(|store| store.branch());
     assert_eq!(opened.map_err(|error| error.errno()), Ok(forked.id));
 }
 
@@ -5424,11 +5394,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
                     let (client, server) = UnixStream::pair().unwrap();
                     let tenant = default_tenant().unwrap();
                     let served = std::thread::spawn(move || serve_connection(server, tenant));
-                    match DaemonExtentStore::over(
-                        client,
-                        &path,
-                        Opening::Create(1 << 24, Kind::Fxfs),
-                    ) {
+                    match CellClient::over(client, &path, Opening::Create(1 << 24, Kind::Fxfs)) {
                         Ok(store) => {
                             won.store(true, Ordering::SeqCst);
                             break Ok((store, served));
@@ -5498,7 +5464,7 @@ fn opens_race_the_exit_of_the_vm_process_writing_their_store() {
     assert_eq!(opened, vec![Ok(Ok(pattern(1, BLOCK)))]);
     assert_eq!(refused, vec![Err(Some(Errno::EBUSY)); WRITERS - 1]);
     assert_eq!(follows, vec![Ok(Ok(pattern(1, BLOCK))); FOLLOWERS]);
-    assert!(super::stores::table().is_empty(), "the store is held or open once all are gone");
+    assert!(super::cells::table().is_empty(), "the store is held or open once all are gone");
     let (again, served) = connect(&path, 1 << 24);
     assert_eq!(read(&again, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
     drop(again);
@@ -5601,7 +5567,7 @@ fn window_mappings_are_answered_beside_the_stream_data_in_flight() {
         sender.send(read, &[], &[]).unwrap();
     }
     sender.send(Header::new(MAPPINGS, id + reads + 1), &[], &[]).unwrap();
-    let holder = super::stores::table().writer(&super::stores::store_key(&path)).unwrap();
+    let holder = super::cells::table().writer(&super::cells::store_key(&path)).unwrap();
     // All of them queued, but what the socket holds, a mebibyte at most.
     let replies = reads * MAX_PAYLOAD + count * MAPPING_BYTES - (1 << 20);
     while holder.queued() < replies {
@@ -5728,14 +5694,14 @@ fn whatever_a_vm_process_says_harms_no_other() {
     std::thread::spawn(move || serve(listener));
 
     let other_path = dir.path().join("other");
-    let other = DaemonExtentStore::connect(&other_socket, &other_path, 1 << 24).unwrap();
+    let other = CellClient::connect(&other_socket, &other_path, 1 << 24).unwrap();
     let kept = ExtentId { branch: other.branch(), sequence: 1 };
     write(&other, kept, 0, &pattern(9, BLOCK)).unwrap();
     other.commit(None).unwrap();
     let their_bytes = std::sync::Arc::new(pattern(9, BLOCK));
 
     // A snapshot in the bucket, a version of the other tenant's cell, not shared.
-    let given = DaemonExtentStore::connect(&other_socket, dir.path().join("given"), 1 << 24);
+    let given = CellClient::connect(&other_socket, dir.path().join("given"), 1 << 24);
     let given = given.unwrap();
     let given_branch = given.branch();
     write(&given, ExtentId { branch: given_branch, sequence: 1 }, 0, &pattern(8, BLOCK)).unwrap();
@@ -6001,7 +5967,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 let (opening, reopened) = (socket.clone(), path);
                 let opened = within(wait, move || {
                     loop {
-                        match DaemonExtentStore::connect(&opening, &reopened, 1 << 24) {
+                        match CellClient::connect(&opening, &reopened, 1 << 24) {
                             Err(error) if error.errno() == Some(Errno::EBUSY) => {
                                 std::thread::yield_now()
                             }
@@ -6092,7 +6058,7 @@ fn a_panic_holding_a_stores_lock_halts_it_alone() {
 
 /// The locks shared beyond one store a VM process's requests take ([`child_panics_holding`]): the
 /// extent cache's and its extents', a window's and its change's, its connection's, and those of
-/// `extent_store`'s store, which its followers share with its writer (TASK-149.24).
+/// `local_cell`'s store, which its followers share with its writer (TASK-149.24).
 const SHARED_LOCKS: &[&str] = &[
     "extent cache",
     "cached extent holders",
@@ -6119,7 +6085,7 @@ const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 #[ignore = "run by a_panic_holding_a_shared_lock_stops_the_daemon, in a process of its own"]
 fn child_panics_holding() {
     let Ok(lock) = std::env::var(PANIC_HOLDING) else { return };
-    extent_store::shared::abort_on_panics();
+    local_cell::shared::abort_on_panics();
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
@@ -6128,7 +6094,7 @@ fn child_panics_holding() {
     // SAFETY: The memory is the test's, and outlives the store.
     unsafe { store.create_dax_window_in_host_memory(memory, ps as u64, None, 1) }.unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
-    extent_store::shared::testing::panic_holding(lock.leak());
+    local_cell::shared::testing::panic_holding(lock.leak());
     let written = write(&store, extent, 0, &pattern(3, ps));
     let committed = store.commit(None);
     let mapped = store.map(extent, 0, ps as u64, 0);
@@ -6155,14 +6121,14 @@ fn a_panic_holding_a_shared_lock_stops_the_daemon() {
         let said =
             String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{lock}: {said}");
-        assert!(extent_store::shared::aborted_holding(&said, lock), "{lock}: {said}");
+        assert!(local_cell::shared::aborted_holding(&said, lock), "{lock}: {said}");
         assert!(!said.contains("THE END"), "{lock}: {said}");
         assert!(!said.contains("panic in a destructor"), "{lock}: {said}");
     }
 }
 
 /// TASK-153.16: a panic serving a VM process's request past the store's locks, which poisons
-/// none of them, as one in `extent_store` beneath them may (TASK-79.1, TASK-79.80), halts the
+/// none of them, as one in `local_cell` beneath them may (TASK-79.1, TASK-79.80), halts the
 /// store as well: a read after it, which would find nothing amiss, fails with `EIO`. Its VM
 /// process gone, the store opens anew as of its last commit.
 #[test]
@@ -6266,8 +6232,8 @@ fn drains_close_every_connection_and_take_no_more() {
     let serving_tenant = std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
 
     let (path, tenant_path) = (dir.path().join("store"), vms.join("store"));
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
-    let tenants = DaemonExtentStore::connect(&tenant_socket, &tenant_path, 1 << 24).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let tenants = CellClient::connect(&tenant_socket, &tenant_path, 1 << 24).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     for (name, store) in [("store", &store), ("tenant's", &tenants)] {
         let told = told.clone();
@@ -6291,7 +6257,7 @@ fn drains_close_every_connection_and_take_no_more() {
     assert!(super::control::CALLS.begin().is_none(), "a control call began, drained");
     drop((store, tenants));
     // Closed, durable, as of its last commit, though only ordered.
-    let closed = ExtentStore::open(&path).unwrap();
+    let closed = OpenCell::open(&path).unwrap();
     assert_eq!(closed.root(), Ok(b"drained".to_vec()));
 }
 
@@ -6321,7 +6287,7 @@ fn drains_give_up_past_their_bound() {
 #[test]
 fn imports_read_what_they_made_from_the_hosts_cache() {
     use crate::import::testing::{Entry, Kind, layer};
-    use extent_bucket::object_bucket::Request;
+    use bucket_cell::object_bucket::Request;
     host();
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("cache");
@@ -6329,7 +6295,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe { std::env::set_var("CLADEFSD_PART_CACHE", &cache) };
-    let bucket = super::stores::daemon_bucket().unwrap();
+    let bucket = super::cells::daemon_bucket().unwrap();
     // Files of a few parts each, so that what the check reads is in segments the bucket
     // acknowledged before it, as the import's close waits for its uploads.
     let contents: Vec<Vec<u8>> = (0..8u8).map(|file| pattern(file, 3 << 20)).collect();
@@ -6342,7 +6308,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     let ranged = || bucket.stats().requests(Request::GetRange);
     let before = ranged();
     let path = dir.path().join("store");
-    control(super::stores::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
+    control(super::cells::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
     // Before TASK-407, three: a footer as the store's writer took its branch, made, its fence's;
     // two as the daemon opened it after, its recovery's and its writer's, past the checkpoint.
     assert_eq!(ranged() - before, 0, "ranged GETs of the bucket as the import ran");
@@ -6469,7 +6435,7 @@ fn durable_commits_through_the_daemon() {
 fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
     let allowance = 8 << 30;
     super::memory::govern(allowance);
-    let sized = extent_store::pages::shared().options();
+    let sized = local_cell::pages::shared().options();
     assert_eq!(
         (sized.background, sized.hard, sized.most),
         (allowance / 10, allowance / 5, allowance)

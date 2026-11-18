@@ -14,10 +14,10 @@
 use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
 use crate::faults::RESTORE_STEPS;
-use crate::{Errno, ExtentId, ExtentStore, StoreRole};
-use extent_bucket::branch;
-use extent_bucket::layout::{self, Kind};
-use extent_bucket::object_bucket::ObjectBucket;
+use crate::{CellRole, Errno, ExtentId, OpenCell};
+use bucket_cell::branch;
+use bucket_cell::layout::{self, Kind};
+use bucket_cell::object_bucket::ObjectBucket;
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -54,9 +54,9 @@ struct Hosts {
     /// Each host's disk: a dead host's, its copy, restarted.
     disks: Vec<PathBuf>,
     /// Each host's copy of the version, open, but for one that died.
-    copies: Vec<Option<Arc<ExtentStore>>>,
+    copies: Vec<Option<Arc<OpenCell>>>,
     /// The store whose cell's version it is, and the version.
-    source: Option<Arc<ExtentStore>>,
+    source: Option<Arc<OpenCell>>,
     version: u64,
     /// The segments of its cell's in the bucket as the hosts were made, which no restore adds to.
     segments: Vec<String>,
@@ -77,7 +77,7 @@ fn copy_at(disk: &Path) -> PathBuf {
 
 /// The keys of the segments of `branch` in `bucket`.
 fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::CellId) -> Vec<String> {
-    let keys = block_on(extent_bucket::Bucket::list(&**bucket, "")).unwrap();
+    let keys = block_on(bucket_cell::Bucket::list(&**bucket, "")).unwrap();
     let segments = keys.into_iter().map(|meta| meta.key);
     segments
         .filter(|key| matches!(layout::kind(key), Kind::Segment { branch, .. } if branch == of))
@@ -96,17 +96,17 @@ fn in_bucket(
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::bucket::kms().map_err(|err| err.to_string())?;
-        let keys = extent_bucket::keys::writing(&**bucket, &kms, child, &record).await;
+        let keys = bucket_cell::keys::writing(&**bucket, &kms, child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
-        let recovering = extent_bucket::recovery::recover_under(&**bucket, child, origin, &keys);
+        let recovering = bucket_cell::recovery::recover_under(&**bucket, child, origin, &keys);
         let state = recovering.await.map_err(|err| err.to_string())?.state;
-        let memory = extent_bucket::fetch::Memory::new();
+        let memory = bucket_cell::fetch::Memory::new();
         let _held = memory.keys().hold(keys);
-        let budget = extent_bucket::fetch::Budget::new(extent_bucket::fetch::Limits::UNBOUNDED);
-        let fetcher = extent_bucket::fetch::Fetcher::new(bucket.clone(), budget, memory, None);
+        let budget = bucket_cell::fetch::Budget::new(bucket_cell::fetch::Limits::UNBOUNDED);
+        let fetcher = bucket_cell::fetch::Fetcher::new(bucket.clone(), budget, memory, None);
         let mut read = Vec::new();
         for (extent, location) in &state.extents {
-            let demand = extent_bucket::fetch::Priority::Demand;
+            let demand = bucket_cell::fetch::Priority::Demand;
             let bytes = fetcher.read(*extent, location, 0, location.len, demand).await;
             read.push((*extent, bytes.map_err(|err| err.to_string())?));
         }
@@ -120,7 +120,7 @@ async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
     branch: crate::CellId,
     holder: u64,
-) -> Result<(), extent_bucket::Error> {
+) -> Result<(), bucket_cell::Error> {
     let kms = crate::bucket::kms().unwrap();
     branch::delete(&**bucket, branch, holder, u64::MAX, &kms).await
 }
@@ -151,8 +151,8 @@ impl Hosts {
         // that, and what it names is all gone once nothing keeps it: its state too, not just its
         // data.
         let later = disks[0].join("later");
-        source.fork_to(&later, crate::host_store::new_alone()).unwrap();
-        ExtentStore::delete(&later, Some(&bucket)).unwrap();
+        source.fork_to(&later, crate::host_cell::new_alone()).unwrap();
+        OpenCell::delete(&later, Some(&bucket)).unwrap();
 
         source.wait_uploaded().unwrap();
         let mut copies = Vec::new();
@@ -160,16 +160,16 @@ impl Hosts {
             let path = copy_at(disk);
             {
                 let url = super::tests::url_of(&reached(host));
-                let description = extent_store::Description {
-                    block_size: ExtentStore::BLOCK_SIZE,
+                let description = local_cell::Description {
+                    block_size: OpenCell::BLOCK_SIZE,
                     capacity: 1 << 30,
                     branch: source.branch(),
                 };
-                let kind = extent_bucket::cell::Kind::Fxfs;
-                ExtentStore::create_at_version(&path, (&url, kind), description, version).unwrap();
+                let kind = bucket_cell::cell::Kind::Fxfs;
+                OpenCell::create_at_version(&path, (&url, kind), description, version).unwrap();
             }
             let copy = reopened(&path, options()).unwrap();
-            assert_eq!(copy.access().role, StoreRole::Version, "host {host} holds no copy");
+            assert_eq!(copy.access().role, CellRole::Version, "host {host} holds no copy");
             copies.push(Some(Arc::new(copy)));
         }
         let segments = segments_of(&bucket, source.branch());
@@ -193,8 +193,8 @@ impl Hosts {
     /// delete nothing: a dead cell's pass retires the references the version's cell keeps its
     /// state for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(bucket: &Arc<ObjectBucket>, case: &str) {
-        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = extent_bucket::testing::collect_until_quiet(&**bucket, &options);
+        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
+        let collected = bucket_cell::testing::collect_until_quiet(&**bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
@@ -228,7 +228,7 @@ impl Hosts {
     /// gave: the child noted, if made.
     fn restore(&mut self, host: usize, name: &str) -> Result<(), Option<Errno>> {
         let path = self.disks[host].join(name);
-        let child = crate::host_store::new_alone();
+        let child = crate::host_cell::new_alone();
         let copy = self.copies[host].as_ref().expect("a host's copy");
         let forked = copy.fork_to(&path, child).map_err(|err| err.errno());
         if forked.is_ok() {
@@ -261,7 +261,7 @@ impl Hosts {
                         (copies.clone(), bucket.clone(), children.clone());
                     let raced = std::thread::spawn(move || {
                         for (copy, disk) in copies {
-                            let child = crate::host_store::new_alone();
+                            let child = crate::host_cell::new_alone();
                             let path = disk.join("raced");
                             copy.fork_to(&path, child).unwrap();
                             children.lock().unwrap().push((child, path));
@@ -333,7 +333,7 @@ impl Hosts {
         let case = format!("host {host}, {fault:?}, {leftover:?}");
         let guard = fault.and_then(|fault| self.arm(host, fault));
         let handle = self.disks[host].join("child");
-        let child = crate::host_store::new_alone();
+        let child = crate::host_cell::new_alone();
         let forked = self.copies[host].as_ref().unwrap().fork_to(&handle, child);
         let forked = forked.map_err(|err| err.errno());
         drop(guard);
@@ -376,7 +376,7 @@ impl Hosts {
         if told || handle.exists() && leftover == Leftover::Opened && opened().is_ok() {
             self.children.lock().unwrap().push((child, handle.clone()));
         } else if handle.exists() {
-            let deleted = ExtentStore::delete(&handle, Some(&self.bucket));
+            let deleted = OpenCell::delete(&handle, Some(&self.bucket));
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         }
         // What the dead host had going, after what was done with what it left.
@@ -387,7 +387,7 @@ impl Hosts {
         // operator finds among the live branches, and deletes (TASK-165.7).
         let mut named = vec![self.source.as_ref().unwrap().branch()];
         named.extend(self.children.lock().unwrap().iter().map(|(child, _)| *child));
-        let live = block_on(extent_bucket::testing::live(&*self.bucket)).unwrap();
+        let live = block_on(bucket_cell::testing::live(&*self.bucket)).unwrap();
         let orphans: Vec<_> = live.into_keys().filter(|live| !named.contains(live)).collect();
         if !orphans.is_empty() {
             assert!(!told, "{case}: a restore made left orphans: {orphans:x?}");
@@ -430,7 +430,7 @@ impl Hosts {
 
         // Everything deleted, nothing is left of it.
         for (_, path) in &children {
-            let deleted = ExtentStore::delete(path, Some(&self.bucket));
+            let deleted = OpenCell::delete(path, Some(&self.bucket));
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting a fork");
         }
         let source = self.source.take().unwrap();
@@ -439,13 +439,13 @@ impl Hosts {
         for disk in &self.disks {
             let copy = copy_at(disk);
             if copy.exists() {
-                ExtentStore::delete(&copy, None).unwrap();
+                OpenCell::delete(&copy, None).unwrap();
             }
         }
         let gone = block_on(operator_delete(&self.bucket, branch, rand::random()));
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
-        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
+        let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
         let leaked: Vec<_> = (keys.into_iter().map(|meta| meta.key))
             .filter(|key| match layout::kind(key) {
                 // TASK-395.10: every reference retired, whether its child got a record or not.
@@ -460,7 +460,7 @@ impl Hosts {
                 // cladefs: a cell's object stays, as its branch's record does, its epoch fencing
                 // its branch's head (TASK-364): left over only if it names a live branch.
                 Kind::Cell { cell } => {
-                    let object = block_on(extent_bucket::cell::read(&*self.bucket, cell));
+                    let object = block_on(bucket_cell::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
                     object.branch(cell).is_some_and(|branch| {
                         let record = block_on(branch::record(&*self.bucket, branch)).unwrap();
@@ -539,7 +539,7 @@ fn restores_take_their_steps_in_order() {
         })
         .collect();
     let copy = hosts.copies[1].as_ref().unwrap();
-    copy.fork_to(hosts.disks[1].join("child"), crate::host_store::new_alone()).unwrap();
+    copy.fork_to(hosts.disks[1].join("child"), crate::host_cell::new_alone()).unwrap();
     drop(guards);
     assert_eq!(*steps.lock().unwrap(), RESTORE_STEPS);
 }
@@ -616,7 +616,7 @@ fn each_write_of_a_restore_going_wrong() {
 fn encrypted() -> tempfile::TempDir {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
-    kms.create(crate::host_store::DEFAULT_TENANT).unwrap();
+    kms.create(crate::host_cell::DEFAULT_TENANT).unwrap();
     crate::bucket::set_kms(Arc::new(kms)).unwrap();
     keys
 }
@@ -631,7 +631,7 @@ fn encrypted_restores_with_nothing_going_wrong() {
     assert_eq!(restored, vec![Ok(()); HOSTS]);
     let hosts = Hosts::new();
     let copy = hosts.copies[1].as_ref().unwrap();
-    let child = crate::host_store::new_alone();
+    let child = crate::host_cell::new_alone();
     copy.fork_to(hosts.disks[1].join("child"), child).unwrap();
     let record = block_on(branch::record(&*hosts.bucket, child)).unwrap().unwrap();
     let source = hosts.source.as_ref().unwrap().branch();

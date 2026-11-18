@@ -337,12 +337,12 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         machine.guest_kernel()?;
         let (root_window, data_window) = mode.windows;
         let root_window = if sandbox.role == Role::Builder { root_window } else { 0 };
-        machine.extent_store_served("root", &fork, ROOT_CAPACITY, root_window, &host.socket);
+        machine.cell_served("root", &fork, ROOT_CAPACITY, root_window, &host.socket);
         machine.fxfs_root("root");
         if sandbox.role != Role::Builder {
             let window = if sandbox.dax { data_window } else { 0 };
             let data = dir.join(format!("{name}.data"));
-            machine.extent_store_served("extents", &data, DATA_CAPACITY, window, &host.socket);
+            machine.cell_served("extents", &data, DATA_CAPACITY, window, &host.socket);
         }
         let mut env = vec![
             ("CLADEFS_SANDBOX_ROLE", sandbox.role.name().to_owned()),
@@ -370,7 +370,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     }
 
     /// A framing past cladefsd's turn, as its daemon's log warns of it: its milliseconds, and its
-    /// phases', by name, as extent_store's timings say them, its threads' waits to run among them,
+    /// phases', by name, as local_cell's timings say them, its threads' waits to run among them,
     /// `runnable` (TASK-336).
     #[derive(Debug, PartialEq)]
     struct SlowFraming {
@@ -837,15 +837,15 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             assert_eq!(commands("OK sandbox git\n"), None);
         }
 
-        /// The framings a daemon's log warns of, each's milliseconds, as extent_store's timings
+        /// The framings a daemon's log warns of, each's milliseconds, as local_cell's timings
         /// say them.
         #[test]
         fn a_daemons_slow_framings_read_back() {
             let log = "\
-WARN extent_store::timings: extent store: framing SegmentId { branch: 3670381491063303249, number: 28 } took 497.0 ms (own 0.0, write 26.6, sync 28.6, dirs 441.8 ms)
-WARN extent_store::timings: extent store: branch 0x32efd08504ff2c51's flush of 10 commits took 407.4 ms (wait 0.0)
-WARN extent_store::timings: extent store: framing SegmentId { branch: 1, number: 2 } took 1291.8 ms (own 0.0, write 110.1, sync 1175.0, dirs 6.7 ms)
-WARN extent_store::timings: extent store: framing SegmentId { branch: 1, number: 3 } took 1045.0 ms (own 0.0, read 5.0, compress 900.0, write 140.0 ms; runnable 800.5 ms)
+WARN local_cell::timings: extent store: framing SegmentId { branch: 3670381491063303249, number: 28 } took 497.0 ms (own 0.0, write 26.6, sync 28.6, dirs 441.8 ms)
+WARN local_cell::timings: extent store: branch 0x32efd08504ff2c51's flush of 10 commits took 407.4 ms (wait 0.0)
+WARN local_cell::timings: extent store: framing SegmentId { branch: 1, number: 2 } took 1291.8 ms (own 0.0, write 110.1, sync 1175.0, dirs 6.7 ms)
+WARN local_cell::timings: extent store: framing SegmentId { branch: 1, number: 3 } took 1045.0 ms (own 0.0, read 5.0, compress 900.0, write 140.0 ms; runnable 800.5 ms)
 ";
             let slow = slow_framings(log);
             let ms: Vec<f64> = slow.iter().map(|framing| framing.ms).collect();

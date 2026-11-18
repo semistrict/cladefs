@@ -1467,7 +1467,7 @@ fn push_dirent(reply: &mut Vec<u8>, entry: &DirEntry, next_offset: u64, dirent_l
 mod fuzz_tests;
 
 #[cfg(test)]
-mod stores_tests;
+mod cells_tests;
 
 #[cfg(test)]
 mod tests {

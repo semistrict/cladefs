@@ -23,8 +23,8 @@ Read the release's notes for which of these changed. Each one changed means what
 |---|---|---|
 | VM process and daemon wire (`wire::VERSION`) | A VMM and a daemon of different versions meet: the daemon refuses its `OPEN` | The VMM fails to make its extent device: "the extent daemon refused this VM process's wire version N". The daemon's log says "refusing a VM process of wire version N: this daemon's is M". |
 | Device protocol (`VIRTIO_EXTENT_VERSION`) | A guest's driver meets a device of another version, or a snapshot of another version is restored | The guest's kernel log says "the device is of protocol version N, this driver of M: refused", and its extent filesystem doesn't mount. The VMM refuses the snapshot's load: "The snapshot's extent device is of protocol version N, this VMM's M". |
-| Store files (`extent_store` `FORMAT`) | The new daemon opens a store of the old format | `ENOTSUP`. The store is made again, from its branch in the bucket if that format didn't change too. |
-| Branches in the bucket (`extent_bucket` `layout::FORMAT`) | A daemon reads a branch of another format | The branch is refused, and the collector's pass stops, deleting nothing. |
+| Store files (`local_cell` `FORMAT`) | The new daemon opens a store of the old format | `ENOTSUP`. The store is made again, from its branch in the bucket if that format didn't change too. |
+| Branches in the bucket (`bucket_cell` `layout::FORMAT`) | A daemon reads a branch of another format | The branch is refused, and the collector's pass stops, deleting nothing. |
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
 

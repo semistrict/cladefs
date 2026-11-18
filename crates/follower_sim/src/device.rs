@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Fxfs devices on an extent store (crates/extent_store, backlog doc-4): the writer's, on the
-//! store's branch, and a follower's, on a view of it ([`extent_store::View`]), read-only, as of the
+//! Fxfs devices on an extent store (crates/local_cell, backlog doc-4): the writer's, on the
+//! store's branch, and a follower's, on a view of it ([`local_cell::View`]), read-only, as of the
 //! view's commit. Extents' I/O, commits and frees go to the store directly, as its locks are
 //! Shuttle's in the simulation (cladefs's own image device moves them off Fxfs's threads instead).
 
 use anyhow::{Error, bail};
 use async_trait::async_trait;
-use extent_store::{Description, Dir, Store, View};
 use fuchsia_sync::Mutex;
+use local_cell::{Description, Dir, LocalCell, View};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
@@ -35,21 +35,21 @@ impl Drop for LetGo {
 }
 
 /// The writer's device: the store's branch. A flush commits the store, durably.
-pub struct StoreDevice<D: Dir> {
-    store: Arc<Store<D>>,
+pub struct CellDevice<D: Dir> {
+    store: Arc<LocalCell<D>>,
     description: Description,
     allocator: BufferAllocator,
 }
 
-impl<D: Dir> StoreDevice<D> {
-    pub fn new(store: Arc<Store<D>>) -> Self {
+impl<D: Dir> CellDevice<D> {
+    pub fn new(store: Arc<LocalCell<D>>) -> Self {
         let description = store.description();
         Self { allocator: allocator(&description), store, description }
     }
 }
 
 #[async_trait]
-impl<D: Dir + 'static> Device for StoreDevice<D> {
+impl<D: Dir + 'static> Device for CellDevice<D> {
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
         self.allocator.allocate_buffer(size)
     }
@@ -131,7 +131,7 @@ impl<D: Dir + 'static> Device for StoreDevice<D> {
 /// as of held until the follower lets go of them: what applying them, and its readers, read.
 /// Pins are the view's.
 pub struct ViewDevice<D: Dir> {
-    store: Arc<Store<D>>,
+    store: Arc<LocalCell<D>>,
     view: Arc<Mutex<View>>,
     description: Description,
     allocator: BufferAllocator,
@@ -142,7 +142,7 @@ pub struct ViewDevice<D: Dir> {
 }
 
 impl<D: Dir> ViewDevice<D> {
-    pub fn new(store: Arc<Store<D>>, view: View) -> Self {
+    pub fn new(store: Arc<LocalCell<D>>, view: View) -> Self {
         let description = store.description();
         let allocator = allocator(&description);
         Self {
@@ -157,7 +157,7 @@ impl<D: Dir> ViewDevice<D> {
 
     /// A follower's device with a bug, the simulation's to catch: it reads extents of commits
     /// after its view's, as of now.
-    pub fn reading_past_its_view(store: Arc<Store<D>>, view: View) -> Self {
+    pub fn reading_past_its_view(store: Arc<LocalCell<D>>, view: View) -> Self {
         Self { past_its_view: true, ..Self::new(store, view) }
     }
 

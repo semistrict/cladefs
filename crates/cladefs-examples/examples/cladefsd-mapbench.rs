@@ -40,7 +40,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod bench {
-    use cladefs::{Commit, DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
+    use cladefs::{CellClient, Commit, ExtentId, VolatileSlice, VolatileSliceMut};
     use cladefs::{WriteBarriers, cladefsd};
     use std::os::unix::net::UnixListener;
     use std::ptr::NonNull;
@@ -146,14 +146,13 @@ mod bench {
         let socket = dir.path().join("cladefsd.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || cladefsd::serve(listener));
-        let store =
-            DaemonExtentStore::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
+        let store = CellClient::connect(&socket, dir.path().join("store"), 64 << 30).unwrap();
         // The other VM processes' connections, idle.
         cladefsd::raise_open_files_limit().unwrap();
         let _others: Vec<_> = (0..connections)
             .map(|n| {
                 let path = dir.path().join(format!("other-{n}"));
-                DaemonExtentStore::connect(&socket, path, 1 << 30).unwrap()
+                CellClient::connect(&socket, path, 1 << 30).unwrap()
             })
             .collect();
 
@@ -245,13 +244,7 @@ mod bench {
     /// memory runs low evicts them (`ShrinkMemory`): the loads of each extent's pages after that,
     /// timed, take FAULTs, which the daemon resolves, paging the extent in from the store
     /// (TASK-92.20).
-    fn faults(
-        store: &DaemonExtentStore,
-        memory: NonNull<u8>,
-        count: u64,
-        pages: u64,
-        sequence: u64,
-    ) {
+    fn faults(store: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
         let page_size = 4096u64;
         let len = pages * page_size;
         let slots = WINDOW / len;
@@ -286,13 +279,7 @@ mod bench {
     /// of extents from `sequence` on: `pages` pages of a sealed extent mapped, each stored to,
     /// which copies it into a private page, and a journal block written with an ordered commit;
     /// then the range unmapped, its private pages with it, as writeback and rebinding end them.
-    fn fsyncs(
-        store: &DaemonExtentStore,
-        memory: NonNull<u8>,
-        count: u64,
-        pages: u64,
-        sequence: u64,
-    ) {
+    fn fsyncs(store: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
         let page_size = 4096u64;
         let len = pages * page_size;
         let file = ExtentId { branch: store.branch(), sequence };

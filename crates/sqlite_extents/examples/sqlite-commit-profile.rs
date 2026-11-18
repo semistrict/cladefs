@@ -4,7 +4,7 @@
 
 //! Where a SQLite transaction of one row's time goes on a file set (TASK-301): the device's
 //! requests and the window's, each timed as the file set makes them; the store's flushes, phase by
-//! phase (`extent_store::timings`); and, for scale, what an fsync of a block appended to a file
+//! phase (`local_cell::timings`); and, for scale, what an fsync of a block appended to a file
 //! takes on the same disk, and a commit of SQLite's own WAL with `synchronous=FULL`.
 //!
 //! Configurations: `image`, the file set on an in-process image (`cladefs::Storage`); on Linux,
@@ -150,7 +150,7 @@ fn commits(connection: &Connection, commits: usize) -> Vec<Duration> {
     }
     transaction.commit().unwrap();
     reset();
-    let flushes = extent_store::timings().flushes;
+    let flushes = local_cell::timings().flushes;
     let times = (0..commits)
         .map(|index| {
             let start = Instant::now();
@@ -182,10 +182,10 @@ fn report_requests(commits: usize) {
 }
 
 /// The store's flushes since `before`, phase by phase, a commit's share.
-fn report_flushes(before: extent_store::Timed<6>, commits: usize) {
-    let after = extent_store::timings().flushes;
+fn report_flushes(before: local_cell::Timed<6>, commits: usize) {
+    let after = local_cell::timings().flushes;
     let count = after.count - before.count;
-    let phases: Vec<String> = (extent_store::FLUSH_PHASES.iter().enumerate())
+    let phases: Vec<String> = (local_cell::FLUSH_PHASES.iter().enumerate())
         .map(|(phase, name)| {
             let us = after.sum.us[phase] - before.sum.us[phase];
             format!("{name} {:.1}", us as f64 / commits as f64)
@@ -296,8 +296,7 @@ fn main() {
         let socket = root.join("cladefsd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || cladefs::cladefsd::serve(listener));
-        let store =
-            cladefs::DaemonExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
+        let store = cladefs::CellClient::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);
         let window = sqlite_extents::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
         let device = DeviceHolder::new(Timing(DeviceHolder::new(

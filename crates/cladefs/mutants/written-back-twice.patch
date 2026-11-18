@@ -6,8 +6,8 @@
 # TASK-433.5, the host's and the memory directory's alike, TASK-467).
 # Kind: writes
 # Killer: bucket::write_budgets::a_hosts_store_writes_what_its_design_says
---- a/crates/extent_store/src/cached.rs
-+++ b/crates/extent_store/src/cached.rs
+--- a/crates/local_cell/src/cached.rs
++++ b/crates/local_cell/src/cached.rs
 @@ -264,7 +264,10 @@ impl<F: File> File for CachedFile<F> {
          match self {
              Self::Raw(file) => file.write_back(offset, len),

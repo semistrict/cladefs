@@ -77,7 +77,7 @@ pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
     // log, as the stats file, gone with a repeat's directory that passed.
     let log = test_setup.tmp_dir.join(format!("{name}.log"));
     let warned = fs::read_to_string(&log).unwrap_or_default();
-    let warned = warned.lines().filter(|line| line.contains("WARN extent_store"));
+    let warned = warned.lines().filter(|line| line.contains("WARN local_cell"));
     for line in warned.take(200) {
         eprintln!("{name} log: {line}");
     }
@@ -443,9 +443,9 @@ pub fn control(socket: &Path) -> Result<cladefs::cladefsd::control::Client, clad
 /// until its last user, an upload too, lets it go. Copied while the daemon held it, an upload's
 /// marker's `.new` file was renamed away between listing it and copying it (TASK-129).
 pub fn copy_store(from: &Path, to: &Path) -> anyhow::Result<()> {
-    use extent_store::Dir;
-    let dir = extent_store::HostDir::new(from)
-        .with_context(|| format!("opening {}", from.display()))?;
+    use local_cell::Dir;
+    let dir =
+        local_cell::HostDir::new(from).with_context(|| format!("opening {}", from.display()))?;
     dir.take().with_context(|| format!("taking {}", from.display()))?;
     let copied = copy_dir(from, to);
     dir.let_go();
@@ -487,8 +487,7 @@ mod tests {
     fn a_processs_costs_read_from_its_proc_files() {
         let io = "rchar: 10\nwchar: 20\nsyscr: 1\nsyscw: 2\nread_bytes: 4096\nwrite_bytes: 8192\n\
                   cancelled_write_bytes: 0\n";
-        let status =
-            "Name:\tcladefsd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
+        let status = "Name:\tcladefsd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
         let stat = "42 (cladefsd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
         let costs = ProcessCosts::parse(io, status, stat, 100.0).unwrap();
         assert_eq!(costs, ProcessCosts { disk_written: 8192, peak_rss: 512 << 10, cpu_secs: 3.0 });

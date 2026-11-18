@@ -9,16 +9,16 @@
 //! guest's bytes twice, framing in a copy what it frames in place (TASK-310's sandbox host: 2.3
 //! times what its guests wrote), or writing back what it wrote back already, writes past them.
 //!
-//! The store is a host's, as the extent daemon opens it (`crate::host_store`: its segments of
+//! The store is a host's, as the extent daemon opens it (`crate::host_cell`: its segments of
 //! 32 MiB, its extents of 64 MiB at most, large from 4 MiB), on the host's disk, its bucket in
 //! memory, uploading nothing until the test is done: what the process wrote to its disk, as its
 //! kernel counts it (`/proc/self/io`, Linux's), is the store's alone.
 
 use super::tests::{idle, kept_in};
 use crate::test_data::noise;
-use crate::{ExtentId, ExtentStore, VolatileSlice};
-use extent_bucket::object_bucket::ObjectBucket;
-use extent_store::Written;
+use crate::{ExtentId, OpenCell, VolatileSlice};
+use bucket_cell::object_bucket::ObjectBucket;
+use local_cell::Written;
 use std::sync::Arc;
 
 /// The bytes of each write a guest's VM process sends: Fxfs's writeback's, of 256 KiB.
@@ -41,7 +41,7 @@ fn delta(before: Written, after: Written) -> Written {
 }
 
 /// Writes `data` to `extent` of `store` as a guest's VM process does, [`WRITE`] bytes a request.
-fn write(store: &ExtentStore, extent: ExtentId, data: &[u8]) {
+fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
     for (at, piece) in data.chunks(WRITE).enumerate() {
         store.write(extent, (at * WRITE) as u64, &[VolatileSlice::from(piece)]).unwrap();
     }
@@ -95,7 +95,7 @@ fn a_hosts_store_writes_what_its_design_says() {
     let bucket =
         Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "branches"));
     let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).unwrap();
-    let options = crate::host_store::options();
+    let options = crate::host_cell::options();
     let branch = store.branch();
     let mut sequence = 0;
     let mut next = || {
@@ -103,7 +103,7 @@ fn a_hosts_store_writes_what_its_design_says() {
         ExtentId { branch: branch.id, sequence }
     };
     #[cfg(target_os = "linux")]
-    let (start, io_before) = (extent_store::written(), io_written());
+    let (start, io_before) = (local_cell::written(), io_written());
 
     // The large file: 768 MiB that don't compress, in two bursts between commits, its fsyncs, each
     // past what the open segment takes (`Options::segment_limit`, 96 MiB), as LangSmith's sandboxes
@@ -114,7 +114,7 @@ fn a_hosts_store_writes_what_its_design_says() {
     // Its extents' data made first, so that what the process spends meanwhile is the store's: as
     // many as a part, which is compressed alone, needs to find none like it.
     let data: Vec<Vec<u8>> = (0..16).map(|seed| noise(seed, LARGE_FILES_EXTENT)).collect();
-    let (before, cpu_before) = (extent_store::written(), cpu());
+    let (before, cpu_before) = (local_cell::written(), cpu());
     for _ in 0..BURSTS {
         for at in 0..extents_per_burst {
             write(&store, next(), &data[at % data.len()]);
@@ -123,12 +123,12 @@ fn a_hosts_store_writes_what_its_design_says() {
     }
     // The last commit's copies framed too, as the open segment closes for its upload.
     store.frame_open_segment().unwrap();
-    let (large, large_cpu) = (delta(before, extent_store::written()), cpu() - cpu_before);
+    let (large, large_cpu) = (delta(before, local_cell::written()), cpu() - cpu_before);
 
     // The small files: 2,000 of 8 KiB, which compress, four commits of 500.
     const SMALL_FILES: usize = 2000;
     const SMALL_FILE: usize = 8 << 10;
-    let before = extent_store::written();
+    let before = local_cell::written();
     for commit in 0..4 {
         for file in 0..SMALL_FILES / 4 {
             let seed = (commit * SMALL_FILES + file) as u8;
@@ -139,7 +139,7 @@ fn a_hosts_store_writes_what_its_design_says() {
     }
     // Their segment framed, as it closes for its upload.
     store.frame_open_segment().unwrap();
-    let small = delta(before, extent_store::written());
+    let small = delta(before, local_cell::written());
 
     let guests = (BURSTS as usize * BURST) as u64;
     eprintln!("large file, {} MiB: {large:?}, {large_cpu:?} of CPU", guests >> 20);
@@ -172,7 +172,7 @@ fn a_hosts_store_writes_what_its_design_says() {
     // a page more at most, the last it dirtied in part.
     #[cfg(target_os = "linux")]
     {
-        let (all, io) = (delta(start, extent_store::written()), io_written() - io_before);
+        let (all, io) = (delta(start, local_cell::written()), io_written() - io_before);
         let counted = [all.raw, all.copied, all.framed, all.own, all.log].iter().sum::<u64>();
         let bound = counted + all.writes * crate::pages::page_size();
         assert!(

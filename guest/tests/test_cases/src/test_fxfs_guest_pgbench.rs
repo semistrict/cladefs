@@ -275,7 +275,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         vm.guest_kernel()?;
         match device {
             Device::Store { store, cladefsd, window } => {
-                vm.extent_store_served("extents", store, CAPACITY, window, cladefsd);
+                vm.cell_served("extents", store, CAPACITY, window, cladefsd);
             }
             Device::Pmem(image) => {
                 let device = vm.pmem("pgbench", image)?;

@@ -14,7 +14,7 @@
 mod common;
 
 use cladefs::cladefsd::{Tenant, serve, serve_tenant};
-use cladefs::{DaemonExtentStore, Errno, ExtentId, ExtentStore};
+use cladefs::{CellClient, Errno, ExtentId, OpenCell};
 use common::{cache, copies, holds, memory, pattern};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
@@ -46,8 +46,8 @@ fn tenants_hold_their_own_pages() {
     let dir = tempfile::tempdir().unwrap();
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
     let two = listen(dir.path(), "two", Some(tenant(dir.path(), "two", 2)));
-    let ours = DaemonExtentStore::connect(&one, dir.path().join("one/ours"), 1 << 24).unwrap();
-    let theirs = DaemonExtentStore::connect(&two, dir.path().join("two/theirs"), 1 << 24).unwrap();
+    let ours = CellClient::connect(&one, dir.path().join("one/ours"), 1 << 24).unwrap();
+    let theirs = CellClient::connect(&two, dir.path().join("two/theirs"), 1 << 24).unwrap();
     let (our_bytes, their_bytes) = (pattern(1), pattern(2));
     cache(&ours, &our_bytes);
     cache(&theirs, &their_bytes);
@@ -69,7 +69,7 @@ fn public_bases_are_shared_read_only() {
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
     let two = listen(dir.path(), "two", Some(tenant(dir.path(), "two", 2)));
     let base_path = dir.path().join("base");
-    let base = ExtentStore::create(&base_path, 1 << 24).unwrap();
+    let base = OpenCell::create(&base_path, 1 << 24).unwrap();
     let base_bytes = pattern(3);
     let extent = ExtentId { branch: base.branch().id, sequence: 1 };
     base.write(extent, 0, &[cladefs::VolatileSlice::from(&base_bytes[..])]).unwrap();
@@ -78,7 +78,7 @@ fn public_bases_are_shared_read_only() {
     drop(base);
     let forks = [dir.path().join("one/fork"), dir.path().join("two/fork")];
     // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the branch with.
-    let base = ExtentStore::open(&base_path).unwrap();
+    let base = OpenCell::open(&base_path).unwrap();
     for (fork, tenant) in forks.iter().zip(1..) {
         // Each a cell of its tenant's (TASK-364).
         base.fork(fork, tenant).unwrap();
@@ -86,17 +86,17 @@ fn public_bases_are_shared_read_only() {
     drop(base);
 
     // Not in its directory, nor a tenant's to open were it there.
-    let refused = DaemonExtentStore::connect(&one, &base_path, 1 << 24);
+    let refused = CellClient::connect(&one, &base_path, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EACCES));
     let base_in_one = dir.path().join("one/base");
     // Of a cell of its own (TASK-364), refused as public.
-    ExtentStore::create_in(&base_in_one, 1 << 24, 1).unwrap().make_public().unwrap();
-    let refused = DaemonExtentStore::connect(&one, &base_in_one, 1 << 24);
+    OpenCell::create_in(&base_in_one, 1 << 24, 1).unwrap().make_public().unwrap();
+    let refused = CellClient::connect(&one, &base_in_one, 1 << 24);
     assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::EPERM));
 
     let mut stores = Vec::new();
     for (socket, fork) in [(&one, &forks[0]), (&two, &forks[1])] {
-        let store = DaemonExtentStore::connect(socket, fork, 1 << 24).unwrap();
+        let store = CellClient::connect(socket, fork, 1 << 24).unwrap();
         let pages = base_bytes.len() / cladefs::pages::page_size() as usize;
         let window = memory(pages);
         // SAFETY: The memory is this test's, which it leaks: the window maps it while the process
@@ -139,8 +139,8 @@ fn the_default_tenants_pages_are_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let default = listen(dir.path(), "default", None);
     let one = listen(dir.path(), "one", Some(tenant(dir.path(), "one", 1)));
-    let ours = DaemonExtentStore::connect(&default, dir.path().join("ours"), 1 << 24).unwrap();
-    let theirs = DaemonExtentStore::connect(&one, dir.path().join("one/theirs"), 1 << 24).unwrap();
+    let ours = CellClient::connect(&default, dir.path().join("ours"), 1 << 24).unwrap();
+    let theirs = CellClient::connect(&one, dir.path().join("one/theirs"), 1 << 24).unwrap();
     let our_bytes = pattern(4);
     cache(&ours, &our_bytes);
 

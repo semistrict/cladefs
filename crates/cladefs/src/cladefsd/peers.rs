@@ -55,8 +55,8 @@ pub fn start(
     }
     let url = crate::bucket::Host::from_env()?.bucket;
     let failed = |what: &str| format!("serving peers: {what}");
-    let bucket = super::stores::daemon_bucket().map_err(|err| failed(&format!("{err:?}")))?;
-    let cache = super::stores::part_cache().map_err(|err| failed(&format!("{err:?}")))?;
+    let bucket = super::cells::daemon_bucket().map_err(|err| failed(&format!("{err:?}")))?;
+    let cache = super::cells::part_cache().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = cache.ok_or_else(|| {
         "CLADEFSD_PEER_ADDRESS is set, but CLADEFSD_PART_CACHE names no directory for the \
          part cache, which keeps what the daemon serves its peers"
@@ -161,7 +161,7 @@ impl proto::peer_server::Peer for Server {
             let theirs = format!("asked of {bucket}, this host's bucket being {}", self.bucket);
             return Err(Status::failed_precondition(theirs));
         }
-        if !extent_bucket::peer::served(&key) {
+        if !bucket_cell::peer::served(&key) {
             return Err(Status::invalid_argument(format!("{key}: no parts served")));
         }
         let asked = Asked { key, part };

@@ -29,5 +29,5 @@ export AWS_ACCESS_KEY_ID=cladefs-local-kms AWS_SECRET_ACCESS_KEY=cladefs-local-k
 # Nothing else of the chain is asked: no profile's, nor the instance's.
 unset AWS_SESSION_TOKEN AWS_PROFILE
 export AWS_EC2_METADATA_DISABLED=true
-cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_keys -p extent_store \
+cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_keys -p local_cell \
     --run-ignored only -E 'test(/local_kms/)' "$@"

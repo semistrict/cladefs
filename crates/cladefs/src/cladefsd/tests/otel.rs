@@ -136,6 +136,6 @@ fn nothing_is_exported_while_tracing_is_off() {
     opentelemetry::global::set_tracer_provider(provider.clone());
     write_read_commit();
     provider.force_flush().unwrap();
-    assert!(!extent_bucket::trace::enabled());
+    assert!(!bucket_cell::trace::enabled());
     assert_eq!(names(exporter.get_finished_spans().unwrap().iter()), Vec::<String>::new());
 }

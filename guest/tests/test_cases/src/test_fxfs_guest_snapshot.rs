@@ -317,8 +317,8 @@ mod host {
                     // test's directory, a repeat's of a soak, may not be.
                     let socket = std::env::temp_dir()
                         .join(format!("cladefs-{}-cladefsd.sock", std::process::id()));
-                    let named = std::env::var_os("CLADEFSD_BUCKET")
-                        .is_some_and(|url| !url.is_empty());
+                    let named =
+                        std::env::var_os("CLADEFSD_BUCKET").is_some_and(|url| !url.is_empty());
                     let bucket = std::ffi::OsStr::new("memory:///migrate");
                     // Beside it, for its tenant's socket, in the jail if there is one.
                     let tenants = std::env::temp_dir()
@@ -353,13 +353,7 @@ mod host {
                 } else {
                     0
                 };
-                vm.extent_store_served(
-                    "extents",
-                    &store(dir, "source"),
-                    CAPACITY,
-                    window,
-                    &cladefsd,
-                );
+                vm.cell_served("extents", &store(dir, "source"), CAPACITY, window, &cladefsd);
                 vm.read_only_root();
                 let source_uds = uds("source");
                 vm.vsock(&source_uds);
@@ -500,7 +494,9 @@ mod host {
                             let control = crate::common::control(&cladefsd)?;
                             let mut most = (0, 0);
                             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                                let gauges = control.stats(Some(std::time::Duration::from_millis(1)))?.gauges;
+                                let gauges = control
+                                    .stats(Some(std::time::Duration::from_millis(1)))?
+                                    .gauges;
                                 let gauge = |name: &str| gauges.get(name).copied().unwrap_or(0);
                                 most.0 = most.0.max(gauge("window_pages"));
                                 most.1 = most.1.max(gauge("window_private_pages"));
@@ -515,7 +511,9 @@ mod host {
                     let (status, console) = firecracker.wait()?;
                     stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     let (pages, private) = sampling.join().expect("the sampling")?;
-                    eprintln!("{name}: its windows mapped {pages} pages at most, {private} private");
+                    eprintln!(
+                        "{name}: its windows mapped {pages} pages at most, {private} private"
+                    );
                     // The first restore's window shares more than half of what it maps: its
                     // private pages are its guest's stores, a third or so of its pages, the
                     // case's files read into its page cache among them. Its loads, of pages its

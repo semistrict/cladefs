@@ -18,7 +18,7 @@ test_master_key
 rustfs_start
 trap rustfs_stop EXIT
 CLADEFS_S3_URL=s3://cladefs/test cargo nextest run --manifest-path "$root/Cargo.toml" \
-    -p extent_bucket -p cladefs --run-ignored only -E 'test(/rustfs/)' "$@"
+    -p bucket_cell -p cladefs --run-ignored only -E 'test(/rustfs/)' "$@"
 # The collector, over what the tests left.
-cargo run --quiet --manifest-path "$root/Cargo.toml" -p extent_bucket --bin cladefs-gc -- \
+cargo run --quiet --manifest-path "$root/Cargo.toml" -p bucket_cell --bin cladefs-gc -- \
     s3://cladefs/test --grace 0

@@ -66,8 +66,8 @@ pub async fn store(
     image: &Path,
     reference: Option<&str>,
 ) -> Result<(), Error> {
-    let keeping = crate::host_store::keeping().map_err(Error::new)?;
-    let made = (capacity, crate::host_store::DEFAULT_TENANT);
+    let keeping = crate::host_cell::keeping().map_err(Error::new)?;
+    let made = (capacity, crate::host_cell::DEFAULT_TENANT);
     make_store(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
 }
 
@@ -79,7 +79,7 @@ pub(crate) async fn store_keeping(
     path: impl AsRef<Path>,
     (capacity, tenant): (u64, u64),
     (image, reference): (&Path, Option<&str>),
-    keeping: extent_store::upload::Options,
+    keeping: local_cell::upload::Options,
 ) -> Result<(), Error> {
     let filled = |storage| fill(storage, image, reference);
     make_store(path.as_ref(), (capacity, tenant), keeping, filled).await
@@ -92,7 +92,7 @@ pub(crate) async fn store_keeping(
 async fn make_store<F: Future<Output = anyhow::Result<()>>>(
     path: &Path,
     (capacity, tenant): (u64, u64),
-    keeping: extent_store::upload::Options,
+    keeping: local_cell::upload::Options,
     fill: impl FnOnce(Storage) -> F,
 ) -> Result<(), Error> {
     // cladefs: what an import its process died in left, unmade, is no store: made anew (TASK-196).
@@ -901,8 +901,8 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// How a store an import here makes keeps its branch: where no host's daemon serves it.
-    fn keeping() -> extent_store::upload::Options {
-        crate::host_store::keeping().unwrap()
+    fn keeping() -> local_cell::upload::Options {
+        crate::host_cell::keeping().unwrap()
     }
 
     /// A store whose filling panics is deleted as the panic unwinds, as one whose filling fails
@@ -914,7 +914,7 @@ mod tests {
         let made = catch_unwind(AssertUnwindSafe(|| {
             block_on(make_store(
                 &path,
-                (64 << 20, crate::host_store::DEFAULT_TENANT),
+                (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
                 |storage| async {
                     let _fs = Filesystem::format(storage).await?;
@@ -938,7 +938,7 @@ mod tests {
             let (formatted, filling) = oneshot::channel();
             let made = Box::pin(make_store(
                 &path,
-                (64 << 20, crate::host_store::DEFAULT_TENANT),
+                (64 << 20, crate::host_cell::DEFAULT_TENANT),
                 keeping(),
                 |storage| async {
                     let _fs = Filesystem::format(storage).await?;
@@ -969,7 +969,7 @@ mod tests {
         let half = layer(&[Entry::new("half", Kind::File(b"half an image"))]).unwrap();
         let made = block_on(make_store(
             Path::new(&path),
-            (64 << 20, crate::host_store::DEFAULT_TENANT),
+            (64 << 20, crate::host_cell::DEFAULT_TENANT),
             keeping(),
             |storage| async move {
                 let fs = Filesystem::format(storage).await?;

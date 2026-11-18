@@ -38,10 +38,10 @@ mod shuttle_tests;
 pub(crate) mod uffd;
 
 use crate::error::{Errno, Result};
-use crate::extents::{MappingContents, WindowMapping};
+use crate::open_cell::{MappingContents, WindowMapping};
 use crate::pages::{PhysLocation, page_size};
-use extent_store::shared::SharedLock;
 use futures::future::BoxFuture;
+use local_cell::shared::SharedLock;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
@@ -609,7 +609,7 @@ pub(crate) struct Window {
     size: u64,
     translation: Translation,
     /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what halts
-    /// its store: a panic holding it aborts the daemon (`extent_store::shared`, TASK-149.24).
+    /// its store: a panic holding it aborts the daemon (`local_cell::shared`, TASK-149.24).
     state: SharedLock<Mutex<WindowState>>,
     /// cladefs: how it copies on write, if it does (backlog doc-13): a store to a window that
     /// doesn't, a follower's, is refused.
@@ -1083,7 +1083,7 @@ impl Window {
     }
 
     /// The window's mappings, in order, as a snapshot of its VM records them, to map them again
-    /// where it is restored ([`crate::ExtentStore::window_mappings`]).
+    /// where it is restored ([`crate::OpenCell::window_mappings`]).
     fn mappings(&self) -> Vec<WindowMapping> {
         let state = self.state.with(Mutex::lock);
         (state.mappings.iter())

@@ -10,7 +10,7 @@
 //! synced to the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
 //! waiting for the bucket (the user, 2026-11-09, TASK-301); closing it waits for that.
 
-use super::DaemonExtentStore;
+use super::CellClient;
 use crate::{Commit, VolatileSlice, VolatileSliceMut, WriteBarriers};
 use anyhow::{Context as _, Error, ensure};
 use async_trait::async_trait;
@@ -24,15 +24,15 @@ const TRANSFER_HEAP_SIZE: usize = 32 << 20;
 
 /// A store the daemon serves, as a device. See the module docs.
 pub struct DaemonDevice {
-    store: Arc<DaemonExtentStore>,
+    store: Arc<CellClient>,
     allocator: BufferAllocator,
     block_count: u64,
 }
 
 impl DaemonDevice {
     /// `store` as a device.
-    pub fn new(store: Arc<DaemonExtentStore>) -> Result<Self, Error> {
-        let block_size = crate::host_store::BLOCK_SIZE;
+    pub fn new(store: Arc<CellClient>) -> Result<Self, Error> {
+        let block_size = crate::host_cell::BLOCK_SIZE;
         let capacity = store.info().map_err(Error::new).context("the store's capacity")?.capacity;
         let allocator =
             BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
@@ -40,7 +40,7 @@ impl DaemonDevice {
     }
 
     /// The store.
-    pub fn store(&self) -> &Arc<DaemonExtentStore> {
+    pub fn store(&self) -> &Arc<CellClient> {
         &self.store
     }
 }
@@ -52,7 +52,7 @@ impl Device for DaemonDevice {
     }
 
     fn block_size(&self) -> u32 {
-        crate::host_store::BLOCK_SIZE
+        crate::host_cell::BLOCK_SIZE
     }
 
     fn block_count(&self) -> u64 {

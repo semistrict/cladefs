@@ -88,9 +88,9 @@ Firecracker              vendor/firecracker: the device, a client of the daemon
   │  Unix socket; the daemon's memory mapped into the guest's DAX window
 cladefsd                 crates/cladefs: the extent daemon, its extent cache
   │
-local disk               crates/extent_store: each store's write-ahead log; the part cache
+local disk               crates/local_cell: each store's write-ahead log; the part cache
   │
-bucket                   crates/extent_bucket: every cell's durable copy
+bucket                   crates/bucket_cell: every cell's durable copy
 ```
 
 - **A read.** The guest asks the device to `MAP` part of a sealed extent into its DAX window, a
@@ -169,7 +169,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 | Path | What |
 |---|---|
 | `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, `cladefs-mount`, and the host's library. |
-| `crates/extent_store`, `crates/extent_bucket` | An extent store on local disk, and cells in the bucket. |
+| `crates/local_cell`, `crates/bucket_cell` | An extent store on local disk, and cells in the bucket. |
 | `crates/physmem` | The daemon's physical memory: arenas of shared memory. |
 | `crates/virtio_extent` | The extent store device, for a VMM to host. |
 | `crates/fxfs`, `crates/fxfs-posix` | Fxfs, copied from Fuchsia, and the POSIX layer the guest and the host both call. |

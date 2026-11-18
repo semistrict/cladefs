@@ -15,8 +15,8 @@
 //! dropped, but a future leaked (`mem::forget`) waited for nothing, which safe code may do of a
 //! device's read, and the host went on writing memory its caller had back (TASK-24).
 
-use extent_store::Aligned;
 use futures::task::AtomicWaker;
+use local_cell::Aligned;
 use std::future::Future;
 use std::io;
 use std::os::fd::AsRawFd;

@@ -4,10 +4,10 @@
 (* Use of this source code is governed by a BSD-style license that can be  *)
 (* found in the LICENSE file.                                              *)
 (*                                                                         *)
-(* Branches in object storage (backlog doc-7, crates/extent_bucket) with   *)
+(* Branches in object storage (backlog doc-7, crates/bucket_cell) with   *)
 (* the host's write-ahead log of doc-14 (TASK-165.2): at the level of the  *)
 (* protocol, what each step reads and writes in the bucket, and in what    *)
-(* order. The simulation (extent_bucket's sim) samples interleavings, and  *)
+(* order. The simulation (bucket_cell's sim) samples interleavings, and  *)
 (* found TASK-79.18 and 79.3 only after the fact; TLC exhausts small ones. *)
 (*                                                                         *)
 (* Keys are written once (TASK-407): every object a writer writes is at a  *)
@@ -160,7 +160,7 @@
 (*   bucket has it whole, and a head names no commit begun.                *)
 (* - wholeCommitsKept (NoWholeCommitsKept): a host's local recovery keeps  *)
 (*   a commit spanning segments only if consecutive segments end it, and   *)
-(*   closes the first again without it otherwise (extent_store's           *)
+(*   closes the first again without it otherwise (local_cell's           *)
 (*   wal::recover): a store whose log ends inside a commit refuses to      *)
 (*   open.                                                                 *)
 (* - references (NoReferences): a fork of a branch to a child in another   *)
@@ -2132,7 +2132,7 @@ DeletedUntaken ==
 \* A segment a head names keeps its epoch while the head stands (TASK-449): an acknowledgement names
 \* more, a takeover goes on from the head's end, a deletion keeps what it names, and nothing
 \* renames one; only a removal deletes a head, with its cell (recordsKept). So a host keeps the
-\* epoch of an origin's segment once it read it (extent_bucket::known), and reads the
+\* epoch of an origin's segment once it read it (bucket_cell::known), and reads the
 \* checkpoint there by its key, with no read of its origin's head, whenever after.
 NamedEpochsStay ==
     [][\A b \in Branches :

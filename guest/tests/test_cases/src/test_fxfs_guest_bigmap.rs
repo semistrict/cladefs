@@ -69,7 +69,7 @@ mod host {
     ) -> anyhow::Result<Vm> {
         let mut vm = Vm::new(2, memory()?)?;
         vm.guest_kernel()?;
-        vm.extent_store_served("extents", store, capacity, window, cladefsd);
+        vm.cell_served("extents", store, capacity, window, cladefsd);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_ROLE={role}"))?);
         vm.env(&CString::new(format!("CLADEFS_BIGMAP_BYTES={}", file_bytes()?))?);
         for var in ["CLADEFS_BIGMAP_READ_SECS", "CLADEFS_BIGMAP_WRITE_PERCENT"] {
@@ -114,7 +114,8 @@ mod host {
             let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
             // The file whole in its memory, as a host keeps a base's pages for its forks, and room.
             let memory = Some(bytes + (2 << 30));
-            let daemon = crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, memory)?;
+            let daemon =
+                crate::common::spawn_daemon(test_setup, &socket, "cladefsd", &env, memory)?;
             // The file, what the fork writes again of it, and room.
             let capacity = 2 * bytes + (4 << 30);
             let base = dir.join("base");

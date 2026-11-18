@@ -48,7 +48,7 @@ const BUILDX: &str = "/usr/libexec/docker/cli-plugins/docker-buildx";
 #[host]
 pub(crate) mod host {
     use super::*;
-    use crate::common::{control, cladefs_guest_should_run};
+    use crate::common::{cladefs_guest_should_run, control};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -174,7 +174,8 @@ pub(crate) mod host {
     /// The root's image: the guest agent, Docker's files, and what init and the daemons mount on
     /// and keep their state in; with `buildx`, Docker's plugin's binary.
     fn root_layer(dir: &Path, buildx: Option<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
-        let agent = std::env::var_os("CLADEFS_GUEST_AGENT").context("CLADEFS_GUEST_AGENT not set")?;
+        let agent =
+            std::env::var_os("CLADEFS_GUEST_AGENT").context("CLADEFS_GUEST_AGENT not set")?;
         let agent = std::fs::read(agent)?;
         let docker = DockerFiles::new(dir, buildx)?;
         let mut entries = vec![Entry::new("guest-agent", Kind::File(&agent)).perm(0o755)];
@@ -226,7 +227,7 @@ pub(crate) mod host {
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
             vm.guest_kernel()?;
-            vm.extent_store("root", &store, capacity, crate::common::dax_window(WINDOW)?)?;
+            vm.cell("root", &store, capacity, crate::common::dax_window(WINDOW)?)?;
             vm.fxfs_root("root");
             if self.build {
                 for name in [BUILDS, BUILD_MIB] {

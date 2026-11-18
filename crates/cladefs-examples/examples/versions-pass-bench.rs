@@ -14,13 +14,13 @@
 //! cargo run --release -p cladefs-examples --example versions-pass-bench -- [N...]
 //! ```
 //!
-//! N defaults to 0 1 4 16 64 256 (`extent_bucket::layout::MAX_VERSIONS`).
+//! N defaults to 0 1 4 16 64 256 (`bucket_cell::layout::MAX_VERSIONS`).
 
-use extent_bucket::collector::{Collector, Options};
-use extent_bucket::keys::CachingKms;
-use extent_bucket::layout::{CellId, NewVersion};
-use extent_bucket::object_bucket::{ObjectBucket, Request, Stats};
-use extent_bucket::{Commit, SegmentBuilder, Writer, branch};
+use bucket_cell::collector::{Collector, Options};
+use bucket_cell::keys::CachingKms;
+use bucket_cell::layout::{CellId, NewVersion};
+use bucket_cell::object_bucket::{ObjectBucket, Request, Stats};
+use bucket_cell::{Commit, SegmentBuilder, Writer, branch};
 use futures::executor::block_on;
 use object_store::memory::InMemory;
 use std::sync::Arc;

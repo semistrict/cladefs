@@ -155,8 +155,8 @@ impl Replays<'_> {
 /// the image's fsck passing, or else how not: what the host's Fxfs reads of what a script's guest
 /// left in the store.
 pub fn stored_as_modelled(path: &Path, files: &[(String, String)]) -> Option<Failure> {
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Storage};
+    use futures::executor::block_on;
     let read = |fs: &Filesystem, name: &str| -> anyhow::Result<Vec<u8>> {
         block_on(async {
             let (file, attr) = fs.root().lookup(name.as_bytes()).await?;

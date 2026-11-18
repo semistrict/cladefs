@@ -9,8 +9,8 @@
 //! connection's end closes it as a writer's that went with writes uncommitted, and the next to
 //! open it has it as of its last commit: a store is usable again opened anew, as after a crash.
 //!
-//! A store's locks are [`StoreMutex`]es and [`StoreRwLock`]s, locked only through its [`Halt`]:
-//! `EIO` once it is halted, and a guard ([`StoreGuard`]) dropped as a panic unwinds halts it. So no
+//! A store's locks are [`CellMutex`]es and [`StoreRwLock`]s, locked only through its [`Halt`]:
+//! `EIO` once it is halted, and a guard ([`CellGuard`]) dropped as a panic unwinds halts it. So no
 //! lock of a store's is held across a panic without halting it, and none is locked poisoned. What
 //! panics beneath a store, past its locks, the extent daemon halts it for, as it answers the
 //! request that panicked.
@@ -23,8 +23,8 @@
 //! A halted store is not fenced: fencing is a later taking's cutting a writer off (`Error::Fenced`).
 //!
 //! A lock shared beyond one store, which no halt contains, as the process's cache of extents, a
-//! window's, a connection's, or `extent_store`'s store's, which its followers share with its writer,
-//! is an `extent_store::shared::SharedLock`: a panic holding one stops the daemon (TASK-149.24).
+//! window's, a connection's, or `local_cell`'s store's, which its followers share with its writer,
+//! is an `local_cell::shared::SharedLock`: a panic holding one stops the daemon (TASK-149.24).
 
 use crate::CellId;
 use crate::error::{Errno, Result};
@@ -83,13 +83,13 @@ impl Halt {
     /// `locked`, the guard of the store's lock called `lock`, held: `EIO`, the lock let go of, if
     /// the store is halted, as it may have been while this waited for it; or if the lock is
     /// poisoned, which halts it, though no lock of a store's is poisoned unhalted.
-    fn guard<G>(&self, lock: &'static str, locked: LockResult<G>) -> Result<StoreGuard<'_, G>> {
+    fn guard<G>(&self, lock: &'static str, locked: LockResult<G>) -> Result<CellGuard<'_, G>> {
         let guard = locked.map_err(|_| {
             self.halt(|| format!("its {lock} lock found poisoned"));
             Errno::EIO
         })?;
         self.check()?;
-        let guard = StoreGuard { guard, halt: self, lock };
+        let guard = CellGuard { guard, halt: self, lock };
         #[cfg(test)]
         tests::panic_if_asked(lock);
         Ok(guard)
@@ -125,13 +125,13 @@ pub(crate) fn halt_stores(scope: impl Fn(CellId) -> bool, errno: Errno, why: &st
 }
 
 /// A guard of a store's lock: which halts the store if a panic drops it, holding the lock.
-pub(crate) struct StoreGuard<'a, G> {
+pub(crate) struct CellGuard<'a, G> {
     guard: G,
     halt: &'a Halt,
     lock: &'static str,
 }
 
-impl<G: Deref> Deref for StoreGuard<'_, G> {
+impl<G: Deref> Deref for CellGuard<'_, G> {
     type Target = G::Target;
 
     fn deref(&self) -> &G::Target {
@@ -139,14 +139,14 @@ impl<G: Deref> Deref for StoreGuard<'_, G> {
     }
 }
 
-impl<G: DerefMut> DerefMut for StoreGuard<'_, G> {
+impl<G: DerefMut> DerefMut for CellGuard<'_, G> {
     fn deref_mut(&mut self) -> &mut G::Target {
         &mut self.guard
     }
 }
 
 // Before the guard is dropped, which lets the lock go: whoever takes it next finds the store halted.
-impl<G> Drop for StoreGuard<'_, G> {
+impl<G> Drop for CellGuard<'_, G> {
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.halt.halt(|| format!("a panic holding its {} lock", self.lock));
@@ -154,25 +154,25 @@ impl<G> Drop for StoreGuard<'_, G> {
     }
 }
 
-/// A mutex of a store's, locked only through its halt ([`StoreMutex::lock`]).
-pub(crate) struct StoreMutex<T> {
+/// A mutex of a store's, locked only through its halt ([`CellMutex::lock`]).
+pub(crate) struct CellMutex<T> {
     /// What the store's log calls it.
     name: &'static str,
     lock: Mutex<T>,
 }
 
-impl<T> StoreMutex<T> {
+impl<T> CellMutex<T> {
     pub(crate) const fn new(name: &'static str, value: T) -> Self {
         Self { name, lock: Mutex::new(value) }
     }
 
     /// Locks it, for the store `halt` halts: `EIO` if it is halted.
-    pub(crate) fn lock<'a>(&'a self, halt: &'a Halt) -> Result<StoreGuard<'a, MutexGuard<'a, T>>> {
+    pub(crate) fn lock<'a>(&'a self, halt: &'a Halt) -> Result<CellGuard<'a, MutexGuard<'a, T>>> {
         halt.guard(self.name, self.lock.lock())
     }
 }
 
-/// A reader-writer lock of a store's, locked only through its halt, as a [`StoreMutex`] is.
+/// A reader-writer lock of a store's, locked only through its halt, as a [`CellMutex`] is.
 pub(crate) struct StoreRwLock<T> {
     /// What the store's log calls it.
     name: &'static str,
@@ -189,7 +189,7 @@ impl<T> StoreRwLock<T> {
     pub(crate) fn read<'a>(
         &'a self,
         halt: &'a Halt,
-    ) -> Result<StoreGuard<'a, RwLockReadGuard<'a, T>>> {
+    ) -> Result<CellGuard<'a, RwLockReadGuard<'a, T>>> {
         halt.guard(self.name, self.lock.read())
     }
 
@@ -197,7 +197,7 @@ impl<T> StoreRwLock<T> {
     pub(crate) fn write<'a>(
         &'a self,
         halt: &'a Halt,
-    ) -> Result<StoreGuard<'a, RwLockWriteGuard<'a, T>>> {
+    ) -> Result<CellGuard<'a, RwLockWriteGuard<'a, T>>> {
         halt.guard(self.name, self.lock.write())
     }
 }
@@ -229,10 +229,10 @@ pub(crate) mod tests {
     /// store be read past it; another store's are untouched.
     #[test]
     fn a_panic_holding_a_lock_halts_its_store() {
-        let branch = crate::host_store::new_alone();
+        let branch = crate::host_cell::new_alone();
         let (halt, other) =
             (Halt::new(Path::new("store"), branch), Halt::new(Path::new("other"), branch));
-        let (lock, rw) = (StoreMutex::new("first", 1), StoreRwLock::new("second", 2));
+        let (lock, rw) = (CellMutex::new("first", 1), StoreRwLock::new("second", 2));
         let panicked = std::panic::catch_unwind(|| {
             let mut guard = lock.lock(&halt).unwrap();
             *guard += 1;
@@ -244,7 +244,7 @@ pub(crate) mod tests {
         assert_eq!(rw.read(&halt).err(), Some(Errno::EIO));
         assert_eq!(rw.write(&halt).err(), Some(Errno::EIO));
         assert_eq!(halt.check(), Err(Errno::EIO));
-        let unhalted = StoreMutex::new("third", 3);
+        let unhalted = CellMutex::new("third", 3);
         assert_eq!(*unhalted.lock(&other).unwrap(), 3);
         assert_eq!(other.check(), Ok(()));
     }
@@ -253,7 +253,7 @@ pub(crate) mod tests {
     /// too.
     #[test]
     fn a_panic_holding_a_lock_shared_halts_its_store() {
-        let halt = Halt::new(Path::new("store"), crate::host_store::new_alone());
+        let halt = Halt::new(Path::new("store"), crate::host_cell::new_alone());
         let rw = StoreRwLock::new("shared", ());
         let panicked = std::panic::catch_unwind(|| {
             let _guard = rw.read(&halt).unwrap();
@@ -266,8 +266,8 @@ pub(crate) mod tests {
     /// A store's lock taken without a panic, and let go of, leaves it unhalted, however often.
     #[test]
     fn locks_let_go_of_leave_their_store_unhalted() {
-        let halt = Halt::new(Path::new("store"), crate::host_store::new_alone());
-        let lock = StoreMutex::new("lock", 0);
+        let halt = Halt::new(Path::new("store"), crate::host_cell::new_alone());
+        let lock = CellMutex::new("lock", 0);
         for _ in 0..3 {
             *lock.lock(&halt).unwrap() += 1;
         }

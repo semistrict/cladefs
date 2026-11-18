@@ -55,7 +55,7 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
-    use extent_bucket::faults::Fault;
+    use bucket_cell::faults::Fault;
     use std::ffi::CString;
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ mod host {
     const MIN_SECS: u64 = 1200;
 
     /// The phases, each a fraction of the run, and what the bucket does through it, as
-    /// `extent_bucket::faults::Fault`'s words say it, answering again as slowly as before it
+    /// `bucket_cell::faults::Fault`'s words say it, answering again as slowly as before it
     /// failed, each PUT of what waited holding its object as long; and whether it fails.
     const PHASES: [(&str, f64, &str, bool); 5] = [
         ("answering", 0.1, "latency-ms=0 failing=not", false),
@@ -124,7 +124,7 @@ mod host {
         let name = format!("vm-{vm}");
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.extent_store_served("extents", store, CAPACITY, 0, socket);
+        machine.cell_served("extents", store, CAPACITY, 0, socket);
         for (var, value) in [
             ("CLADEFS_BUCKET_SOAK_SEED", vm),
             ("CLADEFS_BUCKET_SOAK_RATE", rate),

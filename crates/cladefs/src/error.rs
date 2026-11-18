@@ -31,8 +31,8 @@ impl Error {
     }
 
     /// The errno that caused the error, if one did: `ENOTSUP` for a store of another format, an
-    /// older one included, which is refused (`extent_store::Format`, TASK-165.6); `ENOENT` for one
-    /// its maker never made whole, which is no store (`extent_store::Unmade`, TASK-196).
+    /// older one included, which is refused (`local_cell::Format`, TASK-165.6); `ENOENT` for one
+    /// its maker never made whole, which is no store (`local_cell::Unmade`, TASK-196).
     pub fn errno(&self) -> Option<Errno> {
         // An errno added as context is found by downcasting the error, not its causes.
         let errno = self.0.downcast_ref::<Errno>().copied();
@@ -41,18 +41,18 @@ impl Error {
             .or_else(|| {
                 self.0
                     .chain()
-                    .any(|cause| cause.is::<extent_store::Format>())
+                    .any(|cause| cause.is::<local_cell::Format>())
                     .then_some(Errno::ENOTSUP)
             })
             .or_else(|| {
                 (self.0.chain())
-                    .any(|cause| cause.is::<extent_store::Unmade>())
+                    .any(|cause| cause.is::<local_cell::Unmade>())
                     .then_some(Errno::ENOENT)
             })
     }
 
     /// Whether what failed waited for something busy and gave up: another process's lock of a
-    /// store (`extent_store`'s, which an extent daemon serving it holds).
+    /// store (`local_cell`'s, which an extent daemon serving it holds).
     #[cfg(target_os = "linux")]
     pub(crate) fn is_busy(&self) -> bool {
         self.0.chain().any(|cause| {
@@ -63,11 +63,11 @@ impl Error {
     }
 }
 
-/// cladefs: an uploader's failure, or an opening's (`extent_store::upload`): its errno, as cladefs's
+/// cladefs: an uploader's failure, or an opening's (`local_cell::upload`): its errno, as cladefs's
 /// `bucket` maps it, as context; this host's own as the error it is, whose causes say its errno.
-impl From<extent_store::upload::Failure> for Error {
-    fn from(failure: extent_store::upload::Failure) -> Self {
-        use extent_store::upload::Failure;
+impl From<local_cell::upload::Failure> for Error {
+    fn from(failure: local_cell::upload::Failure) -> Self {
+        use local_cell::upload::Failure;
         match failure {
             Failure::Local(error) => Self(
                 std::sync::Arc::try_unwrap(error)
@@ -87,7 +87,7 @@ impl From<extent_store::upload::Failure> for Error {
 
 /// cladefs: `failure` as [`Error`] has it, for what returns `anyhow`'s: its causes, or its errno as
 /// context, say its errno once it is an [`Error`] again.
-pub(crate) fn anyhow_of(failure: extent_store::upload::Failure) -> anyhow::Error {
+pub(crate) fn anyhow_of(failure: local_cell::upload::Failure) -> anyhow::Error {
     Error::from(failure).0
 }
 

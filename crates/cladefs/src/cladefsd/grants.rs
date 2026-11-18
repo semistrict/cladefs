@@ -117,7 +117,7 @@ impl Grants {
 /// bytes in flight of its own: the default tenant is every tenant's with them.
 pub(super) fn check_tenant(tenant: u64) -> Result<(), Errno> {
     match tenant {
-        crate::host_store::DEFAULT_TENANT => Err(Errno::EINVAL),
+        crate::host_cell::DEFAULT_TENANT => Err(Errno::EINVAL),
         _ => Ok(()),
     }
 }
@@ -166,6 +166,6 @@ mod tests {
         assert_eq!(socket_name(0xa), "a.sock");
         assert_eq!(socket_name(u64::MAX), "fzzzzzzzzzzzz.sock");
         assert_eq!(check_tenant(1), Ok(()));
-        assert_eq!(check_tenant(crate::host_store::DEFAULT_TENANT), Err(Errno::EINVAL));
+        assert_eq!(check_tenant(crate::host_cell::DEFAULT_TENANT), Err(Errno::EINVAL));
     }
 }

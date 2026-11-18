@@ -6,13 +6,13 @@
 //! and the model of what they leave: the oracle of what a follower may show. The model knows each
 //! file's object, so that what a reader holding one open reads of it can be checked too.
 
-use crate::device::StoreDevice;
-use extent_store::{Dir, Store};
+use crate::device::CellDevice;
 use fxfs::filesystem::{FxFilesystem, OpenFxFilesystem, SyncOptions};
 use fxfs::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
 use fxfs::object_store::directory::{Directory, ReplacedChild, replace_child_with_purge};
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{HandleOptions, ObjectStore};
+use local_cell::{Dir, LocalCell};
 use shuttle::rand::{Rng, thread_rng};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -107,8 +107,8 @@ pub struct Writer {
 
 impl Writer {
     /// Makes a filesystem on `store`, empty.
-    pub async fn new<D: Dir + 'static>(store: Arc<Store<D>>) -> Self {
-        let device = DeviceHolder::new(StoreDevice::new(store));
+    pub async fn new<D: Dir + 'static>(store: Arc<LocalCell<D>>) -> Self {
+        let device = DeviceHolder::new(CellDevice::new(store));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root_store = fs.root_store();
         let root = Directory::open(&root_store, root_store.root_directory_object_id())

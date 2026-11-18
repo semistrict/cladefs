@@ -135,9 +135,9 @@ mod host {
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
             if role == "writer" {
-                vm.extent_store("extents", store, CAPACITY, window)?;
+                vm.cell("extents", store, CAPACITY, window)?;
             } else {
-                vm.extent_store_following("extents", store, window)?;
+                vm.cell_following("extents", store, window)?;
             }
             vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.env(&CString::new(format!("CLADEFS_FOLLOW_SECONDS={}", seconds()))?);
@@ -621,7 +621,8 @@ mod guest {
     fn commits(dir: &fs::File) -> FollowCommits {
         let mut commits = FollowCommits::default();
         // SAFETY: The ioctl writes a `FollowCommits`.
-        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }.expect("CLADEFS_IOC_FOLLOW_COMMITS");
+        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }
+            .expect("CLADEFS_IOC_FOLLOW_COMMITS");
         commits
     }
 

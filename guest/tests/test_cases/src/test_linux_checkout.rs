@@ -74,15 +74,15 @@ const DEVICE: &str = "CLADEFS_LINUX_CHECKOUT_DEVICE";
 mod host {
     use super::*;
     use crate::common::{
-        Window, control, dax_window, cladefs_guest_should_run, setup_rootfs, spawn_daemon,
+        Window, cladefs_guest_should_run, control, dax_window, setup_rootfs, spawn_daemon,
     };
     use crate::measure::{HostMemory, metrics_address};
     use crate::shared_volumes::host::{Vms, format, next_generation};
     use crate::vm::{Vm, without_kernel_lines};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
-    use futures::executor::block_on;
     use cladefs::{Image, Storage};
+    use futures::executor::block_on;
     use std::ffi::{CString, OsStr};
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
@@ -116,7 +116,10 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             let fs = image.open_volume("repo").await?;
             let metadata = fs.metadata().await?;
             println!("measure host volume-layers {} bytes", metadata.layer_bytes);
-            println!("measure host volume-allocator-records {} records", metadata.allocator_records);
+            println!(
+                "measure host volume-allocator-records {} records",
+                metadata.allocator_records
+            );
             fs.unmount().await?;
             image.close().await?;
             Ok(())

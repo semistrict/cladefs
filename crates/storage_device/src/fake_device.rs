@@ -470,7 +470,7 @@ impl Drop for Passage<'_> {
     }
 }
 
-/// cladefs: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/extent_bucket).
+/// cladefs: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/bucket_cell).
 const EPOCH_SHIFT: u32 = 40;
 
 /// cladefs: the seed of the next device that isn't given one: CLADEFS_DEVICE_SEED, or 0, then the next

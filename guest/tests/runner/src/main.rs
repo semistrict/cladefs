@@ -408,7 +408,9 @@ fn run_single_test(
     // cladefs: a test that passed fails if the run's stores are to be encrypted and its are not
     // (TASK-411.15): checked once its processes are gone, before its directory is.
     let outcome = match outcome {
-        TestOutcome::Pass | TestOutcome::Report(_) if env::var_os(encrypted::ENCRYPTED).is_some() => {
+        TestOutcome::Pass | TestOutcome::Report(_)
+            if env::var_os(encrypted::ENCRYPTED).is_some() =>
+        {
             match encrypted::case(&test_dir) {
                 Ok(report) => match report.verdict() {
                     Ok(()) => {
@@ -417,7 +419,9 @@ fn run_single_test(
                     }
                     Err(err) => TestOutcome::Fail(format!("{err:#}")),
                 },
-                Err(err) => TestOutcome::Fail(format!("checking its stores are encrypted: {err:#}")),
+                Err(err) => {
+                    TestOutcome::Fail(format!("checking its stores are encrypted: {err:#}"))
+                }
             }
         }
         outcome => outcome,
@@ -920,7 +924,15 @@ fn main() -> anyhow::Result<()> {
             eprintln!("encrypted: {}", report.summary());
             Ok(())
         }
-        CliCommand::Test { test_case, base_dir, keep_all, github_summary, outcome, run, repeat } => {
+        CliCommand::Test {
+            test_case,
+            base_dir,
+            keep_all,
+            github_summary,
+            outcome,
+            run,
+            repeat,
+        } => {
             sockets_fit(&std::env::temp_dir())?;
             // cladefs: the stores its cases make and open in its own processes are encrypted under the
             // host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as every

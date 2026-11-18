@@ -34,7 +34,7 @@ describe("where code comes from", () => {
     ["crates/zx/src/lib.rs", "fuchsia"],
     ["crates/fidl/src/lib.rs", "stand-in"],
     ["crates/cladefs/src/extents.rs", "cladefs"],
-    ["crates/extent_bucket/src/writer.rs", "cladefs"],
+    ["crates/bucket_cell/src/writer.rs", "cladefs"],
     ["guest/linux/fs/cladefs/dax.c", "cladefs"],
   ])("%s is %s", (path, origin) => {
     expect(originOf(path, crates)).toBe(origin);

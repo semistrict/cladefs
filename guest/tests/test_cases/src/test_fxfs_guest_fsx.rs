@@ -87,8 +87,8 @@ mod host {
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Storage};
+    use futures::executor::block_on;
     use std::ffi::CString;
     use std::path::Path;
     use std::time::Duration;
@@ -258,7 +258,7 @@ mod host {
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.extent_store("cladefs", &test_setup.tmp_dir.join("cladefs.img"), IMAGE_SIZE, window)?;
+            vm.cell("cladefs", &test_setup.tmp_dir.join("cladefs.img"), IMAGE_SIZE, window)?;
             let device = vm.disk("reference", &test_setup.tmp_dir.join("ext4.img"))?;
             vm.env(&CString::new(format!("{REFERENCE}={device}"))?);
             vm.env(&CString::new(format!("{SECS}={}", secs(SECS, DEFAULT_SECS)))?);

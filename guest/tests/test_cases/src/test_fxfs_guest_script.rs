@@ -59,8 +59,8 @@ mod host {
     use crate::test_fxfs_guest_checks::host::seed;
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Storage};
+    use futures::executor::block_on;
     use std::path::Path;
     use std::time::Duration;
 
@@ -100,10 +100,9 @@ mod host {
         let failed = |kind: &str, what: String| {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
-        let fs =
-            Storage::open(dir.join("cladefs.img")).map_err(anyhow::Error::from).and_then(|storage| {
-                block_on(async { Ok(Filesystem::mount(storage.check().await?).await?) })
-            });
+        let fs = Storage::open(dir.join("cladefs.img")).map_err(anyhow::Error::from).and_then(
+            |storage| block_on(async { Ok(Filesystem::mount(storage.check().await?).await?) }),
+        );
         let fs = match fs {
             Ok(fs) => fs,
             Err(err) => return failed(kind::FSCK, format!("{err:#}")),
@@ -234,7 +233,7 @@ mod host {
             create_image(&image, size)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store(
+            vm.cell(
                 "cladefs",
                 &image,
                 size,

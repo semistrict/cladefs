@@ -83,7 +83,7 @@ mod host {
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store("extents", &store, CAPACITY, 0)?;
+            vm.cell("extents", &store, CAPACITY, 0)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-resize-{}.vsock", std::process::id()));
@@ -103,7 +103,7 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let store = cladefs::ExtentStore::open(test_setup.tmp_dir.join("extents"))
+            let store = cladefs::OpenCell::open(test_setup.tmp_dir.join("extents"))
                 .expect("open the extent store");
             assert_eq!(store.info().unwrap().capacity, STEPS[1].1);
             TestOutcome::Pass

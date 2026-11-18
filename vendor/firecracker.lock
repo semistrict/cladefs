@@ -1005,11 +1005,11 @@ dependencies = [
  "base32_id",
  "bitflags 2.13.2",
  "event-listener",
- "extent_bucket",
+ "bucket_cell",
  "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_store",
+ "local_cell",
  "fail",
  "flate2",
  "fuchsia-async",
@@ -1464,7 +1464,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_bucket"
+name = "bucket_cell"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1545,14 +1545,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_store"
+name = "local_cell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base32_id",
  "bincode",
  "event-listener",
- "extent_bucket",
+ "bucket_cell",
  "extent_frame",
  "extent_keys",
  "fail",

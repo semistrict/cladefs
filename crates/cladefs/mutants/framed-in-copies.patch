@@ -9,8 +9,8 @@
 # times their guests' bytes, past 1.5, and frame for up to 2.3 s, past a second (TASK-330.1).
 # Kind: writes
 # Killer: scripts/sandboxes.sh short
---- a/crates/extent_store/src/segments.rs
-+++ b/crates/extent_store/src/segments.rs
+--- a/crates/local_cell/src/segments.rs
++++ b/crates/local_cell/src/segments.rs
 @@ -1546,6 +1546,7 @@
      // file's key (TASK-411.23).
      let sectors = raw.sectors();
@@ -19,8 +19,8 @@
      let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
      // cladefs: in place at once if a look at its parts says compressing them saves too little,
      // compressing no more of them: compressing every part to tell was most of what framings took
---- a/crates/extent_store/src/store.rs
-+++ b/crates/extent_store/src/store.rs
+--- a/crates/local_cell/src/store.rs
++++ b/crates/local_cell/src/store.rs
 @@ -2267,10 +2267,6 @@
              }
              let end = packer.end();

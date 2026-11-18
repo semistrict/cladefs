@@ -91,9 +91,9 @@ mod host {
                 0
             };
             if read_only {
-                vm.extent_store_following_served("extents", self.store, window, self.cladefsd);
+                vm.cell_following_served("extents", self.store, window, self.cladefsd);
             } else {
-                vm.extent_store_served("extents", self.store, CAPACITY, window, self.cladefsd);
+                vm.cell_served("extents", self.store, CAPACITY, window, self.cladefsd);
             }
             vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.vsock(&uds);

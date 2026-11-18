@@ -15,7 +15,7 @@ mod model_tests;
 use crate::error::{Error, Result};
 use crate::executor::Executor;
 use crate::filesystem::DEFAULT_EXECUTOR_THREADS;
-use crate::host_store;
+use crate::host_cell;
 use anyhow::Context as _;
 use fxfs::filesystem::FxFilesystem;
 use fxfs::fsck::errors::FsckIssue;
@@ -63,7 +63,7 @@ impl fmt::Debug for Kind {
 
 impl Storage {
     /// The size of the blocks storage is read and written in. Storage sizes are multiples of it.
-    pub const BLOCK_SIZE: u32 = host_store::BLOCK_SIZE;
+    pub const BLOCK_SIZE: u32 = host_cell::BLOCK_SIZE;
 
     /// The image at `path`: a directory holding an extent store (see `image`), a fork's or not,
     /// its branch kept in the bucket its description names (see `kept`).
@@ -85,7 +85,7 @@ impl Storage {
     /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFSD_BUCKET`).
     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), true, Self::keeping()?)
+        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), true, Self::keeping()?)
     }
 
     /// cladefs: the image at `path` of the branch `of` says, kept in the bucket at `bucket`
@@ -99,14 +99,14 @@ impl Storage {
     /// `EEXIST` otherwise, and for a new branch.
     pub fn take(
         path: impl AsRef<Path>,
-        (of, capacity): (host_store::BranchOf, u64),
+        (of, capacity): (host_cell::BranchOf, u64),
         bucket: &str,
         token: Option<u64>,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         // What a making that died part way left is no store: its directory goes, not the branch,
         // which may be another's, as the extent daemon's `CreateStore` has it (TASK-196).
-        if host_store::unmade(path) {
+        if host_cell::unmade(path) {
             std::fs::remove_dir_all(path)
                 .with_context(|| format!("removing {}, a store unmade", path.display()))
                 .map_err(Error::new)?;
@@ -114,20 +114,20 @@ impl Storage {
         if !path.exists() {
             let keeping = Self::keeping()?;
             let keeping =
-                extent_store::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
-            let kept = (extent_bucket::cell::Kind::Fxfs, Some(bucket), keeping);
-            let opened = host_store::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
+                local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
+            let kept = (bucket_cell::cell::Kind::Fxfs, Some(bucket), keeping);
+            let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
             opened.made().map_err(Error::new)?;
             // Closed before it is placed, as `CreateStore` places a store, and opened again.
             drop(opened);
             if let Some(token) = token {
-                extent_store::place_host(path, token).map_err(Error::new)?;
+                local_cell::place_host(path, token).map_err(Error::new)?;
             }
         } else {
-            let found = extent_store::host_branch(path).map_err(Error::new)?;
+            let found = local_cell::host_branch(path).map_err(Error::new)?;
             let not = match of {
-                host_store::BranchOf::Taken(branch) if found == branch => None,
-                host_store::BranchOf::Taken(branch) => Some(format!("{branch}")),
+                host_cell::BranchOf::Taken(branch) if found == branch => None,
+                host_cell::BranchOf::Taken(branch) => Some(format!("{branch}")),
                 _ => Some("a new branch".to_owned()),
             };
             if let Some(not) = not {
@@ -142,7 +142,7 @@ impl Storage {
     /// it is whole ([`Storage::made`]): what opens it before, or after its maker died part way,
     /// finds no store (TASK-196). As an import makes one, filling it first.
     pub fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), false, Self::keeping()?)
+        Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), false, Self::keeping()?)
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
@@ -152,26 +152,26 @@ impl Storage {
     pub(crate) fn create_unmade_keeping(
         path: impl AsRef<Path>,
         (size, tenant): (u64, u64),
-        keeping: extent_store::upload::Options,
+        keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         Self::make(path.as_ref(), (size, tenant), false, keeping)
     }
 
     /// How an image this process makes, where no host's daemon serves it, keeps its branch
-    /// ([`host_store::keeping`]): with no cache of the bucket's objects.
-    fn keeping() -> Result<extent_store::upload::Options, Error> {
-        host_store::keeping().map_err(Error::new)
+    /// ([`host_cell::keeping`]): with no cache of the bucket's objects.
+    fn keeping() -> Result<local_cell::upload::Options, Error> {
+        host_cell::keeping().map_err(Error::new)
     }
 
     /// cladefs: the image at `path`, made by [`Storage::create_unmade`] and closed since, is whole.
     pub fn made(path: impl AsRef<Path>) -> Result<(), Error> {
-        extent_store::made_host(path.as_ref()).map_err(Error::new)
+        local_cell::made_host(path.as_ref()).map_err(Error::new)
     }
 
     /// cladefs: whether `path` is what a making of an image, or of a store, left unmade, its maker
     /// dying part way: no store, which deleting finishes (TASK-196).
     pub fn is_unmade(path: impl AsRef<Path>) -> bool {
-        host_store::unmade(path.as_ref())
+        host_cell::unmade(path.as_ref())
     }
 
     /// A new image at `path`, as [`Storage::create`] makes it, a new cell of
@@ -180,13 +180,13 @@ impl Storage {
         path: &Path,
         (size, tenant): (u64, u64),
         whole: bool,
-        keeping: extent_store::upload::Options,
+        keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         if size < Self::BLOCK_SIZE as u64 {
             return Err(Error::msg("the image is smaller than a block"));
         }
         let writes = Arc::new(WriteGate::default());
-        let made = (size, host_store::BranchOf::New(tenant), whole);
+        let made = (size, host_cell::BranchOf::New(tenant), whole);
         let device =
             ImageDevice::create(path, made, keeping, writes.clone()).map_err(Error::new)?;
         Ok(Self::image(path.to_owned(), writes, device))

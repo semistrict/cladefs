@@ -135,18 +135,18 @@ pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
 }
 
 /// cladefs: the parts of segments the daemon's stores pack as they fill, held until their framings,
-/// which they share (`extent_store::HeldParts`, TASK-400): memory the daemon holds, which the
+/// which they share (`local_cell::HeldParts`, TASK-400): memory the daemon holds, which the
 /// governor lets go of before any tenant's ([`govern`]).
-pub fn held_parts() -> &'static Arc<extent_store::HeldParts> {
-    static HELD: std::sync::LazyLock<Arc<extent_store::HeldParts>> =
-        std::sync::LazyLock::new(extent_store::HeldParts::new);
+pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
+    static HELD: std::sync::LazyLock<Arc<local_cell::HeldParts>> =
+        std::sync::LazyLock::new(local_cell::HeldParts::new);
     &HELD
 }
 
 /// cladefs: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena holds,
 /// and the parts held ([`held_parts`]).
 pub fn governed_bytes() -> u64 {
-    physmem::arenas_bytes() + held_parts().bytes() + extent_store::pages::shared().bytes()
+    physmem::arenas_bytes() + held_parts().bytes() + local_cell::pages::shared().bytes()
 }
 
 /// cladefs: the governor's look at the host's memory (TASK-358): every tenant's memory together, and
@@ -156,9 +156,9 @@ pub fn governed_bytes() -> u64 {
 /// tenant past its share by weight down to it ([`super::governor::shares`]), then any tenant's,
 /// least recently used first. The tenants are limited to `allowance`: the parts held take no room
 /// from them, but what the headroom leaves between looks. cladefs: the stores' page cache
-/// (`extent_store::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty
+/// (`local_cell::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty
 /// ones written back to be: what it holds counted as the process's, where the host's page cache
-/// was counted free; and sized to what is left it ([`extent_store::pages::PageCache::size_to`]),
+/// was counted free; and sized to what is left it ([`local_cell::pages::PageCache::size_to`]),
 /// as Linux sizes its page cache to the memory free.
 pub fn govern(allowance: u64) {
     GOVERNED.store(allowance, Ordering::Relaxed);
@@ -167,7 +167,7 @@ pub fn govern(allowance: u64) {
     if parts.bytes() > room {
         parts.evict_to(room);
     }
-    let pages = extent_store::pages::shared();
+    let pages = local_cell::pages::shared();
     let room = room.saturating_sub(parts.bytes());
     // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8).
     pages.size_to(room);

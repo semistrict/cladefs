@@ -147,7 +147,7 @@ fn extents_are_counted_through_the_control_api() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
-    let write = |vm: &cladefs::DaemonExtentStore, sequence: u64| {
+    let write = |vm: &cladefs::CellClient, sequence: u64| {
         let extent = cladefs::ExtentId { branch: vm.branch(), sequence };
         vm.write(extent, 0, &[cladefs::VolatileSlice::from(&pattern(sequence)[..4096])]).unwrap();
         extent
@@ -429,7 +429,7 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"encrypted");
     }
-    let read = |vm: &cladefs::DaemonExtentStore, seed: u64| {
+    let read = |vm: &cladefs::CellClient, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { branch: vm.branch(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
@@ -491,7 +491,7 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"encrypted");
     }
-    let read = |vm: &cladefs::DaemonExtentStore, seed: u64| {
+    let read = |vm: &cladefs::CellClient, seed: u64| {
         let mut data = vec![0; 64 << 10];
         let extent = cladefs::ExtentId { branch: vm.branch(), sequence: 1 };
         let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);

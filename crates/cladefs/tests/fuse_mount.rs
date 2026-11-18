@@ -560,15 +560,12 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let shown = m.join("0000000000001").join(&cell);
     std::fs::write(shown.join("file"), "drained").unwrap();
 
-    let vm = cladefs::DaemonExtentStore::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
+    let vm = cladefs::CellClient::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
     let vm = vm.unwrap();
     vm.commit_ordered(Some(b"vm drained")).unwrap();
     terminate(child, &m);
     drop(vm);
-    assert_eq!(
-        cladefs::ExtentStore::open(first.join("vm")).unwrap().root().unwrap(),
-        b"vm drained"
-    );
+    assert_eq!(cladefs::OpenCell::open(first.join("vm")).unwrap().root().unwrap(), b"vm drained");
 
     let second = dir.path().join("second");
     std::fs::create_dir(&second).unwrap();
@@ -612,7 +609,7 @@ fn a_cell_mounted_is_the_mounts_alone() {
     let store = dir.path().join("stores").join("0000000000001").join(&cell);
 
     let started = std::time::Instant::now();
-    let vm = cladefs::DaemonExtentStore::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);
+    let vm = cladefs::CellClient::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);
     assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
     let control = cladefs::cladefsd::control::Client::connect(socket).unwrap();
     let forked = control.fork_store(&store, &dir.path().join("fork"));

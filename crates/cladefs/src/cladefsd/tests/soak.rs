@@ -4,7 +4,7 @@
 
 //! TASK-330.3: the daemon against a degraded bucket, for a long while, with VM processes writing
 //! all the while: the bucket slow, then full, then out of service, then answering again as slowly
-//! as before ([`extent_bucket::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
+//! as before ([`bucket_cell::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
 //! beside their hosts' daemons on a shared disk was (TASK-310, TASK-314, TASK-317). The simulation of the
 //! bucket's protocol checks that nothing a failing bucket does is wrong; this checks what it costs
 //! the daemon over time, and what it says of it:
@@ -24,7 +24,7 @@
 //!   up, as slowly as the bucket lets it;
 //! - **a failing bucket is sent no more than probes** (TASK-382): through a failing phase, the
 //!   writes that failed, each its object sent whole, are a wave of the host's uploads at once and
-//!   then a probe of each kind every [`extent_bucket::object_bucket`]'s backoff at most, not every
+//!   then a probe of each kind every [`bucket_cell::object_bucket`]'s backoff at most, not every
 //!   upload tried again and again, most of the daemon's CPU in the qualification's soak;
 //! - **its background threads live** (TASK-493): a panic holding what is shared beyond one store,
 //!   the page cache's flusher's work among it, aborts it, as the daemon's does; and the page
@@ -37,12 +37,12 @@
 //! upload's bytes for each try, and sees this fail.
 
 use super::super::server::connections;
-use super::super::{process, stores};
+use super::super::{cells, process};
 use super::{connect, read};
 use crate::test_data::noise;
 use crate::{ExtentId, VolatileSlice};
-use extent_bucket::faults::{Failing, Fault};
-use extent_bucket::object_bucket::Request;
+use bucket_cell::faults::{Failing, Fault};
+use bucket_cell::object_bucket::Request;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -52,14 +52,14 @@ const VMS: usize = 4;
 
 /// The host's upload memory: as much as its stores upload at once, the host's 64 PUTs
 /// (`crate::bucket::UPLOADS`' requests) of segments some 24 MiB each, as these close a second
-/// after their first commit (`extent_store::upload::Options::interval`), at the rate they are
+/// after their first commit (`local_cell::upload::Options::interval`), at the rate they are
 /// written: so that its uploads, holding each object twice, TASK-317's bug, hold more than every
 /// other part of the daemon's budget may (`process::AnonBudget`), 1.5 GiB more against some 1.4
 /// (four stores' framings, its fetches and its own).
 const UPLOAD_MEMORY: u64 = 1536 << 20;
 
 /// What the guests write while the bucket fails: past every store's lag bound (1 GiB of its
-/// write-ahead log, `extent_store::upload::Options::max_lag_bytes`), so that their commits stall
+/// write-ahead log, `local_cell::upload::Options::max_lag_bytes`), so that their commits stall
 /// there, and past the host's upload memory, so that its uploads hold all of it.
 const WRITTEN_WHILE_FAILING: u64 = 6 << 30;
 
@@ -195,9 +195,9 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     super::super::raise_open_files_limit().unwrap();
     // A panic holding what no store's halt contains, the page cache's flusher's work among it,
     // aborting the process (TASK-149.24, TASK-493).
-    extent_store::shared::abort_on_panics();
+    local_cell::shared::abort_on_panics();
     let flusher_lives = || {
-        let pages = extent_store::pages::shared();
+        let pages = local_cell::pages::shared();
         assert!(!pages.flusher_died(), "the page cache's flusher died: {:?}", pages.usage());
     };
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
@@ -232,7 +232,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     let began = Instant::now();
     // Whether a commit made before `since`, a time of the wall's, waits for its upload still.
     let behind = |since: SystemTime| {
-        let statuses = stores::upload_statuses();
+        let statuses = cells::upload_statuses();
         let behind = statuses
             .iter()
             .any(|(_, status)| status.oldest_pending.is_some_and(|oldest| oldest < since));
@@ -289,7 +289,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
             writes_failed - writes_failed_before
         );
         writes_failed_before = writes_failed;
-        let statuses = stores::upload_statuses();
+        let statuses = cells::upload_statuses();
         let pending: u64 = statuses.iter().map(|(_, status)| status.pending_bytes).sum();
         let sample = process::last();
         eprintln!(

@@ -143,7 +143,7 @@ pub const MAX_TRANSFER: u32 = 8 << 20;
 /// The most bytes the root holds.
 pub const MAX_ROOT: u32 = 4096;
 /// The most bytes one extent holds.
-pub const MAX_EXTENT: u64 = cladefs::ExtentStore::MAX_EXTENT;
+pub const MAX_EXTENT: u64 = cladefs::OpenCell::MAX_EXTENT;
 /// cladefs: the most bytes of data a `FREE_MANY` or a `MAP_MANY` carries, its further extents or
 /// maps: a page of the largest a guest's kernel has, as its drivers send a page's worth at most;
 /// past it, the request is refused (`EINVAL`). The device lists what the data names in its own
@@ -154,7 +154,7 @@ pub const MAX_MANY_DATA: usize = 64 << 10;
 pub const MAX_STATS: usize = 64 << 10;
 
 #[cfg(target_os = "linux")]
-const _: () = assert!(MAX_STATS == cladefs::DaemonExtentStore::MAX_STATS);
+const _: () = assert!(MAX_STATS == cladefs::CellClient::MAX_STATS);
 
 /// cladefs TASK-470: the ranges a request's offsets and lengths keep to (doc-4), as the device's
 /// configuration and window say: a request out of them is refused, `EINVAL`, before its store sees

@@ -57,31 +57,31 @@ if part clippy; then
     (cd "$root" && cargo fmt --check)
     UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p extent_store -p physmem -p cladefs \
+    cargo clippy --manifest-path "$root/Cargo.toml" -p local_cell -p physmem -p cladefs \
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
         --features loom --tests -- -A clippy::all -D warnings
 fi
-# The simulation of extent_bucket's protocol over extent_store's stores (TASK-88): its profiles'
+# The simulation of bucket_cell's protocol over local_cell's stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
 # prevents, up to 20,000. Its own part, built with the profile sim, optimized with a debug build's
 # checks: unoptimized, in the suite's build, four searches took 20 to 27 minutes each, which ran
 # CI's workspace job out of time (TASK-188).
-sim='package(extent_store) & test(/^sim::/)'
+sim='package(local_cell) & test(/^sim::/)'
 if part workspace; then
     UCD_ZIP="$zip" cargo nextest run --manifest-path "$root/Cargo.toml" --workspace \
         -E "not ($sim)" "$@"
 fi
 if part sim; then
-    cargo nextest run --manifest-path "$root/Cargo.toml" --cargo-profile sim -p extent_store \
+    cargo nextest run --manifest-path "$root/Cargo.toml" --cargo-profile sim -p local_cell \
         -E "$sim" "$@"
 fi
 # The concurrency tests under Shuttle, built with each crate's `shuttle` feature, which only they
 # can run (TASK-44).
 if part shuttle; then
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_store --features shuttle \
+    cargo nextest run --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle \
         --test shuttle
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p extent_store --features shuttle --lib \
+    cargo nextest run --manifest-path "$root/Cargo.toml" -p local_cell --features shuttle --lib \
         shuttle_tests::
     cargo nextest run --manifest-path "$root/Cargo.toml" -p physmem --features shuttle --lib \
         shuttle::
@@ -110,7 +110,7 @@ if part scripts; then
     "$root/crates/fxfs-posix/mutants.sh" --check
     "$root/crates/fxfs-sim-diff/mutants.sh" --check
     "$root/crates/cladefs/mutants.sh" --check
-    "$root/crates/extent_bucket/mutants.sh" --check
+    "$root/crates/bucket_cell/mutants.sh" --check
     "$root/scripts/loom-mutants.sh" --check
     "$root/scripts/guest-mutants-host.py" --check
     # Firecracker's lock as Cargo resolves it with cladefs's crates, which only Linux builds: a

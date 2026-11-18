@@ -11,7 +11,7 @@
 # KEKs in the processes' bucket. An old pin's binaries, built before encryption, ignore it.
 # Sourced; scripts/test-e2e.sh makes a KMS of its own instead (`runner kms`).
 
-# The tests' master key, in hexadecimal: 32 bytes of 0x7e, as the Rust tests' (extent_bucket's
+# The tests' master key, in hexadecimal: 32 bytes of 0x7e, as the Rust tests' (bucket_cell's
 # tests/gc.rs).
 TEST_MASTER_KEY=7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e
 

@@ -17,8 +17,8 @@
 //! it at random for SECS seconds (default 10), and prints a Markdown table of what each did: MiB/s,
 //! GETs/s, and their latencies' median and 99th percentile. Then it deletes the object.
 
-use extent_bucket::bucket::{Bucket, ByteRange, PutMode};
-use extent_bucket::object_bucket::ObjectBucket;
+use bucket_cell::bucket::{Bucket, ByteRange, PutMode};
+use bucket_cell::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use std::sync::Arc;

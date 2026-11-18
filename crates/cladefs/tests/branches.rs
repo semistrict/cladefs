@@ -8,8 +8,8 @@
 //! that alone until TASK-149.20, which found `cladefsctl take` of a new copy at a later placement
 //! refused (`ESTALE`): nothing ran them.
 
-use cladefs::{ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_bucket::object_bucket::ObjectBucket;
+use bucket_cell::object_bucket::ObjectBucket;
+use cladefs::{ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -35,11 +35,11 @@ fn branch(url: &str, args: &[&str]) -> String {
 
 /// The store at `path`, which keeps its branch in the bucket its description names, opened as a
 /// copy never placed here takes it, as the first placement (TASK-165.9).
-fn attached(path: &Path) -> ExtentStore {
-    ExtentStore::open(path).unwrap()
+fn attached(path: &Path) -> OpenCell {
+    OpenCell::open(path).unwrap()
 }
 
-fn read(store: &ExtentStore, extent: ExtentId, len: usize) -> Vec<u8> {
+fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
     store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     data
@@ -90,7 +90,7 @@ fn forks_and_takes_branches_in(url: &str) {
         branch(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
     let child_branch: cladefs::CellId = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let record = runtime.block_on(extent_bucket::branch::record(&*bucket, child_branch));
+    let record = runtime.block_on(bucket_cell::branch::record(&*bucket, child_branch));
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_branch));
     let forked = attached(&path("child"));
     assert_eq!(forked.branch(), child_branch);
@@ -149,7 +149,7 @@ fn places_and_syncs_stores_in(url: &str) {
 
     // Made by cladefsctl, naming the bucket at `url`, its branch the bucket's to name (TASK-364).
     let made = branch(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
-    let store = ExtentStore::open(path("first")).unwrap();
+    let store = OpenCell::open(path("first")).unwrap();
     let branch_id = store.branch();
     assert_eq!(made.parse::<cladefs::CellId>(), Ok(branch_id));
     let extent = ExtentId { branch: branch_id.id, sequence: 1 };
@@ -159,7 +159,7 @@ fn places_and_syncs_stores_in(url: &str) {
     branch(&url, &["place", &path("first"), "5"]);
     branch(&url, &["sync", &path("first")]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let state = runtime.block_on(extent_bucket::recover(&*bucket, branch_id, None)).unwrap().state;
+    let state = runtime.block_on(bucket_cell::recover(&*bucket, branch_id, None)).unwrap().state;
     assert_eq!(state.root, Some(b"synced".to_vec()));
 
     let capacity = (1u64 << 30).to_string();

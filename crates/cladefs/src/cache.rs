@@ -22,14 +22,14 @@
 
 use crate::dax::{Origin, Source, Window};
 use crate::error::{Errno, Result};
-use crate::extents::PublicReach;
+use crate::open_cell::PublicReach;
 use crate::pages::{ArenaId, page_size};
 use crate::profile::Recorder;
 use crate::stats::{self, Counter};
-use extent_bucket::trace;
-use extent_store::shared::SharedLock;
-use extent_store::{HostDir, Store};
+use bucket_cell::trace;
 use futures::future::BoxFuture;
+use local_cell::shared::SharedLock;
+use local_cell::{HostDir, LocalCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -43,7 +43,7 @@ struct ExtentCache {
     /// The threads the pager reads extents' parts on.
     pager: tokio::runtime::Runtime,
     /// By the arena their pages are of (TASK-43), and their IDs. Every tenant's, which a panic
-    /// holding aborts the daemon (`extent_store::shared`, TASK-149.24); as do the others here.
+    /// holding aborts the daemon (`local_cell::shared`, TASK-149.24); as do the others here.
     extents: SharedLock<Mutex<HashMap<(ArenaId, ExtentId), Cached>>>,
     /// The arenas but the default that extents were cached of, to look for an extent's copy in,
     /// taken after `extents` (TASK-234).
@@ -74,16 +74,20 @@ impl Default for Holders {
 /// A store a cached extent's pages are read from, and its object storage, which holds them if the
 /// store holds them without their data.
 struct Holder {
-    store: Weak<Store<HostDir>>,
+    store: Weak<LocalCell<HostDir>>,
     fetcher: Option<Weak<crate::bucket::HostFetcher>>,
 }
 
 /// A [`Holder`] open still.
-type OpenHolder = (Arc<Store<HostDir>>, Option<Arc<crate::bucket::HostFetcher>>);
+type OpenHolder = (Arc<LocalCell<HostDir>>, Option<Arc<crate::bucket::HostFetcher>>);
 
 impl Holders {
     /// Adds `store`, reading through `fetcher`, unless it is there, letting go of those closed.
-    fn add(&self, store: &Arc<Store<HostDir>>, fetcher: Option<&Arc<crate::bucket::HostFetcher>>) {
+    fn add(
+        &self,
+        store: &Arc<LocalCell<HostDir>>,
+        fetcher: Option<&Arc<crate::bucket::HostFetcher>>,
+    ) {
         let mut holders = self.0.with(Mutex::lock);
         holders.retain(|holder| holder.store.strong_count() > 0);
         if !holders.iter().any(|holder| std::ptr::eq(holder.store.as_ptr(), Arc::as_ptr(store))) {
@@ -130,7 +134,7 @@ impl Holders {
     }
 
     /// Whether one open still, but `store`, holds `extent`.
-    fn another_holds(&self, store: &Arc<Store<HostDir>>, extent: ExtentId) -> bool {
+    fn another_holds(&self, store: &Arc<LocalCell<HostDir>>, extent: ExtentId) -> bool {
         (self.open().into_iter())
             .filter(|(holder, _)| !Arc::ptr_eq(holder, store))
             .any(|(holder, _)| holder.extent(extent).is_ok_and(|held| held.is_some()))
@@ -186,7 +190,7 @@ fn extent_cache() -> &'static ExtentCache {
 /// or the arenas past the total's, give back (TASK-50.3). Returns the bytes it evicted. Evicted
 /// pages are read in again as they are touched.
 ///
-/// cladefs: in a span of its own, `cache.relief` (`extent_bucket::trace`, TASK-258).
+/// cladefs: in a span of its own, `cache.relief` (`bucket_cell::trace`, TASK-258).
 pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {
     let span = trace::Span::start("cache.relief");
     if let Some(arena) = arena {
@@ -303,7 +307,7 @@ impl CachedIn {
 /// read from it, or from `fetcher`, with its page-ins recorded by `recorder`, if any; and from any
 /// other store that asked for it, which `store` is one of from now on (TASK-79.7).
 pub(crate) fn cached(
-    store: &Arc<Store<HostDir>>,
+    store: &Arc<LocalCell<HostDir>>,
     cached_in: CachedIn,
     fetcher: Option<Arc<crate::bucket::HostFetcher>>,
     recorder: Option<Arc<Recorder>>,
@@ -399,7 +403,7 @@ pub(crate) fn find(arena: ArenaId, extent: ExtentId) -> Option<Arc<CachedExtent>
 /// them anew. Returns what keeps its pages, which the window's mappings of it map zeros in place
 /// of, if it was cached.
 pub(crate) fn freed(
-    store: &Arc<Store<HostDir>>,
+    store: &Arc<LocalCell<HostDir>>,
     arena: ArenaId,
     extent: ExtentId,
 ) -> Option<Arc<CachedExtent>> {
@@ -520,15 +524,15 @@ impl StoredExtent {
     /// `extent`, read through `holders`, laid out as `store` holds it.
     fn new(
         holders: Arc<Holders>,
-        store: &Store<HostDir>,
+        store: &LocalCell<HostDir>,
         extent: ExtentId,
         recorder: Option<Arc<Recorder>>,
     ) -> Self {
         // Its offset in the data of the object it is in: a segment's, its own file's, or the one
         // object storage holds it in.
         let offset = match store.place(extent) {
-            Ok(Some(extent_store::Place::Run { offset, .. })) => offset,
-            Ok(Some(extent_store::Place::Bucket(location))) => location.offset,
+            Ok(Some(local_cell::Place::Run { offset, .. })) => offset,
+            Ok(Some(local_cell::Place::Bucket(location))) => location.offset,
             _ => 0,
         };
         let phase = offset % extent_frame::PART / page_size() * page_size();
@@ -566,7 +570,7 @@ impl Contents for StoredExtent {
                     return Box::pin(std::future::ready(Ok(())));
                 }
                 Err(ref error)
-                    if let Some(data) = error.downcast_ref::<extent_store::BucketData>()
+                    if let Some(data) = error.downcast_ref::<local_cell::BucketData>()
                         && let Some(fetcher) = fetcher =>
                 {
                     let fetched = fetcher.read(id, data.location.clone(), offset, buf.len() as u64);
@@ -854,7 +858,7 @@ impl CachedExtent {
         bytes
     }
 
-    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`extent_bucket::trace`,
+    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`bucket_cell::trace`,
     /// TASK-258): its reads, from the store or the bucket, its children.
     fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
         let span = trace::Span::start("cache.page_in");

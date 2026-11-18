@@ -163,7 +163,7 @@ pub(super) fn served(kind: u32, took: Duration, failed: bool) {
 
 /// The requests served, as a line of `NAME=COUNT` after `requests:`: of each kind served, how
 /// many (`KIND`) and their nanoseconds (`KIND-ns`), which the daemon's stats file keeps
-/// (`super::stores`).
+/// (`super::cells`).
 pub(super) fn requests_line() -> String {
     let mut line = String::from("requests:");
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
@@ -241,7 +241,7 @@ pub fn render() -> String {
     let name = "cladefsd_window_open_maps_refused_total";
     let _ = writeln!(out, "# HELP {name} MAPs of open extents refused.");
     let _ = writeln!(out, "# TYPE {name} counter");
-    let _ = writeln!(out, "{name} {}", crate::extents::open_maps_refused());
+    let _ = writeln!(out, "{name} {}", crate::open_cell::open_maps_refused());
 
     // cladefs: each VM process's (TASK-111.5).
     let vms = super::stats::vms();
@@ -361,7 +361,7 @@ pub fn render() -> String {
     }
 
     // cladefs: what the part cache keeps, and its budget (TASK-406.1).
-    if let Some(cache) = super::stores::opened_cache() {
+    if let Some(cache) = super::cells::opened_cache() {
         for (name, help, value) in [
             (
                 "cladefsd_part_cache_bytes",
@@ -444,8 +444,8 @@ pub fn render() -> String {
         let _ = writeln!(out, "{name} {value}");
     }
 
-    let uploads = super::stores::upload_statuses();
-    let series: [(&str, &str, &str, fn(&extent_store::upload::UploadStatus) -> String); 3] = [
+    let uploads = super::cells::upload_statuses();
+    let series: [(&str, &str, &str, fn(&local_cell::upload::UploadStatus) -> String); 3] = [
         (
             "upload_pending_bytes",
             "gauge",
@@ -476,8 +476,8 @@ pub fn render() -> String {
         }
     }
 
-    if let Some(stats) = super::stores::bucket_stats() {
-        use extent_bucket::object_bucket::{Request, Upload};
+    if let Some(stats) = super::cells::bucket_stats() {
+        use bucket_cell::object_bucket::{Request, Upload};
         let name = "cladefsd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
         let _ = writeln!(out, "# TYPE {name} counter");
@@ -529,9 +529,9 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
         (
             "stores_open",
             "Stores VM processes' connections write.",
-            super::stores::open_count() as u64,
+            super::cells::open_count() as u64,
         ),
-        ("follower_views", "Followers' views of stores.", super::stores::follower_views() as u64),
+        ("follower_views", "Followers' views of stores.", super::cells::follower_views() as u64),
         (
             "extent_cache_pinned_entries",
             "Sealed extents cached that a window's mapping, a read or a page-in holds.",

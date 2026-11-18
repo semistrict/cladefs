@@ -13,7 +13,8 @@ use super::*;
 fn trace_dump_frame(frame: u64) {
     let traced = fs::read_to_string("/sys/module/cladefs/parameters/dax_trace");
     if traced.is_ok_and(|traced| traced.trim() == "Y") {
-        let _ = fs::write("/sys/module/cladefs/parameters/dax_trace_dump", format!("pfn {frame:x}"));
+        let _ =
+            fs::write("/sys/module/cladefs/parameters/dax_trace_dump", format!("pfn {frame:x}"));
     }
 }
 

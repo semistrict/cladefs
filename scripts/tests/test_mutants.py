@@ -69,43 +69,43 @@ class Mutants(unittest.TestCase):
 
     def test_each_pass_keeps_its_report(self):
         self.assertEqual(
-            self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "extent_store"),
+            self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "local_cell"),
             (
                 0,
-                "extent_store: caught 3, missed 2, timeout 1, unviable 1\n"
-                "extent_store, the missed under Shuttle: caught 1, missed 1, timeout 0, unviable 0\n",
+                "local_cell: caught 3, missed 2, timeout 1, unviable 1\n"
+                "local_cell, the missed under Shuttle: caught 1, missed 1, timeout 0, unviable 0\n",
             ),
         )
         without = {kind: names for kind, names in SWEEP.items() if kind != "status"}
-        self.assertEqual(self.report(self.out / "extent_store" / "mutants.out"), without)
+        self.assertEqual(self.report(self.out / "local_cell" / "mutants.out"), without)
         self.assertEqual(
-            self.report(self.out / "extent_store" / "shuttle" / "mutants.out"),
+            self.report(self.out / "local_cell" / "shuttle" / "mutants.out"),
             {"caught": ["m1"], "missed": ["m2"]},
         )
         self.assertEqual(
             self.calls()[1],
             [
-                "-p", "extent_store", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3",
-                "--output", str(self.out / "extent_store" / "shuttle"),
+                "-p", "local_cell", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3",
+                "--output", str(self.out / "local_cell" / "shuttle"),
                 "--features", "shuttle", "-F", "^m1$|^m2$",
                 "--", "-E", "test(/shuttle/) | binary(shuttle)",
             ],
         )
 
     def test_the_simulations_crates_mutants_build_with_the_profile_sim(self):
-        # The simulation, optimized, as scripts/test.sh runs it (TASK-92.40), extent_store's,
-        # which extent_bucket's mutants run too (TASK-88); others as their tests build.
-        self.mutants({"sweep": SWEEP}, "extent_bucket", "extent_store", "extent_frame")
+        # The simulation, optimized, as scripts/test.sh runs it (TASK-92.40), local_cell's,
+        # which bucket_cell's mutants run too (TASK-88); others as their tests build.
+        self.mutants({"sweep": SWEEP}, "bucket_cell", "local_cell", "extent_frame")
         self.assertEqual(
             [call[:8] for call in self.calls()],
             [
                 [
-                    "-p", "extent_bucket", "--profile", "sim",
-                    "--test-package", "extent_bucket", "--test-package", "extent_store",
+                    "-p", "bucket_cell", "--profile", "sim",
+                    "--test-package", "bucket_cell", "--test-package", "local_cell",
                 ],
-                ["-p", "extent_store", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3"],
+                ["-p", "local_cell", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3"],
                 # Its missed, under Shuttle.
-                ["-p", "extent_store", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3"],
+                ["-p", "local_cell", "--profile", "sim", "--test-tool", "nextest", "--jobs", "3"],
                 [
                     "-p", "extent_frame", "--test-tool", "nextest", "--jobs", "3",
                     "--output", str(self.out / "extent_frame"),
@@ -114,17 +114,17 @@ class Mutants(unittest.TestCase):
         )
 
     def test_a_rerun_keeps_each_passes_report_before_it(self):
-        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "extent_store")
+        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "local_cell")
         again = {"caught": ["c1", "c2", "c3", "m1"], "missed": ["m2"], "status": 2}
         self.assertEqual(
-            self.mutants({"sweep": again, "shuttle": {"missed": ["m2"], "status": 2}}, "extent_store"),
+            self.mutants({"sweep": again, "shuttle": {"missed": ["m2"], "status": 2}}, "local_cell"),
             (
                 0,
-                "extent_store: caught 4, missed 1, timeout 0, unviable 0\n"
-                "extent_store, the missed under Shuttle: caught 0, missed 1, timeout 0, unviable 0\n",
+                "local_cell: caught 4, missed 1, timeout 0, unviable 0\n"
+                "local_cell, the missed under Shuttle: caught 0, missed 1, timeout 0, unviable 0\n",
             ),
         )
-        crate = self.out / "extent_store"
+        crate = self.out / "local_cell"
         self.assertEqual(self.report(crate / "mutants.out")["caught"], ["c1", "c2", "c3", "m1"])
         self.assertEqual(self.report(crate / "mutants.out.old")["caught"], ["c1", "c2", "c3"])
         self.assertEqual(self.report(crate / "shuttle" / "mutants.out"), {"missed": ["m2"]})
@@ -133,11 +133,11 @@ class Mutants(unittest.TestCase):
         )
 
     def test_an_earlier_runs_shuttle_report_is_not_this_ones(self):
-        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "extent_store")
+        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "local_cell")
         every = {"caught": ["c1", "c2", "c3", "m1", "m2"], "status": 0}
         self.assertEqual(
-            self.mutants({"sweep": every}, "extent_store"),
-            (0, "extent_store: caught 5, missed 0, timeout 0, unviable 0\n"),
+            self.mutants({"sweep": every}, "local_cell"),
+            (0, "local_cell: caught 5, missed 0, timeout 0, unviable 0\n"),
         )
         self.assertEqual(len(self.calls()), 1)
 
@@ -151,38 +151,38 @@ class Mutants(unittest.TestCase):
     def test_a_pass_that_failed_fails_the_run(self):
         # A report of a pass that failed is not of every mutant it had: it has no counts.
         self.assertEqual(
-            self.mutants({"sweep": SWEEP, "shuttle": {"status": 101}}, "extent_store"),
+            self.mutants({"sweep": SWEEP, "shuttle": {"status": 101}}, "local_cell"),
             (
                 1,
-                "extent_store: caught 3, missed 2, timeout 1, unviable 1\n"
-                "extent_store, the missed under Shuttle: failed with status 101\n",
+                "local_cell: caught 3, missed 2, timeout 1, unviable 1\n"
+                "local_cell, the missed under Shuttle: failed with status 101\n",
             ),
         )
 
     def test_a_shuttle_pass_that_failed_early_has_no_counts_of_the_earlier_runs(self):
-        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "extent_store")
+        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "local_cell")
         self.assertEqual(
-            self.mutants({"sweep": SWEEP, "shuttle": {"status": 1, "early": True}}, "extent_store"),
+            self.mutants({"sweep": SWEEP, "shuttle": {"status": 1, "early": True}}, "local_cell"),
             (
                 1,
-                "extent_store: caught 3, missed 2, timeout 1, unviable 1\n"
-                "extent_store, the missed under Shuttle: failed with status 1\n",
+                "local_cell: caught 3, missed 2, timeout 1, unviable 1\n"
+                "local_cell, the missed under Shuttle: failed with status 1\n",
             ),
         )
 
     def test_a_sweep_that_failed_early_has_no_shuttle_pass_over_the_earlier_runs_missed(self):
-        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "extent_store")
+        self.mutants({"sweep": SWEEP, "shuttle": SHUTTLE}, "local_cell")
         early = {"status": 1, "early": True}
         self.assertEqual(
-            self.mutants({"sweep": early, "shuttle": SHUTTLE}, "extent_store"),
-            (1, "extent_store: failed with status 1\n"),
+            self.mutants({"sweep": early, "shuttle": SHUTTLE}, "local_cell"),
+            (1, "local_cell: failed with status 1\n"),
         )
         self.assertEqual(len(self.calls()), 1)
 
     def test_a_failed_crate_leaves_the_next_to_run(self):
         self.assertEqual(
-            self.mutants({"sweep": {"status": 4}}, "extent_frame", "extent_bucket"),
-            (1, "extent_frame: failed with status 4\nextent_bucket: failed with status 4\n"),
+            self.mutants({"sweep": {"status": 4}}, "extent_frame", "bucket_cell"),
+            (1, "extent_frame: failed with status 4\nbucket_cell: failed with status 4\n"),
         )
         self.assertEqual(len(self.calls()), 2)
 

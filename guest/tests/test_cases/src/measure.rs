@@ -349,7 +349,8 @@ mod guest {
         }
         // cladefs: what its Fxfs counts of copy-on-write DAX's private pages, if it is mounted
         // (/proc/fs/cladefs/<tag>, the first's).
-        let stats = fs::read_dir("/proc/fs/cladefs").ok().and_then(|mut dir| dir.find_map(Result::ok));
+        let stats =
+            fs::read_dir("/proc/fs/cladefs").ok().and_then(|mut dir| dir.find_map(Result::ok));
         let stats = stats.and_then(|stats| fs::read_to_string(stats.path()).ok());
         for line in stats.as_deref().unwrap_or_default().lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };
@@ -375,7 +376,8 @@ mod guest {
             for line in window.lines() {
                 let Some((name, value)) = line.split_once(' ') else { continue };
                 let value: u64 = value.parse().unwrap_or_else(|_| panic!("window: {line:?}"));
-                let name = if name == "len" { "window".to_owned() } else { format!("window_{name}") };
+                let name =
+                    if name == "len" { "window".to_owned() } else { format!("window_{name}") };
                 *windows.entry(name).or_default() += value;
             }
         }

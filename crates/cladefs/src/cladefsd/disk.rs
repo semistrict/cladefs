@@ -36,7 +36,7 @@
 //!
 //! **Not directory quotas.** A filesystem's quota of a tenant's directory (XFS project quotas,
 //! ext4's) refuses whichever write of the directory's comes past it: a store closing and framing a
-//! segment, which fails the store (`extent_store`'s `Phase::Failed`), or a flush appending a
+//! segment, which fails the store (`local_cell`'s `Phase::Failed`), or a flush appending a
 //! commit's record, rather than the guest's next write, which the daemon refuses before the store
 //! takes any of it. And it is the host's setup, a filesystem's that has them, which the daemon
 //! can't set as tenants are granted.
@@ -199,14 +199,14 @@ impl Disk {
 
     /// Counts it anew: walks its directory, what it takes then, with the writes not done as the
     /// walk began, and those admitted meanwhile, which the walk may not have found. Writes done
-    /// may be held dirty in the stores' page cache (`extent_store::pages`, TASK-433), on no disk
+    /// may be held dirty in the stores' page cache (`local_cell::pages`, TASK-433), on no disk
     /// yet: it writes them back first, after reading what is being written, so that a write done
     /// meanwhile is either counted being written or written back and walked.
     pub(super) fn recount(&self) {
         let _counting = self.counting.lock().unwrap();
         let before = self.used.load(Ordering::SeqCst);
         let writing = self.writing.load(Ordering::SeqCst);
-        if let Err(err) = extent_store::pages::shared().write_back_all() {
+        if let Err(err) = local_cell::pages::shared().write_back_all() {
             log::warn!(
                 "cladefsd: writing back the stores' page cache to count tenant {}'s disk: {err}",
                 base32_id::Short(self.tenant)

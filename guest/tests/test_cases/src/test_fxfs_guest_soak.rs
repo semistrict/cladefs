@@ -457,7 +457,7 @@ mod host {
         fn boot(&self, name: &str, store: &Path, env: &[String]) -> anyhow::Result<Firecracker> {
             let mut vm = Vm::new(VCPUS, MEMORY_MIB)?;
             vm.guest_kernel()?;
-            vm.extent_store_served(
+            vm.cell_served(
                 TAG,
                 store,
                 CAPACITY,
@@ -867,7 +867,7 @@ mod host {
 
         /// The branches whose uploads the repeat's daemons failed, as their logs say: those stores'
         /// uploaders stopped, and their commits fail until they are attached again
-        /// (`extent_store::upload`).
+        /// (`local_cell::upload`).
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
@@ -879,12 +879,12 @@ mod host {
 
         /// The bytes of the bucket's objects.
         fn bucket_bytes(&self) -> anyhow::Result<u64> {
-            use extent_bucket::bucket::Bucket as _;
+            use bucket_cell::bucket::Bucket as _;
             if let Some(dir) = &self.paths.bucket_dir {
                 return du(dir);
             }
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let bucket = extent_bucket::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
+            let bucket = bucket_cell::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
                 .map_err(anyhow::Error::msg)?;
             let objects = runtime
                 .block_on(bucket.list(""))
@@ -1166,7 +1166,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
         /// Only a store whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
-            let log = "ERROR extent_store::upload: cladefs: uploading branch \
+            let log = "ERROR local_cell::upload: cladefs: uploading branch \
                        0/3t/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
                        cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
                        writer::upload\n";
@@ -1295,8 +1295,11 @@ mod guest {
 
     fn mount() {
         fs::create_dir_all(MNT).unwrap();
-        let (source, target, fstype) =
-            (CString::new(TAG).unwrap(), CString::new(MNT).unwrap(), CString::new("cladefs").unwrap());
+        let (source, target, fstype) = (
+            CString::new(TAG).unwrap(),
+            CString::new(MNT).unwrap(),
+            CString::new("cladefs").unwrap(),
+        );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

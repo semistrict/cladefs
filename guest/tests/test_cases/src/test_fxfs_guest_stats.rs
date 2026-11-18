@@ -170,12 +170,11 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
-            let cladefsd = PathBuf::from(
-                std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
-            );
+            let cladefsd =
+                PathBuf::from(std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"));
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store("extents", &store, CAPACITY, crate::common::dax_window(WINDOW)?)?;
+            vm.cell("extents", &store, CAPACITY, crate::common::dax_window(WINDOW)?)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
                 std::env::temp_dir().join(format!("cladefs-stats-{}.vsock", std::process::id()));

@@ -147,18 +147,18 @@ pub(crate) const FAULT: u32 = 11;
 pub(crate) const ACK: u32 = 12;
 /// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
 /// directory at the path the payload holds, nothing there (`EEXIST`)
-/// ([`ExtentStore::fork`](crate::ExtentStore)): a fork the daemon serves, sharing its extents'
+/// ([`OpenCell::fork`](crate::OpenCell)): a fork the daemon serves, sharing its extents'
 /// pages with the store's. cladefs: a new cell of the store's tenant's, its ID the
-/// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
+/// bucket's to give (`bucket_cell::objectid`, TASK-364), which the reply's `args[0]` is. With
 /// [`FORK_QUIESCENT`], no payload, it makes a version of the store's cell instead, a VM
 /// snapshot's, which any number of hosts fork at once and none writes: `EBUSY` unless nothing is
-/// open ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)); the reply's `args[1]`
+/// open ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)); the reply's `args[1]`
 /// is its ID.
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.
 pub(crate) const RESIZED: u32 = 16;
-/// The window's mappings ([`ExtentStore::window_mappings`](crate::ExtentStore::window_mappings)):
+/// The window's mappings ([`OpenCell::window_mappings`](crate::OpenCell::window_mappings)):
 /// the reply's payload, each six little-endian words ([`MAPPING_BYTES`]): its offset in the
 /// window, its length, the extent's branch and sequence and the offset in it, and 0 or
 /// [`MAPPING_ZEROS`]. As many as a window of its size holds, a mapping a
@@ -170,14 +170,14 @@ pub(crate) const MAPPING_BYTES: u64 = 6 * 8;
 // fork, delete and sync stores by path: the control API's now (TASK-43.5), not reused.
 /// cladefs: moves a follower's view to the writer's latest commit, whose number is the reply's
 /// `args[0]`, holding what the commits since the one it was as of held, until [`LET_GO`]
-/// ([`ExtentStore::advance`](crate::ExtentStore::advance)).
+/// ([`OpenCell::advance`](crate::OpenCell::advance)).
 pub(crate) const ADVANCE: u32 = 21;
 /// cladefs: lets go of what a follower's view held of the commits before commit number
-/// `args[0]`, which an [`ADVANCE`] returned ([`ExtentStore::let_go`](crate::ExtentStore::let_go)):
+/// `args[0]`, which an [`ADVANCE`] returned ([`OpenCell::let_go`](crate::OpenCell::let_go)):
 /// the commit named, a let-go served after the next advance lets go of no more.
 pub(crate) const LET_GO: u32 = 22;
 /// cladefs: keeps extent `args[0..2]`, which a follower's view holds, whatever commit it advances
-/// to, until [`UNPIN`] ([`ExtentStore::pin`](crate::ExtentStore::pin)).
+/// to, until [`UNPIN`] ([`OpenCell::pin`](crate::OpenCell::pin)).
 pub(crate) const PIN: u32 = 23;
 /// cladefs: lets go of extent `args[0..2]`, pinned.
 pub(crate) const UNPIN: u32 = 24;
@@ -338,7 +338,7 @@ pub(crate) const STATS_ASK: u32 = 109;
 pub(crate) const STAGE_ACK: u32 = 1 << 0;
 
 /// The most bytes of payload a message carries: a `READ` or `WRITE` of a whole extent, or less.
-pub(crate) const MAX_PAYLOAD: u64 = crate::ExtentStore::MAX_EXTENT;
+pub(crate) const MAX_PAYLOAD: u64 = crate::OpenCell::MAX_EXTENT;
 
 /// cladefs: the most requests a VM process keeps sent and not answered, its replies not yet received
 /// (TASK-79.16): many times what its device's queues and its window's faults have at once. A VM

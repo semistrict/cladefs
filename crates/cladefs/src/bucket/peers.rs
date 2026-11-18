@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: the hosts sharing this host's bucket, which its fetchers ask for the parts they own
-//! before the bucket (TASK-406.2, [`extent_bucket::peer`]), so that a part many of them read comes
+//! before the bucket (TASK-406.2, [`bucket_cell::peer`]), so that a part many of them read comes
 //! from the bucket about once for them all.
 //!
 //! Each part of an object has one owner among them, by rendezvous hashing of its key and number
@@ -19,7 +19,7 @@
 //! API, as hosts come and go. How a peer is reached is a [`Link`]'s: gRPC over TCP, in the daemon
 //! (`cladefsd::peers`).
 
-use extent_bucket::peer::{self, Peer};
+use bucket_cell::peer::{self, Peer};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use std::collections::HashMap;

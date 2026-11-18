@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cladefs::{DaemonConnection, DaemonExtentStore, WindowMapping};
+use cladefs::{CellClient, DaemonConnection, WindowMapping};
 use log::{error, info};
 use zerocopy::FromZeros;
 
@@ -82,7 +82,7 @@ pub struct Device {
     // The store before the window, whose host memory the store's fault thread serves: the store
     // is dropped first.
     // cladefs: none from a follower's reset until it is activated again.
-    store: Option<Arc<DaemonExtentStore>>,
+    store: Option<Arc<CellClient>>,
     window: Option<WindowMemory>,
     /// Whether the store's window is created, which it is on the first activation.
     window_created: bool,
@@ -159,7 +159,7 @@ impl Device {
         let mut config_space = ConfigSpace::new_zeroed();
         config_space.version = VIRTIO_EXTENT_VERSION.to_le();
         config_space.num_request_queues = u32::from(queues).to_le();
-        config_space.block_size = cladefs::ExtentStore::BLOCK_SIZE.to_le();
+        config_space.block_size = cladefs::OpenCell::BLOCK_SIZE.to_le();
         config_space.map_alignment =
             u32::try_from(cladefs::pages::page_size()).expect("a page is small").to_le();
         config_space.max_transfer = MAX_TRANSFER.to_le();
@@ -283,7 +283,7 @@ impl Device {
     }
 
     /// Its store: open, but from a follower's reset until it is activated again.
-    fn store(&self) -> &Arc<DaemonExtentStore> {
+    fn store(&self) -> &Arc<CellClient> {
         self.store.as_ref().expect("the device's store is closed")
     }
 
@@ -480,7 +480,7 @@ fn connect(
 
 /// cladefs: has `following` hear of the commits of the writer of `store`, a follower's, from the
 /// one its view is as of.
-fn hear_commits(store: &DaemonExtentStore, following: &Arc<Following>) {
+fn hear_commits(store: &CellClient, following: &Arc<Following>) {
     let heard = following.clone();
     following.committed(store.on_committed(move |commit| heard.committed(commit)));
 }
@@ -488,7 +488,7 @@ fn hear_commits(store: &DaemonExtentStore, following: &Arc<Following>) {
 /// cladefs: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,
 /// through `notices`, while its driver takes asks; otherwise the store answers at once, with none
 /// of the guest's (TASK-111.4).
-fn hear_stats_asks(store: &DaemonExtentStore, notices: &Arc<Notices>) {
+fn hear_stats_asks(store: &CellClient, notices: &Arc<Notices>) {
     let notices = notices.clone();
     store.on_stats_asked(move |ask| notices.stats.ask(ask));
 }

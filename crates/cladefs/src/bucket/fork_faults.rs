@@ -24,10 +24,10 @@
 
 use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, restart, uploaded};
 use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
-use crate::{Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_bucket::layout::{self, Kind};
-use extent_bucket::object_bucket::ObjectBucket;
-use extent_bucket::{EPOCH_SHIFT, branch};
+use crate::{Errno, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
+use bucket_cell::layout::{self, Kind};
+use bucket_cell::object_bucket::ObjectBucket;
+use bucket_cell::{EPOCH_SHIFT, branch};
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The fencing token of the placement of this host, and of the others.
 const TOKEN: u64 = 1;
 
-pub(super) const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+pub(super) const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 /// What goes wrong in a fork.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,13 +81,13 @@ struct World {
     host: PathBuf,
     bucket: Arc<ObjectBucket>,
     gated: Arc<Gated>,
-    parent: Option<ExtentStore>,
+    parent: Option<OpenCell>,
     branch: crate::CellId,
     /// The child of the fork.
     child: crate::CellId,
     /// The parent's extents, with their data.
     held: Vec<(ExtentId, Vec<u8>)>,
-    other: ExtentStore,
+    other: OpenCell,
     other_held: Vec<(ExtentId, Vec<u8>)>,
     /// Whether the host died.
     dead: Arc<AtomicBool>,
@@ -97,7 +97,7 @@ struct World {
 
 /// `store`'s next extents' IDs, `count` of them, as its guest mints them: never below its writer's
 /// floor, whatever it minted before.
-fn mint(store: &ExtentStore, count: u64) -> Vec<ExtentId> {
+fn mint(store: &OpenCell, count: u64) -> Vec<ExtentId> {
     let info = store.info().unwrap();
     let first = info.next_sequence.max(info.sequence_floor);
     assert!(first >= 1 << EPOCH_SHIFT, "a guest mints from its writer's floor: {info:?}");
@@ -106,25 +106,25 @@ fn mint(store: &ExtentStore, count: u64) -> Vec<ExtentId> {
         .collect()
 }
 
-fn write(store: &ExtentStore, extent: ExtentId, data: &[u8]) {
+fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
     store.write(extent, 0, &[VolatileSlice::from(data)]).unwrap();
 }
 
-pub(super) fn read(store: &ExtentStore, extent: ExtentId, len: usize) -> Vec<u8> {
+pub(super) fn read(store: &OpenCell, extent: ExtentId, len: usize) -> Vec<u8> {
     let mut data = vec![0; len];
     store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     data
 }
 
 /// Options of a store of this host's or another's.
-pub(super) fn options() -> extent_store::upload::Options {
-    extent_store::upload::Options { token: TOKEN, ..idle() }
+pub(super) fn options() -> local_cell::upload::Options {
+    local_cell::upload::Options { token: TOKEN, ..idle() }
 }
 
 /// Mints `extents` of `store`'s, of those lengths, with data from `seed`, and commits them, the
 /// root `root`: returns them.
 pub(super) fn commit(
-    store: &ExtentStore,
+    store: &OpenCell,
     seed: u8,
     lens: &[usize],
     root: &[u8],
@@ -181,7 +181,7 @@ impl World {
             gated,
             parent: Some(parent),
             branch,
-            child: crate::host_store::new_alone(),
+            child: crate::host_cell::new_alone(),
             held,
             other,
             other_held,
@@ -226,7 +226,7 @@ impl World {
                     {
                         taken.store(true, Ordering::SeqCst);
                         let taking =
-                            extent_bucket::head::take(&*bucket, child, rand::random(), TOKEN);
+                            bucket_cell::head::take(&*bucket, child, rand::random(), TOKEN);
                         assert_eq!(block_on(taking).map(|held| held.head.epoch), Ok(1));
                     }
                 })
@@ -256,20 +256,20 @@ impl World {
     /// delete nothing: a dead cell's pass retires the references its parent's cell keeps the fork
     /// version for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(&self, case: &str) {
-        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
-        let collected = extent_bucket::testing::collect_until_quiet(&*self.bucket, &options);
+        let options = bucket_cell::collector::Options { compact_below: 0.0, grace: 0 };
+        let collected = bucket_cell::testing::collect_until_quiet(&*self.bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
     /// Opens the store at `path`, and takes its branch.
-    fn open(&self, path: &Path) -> Result<ExtentStore, String> {
+    fn open(&self, path: &Path) -> Result<OpenCell, String> {
         naming(path, &self.bucket);
         reopened(path, options()).map_err(|err| err.to_string())
     }
 
     /// Whether `store`, a fork of the parent, reads what the parent held at the fork, whose root
     /// was `root`, and goes on committing, its writer's floor its own.
-    fn check_fork(&self, store: &ExtentStore, root: &[u8], case: &str) {
+    fn check_fork(&self, store: &OpenCell, root: &[u8], case: &str) {
         assert_eq!(store.root(), Ok(root.to_vec()), "{case}");
         for (extent, data) in &self.held {
             assert!(read(store, *extent, data.len()) == *data, "{case}: {extent:?} of a fork");
@@ -281,19 +281,19 @@ impl World {
 
     /// Deletes the fork at `path`, as the control API does.
     fn delete(&self, path: &Path, case: &str) {
-        let deleted = ExtentStore::delete(path, Some(&self.bucket));
+        let deleted = OpenCell::delete(path, Some(&self.bucket));
         assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting it");
         assert!(!path.exists(), "{case}: it is there still");
     }
 
     /// The child's record, if it has one.
-    fn record(&self, child: crate::CellId) -> Option<extent_bucket::record::Record> {
+    fn record(&self, child: crate::CellId) -> Option<bucket_cell::record::Record> {
         block_on(branch::record(&*self.bucket, child)).unwrap()
     }
 
     /// The branches live in the bucket.
     fn live(&self) -> Vec<crate::CellId> {
-        block_on(extent_bucket::testing::live(&*self.bucket)).unwrap().into_keys().collect()
+        block_on(bucket_cell::testing::live(&*self.bucket)).unwrap().into_keys().collect()
     }
 
     /// The branches live in the bucket that no store holds, of those `named`: what a fork whose
@@ -313,7 +313,7 @@ impl World {
             self.child,
             rand::random(),
             u64::MAX,
-            &extent_bucket::keys::testing::host_kms(),
+            &bucket_cell::keys::testing::host_kms(),
         ));
         assert_eq!(deleted, Ok(()), "{case}: deleting the orphan");
     }
@@ -391,7 +391,7 @@ impl World {
             children.push(path.clone());
             unchecked.push((path.clone(), b"later"));
         }
-        let retried = crate::host_store::new_alone();
+        let retried = crate::host_cell::new_alone();
         assert_eq!(
             parent.fork_to(self.path("retried"), retried).map_err(|err| err.to_string()),
             Ok(()),
@@ -408,7 +408,7 @@ impl World {
         let mut live = self.live();
         live.sort();
         let mut named = vec![self.branch, self.other.branch()];
-        named.extend(children.iter().map(|child| ExtentStore::open(child).unwrap().branch()));
+        named.extend(children.iter().map(|child| OpenCell::open(child).unwrap().branch()));
         if taken {
             named.push(self.child);
         }
@@ -421,7 +421,7 @@ impl World {
         assert_eq!(self.other.wait_uploaded(), Ok(()), "{case}: another's branch");
         if taken {
             let writer =
-                extent_bucket::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
+                bucket_cell::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
             assert_eq!(block_on(writer).map(drop), Ok(()), "{case}: the branch that took the ID");
         }
 
@@ -432,7 +432,7 @@ impl World {
         drop(parent);
         self.delete(&parent_path, case);
         self.collect(case);
-        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
+        let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
         let kept = |branch| branch == self.other.branch() || taken && branch == self.child;
         let leaked: Vec<_> = (keys.into_iter().map(|meta| meta.key))
             .filter(|key| match layout::kind(key) {
@@ -660,7 +660,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let parent = kept_in(&moved, (1 << 30, Some(world.branch)), &world.bucket, options()).unwrap();
     let reopen = moved.clone();
     assert!(world.record(world.child).is_some_and(|record| !record.deleted), "no orphan");
-    let state = block_on(extent_bucket::recover(&*world.bucket, world.branch, None));
+    let state = block_on(bucket_cell::recover(&*world.bucket, world.branch, None));
     let key = state.unwrap().state.extents[&large].key.clone();
     assert!(matches!(layout::kind(&key), Kind::Extent { .. }), "{key}");
     for (extent, _) in &world.held {
@@ -670,7 +670,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     assert_eq!(parent.wait_uploaded(), Ok(()));
     drop(parent);
     let stored = || {
-        let listed = block_on(extent_bucket::Bucket::list(&*world.bucket, "")).unwrap();
+        let listed = block_on(bucket_cell::Bucket::list(&*world.bucket, "")).unwrap();
         listed.iter().any(|meta| meta.key == key)
     };
     world.collect("orphaned");
@@ -685,7 +685,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
             world.child,
             9,
             u64::MAX,
-            &extent_bucket::keys::testing::host_kms()
+            &bucket_cell::keys::testing::host_kms()
         )),
         Ok(())
     );

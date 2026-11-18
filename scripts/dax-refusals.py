@@ -24,7 +24,7 @@ any.
 import re
 import sys
 
-# The daemon's line for a store a window refused (`ExtentStore::refused`), with what the window
+# The daemon's line for a store a window refused (`OpenCell::refused`), with what the window
 # maps at the page and the extent's state in the store: not the line of what a refusal met later.
 REFUSED = re.compile(r"cladefsd: a store at DAX window offset (0x[0-9a-f]+) refused")
 

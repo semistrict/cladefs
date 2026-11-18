@@ -142,9 +142,9 @@ mod test_fs_bench;
 #[cfg(any(feature = "host", target_os = "linux"))]
 mod test_ext4_loop_persists;
 #[cfg(any(feature = "host", target_os = "linux"))]
-use test_fs_bench::{Backend as BenchBackend, TestFsBench};
-#[cfg(any(feature = "host", target_os = "linux"))]
 use test_ext4_loop_persists::TestExt4LoopPersists;
+#[cfg(any(feature = "host", target_os = "linux"))]
+use test_fs_bench::{Backend as BenchBackend, TestFsBench};
 
 pub enum TestOutcome {
     Pass,
@@ -1017,9 +1017,9 @@ pub mod rootfs;
 mod shared_volumes;
 
 #[cfg(feature = "host")]
-pub mod vm;
-#[cfg(feature = "host")]
 pub mod loop_device;
+#[cfg(feature = "host")]
+pub mod vm;
 
 #[cfg(all(feature = "guest", target_os = "linux"))]
 pub mod guest_init;
@@ -1260,7 +1260,12 @@ mod tests {
         assert_eq!(joined, sorted_whole);
         assert_eq!(names_of("1/1".parse::<Shard>().unwrap().of(nightly())), whole);
         assert_eq!(
-            names_of("2/3".parse::<Shard>().unwrap().of(select(test_cases(), &[], &[Tag::PerfDensity]).unwrap())),
+            names_of(
+                "2/3"
+                    .parse::<Shard>()
+                    .unwrap()
+                    .of(select(test_cases(), &[], &[Tag::PerfDensity]).unwrap())
+            ),
             vec!["fxfs-guest-pgbench-dax-density"]
         );
     }

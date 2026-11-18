@@ -14,14 +14,14 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
-use cladefs::{DaemonExtentStore, Errno, ExtentStore};
+use cladefs::{CellClient, Errno, OpenCell};
 use virtio_extent::protocol::*;
 use virtio_extent::{
     BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Notices, WindowVm, handle,
 };
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 const RESPONSE: usize = size_of::<Response>();
 
 /// The bounds of a device of the test's stores, which have no window (TASK-470).
@@ -86,13 +86,13 @@ fn daemon() -> TestDir {
 }
 
 /// A store of `capacity` bytes, which a daemon of the test's serves.
-fn store_of(capacity: u64) -> (DaemonExtentStore, TestDir) {
+fn store_of(capacity: u64) -> (CellClient, TestDir) {
     let dir = daemon();
-    let store = DaemonExtentStore::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
+    let store = CellClient::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
     (store, dir)
 }
 
-fn store() -> (DaemonExtentStore, TestDir) {
+fn store() -> (CellClient, TestDir) {
     store_of(1 << 20)
 }
 
@@ -139,12 +139,7 @@ fn buffers(readable: &mut [u8], written: &mut [u8], split: usize) -> Buffers {
 /// Serves a request of `readable` bytes, with `writable` bytes for the device to write, the
 /// response included, split into descriptors of at most `split` bytes; returns how much the device
 /// says it wrote, and the `writable` bytes it was given.
-fn serve(
-    store: &DaemonExtentStore,
-    readable: &[u8],
-    writable: usize,
-    split: usize,
-) -> (usize, Vec<u8>) {
+fn serve(store: &CellClient, readable: &[u8], writable: usize, split: usize) -> (usize, Vec<u8>) {
     let mut readable = readable.to_vec();
     let mut written = vec![0xa5; writable];
     let buffers = buffers(&mut readable, &mut written, split);
@@ -157,7 +152,7 @@ fn serve(
 /// Serves a request as [`serve`] does, and returns what the device wrote, the response apart, and
 /// the response's status.
 fn request_split(
-    store: &DaemonExtentStore,
+    store: &CellClient,
     readable: &[u8],
     writable: usize,
     split: usize,
@@ -169,7 +164,7 @@ fn request_split(
     (written, u32::from_le(response.status))
 }
 
-fn request(store: &DaemonExtentStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
+fn request(store: &CellClient, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
     request_split(store, readable, writable, usize::MAX)
 }
 
@@ -177,7 +172,7 @@ fn read<T: FromBytes>(bytes: &[u8]) -> T {
     T::read_from_prefix(bytes).unwrap().0
 }
 
-fn io(store: &DaemonExtentStore, sequence: u64, offset: u64, len: usize) -> IoArgs {
+fn io(store: &CellClient, sequence: u64, offset: u64, len: usize) -> IoArgs {
     IoArgs {
         id: ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() },
         offset: offset.to_le(),
@@ -376,7 +371,7 @@ fn roots_and_info() {
 #[test]
 fn follows_a_writer() {
     let (store, dir) = store();
-    let follower = DaemonExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
+    let follower = CellClient::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
     let (heard, commits) = mpsc::channel();
     follower.on_committed(move |committed| {
         // Unheard once the test stops listening.

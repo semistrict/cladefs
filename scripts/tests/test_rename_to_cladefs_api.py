@@ -85,7 +85,7 @@ class Filter(unittest.TestCase):
 
     def test_the_device_and_the_domain_keep_their_names(self):
         kept = ("devices::virtio::extent::Extent, ExtentState, the snapshot's extent_devices, "
-                "extent_store::ExtentId, virtio_extent, the extent store device, \"extent\", "
+                "local_cell::ExtentId, virtio_extent, the extent store device, \"extent\", "
                 "<snapshot>.extent-<id>, CLADEFSD_BUCKET\n")
         self.assertEqual(filtered(kept), kept)
 

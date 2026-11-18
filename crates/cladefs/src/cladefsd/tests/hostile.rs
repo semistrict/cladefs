@@ -47,10 +47,10 @@
 //! ([`a_tenant_filling_its_disk_leaves_others_committing`], TASK-94).
 //! `crates/cladefs/mutants.sh` puts back a bug of each kind it exists to find, and sees it fail.
 
-use super::super::client::DaemonExtentStore;
+use super::super::cells::table;
+use super::super::client::CellClient;
 use super::super::disk;
 use super::super::server::{QUEUED_CREDIT, Tenant, connections, serve, serve_tenant};
-use super::super::stores::table;
 use super::super::wire::*;
 use super::{BLOCK, LastWords, control, host, memory, read, within, write};
 use crate::heap::{CASE, LIMIT, held, peak_while};
@@ -811,7 +811,7 @@ enum Page {
 /// Alice: a correct VM process, of a granted tenant, beside mallory's; her store, her window in
 /// this process's memory, which copies on write, and her model of both.
 struct Alice {
-    store: DaemonExtentStore,
+    store: CellClient,
     window: NonNull<u8>,
     branch: u64,
     /// The sequence of her next extent.
@@ -848,7 +848,7 @@ impl Alice {
     /// committed.
     fn new(socket: &Path, path: &Path) -> Self {
         let ps = page_size() as usize;
-        let store = DaemonExtentStore::connect(socket, path, 1 << 27).unwrap();
+        let store = CellClient::connect(socket, path, 1 << 27).unwrap();
         let window = memory(ALICE_PAGES);
         // SAFETY: The memory is hers, and outlives the store, as it is never unmapped.
         unsafe {
@@ -1783,7 +1783,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     // Alice's store she closed, which mallory names every way it can.
     let archive = alices.join("archive");
     let archived = {
-        let store = DaemonExtentStore::connect(&alice_socket, &archive, STORE_BYTES).unwrap();
+        let store = CellClient::connect(&alice_socket, &archive, STORE_BYTES).unwrap();
         let extent = ExtentId { branch: store.branch(), sequence: 1 };
         write(&store, extent, 0, &marked(ALICE_MARK, 0, 4 * BLOCK)).unwrap();
         store.commit(Some(b"archived")).unwrap();
@@ -1791,14 +1791,13 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     };
     // Bob's, the default tenant's, which waits.
     let bob_path = dir.path().join("bob");
-    let bob = DaemonExtentStore::connect(&bob_socket, &bob_path, STORE_BYTES).unwrap();
+    let bob = CellClient::connect(&bob_socket, &bob_path, STORE_BYTES).unwrap();
     let bobs = ExtentId { branch: bob.branch(), sequence: 1 };
     write(&bob, bobs, 0, &marked(BOB_MARK, 1, BLOCK)).unwrap();
     bob.commit(None).unwrap();
     // A snapshot in the bucket, of a branch mallory's VM manager makes a version of in its directory.
     // Its extents a MiB each, which mallory's floods of page-ins page in (TASK-149.34).
-    let given =
-        DaemonExtentStore::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
+    let given = CellClient::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
     let given_branch = given.branch();
     for sequence in 1..=GIVEN_EXTENTS {
         let extent = ExtentId { branch: given_branch, sequence };
@@ -1808,7 +1807,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let given_version = given.make_version().unwrap();
     drop(given);
     let shared = (given_version.version, true);
-    control(super::super::stores::share_version(dir.path().join("given"), shared.0, shared.1))
+    control(super::super::cells::share_version(dir.path().join("given"), shared.0, shared.1))
         .unwrap();
 
     // Alice, on a thread of her own, her guest's, doing what each case asks of her.
@@ -1957,7 +1956,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             // That work: their logs, branches and segments' tails, tens of KiB; and their
             // extents' holes, zeros a commit seals with them, admitted for no write. A segment
             // holding them is framed in a copy, compressed, where they take nothing, unless
-            // compressing it saves under an eighth of it (`extent_store`'s `IN_PLACE_SAVING`),
+            // compressing it saves under an eighth of it (`local_cell`'s `IN_PLACE_SAVING`),
             // framed in place, raw: its holes under an eighth of it, a seventh of the rest of it,
             // written and admitted; under 4/7 MiB of the case's `FILL_ROOM` (TASK-343).
             let (counted, _) = disk::count(Some(MALLORY)).unwrap();
@@ -1986,7 +1985,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 .collect();
             named.sort();
             for path in named {
-                let opened = DaemonExtentStore::connect(&mallory_socket, &path, STORE_BYTES);
+                let opened = CellClient::connect(&mallory_socket, &path, STORE_BYTES);
                 let errno = opened.map(drop).err().and_then(|error| error.errno());
                 prop_assert_ne!(errno, Some(Errno::EBUSY), "{} stayed held", path.display());
             }
@@ -1997,21 +1996,21 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             let wrote: BTreeSet<&PathBuf> =
                 seen.iter().filter_map(|seen| seen.wrote.as_ref()).collect();
             for path in wrote {
-                let reopened = DaemonExtentStore::connect(&mallory_socket, path, STORE_BYTES)
+                let reopened = CellClient::connect(&mallory_socket, path, STORE_BYTES)
                     .map_err(|error| error.to_string())
                     .map(|store| store.commit(None));
                 prop_assert_eq!(reopened, Ok(Ok(())), "{} opened again", path.display());
             }
             // And the daemon serves on.
             let after = vms.join(format!("{case}-after"));
-            let after = DaemonExtentStore::connect(&mallory_socket, &after, STORE_BYTES);
+            let after = CellClient::connect(&mallory_socket, &after, STORE_BYTES);
             prop_assert_eq!(after.map(drop).map_err(|error| error.to_string()), Ok(()));
 
             // Nothing came into the others' directories, nor went.
             prop_assert_eq!(listing(&alices), alices_listed.clone());
             prop_assert_eq!(listing(dir.path()), root_listed.clone());
             // Alice's store she closed holds what she wrote; bob's serves.
-            let reopened = DaemonExtentStore::connect(&alice_socket, &archive, STORE_BYTES);
+            let reopened = CellClient::connect(&alice_socket, &archive, STORE_BYTES);
             let reopened = reopened.map_err(|error| error.to_string());
             let archived_bytes = reopened.as_ref().map(|store| read(store, archived, 0, 4 * BLOCK));
             prop_assert_eq!(archived_bytes, Ok(Ok(marked(ALICE_MARK, 0, 4 * BLOCK))));
@@ -2071,7 +2070,7 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     let tenant = Tenant::new(1, &vms).unwrap();
     std::thread::spawn(move || serve_tenant(listener, tenant));
-    let store = DaemonExtentStore::connect(&socket, vms.join("store"), 1 << 26).unwrap();
+    let store = CellClient::connect(&socket, vms.join("store"), 1 << 26).unwrap();
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
     write(&store, extent(1), 0, &super::pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -2220,12 +2219,12 @@ fn what_requests_hold_is_within_the_credit() {
 /// of a MiB, the snapshot's version of another host's, all in the bucket alone, whose reads are held.
 #[test]
 fn page_ins_in_flight_are_bounded() {
-    use crate::{ExtentStore, VolatileSlice};
+    use crate::{OpenCell, VolatileSlice};
     const EXTENTS: u64 = 256;
     const MIB: u64 = 1 << 20;
     host();
     let gated = Arc::new(super::GatedReads::new());
-    super::super::stores::use_bucket(extent_bucket::object_bucket::ObjectBucket::new(
+    super::super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
         gated.clone(),
         "branches",
     ));
@@ -2237,7 +2236,7 @@ fn page_ins_in_flight_are_bounded() {
     // alone.
     let path = dir.path().join("store");
     let branch = {
-        let store = ExtentStore::create(&path, 1 << 30).unwrap();
+        let store = OpenCell::create(&path, 1 << 30).unwrap();
         let branch = store.branch();
         for sequence in 1..=EXTENTS {
             let data = super::pattern(sequence as u8, MIB as usize);
@@ -2252,13 +2251,13 @@ fn page_ins_in_flight_are_bounded() {
         store.commit(None).unwrap();
         branch
     };
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 30).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 30).unwrap();
     let version = store.make_version().unwrap();
     drop(store);
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
     let restored = elsewhere.join("store");
-    let forked = DaemonExtentStore::connect_forked(&socket, &restored, version, 1 << 30);
+    let forked = CellClient::connect_forked(&socket, &restored, version, 1 << 30);
     drop(forked.unwrap());
 
     let (sender, receiver, _stream, _) = super::raw_connection(&socket, &restored, 1 << 30);
@@ -2532,7 +2531,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
                 (msocket.clone(), mstores.join(format!("store-{n}")), start.clone());
             std::thread::spawn(move || {
                 // Its capacity bounds what it writes without a limit, 512 MiB in all.
-                let store = DaemonExtentStore::connect(&socket, &path, 64 * MIB);
+                let store = CellClient::connect(&socket, &path, 64 * MIB);
                 start.wait();
                 let store = store.unwrap();
                 let mut written = 0;
@@ -2547,7 +2546,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
             })
         })
         .collect();
-    let alice = DaemonExtentStore::connect(&asocket, astores.join("store"), 1 << 30).unwrap();
+    let alice = CellClient::connect(&asocket, astores.join("store"), 1 << 30).unwrap();
     start.wait();
     let alices: Vec<_> = (1..=ALICES)
         .map(|sequence| {

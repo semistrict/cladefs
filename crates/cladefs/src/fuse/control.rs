@@ -16,8 +16,8 @@ use crate::cladefsd::control::{channel, errno, saying};
 use crate::error::{Errno, Error};
 use crate::{BranchOf, CellId, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
-use extent_bucket::cell::{self, Kind};
-use extent_bucket::keys;
+use bucket_cell::cell::{self, Kind};
+use bucket_cell::keys;
 use proto::mount_client::MountClient;
 use proto::mount_server::MountServer;
 use proto::*;
@@ -88,7 +88,7 @@ struct Control {
 /// (TASK-475.3): while the mount has a store, a VM process opening it, or the daemon's control API
 /// working on it, fails with `EBUSY` at once. Taken before a store opens, let go once it is
 /// detached, written back and closed, or failed to attach.
-type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::stores::MountHold>>>;
+type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::cells::MountHold>>>;
 
 /// Opens the store at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]): `open`
 /// opens it, given the hold, and keeps the hold in `holds` if it opens.
@@ -97,7 +97,7 @@ fn held_open(
     path: &Path,
     open: impl FnOnce() -> Result<Filesystem, Error>,
 ) -> Result<Filesystem, Error> {
-    let hold = crate::cladefsd::stores::hold_mounted(path).map_err(|errno| {
+    let hold = crate::cladefsd::cells::hold_mounted(path).map_err(|errno| {
         Error::new(
             anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
         )
@@ -195,7 +195,7 @@ impl Control {
             return Err(err);
         }
         // Its branch's ID, the bucket's to give if new (TASK-364), as its description says.
-        Ok(extent_store::host_branch(&opened).map_err(Error::new)?.id)
+        Ok(local_cell::host_branch(&opened).map_err(Error::new)?.id)
     }
 }
 
@@ -217,7 +217,7 @@ impl proto::mount_server::Mount for Control {
             0 => {
                 let url = self.stores.bucket.clone();
                 let made = tokio::task::spawn_blocking(move || {
-                    crate::host_store::new_cell(&url, tenant).map_err(Error::new)
+                    crate::host_cell::new_cell(&url, tenant).map_err(Error::new)
                 });
                 made.await.map_err(|err| failed(Error::new(err)))?.map_err(failed)?
             }
@@ -239,10 +239,10 @@ impl proto::mount_server::Mount for Control {
             let attached = async {
                 let url = control.stores.bucket.clone();
                 let held = tokio::task::spawn_blocking(move || {
-                    let bucket = crate::host_store::bucket(&url).map_err(Error::new)?;
+                    let bucket = crate::host_cell::bucket(&url).map_err(Error::new)?;
                     let placement = match token {
                         Some(token) => token,
-                        None => crate::host_store::token().map_err(Error::new)?,
+                        None => crate::host_cell::token().map_err(Error::new)?,
                     };
                     // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is encrypted
                     // (TASK-411.3, TASK-411.28).
@@ -264,9 +264,9 @@ impl proto::mount_server::Mount for Control {
                             }
                         };
                         drop(keys::held(&kms, cell, object.clone(), kek));
-                        Ok::<_, extent_bucket::Error>((held, object))
+                        Ok::<_, bucket_cell::Error>((held, object))
                     };
-                    let held = extent_store::upload::block_on(holding).map_err(Error::new)?;
+                    let held = local_cell::upload::block_on(holding).map_err(Error::new)?;
                     let (_, object) = held.map_err(|err| {
                         let errno = cell_errno(&err);
                         Error::new(anyhow::Error::new(err).context(errno))
@@ -342,7 +342,7 @@ impl proto::mount_server::Mount for Control {
                     let shown = shown.iter().find(|attached| attached.name == path);
                     let branch = shown.map_or(0, |attached| {
                         let store = dir.join(&attached.name);
-                        match extent_store::host_branch(&store) {
+                        match local_cell::host_branch(&store) {
                             Ok(branch) => branch.id,
                             Err(err) => {
                                 log::error!("fuse: the branch of {}: {err:#}", store.display());
@@ -362,8 +362,8 @@ impl proto::mount_server::Mount for Control {
 
 /// The errno a failure to hold a cell says, as the extent daemon's API has it: `ENOENT` for a cell
 /// the bucket has none of, `ESTALE` for one a later placement holds.
-fn cell_errno(err: &extent_bucket::Error) -> Errno {
-    let failure = extent_store::upload::Failure::Bucket(err.clone());
+fn cell_errno(err: &bucket_cell::Error) -> Errno {
+    let failure = local_cell::upload::Failure::Bucket(err.clone());
     crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
 }
 

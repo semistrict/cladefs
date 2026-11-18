@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! What serving the device's requests asks of its backend, its store: on Linux, cladefs's
-//! `DaemonExtentStore`, the device's connection to the extent daemon; a fake one in tests.
+//! `CellClient`, the device's connection to the extent daemon; a fake one in tests.
 
 use std::future::Future;
 
@@ -12,7 +12,7 @@ use cladefs::{
 };
 
 /// The store a device's requests are served with ([`handle`](crate::handle)), its backend: each
-/// method one of the device's requests, as cladefs's `DaemonExtentStore` serves it, which its
+/// method one of the device's requests, as cladefs's `CellClient` serves it, which its
 /// documentation describes. Errors are the request's status.
 pub trait Backend: Send + Sync {
     /// The branch the guest mints extents of.
@@ -92,13 +92,13 @@ pub trait Backend: Send + Sync {
 }
 
 #[cfg(target_os = "linux")]
-impl Backend for cladefs::DaemonExtentStore {
+impl Backend for cladefs::CellClient {
     fn branch(&self) -> u64 {
-        cladefs::DaemonExtentStore::branch(self)
+        cladefs::CellClient::branch(self)
     }
 
     fn copies_on_write(&self) -> bool {
-        cladefs::DaemonExtentStore::copies_on_write(self)
+        cladefs::CellClient::copies_on_write(self)
     }
 
     fn read(
@@ -143,7 +143,7 @@ impl Backend for cladefs::DaemonExtentStore {
     }
 
     fn prefault(&self, window_offset: u64, len: u64) {
-        cladefs::DaemonExtentStore::prefault(self, window_offset, len);
+        cladefs::CellClient::prefault(self, window_offset, len);
     }
 
     fn unmap(

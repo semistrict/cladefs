@@ -76,7 +76,7 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let window =
                 if self.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
-            vm.extent_store("extents", &store, 1 << 30, window)?;
+            vm.cell("extents", &store, 1 << 30, window)?;
             vm.env(&host_os_env);
             vm.env(&only_env);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)

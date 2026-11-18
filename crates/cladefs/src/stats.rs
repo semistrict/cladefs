@@ -37,7 +37,7 @@ pub struct Stats {
     pub read_stored_bytes: u64,
     /// Units of boot profiles read into the extent cache ahead of forks, once read.
     pub prefetches: u64,
-    /// The parts of extents stored compressed decompressed (`extent_store::unpacks`).
+    /// The parts of extents stored compressed decompressed (`local_cell::unpacks`).
     pub unpacks: u64,
     /// The changes to their DAX windows the extent daemon sent its VM processes, which they made
     /// (`cladefsd::client`'s stage operations: maps, unmaps, private pages), as they told it
@@ -55,7 +55,7 @@ pub struct Stats {
     /// Of those, waiting for object storage: for the upload of a durable commit, or for the
     /// uploads to come within the lag an ordered one allows.
     pub commit_wait_ns: u64,
-    /// The segments stores closed and framed (`extent_store::segment_closes`).
+    /// The segments stores closed and framed (`local_cell::segment_closes`).
     pub segment_closes: u64,
     /// The nanoseconds closing them took.
     pub segment_close_ns: u64,
@@ -184,15 +184,15 @@ pub fn stats() -> Stats {
         read_bytes: count(Counter::ReadBytes),
         read_stored_bytes: count(Counter::ReadStoredBytes),
         prefetches: count(Counter::Prefetches),
-        unpacks: extent_store::unpacks(),
+        unpacks: local_cell::unpacks(),
         stage_ops: count(Counter::StageOps),
         stage_ns: count(Counter::StageNs),
         commits: count(Counter::Commits),
         commit_ns: count(Counter::CommitNs),
         commit_store_ns: count(Counter::CommitStoreNs),
         commit_wait_ns: count(Counter::CommitWaitNs),
-        segment_closes: extent_store::segment_closes().0,
-        segment_close_ns: extent_store::segment_closes().1,
+        segment_closes: local_cell::segment_closes().0,
+        segment_close_ns: local_cell::segment_closes().1,
         stage_maps: count(Counter::StageMaps),
         stage_map_bytes: count(Counter::StageMapBytes),
         stage_overwrites: count(Counter::StageOverwrites),

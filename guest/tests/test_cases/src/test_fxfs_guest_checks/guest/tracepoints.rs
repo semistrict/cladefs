@@ -47,7 +47,8 @@ impl Trace {
     /// fs/cladefs's events, every one, on, the trace emptied: tracefs mounted first, if it isn't.
     fn new() -> Self {
         if !std::path::Path::new(&format!("{TRACING}/events")).exists() {
-            let (source, target) = (CString::new("tracefs").unwrap(), CString::new(TRACING).unwrap());
+            let (source, target) =
+                (CString::new("tracefs").unwrap(), CString::new(TRACING).unwrap());
             let ret = unsafe {
                 libc::mount(source.as_ptr(), target.as_ptr(), source.as_ptr(), 0, std::ptr::null())
             };
@@ -156,13 +157,12 @@ fn check_fsync(events: &[Event], ino: u64, len: i64, dax: bool) {
     assert_eq!(seals % 2, 1, "a seal begun with an even count: {begin:?}");
     let end = next(events, &mut at, "the seal's end", |e| e.name == "cladefs_seal_end");
     assert_eq!(end.number("seals"), seals + 1, "{end:?}");
-    let fsync_end = next(events, &mut at, "fsync end", |e| e.name == "cladefs_fsync_end" && ino_is(e));
+    let fsync_end =
+        next(events, &mut at, "fsync end", |e| e.name == "cladefs_fsync_end" && ino_is(e));
     assert_eq!(fsync_end.number("ret"), 0, "{fsync_end:?}");
     // What the fsync wrote, the seals in it sealed.
-    let sealed: i64 = (events.iter())
-        .filter(|e| e.name == "cladefs_seal_end")
-        .map(|e| e.number("bytes"))
-        .sum();
+    let sealed: i64 =
+        (events.iter()).filter(|e| e.name == "cladefs_seal_end").map(|e| e.number("bytes")).sum();
     assert!(sealed >= len, "the fsync's seals sealed {sealed} bytes, of {len} written");
 }
 

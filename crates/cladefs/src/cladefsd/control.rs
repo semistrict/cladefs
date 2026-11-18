@@ -5,17 +5,17 @@
 //! The daemon's control API (TASK-43.3): gRPC over a Unix socket, for the host's VM manager, which
 //! launches the VMMs. Its calls and their errors are `proto/cladefs/cladefsd/v1/cladefsd.proto`'s.
 //!
-//! The store operations it serves are futures ([`super::stores`], TASK-43.6): their waits, for
+//! The store operations it serves are futures ([`super::cells`], TASK-43.6): their waits, for
 //! uploads, guests' answers, and stores to be let go, hold no thread, and their stores' I/O runs on
 //! the runtime's blocking threads, so that many calls waiting, syncs while object storage is slow,
 //! keep no other call waiting.
 
+use super::cells;
 use super::disk;
 use super::grants::Grants;
 use super::memory;
-use super::stores;
 use crate::Errno;
-use extent_bucket::cell::Kind;
+use bucket_cell::cell::Kind;
 use proto::cladefsd_client::CladefsdClient;
 use proto::cladefsd_server::{Cladefsd, CladefsdServer};
 use proto::*;
@@ -240,8 +240,8 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
 
 /// The reply to a call that did, or failed with an errno.
 /// What StatStore says of a store that is and holds `state`.
-fn stat_response(state: stores::StoreState) -> StatStoreResponse {
-    let upload = state.upload.unwrap_or(extent_store::upload::UploadStatus {
+fn stat_response(state: cells::CellState) -> StatStoreResponse {
+    let upload = state.upload.unwrap_or(local_cell::upload::UploadStatus {
         taking: None,
         uploaded: 0,
         pending_bytes: 0,
@@ -308,7 +308,7 @@ impl Control {
     /// processes write no store of it (`Tenant::reaches`), and its restores are of their own.
     fn new_cell_at(&self, path: &Path, tenant: u64) -> Result<u64, Status> {
         match self.grants.tenant_at(path) {
-            Some(granted) if tenant == crate::host_store::DEFAULT_TENANT || tenant == granted => {
+            Some(granted) if tenant == crate::host_cell::DEFAULT_TENANT || tenant == granted => {
                 Ok(granted)
             }
             Some(_) => Err(status(Errno::EPERM)),
@@ -337,7 +337,7 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let branch = crate::CellId { tenant: tenant, id: branch };
-        let made = stores::create(store, capacity, branch, (token, kind)).await;
+        let made = cells::create(store, capacity, branch, (token, kind)).await;
         reply(made.map(|made| CreateStoreResponse {
             branch: made.id,
             tenant: made.tenant,
@@ -354,7 +354,7 @@ impl Cladefsd for Control {
         let (store, image) = (path(store)?, path(image)?);
         let reference = Some(reference).filter(|reference| !reference.is_empty());
         let tenant = self.new_cell_at(&store, tenant)?;
-        let made = stores::import(store, capacity, image, reference, tenant).await;
+        let made = cells::import(store, capacity, image, reference, tenant).await;
         reply(made.map(|made| ImportImageResponse {
             branch: made.id,
             tenant: made.tenant,
@@ -370,9 +370,9 @@ impl Cladefsd for Control {
         let to = path(to)?;
         let tenant = self.grants.tenant_at(&to);
         let forked = match version {
-            0 => stores::fork(path(from)?, to, tenant).await,
+            0 => cells::fork(path(from)?, to, tenant).await,
             _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ => stores::fork_of_version(branched(of, cell), version, to, tenant).await,
+            _ => cells::fork_of_version(branched(of, cell), version, to, tenant).await,
         };
         reply(forked.map(|forked| ForkStoreResponse {
             branch: forked.id,
@@ -386,7 +386,7 @@ impl Cladefsd for Control {
         request: Request<DeleteStoreRequest>,
     ) -> Result<Response<DeleteStoreResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::delete(store).await.map(|()| DeleteStoreResponse {}))
+        reply(cells::delete(store).await.map(|()| DeleteStoreResponse {}))
     }
 
     async fn drop_store(
@@ -394,7 +394,7 @@ impl Cladefsd for Control {
         request: Request<DropStoreRequest>,
     ) -> Result<Response<DropStoreResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::drop_here(store).await.map(|()| DropStoreResponse {}))
+        reply(cells::drop_here(store).await.map(|()| DropStoreResponse {}))
     }
 
     async fn resize_store(
@@ -403,7 +403,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<ResizeStoreResponse>, Status> {
         let ResizeStoreRequest { path: store, capacity } = request.into_inner();
         let store = path(store)?;
-        reply(stores::resize(store, capacity).await.map(|()| ResizeStoreResponse {}))
+        reply(cells::resize(store, capacity).await.map(|()| ResizeStoreResponse {}))
     }
 
     async fn place_store(
@@ -412,7 +412,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<PlaceStoreResponse>, Status> {
         let PlaceStoreRequest { path: store, token } = request.into_inner();
         let store = path(store)?;
-        reply(stores::place(store, token).await.map(|()| PlaceStoreResponse {}))
+        reply(cells::place(store, token).await.map(|()| PlaceStoreResponse {}))
     }
 
     async fn make_public(
@@ -421,7 +421,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<MakePublicResponse>, Status> {
         let MakePublicRequest { path: store, attach_only } = request.into_inner();
         let store = path(store)?;
-        reply(stores::make_public(store, attach_only).await.map(|()| MakePublicResponse {}))
+        reply(cells::make_public(store, attach_only).await.map(|()| MakePublicResponse {}))
     }
 
     async fn make_version(
@@ -431,7 +431,7 @@ impl Cladefsd for Control {
         let MakeVersionRequest { path: store, keep_last } = request.into_inner();
         let store = path(store)?;
         let keep_last = Some(keep_last).filter(|&keep| keep > 0);
-        let made = stores::make_version(store, keep_last).await;
+        let made = cells::make_version(store, keep_last).await;
         reply(made.map(|version| MakeVersionResponse { version }))
     }
 
@@ -440,7 +440,7 @@ impl Cladefsd for Control {
         request: Request<ListVersionsRequest>,
     ) -> Result<Response<ListVersionsResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::versions(store).await.map(|versions| {
+        reply(cells::versions(store).await.map(|versions| {
             ListVersionsResponse {
                 versions: (versions.into_iter())
                     .map(|crate::VersionInfo { id, uploaded, shared }| Version {
@@ -459,7 +459,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<DropVersionsResponse>, Status> {
         let DropVersionsRequest { path: store, versions } = request.into_inner();
         let store = path(store)?;
-        let dropped = stores::drop_versions(store, versions.into_iter().collect()).await;
+        let dropped = cells::drop_versions(store, versions.into_iter().collect()).await;
         reply(dropped.map(|()| DropVersionsResponse {}))
     }
 
@@ -469,7 +469,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<ShareVersionResponse>, Status> {
         let ShareVersionRequest { path: store, version, shared } = request.into_inner();
         let store = path(store)?;
-        let shared = stores::share_version(store, version, shared).await;
+        let shared = cells::share_version(store, version, shared).await;
         reply(shared.map(|()| ShareVersionResponse {}))
     }
 
@@ -481,7 +481,7 @@ impl Cladefsd for Control {
         let (store, base) = (path(store)?, path(base)?);
         let grants = self.grants.clone();
         let allowed = move |store: &Path, base: &Path| grants.same_tenant(store, base);
-        reply(stores::attach(store, base, allowed).await.map(|()| AttachBaseResponse {}))
+        reply(cells::attach(store, base, allowed).await.map(|()| AttachBaseResponse {}))
     }
 
     async fn sync_store(
@@ -489,7 +489,7 @@ impl Cladefsd for Control {
         request: Request<SyncStoreRequest>,
     ) -> Result<Response<SyncStoreResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::sync(store).await.map(|()| SyncStoreResponse {}))
+        reply(cells::sync(store).await.map(|()| SyncStoreResponse {}))
     }
 
     async fn stat_store(
@@ -497,14 +497,14 @@ impl Cladefsd for Control {
         request: Request<StatStoreRequest>,
     ) -> Result<Response<StatStoreResponse>, Status> {
         let store = path(request.into_inner().path)?;
-        reply(stores::stat(store).await.map(stat_response))
+        reply(cells::stat(store).await.map(stat_response))
     }
 
     async fn list_stores(
         &self,
         _request: Request<ListStoresRequest>,
     ) -> Result<Response<ListStoresResponse>, Status> {
-        let listed = stores::list().map(|stores| {
+        let listed = cells::list().map(|stores| {
             let stores = stores.into_iter().map(|(path, state)| ListedStore {
                 path: path.to_string_lossy().into_owned(),
                 stat: Some(stat_response(state)),
@@ -564,8 +564,8 @@ impl Cladefsd for Control {
             vm_private_requests: _,
             vm_private_request_ns: _,
         } = crate::stats::stats();
-        use extent_bucket::object_bucket::{Request, Upload};
-        let bucket = stores::daemon_bucket().map_err(status)?.stats();
+        use bucket_cell::object_bucket::{Request, Upload};
+        let bucket = cells::daemon_bucket().map_err(status)?.stats();
         let object_storage = Some(ObjectStorageStats {
             requests: (Request::ALL.into_iter())
                 .map(|request| (request.name().to_owned(), bucket.requests(request)))
@@ -619,7 +619,7 @@ impl Cladefsd for Control {
         let GrantRequest { tenant, dir, uid, gid } = request.into_inner();
         let dir = path(dir)?;
         let grants = self.grants.clone();
-        let granted = stores::blocking(move || {
+        let granted = cells::blocking(move || {
             let socket = grants.grant(tenant, &dir, (uid, gid))?;
             let socket = socket.into_os_string().into_string().map_err(|_| Errno::EINVAL)?;
             Ok(GrantResponse { socket })
@@ -633,7 +633,7 @@ impl Cladefsd for Control {
     ) -> Result<Response<RevokeResponse>, Status> {
         let tenant = request.into_inner().tenant;
         let grants = self.grants.clone();
-        reply(stores::blocking(move || grants.revoke(tenant).map(|()| RevokeResponse {})).await)
+        reply(cells::blocking(move || grants.revoke(tenant).map(|()| RevokeResponse {})).await)
     }
 
     async fn set_memory_limit(
@@ -665,7 +665,7 @@ impl Cladefsd for Control {
         request: Request<ShrinkMemoryRequest>,
     ) -> Result<Response<ShrinkMemoryResponse>, Status> {
         let ShrinkMemoryRequest { tenant, target_bytes } = request.into_inner();
-        let shrunk = stores::blocking(move || memory::shrink(tenant, target_bytes));
+        let shrunk = cells::blocking(move || memory::shrink(tenant, target_bytes));
         reply(shrunk.await.map(|bytes| ShrinkMemoryResponse { bytes }))
     }
 
@@ -682,7 +682,7 @@ impl Cladefsd for Control {
         request: Request<GetTenantDiskRequest>,
     ) -> Result<Response<GetTenantDiskResponse>, Status> {
         let tenant = request.into_inner().tenant;
-        let counted = stores::blocking(move || disk::count(tenant));
+        let counted = cells::blocking(move || disk::count(tenant));
         let response = |(bytes, limit_bytes)| GetTenantDiskResponse { bytes, limit_bytes };
         reply(counted.await.map(response))
     }
@@ -701,9 +701,9 @@ impl Cladefsd for Control {
     ) -> Result<Response<ShredCellResponse>, Status> {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::CellId { tenant, id: cell };
-        let bucket = stores::daemon_bucket().map_err(status)?;
+        let bucket = cells::daemon_bucket().map_err(status)?;
         let shredded = crate::bucket::shred_cell(&bucket, cell).await.map_err(|err| {
-            let failure = extent_store::upload::Failure::Bucket(err);
+            let failure = local_cell::upload::Failure::Bucket(err);
             let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
             log::error!("cladefsd: shredding cell {cell}: {failure}");
             saying(errno, format!("shredding cell {cell}: {failure}"))
@@ -727,8 +727,8 @@ impl Cladefsd for Control {
             }
             false => why,
         };
-        let scope = extent_bucket::keys::Scope::Tenant(tenant);
-        let forgotten = stores::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
+        let scope = bucket_cell::keys::Scope::Tenant(tenant);
+        let forgotten = cells::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
                 forgotten: Some(forgotten_of(forgotten)),
@@ -745,7 +745,7 @@ impl Cladefsd for Control {
             log::error!("cladefsd: shredding tenant {tenant}: {why}");
             saying(Errno::ENOTSUP, why)
         })?;
-        let shredded_now = destroyed == extent_bucket::bucket_kms::Destroyed::Now;
+        let shredded_now = destroyed == bucket_cell::bucket_kms::Destroyed::Now;
         Ok(Response::new(ShredTenantResponse {
             shredded_now,
             forgotten: Some(forgotten_of(forgotten)),
@@ -826,7 +826,7 @@ impl Client {
             capacity,
             image: name(image)?,
             reference: reference.unwrap_or_default().to_owned(),
-            tenant: crate::host_store::DEFAULT_TENANT,
+            tenant: crate::host_cell::DEFAULT_TENANT,
         };
         let response = self.call(format!("importing {}", image.display()), |mut c| async move {
             c.import_image(request).await

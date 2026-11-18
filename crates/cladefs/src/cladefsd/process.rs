@@ -5,7 +5,7 @@
 //! cladefs: what the daemon's process holds and has spent, as its kernel counts it, against what its
 //! design bounds it by (TASK-330.2): its anonymous memory, what a host's OOM killer weighs it by
 //! (TASK-317: 5-6 GB under an upload backlog, past any budget, until the killer took it, and every
-//! VM it served), sampled as its stats are, every [`super::stores`]' poll, and its most; its shared
+//! VM it served), sampled as its stats are, every [`super::cells`]' poll, and its most; its shared
 //! memory, the extent cache's pages, which `MEMORY_BYTES` bounds; and its CPU time. The stats
 //! line's `process:` says them ([`line`]), and the metrics.
 //!
@@ -62,17 +62,17 @@ pub struct AnonBudget {
     /// pages as the host's memory runs short (`super::memory::held_parts`, TASK-400).
     pub held: u64,
     /// The stores' page cache's: the most it held at once so far, which the memory governor bounds
-    /// as it bounds the parts held (`extent_store::pages`, TASK-433).
+    /// as it bounds the parts held (`local_cell::pages`, TASK-433).
     pub pages: u64,
     /// The stores' maps of their extents: the most they held at once so far (TASK-453). Of each
     /// decoded state the stores open share, its map once, however many share it, the bucket's
-    /// layer of each of them (`crate::host_store::decoded_held`); and of each store, what it holds
+    /// layer of each of them (`crate::host_cell::decoded_held`); and of each store, what it holds
     /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
     /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
-    /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
-    /// (`extent_bucket::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
+    /// shared, copies of it as it changes it (`local_cell::own_held`). Each entry at its bound
+    /// (`bucket_cell::recovery::ENTRY_BYTES`, `local_cell::OWN_ENTRY_BYTES`), and each run of
     /// changes to a shared map, a path of its nodes copied, at its
-    /// (`extent_bucket::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory`
+    /// (`bucket_cell::recovery::RUN_BYTES`), which `bucket::tests::bench_fork_extent_memory`
     /// holds them to. Not bounded otherwise: a host's
     /// stores' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
@@ -106,12 +106,12 @@ impl AnonBudget {
 /// of its length, an extent at most, and framing it into its own file a chunk at a time
 /// (`Store::write_own`'s `OWN_CHUNK`, 16 MiB, and its framed bytes): an extent and two chunks.
 pub const FRAMING: u64 = {
-    let (segment, extent, chunk) = (32 << 20, crate::ExtentStore::MAX_EXTENT, 16 << 20);
+    let (segment, extent, chunk) = (32 << 20, crate::OpenCell::MAX_EXTENT, 16 << 20);
     2 * (segment + extent) + extent + 2 * chunk
 };
 
 /// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_bucket::fetch`'s `TAILS`,
+/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`bucket_cell::fetch`'s `TAILS`,
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its stores read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);
@@ -159,7 +159,7 @@ pub fn anon_budget() -> AnonBudget {
 }
 
 fn budget(state: &mut State) -> AnonBudget {
-    state.writers = state.writers.max(super::stores::open_count() as u64);
+    state.writers = state.writers.max(super::cells::open_count() as u64);
     state.in_flight = state.in_flight.max(super::memory::in_flight_held());
     state.extents = state.extents.max(extents_held());
     AnonBudget {
@@ -168,7 +168,7 @@ fn budget(state: &mut State) -> AnonBudget {
         fetches: FETCHES,
         in_flight: state.in_flight,
         held: super::memory::held_parts().counts().peak,
-        pages: extent_store::pages::shared().usage().peak,
+        pages: local_cell::pages::shared().usage().peak,
         extents: state.extents,
         own: OWN,
     }
@@ -177,7 +177,7 @@ fn budget(state: &mut State) -> AnonBudget {
 /// What the stores' maps of their extents hold now, at their entries' bounds ([`AnonBudget`]'s
 /// `extents`): the decoded states they share, each once, and what each holds of its own.
 pub fn extents_held() -> u64 {
-    extent_store::own_held().bytes() + crate::host_store::decoded_held().bytes()
+    local_cell::own_held().bytes() + crate::host_cell::decoded_held().bytes()
 }
 
 /// Samples what the daemon holds and spent now, against its budget now; and returns the sample.
@@ -215,7 +215,7 @@ pub fn last() -> Sample {
 }
 
 /// The last sample as a line of `NAME=COUNT` after `process:`, which the daemon's stats file
-/// keeps (`super::stores`): CPU time, then anonymous and shared memory in bytes, now and at most,
+/// keeps (`super::cells`): CPU time, then anonymous and shared memory in bytes, now and at most,
 /// the anonymous memory's budget, and the samples past it and by how much at most.
 pub fn line() -> String {
     let sample = last();

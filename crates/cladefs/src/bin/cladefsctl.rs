@@ -96,7 +96,7 @@
 //! of (`cladefs::BUILD_COMMIT`, TASK-111.7).
 //!
 //! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an object
-//! the collector's newest mark-only pass marked, a bug in the collector (`extent_bucket::marks`,
+//! the collector's newest mark-only pass marked, a bug in the collector (`bucket_cell::marks`,
 //! TASK-264).
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
@@ -149,7 +149,7 @@
 //! a line each, `TENANT CELL BRANCH`, and `detaching` after one being detached.
 
 use anyhow::{Context as _, bail};
-use cladefs::ExtentStore;
+use cladefs::OpenCell;
 use std::path::{Path, PathBuf};
 
 /// The ID `given` writes, in base 32 (`base32_id`): `what`, as a refusal names it.
@@ -510,7 +510,7 @@ impl Command {
                         capacity: stat.capacity,
                         used: stat.used,
                         available: stat.available,
-                        holding: cladefs::StoreHolding {
+                        holding: cladefs::CellHolding {
                             bytes: whose(stat.own, stat.inherited),
                             extents: whose(stat.own_extents, stat.inherited_extents),
                         },
@@ -588,14 +588,14 @@ impl Command {
         }
         match self {
             Self::Create { dir, capacity } => {
-                println!("{}", ExtentStore::create(&dir, capacity)?.branch());
+                println!("{}", OpenCell::create(&dir, capacity)?.branch());
             }
             Self::Take { dir, capacity, branch, token } => {
-                ExtentStore::take(&dir, capacity, branch, token)?;
+                OpenCell::take(&dir, capacity, branch, token)?;
             }
-            Self::Place { dir, token } => ExtentStore::place(&dir, token)?,
+            Self::Place { dir, token } => OpenCell::place(&dir, token)?,
             Self::Sync { dir } => {
-                let store = ExtentStore::open(&dir)?;
+                let store = OpenCell::open(&dir)?;
                 store.wait_uploaded()?;
             }
             Self::Import { dir, capacity, image, reference } => {
@@ -604,18 +604,18 @@ impl Command {
                     .with_context(|| format!("importing {}", image.display()))?;
             }
             Self::Fork { src, dst } => {
-                let store = ExtentStore::open(&src)?;
+                let store = OpenCell::open(&src)?;
                 // A new cell of the store's tenant's (TASK-364).
                 let tenant = store.branch().tenant;
                 println!("{}", store.fork(&dst, tenant)?);
             }
-            Self::Version { dir } => println!("{:x}", ExtentStore::open(&dir)?.make_version(None)?),
-            Self::Versions { dir } => print_versions(&ExtentStore::open(&dir)?.versions()),
+            Self::Version { dir } => println!("{:x}", OpenCell::open(&dir)?.make_version(None)?),
+            Self::Versions { dir } => print_versions(&OpenCell::open(&dir)?.versions()),
             Self::DropVersions { dir, versions } => {
-                ExtentStore::open(&dir)?.drop_versions(&versions.into_iter().collect())?;
+                OpenCell::open(&dir)?.drop_versions(&versions.into_iter().collect())?;
             }
             Self::Share { dir, version, shared } => {
-                ExtentStore::open(&dir)?.share_version(version, shared)?;
+                OpenCell::open(&dir)?.share_version(version, shared)?;
             }
             Self::ForkVersion { from, dst } => bail!(
                 "forking version {:x} of cell {:x} to {} needs the extent daemon (CLADEFSD_GRPC)",
@@ -624,12 +624,12 @@ impl Command {
                 dst.display()
             ),
             Self::Delete { dir } => {
-                let bucket = ExtentStore::bucket_at(&dir)?;
-                ExtentStore::delete(&dir, bucket.as_deref())?
+                let bucket = OpenCell::bucket_at(&dir)?;
+                OpenCell::delete(&dir, bucket.as_deref())?
             }
-            Self::Drop { dir } => ExtentStore::delete(&dir, None)?,
+            Self::Drop { dir } => OpenCell::delete(&dir, None)?,
             Self::Resize { dir, capacity } => {
-                let store = ExtentStore::open(&dir)?;
+                let store = OpenCell::open(&dir)?;
                 // Opened, it says whether it is a version, whose capacity changes nowhere
                 // (TASK-160.10).
                 if capacity < store.info()?.capacity {
@@ -640,11 +640,11 @@ impl Command {
                 }
                 store.set_capacity(capacity)?;
             }
-            Self::Public { dir } => ExtentStore::open(&dir)?.make_public()?,
-            Self::PublicAttachOnly { dir } => ExtentStore::open(&dir)?.make_public_attach_only()?,
+            Self::Public { dir } => OpenCell::open(&dir)?.make_public()?,
+            Self::PublicAttachOnly { dir } => OpenCell::open(&dir)?.make_public_attach_only()?,
             Self::Attach { dir, base } => {
-                let ancestry = ExtentStore::open(&base)?.ancestry();
-                ExtentStore::open(&dir)?.attach_base(&base.canonicalize()?, &ancestry)?;
+                let ancestry = OpenCell::open(&base)?.ancestry();
+                OpenCell::open(&dir)?.attach_base(&base.canonicalize()?, &ancestry)?;
             }
             Self::Stats { .. }
             | Self::Grant { .. }
@@ -654,7 +654,7 @@ impl Command {
             | Self::ShredTenant { .. }
             | Self::Mount(_) => unreachable!("refused above"),
             Self::Stat { dir } => {
-                let store = ExtentStore::open(&dir)?;
+                let store = OpenCell::open(&dir)?;
                 let info = store.info()?;
                 print!(
                     "{}",
@@ -680,7 +680,7 @@ struct Stat {
     capacity: u64,
     used: u64,
     available: u64,
-    holding: cladefs::StoreHolding,
+    holding: cladefs::CellHolding,
     public: bool,
     /// Whether the store is open, if known.
     open: Option<bool>,
@@ -689,7 +689,7 @@ struct Stat {
 impl std::fmt::Display for Stat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self { branch, capacity, used, available, holding, public, open } = self;
-        let cladefs::StoreHolding { bytes, extents } = holding;
+        let cladefs::CellHolding { bytes, extents } = holding;
         writeln!(f, "branch {branch}\ncapacity {capacity}\nused {used}\navailable {available}")?;
         writeln!(f, "own {}\ninherited {}", bytes.own, bytes.inherited)?;
         writeln!(f, "own_extents {}\ninherited_extents {}", extents.own, extents.inherited)?;

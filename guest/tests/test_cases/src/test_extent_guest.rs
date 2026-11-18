@@ -47,7 +47,7 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store("extents", &store, 64 << 20, 64 << 20)?;
+            vm.cell("extents", &store, 64 << 20, 64 << 20)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
 
@@ -57,7 +57,7 @@ mod host {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
             // What the self-test committed is in the store.
-            let store = cladefs::ExtentStore::open(test_setup.tmp_dir.join("extents"))
+            let store = cladefs::OpenCell::open(test_setup.tmp_dir.join("extents"))
                 .expect("open the extent store");
             assert_eq!(store.root().unwrap(), ROOT);
             let info = store.info().unwrap();
@@ -84,7 +84,7 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store("extents", &store, 64 << 20, 64 << 20)?;
+            vm.cell("extents", &store, 64 << 20, 64 << 20)?;
             let param = format!("virtio_extent.version={}", OTHER_VERSION.1);
             vm.module_param(&std::ffi::CString::new(param)?);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)

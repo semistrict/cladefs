@@ -33,8 +33,8 @@ mod host {
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use futures::executor::block_on;
     use cladefs::{Image, Storage};
+    use futures::executor::block_on;
     use std::path::Path;
 
     const CAPACITY: u64 = 256 << 20;
@@ -81,7 +81,7 @@ mod host {
             format(&path)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
-            vm.extent_store(
+            vm.cell(
                 "extents",
                 &path,
                 CAPACITY,

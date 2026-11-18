@@ -20,7 +20,7 @@
 //! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
 //! trips do.
 
-use cladefs::{ExtentId, ExtentStore, VolatileSlice};
+use cladefs::{ExtentId, OpenCell, VolatileSlice};
 use std::time::{Duration, Instant};
 
 const EXTENTS: u64 = 64;
@@ -55,7 +55,7 @@ fn main() {
 fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     std::fs::create_dir(dir).unwrap();
     let capacity = 2 * EXTENTS * EXTENT as u64;
-    let store = ExtentStore::create_in(dir.join("parent"), capacity, tenant);
+    let store = OpenCell::create_in(dir.join("parent"), capacity, tenant);
     let store = store.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
@@ -77,7 +77,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let mut opened = Vec::with_capacity(OPENED);
     for n in 0..OPENED.min(forks) {
         let started = Instant::now();
-        drop(ExtentStore::open(dir.join(format!("fork-{n}"))).unwrap());
+        drop(OpenCell::open(dir.join(format!("fork-{n}"))).unwrap());
         opened.push(started.elapsed());
     }
     took.sort();

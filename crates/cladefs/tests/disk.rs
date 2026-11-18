@@ -14,7 +14,7 @@ mod common;
 
 use cladefs::cladefsd::disk::STORE_MADE;
 use cladefs::cladefsd::metrics::render;
-use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::pattern;
 use std::path::Path;
@@ -31,7 +31,7 @@ fn contents(seed: u64) -> Vec<u8> {
 }
 
 /// Writes extent `sequence` of `store`, `seed`'s bytes.
-fn write(store: &DaemonExtentStore, sequence: u64, seed: u64) -> Result<(), Errno> {
+fn write(store: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
     let extent = ExtentId { branch: store.branch(), sequence };
     store.write(extent, 0, &[VolatileSlice::from(&contents(seed)[..])])
 }
@@ -45,7 +45,7 @@ fn metric(series: &str) -> u64 {
 }
 
 /// What the files under `dir` take of the disk, as `du -sx` says.
-/// The bytes of a segment's log's header, a block (`extent_store::wal::LOG_RECORDS`).
+/// The bytes of a segment's log's header, a block (`local_cell::wal::LOG_RECORDS`).
 const LOG_HEADER: u64 = 4096;
 
 fn du(dir: &Path) -> u64 {
@@ -81,7 +81,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
 
     // Acme's base, which its VMs' stores are forks of, uploaded, as its VM manager makes them.
     let base = acme.join("base");
-    let vm = DaemonExtentStore::connect(&acme_socket, &base, CAPACITY).unwrap();
+    let vm = CellClient::connect(&acme_socket, &base, CAPACITY).unwrap();
     for sequence in 1..=8 {
         write(&vm, sequence, sequence).unwrap();
     }
@@ -106,7 +106,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     daemon.set_disk_limit(Some(1), Some(limit)).unwrap();
     assert_eq!(daemon.tenant_disk(Some(1)).unwrap(), (taken, Some(limit)));
     let vms: Vec<_> = (forks.iter())
-        .map(|fork| DaemonExtentStore::connect(&acme_socket, fork, CAPACITY).unwrap())
+        .map(|fork| CellClient::connect(&acme_socket, fork, CAPACITY).unwrap())
         .collect();
     let mut written = 0;
     let refused = loop {
@@ -128,12 +128,12 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
     assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
     // A store its VM makes is refused too.
-    let made = DaemonExtentStore::connect(&acme_socket, acme.join("more"), CAPACITY);
+    let made = CellClient::connect(&acme_socket, acme.join("more"), CAPACITY);
     assert_eq!(made.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOSPC)));
     assert!(!acme.join("more").exists());
 
     // Globex writes, past what acme's limit would allow, as the daemon's own VMs do.
-    let theirs = DaemonExtentStore::connect(&globex_socket, globex.join("vm"), CAPACITY).unwrap();
+    let theirs = CellClient::connect(&globex_socket, globex.join("vm"), CAPACITY).unwrap();
     for sequence in 1..=24 {
         write(&theirs, sequence, 1000 + sequence).unwrap();
     }

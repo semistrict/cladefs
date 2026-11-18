@@ -21,11 +21,11 @@ aws-sdk-kms.workspace = true
 # rustls-platform-verifier (MIT OR Apache-2.0); on a Tokio runtime of its own (tokio, MIT); its
 # requests and replies JSON (serde_json, MIT OR Apache-2.0) holding base64 (MIT OR Apache-2.0),
 # their bodies' buffers zeroed (bytes, MIT), its URL parsed by url (MIT OR Apache-2.0). Each is in
-# the build already, through object_store and extent_bucket.
+# the build already, through object_store and bucket_cell.
 base64.workspace = true
 bytes = "1.12.1"
 # cladefs: Google Cloud KMS's REST API (TASK-411.18), each in the build already through object_store
-# and extent_bucket: reqwest (MIT OR Apache-2.0) over rustls, serde_json (MIT OR Apache-2.0),
+# and bucket_cell: reqwest (MIT OR Apache-2.0) over rustls, serde_json (MIT OR Apache-2.0),
 # base64 (MIT OR Apache-2.0), crc-fast's CRC32C (MIT OR Apache-2.0) for its integrity fields,
 # tokio's timer (MIT) between retries, url's query parsing (MIT OR Apache-2.0); and object_store's
 # (MIT OR Apache-2.0) GCP credentials, Application Default Credentials as cladefs's gs:// buckets

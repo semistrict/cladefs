@@ -369,7 +369,7 @@ mod linux {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Instant;
 
-    use cladefs::DaemonExtentStore;
+    use cladefs::CellClient;
     use log::error;
 
     use super::{Served, handle, type_of};
@@ -383,7 +383,7 @@ mod linux {
     /// receiving the daemon's replies, which complete them. Counts those in flight, which the
     /// worker waits for as it stops ([`Requests::wait_idle`]), and what it served of each type.
     pub struct Requests {
-        store: Arc<DaemonExtentStore>,
+        store: Arc<CellClient>,
         notices: Arc<Notices>,
         /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
         cache: CacheType,
@@ -411,7 +411,7 @@ mod linux {
         /// Requests served with `store`, as `notices`, `cache` and `bounds` say: those of a device
         /// ([`Device::requests`](crate::Device::requests)).
         pub fn new(
-            store: Arc<DaemonExtentStore>,
+            store: Arc<CellClient>,
             notices: Arc<Notices>,
             cache: CacheType,
             bounds: Bounds,
@@ -503,7 +503,7 @@ mod tests {
 
     /// A store in memory, which records what it is asked: extents, sealed by a commit; a root; a
     /// window's maps; and the guest's stats and answers. Asked of a range, it answers as cladefs's
-    /// does (extent_store's `check_io`, the window's `check_range`), and records any doc-4 calls
+    /// does (local_cell's `check_io`, the window's `check_range`), and records any doc-4 calls
     /// out of range, which the device refuses before (TASK-470).
     #[derive(Default)]
     struct FakeBackend {
@@ -534,7 +534,7 @@ mod tests {
     }
 
     impl FakeState {
-        /// `len` bytes at `offset` in an extent, as extent_store's `check_io` takes them: multiples
+        /// `len` bytes at `offset` in an extent, as local_cell's `check_io` takes them: multiples
         /// of a block, some bytes, ending within the most an extent holds; `EINVAL` otherwise.
         fn extent_range(
             &mut self,

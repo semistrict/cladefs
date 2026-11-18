@@ -432,10 +432,10 @@ mod host {
                 let socket =
                     std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
                 let daemon = spawn_daemon(&test_setup, &socket, "cladefsd", &[], None)?;
-                vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
+                vm.cell_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
             } else {
-                vm.extent_store("extents", &path, CAPACITY, window)?;
+                vm.cell("extents", &path, CAPACITY, window)?;
                 None
             };
             if self.mode == Mode::Crash {
@@ -504,7 +504,7 @@ mod host {
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
                     let socket = std::env::var_os("CLADEFSD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::cladefsd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::cladefsd::CellClient::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
                     crate::common::say_daemon_stats(&test_setup, "cladefsd");

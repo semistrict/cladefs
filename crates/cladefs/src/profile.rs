@@ -143,7 +143,7 @@ impl Recorder {
         }
         // Whole or not at all, and durably, as every record beside a store (TASK-160.13).
         let name = self.path.file_name().and_then(|name| name.to_str());
-        crate::store_dir::write(dir, name.expect("a profile is named by its branch"), &text)
+        crate::cell_dir::write(dir, name.expect("a profile is named by its branch"), &text)
     }
 }
 

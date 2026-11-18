@@ -11,7 +11,7 @@ import script
 dax_refusals = script.load("dax-refusals")
 
 PREFIX = "WARN cladefs::cladefsd::server: cladefsd: a store at DAX window offset 0x10fab000 refused "
-# As ExtentStore::refused says what the window maps at the page.
+# As OpenCell::refused says what the window maps at the page.
 SEALED = (PREFIX + '(1 so far): ExtentId { branch: 1, sequence: 2 } from 0x0, 0x10000 bytes from '
           '0x10fa3000; in the store: Ok(Some("0xa000 bytes, sealed")); '
           'the page\'s latest MAPs and UNMAPs: [\n')

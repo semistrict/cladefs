@@ -10,8 +10,8 @@
 //! own, at most one every [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
 //! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
-use extent_bucket::collector::{Collector, Options, Report};
-use extent_bucket::object_bucket::ObjectBucket;
+use bucket_cell::collector::{Collector, Options, Report};
+use bucket_cell::object_bucket::ObjectBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -171,13 +171,13 @@ impl Collecting {
         }
         let mut collector = new_collector(Options { grace: 0, ..self.pace.options });
         let collected =
-            extent_store::upload::block_on(collector.collect(&*self.bucket, rand::random()));
+            local_cell::upload::block_on(collector.collect(&*self.bucket, rand::random()));
         collected.unwrap().unwrap()
     }
 
     /// Runs passes as [`Collecting::pass_now`] does until two in a row delete and compact nothing,
     /// every image of the bucket closed, and says what they left that they should have collected
-    /// ([`extent_bucket::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
+    /// ([`bucket_cell::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
     /// pass over a dead cell retires the references that kept what its parents' cells reclaim at
     /// their next (TASK-395.4); and a pass retiring them again deletes nothing.
     #[cfg(test)]
@@ -193,8 +193,8 @@ impl Collecting {
         }
         assert_eq!(quiet, 2, "{PASSES} passes alone, which kept doing something");
         let left =
-            extent_bucket::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
-        extent_store::upload::block_on(left).unwrap()
+            bucket_cell::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
+        local_cell::upload::block_on(left).unwrap()
     }
 }
 
@@ -213,7 +213,7 @@ impl Drop for Collecting {
 fn pass(collector: &mut Collector, bucket: &ObjectBucket) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
-    let failed = match extent_store::upload::block_on(collector.collect(bucket, rand::random())) {
+    let failed = match local_cell::upload::block_on(collector.collect(bucket, rand::random())) {
         Ok(Ok(report)) => {
             let Report {
                 deleted,

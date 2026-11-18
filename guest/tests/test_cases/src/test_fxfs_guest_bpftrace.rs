@@ -21,7 +21,7 @@ const SCRIPT: &str = include_str!("../../../../scripts/bpftrace/cladefs-latency.
 #[host]
 mod host {
     use super::*;
-    use crate::common::{Window, dax_window, cladefs_guest_should_run, setup_rootfs};
+    use crate::common::{Window, cladefs_guest_should_run, dax_window, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestSetup};
 
@@ -48,7 +48,7 @@ mod host {
             let path = test_setup.tmp_dir.join("extents");
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
-            vm.extent_store("extents", &path, CAPACITY, dax_window(Window::Large)?)?;
+            vm.cell("extents", &path, CAPACITY, dax_window(Window::Large)?)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
     }
@@ -104,8 +104,9 @@ mod guest {
         let file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
         let len = data.len();
         let prot = libc::PROT_READ | libc::PROT_WRITE;
-        let map =
-            unsafe { libc::mmap(std::ptr::null_mut(), len, prot, libc::MAP_SHARED, file.as_raw_fd(), 0) };
+        let map = unsafe {
+            libc::mmap(std::ptr::null_mut(), len, prot, libc::MAP_SHARED, file.as_raw_fd(), 0)
+        };
         assert_ne!(map, libc::MAP_FAILED, "mmap: {}", std::io::Error::last_os_error());
         let bytes = unsafe { std::slice::from_raw_parts_mut(map.cast::<u8>(), len) };
         for page in 0..pages {

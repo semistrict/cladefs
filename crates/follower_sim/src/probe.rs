@@ -7,14 +7,14 @@
 //! until it follows the writer.
 
 use crate::BRANCH;
-use crate::device::{StoreDevice, ViewDevice};
-use extent_store::{Description, MemDir, Options as StoreOptions, Store};
+use crate::device::{CellDevice, ViewDevice};
 use fuchsia_async as fasync;
 use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
 use fxfs::object_handle::{ObjectHandle, WriteObjectHandle};
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{HandleOptions, ObjectStore};
+use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions};
 use shuttle::scheduler::RandomScheduler;
 use shuttle::{Config, Runner};
 use std::sync::Arc;
@@ -47,8 +47,8 @@ async fn read(fs: &OpenFxFilesystem, file: &str) -> Vec<u8> {
 async fn write_and_follow() {
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
     let store =
-        Arc::new(Store::create(MemDir::new(), description, StoreOptions::default()).unwrap());
-    let device = DeviceHolder::new(StoreDevice::new(store.clone()));
+        Arc::new(LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap());
+    let device = DeviceHolder::new(CellDevice::new(store.clone()));
     let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
     let root_store = fs.root_store();
     let root = Directory::open(&root_store, root_store.root_directory_object_id())

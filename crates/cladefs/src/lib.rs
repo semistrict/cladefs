@@ -6,11 +6,11 @@
 //!
 //! cladefs has two uses of Fxfs:
 //!
-//! - **Extent stores** ([`ExtentStore`]), which a guest running Fxfs in its own kernel keeps its
+//! - **Extent stores** ([`OpenCell`]), which a guest running Fxfs in its own kernel keeps its
 //!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's daemon,
 //!   `cladefsd`, one a host (`cladefsd`), serves the stores of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
-//!   device is a `DaemonExtentStore`, a connection to it.
+//!   device is a `CellClient`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
 //!   as the stores a guest's Fxfs mounts. It is the guest's filesystem too: Fxfs's POSIX layer
 //!   (crates/fxfs-posix), which the guest kernel's VFS calls, and the host's filesystem calls as a
@@ -130,7 +130,6 @@ pub mod cladefsd;
 mod dax;
 mod error;
 mod executor;
-mod extents;
 pub mod faults;
 mod filesystem;
 pub mod fuse;
@@ -139,13 +138,14 @@ mod halt;
 mod heap;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod hearing;
-mod host_store;
+mod host_cell;
 mod image;
 pub mod import;
 mod memory;
 #[cfg(target_os = "linux")]
 pub mod memory_cell;
 mod node;
+mod open_cell;
 pub mod pages;
 mod profile;
 pub mod renamed;
@@ -157,18 +157,18 @@ pub mod stats;
 mod storage;
 mod sync;
 // The extent daemon's (Linux), and its tests' everywhere.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod cell_dir;
 #[cfg(target_os = "linux")]
 pub mod signals;
 #[cfg(target_os = "linux")]
 pub mod stacks;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod store_dir;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod store_requests;
+mod cell_requests;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod store_table;
+mod cell_table;
 #[cfg(test)]
 mod test_checkpoints;
 #[cfg(test)]
@@ -179,8 +179,9 @@ pub mod testing;
 pub mod thread;
 mod volume;
 
+pub use bucket_cell::layout::CellId;
 #[cfg(target_os = "linux")]
-pub use cladefsd::{DaemonConnection, DaemonDevice, DaemonExtentStore, Unmapped};
+pub use cladefsd::{CellClient, DaemonConnection, DaemonDevice, Unmapped};
 #[cfg(target_os = "linux")]
 pub use dax::Prefault;
 pub use dax::failures::{AccessFailures, FailingRun, Failure};
@@ -190,18 +191,16 @@ pub use dax::uffd::{
 };
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
-/// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
-pub use extent_bucket::layout::CellId;
-pub use extents::{
-    CellVersion, Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
-    StoreHolding, StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,
-};
 pub use filesystem::{Filesystem, Node, Options};
-pub use host_store::BranchOf;
+pub use host_cell::BranchOf;
 pub use image::{Compactions, Image, TreeCompactions, VolumeMetadata};
 pub use memory::{VolatileSlice, VolatileSliceMut};
 pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
+};
+pub use open_cell::{
+    CellAccess, CellHolding, CellRole, CellVersion, Commit, ExtentInfo, MappingContents, OpenBase,
+    OpenCell, Opening, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use storage::Storage;
 pub use storage_device::ExtentId;

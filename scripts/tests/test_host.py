@@ -1212,10 +1212,10 @@ class Drivers(unittest.TestCase):
         results = fleet.directory / "mutants"
         status, _, errors = fleet.run_driver(
             "mutants-host.sh", str(results),
-            environment={"CLADEFS_MUTANTS_CRATES": "extent_store cladefs", "CLADEFS_MUTANTS_SHARD": "1/4"})
+            environment={"CLADEFS_MUTANTS_CRATES": "local_cell cladefs", "CLADEFS_MUTANTS_SHARD": "1/4"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
-        self.assertEqual(ran[0], "mutants-linux-host.sh extent_store cladefs")
+        self.assertEqual(ran[0], "mutants-linux-host.sh local_cell cladefs")
         self.assertIn("CLADEFS_MUTANTS_SHARD=1/4", ran)
 
     def test_fork_times_each_commit(self):

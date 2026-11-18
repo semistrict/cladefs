@@ -1,0 +1,15 @@
+# A version named at the segment after the one its cut closed (TASK-476): its state, which the
+# version names, holds a commit made after its cut, or the head names it past its end, which the
+# check of every version a head names finds.
+# Killer: sim::versions_cut_dropped_and_restored
+--- a/crates/bucket_cell/src/writer.rs
++++ b/crates/bucket_cell/src/writer.rs
+@@ -513,7 +513,7 @@
+             // this swap doesn't name among them.
+             let cut = |(&seq, pending): (&u64, &Pending)| {
+                 let cuts = pending.footer.contents.versions.iter();
+-                cuts.map(move |cut| (seq, *cut)).collect::<Vec<_>>()
++                cuts.map(move |cut| (seq + 1, *cut)).collect::<Vec<_>>()
+             };
+             let cuts: Vec<_> = match rules().versions_acked {
+                 true => inner.pending.range(..=through).flat_map(cut).collect(),

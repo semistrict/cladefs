@@ -5,20 +5,20 @@
 //! The daemon's side of a connection: a VM process's store and window, served from this process's
 //! stores, extent cache and kernel.
 
+use super::cells::{self, open_store, store_key};
 use super::codec::{
     self, Advanced, Data, Fault, Forked, Info, Made, Opened, ReadInto, Request, Stage, StageOp,
     Told, stream_bytes,
 };
 use super::pool::Pool;
 use super::stats;
-use super::stores::{self, open_store, store_key};
 use super::wire::*;
-use crate::store_requests::{self, Guest, Resizes, Shrinking};
-use crate::store_table::Writer;
+use crate::cell_requests::{self, Guest, Resizes, Shrinking};
+use crate::cell_table::Writer;
 use crate::{Commit, MappingContents, VolatileSlice, VolatileSliceMut, WindowMapping};
-use crate::{DaxWindow, Errno, ExtentStore, SecondStage};
-use extent_bucket::trace;
-use extent_store::shared::SharedLock;
+use crate::{DaxWindow, Errno, OpenCell, SecondStage};
+use bucket_cell::trace;
+use local_cell::shared::SharedLock;
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -188,7 +188,7 @@ pub(super) fn stop_accepting() {
 pub struct Tenant {
     /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are, which names
     /// it in every call of the control API: a granted tenant's, its grant's; the default tenant's,
-    /// [`DEFAULT_TENANT`](crate::host_store::DEFAULT_TENANT).
+    /// [`DEFAULT_TENANT`](crate::host_cell::DEFAULT_TENANT).
     id: u64,
     policy: Policy,
     memory: Memory,
@@ -302,7 +302,7 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
         Errno::EIO
     })?;
     let (policy, disk) = (Policy::default_tenant(), None);
-    let id = crate::host_store::DEFAULT_TENANT;
+    let id = crate::host_cell::DEFAULT_TENANT;
     let tenant = Tenant { id, policy, memory, disk };
     Ok(DEFAULT.get_or_init(|| Arc::new(tenant)).clone())
 }
@@ -338,7 +338,7 @@ impl Tenant {
     /// own; and a store put there by other means is no more its than it was.
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
-        match extent_store::host_branch(path) {
+        match local_cell::host_branch(path) {
             Ok(branch) if branch.tenant != id => Err(Errno::EACCES),
             // No store yet, which it makes of its own cell; or one its opening fails, saying why.
             _ => Ok(()),
@@ -542,7 +542,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
     // store closed leaves for the next to open it to upload (TASK-141.4).
     if super::drain::draining()
         && let (Some(_), Some(store)) = (connection.hold(), connection.store())
-        && let Err(errno) = stores::uploaded(store).await
+        && let Err(errno) = cells::uploaded(store).await
     {
         log::error!("cladefsd: uploading a store's last commits as the daemon drains: {errno}");
     }
@@ -663,7 +663,7 @@ fn finish_connection(connection: Arc<Connection>) {
         }
         // cladefs: what it wrote since its last commit no next writer knows of, nor takes over.
         if store.is_quiescent() != Ok(true) {
-            stores::retire(&hold, store);
+            cells::retire(&hold, store);
         }
     }
     connection.peer.sender.shutdown();
@@ -949,7 +949,7 @@ fn roots() -> Option<&'static [PathBuf]> {
 /// through symlinks, or `..`.
 pub(super) fn in_dir(path: &Path, dir: &Path) -> bool {
     use std::path::Component;
-    let key = stores::store_key(path);
+    let key = cells::store_key(path);
     // A path not resolved, its directory not there, holds no `..` that leads out.
     let plain =
         key.components().all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
@@ -972,10 +972,10 @@ pub(super) struct Connection {
     /// Its store, once open: set once, as its `OPEN` is, before its phase says how it has it;
     /// read by its every request, without a lock. cladefs: a follower's, if read-only (backlog
     /// doc-8).
-    store: OnceLock<Arc<ExtentStore>>,
+    store: OnceLock<Arc<OpenCell>>,
     /// Where it is in its life: whether it has its store, and how (TASK-160.8). Its locks are
     /// its requests', its teardown's and its window's, beyond what halts its store: a panic
-    /// holding one aborts the daemon (`extent_store::shared`, TASK-149.24).
+    /// holding one aborts the daemon (`local_cell::shared`, TASK-149.24).
     phase: SharedLock<Mutex<Phase>>,
     window: SharedLock<Mutex<Option<DaxWindow>>>,
     /// What works behind the store, a task, and what stops it, dropped: making a writer's commits
@@ -1011,10 +1011,10 @@ enum Phase {
     Unopened,
     /// cladefs: an [`OPEN`] in progress, the only one ([`Opening`]).
     Opening,
-    /// It writes its store, which it holds in the daemon's table (`stores::table`) until it is
+    /// It writes its store, which it holds in the daemon's table (`cells::table`) until it is
     /// dropped, after its store and window ([`Connection`]'s drop). Shared only with what retires
     /// the store as the connection goes ([`finish_connection`]), which holds the connection.
-    Writing(Arc<stores::Hold>),
+    Writing(Arc<cells::Hold>),
     /// cladefs: it follows its store, read-only (backlog doc-8): the store connections have open,
     /// which the table has, and which it holds none of.
     Following,
@@ -1028,7 +1028,7 @@ struct Opening<'a>(&'a Connection);
 impl Opening<'_> {
     /// The connection has `store`, at `path`, from now on, as `opened` says: [`Phase::Writing`] or
     /// [`Phase::Following`]. Checked without the phase's lock, which a panic would poison.
-    fn opened(self, path: &Path, store: Arc<ExtentStore>, opened: Phase) {
+    fn opened(self, path: &Path, store: Arc<OpenCell>, opened: Phase) {
         let follower = matches!(opened, Phase::Following);
         let key = store_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
@@ -1093,12 +1093,12 @@ fn failpoint(kind: u32) -> Option<&'static str> {
 
 impl Connection {
     /// Its store, once it has opened one.
-    pub(super) fn store(&self) -> Option<&Arc<ExtentStore>> {
+    pub(super) fn store(&self) -> Option<&Arc<OpenCell>> {
         self.store.get()
     }
 
     /// Its hold of its store, if it writes it.
-    fn hold(&self) -> Option<Arc<stores::Hold>> {
+    fn hold(&self) -> Option<Arc<cells::Hold>> {
         match &*self.phase.with(Mutex::lock) {
             Phase::Writing(hold) => Some(hold.clone()),
             Phase::Unopened | Phase::Opening | Phase::Following => None,
@@ -1383,7 +1383,7 @@ impl Connection {
                     if err.errno() == Some(Errno::EBUSY) {
                         log::warn!("cladefsd: a version refused: {err:#}");
                     }
-                    stores::errno_of(format_args!("making a version"), err)
+                    cells::errno_of(format_args!("making a version"), err)
                 })?;
                 let branch = store.branch();
                 reply.args = Forked { branch: branch.id, version, tenant: branch.tenant }.args();
@@ -1401,7 +1401,7 @@ impl Connection {
                     log::warn!("cladefsd: forking to {} refused: {err:#}", path.display());
                 }
                 let branch = forked.map_err(|err| {
-                    stores::errno_of(format_args!("forking to {}", path.display()), err)
+                    cells::errno_of(format_args!("forking to {}", path.display()), err)
                 })?;
                 // cladefs: the fork made, its reply lost: its guest takes it to have failed.
                 fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
@@ -1519,12 +1519,12 @@ impl Connection {
 
     /// cladefs: opens a follower of the store at `path`, authorized (backlog doc-8), of the store
     /// a writer's connection, or followers', have open, or, if none has, of the store as of its
-    /// last commit, which a writer opening it then takes over ([`stores::followed`]); tells its VM
+    /// last commit, which a writer opening it then takes over ([`cells::followed`]); tells its VM
     /// process of the writer's commits after its view's ([`COMMITTED`]); and returns its branch.
     fn follow(&self, path: &Path) -> Result<u64, Errno> {
         let opening = self.opening()?;
         self.tenant.reaches(path)?;
-        let follower = stores::followed(path, self.arena())?;
+        let follower = cells::followed(path, self.arena())?;
         if follower.access().public && !self.tenant.policy.follows_public_bases {
             return Err(Errno::EPERM);
         }
@@ -1569,15 +1569,15 @@ impl Connection {
     }
 
     /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
-    /// forking it from the version `how` names if it doesn't exist ([`stores::fork_version`]);
+    /// forking it from the version `how` names if it doesn't exist ([`cells::fork_version`]);
     /// unless another connection has it open; and returns its branch. cladefs: a store followers
-    /// have open, it takes over ([`stores::take_over`]). Its waits, for a connection whose VM
+    /// have open, it takes over ([`cells::take_over`]). Its waits, for a connection whose VM
     /// process is gone to let the store go, and for a restore's version, hold no thread
     /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
     /// if it is shared (`EACCES`, TASK-395.7).
     async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
-        let hold = stores::hold_to_write(&store_key(path), self.this.clone()).await?;
+        let hold = cells::hold_to_write(&store_key(path), self.this.clone()).await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
         self.tenant.reaches(path)?;
         // cladefs: a store it makes, within its tenant's disk (TASK-94).
@@ -1589,7 +1589,7 @@ impl Connection {
         // Closed before its hold lets its path go, if it fails here.
         let store = self.open_held(path, &hold, &how).await?;
         // A VM process opens no store to write that its writer may not write
-        // ([`crate::StoreAccess::may_write`]): a public base, only forks of it (TASK-43), what it
+        // ([`crate::CellAccess::may_write`]): a public base, only forks of it (TASK-43), what it
         // wrote being every tenant's, its pages the default arena's, which every VM process holds
         // (TASK-79.17); cladefs: nor a version, which nothing writes (doc-7, Versions).
         store.access().may_write()?;
@@ -1610,26 +1610,26 @@ impl Connection {
     async fn open_held(
         &self,
         path: &Path,
-        hold: &stores::Hold,
+        hold: &cells::Hold,
         how: &codec::Opening,
-    ) -> Result<Arc<ExtentStore>, Errno> {
+    ) -> Result<Arc<OpenCell>, Errno> {
         let arena = self.arena();
         // cladefs: a restore's store there already, which the snapshot was taken of or an earlier
         // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
         if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
             && path.exists()
-            && !crate::host_store::unmade(path)
+            && !crate::host_cell::unmade(path)
         {
             let store = match hold.instance() {
                 Some((store, _)) => store,
                 None => Arc::new(open_store(path, None, Some(arena))?),
             };
-            stores::at_version((version_cell(tenant, cell), version), capacity, path, &store)
+            cells::at_version((version_cell(tenant, cell), version), capacity, path, &store)
                 .await?;
             there = Some(store);
         }
-        if let Some(store) = stores::take_over(hold, arena)? {
+        if let Some(store) = cells::take_over(hold, arena)? {
             return Ok(store);
         }
         let store = match (there, how) {
@@ -1637,13 +1637,13 @@ impl Connection {
             // cladefs: or where a store's making was left unmade, its host crashing, which is no
             // store: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
-                stores::removed_if_unmade(path)?;
+                cells::removed_if_unmade(path)?;
                 let forked = (version_cell(tenant, cell), version);
-                stores::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
+                cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
                 Arc::new(open_store(path, None, Some(arena))?)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
-                let new = stores::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
+                let new = cells::New { capacity: *capacity, kind: *kind, tenant: self.tenant.id };
                 Arc::new(open_store(path, Some(new), Some(arena))?)
             }
             (None, _) => Arc::new(open_store(path, None, Some(arena))?),
@@ -1677,8 +1677,8 @@ impl Resizes for Connection {
     /// no thread while it waits for the guest's answer (TASK-43.6). The store's I/O runs on a
     /// blocking thread.
     async fn resize(&self, capacity: u64) -> Result<(), Errno> {
-        let store = stores::Live(self.store().ok_or(Errno::EBADF)?.clone());
-        store_requests::resize_held(&store, self, &self.shrinking, capacity, SHRINK_WAIT).await
+        let store = cells::Live(self.store().ok_or(Errno::EBADF)?.clone());
+        cell_requests::resize_held(&store, self, &self.shrinking, capacity, SHRINK_WAIT).await
     }
 }
 
@@ -1783,7 +1783,7 @@ impl Drop for TransferArea {
 /// do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the guest frees
 /// leaves the host's disk with the segments acknowledged in the bucket, whose collector takes it
 /// back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
-async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
+async fn flush_behind(store: Arc<OpenCell>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
     while tokio::time::timeout(FLUSH_EVERY, &mut stopped).await.is_err() {
         if !store.flush_pending() {
             store.flush_turned();
@@ -1810,7 +1810,7 @@ async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot
 /// cladefs: how many threads every store's flushes run on, at most ([`flush_behind`], TASK-92.49): as many syncs at once as a host's disk
 /// takes, those past them waiting a few milliseconds for their turn, holding no thread; and the
 /// 15 a flush of many files syncs them on beside its own, which every flush shares
-/// (`extent_store`'s `HELPERS`), 47 threads at most at once, those 15 none once idle. A
+/// (`local_cell`'s `HELPERS`), 47 threads at most at once, those 15 none once idle. A
 /// blocking thread each, for every store whose flush came due at its turn, hundreds of stores'
 /// guests committing together kept as many as their syncs' waits took, each idle 10 s after,
 /// and made no store durable sooner: on a GCE host's disk, 300 stores' guests committing at once
@@ -1829,7 +1829,7 @@ static FLUSHERS: std::sync::LazyLock<Pool> =
 /// reading waits for it as one message, the latest commit's, rather than one for each, which the
 /// daemon would hold for it without end, the writer's commits going on (TASK-79.9).
 async fn tell_commits(
-    store: Arc<ExtentStore>,
+    store: Arc<OpenCell>,
     mut commit: u64,
     sender: Arc<AsyncSender>,
     mut stopped: tokio::sync::oneshot::Receiver<()>,

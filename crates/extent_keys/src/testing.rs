@@ -81,7 +81,7 @@ impl<K: Kms> Kms for Counted<K> {
 
 /// cladefs: the tests' KMS by default (TASK-411.28: every store encrypted, every test too): each
 /// tenant's KEK made on its first wrap and kept in memory, as the bucket KMS makes them in the
-/// bucket (`extent_bucket::bucket_kms`), so that any tenant a test names is encrypted with no setup.
+/// bucket (`bucket_cell::bucket_kms`), so that any tenant a test names is encrypted with no setup.
 /// Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]). A tenant [`MemoryKms::destroy`]ed
 /// is refused for good, as a tenant whose KEK object is a tombstone; an unwrap for a tenant with
 /// no KEK is refused as destroyed, what it names gone. Hosts of one test share one, as they share

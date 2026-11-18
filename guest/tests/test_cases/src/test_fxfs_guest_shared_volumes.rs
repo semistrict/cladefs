@@ -35,7 +35,7 @@ const GENERATIONS: usize = 2;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, cladefs_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, control, setup_rootfs};
     use crate::shared_volumes::host::{Vms, format, next_generation};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;

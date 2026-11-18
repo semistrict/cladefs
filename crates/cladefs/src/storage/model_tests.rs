@@ -44,7 +44,7 @@ const FORKS: usize = 2;
 /// at once.
 pub(super) const BUSY: Pace = Pace {
     every: Duration::ZERO,
-    options: extent_bucket::collector::Options { compact_below: 0.5, grace: 0 },
+    options: bucket_cell::collector::Options { compact_below: 0.5, grace: 0 },
 };
 
 /// The files of a filesystem, by their names: what they hold.

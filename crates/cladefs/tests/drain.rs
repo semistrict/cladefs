@@ -9,12 +9,12 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::{DaemonExtentStore, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 struct KillOnDrop(Child);
 
@@ -43,7 +43,7 @@ fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     daemon
 }
 
-fn read(store: &DaemonExtentStore, extent: ExtentId) -> Vec<u8> {
+fn read(store: &CellClient, extent: ExtentId) -> Vec<u8> {
     let mut data = vec![0; BLOCK];
     store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])]).unwrap();
     data
@@ -59,7 +59,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
 
     // A VM's store, its last commit only ordered, which its uploader, uploading within a second of
     // a durable commit, has not uploaded as the daemon is told to stop.
-    let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+    let store = CellClient::connect(&socket, &path, 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     store.on_daemon_lost(move || told.send(()).unwrap());
     let branch = store.branch();
@@ -75,7 +75,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     drop(store);
 
     // Closed, durable: as of its last commit here.
-    let closed = ExtentStore::open(&path).unwrap();
+    let closed = OpenCell::open(&path).unwrap();
     assert_eq!(closed.root().unwrap(), b"drained");
     drop(closed);
 
@@ -88,11 +88,11 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     let taken: PathBuf = other.join("taken");
     // TASK-364: its VM manager makes the cell's store there first, of the branch its tenant, cell
     // and ID name; taken from the bucket.
-    let full = extent_store::host_branch(&path).unwrap();
+    let full = local_cell::host_branch(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
-    ExtentStore::take(&taken, 1 << 28, full, Some(2)).unwrap();
-    let taken = DaemonExtentStore::connect(&second_socket, &taken, 1 << 28).unwrap();
+    OpenCell::take(&taken, 1 << 28, full, Some(2)).unwrap();
+    let taken = CellClient::connect(&second_socket, &taken, 1 << 28).unwrap();
     assert_eq!(taken.root().unwrap(), b"drained");
     assert_eq!(read(&taken, extent), [7; BLOCK]);
 }

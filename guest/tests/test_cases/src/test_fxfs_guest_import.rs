@@ -45,9 +45,9 @@ mod host {
     use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use futures::executor::block_on;
     use cladefs::import::testing::{Entry, Kind, gzip, layer, oci_layout, opaque, whiteout};
     use cladefs::{Errno, Filesystem, Storage};
+    use futures::executor::block_on;
     use std::path::Path;
 
     const CAPACITY: u64 = 256 << 20;
@@ -115,17 +115,22 @@ mod host {
             let layout = dir.join("image");
             oci_layout(&layout, "cladefs/test:import", &layers()?)?;
             let base = dir.join("base");
-            block_on(cladefs::import::store(&base, CAPACITY, &layout, Some("cladefs/test:import")))?;
+            block_on(cladefs::import::store(
+                &base,
+                CAPACITY,
+                &layout,
+                Some("cladefs/test:import"),
+            ))?;
             // A branch of each case's own, as each fork's is, its ID its bucket's to give:
             // a new cell of the base's tenant's (TASK-364).
-            let base = cladefs::ExtentStore::open(&base)?;
+            let base = cladefs::OpenCell::open(&base)?;
             base.fork(dir.join("extents"), base.branch().tenant)?;
             drop(base);
 
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.extent_store("extents", &dir.join("extents"), CAPACITY, window)?;
+            vm.cell("extents", &dir.join("extents"), CAPACITY, window)?;
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }
 

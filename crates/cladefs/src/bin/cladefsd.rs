@@ -96,7 +96,7 @@
 //! by default, 64 MiB at least: an extent, which goes alone), every store's together (TASK-317).
 //! With `CLADEFSD_STATS` naming a file too, the daemon keeps there what it did with the
 //! bucket, its requests by kind and its bytes up and down
-//! (`extent_bucket::object_bucket::Stats::line`), what the stores' followers are, what serving the
+//! (`bucket_cell::object_bucket::Stats::line`), what the stores' followers are, what serving the
 //! stores cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
 //! rewritten as they change.
 //!
@@ -107,7 +107,7 @@
 //! It logs to standard error, a line a record (`cladefs::cladefsd::logging`): text by default, or,
 //! with `CLADEFS_LOG_FORMAT=json`, a JSON object a line, of the record's `timestamp`, `level`,
 //! `target`, `message` and key-values (TASK-259). `CLADEFS_LOG_LEVEL` says how much, `info` by
-//! default, by target too: `info,extent_bucket::object_bucket=debug` logs each request of object
+//! default, by target too: `info,bucket_cell::object_bucket=debug` logs each request of object
 //! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
 //! its `store` (TASK-260).
 
@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
     cladefs::cladefsd::memory::return_large_allocations();
     // cladefs: a panic holding a lock shared beyond one store, which no halt contains, stops the
     // daemon, rather than poison the lock for every user after (TASK-149.24).
-    extent_store::shared::abort_on_panics();
+    local_cell::shared::abort_on_panics();
     // cladefs: the failpoints FAILPOINTS sets, in a daemon built with them (TASK-44.10).
     let _failpoints = fail::FailScenario::setup();
     cladefs::faults::from_seed().map_err(anyhow::Error::msg)?;

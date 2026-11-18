@@ -8,8 +8,8 @@
 # nextest; a mutant no test fails, missed, needs a test, or is recorded as equivalent, with why.
 # Its parts, each against its own tests:
 #
-# - views: the store's views (crates/extent_store: views.rs, kept.rs, and Store's view and kept
-#   functions), against extent_store's tests, then the missed against its Shuttle tests;
+# - views: the store's views (crates/local_cell: views.rs, kept.rs, and Store's view and kept
+#   functions), against local_cell's tests, then the missed against its Shuttle tests;
 # - fxfs: the Fxfs follower (crates/fxfs/src/follower.rs), against its tests and the followers'
 #   simulation (follower_sim, under Shuttle);
 # - protocol: the concurrency protocol (crates/follower), against its tests, then the missed
@@ -71,10 +71,10 @@ for part in "${parts[@]}"; do
             # the rest of store.rs is the store's own, which TASK-44.1's sweep covers
             # (cargo-mutants 27.1.0 lets a few of its field deletions through the filters).
             store='Store<D>::(view|view_stats|view_extent|view_reader|read_view|locate_view|newer|cut_views|kept_for_views|read_kept)\b|views_|Reader::View|kept\('
-            mutants views -p extent_store -f crates/extent_store/src/views.rs \
-                -f crates/extent_store/src/kept.rs -f crates/extent_store/src/store.rs \
-                -F "^crates/extent_store/src/(views|kept)\.rs:|$store" || result $? || status=1
-            under_shuttle views extent_store
+            mutants views -p local_cell -f crates/local_cell/src/views.rs \
+                -f crates/local_cell/src/kept.rs -f crates/local_cell/src/store.rs \
+                -F "^crates/local_cell/src/(views|kept)\.rs:|$store" || result $? || status=1
+            under_shuttle views local_cell
             ;;
         fxfs)
             # The simulation's tests join the mutated package's: only theirs and the follower's

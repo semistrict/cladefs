@@ -24,7 +24,7 @@ pub fn host() {
     }
 }
 
-use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice};
+use cladefs::{CellClient, ExtentId, VolatileSlice};
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 /// An extent's bytes: 64 KiB unlike any other `seed`'s.
@@ -96,7 +96,7 @@ pub fn read_window(at: *const u8, len: usize) -> Vec<u8> {
 
 /// Writes `bytes` as an extent of `store`, commits, and reads it through a window, which caches
 /// its pages in the daemon's memory.
-pub fn cache(store: &DaemonExtentStore, bytes: &[u8]) {
+pub fn cache(store: &CellClient, bytes: &[u8]) {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(None).unwrap();

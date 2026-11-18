@@ -10,10 +10,10 @@
 use crate::BRANCH;
 use crate::device::ViewDevice;
 use crate::model::{NAMES, Op, Writer};
-use extent_store::{Description, MemDir, Options as StoreOptions, Store, View};
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
+use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions, View};
 use shuttle::scheduler::RandomScheduler;
 use shuttle::{Config, Runner};
 use std::future::Future;
@@ -31,7 +31,7 @@ struct Following {
 
 async fn following() -> Following {
     let description = Description { block_size: 4096, capacity: 64 << 20, branch: BRANCH };
-    let store = Store::create(MemDir::new(), description, StoreOptions::default()).unwrap();
+    let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
     let store = Arc::new(store);
     let writer = Writer::new(store.clone()).await;
     writer.apply(Op::Create(NAMES[0])).await;

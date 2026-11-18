@@ -18,7 +18,7 @@ cladefsd            crates/cladefs: cladefsd, the stores, the extent cache,
   │                      the DAX windows
 physical memory          crates/physmem: arenas of shared memory (memfds),
   │                      their caps, relief and quarantine
-extent store             crates/extent_store: segments, large extents' files,
+extent store             crates/local_cell: segments, large extents' files,
                          an index
 ```
 

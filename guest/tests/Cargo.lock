@@ -750,6 +750,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "bucket_cell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base32_id",
+ "bincode",
+ "bytes",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "humantime",
+ "hyper",
+ "imbl",
+ "libc",
+ "log",
+ "object_store",
+ "opentelemetry",
+ "rand 0.10.3",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage_device",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -858,12 +889,11 @@ dependencies = [
  "async-trait",
  "base32_id",
  "bitflags",
+ "bucket_cell",
  "event-listener",
- "extent_bucket",
  "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_store",
  "fail",
  "flate2",
  "fuchsia-async",
@@ -874,6 +904,7 @@ dependencies = [
  "hyper-util",
  "io-uring",
  "libc",
+ "local_cell",
  "log",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1154,37 +1185,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_bucket"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base32_id",
- "bincode",
- "bytes",
- "extent_frame",
- "extent_keys",
- "fail",
- "futures",
- "humantime",
- "hyper",
- "imbl",
- "libc",
- "log",
- "object_store",
- "opentelemetry",
- "rand 0.10.3",
- "reqwest",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "storage_device",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "extent_files"
 version = "0.1.0"
 dependencies = [
@@ -1233,29 +1233,6 @@ dependencies = [
  "url",
  "zerocopy",
  "zeroize",
-]
-
-[[package]]
-name = "extent_store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base32_id",
- "bincode",
- "event-listener",
- "extent_bucket",
- "extent_frame",
- "extent_keys",
- "fail",
- "futures",
- "libc",
- "log",
- "rand 0.10.3",
- "rapidhash",
- "serde",
- "storage_device",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -2298,6 +2275,29 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "local_cell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base32_id",
+ "bincode",
+ "bucket_cell",
+ "event-listener",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "libc",
+ "log",
+ "rand 0.10.3",
+ "rapidhash",
+ "serde",
+ "storage_device",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"
@@ -3785,18 +3785,18 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base32_id",
+ "bucket_cell",
  "bytes",
  "cladefs",
- "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_store",
  "follower_history",
  "futures",
  "fxfs-automount",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "local_cell",
  "macros",
  "nix 0.29.0",
  "serde",

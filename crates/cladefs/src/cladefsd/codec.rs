@@ -23,7 +23,7 @@ use super::wire::*;
 use crate::pages::{ArenaId, PhysLocation};
 use crate::{Access, Commit, Errno, ExtentId, ExtentInfo, MappingContents};
 use crate::{WindowMapping, WriteBarriers};
-use extent_bucket::cell::Kind;
+use bucket_cell::cell::Kind;
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 use std::os::fd::{AsFd, BorrowedFd};

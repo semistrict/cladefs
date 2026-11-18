@@ -73,9 +73,9 @@ mod host {
         let window =
             if test.dax { crate::common::dax_window(crate::common::Window::Large)? } else { 0 };
         if read_only {
-            vm.extent_store_following("extents", store, window)?;
+            vm.cell_following("extents", store, window)?;
         } else {
-            vm.extent_store("extents", store, CAPACITY, window)?;
+            vm.cell("extents", store, CAPACITY, window)?;
         }
         vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
         vm.vsock(uds);

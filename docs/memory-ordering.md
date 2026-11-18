@@ -1,6 +1,6 @@
 # Memory orderings of the host crates' atomics
 
-For whoever changes an atomic in `crates/cladefs`, `physmem`, `extent_store`, `extent_bucket`,
+For whoever changes an atomic in `crates/cladefs`, `physmem`, `local_cell`, `bucket_cell`,
 `follower`, `virtio_extent` or the extent device in `vendor/firecracker`: what each atomic that is
 not `SeqCst` publishes, which access pairs with which, why that is enough, and which loom model
 shows it. A change to one of these orderings, or a new atomic that orders anything but itself,
@@ -62,16 +62,16 @@ measurable.
 | Site | What orders it instead |
 |---|---|
 | `cladefs::cladefsd::client::Client::closing` (Release store in `close`, Acquire load as the receiving loop ends) | `close` stores, then shuts the socket down. The loop ends on the receive that the shutdown ends, a kernel ordering. A daemon going at the same instant is a race no ordering decides. |
-| `DaemonExtentStore::copying` (Release in `create_dax_window_in_host_memory`, Acquire in `copies_on_write`) | only the bool |
+| `CellClient::copying` (Release in `create_dax_window_in_host_memory`, Acquire in `copies_on_write`) | only the bool |
 | `cladefs::cladefsd::server::Connection::closing` (Release once the connection ends, Acquire in `going`) | only the bool. `going` is a hint the writer path polls. |
 | `server::Peer::let_go` (swap AcqRel, loads Acquire) | swapped once, to shut the socket down once; read by `gone` after the connection ended. Only the bool. |
 | `server::Counted` connections (fetch_add/sub AcqRel) | a limit counter: only itself |
 | `cladefsd::control::CONTROL_SERVING` (Release, Acquire) | only the bool |
-| `extents::ExtentStore::flush_turns` (fetch_add Release, load Acquire) | a count of turns that a test reads as a number |
+| `extents::OpenCell::flush_turns` (fetch_add Release, load Acquire) | a count of turns that a test reads as a number |
 | `executor::Jobs::running` (fetch_add/sub AcqRel, load Acquire) | `Notify`'s lock orders the wakeup. The executor thread then drops the runtime, whose tasks tokio's own synchronization frees. The jobs' effects reach no one through the count. |
 | `dax::uffd::Lift::asked` (fetch_add AcqRel, load Acquire) | the eventfd write that follows the ask, and the read that precedes the load, carry happens-before through the kernel, so the load sees the ask by coherence |
-| `extent_store::durability::Helpers` (`update` AcqRel, fetch_sub AcqRel) | a semaphore count of helper threads: only itself |
-| `extent_bucket::trace::ENABLED` (Release store, Relaxed load) | the Release pairs with no Acquire. `TRACER` is a `OnceLock` with its own ordering, and a span that sees `enabled()` before `TRACER` is set makes none. |
+| `local_cell::durability::Helpers` (`update` AcqRel, fetch_sub AcqRel) | a semaphore count of helper threads: only itself |
+| `bucket_cell::trace::ENABLED` (Release store, Relaxed load) | the Release pairs with no Acquire. `TRACER` is a `OnceLock` with its own ordering, and a span that sees `enabled()` before `TRACER` is set makes none. |
 | `physmem::physmap::PhysMemory::chunks` (Release store in `assign_chunk`/`release_chunk`, Acquire loads) | chunks are assigned and released under the PMM's lock, which also puts their pages on the free lists. Any holder of a page took it under that lock. `is_free` (a test's query) reads the value alone. |
 | `physmem::pmm::relief::Reliever::running` (Release in `Gone::drop`, Acquire in the allocator) | only the bool. The `room` pulse after the store is a lock (`Pulse`) and wakes waiters. |
 | `virtio_extent::notices::{Following::committed, StatsAsks::asked, Notices::frozen}`, `Resizing::opened`/`changed` stores | only their values. The configuration interrupt raised after a change carries the order to the guest (an eventfd, through KVM). |
@@ -85,10 +85,10 @@ measurable.
 | `cladefs::cache::CachedExtent::{present, used}`, `CACHE_CLOCK`, `MOST_CACHED`, `TRIM_AT` | eviction hints: `present` changes under the pages' lock and is read as a hint before that lock is taken. The clock orders uses only roughly. |
 | `cladefs::dax::uffd::Busy::{doing, since, serving}` | a watchdog's diagnostic. The two loads may disagree with each other. |
 | `cladefs::profile::Profile::written` | a once-flag (swap). The profile's file is the real guard (`path.exists()`). |
-| `extent_bucket::marks::Watch::{any, marked, marking, marking_due}`, `Held::read` | `any` and `marking` are hints in front of the `cells` lock, which guards the marks. A stale hint only delays a warning. `marking_due` is a CAS so that one caller per refresh rereads. |
-| `extent_bucket::object_bucket::{ObjectBucket::honoured, Failing::on}` | `honoured` caches a probe that is idempotent. `on` is a hint in front of the `run` lock. |
-| `extent_store::dir::Dir::bypassing` | the last open's answer, a diagnostic |
-| `extent_store::sync::REFUSING` (Shuttle builds only) | a test's switch, set before the threads it affects |
+| `bucket_cell::marks::Watch::{any, marked, marking, marking_due}`, `Held::read` | `any` and `marking` are hints in front of the `cells` lock, which guards the marks. A stale hint only delays a warning. `marking_due` is a CAS so that one caller per refresh rereads. |
+| `bucket_cell::object_bucket::{ObjectBucket::honoured, Failing::on}` | `honoured` caches a probe that is idempotent. `on` is a hint in front of the `run` lock. |
+| `local_cell::dir::Dir::bypassing` | the last open's answer, a diagnostic |
+| `local_cell::sync::REFUSING` (Shuttle builds only) | a test's switch, set before the threads it affects |
 | `vendor/firecracker` extent `window::KvmPrefault::failed` | a log-once flag (swap) |
 | `cladefs::cladefsd::server::Peer::mappings` | set once, as a window is made, before the replies that it bounds |
 
@@ -100,12 +100,12 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
   `bucket::peers::Counters`; `dax::Gauges` (window state's gauges); `dax::uffd::{Taken, REFUSED, CHANGED}`;
   `cladefsd::client`'s `Client::next`, `StageCosts` and `Transfer::used`; `cladefsd::metrics::Requests`;
   `cladefsd::stats`'s `ASKS`, `IDS` and each VM's `costs`, `private` and `installed`; `cladefsd::peers::{SERVED,
-  SERVED_MISSING}`; `cladefsd::server::REFUSED`; `cladefsd::stores::{STATS_WRITTEN,
+  SERVED_MISSING}`; `cladefsd::server::REFUSED`; `cladefsd::cells::{STATS_WRITTEN,
   UPLOADS_WHEN_ASKED}`; `cladefsd::wire::AsyncSender::queued`.
 - physmem: `pmm::{free_count, alloc_failed_no_mem}`; `physmap::create_shared_memory`'s `NEXT`.
-- extent_store: `segments`' timing statics; `written::WRITES`; `framed::{OPENED, UNPACKS}`;
+- local_cell: `segments`' timing statics; `written::WRITES`; `framed::{OPENED, UNPACKS}`;
   `framing::SEEN_AHEAD`; `timings`.
-- extent_bucket: `store::Counts` (requests, bytes, failures); `client::Progress::last`;
+- bucket_cell: `store::Counts` (requests, bytes, failures); `client::Progress::last`;
   `checkpoint`, `fetch` and `sweep` counters; `collector`'s; `bin/cladefs-gc-fill`'s.
 - virtio_extent: `requests::Served`.
 
@@ -114,8 +114,8 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
 The atomics in test modules (`#[cfg(test)]`), in Shuttle builds (whose atomics are `SeqCst`
 whatever they ask) and in `tests/` are switches a test sets before the threads it affects start,
 or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` store (`shut`,
-`full`, `held`, `went`, `writes`), `cladefsd::tests`, `store_table`'s and `store_requests`' Shuttle
-tests, `follower`'s test listener, and `extent_bucket::{branch, collector, fetch}` tests. The join
+`full`, `held`, `went`, `writes`), `cladefsd::tests`, `cell_table`'s and `cell_requests`' Shuttle
+tests, `follower`'s test listener, and `bucket_cell::{branch, collector, fetch}` tests. The join
 or channel that ends the test orders the read after the writes.
 
 ## What the audit found
@@ -126,5 +126,5 @@ or channel that ends the test orders the read after the writes.
   meant two concurrent `process::exit` calls in Firecracker's listener. Fixed by `Occurrence`.
 - TASK-444.2.2: a follower's device read the latest commit with a load after setting its
   listener, the same pattern against the rise. loom showed a commit heard by neither. Fixed by
-  `Latest::listen`, which returns the value through an RMW (`DaemonExtentStore::on_committed`
+  `Latest::listen`, which returns the value through an RMW (`CellClient::on_committed`
   now returns it).

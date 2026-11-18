@@ -3,8 +3,8 @@
 # is found poisoned by every user after, or what it guards half changed (TASK-149.24).
 # Kind: shared lock poisoned
 # Killer: cladefsd::tests::a_panic_holding_a_shared_lock_stops_the_daemon
---- a/crates/extent_store/src/shared.rs
-+++ b/crates/extent_store/src/shared.rs
+--- a/crates/local_cell/src/shared.rs
++++ b/crates/local_cell/src/shared.rs
 @@ -53,7 +53,7 @@
          std::panic::set_hook(Box::new(move |info| {
              let held = held();

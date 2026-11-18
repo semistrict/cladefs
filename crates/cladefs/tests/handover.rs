@@ -6,12 +6,12 @@
 //! check of a guest's crash opens it: whole, as of its last commit, durable or only ordered, as a
 //! guest's fsyncs are (TASK-26.6.2). The daemon closes the
 //! store as the VM process goes, flushing it, and the other process's opening waits for that,
-//! as opening a branch another process has open does (`extent_store::Dir::take`), rather than
+//! as opening a branch another process has open does (`local_cell::Dir::take`), rather than
 //! recover the store from under it.
 
 #![cfg(target_os = "linux")]
 
-use cladefs::{DaemonExtentStore, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{CellClient, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -53,7 +53,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
     let path = dir.path().join("store");
     let mut sequence = 1;
     for round in 0..50 {
-        let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+        let store = CellClient::connect(&socket, &path, 1 << 28).unwrap();
         let mut root = Vec::new();
         for commit in 0..20 {
             for _ in 0..4 {
@@ -66,7 +66,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
             store.commit(Some(&root)).unwrap();
         }
         drop(store);
-        let opened = ExtentStore::open(&path).unwrap();
+        let opened = OpenCell::open(&path).unwrap();
         assert_eq!(opened.root().unwrap(), root, "round {round}");
         sequence = opened.info().unwrap().next_sequence.max(sequence);
     }
@@ -83,7 +83,7 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
     let path = dir.path().join("store");
     let mut sequence = 1;
     for round in 0..50u64 {
-        let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+        let store = CellClient::connect(&socket, &path, 1 << 28).unwrap();
         let mut last = Vec::new();
         for commit in 0..20u64 {
             let extent = ExtentId { branch: store.branch(), sequence };
@@ -94,7 +94,7 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
             last.push((extent, data));
         }
         drop(store);
-        let opened = ExtentStore::open(&path).unwrap();
+        let opened = OpenCell::open(&path).unwrap();
         for (extent, data) in &last {
             let mut read = vec![0; data.len()];
             let found = opened.read(*extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]);
@@ -110,13 +110,13 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
 fn stores_are_told_when_their_daemon_goes() {
     let dir = tempfile::tempdir().unwrap();
     let (mut daemon, socket) = daemon(dir.path());
-    let closed = DaemonExtentStore::connect(&socket, dir.path().join("closed"), 1 << 28).unwrap();
+    let closed = CellClient::connect(&socket, dir.path().join("closed"), 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     let told_closed = told.clone();
     closed.on_daemon_lost(move || told_closed.send("closed").unwrap());
     drop(closed);
 
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
+    let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
     store.on_daemon_lost(move || told.send("store").unwrap());
     let write = |sequence| {
         let extent = ExtentId { branch: store.branch(), sequence };

@@ -129,10 +129,12 @@ mod host {
         let store = test_setup.tmp_dir.join(format!("store-{vm}"));
         let mut machine = Vm::new(2, VM_MEMORY_MIB)?;
         machine.guest_kernel()?;
-        machine.extent_store_served("extents", &store, CAPACITY, window, socket);
-        for var in
-            ["CLADEFS_SHARED_DISK_LARGE_MIB", "CLADEFS_SHARED_DISK_FILES", "CLADEFS_SHARED_DISK_FSYNC"]
-        {
+        machine.cell_served("extents", &store, CAPACITY, window, socket);
+        for var in [
+            "CLADEFS_SHARED_DISK_LARGE_MIB",
+            "CLADEFS_SHARED_DISK_FILES",
+            "CLADEFS_SHARED_DISK_FSYNC",
+        ] {
             if let Ok(value) = std::env::var(var) {
                 machine.env(&CString::new(format!("{var}={value}"))?);
             }
@@ -360,8 +362,10 @@ mod guest {
     impl Test for TestFxfsGuestSharedDisk {
         fn in_guest(self: Box<Self>) {
             let seed = count("CLADEFS_SHARED_DISK_SEED", 0) << 32;
-            let (large_mib, files) =
-                (count("CLADEFS_SHARED_DISK_LARGE_MIB", 768), count("CLADEFS_SHARED_DISK_FILES", 3000));
+            let (large_mib, files) = (
+                count("CLADEFS_SHARED_DISK_LARGE_MIB", 768),
+                count("CLADEFS_SHARED_DISK_FILES", 3000),
+            );
             fs::create_dir_all(MNT).unwrap();
             let (source, target, fstype) = (
                 CString::new("extents").unwrap(),

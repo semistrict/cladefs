@@ -4,7 +4,7 @@
 they cause and each commit's phases, uploads to the bucket and each bucket request, store opens
 and forks, extent-cache page-ins, and memory-relief passes. Tracing is off by default. While it is
 off, a span costs one relaxed atomic load (measured below), and nothing is allocated or exported.
-The code is `crates/extent_bucket/src/trace.rs`, which makes the spans, and
+The code is `crates/bucket_cell/src/trace.rs`, which makes the spans, and
 `crates/cladefs/src/cladefsd/otel.rs`, which starts the exporter (TASK-258).
 
 ## Turning it on
@@ -86,7 +86,7 @@ pager's, reads it from `cladefs::request::current()`.
 
 ## Cost while off
 
-`spans_off_are_nothing_and_cost_a_load` (`crates/extent_bucket/src/trace.rs`) times a bucket
+`spans_off_are_nothing_and_cost_a_load` (`crates/bucket_cell/src/trace.rs`) times a bucket
 request's span with tracing off: started, three attributes set, ended. On Linux (aarch64, OrbStack)
 it costs under 1 ns in a release build (the test's nanosecond clock reads 0 ns) and 19 ns in a
 debug build, the fastest of 5 rounds of a million. With tracing off, no tracer exists and no

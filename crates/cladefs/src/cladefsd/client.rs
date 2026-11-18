@@ -19,7 +19,7 @@ use crate::{
     Access, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
     VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
 };
-use extent_bucket::cell::Kind;
+use bucket_cell::cell::Kind;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::borrow::Cow;
@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// An extent store that an extent daemon serves this process. See the module docs.
-pub struct DaemonExtentStore {
+pub struct CellClient {
     client: Arc<Client>,
     branch: u64,
     /// The daemon's physical memory, which the window maps pages of, by arena: its
@@ -53,9 +53,9 @@ pub struct DaemonExtentStore {
     max_map_count: Option<u64>,
 }
 
-impl DaemonExtentStore {
+impl CellClient {
     /// cladefs: the most bytes of a guest's stats an answer carries
-    /// ([`DaemonExtentStore::answer_stats`], TASK-111.4).
+    /// ([`CellClient::answer_stats`], TASK-111.4).
     pub const MAX_STATS: usize = MAX_STATS;
 
     /// The store at `store` that the daemon listening at `socket` serves, created with `capacity`
@@ -133,13 +133,13 @@ impl DaemonExtentStore {
         Ok(Self { client, branch, memories, faults, read_only, transfer, copying, max_map_count })
     }
 
-    /// cladefs: whether it is a follower's, read-only ([`DaemonExtentStore::connect_read_only`]).
+    /// cladefs: whether it is a follower's, read-only ([`CellClient::connect_read_only`]).
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// cladefs: the number of the latest commit of a follower's writer it has heard of: its view's,
-    /// or one after ([`DaemonExtentStore::on_committed`]).
+    /// or one after ([`CellClient::on_committed`]).
     pub fn committed(&self) -> u64 {
         self.client.committed.latest()
     }
@@ -148,20 +148,20 @@ impl DaemonExtentStore {
     /// of from now on: the latest of each run of them, which the follower may advance to. Returns
     /// the latest heard of as it began: each commit is heard of from one or the other, or a later
     /// one, one as it begins perhaps from both; a second read, of
-    /// [`DaemonExtentStore::committed`], might miss one that the call misses (TASK-444.2.2). Once,
+    /// [`CellClient::committed`], might miss one that the call misses (TASK-444.2.2). Once,
     /// of a store.
     pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) -> u64 {
         self.client.committed.listen(Box::new(committed))
     }
 
     /// cladefs: moves a follower's view to its writer's latest commit, holding what the commits
-    /// since the one it was as of held until it lets go of them ([`DaemonExtentStore::let_go`]),
+    /// since the one it was as of held until it lets go of them ([`CellClient::let_go`]),
     /// and returns the commit's number (`ADVANCE`). `ESTALE` once it was cut off.
     pub fn advance(&self) -> Result<u64> {
         blocking(self.advance_async())
     }
 
-    /// [`DaemonExtentStore::advance`], waiting for the daemon holding no thread.
+    /// [`CellClient::advance`], waiting for the daemon holding no thread.
     pub async fn advance_async(&self) -> Result<u64> {
         let reply = self.client.request(&Request::Advance).await?;
         Ok(Advanced::from_args(reply.header.args).commit)
@@ -173,7 +173,7 @@ impl DaemonExtentStore {
         blocking(self.let_go_async(commit))
     }
 
-    /// [`DaemonExtentStore::let_go`], waiting for the daemon holding no thread.
+    /// [`CellClient::let_go`], waiting for the daemon holding no thread.
     pub async fn let_go_async(&self, commit: u64) -> Result<()> {
         self.client.request(&Request::LetGo { commit }).await.map(drop)
     }
@@ -184,7 +184,7 @@ impl DaemonExtentStore {
         blocking(self.pin_async(extent))
     }
 
-    /// [`DaemonExtentStore::pin`], waiting for the daemon holding no thread.
+    /// [`CellClient::pin`], waiting for the daemon holding no thread.
     pub async fn pin_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Pin(extent)).await.map(drop)
     }
@@ -194,14 +194,14 @@ impl DaemonExtentStore {
         blocking(self.unpin_async(extent))
     }
 
-    /// [`DaemonExtentStore::unpin`], waiting for the daemon holding no thread.
+    /// [`CellClient::unpin`], waiting for the daemon holding no thread.
     pub async fn unpin_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Unpin(extent)).await.map(drop)
     }
 
     /// Calls `changed` with the store's capacity each time the daemon resizes it (the control API's `ResizeStore`), and
     /// whether the guest is asked to shrink to it, which it answers
-    /// ([`DaemonExtentStore::resized`]). Unless something is called so, the guest refuses every
+    /// ([`CellClient::resized`]). Unless something is called so, the guest refuses every
     /// shrink.
     pub fn on_capacity(&self, changed: impl Fn(u64, bool) + Send + Sync + 'static) {
         let _ = self.client.capacity.set(Box::new(changed));
@@ -212,14 +212,14 @@ impl DaemonExtentStore {
         blocking(self.resized_async(capacity, took))
     }
 
-    /// [`DaemonExtentStore::resized`], waiting for the daemon holding no thread.
+    /// [`CellClient::resized`], waiting for the daemon holding no thread.
     pub async fn resized_async(&self, capacity: u64, took: bool) -> Result<()> {
         self.client.request(&Request::Resized { capacity, took }).await.map(drop)
     }
 
     /// cladefs: calls `asked` with each of the daemon's asks for this process's stats and its
     /// guest's (`STATS_ASK`, TASK-111.4): it asks the guest, if it has one that answers, and says
-    /// so, the guest's answer then going to [`DaemonExtentStore::answer_stats`]; otherwise the
+    /// so, the guest's answer then going to [`CellClient::answer_stats`]; otherwise the
     /// store answers at once, with no guest's stats, as it does unless something is called so.
     /// Called on the thread receiving the daemon's messages, it must not wait.
     pub fn on_stats_asked(&self, asked: impl Fn(u64) -> bool + Send + Sync + 'static) {
@@ -232,7 +232,7 @@ impl DaemonExtentStore {
         blocking(self.answer_stats_async(ask, guest))
     }
 
-    /// [`DaemonExtentStore::answer_stats`], waiting for the daemon holding no thread.
+    /// [`CellClient::answer_stats`], waiting for the daemon holding no thread.
     pub async fn answer_stats_async(&self, ask: u64, guest: Option<&str>) -> Result<()> {
         self.client.answer_stats(ask, guest).await.map(drop)
     }
@@ -260,7 +260,7 @@ impl DaemonExtentStore {
         blocking(self.info_async())
     }
 
-    /// [`DaemonExtentStore::info`], waiting for the daemon holding no thread.
+    /// [`CellClient::info`], waiting for the daemon holding no thread.
     pub async fn info_async(&self) -> Result<ExtentInfo> {
         Ok(Info::from_args(self.client.request(&Request::Info).await?.header.args).0)
     }
@@ -275,7 +275,7 @@ impl DaemonExtentStore {
         blocking(self.read_async(extent, offset, buffers))
     }
 
-    /// [`DaemonExtentStore::read`], waiting for the daemon holding no thread.
+    /// [`CellClient::read`], waiting for the daemon holding no thread.
     pub async fn read_async(
         &self,
         extent: ExtentId,
@@ -310,7 +310,7 @@ impl DaemonExtentStore {
     }
 
     /// Writes, ordered with `barriers`, in one round trip to the daemon
-    /// ([`ExtentStore::write_with_barriers`](crate::ExtentStore::write_with_barriers)).
+    /// ([`OpenCell::write_with_barriers`](crate::OpenCell::write_with_barriers)).
     pub fn write_with_barriers(
         &self,
         extent: ExtentId,
@@ -321,7 +321,7 @@ impl DaemonExtentStore {
         blocking(self.write_with_barriers_async(extent, offset, buffers, barriers))
     }
 
-    /// [`DaemonExtentStore::write_with_barriers`], waiting for the daemon holding no thread.
+    /// [`CellClient::write_with_barriers`], waiting for the daemon holding no thread.
     pub async fn write_with_barriers_async(
         &self,
         extent: ExtentId,
@@ -376,12 +376,12 @@ impl DaemonExtentStore {
         blocking(self.free_async(extent))
     }
 
-    /// [`DaemonExtentStore::free`], waiting for the daemon holding no thread.
+    /// [`CellClient::free`], waiting for the daemon holding no thread.
     pub async fn free_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Free(extent)).await.map(drop)
     }
 
-    /// cladefs: frees `extents`, each as [`DaemonExtentStore::free`] does, in order: the first that
+    /// cladefs: frees `extents`, each as [`CellClient::free`] does, in order: the first that
     /// fails fails the call, those before it freed. In as few requests as their payloads hold
     /// (`FREE_MANY`), a flush's dead extents in one round trip, rather than one each
     /// (TASK-92.13).
@@ -389,7 +389,7 @@ impl DaemonExtentStore {
         blocking(self.free_many_async(extents))
     }
 
-    /// [`DaemonExtentStore::free_many`], waiting for the daemon holding no thread.
+    /// [`CellClient::free_many`], waiting for the daemon holding no thread.
     pub async fn free_many_async(&self, extents: &[ExtentId]) -> Result<()> {
         // Each request names its first extent in its arguments, and those after it its payload.
         let most = 1 + MAX_PAYLOAD as usize / EXTENT_ID_BYTES;
@@ -418,8 +418,8 @@ impl DaemonExtentStore {
     }
 
     /// Commits, and sets the root to `root` if given, completing as `commit` says, waiting for
-    /// the daemon holding no thread ([`DaemonExtentStore::commit`],
-    /// [`DaemonExtentStore::commit_ordered`]).
+    /// the daemon holding no thread ([`CellClient::commit`],
+    /// [`CellClient::commit_ordered`]).
     pub async fn commit_async(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         self.client.request(&Request::Commit { commit, root }).await.map(drop)
     }
@@ -429,7 +429,7 @@ impl DaemonExtentStore {
         blocking(self.root_async())
     }
 
-    /// [`DaemonExtentStore::root`], waiting for the daemon holding no thread.
+    /// [`CellClient::root`], waiting for the daemon holding no thread.
     pub async fn root_async(&self) -> Result<Vec<u8>> {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
@@ -444,7 +444,7 @@ impl DaemonExtentStore {
     }
 
     /// Makes a version of the store's cell, once nothing is open
-    /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), as with its guest's
+    /// ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)), as with its guest's
     /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
     /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
     pub fn make_version(&self) -> Result<CellVersion> {
@@ -461,7 +461,7 @@ impl DaemonExtentStore {
     }
 
     /// cladefs: maps `mappings`, a snapshot's
-    /// [`window_mappings`](DaemonExtentStore::window_mappings), again, each at the same offset in
+    /// [`window_mappings`](CellClient::window_mappings), again, each at the same offset in
     /// the window, its extent's bytes or zeros, in order, the first that fails failing the call,
     /// those before it mapped: in as few requests as their payloads hold (`MAP_MANY`), each one
     /// change of the window, rather than a `MAP` each, a round trip and a change apiece
@@ -481,7 +481,7 @@ impl DaemonExtentStore {
         blocking(self.map_async(extent, offset, len, window_offset))
     }
 
-    /// [`DaemonExtentStore::map`], waiting for the daemon holding no thread.
+    /// [`CellClient::map`], waiting for the daemon holding no thread.
     pub async fn map_async(
         &self,
         extent: ExtentId,
@@ -509,7 +509,7 @@ impl DaemonExtentStore {
         blocking(self.make_private_async(window_offset, len))
     }
 
-    /// [`DaemonExtentStore::make_private`], waiting for the daemon holding no thread.
+    /// [`CellClient::make_private`], waiting for the daemon holding no thread.
     pub async fn make_private_async(&self, window_offset: u64, len: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let made = self.client.request(&Request::Private { window_offset, len }).await.map(drop);
@@ -550,7 +550,7 @@ impl DaemonExtentStore {
         blocking(self.unmap_async(window_offset, len))
     }
 
-    /// [`DaemonExtentStore::unmap`], waiting for the daemon holding no thread.
+    /// [`CellClient::unmap`], waiting for the daemon holding no thread.
     pub async fn unmap_async(&self, window_offset: u64, len: u64) -> Result<()> {
         self.client.request(&Request::Unmap { window_offset, len }).await.map(drop)
     }
@@ -685,7 +685,7 @@ impl DaemonExtentStore {
     }
 }
 
-impl Drop for DaemonExtentStore {
+impl Drop for CellClient {
     fn drop(&mut self) {
         // cladefs: the window lets go of the daemon's pages first, which the daemon frees once the
         // connection goes, for other VMs' extents, and makes none of the changes the daemon sent
@@ -703,7 +703,7 @@ impl Drop for DaemonExtentStore {
 }
 
 /// cladefs: a VM process's connection to its extent daemon, which opens a store over it, once: a
-/// [`DaemonExtentStore`]. What the VM process does once the daemon goes is said of it before the
+/// [`CellClient`]. What the VM process does once the daemon goes is said of it before the
 /// store opens ([`DaemonConnection::on_lost`]), so that a daemon going as it opens the store, as
 /// one killed while the store recovers from its bucket does, is told of as one going later is,
 /// rather than as the open's failure (TASK-232).
@@ -733,34 +733,26 @@ impl DaemonConnection {
     /// before what was asked of it then fails, a store's open included. Nothing is served from then
     /// on, a store's window's faults included, and it doesn't connect again: a VMM stops its VM,
     /// which can't go on, visibly to its host (TASK-50.2), as it creates the VM too (TASK-232).
-    /// Called once, of the connection and its store ([`DaemonExtentStore::on_daemon_lost`]).
+    /// Called once, of the connection and its store ([`CellClient::on_daemon_lost`]).
     pub fn on_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
         self.client().lost.listen(Box::new(lost));
     }
 
     /// The store at `store`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(self, store: impl AsRef<Path>, capacity: u64) -> Result<DaemonExtentStore, Error> {
+    pub fn open(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Fxfs))
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
     /// exist, a SQLite cell, which the sqlite_extents VFS alone opens, rather
     /// than an Fxfs one (TASK-364).
-    pub fn open_sqlite(
-        self,
-        store: impl AsRef<Path>,
-        capacity: u64,
-    ) -> Result<DaemonExtentStore, Error> {
+    pub fn open_sqlite(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Sqlite))
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
     /// exist, a memory cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
-    pub fn open_memory(
-        self,
-        store: impl AsRef<Path>,
-        capacity: u64,
-    ) -> Result<DaemonExtentStore, Error> {
+    pub fn open_memory(self, store: impl AsRef<Path>, capacity: u64) -> Result<CellClient, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Memory))
     }
 
@@ -773,7 +765,7 @@ impl DaemonConnection {
         store: impl AsRef<Path>,
         from: CellVersion,
         capacity: u64,
-    ) -> Result<DaemonExtentStore, Error> {
+    ) -> Result<CellClient, Error> {
         let CellVersion { tenant, cell, version } = from;
         self.opening(store.as_ref(), Opening::ForkOf { tenant, cell, version, capacity })
     }
@@ -781,8 +773,8 @@ impl DaemonConnection {
     /// cladefs: a follower of the store at `store` (backlog doc-8): read-only, as of the latest
     /// commit of its writer, another VM's, which goes on, or of the store as of its last commit, if
     /// no VM writes it; and which it moves to the writer's latest as it advances
-    /// ([`DaemonExtentStore::advance`]).
-    pub fn open_read_only(self, store: impl AsRef<Path>) -> Result<DaemonExtentStore, Error> {
+    /// ([`CellClient::advance`]).
+    pub fn open_read_only(self, store: impl AsRef<Path>) -> Result<CellClient, Error> {
         self.opening(store.as_ref(), Opening::ReadOnly)
     }
 
@@ -790,13 +782,9 @@ impl DaemonConnection {
     /// wire version alone, which takes every request there is (TASK-141.3): one of another, or
     /// that refuses any of what opening asks, the connection is closed on, failing; and one that
     /// goes as the store opens fails it saying so (TASK-232).
-    pub(crate) fn opening(
-        mut self,
-        store: &Path,
-        opening: Opening,
-    ) -> Result<DaemonExtentStore, Error> {
+    pub(crate) fn opening(mut self, store: &Path, opening: Opening) -> Result<CellClient, Error> {
         let client = self.client.take().expect("a connection opens one store");
-        DaemonExtentStore::open(client.clone(), store, opening).map_err(|err| {
+        CellClient::open(client.clone(), store, opening).map_err(|err| {
             let err = match client.lost.happened() {
                 true => err.context("the extent daemon went"),
                 false => err,
@@ -875,12 +863,12 @@ struct Client {
     /// (TASK-91.16).
     stage_counts: StageCosts,
     /// What the daemon's changes of the store's capacity go to
-    /// ([`DaemonExtentStore::on_capacity`]).
+    /// ([`CellClient::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
-    /// cladefs: what the daemon's asks for stats go to ([`DaemonExtentStore::on_stats_asked`]).
+    /// cladefs: what the daemon's asks for stats go to ([`CellClient::on_stats_asked`]).
     stats_asked: OnceLock<Box<dyn Fn(u64) -> bool + Send + Sync>>,
     /// cladefs: the latest commit of a follower's writer heard of, and what hears of the next
-    /// ([`DaemonExtentStore::on_committed`]).
+    /// ([`CellClient::on_committed`]).
     committed: Latest,
     /// Whether the VM process is closing the connection itself ([`Client::close`]).
     closing: std::sync::atomic::AtomicBool,

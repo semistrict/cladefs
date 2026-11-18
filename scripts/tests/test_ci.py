@@ -173,7 +173,7 @@ class Ci(unittest.TestCase):
     def test_macos_runs_what_compiles_for_macos(self):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
         macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
-        physical map, extent_store's syncs, extent_bucket's cache, cladefs's storage I/O) ran on
+        physical map, local_cell's syncs, bucket_cell's cache, cladefs's storage I/O) ran on
         laptops alone."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)

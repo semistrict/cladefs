@@ -125,7 +125,8 @@ impl Vm {
     /// Boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which CLADEFS_GUEST_KERNEL
     /// names.
     pub fn guest_kernel(&mut self) -> anyhow::Result<()> {
-        let kernel = std::env::var("CLADEFS_GUEST_KERNEL").context("CLADEFS_GUEST_KERNEL not set")?;
+        let kernel =
+            std::env::var("CLADEFS_GUEST_KERNEL").context("CLADEFS_GUEST_KERNEL not set")?;
         self.config["boot-source"]["kernel_image_path"] = kernel.into();
         Ok(())
     }
@@ -133,7 +134,7 @@ impl Vm {
     /// Adds an extent-store device tagged `tag`, on the store at `path`, which it makes, holding
     /// at most `capacity` bytes, if it doesn't exist; with a DAX window of `window` bytes if not
     /// 0. The extent daemon at CLADEFSD serves the store.
-    pub fn extent_store(
+    pub fn cell(
         &mut self,
         tag: &str,
         path: &Path,
@@ -141,48 +142,37 @@ impl Vm {
         window: u64,
     ) -> anyhow::Result<()> {
         let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-        self.extent_store_served(tag, path, capacity, window, Path::new(&cladefsd));
+        self.cell_served(tag, path, capacity, window, Path::new(&cladefsd));
         Ok(())
     }
 
     /// cladefs: adds an extent-store device tagged `tag` that follows the store at `path`, which
     /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
     /// The extent daemon at CLADEFSD serves the store.
-    pub fn extent_store_following(
-        &mut self,
-        tag: &str,
-        path: &Path,
-        window: u64,
-    ) -> anyhow::Result<()> {
+    pub fn cell_following(&mut self, tag: &str, path: &Path, window: u64) -> anyhow::Result<()> {
         let cladefsd = std::env::var_os("CLADEFSD").context("CLADEFSD not set")?;
-        self.extent_store_following_served(tag, path, window, Path::new(&cladefsd));
+        self.cell_following_served(tag, path, window, Path::new(&cladefsd));
         Ok(())
     }
 
-    /// Adds a device as [`Vm::extent_store_following`] does, served by the extent daemon at
+    /// Adds a device as [`Vm::cell_following`] does, served by the extent daemon at
     /// `cladefsd`.
-    pub fn extent_store_following_served(
-        &mut self,
-        tag: &str,
-        path: &Path,
-        window: u64,
-        cladefsd: &Path,
-    ) {
-        self.extent_store_served(tag, path, 0, window, cladefsd);
+    pub fn cell_following_served(&mut self, tag: &str, path: &Path, window: u64, cladefsd: &Path) {
+        self.cell_served(tag, path, 0, window, cladefsd);
         let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("the device added")["read_only"] = true.into();
     }
 
     /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
-    pub fn extent_store_unsafe(&mut self) {
+    pub fn cell_unsafe(&mut self) {
         let devices = self.config["cladefs"].as_array_mut().expect("an array");
         devices.last_mut().expect("a device added")["cache_type"] = "Unsafe".into();
     }
 
-    /// Adds an extent-store device as [`Vm::extent_store`] does, served by the extent daemon at
+    /// Adds an extent-store device as [`Vm::cell`] does, served by the extent daemon at
     /// `cladefsd`.
-    pub fn extent_store_served(
+    pub fn cell_served(
         &mut self,
         tag: &str,
         path: &Path,
@@ -689,7 +679,8 @@ fn spawn(
 ) -> anyhow::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
-    let firecracker = std::env::var_os("CLADEFS_FIRECRACKER").context("CLADEFS_FIRECRACKER not set")?;
+    let firecracker =
+        std::env::var_os("CLADEFS_FIRECRACKER").context("CLADEFS_FIRECRACKER not set")?;
     let mut jail = Jail::from_env()?;
     let mut command = match &mut jail {
         Some(jail) => jail.command(&firecracker, console)?,
@@ -1174,7 +1165,8 @@ mod tests {
         };
         let kcsan = |functions: &str, change: &str| kcsan_of(functions, &[], change);
         assert_eq!(checked("quiet.console.txt", "[ 0.1] Linux version 6.18\n"), Ok(()));
-        let warned = "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/cladefs/dax.c:120 cladefs_dax_seal+0x1/0x2\n";
+        let warned =
+            "[ 2.0] WARNING: CPU: 1 PID: 7 at fs/cladefs/dax.c:120 cladefs_dax_seal+0x1/0x2\n";
         assert_eq!(
             checked("warned.console.txt", warned),
             Err(format!("a kernel complained: {:#?}", vec![warned.trim_end()]))
@@ -1188,8 +1180,7 @@ mod tests {
                           [    0.033601] RETBleed: WARNING: Spectre v2 mitigation leaves CPU \
                           vulnerable to RETBleed attacks, data leaks possible!\n";
         assert_eq!(checked("advisories.console.txt", advisories), Ok(()));
-        let caller =
-            "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/cladefs/super.c:9 cladefs_fill+0x1/0x2\n";
+        let caller = "[    3.5][    T1] WARNING: CPU: 0 PID: 1 at fs/cladefs/super.c:9 cladefs_fill+0x1/0x2\n";
         assert_eq!(
             checked("caller.console.txt", caller),
             Err(format!("a kernel complained: {:#?}", vec![caller.trim_end()]))

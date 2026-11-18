@@ -10,7 +10,7 @@
 # rules the store and the daemon rely on), the mutants missed run again with that
 # feature, its tests alone: cargo-mutants runs one feature set at a time.
 #
-#   scripts/mutants.sh [CRATE...]   (default: extent_frame extent_store extent_bucket cladefs)
+#   scripts/mutants.sh [CRATE...]   (default: extent_frame local_cell bucket_cell cladefs)
 #
 # Each crate's report goes to $CLADEFS_MUTANTS/<crate>/mutants.out (default:
 # ~/.cache/cladefs/mutants): caught.txt, missed.txt, timeout.txt, unviable.txt;
@@ -20,24 +20,24 @@
 # counts, or if it failed, its status, as its report may then be an earlier
 # run's, or of some of its mutants; the Shuttle pass runs only after a sweep
 # that finished. CLADEFS_MUTANTS_JOBS mutants build and run at once (default 3).
-# It takes about a day for all four crates: extent_bucket's simulation takes
+# It takes about a day for all four crates: bucket_cell's simulation takes
 # some 77 s a mutant, and the whole sweep has some 3,600 mutants. Run it on a
 # host of its own (scripts/mutants-host.sh), in shards: CLADEFS_MUTANTS_SHARD=K/N
 # runs the Kth of N (cargo-mutants' --shard), and the Shuttle pass over its
 # missed.
 # CLADEFS_MUTANTS_LIST names a file of mutants, one a line as `cargo mutants --list`
 # names them, to run alone: a sweep's survivors, again, once tests for them came.
-# extent_bucket's and extent_store's mutants build with the profile sim (Cargo.toml: release
-# with debug assertions), as scripts/test.sh builds the simulation, extent_store's: its baseline
+# bucket_cell's and local_cell's mutants build with the profile sim (Cargo.toml: release
+# with debug assertions), as scripts/test.sh builds the simulation, local_cell's: its baseline
 # took 155 s against 854 s unoptimized, its timeout 595 s against 4,170 s, and 16 mutants 639 s
 # against 1,211 s; a mutant its tests catch at once takes 20 s against 7, building optimized
-# (TASK-92.40). extent_bucket's run extent_store's tests too, the simulation of its protocol
+# (TASK-92.40). bucket_cell's run local_cell's tests too, the simulation of its protocol
 # among them (TASK-88). The other crates' build as their tests do.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 crates=("$@")
 if (( ${#crates[@]} == 0 )); then
-    crates=(extent_frame extent_store extent_bucket cladefs)
+    crates=(extent_frame local_cell bucket_cell cladefs)
 fi
 out=${CLADEFS_MUTANTS:-$HOME/.cache/cladefs/mutants}
 jobs=${CLADEFS_MUTANTS_JOBS:-3}
@@ -82,11 +82,11 @@ pass() {
     local line=$1 output=$2 ended=0 profile=() tests=()
     shift 2
     case $crate in
-        extent_bucket)
+        bucket_cell)
             profile=(--profile sim)
-            tests=(--test-package extent_bucket --test-package extent_store)
+            tests=(--test-package bucket_cell --test-package local_cell)
             ;;
-        extent_store) profile=(--profile sim) ;;
+        local_cell) profile=(--profile sim) ;;
     esac
     cargo mutants -p "$crate" ${profile[@]+"${profile[@]}"} ${tests[@]+"${tests[@]}"} \
         --test-tool nextest --jobs "$jobs" --output "$output" "$@" || ended=$?

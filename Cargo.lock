@@ -871,6 +871,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "bucket_cell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base32_id",
+ "bincode",
+ "bytes",
+ "chrono",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "hyper-util",
+ "imbl",
+ "libc",
+ "log",
+ "object_store",
+ "opentelemetry",
+ "rand 0.10.3",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage_device",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -980,13 +1015,12 @@ dependencies = [
  "async-trait",
  "base32_id",
  "bitflags",
+ "bucket_cell",
  "cladefs",
  "event-listener",
- "extent_bucket",
  "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_store",
  "fail",
  "flate2",
  "fuchsia-async",
@@ -997,6 +1031,7 @@ dependencies = [
  "hyper-util",
  "io-uring",
  "libc",
+ "local_cell",
  "log",
  "loom",
  "memchr",
@@ -1037,16 +1072,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base32_id",
+ "bucket_cell",
  "cladefs",
- "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_store",
  "fidl-fuchsia-io",
  "fuchsia-async",
  "futures",
  "fxfs",
  "libc",
+ "local_cell",
  "object_store",
  "storage_device",
  "tempfile",
@@ -1400,41 +1435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_bucket"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base32_id",
- "bincode",
- "bytes",
- "chrono",
- "extent_frame",
- "extent_keys",
- "fail",
- "futures",
- "http-body-util",
- "humantime",
- "hyper",
- "hyper-util",
- "imbl",
- "libc",
- "log",
- "object_store",
- "opentelemetry",
- "rand 0.10.3",
- "reqwest",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "storage_device",
- "tempfile",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "extent_files"
 version = "0.1.0"
 dependencies = [
@@ -1487,33 +1487,6 @@ dependencies = [
  "url",
  "zerocopy",
  "zeroize",
-]
-
-[[package]]
-name = "extent_store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base32_id",
- "bincode",
- "event-listener",
- "extent_bucket",
- "extent_frame",
- "extent_keys",
- "extent_store",
- "fail",
- "futures",
- "libc",
- "log",
- "object_store",
- "rand 0.10.3",
- "rapidhash",
- "serde",
- "shuttle",
- "storage_device",
- "tempfile",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -1645,12 +1618,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "extent_store",
  "follower",
  "follower_history",
  "fuchsia-async",
  "fuchsia-sync",
  "fxfs",
+ "local_cell",
  "shuttle",
  "storage_device",
 ]
@@ -2769,6 +2742,33 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "local_cell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base32_id",
+ "bincode",
+ "bucket_cell",
+ "event-listener",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "libc",
+ "local_cell",
+ "log",
+ "object_store",
+ "rand 0.10.3",
+ "rapidhash",
+ "serde",
+ "shuttle",
+ "storage_device",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "lock_api"
@@ -4288,13 +4288,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bucket_cell",
  "cladefs",
- "extent_bucket",
  "extent_files",
  "extent_keys",
- "extent_store",
  "futures",
  "libc",
+ "local_cell",
  "log",
  "rand 0.10.3",
  "rusqlite",

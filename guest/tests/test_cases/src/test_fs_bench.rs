@@ -334,8 +334,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             if backend.forks_image() {
                 return run_images(test_setup);
             }
-            let cladefsd =
-                PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
+            let cladefsd = PathBuf::from(std::env::var_os("CLADEFSD").context("CLADEFSD")?);
             // Under `extents`, which what keeps a run's results leaves out (bench-linux-host.sh).
             let stores = test_setup.tmp_dir.join("extents");
             std::fs::create_dir_all(&stores)?;
@@ -456,10 +455,10 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
 
         /// The store at `store`, which the daemon at `cladefsd` serves: once the daemon has seen the
         /// VM that had it open go.
-        fn opened(cladefsd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
+        fn opened(cladefsd: &Path, store: &Path) -> anyhow::Result<cladefs::CellClient> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::DaemonExtentStore::connect(cladefsd, store, IMAGE_SIZE) {
+                match cladefs::CellClient::connect(cladefsd, store, IMAGE_SIZE) {
                     Ok(store) => return Ok(store),
                     Err(err)
                         if Instant::now() < deadline
@@ -602,14 +601,14 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             vm.cpus(cpus);
             vm.root_image(&format!("{role}.rootfs.ext4"));
             if writer {
-                vm.extent_store(
+                vm.cell(
                     "bench",
                     store,
                     IMAGE_SIZE,
                     crate::common::dax_window(crate::common::Window::Large)?,
                 )?;
             } else {
-                vm.extent_store_following(
+                vm.cell_following(
                     "bench",
                     store,
                     crate::common::dax_window(crate::common::Window::Large)?,
@@ -713,9 +712,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
             ) && std::env::var_os("CLADEFSD_BIN").is_none()
             {
-                return ShouldRun::No(
-                    "CLADEFSD_BIN does not name the extent daemon's binary",
-                );
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon's binary");
             }
             match self.backend {
                 Backend::FxfsGuest
@@ -801,9 +798,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     } else {
                         crate::common::dax_window(crate::common::Window::Large)?
                     };
-                    vm.extent_store("bench", &store, IMAGE_SIZE, window)?;
+                    vm.cell("bench", &store, IMAGE_SIZE, window)?;
                     if self.backend == Backend::FxfsGuestDaxUnsafe {
-                        vm.extent_store_unsafe();
+                        vm.cell_unsafe();
                     }
                     None
                 }
@@ -818,7 +815,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     } else {
                         crate::common::dax_window(crate::common::Window::Large)?
                     };
-                    vm.extent_store("bench", std::path::Path::new(&store), IMAGE_SIZE, window)?;
+                    vm.cell("bench", std::path::Path::new(&store), IMAGE_SIZE, window)?;
                     vm.env(&CString::new(format!("{ROLE}={}", std::env::var(ROLE)?))?);
                     None
                 }

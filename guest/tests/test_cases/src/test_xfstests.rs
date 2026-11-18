@@ -155,13 +155,13 @@ _scratch_unmount()
             let mut vm = Vm::new(4, 4096)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.extent_store("extents", &test_setup.tmp_dir.join("extents"), SIZE, window)?;
-            vm.extent_store("scratch", &test_setup.tmp_dir.join("scratch"), SIZE, window)?;
+            vm.cell("extents", &test_setup.tmp_dir.join("extents"), SIZE, window)?;
+            vm.cell("scratch", &test_setup.tmp_dir.join("scratch"), SIZE, window)?;
             for size in SIZED {
                 let window = if self.dax { size } else { 0 };
                 let (tag, path) =
                     (format!("scratch-{size}"), test_setup.tmp_dir.join(format!("scratch-{size}")));
-                vm.extent_store(&tag, &path, size, window)?;
+                vm.cell(&tag, &path, size, window)?;
             }
             // Check's arguments, separated by commas: a kernel's command line carries them.
             let tests = std::env::var("CLADEFS_XFSTESTS").unwrap_or("-g,generic/quick".to_owned());

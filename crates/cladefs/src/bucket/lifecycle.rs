@@ -10,7 +10,7 @@
 //! The bucket is one in memory behind [`Recording`], which notes every request that reaches the
 //! object store, the ones `ObjectBucket::stats` leaves out too (the collector's marks), with its
 //! key, its bytes and when it began and ended, and behind a fixed latency
-//! (`extent_bucket::faults::Faulty`). So each phase says, beside its requests by kind and its
+//! (`bucket_cell::faults::Faulty`). So each phase says, beside its requests by kind and its
 //! bytes up and down: how many requests were in flight at once at most; how long at least one was
 //! in flight, which over the latency is how many round trips it made one after another; and the
 //! keys it read more than once.
@@ -20,12 +20,12 @@
 //! debug build's: cladefs's tests don't build in release (TASK-320).
 
 use super::tests::{idle, kept_in, pattern, reopened, url_of};
-use crate::extents::Opening;
-use crate::host_store::{self, DEFAULT_TENANT};
-use crate::{CellId, ExtentId, ExtentStore, VolatileSlice};
+use crate::host_cell::{self, DEFAULT_TENANT};
+use crate::open_cell::Opening;
+use crate::{CellId, ExtentId, OpenCell, VolatileSlice};
 use base32_id::Padded;
-use extent_bucket::faults::{Fault, Faults, Faulty};
-use extent_bucket::object_bucket::ObjectBucket;
+use bucket_cell::faults::{Fault, Faults, Faulty};
+use bucket_cell::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use object_store::path::Path as Key;
@@ -38,7 +38,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
+const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 /// How many stores are closed and opened again, a restore after each, to see which of them reads
 /// the base's checkpoint anew: twice what the bucket keeps decoded, and two.
@@ -401,7 +401,7 @@ impl Run {
 }
 
 /// Writes a block to a new extent of `store`'s and commits it, durable.
-fn write_and_commit(store: &ExtentStore) {
+fn write_and_commit(store: &OpenCell) {
     let info = store.info().unwrap();
     let sequence = info.next_sequence.max(info.sequence_floor);
     let extent = ExtentId { branch: store.branch().id, sequence };
@@ -411,7 +411,7 @@ fn write_and_commit(store: &ExtentStore) {
 }
 
 /// The store at `path`, opened, uploading only as a commit waits.
-fn open(path: &Path) -> ExtentStore {
+fn open(path: &Path) -> OpenCell {
     reopened(path, idle()).unwrap()
 }
 
@@ -440,13 +440,13 @@ impl Made {
 
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
     /// as the daemon's `CreateStore` with a version, then the store's opening, make it.
-    fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> ExtentStore {
+    fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
         let ((branch, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
-        let description = extent_store::Description { block_size: BLOCK as u32, capacity, branch };
-        let kind = extent_bucket::cell::Kind::Fxfs;
-        ExtentStore::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
-        ExtentStore::take_with(self.at(name), (capacity, branch, None), opening()).unwrap()
+        let description = local_cell::Description { block_size: BLOCK as u32, capacity, branch };
+        let kind = bucket_cell::cell::Kind::Fxfs;
+        OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
+        OpenCell::take_with(self.at(name), (capacity, branch, None), opening()).unwrap()
     }
 
     /// The path of the store `name` on the host measured.
@@ -490,8 +490,8 @@ fn based(
 /// taken.
 fn host(bucket: &Arc<ObjectBucket>) {
     unsafe { std::env::set_var("CLADEFSD_BUCKET", url_of(bucket)) };
-    extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_store::new_branch(bucket, DEFAULT_TENANT).unwrap();
+    local_cell::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
+    host_cell::new_branch(bucket, DEFAULT_TENANT).unwrap();
 }
 
 /// A bucket's objects in memory.
@@ -550,7 +550,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     let snapshot = run.phase("snapshot", || vm.make_version(None).unwrap());
     run.phase("drop snapshot", || vm.drop_versions(&[snapshot].into()).unwrap());
     run.phase("close after snapshot", || drop(vm));
-    let deleting = |name: &str| host_store::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
+    let deleting = |name: &str| host_cell::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
     run.phase("delete", || deleting("vm"));
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
     let short = taken.fork(at("short"), DEFAULT_TENANT).unwrap();
@@ -635,7 +635,7 @@ fn bucket_lifecycle_by_phase() {
 /// protocol needs, at once where it can: a fork, its child's record created, then its reference and
 /// its cell held at once, the head naming the version read, the record made from the version its create left
 /// (4 round trips, one after another); the child's open, its head taken from none, then its record
-/// and its cell read again at once (2), all else known from the fork (`extent_bucket::known`; the
+/// and its cell read again at once (2), all else known from the fork (`bucket_cell::known`; the
 /// cell read once the head is taken, as its holding from what the fork left writes nothing:
 /// `restores_refused_to_placements_superseded_since_their_forks`). 8 requests in 6 round trips,
 /// where they were 14 in 13. On a host that never saw the version, its store taken first, opened
@@ -696,9 +696,9 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     let clone = taken.fork(made.at("vm"), DEFAULT_TENANT).unwrap();
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
-    let later = host_store::keeping().unwrap().token + 1;
-    let holding = extent_bucket::cell::hold(&elsewhere, clone, (later, later), None, None);
-    extent_store::upload::block_on(holding).unwrap().unwrap();
+    let later = host_cell::keeping().unwrap().token + 1;
+    let holding = bucket_cell::cell::hold(&elsewhere, clone, (later, later), None, None);
+    local_cell::upload::block_on(holding).unwrap().unwrap();
     let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
     assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
     drop(taken);
@@ -717,7 +717,7 @@ fn uploads_after_restores() {
     };
     let (restores, mib) = (var("CLADEFS_UPLOAD_RESTORES", 8), var("CLADEFS_UPLOAD_MIB", 256));
     let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let server = serving.block_on(async { extent_bucket::s3_server::S3Server::start(None) });
+    let server = serving.block_on(async { bucket_cell::s3_server::S3Server::start(None) });
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
     let made = Made::new(16, &objects, &mut run);
     let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
@@ -758,7 +758,7 @@ fn uploads_after_restores() {
 /// TASK-449: a restore on a host that has the version open opens no connection to the bucket: those
 /// its requests went on before stay in the bucket's pool, the fork's too, on the bucket
 /// runtime, which the calls from no runtime's task run in, and which lives on
-/// (`extent_store::upload::block_on`). On a runtime of
+/// (`local_cell::upload::block_on`). On a runtime of
 /// each call's own, as before, every fork connected anew for what it asked at once beyond the
 /// connections the host's runtime had left idle in the pool (here one: its reference's write and
 /// its cell's holding), a TCP handshake, and on a bucket elsewhere a TLS one too, before the
@@ -767,7 +767,7 @@ fn uploads_after_restores() {
 #[test]
 fn restores_connect_to_the_bucket_no_more() {
     let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let server = serving.block_on(async { extent_bucket::s3_server::S3Server::start(None) });
+    let server = serving.block_on(async { bucket_cell::s3_server::S3Server::start(None) });
     let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
     let made = Made::new(16, &objects, &mut run);
     // The host measured: a client of its own, its own pool of connections, as another host's.

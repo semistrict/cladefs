@@ -42,10 +42,10 @@
 //!   store's uploader and fetches run on one runtime more (`crate::bucket`), its disk work in
 //!   `block_in_place`.
 //! - **Files.** A store keeps its own segments' and extents' files open, the most
-//!   `extent_store::Options::open_files` of each (64) but for those reads use: a fork, which writes
+//!   `local_cell::Options::open_files` of each (64) but for those reads use: a fork, which writes
 //!   little, few; and its open segment's, and its commit log. The files of the segments a fork
 //!   inherited are its store's, which every fork of it shares, the most 64 open but for those in
-//!   use (`extent_store::Lineage`). A VM process's connection is two sockets here.
+//!   use (`local_cell::Lineage`). A VM process's connection is two sockets here.
 //! - **Memory.** A fork holds what it changed over its base, and the segments it tracks: its base's
 //!   state is a layer every fork of it shares, one copy (TASK-31); its base's pages are cached
 //!   once, for every fork reading or mapping them (TASK-32).
@@ -88,8 +88,9 @@
 //! another user, reaches its tenant's socket alone, which the VM manager gives it (`Grant`).
 //! What differs between tenants is a tenant's policy (`server::Policy`, TASK-160.10): where its VM
 //! processes name stores, whether the branch one names counts, and whether they follow public
-//! bases. What may be done to a store is the store's, fixed as it opens ([`crate::StoreAccess`]).
+//! bases. What may be done to a store is the store's, fixed as it opens ([`crate::CellAccess`]).
 
+pub(crate) mod cells;
 pub(crate) mod client;
 mod codec;
 pub mod control;
@@ -108,18 +109,17 @@ mod pool;
 pub mod process;
 pub(crate) mod server;
 mod stats;
-pub(crate) mod stores;
 pub(crate) mod wire;
 
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-pub use client::{DaemonConnection, DaemonExtentStore, Unmapped, spawn_on_replies};
+pub use cells::cache_config;
+pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 pub use device::DaemonDevice;
 pub use metrics::serve_metrics;
 pub use server::{Tenant, serve, serve_tenant};
-pub use stores::cache_config;
 
 /// Whether the daemon accepts VM processes' connections ([`serve`]): what the control API's health
 /// service reports (TASK-48). Not as it starts, nor once it is told to stop ([`stop_serving`]).

@@ -59,7 +59,7 @@ mod host {
         // Both run at once: each boots from an image of its own, which making it remakes.
         vm.root_image(&format!("{name}.rootfs.ext4"));
         let store = test_setup.tmp_dir.join(format!("store-{name}"));
-        vm.extent_store_served(
+        vm.cell_served(
             "extents",
             &store,
             CAPACITY,

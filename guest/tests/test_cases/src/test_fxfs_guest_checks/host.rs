@@ -207,7 +207,7 @@ impl Test for TestFxfsGuestChecks {
         };
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
-        vm.extent_store("cladefs", &image, IMAGE_SIZE, window)?;
+        vm.cell("cladefs", &image, IMAGE_SIZE, window)?;
         // CLADEFS_CHECKS names the checks to run, separated by commas (such as
         // `seal_race,sparse`), for a quick run: all of them otherwise. cladefs: and the guest
         // their budgets' scale (TASK-168).

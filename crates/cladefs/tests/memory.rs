@@ -12,7 +12,7 @@
 mod common;
 
 use cladefs::cladefsd::metrics::render;
-use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
+use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
 use common::daemon::{CAPACITY, Daemon, failure};
 use common::{memory, pattern, read_window};
 use tonic::Code;
@@ -32,7 +32,7 @@ fn contents(sequence: u64) -> Vec<u8> {
 /// Writes [`EXTENTS`] extents to `store`, commits, and reads each through a window mapping them
 /// all, read-only, twice over: [`EXTENTS`] MiB of pages cached in the daemon's memory, as it
 /// holds them. Returns the window.
-fn read_through(store: &DaemonExtentStore) -> std::ptr::NonNull<u8> {
+fn read_through(store: &CellClient) -> std::ptr::NonNull<u8> {
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
     for sequence in 1..=EXTENTS {
         store.write(extent(sequence), 0, &[VolatileSlice::from(&contents(sequence)[..])]).unwrap();
@@ -112,7 +112,7 @@ fn tenants_past_their_limits_evict_then_refuse() {
     // Limited before it is granted, as it is made.
     daemon.set_memory_limit(Some(0xac), Some(2 * CHUNK)).unwrap();
     let socket = daemon.grant(0xac, &acme, None).unwrap();
-    let vm = DaemonExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    let vm = CellClient::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     read_through(&vm);
 
     let tenant = "{tenant=\"5c\"}";
@@ -139,7 +139,7 @@ fn the_daemon_past_its_limit_evicts_any_tenants_pages() {
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
     let socket = daemon.grant(1, &acme, None).unwrap();
-    let theirs = DaemonExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
+    let theirs = CellClient::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     read_through(&theirs);
     let ours = daemon.open(&dir.path().join("vm"), CAPACITY);
     read_through(&ours);

@@ -46,7 +46,7 @@ mod host {
     ) -> anyhow::Result<Firecracker> {
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
-        vm.extent_store(
+        vm.cell(
             "extents",
             store,
             CAPACITY,
@@ -75,7 +75,8 @@ mod host {
                 std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
             let (store, fork) = (dir.join("store"), dir.join("fork"));
             // Short, as Unix sockets' paths must be.
-            let uds = std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
+            let uds =
+                std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
 
             let mut source = run(test_setup, &root, "source", &store, Some(&uds))?;

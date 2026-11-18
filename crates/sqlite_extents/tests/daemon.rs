@@ -134,7 +134,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
 /// A file set on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
 /// database reading it in place, and the store, to fork.
 struct Mounted {
-    store: Arc<cladefs::DaemonExtentStore>,
+    store: Arc<cladefs::CellClient>,
     file_set: Arc<FileSet>,
     _registration: Registration,
     connection: Connection,
@@ -142,7 +142,7 @@ struct Mounted {
 
 impl Mounted {
     fn new(socket: &Path, store: &Path, vfs: &str) -> Self {
-        let store = Arc::new(cladefs::DaemonExtentStore::connect(socket, store, 1 << 30).unwrap());
+        let store = Arc::new(cladefs::CellClient::connect(socket, store, 1 << 30).unwrap());
         let window = daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
         let device = DeviceHolder::new(cladefs::DaemonDevice::new(store.clone()).unwrap());
         let file_set = FileSet::open_mapped(device, Box::new(window), Options::default()).unwrap();
@@ -205,7 +205,7 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
 /// its disk alone, is not in the bucket, its wait for it failing; its commits after it fail.
 #[test]
 fn a_database_is_fenced_with_its_cell() {
-    use extent_bucket::cell;
+    use bucket_cell::cell;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let bucket = dir.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
@@ -228,7 +228,7 @@ fn a_database_is_fenced_with_its_cell() {
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
     control.sync_store(&store).unwrap();
     let ours = control.branch(&store).unwrap();
-    let objects = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours)).unwrap().unwrap();
     assert_eq!((held.branch, held.kind), (Some(ours.id), Some(cell::Kind::Sqlite)));
@@ -242,7 +242,7 @@ fn a_database_is_fenced_with_its_cell() {
         // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
         let kms = cladefs::bucket::kms().unwrap();
         let writer =
-            extent_bucket::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
+            bucket_cell::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();

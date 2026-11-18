@@ -27,7 +27,6 @@ use crate::device::ViewDevice;
 use crate::history::{HeldRead, History, Read};
 use crate::model::{Model, NAMES, Op, Writer, lookup, observe, read};
 use anyhow::Error;
-use extent_store::{Description, MemDir, Options as StoreOptions, Store, View};
 use follower::shuttle_kernel::ShuttleKernel;
 use follower::{Follow, Protocol};
 use fuchsia_async as fasync;
@@ -38,6 +37,7 @@ use fxfs::lsm_tree::Query;
 use fxfs::lsm_tree::types::{ItemRef, LayerIterator};
 use fxfs::object_store::directory::Directory;
 use fxfs::object_store::{ExtentValue, HandleOptions, ObjectDescriptor, ObjectStore, ObjectValue};
+use local_cell::{Description, LocalCell, MemDir, Options as StoreOptions, View};
 use shuttle::rand::{Rng, thread_rng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -76,7 +76,7 @@ pub enum Mutation {
 }
 
 /// Mounts Fxfs read-only on `view`: the checker's own mount of a commit.
-async fn mount(store: &Arc<Store<MemDir>>, view: View) -> Arc<OpenFxFilesystem> {
+async fn mount(store: &Arc<LocalCell<MemDir>>, view: View) -> Arc<OpenFxFilesystem> {
     let device = DeviceHolder::new(ViewDevice::new(store.clone(), view));
     let fs = FxFilesystemBuilder::new().read_only(true).open(device).await.expect("mount failed");
     Arc::new(fs)
@@ -292,7 +292,7 @@ fn check_changes(
 /// commit, and its changes with what changed: but for the records of objects holders held, if
 /// `excluding_held`. Only this task applies batches, so its own reads of the follower need no
 /// validating.
-async fn follow(follower: &Follower, store: &Arc<Store<MemDir>>, excluding_held: bool) {
+async fn follow(follower: &Follower, store: &Arc<LocalCell<MemDir>>, excluding_held: bool) {
     let fs = &follower.fs;
     let before = tree(fs).await;
     let changes = follower.protocol.batch(follower).await.expect("following failed");
@@ -356,7 +356,7 @@ pub async fn simulate(profile: Profile) {
         _ => fxfs::follower::Rules::ALL,
     });
     let description = Description { block_size: 4096, capacity: 64 << 20, branch: BRANCH };
-    let store = Store::create(MemDir::new(), description, StoreOptions::default()).unwrap();
+    let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
     let store = Arc::new(store);
     let writer = Writer::new(store.clone()).await;
     writer.apply(Op::Sync).await;

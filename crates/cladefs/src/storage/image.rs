@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! An Fxfs device on an image: an extent store in a directory (crates/extent_store, backlog
+//! An Fxfs device on an image: an extent store in a directory (crates/local_cell, backlog
 //! doc-4), whose extents are packed into segments, or are files of their own if large, with an
 //! index of them.
 //!
@@ -21,7 +21,7 @@ use super::io::{Done, Io, IoFile, Op};
 use super::kept::KeptImage;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
-use extent_store::{Aligned, Description, HostDir, HostFile, Located, SECTOR, Store};
+use local_cell::{Aligned, Description, HostDir, HostFile, LocalCell, Located, SECTOR};
 use std::path::Path;
 use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
@@ -45,7 +45,7 @@ async fn unblock<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R
 pub(crate) struct ImageDevice {
     image: Arc<KeptImage>,
     /// The image's store, the one `image` keeps.
-    store: Arc<Store<HostDir>>,
+    store: Arc<LocalCell<HostDir>>,
     description: Description,
     io: Io,
     allocator: BufferAllocator,
@@ -59,8 +59,8 @@ impl ImageDevice {
     /// its device, whose writes, frees and commits go through `writes`.
     pub fn create(
         dir: &Path,
-        made: (u64, crate::host_store::BranchOf, bool),
-        keeping: extent_store::upload::Options,
+        made: (u64, crate::host_cell::BranchOf, bool),
+        keeping: local_cell::upload::Options,
         writes: Arc<WriteGate>,
     ) -> Result<Self, Error> {
         Self::new(KeptImage::create(dir, made, keeping)?, writes)
@@ -135,7 +135,7 @@ impl ImageDevice {
     /// sector it wrote, so that what is written again is whole sectors of the same bytes.
     async fn write_file(
         &self,
-        write: &extent_store::Write<'_, HostDir>,
+        write: &local_cell::Write<'_, HostDir>,
         data: BufferRef<'_>,
     ) -> Result<(), Error> {
         let mut owned = Aligned::new(data.len());
@@ -204,7 +204,7 @@ impl Device for ImageDevice {
         let parts = match self.store.locate(extent, offset, buffer.len() as u64) {
             // cladefs: in the image's bucket, as a fork holds what it inherited (TASK-165.7).
             Err(ref error)
-                if let Some(in_bucket) = error.downcast_ref::<extent_store::BucketData>() =>
+                if let Some(in_bucket) = error.downcast_ref::<local_cell::BucketData>() =>
             {
                 let location = in_bucket.location.clone();
                 let fetcher = self.image.fetcher();
@@ -341,9 +341,9 @@ mod tests {
     use std::path::PathBuf;
     use storage_device::NoExtent;
 
-    const BLOCK: u32 = crate::host_store::BLOCK_SIZE;
+    const BLOCK: u32 = crate::host_cell::BLOCK_SIZE;
     const MIB: usize = 1 << 20;
-    const BRANCH: crate::CellId = extent_bucket::layout::test_branch(7);
+    const BRANCH: crate::CellId = bucket_cell::layout::test_branch(7);
 
     /// A new directory, a device on a new image in it holding `capacity` bytes, and the image: in
     /// that order, so that a test's bindings of them drop the device before the directory, as a
@@ -352,8 +352,8 @@ mod tests {
     fn device(capacity: u64) -> (tempfile::TempDir, ImageDevice, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
-        let made = (capacity, crate::host_store::BranchOf::Named(BRANCH), true);
-        let keeping = crate::host_store::keeping().unwrap();
+        let made = (capacity, crate::host_cell::BranchOf::Named(BRANCH), true);
+        let keeping = crate::host_cell::keeping().unwrap();
         (dir, ImageDevice::create(&image, made, keeping, Default::default()).unwrap(), image)
     }
 
@@ -453,7 +453,7 @@ mod tests {
                 std::fs::write(&path, bytes).unwrap();
                 // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
                 // so that its reads read the disk (TASK-433).
-                extent_store::pages::shared().evict_to(0);
+                local_cell::pages::shared().evict_to(0);
 
                 let mut buffer = device.allocate_buffer(BLOCK as usize).await;
                 let at = (3 * MIB + MIB / 2) as u64;
@@ -597,8 +597,8 @@ mod tests {
         crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
-        let made = (64 * MIB as u64, crate::host_store::BranchOf::New(5), true);
-        let keeping = crate::host_store::keeping().unwrap();
+        let made = (64 * MIB as u64, crate::host_cell::BranchOf::New(5), true);
+        let keeping = crate::host_cell::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
         assert!(device.store.keys().encrypts());
         let branch = device.branch();
@@ -608,7 +608,7 @@ mod tests {
         let in_the_clear = |device: &ImageDevice| {
             quiesced(device);
             // As on the disk, what the store's page cache holds written there first (TASK-433).
-            extent_store::pages::shared().write_back_all().unwrap();
+            local_cell::pages::shared().write_back_all().unwrap();
             let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
             crate::testing::files_holding(dir.path(), &pieces)
         };
@@ -637,7 +637,7 @@ mod tests {
     /// behind its callers (TASK-463): its commits uploaded and acknowledged, the uploader's
     /// closings for them framed and what the acknowledgements let go of gone; the store's own work
     /// done, its framings made durable, their files renamed their own, and the next segment's log
-    /// prepared ([`Store::wait_idle`]); and the pass of the bucket's collector its commits started,
+    /// prepared ([`LocalCell::wait_idle`]); and the pass of the bucket's collector its commits started,
     /// if one runs. Walked before, a file listed could go before it was read, `NotFound` (CI run
     /// 43729753505).
     fn quiesced(device: &ImageDevice) {

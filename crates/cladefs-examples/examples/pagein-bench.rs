@@ -21,7 +21,7 @@
 //! process spends on it, on every thread, which other work on the host disturbs less: the median of
 //! each kind's over the rounds.
 
-use cladefs::{Access, ExtentId, ExtentStore, VolatileSlice};
+use cladefs::{Access, ExtentId, OpenCell, VolatileSlice};
 use futures::executor::block_on;
 use std::time::Instant;
 
@@ -61,7 +61,7 @@ fn round(mib: u64, mask: u8) -> (f64, f64) {
     let extents = (mib << 20).div_ceil(PARTS * part);
     let len = PARTS * part;
     let dir = tempfile::tempdir().unwrap();
-    let store = ExtentStore::create(dir.path().join("store"), 2 * extents * len).unwrap();
+    let store = OpenCell::create(dir.path().join("store"), 2 * extents * len).unwrap();
     for sequence in 1..=extents {
         let extent = ExtentId { branch: store.branch().id, sequence };
         let bytes = data(sequence, len as usize, mask);

@@ -6,7 +6,7 @@
 //! (`crate::cache`) and the zeros DAX windows map are of: host shared memory, in arenas, each its
 //! own object (a memfd on Linux), which a process given an arena's object maps the arena's pages
 //! from (TASK-43). As an arena runs out, its relief evicts cached extents' pages. Open extents are
-//! written to their stores' segments (`extent_store`), and a window's private pages, copy-on-write
+//! written to their stores' segments (`local_cell`), and a window's private pages, copy-on-write
 //! DAX's, are of its VM's memory (`crate::dax`): neither is of it.
 //!
 //! Its size is set once, with [`configure`], before its first page is allocated, or is the
@@ -63,12 +63,12 @@ pub fn arena_memory(arena: ArenaId) -> Option<std::sync::Arc<std::os::fd::OwnedF
 }
 
 /// An arena of physical memory of its own (TASK-43), a tenant's, held by what allocates in it: its
-/// tenant, the stores opened in it ([`ExtentStore::open_in`]), and what reads into the extent cache
+/// tenant, the stores opened in it ([`OpenCell::open_in`]), and what reads into the extent cache
 /// for them, as a fork's boot profile does (TASK-79.36). Once none of them holds it, the extents
 /// cached in it go, and it goes, its memory once the pages of it still allocated, those page-ins in
 /// flight hold, are freed: nothing allocates in it after, which would fail.
 ///
-/// [`ExtentStore::open_in`]: crate::ExtentStore::open_in
+/// [`OpenCell::open_in`]: crate::OpenCell::open_in
 pub struct Arena(ArenaId);
 
 impl Arena {

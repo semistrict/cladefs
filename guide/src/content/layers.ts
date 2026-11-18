@@ -58,7 +58,7 @@ export const layers: Layer[] = [
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
       "tables, mappings and private pages) and makes commits local behind the guest.",
     dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/extents.rs", "crates/cladefs/src/dax.rs"],
-    anchors: ["server_serve", "extent_store", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
+    anchors: ["server_serve", "local_cell", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
     docs: ["doc-2", "doc-13"],
     provenance: "cladefs's own.",
   },
@@ -84,7 +84,7 @@ export const layers: Layer[] = [
       "Each branch's extents on the host's disk: open extents written raw, sealed ones framed into " +
       "zstd-compressed segments at commits. Since doc-14 it is the bucket's WAL and cache, one " +
       "storage engine: what is local here and not yet uploaded is the only state the bucket lacks.",
-    dirs: ["crates/extent_store", "crates/extent_frame"],
+    dirs: ["crates/local_cell", "crates/extent_frame"],
     anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_uploaded"],
     docs: ["doc-14", "doc-7"],
     provenance: "cladefs's own.",
@@ -98,7 +98,7 @@ export const layers: Layer[] = [
       "with checkpoints of its index. One writer holds a branch's head, which names its segments " +
       "and newest checkpoint, every key written once; forks record where they were made and " +
       "inherit without copying; the collector alone deletes.",
-    dirs: ["crates/extent_bucket"],
+    dirs: ["crates/bucket_cell"],
     anchors: ["upload", "acknowledge", "head_swap", "bucket", "origin", "fetcher", "es_fork"],
     docs: ["doc-7", "doc-14"],
     provenance: "cladefs's own.",

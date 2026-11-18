@@ -12,7 +12,7 @@
 //!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
 //! - **The stores' directories**: no framed file in the clear, no segment's log headed so
-//!   (`extent_store::on_disk`).
+//!   (`local_cell::on_disk`).
 //! - **Known plaintext**: no file of the directories checked, stores, buckets, part caches and all,
 //!   nor object of the buckets, holds a run of [`crate::canary`]'s bytes, which the cases write
 //!   into their guests' filesystems.
@@ -22,8 +22,8 @@
 //! (`runner encrypted`).
 
 use anyhow::Context as _;
-use extent_bucket::Bucket as _;
-use extent_bucket::layout::{self, CellId};
+use bucket_cell::Bucket as _;
+use bucket_cell::layout::{self, CellId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -137,7 +137,7 @@ struct Scope {
 }
 
 /// Walks `dir`: every regular file searched for known plaintext; each store's directory checked
-/// (`extent_store::on_disk`), the cell of its branch in the bucket it names put in `scope`; each
+/// (`local_cell::on_disk`), the cell of its branch in the bucket it names put in `scope`; each
 /// file bucket, a directory holding the local bucket's locks, put in `scope` whole.
 fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
     let mut dirs = vec![dir.to_owned()];
@@ -157,7 +157,7 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
             } else if kind.is_file() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                bucket |= name.starts_with(extent_bucket::local::LOCK);
+                bucket |= name.starts_with(bucket_cell::local::LOCK);
                 if name == "store" {
                     store(&dir, report, scope)?;
                 }
@@ -173,8 +173,8 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
 
 /// Checks the store in `dir`, if it holds one (its description, `store`, says so).
 fn store(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
-    let host = extent_store::HostDir::new(dir).with_context(|| dir.display().to_string())?;
-    let Some(on_disk) = extent_store::on_disk(&host).with_context(|| dir.display().to_string())?
+    let host = local_cell::HostDir::new(dir).with_context(|| dir.display().to_string())?;
+    let Some(on_disk) = local_cell::on_disk(&host).with_context(|| dir.display().to_string())?
     else {
         return Ok(());
     };
@@ -217,7 +217,8 @@ async fn bucket(
     finder: &Finder,
     report: &mut Report,
 ) -> anyhow::Result<()> {
-    let store = extent_bucket::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
+    let store =
+        bucket_cell::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
     let listed = store.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
     let mut written = BTreeSet::new();
     let mut records = Vec::new();
@@ -234,7 +235,7 @@ async fn bucket(
             layout::Kind::Moves { .. } => true,
             layout::Kind::Cell { cell } => {
                 report.cells += 1;
-                match extent_bucket::cell::read(&store, cell).await.with_context(at)? {
+                match bucket_cell::cell::read(&store, cell).await.with_context(at)? {
                     Some(object) if object.keks.is_empty() && !object.shredded => {
                         report.clear.push(format!("{}: cell {cell}: no KEK, in the clear", at()));
                     }
@@ -248,7 +249,7 @@ async fn bucket(
             }
             _ => false,
         };
-        let Some(object) = extent_bucket::bucket::get(&store, key).await else {
+        let Some(object) = bucket_cell::bucket::get(&store, key).await else {
             continue; // Deleted since it was listed.
         };
         report.objects += 1;
@@ -266,11 +267,8 @@ async fn bucket(
     }
     for branch in records {
         report.records += 1;
-        let Some(record) = extent_bucket::branch::record(&store, branch).await? else { continue };
-        if record.deks.is_empty()
-            && !record.deleted
-            && written.contains(&branch)
-        {
+        let Some(record) = bucket_cell::branch::record(&store, branch).await? else { continue };
+        if record.deks.is_empty() && !record.deleted && written.contains(&branch) {
             report.clear.push(format!(
                 "{url} {}: branch {branch} wrote objects, its record has no DEK",
                 layout::record(branch)

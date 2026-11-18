@@ -22,9 +22,9 @@ pub mod host {
     use crate::measure::{HostMemory, Requests, Served};
     use crate::vm::{Firecracker, Vm};
     use anyhow::Context;
-    use futures::executor::block_on;
     use cladefs::cladefsd::control::Client;
     use cladefs::{Image, Storage};
+    use futures::executor::block_on;
     use fxfs_automount::upcall::{Answer, Newest};
     use std::cell::Cell;
     use std::collections::BTreeMap;
@@ -245,7 +245,7 @@ pub mod host {
             talks: bool,
         ) -> anyhow::Result<(Running, Option<UnixStream>)> {
             self.boot(role, talks, |vm| {
-                vm.extent_store_served("extents", store, self.capacity, self.window, &self.cladefsd);
+                vm.cell_served("extents", store, self.capacity, self.window, &self.cladefsd);
                 Ok(())
             })
         }
