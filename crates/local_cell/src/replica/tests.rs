@@ -99,26 +99,85 @@ fn other_incarnations_are_refused() {
     assert_eq!(refused(replicas.drop_logs(wrong, None)), expected);
 }
 
-/// A log is appended to at its end or before it, never past it; and a cell's logs hold at most
-/// what the member holds for a cell.
+/// A log is appended to at its end or before it: past it, nothing is written and the end is
+/// answered, for the writer to send again from; and a configuration's logs hold at most what the
+/// member holds for one.
 #[test]
 fn appends_past_the_end_or_the_bound_are_refused() {
     let replicas = Replicas::open(MemDir::new(), 10).unwrap();
     let me = (CELL, key(1, 4), replicas.incarnation());
-    assert_eq!(
-        refused(replicas.append(me, 1, 3, b"x")),
-        Refused::Gap { log: 1, end: 0, offset: 3 }
-    );
+    assert_eq!(replicas.append(me, 1, 3, b"x").unwrap(), 0, "past the end: nothing written");
+    assert_eq!(replicas.read(me, 1, 0, 10).unwrap(), b"");
     replicas.append(me, 1, 0, b"abcdef").unwrap();
     assert_eq!(replicas.append(me, 1, 2, b"cdefgh").unwrap(), 8, "sent again, and more");
+    assert_eq!(replicas.append(me, 1, 0, b"abc").unwrap(), 8, "all of it held already");
     assert_eq!(replicas.read(me, 1, 0, 10).unwrap(), b"abcdefgh");
+    assert_eq!(replicas.read(me, 1, 3, 4).unwrap(), b"defg", "across frames");
     assert_eq!(refused(replicas.append(me, 2, 0, b"xyz")), Refused::Full { would: 11, most: 10 });
+    // Empty appends make nothing, however many logs they name (Codex's review).
+    for log in 10..20 {
+        assert_eq!(replicas.append(me, log, 0, b"").unwrap(), 0);
+    }
+    assert_eq!(replicas.fence(me, 4).unwrap(), [(1, 8)]);
     replicas.drop_logs(me, Some(1)).unwrap();
     assert_eq!(replicas.append(me, 2, 0, b"xyz").unwrap(), 3, "room once the bucket has log 1");
 }
 
+/// TASK-537.3.2's review: the bound is a configuration's, as a take installs its own on members
+/// still holding the configuration before, the same commits, until it activates.
+#[test]
+fn takes_install_beside_the_configuration_before() {
+    let replicas = Replicas::open(MemDir::new(), 10).unwrap();
+    let ours = replicas.incarnation();
+    let (old, new) = ((CELL, key(1, 4), ours), (CELL, key(2, 5), ours));
+    replicas.append(old, 1, 0, b"sixsix").unwrap();
+    replicas.fence(old, 5).unwrap();
+    assert_eq!(replicas.append(new, 1, 0, b"sixsix").unwrap(), 6);
+}
+
+/// TASK-537.3.2's review: a crash may leave a log's file longer than what was written, padded with
+/// zeros (a direct write's whole blocks, cut back after): its end, reopened, is what its frames
+/// hold, never the file's size, so a take never takes zeros for commits.
+#[test]
+fn logs_padded_by_crashes_end_where_their_frames_do() {
+    let dir = MemDir::new();
+    let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+    let me = (CELL, key(1, 4), replicas.incarnation());
+    replicas.append(me, 1, 0, &[7; 100]).unwrap();
+    let path = log_path(CELL, key(1, 4), 1);
+    let file = dir.open(&path, false).unwrap();
+    let size = file.size().unwrap();
+    file.write_at(&vec![0; 4096 - size as usize], size).unwrap();
+    file.sync().unwrap();
+    // A frame torn past the zeros' start counts no more than they do.
+    let reopened = Replicas::open(dir.clone(), MOST).unwrap();
+    assert_eq!(reopened.fence(me, 4).unwrap(), [(1, 100)]);
+    assert_eq!(reopened.append(me, 1, 100, b"more").unwrap(), 104);
+    let mut expected = vec![7; 100];
+    expected.extend_from_slice(b"more");
+    assert_eq!(reopened.read(me, 1, 0, 200).unwrap(), expected);
+}
+
+/// TASK-537.3.2's review: a log whose first append failed after its file was made is appended to
+/// the next time, not refused for good as made already.
+#[test]
+fn logs_whose_first_append_failed_are_appended_to_after() {
+    for failing in 1..=4 {
+        let dir = MemDir::serial();
+        let replicas = Replicas::open(dir.clone(), MOST).unwrap();
+        let me = (CELL, key(1, 4), replicas.incarnation());
+        dir.fail_after(Some(failing));
+        let first = replicas.append(me, 1, 0, b"first");
+        dir.fail_after(None);
+        let end = first.unwrap_or(0);
+        assert_eq!(replicas.append(me, 1, end, &b"first"[end as usize..]).unwrap(), 5, "{failing}");
+        assert_eq!(replicas.read(me, 1, 0, 10).unwrap(), b"first", "{failing}");
+    }
+}
+
 /// Logs the bucket holds, or of configurations the head names no more, are dropped; a sweep of a
-/// cell no longer replicated drops its promise too.
+/// cell gone drops its promise too; and a sweep of a replicated cell whose head names no
+/// configuration yet drops nothing (TASK-537.3.2's review), as its first may be being installed.
 #[test]
 fn drops_and_sweeps_remove_what_no_take_reads() {
     let dir = MemDir::new();
@@ -134,21 +193,34 @@ fn drops_and_sweeps_remove_what_no_take_reads() {
     assert_eq!(replicas.cells().unwrap(), [(CELL, vec![active, pending])]);
     assert_eq!(replicas.fence((CELL, active, ours), 6).unwrap(), [(3, 1)]);
 
+    let first = CellId { tenant: 3, id: 12 };
+    replicas.append((first, key(1, 2), ours), 1, 0, b"x").unwrap();
+    replicas.sweep(first, Swept::Unconfigured).unwrap();
+    assert_eq!(replicas.read((first, key(1, 2), ours), 1, 0, 1).unwrap(), b"x");
+
     let other = CellId { tenant: 3, id: 11 };
     replicas.append((other, key(4, 2), ours), 1, 0, b"x").unwrap();
     replicas.fence((other, key(4, 2), ours), 3).unwrap();
-    replicas.sweep(CELL, Some(pending)).unwrap();
-    replicas.sweep(other, None).unwrap();
-    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![pending])]);
+    replicas.sweep(CELL, Swept::Before(pending)).unwrap();
+    replicas.sweep(other, Swept::Gone).unwrap();
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![pending]), (first, vec![key(1, 2)])]);
     let names: Vec<String> = dir.files().into_iter().map(|(name, _)| name).collect();
     assert!(!names.iter().any(|name| name.starts_with("3.11.")), "{names:?}");
 }
 
-/// A directory holding files and no incarnation is refused: what it promised can't be known.
+/// A directory holding a member's files and no incarnation is refused: what it promised can't be
+/// known. One holding only what a file system or a crash on its first opening leaves is made a
+/// member (TASK-537.3.2's review).
 #[test]
 fn directories_without_incarnations_are_refused() {
     let dir = MemDir::new();
     dir.create("3.9.promise", false).unwrap();
     let opened = Replicas::open(dir, MOST);
     assert!(matches!(opened, Err(Error::Io(_))), "{:?}", opened.err());
+
+    let dir = MemDir::new();
+    dir.create_dir("lost+found").unwrap();
+    dir.create("incarnation.new", false).unwrap();
+    let opened = Replicas::open(dir.clone(), MOST).unwrap();
+    assert_eq!(Replicas::open(dir, MOST).unwrap().incarnation(), opened.incarnation());
 }

@@ -13,7 +13,7 @@ use crate::bucket::peers::{Asked, Link, Peers};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use local_cell::HostDir;
-use local_cell::replica::{self, Key, Refused, Replicas};
+use local_cell::replica::{self, Key, Refused, Replicas, Swept};
 use proto::peer_client::PeerClient;
 use proto::peer_server::PeerServer;
 use proto::{
@@ -51,6 +51,11 @@ const KEEPALIVE: Duration = Duration::from_secs(5);
 
 /// cladefs: how much of a log a member sends a take at once (`ReadLog`).
 const READ_PIECE: u64 = 1 << 20;
+
+/// cladefs: the largest message a member takes or sends (doc-21): a writer's append carries its
+/// flush's records, their data inline, and a writer sends 4 MiB at most at once, well within it;
+/// tonic's default, 4 MiB, refused one a little larger as OUT_OF_RANGE (TASK-537.3.2's review).
+pub(crate) const MESSAGE_MOST: usize = 64 << 20;
 
 /// cladefs: how often a member sweeps its replica directory, reading each cell's head (doc-21,
 /// Sweeping stale replica logs).
@@ -166,7 +171,11 @@ fn serve(listener: std::net::TcpListener, server: Server) -> std::io::Result<()>
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         tonic::transport::Server::builder()
             .tcp_nodelay(true)
-            .add_service(PeerServer::new(server))
+            .add_service(
+                PeerServer::new(server)
+                    .max_decoding_message_size(MESSAGE_MOST)
+                    .max_encoding_message_size(MESSAGE_MOST),
+            )
             .serve_with_incoming(incoming)
             .await
             .map_err(std::io::Error::other)
@@ -205,8 +214,9 @@ fn sweeping(
 }
 
 /// cladefs: drops from `replicas` what the heads of `bucket`'s cells name no more: every
-/// configuration's logs before the active one, and all of a cell gone, deleted, or no longer
-/// replicated (doc-21). A head that can't be read keeps what its cell has.
+/// configuration's logs before the active one, and all of a cell gone or deleted; nothing of a
+/// cell whose head names no configuration (doc-21). A head that can't be read keeps what its cell
+/// has.
 pub(super) async fn sweep(
     replicas: &Replicas<HostDir>,
     bucket: &impl bucket_cell::bucket::Bucket,
@@ -219,12 +229,23 @@ pub(super) async fn sweep(
                 continue;
             }
         };
-        let active = (head.filter(|head| !head.deleted()))
-            .and_then(|head| head.replication)
-            .and_then(|replication| replication.configuration)
-            .map(|configuration| Key { number: configuration.number, epoch: configuration.epoch });
+        // Gone for good only if its head is, or is deleted: a head read without a configuration,
+        // or not replicated, may name one by the time the sweep acts, its first installed and
+        // active since (Codex's review of TASK-537.3.2).
+        let swept = match head.filter(|head| !head.deleted()) {
+            None => Swept::Gone,
+            Some(head) => {
+                match head.replication.and_then(|replication| replication.configuration) {
+                    None => Swept::Unconfigured,
+                    Some(configuration) => Swept::Before(Key {
+                        number: configuration.number,
+                        epoch: configuration.epoch,
+                    }),
+                }
+            }
+        };
         // On the sweep's own thread, which nothing else waits on: its file I/O blocks it alone.
-        replicas.sweep(cell, active).map_err(|err| err.to_string())?;
+        replicas.sweep(cell, swept).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -293,9 +314,6 @@ fn refused(err: replica::Error) -> Status {
         }
         replica::Error::Refused(refused @ Refused::Fenced { .. }) => {
             Status::failed_precondition(refused.to_string())
-        }
-        replica::Error::Refused(refused @ Refused::Gap { .. }) => {
-            Status::out_of_range(refused.to_string())
         }
         replica::Error::Refused(refused @ Refused::Full { .. }) => {
             Status::resource_exhausted(refused.to_string())
@@ -487,7 +505,8 @@ pub(crate) fn member(
         .keep_alive_timeout(CONNECT)
         .keep_alive_while_idle(true)
         .tcp_nodelay(true);
-    Ok(PeerClient::new(endpoint.connect_lazy()))
+    let client = PeerClient::new(endpoint.connect_lazy());
+    Ok(client.max_decoding_message_size(MESSAGE_MOST).max_encoding_message_size(MESSAGE_MOST))
 }
 
 /// A peer reached over gRPC.

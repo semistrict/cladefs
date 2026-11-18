@@ -55,11 +55,8 @@ pub enum Refused {
     /// refused.
     #[error("fenced at epoch {promise}")]
     Fenced { promise: u64 },
-    /// An append past the log's end: what is before it is missing.
-    #[error("log {log} ends at {end}, appended at {offset}")]
-    Gap { log: u64, end: u64, offset: u64 },
-    /// The cell's logs would hold more than the member holds for a cell.
-    #[error("the cell's logs would hold {would} bytes, past {most}")]
+    /// The configuration's logs would hold more than the member holds for a configuration.
+    #[error("the configuration's logs would hold {would} bytes, past {most}")]
     Full { would: u64, most: u64 },
 }
 
@@ -82,8 +79,9 @@ impl From<io::Error> for Error {
 pub struct Replicas<D: Dir> {
     dir: D,
     incarnation: u64,
-    /// The most bytes a cell's logs hold here, of every configuration: the writer's lag bound in
-    /// bytes, which bounds what is not in the bucket yet (doc-21, Commit).
+    /// The most bytes a configuration's logs hold here: the writer's lag bound in bytes, which
+    /// bounds what is not in the bucket yet (doc-21, Commit). Per configuration, as a take installs
+    /// its own while the one before, holding the same commits, is still here until it activates.
     most: u64,
     cells: Mutex<HashMap<CellId, Arc<Mutex<Held>>>>,
 }
@@ -94,20 +92,101 @@ pub struct Replicas<D: Dir> {
 struct Held {
     /// Its promise, as on the disk.
     promise: u64,
-    /// Its logs' ends, by configuration and log.
-    ends: BTreeMap<(Key, u64), u64>,
+    /// Its logs, by configuration and log.
+    logs: BTreeMap<(Key, u64), Log>,
 }
 
 impl Held {
-    fn bytes(&self) -> u64 {
-        self.ends.values().sum()
+    /// The bytes the logs of configuration `key` hold.
+    fn bytes(&self, key: Key) -> u64 {
+        self.logs.range((key, 0)..=(key, u64::MAX)).map(|(_, log)| log.end).sum()
+    }
+}
+
+/// A log a member holds: its frames, each of bytes the writer sent at an offset of its log, one
+/// after another in the file and in the log (a frame's offset its frame before's end), each
+/// written whole, with its CRC, so that a reopening reads the log's end from its frames, never from
+/// the file's size, which a crash leaves past them, padded with zeros (a direct write's whole
+/// blocks, `bucket_cell::direct::write_at`, cut back after; TASK-537.3.2's review).
+#[derive(Default)]
+struct Log {
+    /// Its end: the last frame's offset and length.
+    end: u64,
+    /// Where its next frame goes in the file.
+    at: u64,
+    /// Each frame's offset in the log, and where its bytes are in the file.
+    frames: Vec<(u64, u64)>,
+}
+
+/// A frame's header: its offset in the log (u64), its length (u32), and the CRC of the two and its
+/// bytes (u32), little-endian.
+const HEADER: u64 = 16;
+
+fn frame(offset: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(HEADER as usize + bytes.len());
+    frame.extend_from_slice(&offset.to_le_bytes());
+    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    let crc = frame_crc(&frame, bytes);
+    frame.extend_from_slice(&crc.to_le_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+fn frame_crc(head: &[u8], bytes: &[u8]) -> u32 {
+    let mut both = head[..12].to_vec();
+    both.extend_from_slice(bytes);
+    extent_frame::crc(&both)
+}
+
+impl Log {
+    /// The log in `file`, as far as its frames go: each whole, its CRC right, at the end of the one
+    /// before. A frame torn by a crash, zeros past the last, or anything after either, is no part
+    /// of it: none of it was answered synced.
+    fn read(file: &impl File) -> io::Result<Self> {
+        let size = file.size()?;
+        let mut log = Self::default();
+        while log.at + HEADER <= size {
+            let mut head = [0; HEADER as usize];
+            file.read_at(&mut head, log.at)?;
+            let offset = u64::from_le_bytes(head[..8].try_into().unwrap());
+            let len = u64::from(u32::from_le_bytes(head[8..12].try_into().unwrap()));
+            let crc = u32::from_le_bytes(head[12..].try_into().unwrap());
+            if len == 0 || offset != log.end || log.at + HEADER + len > size {
+                break;
+            }
+            let mut bytes = vec![0; len as usize];
+            file.read_at(&mut bytes, log.at + HEADER)?;
+            if frame_crc(&head, &bytes) != crc {
+                break;
+            }
+            log.frames.push((offset, log.at + HEADER));
+            log.end += len;
+            log.at += HEADER + len;
+        }
+        Ok(log)
+    }
+
+    /// Where the log's bytes from `offset`, `len` of them at most, are in the file, frame by frame.
+    fn pieces(&self, offset: u64, len: u64) -> Vec<(u64, u64)> {
+        let last = offset.saturating_add(len).min(self.end);
+        let mut pieces = Vec::new();
+        for (i, &(start, at)) in self.frames.iter().enumerate() {
+            let stop = self.frames.get(i + 1).map_or(self.end, |&(next, _)| next);
+            let (from, to) = (start.max(offset), stop.min(last));
+            if from < to {
+                pieces.push((at + (from - start), to - from));
+            }
+        }
+        pieces
     }
 }
 
 impl<D: Dir> Replicas<D> {
     /// The replica directory `dir`: of the incarnation its file names, or a new one, made, if it
-    /// holds nothing yet. A directory holding files and no incarnation is refused: what its logs
-    /// were promised can't be known. Each cell's logs hold at most `most` bytes.
+    /// holds nothing of a member's yet (a file system's own `lost+found`, or an incarnation's file
+    /// a crash left half made, aside). A directory holding a member's files and no incarnation is
+    /// refused: what its logs were promised can't be known. Each configuration's logs hold at most
+    /// `most` bytes.
     pub fn open(dir: D, most: u64) -> Result<Self, Error> {
         let names = dir.list("").context("listing the replica directory")?;
         let incarnation = if names.iter().any(|name| name == INCARNATION) {
@@ -120,11 +199,14 @@ impl<D: Dir> Replicas<D> {
             let number = line.strip_prefix("incarnation ").unwrap_or_default();
             number.parse().with_context(|| format!("{INCARNATION}: bad line {line:?}"))?
         } else {
-            if !names.is_empty() {
+            let held: Vec<&String> =
+                names.iter().filter(|name| parse_name(name).is_some()).collect();
+            if !held.is_empty() {
                 return Err(anyhow!(
-                    "the replica directory holds {} files and no {INCARNATION}: refused, its \
-                     promises unknown",
-                    names.len()
+                    "the replica directory holds {} files of a member's ({}...) and no \
+                     {INCARNATION}: refused, its promises unknown",
+                    held.len(),
+                    held[0]
                 )
                 .into());
             }
@@ -147,8 +229,9 @@ impl<D: Dir> Replicas<D> {
 
     /// Appends `bytes` at `offset` of the log `log` of `cell`'s configuration `key`, whose writer's
     /// epoch is `key.epoch`, to this member named in `incarnation`, and syncs it: the log's end,
-    /// synced. Bytes before the end again are written again, as a writer catching a member up
-    /// sends what it may have had: the same, as a configuration's log is written once.
+    /// synced. Bytes before the end again are not written again, as a writer catching a member up
+    /// sends what it may have had: the same, as a configuration's log is written once. An append
+    /// past the end writes nothing, and answers the end, from which the writer sends again.
     pub fn append(
         &self,
         (cell, key, incarnation): (CellId, Key, u64),
@@ -162,29 +245,57 @@ impl<D: Dir> Replicas<D> {
         if key.epoch < held.promise {
             return Err(Refused::Fenced { promise: held.promise }.into());
         }
-        let end = held.ends.get(&(key, log)).copied().unwrap_or(0);
-        if offset > end {
-            return Err(Refused::Gap { log, end, offset }.into());
+        // Nothing to append makes nothing: no file a writer's empty appends would make by the
+        // thousand, past the bound, which counts bytes (Codex's review of TASK-537.3.2).
+        if bytes.is_empty() {
+            return Ok(held.logs.get(&(key, log)).map_or(0, |state| state.end));
         }
-        let after = end.max(offset + bytes.len() as u64);
-        let would = held.bytes() - end + after;
+        let path = log_path(cell, key, log);
+        // What it would append, checked before any file is made: an append past the end, all of
+        // it held already, or past the bound, leaves nothing behind.
+        let end = held.logs.get(&(key, log)).map_or(0, |state| state.end);
+        if offset > end || offset + bytes.len() as u64 <= end {
+            return Ok(end);
+        }
+        let would = held.bytes(key) + (offset + bytes.len() as u64 - end);
         if would > self.most {
             return Err(Refused::Full { would, most: self.most }.into());
         }
-        let path = log_path(cell, key, log);
-        let file = match end {
-            0 if !held.ends.contains_key(&(key, log)) => {
-                let file =
-                    self.dir.create(&path, false).with_context(|| format!("making {path}"))?;
-                self.dir.sync_dir("").context("syncing the replica directory")?;
-                file
+        if !held.logs.contains_key(&(key, log)) {
+            // Its file made, it is held at once, empty, however its first append ends: a failure
+            // after leaves a file the next append opens, and drops and sweeps remove.
+            match self.dir.create(&path, false) {
+                Ok(_) => {
+                    held.logs.insert((key, log), Log::default());
+                    self.dir.sync_dir("").context("syncing the replica directory")?;
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    // Made by an append that failed before it was held: what it holds, if any of
+                    // it was written, read as a reopening would.
+                    let file =
+                        self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
+                    let found = Log::read(&file).with_context(|| format!("reading {path}"))?;
+                    let found_end = found.end;
+                    held.logs.insert((key, log), found);
+                    if found_end != 0 {
+                        drop(held);
+                        return self.append((cell, key, incarnation), log, offset, bytes);
+                    }
+                }
+                Err(err) => {
+                    return Err(anyhow::Error::from(err).context(format!("making {path}")).into());
+                }
             }
-            _ => self.dir.open(&path, false).with_context(|| format!("opening {path}"))?,
-        };
-        file.write_at(bytes, offset).with_context(|| format!("writing {path}"))?;
+        }
+        let state = held.logs.get_mut(&(key, log)).unwrap();
+        let new = &bytes[(end - offset) as usize..];
+        let file = self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
+        file.write_at(&frame(end, new), state.at).with_context(|| format!("writing {path}"))?;
         file.sync_cached().with_context(|| format!("syncing {path}"))?;
-        held.ends.insert((key, log), after);
-        Ok(after)
+        state.frames.push((end, state.at + HEADER));
+        state.at += HEADER + new.len() as u64;
+        state.end += new.len() as u64;
+        Ok(state.end)
     }
 
     /// Fences `cell` at `epoch`, for this member named in `incarnation`: its promise raised to it,
@@ -205,10 +316,8 @@ impl<D: Dir> Replicas<D> {
             write_text(&self.dir, &promise_path(cell), &format!("{epoch}\n"))?;
             held.promise = epoch;
         }
-        Ok(held
-            .ends
-            .range((key, 0)..=(key, u64::MAX))
-            .map(|(&(_, log), &end)| (log, end))
+        Ok((held.logs.range((key, 0)..=(key, u64::MAX)))
+            .map(|(&(_, log), state)| (log, state.end))
             .collect())
     }
 
@@ -224,13 +333,17 @@ impl<D: Dir> Replicas<D> {
         self.check(incarnation)?;
         let held = self.held(cell)?;
         let held = held.lock().unwrap();
-        let end = held.ends.get(&(key, log)).copied().unwrap_or(0);
-        let len = len.min(end.saturating_sub(offset));
-        let mut bytes = vec![0; len as usize];
-        if len > 0 {
+        let Some(state) = held.logs.get(&(key, log)) else { return Ok(Vec::new()) };
+        let pieces = state.pieces(offset, len);
+        let mut bytes = Vec::new();
+        if !pieces.is_empty() {
             let path = log_path(cell, key, log);
             let file = self.dir.open(&path, false).with_context(|| format!("opening {path}"))?;
-            file.read_at(&mut bytes, offset).with_context(|| format!("reading {path}"))?;
+            for (at, len) in pieces {
+                let start = bytes.len();
+                bytes.resize(start + len as usize, 0);
+                file.read_at(&mut bytes[start..], at).with_context(|| format!("reading {path}"))?;
+            }
         }
         Ok(bytes)
     }
@@ -246,7 +359,7 @@ impl<D: Dir> Replicas<D> {
         self.check(incarnation)?;
         let held = self.held(cell)?;
         let mut held = held.lock().unwrap();
-        let gone: Vec<(Key, u64)> = (held.ends.keys())
+        let gone: Vec<(Key, u64)> = (held.logs.keys())
             .filter(|&&(of, log)| {
                 of < key || (of == key && through.is_some_and(|last| log <= last))
             })
@@ -268,18 +381,22 @@ impl<D: Dir> Replicas<D> {
         Ok(cells.into_iter().map(|((tenant, id), keys)| (CellId { tenant, id }, keys)).collect())
     }
 
-    /// Drops what the directory holds of `cell` that its head names no more: every configuration's
-    /// logs before `active`, the one it names; or, of a cell deleted, gone, or no longer replicated
-    /// (`active` none), its logs and its promise.
-    pub fn sweep(&self, cell: CellId, active: Option<Key>) -> Result<(), Error> {
+    /// Drops what the directory holds of `cell` that its head names no more ([`Swept`]).
+    pub fn sweep(&self, cell: CellId, swept: Swept) -> Result<(), Error> {
         let held = self.held(cell)?;
         let mut held = held.lock().unwrap();
-        let gone: Vec<(Key, u64)> = (held.ends.keys())
-            .filter(|&&(of, _)| active.is_none_or(|active| of < active))
-            .copied()
-            .collect();
+        let gone: Vec<(Key, u64)> = match swept {
+            // A replicated cell whose head names no configuration yet: its first may be being
+            // installed, or active since the head was read. Nothing goes (the spec sweeps only
+            // what the head names a configuration later than; TASK-537.3.2's review).
+            Swept::Unconfigured => return Ok(()),
+            Swept::Before(active) => {
+                held.logs.keys().filter(|&&(of, _)| of < active).copied().collect()
+            }
+            Swept::Gone => held.logs.keys().copied().collect(),
+        };
         self.remove(cell, &mut held, &gone)?;
-        if active.is_none() && held.promise > 0 {
+        if swept == Swept::Gone && held.promise > 0 {
             self.dir.remove(&promise_path(cell)).context("removing a promise")?;
             self.dir.sync_dir("").context("syncing the replica directory")?;
             held.promise = 0;
@@ -291,7 +408,7 @@ impl<D: Dir> Replicas<D> {
         for &(key, log) in gone {
             let path = log_path(cell, key, log);
             self.dir.remove(&path).with_context(|| format!("removing {path}"))?;
-            held.ends.remove(&(key, log));
+            held.logs.remove(&(key, log));
         }
         if !gone.is_empty() {
             self.dir.sync_dir("").context("syncing the replica directory")?;
@@ -325,8 +442,10 @@ impl<D: Dir> Replicas<D> {
                     let log = log.ok_or_else(|| anyhow!("bad log name {name:?}"))?;
                     let file =
                         self.dir.open(&name, false).with_context(|| format!("opening {name}"))?;
-                    held.ends
-                        .insert((key, log), file.size().with_context(|| format!("sizing {name}"))?);
+                    held.logs.insert(
+                        (key, log),
+                        Log::read(&file).with_context(|| format!("reading {name}"))?,
+                    );
                 }
                 _ => {}
             }
@@ -335,6 +454,17 @@ impl<D: Dir> Replicas<D> {
         cells.insert(cell, held.clone());
         Ok(held)
     }
+}
+
+/// What a sweep found of a cell in its head ([`Replicas::sweep`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Swept {
+    /// Its head names this configuration: those before it go.
+    Before(Key),
+    /// Its head names no configuration: nothing goes, as one may be installed and active by now.
+    Unconfigured,
+    /// It is gone, or deleted, for good: all of it goes, its promise too.
+    Gone,
 }
 
 fn promise_path(cell: CellId) -> String {

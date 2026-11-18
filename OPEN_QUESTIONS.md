@@ -1,5 +1,9 @@
 # Open questions
 
+## Run the full ubu1 suite of TASK-537.3's batch 1 where sudo works (2026-11-18)
+
+Needed: `CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_RUN=t537a scripts/test-host.sh /tmp/t537a-results` at the branch `t3/durable-commit-recovery-protocol` (pushed), from a shell whose sudo works. Why: this session runs under "no new privileges", and the driver needs sudo for the root tests and to hand back ~/.cargo and ~/.rustup; its run here stopped at once. Recommend: run it, or say how agents here should reach a sudo-capable shell. Until answered: batch 1's own tests (bucket_cell, local_cell, cladefs's peers and control) pass under fxjob, clippy is clean, and batch 1 waits on the branch, not on main.
+
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports

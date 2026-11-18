@@ -179,11 +179,18 @@ fn members_take_appends_and_fences_over_grpc() {
         assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 1, end: 6 }));
         sending.send(append(1, 6, b"second")).await.unwrap();
         assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 1, end: 12 }));
+        // An append past the end writes nothing and answers the end (not OUT_OF_RANGE, which a
+        // message past tonic's size limit is answered with); one of 5 MiB, past tonic's default
+        // limit, is taken (TASK-537.3.2's review).
+        sending.send(append(2, 4, b"past")).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 2, end: 0 }));
+        sending.send(append(2, 0, &vec![5; 5 << 20])).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 2, end: 5 << 20 }));
 
         // A take of epoch 5 fences the cell, and reads what the old writer's configuration holds.
         let fence = FenceRequest { of: of(incarnation, 1, 4), epoch: 5 };
         let fenced = client.fence(fence).await.unwrap().into_inner();
-        assert_eq!(fenced.logs, [LogEnd { log: 1, end: 12 }]);
+        assert_eq!(fenced.logs, [LogEnd { log: 1, end: 12 }, LogEnd { log: 2, end: 5 << 20 }]);
         let read = ReadLogRequest { of: of(incarnation, 1, 4), log: 1, offset: 0 };
         let mut pieces = client.read_log(read).await.unwrap().into_inner();
         let mut bytes = Vec::new();
@@ -243,7 +250,9 @@ fn sweeps_drop_what_heads_name_no_more() {
     let replicas = super::replicas(dir.path()).unwrap();
     let ours = replicas.incarnation();
     let (cell, gone) = (crate::CellId { tenant: 3, id: 9 }, crate::CellId { tenant: 3, id: 10 });
-    for (of, number) in [(cell, 1), (cell, 2), (gone, 1)] {
+    let unconfigured = crate::CellId { tenant: 3, id: 11 };
+    let plain = crate::CellId { tenant: 3, id: 12 };
+    for (of, number) in [(cell, 1), (cell, 2), (gone, 1), (unconfigured, 1), (plain, 1)] {
         replicas.append((of, Key { number, epoch: number }, ours), 1, 0, b"x").unwrap();
     }
     let bucket = bucket_cell::testing::Direct(bucket_cell::testing::SimBucket::new());
@@ -270,7 +279,22 @@ fn sweeps_drop_what_heads_name_no_more() {
             configuration: Some(Configuration { number: 2, epoch: 2, f: 1, members }),
         });
         bucket_cell::head::swap(&bucket, cell, &held, next).await.unwrap();
+        // A replicated cell whose head names no configuration yet: its first may be installed
+        // now, and nothing of it goes (TASK-537.3.2's review).
+        bucket_cell::lifecycle::create(&bucket, unconfigured, 1).await.unwrap();
+        let read = bucket_cell::head::read(&bucket, unconfigured).await;
+        bucket_cell::head::take(&bucket, unconfigured, read, &taking).await.unwrap();
+        // Nor of one whose head, read, is not replicated: a take may make it so, and install its
+        // first configuration, before the sweep acts (Codex's review).
+        bucket_cell::lifecycle::create(&bucket, plain, 1).await.unwrap();
         sweep(&replicas, &bucket).await.unwrap();
     });
-    assert_eq!(replicas.cells().unwrap(), [(cell, vec![Key { number: 2, epoch: 2 }])]);
+    assert_eq!(
+        replicas.cells().unwrap(),
+        [
+            (cell, vec![Key { number: 2, epoch: 2 }]),
+            (unconfigured, vec![Key { number: 1, epoch: 1 }]),
+            (plain, vec![Key { number: 1, epoch: 1 }]),
+        ]
+    );
 }
