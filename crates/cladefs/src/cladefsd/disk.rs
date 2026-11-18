@@ -435,6 +435,26 @@ pub fn host_disks() -> Vec<(&'static str, &'static str, Vec<(String, u64)>)> {
         .collect()
 }
 
+/// cladefs: the host's disks as the stats file says them (doc-22, TASK-539.11): after `disks:`, each
+/// disk's device, `MAJOR:MINOR`, and its gauges ([`host_disks`]), `NAME=VALUE`, by the part of their
+/// names after `cladefsd_host_disk_`; disks separated by `;`. `disks: none` before any is opened.
+pub fn line() -> String {
+    let mut by_device: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (name, _, values) in host_disks() {
+        let short = name.trim_start_matches("cladefsd_host_disk_").trim_end_matches("_bytes");
+        for (device, value) in values {
+            by_device.entry(device).or_default().push(format!("{short}={value}"));
+        }
+    }
+    let disks: Vec<_> = (by_device.into_iter())
+        .map(|(device, values)| format!("{device} {}", values.join(" ")))
+        .collect();
+    match disks.is_empty() {
+        true => "disks: none".to_owned(),
+        false => format!("disks: {}", disks.join("; ")),
+    }
+}
+
 /// cladefs: shares what `disk`'s allowance leaves the tenants by their allotments' weights while it is
 /// under pressure, each allotment on it refused past its share; none otherwise (TASK-539.10).
 /// What its stores in no allotment take, the default tenant's, comes off first.
@@ -601,6 +621,7 @@ mod tests {
         let refused = light_store.footprint().admit(past, 0).map(drop);
         assert_eq!(refused, Err(DiskFull::Share));
         assert!(heavy_store.footprint().admit(4096, 0).is_ok());
+        assert!(super::line().contains(" pressure=1"), "{}", super::line());
         let rendered = super::super::metrics::render();
         for line in
             ["cladefsd_tenant_disk_weight{tenant=\"3\"} 3", "cladefsd_host_disk_pressure{device="]
