@@ -11,7 +11,7 @@
 # Killer: scripts/sandboxes.sh short
 --- a/crates/local_cell/src/segments.rs
 +++ b/crates/local_cell/src/segments.rs
-@@ -1546,6 +1546,7 @@
+@@ -1547,6 +1547,7 @@
      // file's key (TASK-411.23).
      let sectors = raw.sectors();
      let in_place_maybe = quiet && len > 0 && len.is_multiple_of(SECTOR);
@@ -19,9 +19,9 @@
      let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
      // cladefs: in place at once if a look at its parts says compressing them saves too little,
      // compressing no more of them: compressing every part to tell was most of what framings took
---- a/crates/local_cell/src/store.rs
-+++ b/crates/local_cell/src/store.rs
-@@ -2267,10 +2267,6 @@
+--- a/crates/local_cell/src/cell.rs
++++ b/crates/local_cell/src/cell.rs
+@@ -2348,10 +2348,6 @@
              }
              let end = packer.end();
              let packed = packer.push(buf);
@@ -31,4 +31,4 @@
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 // Its raw parts before are no parts of a copy's, encrypted with AES-GCM: framed anew,
+                 // Its raw parts before are no parts of a store at a version's, encrypted with AES-GCM: framed anew,

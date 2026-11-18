@@ -97,6 +97,11 @@
 //! The network is trusted: peers are unauthenticated, as every host reads the whole bucket anyway,
 //! and what a peer gives is checked against the CRCs of the asker's own tail of the object; on any
 //! failure a part comes from the bucket, and the peer is asked nothing for 30 seconds.
+//! With `CLADEFSD_REPLICAS` naming a directory too, made if it is not there, the daemon is a
+//! member of other hosts' replicated cells' configurations (backlog doc-21, TASK-537): it keeps
+//! their writers' logs there until the bucket does, each cell's to the lag bound in bytes, and
+//! sweeps what their heads name no more every ten minutes. The directory's incarnation, made with
+//! it, names this host in their configurations: one made anew, its disk lost, is another member.
 //! However far behind the bucket its stores fall, what waits for it is on the host's disk, each
 //! store's write-ahead log, bounded by its lag (backlog doc-7, Uploads); what of it the daemon
 //! holds in memory is what it uploads at once, `CLADEFSD_UPLOAD_MEMORY` bytes at most (512 MiB

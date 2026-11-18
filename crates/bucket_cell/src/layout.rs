@@ -66,8 +66,10 @@ pub struct Child {
 /// (TASK-508.3); nothing reads 17's. 19: a cell's head is its one swapped object, holding what its
 /// record and its cell's object held (TASK-515); nothing reads 18's. 20: a bucket has a number, in
 /// its identity object ([`IDENTITY`]), which the high bits of every cell ID it gives carry
-/// ([`crate::identity`], doc-23, TASK-633.9); nothing reads 19's.
-pub const FORMAT: u32 = 20;
+/// ([`crate::identity`], doc-23, TASK-633.9); nothing reads 19's. 21: a cell's head says whether
+/// it is replicated, and names its active configuration ([`Head::replication`], doc-21,
+/// TASK-537.3.1); nothing reads 20's.
+pub const FORMAT: u32 = 21;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -618,6 +620,77 @@ pub struct Head {
     /// segment names the versions cut at its end, in the same swap; a takeover names what the
     /// head did; its writer drops one by a swap; a deletion's final head names none.
     pub versions: Vec<Version>,
+    /// cladefs: whether the cell is replicated, and how (doc-21, TASK-537): its commits on f+1 of
+    /// 2f+1 hosts' disks before the bucket. None, as every cell was before, for a cell whose
+    /// commits are durable off their host once uploaded alone. Given by a taking
+    /// ([`crate::head::Taking::replication`]); its configuration swapped by its writer.
+    pub replication: Option<Replication>,
+}
+
+/// cladefs: what a guest's fsync waits for in a cell (doc-12, doc-21): its commit's level. The
+/// sync family (sync, syncfs, unmount) waits for [`Fsync::Replicated`] in a replicated cell, and
+/// for its upload in any other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Fsync {
+    /// In the daemon's memory, in order: survives what leaves the daemon alive.
+    #[default]
+    Ordered,
+    /// On the writer's host's disk.
+    Local,
+    /// On f+1 members' disks (or uploaded): survives the writer's host.
+    Replicated,
+}
+
+/// cladefs: the most f a cell is replicated with: 2f+1 = 7 copies.
+pub const MAX_F: u8 = 3;
+
+/// cladefs: what a replicated cell asks for, as its taking gives it ([`Head::replication`]): its
+/// f, and what its guest's fsync waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wish {
+    pub f: u8,
+    pub fsync: Fsync,
+}
+
+impl Wish {
+    /// A wish of `f` and `fsync`, unless `f` is past [`MAX_F`], or `fsync` waits for copies an
+    /// f of 0 never makes.
+    pub fn new(f: u8, fsync: Fsync) -> Option<Self> {
+        (f <= MAX_F && !(f == 0 && fsync == Fsync::Replicated)).then_some(Self { f, fsync })
+    }
+}
+
+/// cladefs: a replicated cell's replication (doc-21): what it asks for, and the configuration
+/// its writer's commits are replicated in, once it has one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Replication {
+    pub wish: Wish,
+    /// The active configuration: none until a writer installs one.
+    pub configuration: Option<Configuration>,
+}
+
+/// cladefs: a configuration of a replicated cell (doc-21): its writer and 2f members, holding a
+/// write-once log of the commits the head does not name yet. Made by a taking, or by its writer
+/// replacing members, and active once the head names it. An f of 0, its writer alone, holds no
+/// quorum: a taker of a cell whose head names it reads the bucket alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Configuration {
+    /// Its number, greater than every configuration's before it in the cell.
+    pub number: u64,
+    /// The epoch of the writer that made it, the only one that appends to its log.
+    pub epoch: u64,
+    pub f: u8,
+    /// Its members, its writer first.
+    pub members: Vec<Member>,
+}
+
+/// cladefs: a member of a configuration (doc-21): a host, by its peer address, in one incarnation
+/// of its replica directory, which a host that lost its disk, and the promises on it, is no more.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Member {
+    /// `HOST:PORT`, as the hosts sharing the bucket name it (`CLADEFSD_PEERS`).
+    pub address: String,
+    pub incarnation: u64,
 }
 
 /// cladefs: a version a head names ([`Head::versions`], doc-18, doc-20): its ID, which the footer
@@ -1126,9 +1199,30 @@ mod tests {
             checkpoint: Some((2, 1)),
             versions: vec![Version { id: 0xbe, at: 3, shared: true }],
             kind: Some(crate::cell::Kind::Sqlite),
+            replication: Some(Replication {
+                wish: Wish::new(1, Fsync::Replicated).unwrap(),
+                configuration: Some(Configuration {
+                    number: 2,
+                    epoch: 4,
+                    f: 1,
+                    members: vec![
+                        Member { address: "a:1".into(), incarnation: 5 },
+                        Member { address: "b:1".into(), incarnation: 6 },
+                        Member { address: "c:1".into(), incarnation: 7 },
+                    ],
+                }),
+            }),
             ..Head::of(crate::record::Made::Root, 3)
         };
-        assert_eq!(Head::decode(TEST_CELL, &encode(&head)), Ok(head));
+        assert_eq!(Head::decode(TEST_CELL, &encode(&head)), Ok(head.clone()));
+        // cladefs: a head of the format before, whose first bytes say so, is refused, not read
+        // (TASK-537.3.1: no migrations).
+        let mut older = encode(&head);
+        older[..4].copy_from_slice(&encode(&(FORMAT - 1)));
+        assert_eq!(
+            Head::decode(TEST_CELL, &older),
+            Err(crate::Error::Format { cell: TEST_CELL, format: FORMAT - 1 })
+        );
     }
 
     /// TASK-476: a head names the versions cut at the segments it names, in order, each once; a

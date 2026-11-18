@@ -3,10 +3,11 @@ id: TASK-537.3
 title: >-
   Implement replicated commits: peer append RPCs, replica logs, the Replicated
   level and recovery on take
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18T12:36:00Z'
-updated_date: '2026-11-18 17:04'
+updated_date: '2026-11-18T17:02:00Z'
 labels:
   - durability
   - peers

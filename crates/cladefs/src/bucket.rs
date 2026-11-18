@@ -558,6 +558,21 @@ pub fn peers() -> Option<Arc<peers::Peers>> {
     PEERS.get().map(|(_, peers)| peers.clone())
 }
 
+static MEMBERS: std::sync::OnceLock<Arc<dyn local_cell::upload::Members>> =
+    std::sync::OnceLock::new();
+
+/// cladefs: has the host's replicated cells' configurations be made of `members`, its peers, from
+/// now on (doc-21, TASK-537.3.3): before any store opens. Once.
+pub fn replicate_with(members: Arc<dyn local_cell::upload::Members>) -> Result<(), String> {
+    MEMBERS.set(members).map_err(|_| "the host's members are set already".to_owned())
+}
+
+/// cladefs: the hosts the host's replicated cells' configurations are made of, if it has peers
+/// and a replica directory ([`replicate_with`]).
+pub fn members() -> Option<Arc<dyn local_cell::upload::Members>> {
+    MEMBERS.get().cloned()
+}
+
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
 /// (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its stores'
 /// fetchers do, with them, under the host's budget, and asking no peer.

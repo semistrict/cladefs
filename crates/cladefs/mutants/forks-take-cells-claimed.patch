@@ -1,0 +1,20 @@
+# A fork takes its cell ID whatever has it in the bucket: its child's head's create refuses no
+# other's: a fork to another cell's ID, which no ID the bucket gives is (TASK-364) but a fork's
+# named so is, wedges that cell's writer (TASK-79.82, TASK-165.7). Forks are of versions alone
+# since TASK-508.3, which make no look first (TASK-449): the create is the one refusal.
+# Kind: commits wedged
+# Killer: bucket::tests::forks_to_a_cell_the_bucket_has_fail_with_eexist
+--- a/crates/bucket_cell/src/lifecycle.rs
++++ b/crates/bucket_cell/src/lifecycle.rs
+@@ -238,11 +238,6 @@
+     let mut refused = None;
+     let making = change_leaving(bucket, child, Start::Create, |found| match found {
+         None => Ok(Step::Write(head.clone(), true)),
+-        // Another's, deleted or not: its ID taken, as a read of the head before found.
+-        Some(found) if !found.is_child_of(head.owner) => {
+-            refused = Some(found);
+-            Err(Error::IdTaken(child))
+-        }
+         // Ours, given up on, its version dropped.
+         Some(found) if found.deleted() => {
+             refused = Some(found);

@@ -1817,6 +1817,53 @@ mod tests {
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 3));
     }
 
+    /// cladefs: a taking gives a cell the replication it is asked for, keeping the configuration
+    /// its head names; a taking asked for none keeps what the head says, whoever takes it
+    /// (doc-21, TASK-537.3.1).
+    #[test]
+    fn takings_give_cells_their_replication_and_keep_their_configuration() {
+        use crate::layout::{Configuration, Fsync, Member, Replication, Wish};
+        let (_dir, _counted, kms) = kms();
+        let bucket = Direct(SimBucket::new());
+        block_on(lifecycle::create(&bucket, TEST_CELL, 1)).unwrap();
+        let take = |holder: u64, replication: Option<Wish>| {
+            let taking = head::Taking { holder, replication, ..head::Taking::default() };
+            block_on(taking_(&bucket, &kms, TEST_CELL, taking)).unwrap().0
+        };
+        let wish = Wish::new(1, Fsync::Replicated).unwrap();
+        let held = take(5, Some(wish));
+        assert_eq!(held.head.replication, Some(Replication { wish, configuration: None }));
+
+        // Its writer installs a configuration: kept by every taking after.
+        let configuration = Configuration {
+            number: 1,
+            epoch: held.head.epoch,
+            f: 1,
+            members: (0..3)
+                .map(|i| Member { address: format!("h{i}:1"), incarnation: i })
+                .collect(),
+        };
+        let mut next = held.head.clone();
+        next.replication.as_mut().unwrap().configuration = Some(configuration.clone());
+        block_on(head::swap(&bucket, TEST_CELL, &held, next)).unwrap();
+        let held = take(6, None);
+        assert_eq!(
+            held.head.replication,
+            Some(Replication { wish, configuration: Some(configuration.clone()) })
+        );
+        let other = Wish::new(2, Fsync::Local).unwrap();
+        let held = take(7, Some(other));
+        assert_eq!(
+            held.head.replication,
+            Some(Replication { wish: other, configuration: Some(configuration) })
+        );
+        assert_eq!(block_on(head::get(&bucket, TEST_CELL)).unwrap().unwrap(), held.head);
+        // No f past the most, and no fsync waiting for copies an f of 0 never makes.
+        assert_eq!(Wish::new(crate::layout::MAX_F + 1, Fsync::Ordered), None);
+        assert_eq!(Wish::new(0, Fsync::Replicated), None);
+        assert!(Wish::new(0, Fsync::Local).is_some());
+    }
+
     /// Takes `cell` as `holder`, of token 0, by `kms`, the host's, giving it `kind`: its head as
     /// taken, and its keys ([`taking`]).
     fn taken(

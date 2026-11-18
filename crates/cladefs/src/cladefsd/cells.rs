@@ -603,7 +603,9 @@ fn keeping() -> Result<local_cell::upload::Options, Errno> {
     })?;
     let (cache, interval) = (part_cache()?, upload_interval());
     let held = Some(super::memory::held_parts().clone());
-    Ok(local_cell::upload::Options { cache, held, token, interval, ..Default::default() })
+    // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
+    let members = crate::bucket::members().map(local_cell::upload::MembersOf);
+    Ok(local_cell::upload::Options { cache, held, token, interval, members, ..Default::default() })
 }
 
 /// How long the stores' durable commits wait at most before they upload: the uploader's default;
@@ -648,7 +650,7 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind): (Option<u64>, Kind),
+    (token, kind, replication): (Option<u64>, Kind, Option<bucket_cell::layout::Wish>),
 ) -> Result<CellId, Errno> {
     let held = hold(&path).await?;
     blocking(move || {
@@ -666,7 +668,10 @@ pub(super) async fn create(
             (_, 0) | (0, _) => return Err(Errno::EINVAL),
             (_, _) => CellOf::Taken(cell),
         };
+        // cladefs: the replication its call asked for, which its taking gives the cell's head
+        // (doc-21, TASK-537.3.1).
         attached(&path, |keeping| {
+            let keeping = local_cell::upload::Options { replication, ..keeping };
             OpenCell::create_placed(&path, (capacity, of, token), kind, keeping)
         })
     })

@@ -11,12 +11,12 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -1322,11 +1322,9 @@
+@@ -1498,11 +1498,9 @@
  	struct cladefs_dax_region *region, *new;
  	long window_offset;
  
 -	spin_lock(&dax->regions_lock);
- 	region = cladefs_dax_find_region(dax, e->branch, e->sequence);
+ 	region = cladefs_dax_find_region(dax, e->cell, e->sequence);
  	if (region)
  		region->refs++;
 -	spin_unlock(&dax->regions_lock);

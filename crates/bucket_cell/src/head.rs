@@ -21,7 +21,7 @@
 use crate::bucket::{self, Bucket, Object, PutMode, Version};
 use crate::cell::Kind;
 use crate::keys::{Dek, InheritedDek, Kek};
-use crate::layout::{self, CellId, Head};
+use crate::layout::{self, CellId, Head, Replication, Wish};
 use crate::{Error, rules};
 use bytes::Bytes;
 
@@ -96,6 +96,10 @@ pub struct Taking {
     /// cladefs: the keys given a head with none, as found when they were made
     /// ([`crate::keys::taking`]).
     pub keys: Option<Given>,
+    /// cladefs: what the cell's replication is to be (doc-21, TASK-537.3.1), its configuration
+    /// kept: given whatever the head said, as the VM manager may change a cell's f or its fsync's
+    /// level at any taking. None keeps what the head says.
+    pub replication: Option<Wish>,
 }
 
 /// cladefs: keys a taking gives the head it takes, made for the head as found then
@@ -151,6 +155,10 @@ pub async fn take(
         // TASK-476); without the rule, as a test shows it needed, none.
         if !rules().versions_carried {
             next.versions.clear();
+        }
+        if let Some(wish) = taking.replication {
+            let configuration = next.replication.take().and_then(|had| had.configuration);
+            next.replication = Some(Replication { wish, configuration });
         }
         if let Some(given) = &taking.keys {
             if !given.fits(&next) {

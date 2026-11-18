@@ -1428,7 +1428,7 @@ mod guest {
             "select (select count(*) from pgbench_accounts), \
              (select coalesce(sum(abalance), 0) from pgbench_accounts), \
              (select coalesce(sum(tbalance), 0) from pgbench_tellers), \
-             (select coalesce(sum(bbalance), 0) from pgbench_cells)",
+             (select coalesce(sum(bbalance), 0) from pgbench_branches)",
         )?;
         let sums: Vec<&str> = sums.split('|').collect();
         let accounts = (SCALE * 100_000).to_string();
@@ -1436,7 +1436,7 @@ mod guest {
             return Err(format!("accounts and balances {sums:?}: not {accounts} and three alike"));
         }
         psql("create extension if not exists amcheck")?;
-        let tables = "array['pgbench_accounts', 'pgbench_cells', 'pgbench_tellers', \
+        let tables = "array['pgbench_accounts', 'pgbench_branches', 'pgbench_tellers', \
                       'pgbench_history']::regclass[]";
         let corrupt =
             psql(&format!("select count(*) from unnest({tables}) as t(rel), verify_heapam(rel)"))?;

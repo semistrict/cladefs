@@ -13,7 +13,7 @@
 
 --- a/guest/linux/fs/cladefs/dax.c
 +++ b/guest/linux/fs/cladefs/dax.c
-@@ -2130,16 +2130,10 @@
+@@ -2403,15 +2403,11 @@
  		/* Between the count and the swap, where iomaps may dirty more (pause points). */
  		cladefs_dax_pause_file(CLADEFS_DAX_STEP_COUNTED, inode->i_ino);
  		down_write(&file->sem);
@@ -26,9 +26,9 @@
 -		most = now;
 +		break;
  	}
- 	xa_for_each(&file->ranges, chunk, range) {
--		if (!cladefs_dax_range_dirty(range))
-+		if (nr == most || !cladefs_dax_range_dirty(range))
- 			continue;
+ 	xa_for_each_marked(&file->ranges, chunk, range, XA_MARK_0) {
++		if (nr == most)
++			continue;
+ 		xa_clear_mark(&file->ranges, chunk, XA_MARK_0);
  		batch[nr].range = range;
  		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */

@@ -1,5 +1,9 @@
 # Open questions
 
+## Run the full ubu1 suite of TASK-537.3's batch 1 where sudo works (2026-11-18)
+
+Needed: `CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_RUN=t537a scripts/test-host.sh /tmp/t537a-results` at the branch `t3/durable-commit-recovery-protocol` (pushed), from a shell whose sudo works. Why: this session runs under "no new privileges", and the driver needs sudo for the root tests and to hand back ~/.cargo and ~/.rustup; its run here stopped at once. Recommend: run it, or say how agents here should reach a sudo-capable shell. Until answered: batch 1's own tests (bucket_cell, local_cell, cladefs's peers and control) pass under fxjob, clippy is clean, and batch 1 waits on the branch, not on main.
+
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
@@ -20,6 +24,16 @@ and Codex. Recommend: the second Claude instance on Opus, else wait for the rese
 the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
 
 # Decisions
+
+## Replicated cells: the wish in the head, members by CLADEFSD_REPLICAS (TASK-537.3.1, .3.2, 2026-11-18)
+
+Decided without you:
+- **A cell's f and fsync level live in its head** (`Head::replication`, bucket format 20), given by a taking (`head::Taking::replication`, from CreateCell's `replicas`/`fsync` through `upload::Options`), not in the store file the task first named: a take on another host must know them, and only the head reaches every host. A taking asking nothing keeps what the head says. *Undo:* nothing reads a store file's copy, so none to drop.
+- **A daemon is a member only with `CLADEFSD_REPLICAS`** (a directory, made if missing; its incarnation made with it). Without it, the member RPCs refuse (FAILED_PRECONDITION) and the writer picks another host: loud, no fallback. *Instead:* a default under the daemon's state directory. *Undo:* default the variable.
+- **Members are distinct hosts, no failure-domain labels** (your word, 2026-11-18: "this is fine"): picked by rendezvous hashing of the cell and the configuration's number over the peer list, each that answers its incarnation. *Undo:* labels on peer entries, and the pick preferring distinct ones.
+- **A writer's replica bytes are spooled on its store's disk** (`replica-spool/<cell>/`, bypassing the host's page cache, never synced, emptied as a replicator starts), not held in memory up to the lag bound (your word, 2026-11-18): the replicator keeps each log's length alone. A spool failing breaks the replicator, whose commits then wait for the bucket. *Instead:* regenerating the replica bytes from the local log on a member's catch-up (no second write, but re-reading runs and own files). *Undo:* `MemSpool` in place of the store's.
+- **The replica directory is flat** (`<tenant>.<cell>.promise`, `<tenant>.<cell>.<number>.<epoch>.<log>`), as `local_cell::Dir` removes no directories, and configurations are keyed by number and epoch, as two racing takers make the same number.
+
 
 ## Replicated commits: the protocol (TASK-537.1, doc-21, 2026-11-18)
 

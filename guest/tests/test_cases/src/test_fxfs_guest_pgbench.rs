@@ -925,7 +925,7 @@ mod guest {
 
     /// cladefs: the database is whole (TASK-119.4), after a run that began with each table's
     /// balances summing to `before`: each of pgbench's transactions adds a delta to an account,
-    /// its teller and its cell, and logs it in the history, which pgbench empties as a run begins:
+    /// its teller and its branch, and logs it in the history, which pgbench empties as a run begins:
     /// each table's balances sum to `before` and the history's deltas. And, with amcheck, every
     /// tuple of the tables is sound, and their indexes hold them all; a page whose checksum fails
     /// fails the query reading it. Returns the balances' sum.
@@ -934,7 +934,7 @@ mod guest {
             socket,
             "select (select coalesce(sum(abalance), 0) from pgbench_accounts), \
              (select coalesce(sum(tbalance), 0) from pgbench_tellers), \
-             (select coalesce(sum(bbalance), 0) from pgbench_cells), \
+             (select coalesce(sum(bbalance), 0) from pgbench_branches), \
              (select coalesce(sum(delta), 0) from pgbench_history)",
         );
         let sums: Vec<i64> = sums.split('|').map(|sum| sum.parse().unwrap()).collect();
@@ -943,11 +943,11 @@ mod guest {
         assert_eq!(
             sums[..3],
             [after; 3],
-            "accounts, tellers and cells' sums, from {before}, and the history's {}",
+            "accounts, tellers and branches' sums, from {before}, and the history's {}",
             sums[3]
         );
         psql(socket, "create extension if not exists amcheck");
-        let tables = "array['pgbench_accounts', 'pgbench_cells', 'pgbench_tellers', \
+        let tables = "array['pgbench_accounts', 'pgbench_branches', 'pgbench_tellers', \
                       'pgbench_history']::regclass[]";
         let corrupt = psql(
             socket,

@@ -4,6 +4,7 @@ title: Measure what a fork across buckets would read and copy
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:02'
+updated_date: '2026-11-18 20:39'
 labels:
   - bucket
   - multi-region
@@ -37,3 +38,9 @@ Whether a child should read its parent's bucket lazily or have its version mirro
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Archived 2026-11-18 with the user: nothing in TASK-633 waits for it. Mirrors are asked for by a control call, their policy the VM manager's; a mirror copies the version's objects, dead bytes included, and a cold read across buckets is a tail GET then the part (2 round trips, 3 for a tail past 64 KiB), as doc-23's Costs say. Worth measuring only if cladefs ever owns an automatic hydration policy.
+<!-- SECTION:NOTES:END -->

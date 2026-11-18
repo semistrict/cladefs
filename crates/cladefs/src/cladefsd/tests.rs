@@ -2767,7 +2767,7 @@ fn control_takes_cells_at_the_placements_given() {
     let path = |name: &str| dir.path().join(name);
     // Host 1's copy, of a new cell the bucket names, placed at 5, its commit synced.
     let new = crate::CellId { tenant: 0, id: 0 };
-    let made = super::cells::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs));
+    let made = super::cells::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs, None));
     let cell = control(made).unwrap();
     let extent = ExtentId { cell: cell.id, sequence: 1 };
     let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
@@ -2778,7 +2778,7 @@ fn control_takes_cells_at_the_placements_given() {
     // A copy beside the daemon, as cladefsctl's without it, placed at 6.
     OpenCell::take(path("second"), 1 << 24, cell, Some(6)).unwrap();
     // One through the daemon, placed at 7.
-    let taken = super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs));
+    let taken = super::cells::create(path("third"), 1 << 24, cell, (Some(7), Kind::Fxfs, None));
     assert_eq!(control(taken), Ok(cell));
     let third = CellClient::connect(&socket, path("third"), 1 << 24).unwrap();
     assert_eq!(third.root().unwrap(), b"placed at 5");

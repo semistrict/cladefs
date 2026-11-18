@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! What a host's store writes to its disk for what a guest writes, by kind, against what its design
-//! says it writes (TASK-330.2): a guest's large file, written faster than it commits, and its small
-//! files, each workload's bytes of each kind bounded by the rules the store writes by (doc-7, On
+//! says it writes (TASK-330.2): a guest's large file, written faster than it commits, its small
+//! files, and its large extents, each workload's bytes of each kind bounded by the rules the store writes by (doc-7, On
 //! the host; TASK-310), not by what it wrote when the test was written. A daemon that writes a
 //! guest's bytes twice, framing in a copy what it frames in place (TASK-310's sandbox host: 2.3
 //! times what its guests wrote), or writing back what it wrote back already, writes past them.
@@ -84,7 +84,8 @@ fn framing_overhead(len: u64) -> u64 {
 /// store commits, every extent sealed where it was written, in the segments it filled, which its
 /// commit spans, each framed in place, its tail alone written (TASK-92.41, TASK-310); each small
 /// file, written in one run of the open segment, never copied, framed once, no larger than it was
-/// written. And
+/// written; each large extent, in a raw file of its own, framed there in place, its tail alone
+/// written, as none of its parts compresses (TASK-310). And
 /// (Linux) what its process had the kernel write to its disk is what the store says it wrote, each
 /// write a page more than its bytes at most: nothing written twice uncounted.
 #[test]
@@ -141,9 +142,28 @@ fn a_hosts_store_writes_what_its_design_says() {
     store.frame_open_segment().unwrap();
     let small = delta(before, local_cell::written());
 
+    // The large extents: 4 of 8 MiB, which don't compress, each reaching past
+    // `Options::large_extent` with its first write, its last piece first, as a guest's sparse
+    // file's does (TASK-142): in a raw file of its own from then on, sealed at their commit.
+    const LARGE_EXTENTS: usize = 4;
+    let large_extent = 2 * options.large_extent as usize;
+    let before = local_cell::written();
+    let mut tails = 0;
+    for seed in 0..LARGE_EXTENTS {
+        let (extent, data) = (next(), noise(16 + seed as u64, large_extent));
+        let (first, last) = data.split_at(large_extent - WRITE);
+        store.write(extent, first.len() as u64, &[VolatileSlice::from(last)]).unwrap();
+        write(&store, extent, first);
+        tails += framing_overhead(large_extent as u64)
+            + bucket_cell::layout::encode(&extent).len() as u64;
+    }
+    store.commit_local(None).unwrap();
+    let own = delta(before, local_cell::written());
+
     let guests = (BURSTS as usize * BURST) as u64;
     eprintln!("large file, {} MiB: {large:?}, {large_cpu:?} of CPU", guests >> 20);
     eprintln!("small files, {} MiB: {small:?}", (SMALL_FILES * SMALL_FILE) >> 20);
+    eprintln!("large extents, {} MiB: {own:?}", (LARGE_EXTENTS * large_extent) >> 20);
     // Each byte the guest wrote, written once, raw, to the open segment or a raw file of its
     // extent's own.
     assert_eq!(large.raw, guests);
@@ -167,6 +187,15 @@ fn a_hosts_store_writes_what_its_design_says() {
     assert_eq!((small.copied, small.own), (0, 0));
     let bound = small.raw + framing_overhead(small.raw) + small.log;
     assert!(small.framed <= bound, "small files framed in {} bytes: {bound} at most", small.framed);
+    // The large extents: each byte written once, raw, to its own file, never copied; framed in
+    // place, as none of its parts compresses, its tail alone written: its parts' table, the
+    // trailer and its footer (TASK-310).
+    assert_eq!((own.raw, own.copied), ((LARGE_EXTENTS * large_extent) as u64, 0));
+    assert!(
+        own.own <= tails,
+        "large extents' own files written {} bytes: {tails} at most",
+        own.own
+    );
 
     // What the process wrote to its disk is what the store says it wrote: each write's bytes, and
     // a page more at most, the last it dirtied in part.
