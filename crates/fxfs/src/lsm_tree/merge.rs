@@ -1134,7 +1134,7 @@ mod tests {
 
         skip_list.merge_into(items[1].clone(), &items[0].key, |left, right| {
             if left.key() == &TestKey(1..1) {
-                // This tests the top cell in merge_into.
+                // This tests the top branch in merge_into.
                 assert_eq!(right.key(), &TestKey(3..3));
                 MergeResult::Other {
                     emit: Some(Item::new(TestKey(2..2), 2).boxed()),
@@ -1142,7 +1142,7 @@ mod tests {
                     right: Keep,
                 }
             } else {
-                // This tests the bottom cell in merge_into.
+                // This tests the bottom branch in merge_into.
                 assert_eq!(left.key(), &TestKey(3..3));
                 assert_eq!(right.key(), &TestKey(5..5));
                 MergeResult::Other {
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     // This tests replacing the item and discarding the right item (the one remaining untested
-    // discard path) in the top cell in merge_into.
+    // discard path) in the top branch in merge_into.
     #[fuchsia::test]
     async fn test_merge_into_replace_and_discard() {
         let skip_list = SkipListLayer::new(100);
@@ -1187,8 +1187,8 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    // This tests replacing the right item in the top cell of merge_into and the left item in the
-    // bottom cell of merge_into.
+    // This tests replacing the right item in the top branch of merge_into and the left item in the
+    // bottom branch of merge_into.
     #[fuchsia::test]
     async fn test_merge_into_replace_merge_item() {
         let skip_list = SkipListLayer::new(100);
@@ -1221,7 +1221,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    // This tests replacing the right item in the bottom cell of merge_into.
+    // This tests replacing the right item in the bottom branch of merge_into.
     #[fuchsia::test]
     async fn test_merge_into_replace_existing() {
         let skip_list = SkipListLayer::new(100);

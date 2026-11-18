@@ -184,10 +184,10 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: cell `cladefs-v1.16.1-r10` of
+The VMM is a submodule: branch `cladefs-v1.16.1-r10` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one
-linear series, each release of it a cell `cladefs-v1.16.1-rN` (TASK-269; r2,
+linear series, each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2,
 TASK-273, the one with the extent device over virtio-PCI alone; r8, TASK-437, r7
 renamed, the releases before it named `fxdax-v1.16.1-rN`; r10, TASK-503, r8 with
 its API saying cladefs). Its first commits are general fixes, each standing
@@ -206,8 +206,8 @@ builds Firecracker goes through): the vmm crate's dependency on
 `crates/cladefs`, cladefs's lock (`vendor/firecracker.lock`, which
 `scripts/firecracker-cargo.sh --lock` updates), and frame pointers, from this
 repo's `.cargo/config.toml`. The series' own `resources/cladefs/README.md` says
-the same for its users. Cell `fxdax-v1.16.1`, the series before, a commit a
-change, `fxdax`, on Firecracker's main cell, where they began, r1's
+the same for its users. Branch `fxdax-v1.16.1`, the series before, a commit a
+change, `fxdax`, on Firecracker's main branch, where they began, r1's
 `fxdax-v1.16.1-optin` and its PCI stack, `fxdax-pci-r1`, are superseded by it
 (`vendor/firecracker.rewrites`). cladefs ran on libkrun before; it left it for
 Firecracker, which the sandboxes it serves run (TASK-40).

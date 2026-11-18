@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-18 21:59'
+updated_date: '2026-11-18 22:08'
 labels:
   - testing
   - ci
@@ -40,4 +40,6 @@ CI runs 44353952388 (8111fb784) and 44380042393 (ca72b5814) on main, 2026-11-18:
 
 <!-- SECTION:NOTES:BEGIN -->
 Cause (AC #1), ubu1 2026-11-18, sandboxes.sh short with results kept, sandbox-1-pgbench.console.txt: after the load and its first 60 s run, check_data's query fails: ERROR: relation "pgbench_cells" does not exist; the guest panics (test_fxfs_guest_pgbench.rs check_data), reboots, and Firecracker exits 0, its stdout 'OK load 1000000' alone. f3cf366ce (TASK-508.3, branch is cell everywhere) renamed pgbench's own table pgbench_branches to pgbench_cells in test_fxfs_guest_pgbench.rs and test_fxfs_guest_soak.rs, with pgbench's prose (its teller and its branch); hidden on CI from 845a6c123 to 8111fb784 by the guest kernel not compiling. The same rename turned AGENTS.md's git branches into cells. Restored all of them. The check already fails a pgbench role that stops early (it caught this).
+
+A sweep of the rename commits' 362 files (f3cf366ce, 8e9f18a42, ddbe40889; a finder and a skeptic per group) found 35 more words of other systems renamed branch -> cell, all restored: git's in guest cases that ran git (test_fxfs_guest_shared_volumes: init --initial-cell, git cell -D side, twice; test_fxfs_guest_git_fetch: init --initial-cell), which broke those cases; and prose: Firecracker's and this repo's git branches (docs/code.md, docs/testing.md, docs/research/kvm-async-pf..., README.md, OPEN_QUESTIONS.md, build.rs's HEAD), kernel code paths (async branch), upstream Fxfs's merge_into branches (crates/fxfs/src/lsm_tree/merge.rs, an upstream deviation), fuchsia_merkle's branch check.
 <!-- SECTION:NOTES:END -->

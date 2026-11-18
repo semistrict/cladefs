@@ -201,7 +201,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 
 cladefs was fxdax (Fxfs plus DAX, the first prototype's name) until TASK-437. Records of what ran
 before, such as `docs/measurements` and closed backlog tasks, keep the old name, and
-`scripts/rename-to-cladefs.sh` renames a cell begun before.
+`scripts/rename-to-cladefs.sh` renames a branch begun before.
 
 ## Licenses
 
@@ -226,7 +226,7 @@ before, such as `docs/measurements` and closed backlog tasks, keep the old name,
   license; the test cases cladefs wrote are its own, BSD-3-Clause.
 - **Amazon Linux's kernel:** whose sources `scripts/build-guest-kernel.sh`
   builds the guest kernel from, GPL-2.0, with Firecracker's configuration of
-  them (`guest/linux/configs`, from Firecracker's main cell: Apache-2.0).
+  them (`guest/linux/configs`, from Firecracker's main branch: Apache-2.0).
 
 Each source file's header says which applies to it: `make
 check-license-headers` checks that each has the header its origin needs

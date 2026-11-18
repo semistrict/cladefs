@@ -64,7 +64,7 @@ sandbox's commands all the while. It fails on a guest kernel's report, a VM let 
 a second, a command past its budget, or a daemon past its own; LangSmith's pin's double writes,
 put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
 minutes, runs on GitHub's runners' nested KVM on every push to main
-(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a cell. The long mode is
+(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
 LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
 hand, in the qualification before each candidate (below), as no CI runner has its memory (TASK-330.5).
 Each run keeps what the host and the run spent every 30 s (`resources.log`):

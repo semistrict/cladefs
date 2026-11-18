@@ -202,7 +202,7 @@ mod guest {
         give(UPSTREAM);
         mount(Some("upstream"), UPSTREAM);
         give(UPSTREAM);
-        git(UPSTREAM, &["init", "--initial-cell=main"]);
+        git(UPSTREAM, &["init", "--initial-branch=main"]);
         for directory in 0..DIRECTORIES {
             give(&format!("{UPSTREAM}/d{directory}"));
         }
@@ -307,7 +307,7 @@ mod guest {
         (opened, written, printed)
     }
 
-    /// The checkout's changes of its own, before the fetch: a commit on a cell, a change
+    /// The checkout's changes of its own, before the fetch: a commit on a branch, a change
     /// staged, one not, and a file untracked.
     fn change_the_checkout() {
         git(CHECKOUT, &["checkout", "-b", "local"]);
