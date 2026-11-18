@@ -186,7 +186,7 @@ impl Storage {
             return Err(Error::msg("the image is smaller than a block"));
         }
         let writes = Arc::new(WriteGate::default());
-        let made = (size, host_store::BranchOf::New(host_store::new_cell(tenant)), whole);
+        let made = (size, host_store::BranchOf::New(tenant), whole);
         let device =
             ImageDevice::create(path, made, keeping, writes.clone()).map_err(Error::new)?;
         Ok(Self::image(path.to_owned(), writes, device))

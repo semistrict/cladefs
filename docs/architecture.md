@@ -132,7 +132,7 @@ imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 `<ID in base 32>.sock`, for the VM manager to bind-mount into the tenant's jails; a
 connection's tenant is the socket it came in on, and it names stores in the
 tenant's directory alone. The stores in its directory are its own cells, and its VM processes open no store of another tenant's cell, but fork
-the points of others' its VM manager gives it. Revoked, a tenant's socket
+the versions of others' its VM manager gives it. Revoked, a tenant's socket
 goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's, ID 0, which is granted
 nothing and has no limits of its own, only every tenant's: its connections name
@@ -142,12 +142,12 @@ another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
 is separated.
 A tenant's VM process names no branch: what it says is ignored, so that another
-tenant's ID gets it nothing. A VM snapshot restored on another host needs its point
+tenant's ID gets it nothing. A VM snapshot restored on another host needs its version
 there, which the VM manager makes in the tenant's directory first (`CreateStore`
-of the point's branch), and may drop once done (`DropStore`, which leaves the
-branch in the bucket); the proto says how (TASK-154). A point is immutable: any
+of the version's branch), and may drop once done (`DropStore`, which leaves the
+branch in the bucket); the proto says how (TASK-154). A version is immutable: any
 number of hosts fork one at once, and none writes it (TASK-158). A base forked
-on several hosts is made a point first (`ForkStore`'s `point`).
+on several hosts is made a version first (`ForkStore`'s `version`).
 The daemon must be able to kill each VM process (it is the daemon's user's, or
 the daemon has `CAP_KILL`), and refuses a connection whose process it could
 not kill: one that stops acknowledging the daemon's changes to its window,

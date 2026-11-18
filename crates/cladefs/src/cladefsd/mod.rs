@@ -38,7 +38,7 @@
 //!   connection shares, as many as run at once, up to 16 a processor (`pool`), a connection's 8
 //!   at most, the rest waiting their turn; a fault waiting for the pager holds neither a thread
 //!   nor one of the 8 (TASK-92.20), nor does an opening waiting for a store, or for a restore's
-//!   point, which the daemon keeps open for the restores of its snapshot (TASK-92.5). Every
+//!   version, which the daemon keeps open for the restores of its snapshot (TASK-92.5). Every
 //!   store's uploader and fetches run on one runtime more (`crate::bucket`), its disk work in
 //!   `block_in_place`.
 //! - **Files.** A store keeps its own segments' and extents' files open, the most

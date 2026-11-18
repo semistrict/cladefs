@@ -234,8 +234,8 @@ impl Plan {
         if self.latency_ms > 0 {
             faults.push(format!("latency {} ms", self.latency_ms));
         }
-        if let Some(points) = self.failpoints() {
-            faults.push(points);
+        if let Some(versions) = self.failpoints() {
+            faults.push(versions);
         }
         if let Some(at) = self.daemon_killed_at {
             faults.push(format!("daemon killed@{at}s"));

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Stores in directories of the host's, as cladefs's images and cladefsd's stores are: a directory
-//! holds one store, of one branch (TASK-165.7). Forks, points and deletions are the bucket's,
+//! holds one store, of one branch (TASK-165.7). Forks, versions and deletions are the bucket's,
 //! which the store's description names: the store makes nothing of them but the commit that names
 //! a fork ([`Store::commit_fork`]).
 

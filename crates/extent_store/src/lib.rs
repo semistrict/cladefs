@@ -9,7 +9,7 @@
 //! Extents are written once: from their first write until the next commit, which seals them. They
 //! are freed whole. A store holds one branch, a filesystem, which mints its extents' IDs under its
 //! branch; it may hold extents of other branches' too, whose data is in the bucket, as a fork's
-//! inherited ones are (doc-7). cladefs: forks, points and deletion are the bucket's (doc-14,
+//! inherited ones are (doc-7). cladefs: forks, versions and deletion are the bucket's (doc-14,
 //! TASK-165.7): the store makes nothing of them but the commit that names a fork
 //! ([`Store::commit_fork`]). A store's directory holds:
 //!

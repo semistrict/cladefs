@@ -76,10 +76,10 @@ impl Host {
 /// writer or deleted, or one nothing writes, is one the store takes no more commits for (`EROFS`);
 /// one a later placement holds, which a placement cut off takes back no more, or one another
 /// writer moved on from this host's write-ahead log, which the store opens no more until
-/// `cladefsctl take` drops it, `ESTALE`; a branch, or a point, gone, `ENOENT`; a fork's child's ID
+/// `cladefsctl take` drops it, `ESTALE`; a branch, or a version, gone, `ENOENT`; a fork's child's ID
 /// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell, or a vdisk of one,
 /// gone, `ENOENT`; a vdisk's name taken, `EEXIST`, or no vdisk's, `EINVAL` (TASK-364); a fork of
-/// another tenant's point not shared, `EACCES`, and sharing what is no point, `EINVAL`
+/// another tenant's version not shared, `EACCES`, and sharing what is no version, `EINVAL`
 /// (TASK-395.7). None for
 /// what the store failed to read or write, here or in object storage, which is the caller's `EIO`,
 /// logged.
@@ -87,13 +87,12 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
     use extent_bucket::Error;
     match failure {
-        Failure::Bucket(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
+        Failure::Bucket(Error::Fenced | Error::Deleted) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
-        Failure::Bucket(Error::NoBranch | Error::NoCell) | Failure::PointDeleted => {
+        Failure::Bucket(Error::NoBranch | Error::NoCell) | Failure::VersionDropped => {
             Some(Errno::ENOENT)
         }
         Failure::Bucket(Error::IdTaken(_) | Error::CellHasBranch(_)) => Some(Errno::EEXIST),
-        Failure::Bucket(Error::NotPoint(_)) => Some(Errno::EINVAL),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
@@ -281,7 +280,7 @@ pub struct Forgotten {
 /// KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays in
 /// memory: a halted store's own ring, and its open segment's key, until whoever holds it closes it
 /// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
-/// the pages of extents other stores hold too (a shared point's fork, a public base). On disk,
+/// the pages of extents other stores hold too (a shared version's fork, a public base). On disk,
 /// everything of the scope's is as its keys encrypted it: open segments, write-ahead logs, the part
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
@@ -847,7 +846,7 @@ mod tests {
     /// TASK-195: so does a fork's store read what it inherited, its parent deleted: it names the
     /// extents where its own writer's checkpoints move them, from the parent's segment, compacted
     /// into moves, the segment gone. TASK-395.4: the fork in a cell of its own, as every fork a host
-    /// makes, its parent's cell keeps the parent's state at the fork point whole for as long as the
+    /// makes, its parent's cell keeps the parent's state at the origin whole for as long as the
     /// fork lives, by its reference, what the fork frees of it since no matter: the moves, which
     /// hold that state's extents, are compacted no further, as they were when the collector went
     /// by the fork's state (`extents_compacted_twice_read_where_the_store_names_them` shows a
@@ -905,7 +904,7 @@ mod tests {
         child.free(ExtentId { branch: branch.id, sequence: 2 }).unwrap();
         child.free(ExtentId { branch: branch.id, sequence: 3 }).unwrap();
         checkpointed(&child, &bucket);
-        // The segment goes, no state naming it there; the moves stay as they are, the fork point
+        // The segment goes, no state naming it there; the moves stay as they are, the origin
         // holding 1 to 3 in them.
         collect(3);
         collect(4);
@@ -1191,8 +1190,8 @@ mod tests {
     /// list by commas) of a block each, in a memory bucket, forked `CLADEFS_BENCH_FORKS` times (100
     /// unless set; its first count alone), once from the store itself, live, whose writer writes a
     /// checkpoint for each fork, as `cladefsd::tests::serves_hundreds_of_forks_of_a_base` makes its
-    /// forks, and once from a point of it, whose forks all start from the point's one state
-    /// (`CLADEFS_BENCH_PARENTS`, `live,point` unless set). A line for each count of forks open,
+    /// forks, and once from a version of it, whose forks all start from the version's one state
+    /// (`CLADEFS_BENCH_PARENTS`, `live,version` unless set). A line for each count of forks open,
     /// then one of what holds it ([`fork_extent_memory`]).
     /// TASK-453: and it fails unless each fork past the first holds [`IDLE_FORK_BYTES`] at most,
     /// whatever its base holds, and the daemon's count of the stores' maps
@@ -1210,15 +1209,15 @@ mod tests {
         };
         let count = |item: &String| -> u64 { item.parse().expect("a count") };
         let forks = count(&listed("CLADEFS_BENCH_FORKS", "100")[0]) as usize;
-        let parents = listed("CLADEFS_BENCH_PARENTS", "live,point");
+        let parents = listed("CLADEFS_BENCH_PARENTS", "live,version");
         for extents in listed("CLADEFS_BENCH_EXTENTS", "64,1024,32768,300000").iter().map(count) {
             for parent in &parents {
-                let point = match parent.as_str() {
+                let version = match parent.as_str() {
                     "live" => false,
-                    "point" => true,
-                    other => panic!("CLADEFS_BENCH_PARENTS: {other:?}, neither live nor point"),
+                    "version" => true,
+                    other => panic!("CLADEFS_BENCH_PARENTS: {other:?}, neither live nor version"),
                 };
-                fork_extent_memory(extents, forks, point);
+                fork_extent_memory(extents, forks, version);
             }
         }
     }
@@ -1237,7 +1236,7 @@ mod tests {
         (extent_store::own_held(), crate::host_store::decoded_held())
     }
 
-    /// Opens `forks` forks of a base of `extents` extents, forked from a point of it if `point`,
+    /// Opens `forks` forks of a base of `extents` extents, forked from a version of it if `version`,
     /// from the store itself otherwise, and prints what the heap holds more than before them with
     /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
     /// (marginal), and that for each extent of the base; and how long each of those took to open.
@@ -1255,7 +1254,7 @@ mod tests {
     /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
     /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
     /// more.
-    fn fork_extent_memory(extents: u64, forks: usize, point: bool) {
+    fn fork_extent_memory(extents: u64, forks: usize, version: bool) {
         use crate::host_store::fork_child;
         let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
@@ -1271,7 +1270,7 @@ mod tests {
         }
         base.commit(None).unwrap();
         let base_branch = base.branch().id;
-        let parent = match point {
+        let parent = match version {
             false => base,
             true => {
                 let path = dir.path().join("copy");
@@ -1294,7 +1293,7 @@ mod tests {
             let opening = crate::extents::Opening { arena: None, profiled: false, keeping: idle() };
             ExtentStore::open_with(path, opening).unwrap()
         };
-        let name = if point { "point" } else { "live" };
+        let name = if version { "version" } else { "live" };
         // The heap once the page cache has let go of the files closed, and of the pages it holds:
         // its list of files names them by `Weak`, whose allocations stay until the list is next
         // pruned, as its flusher does every quarter of `pages::Options::expire` and
@@ -1348,7 +1347,7 @@ mod tests {
         );
         assert!(others <= IDLE_FORK_BYTES, "{others} bytes a fork past the first, at {extents}");
         // The base's extents, once: in one state, or in a checkpoint of the base's read before and
-        // the fork point's state made of it, holding what changed since.
+        // the origin's state made of it, holding what changed since.
         assert_eq!(shared.entries, extents as usize, "the decoded states' entries: {shared:?}");
         assert_eq!(own, own_before, "the entries the forks hold of their own, idle");
         let layer = first.saturating_sub(others);
@@ -1471,7 +1470,7 @@ mod tests {
     /// TASK-453: the forks of a base open at once hold what they inherited once: their stores' maps
     /// of it one, the decoded state they started from, which their bucket counts once, whether
     /// forked from the base live, each from a checkpoint of its own the base's writer wrote, or
-    /// from a point of it. Each reads the base's data; what one writes and frees, an inherited
+    /// from a version of it. Each reads the base's data; what one writes and frees, an inherited
     /// extent among them, is its own: the others, and a fork opened after, read the base's, and
     /// share its map still.
     #[test]
@@ -1479,7 +1478,7 @@ mod tests {
         use crate::host_store::fork_child;
         const EXTENTS: u64 = 64;
         const FORKS: usize = 4;
-        for point in [false, true] {
+        for version in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let base = kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).unwrap();
@@ -1489,7 +1488,7 @@ mod tests {
             base.commit(None).unwrap();
             let base_branch = base.branch().id;
             let inherited = |sequence| ExtentId { branch: base_branch, sequence };
-            let parent = match point {
+            let parent = match version {
                 false => base,
                 true => {
                     let path = dir.path().join("copy");
@@ -1505,7 +1504,7 @@ mod tests {
             let paths: Vec<_> = (0..=FORKS).map(fork).collect();
             let forks: Vec<_> = paths[..FORKS].iter().map(|path| reopened(path, idle())).collect();
             let forks: Vec<_> = forks.into_iter().map(Result::unwrap).collect();
-            let name = if point { "of a point" } else { "of the live store" };
+            let name = if version { "of a version" } else { "of the live store" };
             for other in &forks[1..] {
                 assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
             }
@@ -3060,27 +3059,27 @@ mod tests {
         source.copy_uploaded(&path).unwrap();
         drop(source);
 
-        let point = reopened(&path, idle()).unwrap();
-        assert_eq!(point.access().role, crate::StoreRole::Point);
-        let capacity = point.info().unwrap().capacity;
-        let own = ExtentId { branch: point.branch().id, sequence: 2 };
+        let version = reopened(&path, idle()).unwrap();
+        assert_eq!(version.access().role, crate::StoreRole::Version);
+        let capacity = version.info().unwrap().capacity;
+        let own = ExtentId { branch: version.branch().id, sequence: 2 };
         let refused = [
-            ("set_capacity", point.set_capacity(2 * capacity)),
-            ("write", point.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
-            ("free", point.free(extent)),
-            ("commit", point.commit(Some(b"changed"))),
-            ("commit_ordered", point.commit_ordered(None)),
-            ("take_over", point.take_over()),
+            ("set_capacity", version.set_capacity(2 * capacity)),
+            ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
+            ("free", version.free(extent)),
+            ("commit", version.commit(Some(b"changed"))),
+            ("commit_ordered", version.commit_ordered(None)),
+            ("take_over", version.take_over()),
         ];
         for (what, result) in refused {
             assert_eq!(result, Err(crate::Errno::EROFS), "{what}");
         }
-        assert_eq!(point.info().unwrap().capacity, capacity);
-        assert_eq!(point.root().unwrap(), b"root");
-        point
-            .fork_to(dir.path().join("fork"), crate::host_store::fork_child(point.branch()))
+        assert_eq!(version.info().unwrap().capacity, capacity);
+        assert_eq!(version.root().unwrap(), b"root");
+        version
+            .fork_to(dir.path().join("fork"), crate::host_store::fork_child(version.branch()))
             .unwrap();
-        point.make_public().unwrap();
+        version.make_public().unwrap();
     }
 
     /// TASK-395.7: a version forks into a cell of another tenant's only while shared: refused with
@@ -3093,10 +3092,7 @@ mod tests {
     fn versions_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
+        let of = |tenant| crate::host_store::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
@@ -3114,10 +3110,10 @@ mod tests {
         let later = dir.path().join("later");
         source.fork_to(&later, crate::host_store::fork_child(source.branch())).unwrap();
         delete(&later);
-        let point = reopened(&path, idle()).unwrap();
+        let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = point.fork_to(&to, of(tenant)).map_err(|err| err.errno());
+            let forked = copy.fork_to(&to, of(tenant)).map_err(|err| err.errno());
             (forked, to.exists())
         };
 
@@ -3130,7 +3126,7 @@ mod tests {
         let refused = source.share_version(version + 1, true);
         assert_eq!(refused.map_err(|err| err.errno()), Err(Some(crate::Errno::ENOENT)));
 
-        drop(point);
+        drop(copy);
         delete(&dir.path().join("ours"));
         delete(&path);
         source.drop_versions(&[version].into()).unwrap();
@@ -3149,9 +3145,9 @@ mod tests {
     }
 
     /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
-    /// host's KMS: the point's fork into the other tenant's cell keeps the DEK it inherits
-    /// rewrapped under its own cell's KEK. The point deleted, the collector run (compacting
-    /// nothing: compaction of encrypted objects is TASK-411.6's), and the point's tenant's KEK
+    /// host's KMS: the version's fork into the other tenant's cell keeps the DEK it inherits
+    /// rewrapped under its own cell's KEK. The version dropped, the collector run (compacting
+    /// nothing: compaction of encrypted objects is TASK-411.6's), and the version's tenant's KEK
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
     /// no more.
     #[test]
@@ -3164,10 +3160,7 @@ mod tests {
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
+        let of = |tenant| crate::host_store::named(tenant);
         let source = dir.path().join("source");
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
@@ -3179,10 +3172,10 @@ mod tests {
         let delete = |path: &std::path::Path| {
             crate::host_store::delete(path, Some(&bucket), crate::host_store::token).unwrap()
         };
-        let point = reopened(&path, idle()).unwrap();
+        let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
             let to = dir.path().join(name);
-            let forked = point.fork_to(&to, of(tenant)).map_err(|err| err.errno());
+            let forked = copy.fork_to(&to, of(tenant)).map_err(|err| err.errno());
             (forked, to.exists())
         };
         assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
@@ -3196,7 +3189,7 @@ mod tests {
         assert_eq!((record.deks.len(), inherited), (1, vec![source.branch()]));
         drop(theirs);
 
-        drop(point);
+        drop(copy);
         delete(&dir.path().join("ours"));
         delete(&path);
         source.drop_versions(&[version].into()).unwrap();
@@ -3229,10 +3222,7 @@ mod tests {
         crate::bucket::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
+        let of = |tenant| crate::host_store::named(tenant);
         for (name, tenant) in [("forgotten", 1), ("never", 2)] {
             let branch = of(tenant);
             let refused = kept_in(dir.path().join(name), (1 << 30, Some(branch)), &bucket, idle());
@@ -3259,10 +3249,7 @@ mod tests {
         crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
+        let of = |tenant| crate::host_store::named(tenant);
         let names = ["ours", "sibling", "theirs"];
         let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 1, 2]))
             .enumerate()
@@ -3356,10 +3343,7 @@ mod tests {
         }
         let bucket = crate::host_store::bucket(url).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
+        let of = |tenant| crate::host_store::named(tenant);
         let names = ["ours", "theirs"];
         let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
             .enumerate()
@@ -3442,11 +3426,7 @@ mod tests {
     fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let of = |tenant| crate::Branch {
-            cell: crate::host_store::new_cell(tenant),
-            id: rand::random::<u64>().max(1),
-        };
-        let cell = |tenant| crate::host_store::new_cell(tenant);
+        let of = |tenant| crate::host_store::named(tenant);
         let listed = || {
             let listed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""));
             listed.unwrap()
@@ -3467,8 +3447,8 @@ mod tests {
         for tenant in [2, crate::host_store::DEFAULT_TENANT] {
             let to = dir.path().join(format!("refused-{tenant}"));
             let refused = [
-                ("fork", errno(acme.fork(&to, cell(tenant)).map(drop))),
-                ("fork_quiescent", errno(acme.fork_quiescent(&to, cell(tenant)).map(drop))),
+                ("fork", errno(acme.fork(&to, tenant).map(drop))),
+                ("fork_quiescent", errno(acme.fork_quiescent(&to, tenant).map(drop))),
                 ("fork_to", errno(acme.fork_to(&to, of(tenant)))),
             ];
             for (how, refused) in refused {
@@ -3478,13 +3458,13 @@ mod tests {
         }
         assert_eq!(listed(), before, "a refused fork wrote to the bucket");
         let ours = dir.path().join("ours");
-        assert_eq!(acme.fork(&ours, cell(1)).unwrap().cell.tenant, 1);
+        assert_eq!(acme.fork(&ours, 1).unwrap().cell.tenant, 1);
         assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
 
         let base = store("base", crate::host_store::DEFAULT_TENANT);
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
-            assert_eq!(base.fork(&to, cell(tenant)).unwrap().cell.tenant, tenant);
+            assert_eq!(base.fork(&to, tenant).unwrap().cell.tenant, tenant);
             let fork = reopened(&to, idle()).unwrap();
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
@@ -3768,7 +3748,7 @@ mod tests {
 
     /// TASK-79.78: a fork to a child it made before, as a fork retried to another path, fails
     /// having made nothing, the bucket having the child's record: no commit of the parent's names
-    /// the child again, from another point, which its writers, finding the child forked twice,
+    /// the child again, from another version, which its writers, finding the child forked twice,
     /// would fail on for ever, the parent's branch taken by none again. The parent attaches again.
     #[test]
     fn forks_to_a_child_forked_before_make_nothing() {
@@ -3789,8 +3769,8 @@ mod tests {
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
         let parents = futures::executor::block_on(recover(&*bucket, parent.branch(), None));
         let forks = parents.unwrap().state.forks;
-        let forks: Vec<_> = forks.iter().map(|fork| (fork.child, fork.at, fork.point)).collect();
-        assert_eq!(forks, [(child, 1, false)]);
+        let forks: Vec<_> = forks.iter().map(|fork| (fork.child, fork.at)).collect();
+        assert_eq!(forks, [(child, 1)]);
     }
 
     /// TASK-165.7: a fork whose host crashed as its parent's head swapped to name its segment

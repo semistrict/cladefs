@@ -157,13 +157,13 @@ of these stands in with the items the code copied from Fuchsia uses:
 `crates/extent_store` is cladefs's too: backlog doc-4's extent store on local
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
-store's directory holds one branch; forks, points and deletion are the
+store's directory holds one branch; forks, versions and deletion are the
 bucket's (`crates/extent_bucket`, TASK-165.7). Nothing collects in a store:
 once a segment is acknowledged in the bucket, it and the extents' files it
 names leave the directory, for the host's cache of the bucket's objects, and
 the bucket's collector, the only thing that deletes, takes back what no extent
 is in (TASK-165.8). Its tests run
-it on a file system in memory that crashes at random points.
+it on a file system in memory that crashes at random versions.
 
 ## cladefs's other crates
 
@@ -171,7 +171,7 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 | Crate | What it is |
 |---|---|
-| `extent_bucket` | Branches of extent stores kept in object storage (backlog doc-7): writers, readers, forks, points, checkpoints and the collector, `cladefs-gc`. |
+| `extent_bucket` | Branches of extent stores kept in object storage (backlog doc-7): writers, readers, forks, versions, checkpoints and the collector, `cladefs-gc`. |
 | `extent_frame` | How objects holding extents' data are framed, locally and in object storage. |
 | `extent_keys` | The keys a tenant's data is encrypted under at rest, the KMS backends, and the primitives that use them (backlog doc-16). |
 | `virtio_extent` | The extent store device but its virtio transport (backlog doc-4), which every VMM hosting it shares; its `README.md` says what a VMM's adapter does. |
@@ -227,7 +227,7 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see `architecture.md`, DAX on Linux (TASK-25.4). |
 | `WRITE_COMMIT`, INFO's `sequence_floor`, and the store's capacity in the device's configuration, changed while the guest runs. | doc-4's requests (TASK-36, TASK-37). |
-| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that point and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's branch (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
+| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that version and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's branch (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
 
 ## `guest/`: Fxfs in the guest's kernel
 

@@ -38,7 +38,7 @@ use storage_device::ExtentId;
 
 /// What a branch holds as of a segment: where its extents are, `P`, and the rest of its state.
 /// One replay makes it, [`State::apply`], whoever reads the branch's history: its recovery, so its
-/// writers, its collector, its points and its deletion; a writer acknowledging its segments; and a
+/// writers, its collector, its versions and its deletion; a writer acknowledging its segments; and a
 /// local store rebuilding it from the footers of its closed segments (TASK-165.3). Each places the
 /// extents as it keeps them ([`Places`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +241,7 @@ impl<P: Places> State<P> {
 pub struct Recovered<S = State> {
     pub state: S,
     /// The head it was recovered from, as read: none if the branch has none, as a fork's child or
-    /// a point before any writer took it. Its end is where the next writer's segments go.
+    /// a version before any writer took it. Its end is where the next writer's segments go.
     pub head: Option<Head>,
     /// The keys it read, which the collector keeps.
     pub touched: BTreeSet<String>,
@@ -398,7 +398,7 @@ pub async fn recover_under(
 
 /// cladefs: the state of `branch` as [`recover_under`] finds it, starting from `head`, what a read of
 /// its head found, rather than a read of its own (TASK-449): as an opening store reads its head at
-/// once with its record, and a point's copy knows it has none. The head read before is as good as
+/// once with its record, and a version's copy knows it has none. The head read before is as good as
 /// one read now: it names what the branch held as of that read, the recovery is of that, and
 /// whatever takes the branch after goes on from what is there then (`Writer::take`). Something it
 /// names gone, it starts again from a read of the head, as [`recover_under`] does.
@@ -416,7 +416,7 @@ pub async fn recover_under_from(
 /// The state of `branch`, forked from `origin`, as `head` names it, a head its reader holds, as a
 /// writer that took it does, or a deletion that ended it: nothing it names goes while it holds it,
 /// but for a takeover since, which fails the writer at its next swap ([`Error::Fenced`]). What it
-/// inherited may go meanwhile, a fork point's state its parent's checkpoint covers: it starts
+/// inherited may go meanwhile, an origin's state its parent's checkpoint covers: it starts
 /// again. cladefs: read holding `ring` (TASK-411.3).
 pub async fn recover_from(
     bucket: &impl Bucket,
@@ -472,7 +472,7 @@ async fn recover_layers_from<B: Bucket>(
 }
 
 /// cladefs: the state of `branch` as of the end of its segment `at`, which its head names: a fork
-/// point's, as a fork made there inherits it; and what reading it read, which the collector keeps
+/// version's, as a fork made there inherits it; and what reading it read, which the collector keeps
 /// for the forks referring to it (doc-7, A pass over a cell; TASK-395.4). Its newest checkpoint up
 /// to there, or its origin's state, then its segments to there, starting again where it finds one
 /// gone that a newer checkpoint covers: [`Error::Lost`] once it keeps going, or what it needs is
@@ -498,7 +498,7 @@ pub(crate) async fn recover_at<B: Bucket>(
 
 /// cladefs: the states of `branch` as of each of its segments `ats`, which its head names, as
 /// [`recover_at`] has each, read in one walk where they share a checkpoint ([`states_at`],
-/// TASK-476): a pass's of a branch's versions and fork points. And what reading them read, which
+/// TASK-476): a pass's of a branch's versions and origins. And what reading them read, which
 /// the collector keeps for them all. [`Error::Lost`] if any is: which, [`recover_at`] says.
 pub(crate) async fn recover_ats<B: Bucket>(
     checkpoints: &Checkpoints<'_, B>,
@@ -556,7 +556,7 @@ pub(crate) struct Checkpoints<'a, B: Bucket> {
     keep: usize,
     read: Mutex<Read<'a>>,
     /// cladefs: a listing of the cell, taken before the recoveries began, and those it gave a
-    /// listing of checkpoints once: each branch's, and each fork point's a pass keeps (TASK-395.16,
+    /// listing of checkpoints once: each branch's, and each origin's a pass keeps (TASK-395.16,
     /// TASK-395.19, [`Checkpoints::listed`]).
     listed: Option<&'a BTreeMap<String, Meta>>,
     served: Mutex<BTreeSet<(Branch, Option<u64>)>>,
@@ -590,19 +590,19 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
 
     /// cladefs: these, the first listing of each branch's checkpoints served by `listed`, a listing
     /// of the cell the collector's pass took before it read anything (TASK-395.16), if it has one:
-    /// a LIST less a branch. A fork point's state ([`state_at`]) is as right from the newest
+    /// a LIST less a branch. An origin's state ([`state_at`]) is as right from the newest
     /// checkpoint up to it listed then as from one listed now: it reads its segments after it, and,
     /// finding one gone, lists the checkpoints again, starting over if a newer one has come; and a
     /// recovery starting over lists them anew, from the bucket. Each branch's once: what started
     /// over may be what the listing shows.
     ///
-    /// And the first of each fork point's state a pass keeps for the references and forks to other
+    /// And the first of each origin's state a pass keeps for the references and forks to other
     /// cells ([`recover_at`]), apart from its branch's and from one another's (TASK-395.19): a LIST
-    /// less a fork point, which a pass over a cell whose branch was forked at many points made for
+    /// less an origin, which a pass over a cell whose branch was forked at many versions made for
     /// each. A state as of a segment is the same from any checkpoint up to there, the newest listed
     /// then as the newest listed now, its segments to there read after it: one it finds gone, a
     /// newer checkpoint covering it, starts it over, listing anew. A checkpoint made since the
-    /// listing, at or before the fork point, which the recovery doesn't read, the pass doesn't
+    /// listing, at or before the origin, which the recovery doesn't read, the pass doesn't
     /// delete either: what it deletes it listed. An origin's state a branch's recovery starts from
     /// goes by the branch's listing, as before: served anew, it would read none of the checkpoints
     /// made during the pass, keeping their segments instead, safe but hiding what the test
@@ -1133,10 +1133,10 @@ fn newest_to(listed: &[Meta], at: u64) -> Option<&Meta> {
 /// cladefs: for a fork in `from`, a cell of its own, of `branch` in another, its checkpoint at `at`
 /// alone, of the epoch of the segment there, read by its key, listing nothing of the other cell's
 /// (TASK-395.4): whoever records a fork across cells writes it first ([`checkpoint_at`]), and the
-/// parent's cell keeps it, the fork point's state, while the fork's reference stands. Gone, what
+/// parent's cell keeps it, the origin's state, while the fork's reference stands. Gone, what
 /// the fork inherited is.
 ///
-/// cladefs: `kept`, a fork point's state a pass keeps ([`recover_at`]), its own first listing of the
+/// cladefs: `kept`, an origin's state a pass keeps ([`recover_at`]), its own first listing of the
 /// checkpoints served by the pass's listing of the cell ([`Checkpoints::listed`]); else, an
 /// origin's state a recovery of a branch starts from, the branch's listing.
 fn state_at<'a, B: Bucket>(
@@ -1196,7 +1196,7 @@ fn states_at<'a, B: Bucket>(
             epochs.push((at, layout::checkpoint(branch, at, epoch)));
         }
         if by_key {
-            // cladefs: a fork point's a pass keeps for the forks to other cells is read as they
+            // cladefs: an origin's a pass keeps for the forks to other cells is read as they
             // read it, by the key of its checkpoint alone, if there is one: a later writer's
             // checkpoint at the segment, at its own key, may name the extents along other moves,
             // of other passes, than the forks follow from it (TASK-407, TASK-407.1). None yet, no
@@ -1436,7 +1436,7 @@ fn named_epoch<B: Bucket>(
 /// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are encrypted, as
 /// its writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in
 /// the clear (TASK-411.4). Asked for only if it is to be written.
-pub(crate) async fn checkpoint_at(
+pub async fn checkpoint_at(
     bucket: &impl Bucket,
     branch: Branch,
     at: u64,
@@ -1524,7 +1524,7 @@ mod tests {
     use crate::batch::{Commit, SegmentBuilder};
     use crate::branch;
     use crate::layout::test_branch;
-    use crate::layout::{Child, Continued, Segment, child};
+    use crate::layout::{Continued, Segment, child};
     use crate::object_bucket::ObjectBucket;
     use crate::testing::SimBucket;
     use crate::writer::{Objects, Writer};
@@ -1766,7 +1766,7 @@ mod tests {
 
     /// TASK-165.3: a branch's capacity is its state, set by its commits, recovered from its
     /// segments and its checkpoints wherever it is taken; a fork's child has its parent's at the
-    /// fork, until it sets its own, and a point keeps it as it was, whatever the parent sets after.
+    /// fork, until it sets its own, and a version keeps it as it was, whatever the parent sets after.
     #[test]
     fn capacities_are_set_by_commits() {
         futures::executor::block_on(async {

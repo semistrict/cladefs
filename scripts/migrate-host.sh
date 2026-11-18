@@ -8,7 +8,7 @@
 # whose store's branch its extent daemon keeps in the bucket, and snapshots it, the snapshot, its
 # memory and the VM's root filesystem left in a bundle; then the run there ends, its directory gone;
 # on the second, which has nothing of the store, the same test restores the VM from the bundle, its
-# store forked from the snapshot's point, whose branch the daemon takes from the bucket, and the
+# store forked from the snapshot's version, whose branch the daemon takes from the bucket, and the
 # guest checks what it wrote before, and writes and reads more (test_fxfs_guest_snapshot.rs). Both
 # run the commit from the same paths, as the restored VM goes on reading its root filesystem where
 # it was. The test hosts' results go to RESULTS/a and RESULTS/b; the bundle, and the bucket if it is

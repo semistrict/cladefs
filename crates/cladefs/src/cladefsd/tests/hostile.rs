@@ -32,7 +32,7 @@
 //!   let go. Nor more of the host's disk than its tenant's limit (TASK-94): its writes past it
 //!   refused with `ENOSPC`, as alice's go on.
 //! - **Nothing of mallory's stays, nor goes**: its every connection ends; every store it named opens
-//!   again (TASK-150.5), every one it wrote commits; no point is taken of a branch it named
+//!   again (TASK-150.5), every one it wrote commits; no version is taken of a branch it named
 //!   (TASK-150.4); nothing comes into the others' directories; nothing panics, nor crashes; bob's
 //!   store reads, writes and commits.
 //!
@@ -80,7 +80,7 @@ const ALICE_MARK: [u8; 8] = *b"ALICE\xa1\x1c\xe5";
 const BOB_MARK: [u8; 8] = *b"BOB\xb0\xb0\xb0\xb0\x0b";
 /// The ID of the request that ends what a connection of mallory's says, which it waits for.
 const LAST: u64 = u64::MAX - 1;
-/// The extents of the point mallory's VM manager made for it, a MiB each.
+/// The extents of the version mallory's VM manager made for it, a MiB each.
 const GIVEN_EXTENTS: u64 = 12;
 /// TASK-343: the bytes of the filesystem's blocks each file under `dir` takes, by path, as
 /// `disk::count` counts them.
@@ -155,7 +155,7 @@ enum Word {
     Own,
     Alice,
     Bob,
-    /// The branch its VM manager made a point of for it, in its directory.
+    /// The branch its VM manager made a version of for it, in its directory.
     Given,
 }
 
@@ -164,9 +164,9 @@ enum Word {
 enum Place {
     /// A store of its own, of the case's: one of four, which its connections share.
     Own(u8),
-    /// The point its VM manager made for it.
-    Point,
-    /// A point there isn't, in its directory, of the case's, which only restores name.
+    /// The version its VM manager made for it.
+    Version,
+    /// A version there isn't, in its directory, of the case's, which only restores name.
     Nothing,
     /// Alice's store she closed, out of its directory by `..`.
     Escaped,
@@ -193,7 +193,7 @@ enum Payload {
     /// So many bytes of one.
     Filled(u8, usize),
     Path(Place),
-    /// A restore's: its store, a NUL, and the point it forks.
+    /// A restore's: its store, a NUL, and the version it forks.
     ForkFrom(Place, Place),
     /// A `FREE_MANY`'s extents, after the first.
     Extents(Vec<(Word, u64)>),
@@ -230,7 +230,7 @@ enum Abuse {
 }
 
 /// What mallory does next: says something, or abuses its memory; or floods the daemon with
-/// page-ins (TASK-149.34): the given point's extents, a MiB each, cold, a page of each mapped and
+/// page-ins (TASK-149.34): the given version's extents, a MiB each, cold, a page of each mapped and
 /// faulted at once, `times` over, as many faults in flight as it says; or fills its disk
 /// (TASK-94): writes so many extents of its store's, a MiB each, uncommitted, each once the last is
 /// answered.
@@ -283,8 +283,8 @@ enum Opens {
     Own,
     /// One somewhere else, out of its directory, or a name there it may not open.
     Elsewhere(Place),
-    /// A restore of its own, of the point its VM manager made for it, as a restored VM opens its
-    /// store, naming the point's branch.
+    /// A restore of its own, of the version its VM manager made for it, as a restored VM opens its
+    /// store, naming the version's branch.
     Restores,
     /// Two stores of its own at once, two OPENs in flight, of which a connection has one
     /// (TASK-150.5).
@@ -408,7 +408,7 @@ fn word() -> BoxedStrategy<Word> {
 fn place() -> BoxedStrategy<Place> {
     prop_oneof![
         4 => (0u8..4).prop_map(Place::Own),
-        1 => Just(Place::Point),
+        1 => Just(Place::Version),
         1 => Just(Place::Escaped),
         1 => Just(Place::Linked),
         1 => Just(Place::Alices),
@@ -599,7 +599,7 @@ fn message() -> BoxedStrategy<Said> {
         1 => (place(), 0u32..2).prop_map(|(to, flags)| {
             said(FORK, flags, [Is(0xf0f0), Is(0), Is(0), Is(0), Is(0)], Payload::Path(to))
         }),
-        // Restores, of points of any branch it names, from anywhere.
+        // Restores, of versions of any branch it names, from anywhere.
         1 => ((0u8..4).prop_map(Place::Own), prop_oneof![2 => Just(Place::Nothing), 3 => place()], prop_oneof![Just(Alice), Just(Bob), Just(Given)])
             .prop_map(|(to, from, branch)| {
                 said(OPEN, OPEN_FORK_FROM, [Is(STORE_BYTES), branch, Is(0), Is(0), Is(VERSION)], Payload::ForkFrom(to, from))
@@ -1164,7 +1164,7 @@ impl Names {
         let alices = self.alices.file_name().unwrap();
         match place {
             Place::Own(store) => self.vms.join(format!("{}-{store}", self.case)),
-            Place::Point => self.vms.join("point"),
+            Place::Version => self.vms.join("version"),
             Place::Nothing => self.vms.join(format!("nothing-{}", self.case)),
             Place::Escaped => self.vms.join("..").join(alices).join("archive"),
             Place::Linked => self.vms.join("link").join("archive"),
@@ -1596,9 +1596,9 @@ fn run_hostile(
         }
     }
     if hostile.opens == Opens::Restores {
-        let (to, point) =
-            (names.vms.join(format!("{}-r{index}", names.case)), names.place(Place::Point));
-        let named = [to.as_os_str().as_bytes(), &[0], point.as_os_str().as_bytes()];
+        let (to, version) =
+            (names.vms.join(format!("{}-r{index}", names.case)), names.place(Place::Version));
+        let named = [to.as_os_str().as_bytes(), &[0], version.as_os_str().as_bytes()];
         let restore = Header::new(OPEN, id())
             .with_args(&[STORE_BYTES, names.given, 0, 0, VERSION])
             .with_flags(OPEN_FORK_FROM);
@@ -1614,7 +1614,7 @@ fn run_hostile(
     }
     let ps = page_size();
     // A flood of page-ins (TASK-149.34): its extents cold, mapped, if its store is a restore of the
-    // point, and faulted on, `times` over, all at once, its replies left to come.
+    // version, and faulted on, `times` over, all at once, its replies left to come.
     let page_in = |id: &mut dyn FnMut() -> u64, times: u8| {
         super::super::super::cache::evict_least_used(Some(names.arena), |_| false);
         for sequence in 1..=GIVEN_EXTENTS {
@@ -1631,7 +1631,7 @@ fn run_hostile(
             }
         }
     };
-    // A restore of the point floods it with page-ins at once, as a restored VM's first faults do.
+    // A restore of the version floods it with page-ins at once, as a restored VM's first faults do.
     if hostile.opens == Opens::Restores {
         // Once its window is, which its MAPs, served beside it, may otherwise come before.
         if let Ok(window) = window {
@@ -1797,7 +1797,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let bobs = ExtentId { branch: bob.branch(), sequence: 1 };
     write(&bob, bobs, 0, &marked(BOB_MARK, 1, BLOCK)).unwrap();
     bob.commit(None).unwrap();
-    // A snapshot in the bucket, of a branch mallory's VM manager makes a point of in its directory.
+    // A snapshot in the bucket, of a branch mallory's VM manager makes a version of in its directory.
     // Its extents a MiB each, which mallory's floods of page-ins page in (TASK-149.34).
     let given =
         DaemonExtentStore::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
@@ -1808,10 +1808,10 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     }
     given.commit(Some(b"given")).unwrap();
     drop(given);
-    let point = vms.join("point");
+    let version = vms.join("version");
     let given =
         (super::branch_at(&dir.path().join("given")), (None, extent_bucket::cell::Kind::Fxfs));
-    control(super::super::stores::create(point, STORE_BYTES, given.0, given.1)).unwrap();
+    control(super::super::stores::create(version, STORE_BYTES, given.0, given.1)).unwrap();
 
     // Alice, on a thread of her own, her guest's, doing what each case asks of her.
     let (asking, asked) = std::sync::mpsc::channel::<Vec<AliceOp>>();
@@ -1991,7 +1991,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 prop_assert_ne!(errno, Some(Errno::EBUSY), "{} stayed held", path.display());
             }
             let nothing = vms.join(format!("nothing-{case}"));
-            prop_assert!(!nothing.exists(), "a point of a branch named was taken");
+            prop_assert!(!nothing.exists(), "a version of a branch named was taken");
             // Every store it opened to write opens again, and commits, whatever it said to it,
             // as far as it was served.
             let wrote: BTreeSet<&PathBuf> =
@@ -2217,7 +2217,7 @@ fn what_requests_hold_is_within_the_credit() {
 /// read into its tenant's memory, the part's frames held until its fetch from the bucket answers,
 /// are bounded by the connection, not by how many faults it has in flight, as a fault holds no
 /// worker while it waits for the pager (TASK-92.20). Here faults on a page of each of 256 extents
-/// of a MiB, the snapshot's point of another host's, all in the bucket alone, whose reads are held.
+/// of a MiB, the snapshot's version of another host's, all in the bucket alone, whose reads are held.
 #[test]
 fn page_ins_in_flight_are_bounded() {
     use crate::{ExtentStore, VolatileSlice};
@@ -2233,9 +2233,9 @@ fn page_ins_in_flight_are_bounded() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    // A point of the extents, made here, restored on another host, which has them in the bucket
+    // A version of the extents, made here, restored on another host, which has them in the bucket
     // alone.
-    let (path, point) = (dir.path().join("store"), dir.path().join("point"));
+    let (path, version) = (dir.path().join("store"), dir.path().join("version"));
     let branch = {
         let store = ExtentStore::create(&path, 1 << 30).unwrap();
         let branch = store.branch();
@@ -2253,21 +2253,21 @@ fn page_ins_in_flight_are_bounded() {
         branch
     };
     let store = DaemonExtentStore::connect(&socket, &path, 1 << 30).unwrap();
-    store.fork_quiescent(&point).unwrap();
+    store.version_copy(&version).unwrap();
     drop(store);
-    // Its VM manager makes the point's store on the other host first: a snapshot names its point's
+    // Its VM manager makes the version's store on the other host first: a snapshot names its version's
     // branch by its ID alone (TASK-364).
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
-    let point_branch = super::branch_at(&point);
+    let point_branch = super::branch_at(&version);
     let made = (None, extent_bucket::cell::Kind::Fxfs);
-    control(super::super::stores::create(elsewhere.join("point"), 1 << 30, point_branch, made))
+    control(super::super::stores::create(elsewhere.join("version"), 1 << 30, point_branch, made))
         .unwrap();
     let restored = elsewhere.join("store");
     let forked = DaemonExtentStore::connect_forked(
         &socket,
         &restored,
-        elsewhere.join("point"),
+        elsewhere.join("version"),
         branch.id + 1,
         1 << 30,
     );

@@ -53,21 +53,21 @@
 (* with "cut" (local recovery keeping commits whole), or losing them.      *)
 (* Placements give hosts fencing tokens. Branches are deleted by their     *)
 (* placements (the head swapped to the final epoch, then the record, the   *)
-(* children recorded), failed forks by their hosts (delete_fork), points   *)
-(* forked by restores (the child's record, the point read, the record      *)
+(* children recorded), failed forks by their hosts (delete_fork), versions   *)
+(* forked by restores (the child's record, the head naming the version read, the record      *)
 (* made); other branches take forks' children's IDs. Every branch is a     *)
 (* vdisk of a cell (CellOf), whose prefix holds its objects. The           *)
 (* collector runs passes per cell (TASK-395), each under its cell's        *)
 (* collector lease, at once with other cells' and with writers: the cell's *)
 (* listing and records, its live branches recovered from their heads, the  *)
-(* states at their fork points of its branches' forks to other cells kept, *)
+(* states at their origins of its branches' forks to other cells kept, *)
 (* its records and references listed again, then compaction and deletion   *)
 (* within the cell, and the references of its deleted children retired     *)
 (* once nothing in it lives, and the cell removed whole if its records are *)
-(* all given roots' and points' forks' (TASK-455). A fork to another cell  *)
+(* all given roots' and versions' forks' (TASK-455). A fork to another cell  *)
 (* writes a reference under its parent's cell, naming the parent, the fork *)
-(* point and the child, which keeps the parent's whole state at the fork   *)
-(* point there while it stands, whatever the child frees of it since: the  *)
+(* version and the child, which keeps the parent's whole state at the fork   *)
+(* version there while it stands, whatever the child frees of it since: the  *)
 (* collector is conservative.                                              *)
 (*                                                                         *)
 (* Each rule is a member of Rules; specs/bucket/mutations removes one      *)
@@ -111,16 +111,15 @@
 (*   it directly (TASK-79.82).                                             *)
 (* - forkClaimsLanded (NoForkClaimsLanded): that record lives only if the  *)
 (*   fork's parent's head names the fork's segment, and says it is a claim.*)
-(* - pointsTakeNoWriter (NoPointsTakeNoWriter): no writer takes a point.   *)
-(* - forksCheckPoints (NoForksCheckPoints): a fork of a point reads the    *)
-(*   point's record after it creates its child's.                          *)
+(* - forksCheck (NoForksCheckVersions): a fork of a version reads the    *)
+(*   version's head after it creates its child's.                          *)
 (* - forksPending (NoForksPending): that record says the fork is being     *)
 (*   made until then.                                                      *)
 (* - collectorAbandons (NoCollectorAbandons): the collector gives up on    *)
-(*   forks being made of points deleted.                                   *)
+(*   forks being made of versions dropped.                                   *)
 (* - recordsRelisted (NoRecordsRelisted): the collector lists the records  *)
 (*   again after reading states with checkpoints of their own. Since       *)
-(*   TASK-395.1, a point's fork's reference, listed after the states,      *)
+(*   TASK-395.1, a version's fork's reference, listed after the states,      *)
 (*   finds it too: its mutation removes references with it.                *)
 (* - recordsOwned (NoRecordsOwned): records name their makings' owners.    *)
 (* - waysFromSeals (NoWaysFromSeals): the collector keeps every moves on   *)
@@ -137,14 +136,14 @@
 (*   state's, not once: a child recovered by the state, that fork refused, *)
 (*   may have a record of a restore's origin, found on relisting           *)
 (*   (TASK-173). Since TASK-395.1, the restore's reference keeps its       *)
-(*   origin's state at the fork point too: its mutation removes references *)
+(*   origin's state at the origin too: its mutation removes references *)
 (*   with it.                                                              *)
 (* - recordsKept (NoRecordsKept): the collector removes a record only with *)
 (*   its cell, dead (no live branch, no reference, no mark of its own),    *)
 (*   and only if every record of the cell is one no recorder makes again:  *)
-(*   a given root's (Given) or a given point's fork's, made, by its        *)
-(*   restore alone. A writable fork's child's, a point's, a claim's, a     *)
-(*   deletion's of no record and a point's fork's never made stay, for     *)
+(*   a given root's (Given) or a given version's fork's, made, by its        *)
+(*   restore alone. A writable fork's child's, a version's, a claim's, a     *)
+(*   deletion's of no record and a version's fork's never made stay, for     *)
 (*   good: a parent's writer slow to record a fork, or its next writer,    *)
 (*   would make the child's again, a deleted branch live again, naming     *)
 (*   what the collector reclaimed (TASK-174, TASK-455). Without the rule,  *)
@@ -165,19 +164,19 @@
 (*   wal::recover): a store whose log ends inside a commit refuses to      *)
 (*   open.                                                                 *)
 (* - references (NoReferences): a fork of a branch to a child in another   *)
-(*   cell, a writable fork or a fork of a point, has a reference under the *)
+(*   cell, a writable fork or a fork of a version, has a reference under the *)
 (*   parent's cell, which that cell's passes keep the parent's state at    *)
-(*   the fork point for: its pass lists nothing of the child's cell, and   *)
+(*   the origin for: its pass lists nothing of the child's cell, and   *)
 (*   the parent deleted, would delete what the child inherits.             *)
 (* - referencesFirst (NoReferencesFirst): a writable fork's reference is   *)
 (*   written before its child's record, by whoever writes the record: its  *)
 (*   writer, the next, or the parent's deletion, before that marks the     *)
 (*   parent deleted. Without it, a pass reading the parent deleted finds   *)
 (*   no reference.                                                         *)
-(* - forksReferFirst (NoForksReferFirst): a fork of a point writes its     *)
-(*   reference before its record and before it reads the point's record:   *)
-(*   one that read the point live then wrote it before the point's         *)
-(*   deletion, which a pass reading the point deleted, or finding its      *)
+(* - forksReferFirst (NoForksReferFirst): a fork of a version writes its     *)
+(*   reference before its record and before it reads the head naming the version:   *)
+(*   one that read the version live then wrote it before the version's         *)
+(*   deletion, which a pass reading the version dropped, or finding its      *)
 (*   reference retired, read after.                                        *)
 (* - referencesHeld (NoReferencesHeld): a reference is retired, by the     *)
 (*   pass of its child's cell, only once that cell has no live branch and  *)
@@ -185,14 +184,14 @@
 (*   by its reference.                                                     *)
 (* - referencesRelisted (NoReferencesRelisted): a pass lists its cell's    *)
 (*   references after the states, as it lists the records again: listed    *)
-(*   with the candidates, it misses a fork's of a point a checkpoint       *)
+(*   with the candidates, it misses a fork's of a version a checkpoint       *)
 (*   dropped since.                                                        *)
-(* - forkPointsKept (NoForkPointsKept): a pass keeps, of the parent's      *)
-(*   state at a referenced fork point, what recovering it reads, not only  *)
+(* - originsKept (NoOriginsKept): a pass keeps, of the parent's      *)
+(*   state at a referenced origin, what recovering it reads, not only  *)
 (*   the objects holding its extents: a child with no checkpoint of its    *)
 (*   own recovers through it.                                              *)
-(* - forksRecordFirst (NoForksRecordFirst): a fork of a point creates its  *)
-(*   record, being made, before its reference (and reads the point's after *)
+(* - forksRecordFirst (NoForksRecordFirst): a fork of a version creates its  *)
+(*   record, being made, before its reference (and reads the version's after *)
 (*   both, forksReferFirst): a reference always has a record naming its    *)
 (*   origin, by which its child's cell's pass retires it, whatever comes   *)
 (*   of the fork. Written first, a host dying between leaves a reference   *)
@@ -221,14 +220,14 @@
 (*   (Given, doc-7 Object IDs) no fork names, nor a contest: each goes to  *)
 (*   one making, a root or a restore, and to no other ever, its cell       *)
 (*   removed or not. Without it, a fork's child, named by a guest, may be  *)
-(*   a given point's fork's ID, recorded by the fork's slow writer after   *)
+(*   a given version's fork's ID, recorded by the fork's slow writer after   *)
 (*   its cell went (RemovedStayGone).                                      *)
 (* - forksMadeUnmarked (NoForksMadeUnmarked): a reference is retired       *)
-(*   unmarked only if its child is a given point's fork made: its restore, *)
+(*   unmarked only if its child is a given version's fork made: its restore, *)
 (*   the only writer of it, wrote it before it made the fork, and no       *)
 (*   recorder writes it, no fork naming the ID; so a base's cell keeps no  *)
-(*   mark of a point's fork made and gone (TASK-455). Any other is marked  *)
-(*   first (retirementsMarked). Without the rule, every point's fork's     *)
+(*   mark of a version's fork made and gone (TASK-455). Any other is marked  *)
+(*   first (retirementsMarked). Without the rule, every version's fork's     *)
 (*   goes unmarked, one being made among them, whose restore, slow, writes *)
 (*   its reference after its retirement (ReferencesRetiredMarked).         *)
 (* - fencesKept (NoFencesKept): a head of a branch whose record a pass    *)
@@ -239,13 +238,13 @@
 (*   pass over a cell of no record deletes it, the parent's writer         *)
 (*   records the child live, and a writer takes it, which the deletion,    *)
 (*   going on, marks deleted under it (DeletedUntaken; TASK-455's review). *)
-(* - resumesRefer (NoResumesRefer): a fork of a point resumed by another   *)
+(* - resumesRefer (NoResumesRefer): a fork of a version resumed by another   *)
 (*   than the restore that began it, a store opening its child, writes its *)
 (*   reference before it makes it, as the restore does. Without it, a      *)
 (*   restore dying between its record and its reference leaves a fork made *)
-(*   of no reference, whose origin's state at the fork point no pass keeps *)
-(*   once the point is gone (ReferencesStand).                             *)
-(* - resumesMarked (NoResumesMarked): a fork of a point resumed says so in *)
+(*   of no reference, whose origin's state at the origin no pass keeps *)
+(*   once the version is dropped (ReferencesStand).                             *)
+(* - resumesMarked (NoResumesMarked): a fork of a version resumed says so in *)
 (*   its record, with a condition, before its reference, and a fork made   *)
 (*   so retires its reference marked: the restore that began it, slow, may *)
 (*   write it after, the fork made, deleted and its cell removed. A resume *)
@@ -253,7 +252,7 @@
 (*   for good (ReferencesRetiredMarked; TASK-455's review).                *)
 (* - versionsKept (NoVersionsKept): a pass keeps, for each version a live  *)
 (*   branch's head names, the branch's state at it whole, and what         *)
-(*   recovering it reads, as for a fork point (TASK-476, doc-18). Without  *)
+(*   recovering it reads, as for an origin (TASK-476, doc-18). Without  *)
 (*   it, a checkpoint since covers the version's segments, which the pass  *)
 (*   deletes (NothingNeededGone).                                          *)
 (* - versionsCarried (NoVersionsCarried): a takeover's swap names the      *)
@@ -270,8 +269,8 @@
 (* segment whose footer names it (its ID, the commit's tag here); the     *)
 (* acknowledgement naming the segment names it in the head; its writer    *)
 (* drops it by a swap; a deletion's final head names none. A restore of   *)
-(* one is a point's fork's steps, the branch's head read in place of the  *)
-(* point's record. A version's cut is of a quiescent store, and seals     *)
+(* one is a version's fork's steps, the branch's head read in place of the  *)
+(* version's head. A version's cut is of a quiescent store, and seals     *)
 (* nothing. Cells' cuts, versions of several vdisks cut at one moment,    *)
 (* are a host's work alone (doc-18): not modelled.                        *)
 (*                                                                         *)
@@ -308,7 +307,7 @@
 (* MaxPasses bounds them all. A pass reads its cell's records once each,   *)
 (* as listings find them, until one finds none new, then once again each  *)
 (* after the states (recordsRelisted), when it lists its references too.   *)
-(* Reads of other cells' objects (a parent's state, a point's record) are  *)
+(* Reads of other cells' objects (a parent's state, a version's head) are  *)
 (* a pass's GETs; it lists only its own cell, and deletes only there, but  *)
 (* for the references it retires, whose keys its deleted children's        *)
 (* records give. Listings are atomic, as before.                           *)
@@ -345,21 +344,21 @@ CONSTANTS
 
 AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "recordsAfterAck",
              "candidatesFirst", "forksFromStates", "tokens", "deleteTokens", "forkClaimsIds",
-             "forkClaimsLanded", "pointsTakeNoWriter", "forksCheckPoints", "forksPending",
+             "forkClaimsLanded", "forksCheck", "forksPending",
              "collectorAbandons", "recordsRelisted", "recordsOwned", "waysFromSeals",
              "movesTakenFirst", "passesFencedStop", "recoveriesByOrigins", "recordsKept",
              "deletionsDoneByOthers", "walFollows", "acksBetweenCommits",
              "wholeCommitsKept", "references", "referencesFirst", "forksReferFirst",
-             "referencesHeld", "referencesRelisted", "forkPointsKept", "forksRecordFirst",
+             "referencesHeld", "referencesRelisted", "originsKept", "forksRecordFirst",
              "referencesTakenBack", "retirementsMarked", "movesByPass", "idsGivenOnce",
              "forksMadeUnmarked", "fencesKept", "resumesRefer", "resumesMarked",
              "versionsKept", "versionsCarried", "versionsAcked"}
 
-AllCan == {"commit", "mint", "seg", "own", "free", "fork", "point", "restore", "unfork",
-           "contest", "delete", "deletePoints", "place", "checkpoint", "collect", "compact",
+AllCan == {"commit", "mint", "seg", "own", "free", "fork", "restore", "unfork",
+           "contest", "delete", "place", "checkpoint", "collect", "compact",
            "compactMoves", "crash", "disk", "staleTake", "overlap", "span", "spanOn", "cut",
            "forkOwn", "deleteRoot", "landInOrder", "forkNext", "deleteEarly", "resume",
-           "version", "dropVersion", "restoreVersion"}
+           "version", "dropVersion"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Can \subseteq AllCan
@@ -368,7 +367,7 @@ ASSUME CellOf \in [Branches -> Nat \ {0}]
 ASSUME Given \subseteq Branches
 
 \* The maps of branches to cells a model's CellOf may be: one cell, which is the whole-bucket
-\* collector before TASK-395; a cell each, as hosts make them (a store, a fork, a point and a
+\* collector before TASK-395; a cell each, as hosts make them (a store, a fork, a version and a
 \* restore each the one vdisk of a new cell); and the root sharing its cell with branch 2, the
 \* others a cell each, for forks within a cell and across cells in one model.
 OneCell == [b \in Branches |-> 1]
@@ -412,7 +411,7 @@ VARIABLES
     mflight,    \* the moves' PUTs in flight: [k, o], at the key k, the moves o
     inflight,   \* the segments' PUTs in flight: [h, b, g, s, o]
     refs,       \* the references of forks across cells, [p, at, c]: under p's cell, naming p, the
-                \* fork point at, and the child c
+                \* origin at, and the child c
     marked,     \* the marks of the references retired or taken back, [p, at, c], under p's cell,
                 \* kept (retirementsMarked): a reference marked is garbage, written again or not
     retired,    \* what happened: the references retired or taken back (kept with the bucket's
@@ -472,13 +471,13 @@ Nameable(c) == rec[c] = None /\ (R("idsGivenOnce") => c \notin Given)
 \* What a record writes for the owner `o` of its making: nothing, without recordsOwned.
 Owner(o) == IF R("recordsOwned") THEN o ELSE <<"anyone">>
 
-\* A record: its kind ("root", "fork", "point", "forking", "claim"), its origin <<parent, at>>,
-\* the point a fork being made is of, or the version, <<branch, id>> (<<>> if none), its owner,
-\* whether deleted, and, of a fork of a point or a version, whether another than the restore that
+\* A record: its kind ("root", "fork", "forking", "claim"), its origin <<parent, at>>,
+\* the version a fork being made is of, <<branch, id>> (<<>> if none), its owner,
+\* whether deleted, and, of a fork of a version, whether another than the restore that
 \* began it resumed it (resumesMarked); and, not in the bucket's bytes, the commit its branch
 \* starts from and the making it is of.
-Record(kind, origin, point, o, base) ==
-    [kind |-> kind, origin |-> origin, point |-> point, ver |-> <<>>, owner |-> Owner(o),
+Record(kind, origin, o, base) ==
+    [kind |-> kind, origin |-> origin, ver |-> <<>>, owner |-> Owner(o),
      deleted |-> FALSE, resumed |-> FALSE, base |-> base, maker |-> o]
 
 \* Whether r is the record of the child of the fork whose owner is o.
@@ -557,8 +556,7 @@ Apply(st, b, s, o) ==
                   !.next = Max2(st.next, o.next),
                   !.forks = IF o.fork = None THEN st.forks
                             ELSE st.forks \cup {[child |-> o.fork.child, at |-> s,
-                                                 owner |-> o.fork.owner,
-                                                 point |-> o.fork.point]},
+                                                 owner |-> o.fork.owner]},
                   !.through = s]
 
 RECURSIVE ApplyAll(_, _, _)
@@ -721,16 +719,15 @@ View(h, b) == ApplyAll(ses[h][b].st, b, wal[h][b])
 \* the fork stands, the record its making's; the fork's commit is what the child starts from.
 RecordFork(rs, parent, f) ==
     LET r == rs[f.child]
-        new == Record(IF f.point THEN "point" ELSE "fork", <<parent, f.at>>, 0, f.owner,
-                      f.owner[2])
+        new == Record("fork", <<parent, f.at>>, f.owner, f.owner[2])
     IN IF r = None THEN [rec |-> new, made |-> TRUE]
        ELSE [rec |-> r, made |-> ~r.deleted /\ ChildOf(r, f.owner)]
 
 \* The fork in F made first.
 FirstFork(F) == CHOOSE f \in F : \A g \in F : f.at <= g.at
 
-\* Whether b's record says it lives: a root, a fork's child, a point.
-LiveRec(b) == rec[b] # None /\ ~rec[b].deleted /\ rec[b].kind \in {"root", "fork", "point"}
+\* Whether b's record says it lives: a root, a fork's child.
+LiveRec(b) == rec[b] # None /\ ~rec[b].deleted /\ rec[b].kind \in {"root", "fork"}
 
 \* The reference of the fork of p at its segment at to c, under p's cell (TASK-395).
 RefOf(p, at, c) == [p |-> p, at |-> at, c |-> c]
@@ -823,7 +820,7 @@ Open(h, b) ==
     /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
     /\ rec[b] # None
     /\ ~rec[b].deleted \/ ("staleTake" \in Can /\ rec[b].maker \in makers[b])
-    /\ IF rec[b].kind = "point" THEN ~R("pointsTakeNoWriter") ELSE rec[b].kind \in {"root", "fork"}
+    /\ rec[b].kind \in {"root", "fork"}
     \* Not deleted's; nor, its token higher, a later placement's (tokens).
     /\ IF head[b] = None THEN TRUE
        ELSE head[b].epoch # Final /\ (R("tokens") => head[b].token <= tok[h][b])
@@ -1008,7 +1005,7 @@ Mint(h, b) ==
 
 \* What a commit does, besides committing: cut a version, the store quiescent, seal an open
 \* extent into its segment or on its own,
-\* free an extent its guest holds, fork the branch (a point, or not) to a child with no record,
+\* free an extent its guest holds, fork the branch to a child with no record,
 \* with "forkOwn" sealing an open extent on its own too, in the fork's segment (a store's segment
 \* holds the commits before the fork it ends, their extents stored on their own among them:
 \* TASK-380), or seal one or two open extents where they were written, in segments filled since the last
@@ -1019,28 +1016,27 @@ Mint(h, b) ==
 Ops(h, b) ==
     LET s == ses[h][b]
         v == View(h, b)
-        op(k, x, c, p) == [k |-> k, x |-> x, c |-> c, point |-> p, xs |-> <<>>, on |-> FALSE]
-        span(xs, on) == [k |-> "span", x |-> None, c |-> 0, point |-> FALSE, xs |-> xs, on |-> on]
+        op(k, x, c) == [k |-> k, x |-> x, c |-> c, xs |-> <<>>, on |-> FALSE]
+        span(xs, on) == [k |-> "span", x |-> None, c |-> 0, xs |-> xs, on |-> on]
         ws == wal[h][b]
         ons == {FALSE} \cup (IF /\ "spanOn" \in Can /\ ws # <<>>
                                  /\ ws[Len(ws)].s \notin s.up /\ ws[Len(ws)].o.cont = None
                               THEN {TRUE} ELSE {})
-        kinds == (IF "fork" \in Can THEN {FALSE} ELSE {})
-                 \cup (IF "point" \in Can THEN {TRUE} ELSE {})
         open == IF "span" \in Can THEN s.open ELSE {}
         \* The IDs a fork's child may take: any with no record; with "forkNext", the least, as
         \* an allocator gives them out, for models whose choice of ID would only multiply states.
         free == {c \in Branches \ {b, Root} : Nameable(c)}
-    IN (IF "commit" \in Can THEN {op("plain", None, 0, FALSE)} ELSE {})
+    IN (IF "commit" \in Can THEN {op("plain", None, 0)} ELSE {})
        \* A version's cut (TASK-476): of a quiescent store, sealing nothing.
-       \cup (IF "version" \in Can /\ s.open = {} THEN {op("version", None, 0, FALSE)} ELSE {})
-       \cup {op("seg", x, 0, FALSE) : x \in IF "seg" \in Can THEN s.open ELSE {}}
-       \cup {op("own", x, 0, FALSE) : x \in IF "own" \in Can THEN s.open ELSE {}}
-       \cup {op("free", x, 0, FALSE) : x \in IF "free" \in Can THEN DOMAIN v.ext ELSE {}}
-       \cup {op("fork", x, c, p) : x \in {None} \cup (IF "forkOwn" \in Can THEN s.open ELSE {}),
-                                   c \in IF "forkNext" \in Can /\ free # {} THEN {Min(free)}
-                                         ELSE free,
-                                   p \in kinds}
+       \cup (IF "version" \in Can /\ s.open = {} THEN {op("version", None, 0)} ELSE {})
+       \cup {op("seg", x, 0) : x \in IF "seg" \in Can THEN s.open ELSE {}}
+       \cup {op("own", x, 0) : x \in IF "own" \in Can THEN s.open ELSE {}}
+       \cup {op("free", x, 0) : x \in IF "free" \in Can THEN DOMAIN v.ext ELSE {}}
+       \cup {op("fork", x, c) : x \in IF "fork" \in Can
+                                     THEN {None} \cup (IF "forkOwn" \in Can THEN s.open ELSE {})
+                                     ELSE {},
+                                c \in IF "forkNext" \in Can /\ free # {} THEN {Min(free)}
+                                      ELSE free}
        \cup {span(<<x>>, on) : x \in open, on \in ons}
        \cup {span(<<x, y>>, on) : <<x, y>> \in {p \in open \X open : p[1] # p[2]}, on \in ons}
 
@@ -1055,7 +1051,7 @@ Commit(h, b) ==
        /\ \E op \in Ops(h, b) :
             LET on == IF op.on THEN 1 ELSE 0
                 n == Len(op.xs) - on
-                f == [child |-> op.c, owner |-> <<"fork", t>>, point |-> op.point]
+                f == [child |-> op.c, owner |-> <<"fork", t>>]
                 cont(i) == [commit |-> t, ext |-> op.xs[i]]
                 part(i) == [s |-> s.seq + i - 1,
                             o |-> [epoch |-> s.epoch, commit |-> 0, ext |-> None, own |-> None,
@@ -1091,8 +1087,7 @@ Commit(h, b) ==
                                                       dropped |-> FALSE]]
                \* Without recordsAfterAck, the child's record at once, and its reference.
                /\ rec' = IF op.k = "fork" /\ ~R("recordsAfterAck")
-                         THEN [rec EXCEPT ![op.c] = Record(IF op.point THEN "point" ELSE "fork",
-                                                           <<b, s.seq>>, 0, f.owner, t)]
+                         THEN [rec EXCEPT ![op.c] = Record("fork", <<b, s.seq>>, f.owner, t)]
                          ELSE rec
                /\ refs' = IF op.k = "fork" /\ ~R("recordsAfterAck")
                           THEN refs \cup RefsOf(b, {[child |-> op.c, at |-> s.seq]})
@@ -1291,14 +1286,14 @@ Place(h, b) ==
 \* Another branch takes the ID c, as a guest may give any (TASK-79.82).
 Contest(c) ==
     /\ "contest" \in Can /\ c # Root /\ Nameable(c)
-    /\ rec' = [rec EXCEPT ![c] = Record("root", <<>>, 0, <<"root", c>>, 0)]
+    /\ rec' = [rec EXCEPT ![c] = Record("root", <<>>, <<"root", c>>, 0)]
     /\ makers' = [makers EXCEPT ![c] = @ \cup {<<"root", c>>}]
     /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone, hostVars,
                    gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, doomed, taken, placed, errors>>
 
 -----------------------------------------------------------------------------
-(* Deletions, failed forks' deletions, and forks of points: a host's work, one at a time. *)
+(* Deletions, failed forks' deletions, and forks of versions: a host's work, one at a time. *)
 
 \* A deletion of b, asked on h: the head ended first. Asked by b's last placement, or one as
 \* late, it may delete b's making. With "deleteRoot" alone, of the root alone.
@@ -1306,7 +1301,6 @@ StartDelete(h, b) ==
     /\ proc[h] = None
     /\ rec[b] # None /\ ~rec[b].deleted
     /\ \/ "delete" \in Can
-       \/ "deletePoints" \in Can /\ rec[b].kind = "point"
        \/ "deleteRoot" \in Can /\ b = Root
     /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", c |-> 0, p |-> 0,
                                     at |-> 0, ep |-> 0, o |-> <<>>, live |-> FALSE,
@@ -1350,29 +1344,29 @@ StartUnfork(h, b) ==
        /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
 
-\* The reference of the fork of a point, the restore q, to its child: under the cell of the
-\* origin the point names, whatever the child's cell. One in that cell too: the cell's pass reads
-\* its records before the states and its references after, and the point's own reference, in
-\* another cell, may be retired between, its point deleted, while the child's record came after
+\* The reference of the fork of a version, the restore q, to its child: under the cell of the
+\* origin the version names, whatever the child's cell. One in that cell too: the cell's pass reads
+\* its records before the states and its references after, and the version's own reference, in
+\* another cell, may be retired between, its version dropped, while the child's record came after
 \* the records were read (BucketOverlap found it).
-PointForkRefs(q) == IF R("references") THEN {RefOf(q.og[1], q.og[2], q.c)} ELSE {}
+ForkRefs(q) == IF R("references") THEN {RefOf(q.og[1], q.og[2], q.c)} ELSE {}
 
-\* The record of the child of the restore q, being made (forksPending), of its point or version.
-Forking(q) == [Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p, q.o, q.bs)
+\* The record of the child of the restore q, being made (forksPending), of its version or version.
+Forking(q) == [Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.o, q.bs)
                    EXCEPT !.ver = q.v]
 
-\* Whether what the restore q forks is gone, as its check reads it: the point's record deleted,
+\* Whether what the restore q forks is gone, as its check reads it: the head naming the version deleted,
 \* or none; the version named by its branch's head no more (TASK-476).
-Unforkable(q) == IF q.v # <<>> THEN VersionGone(q.v) ELSE rec[q.p] = None \/ rec[q.p].deleted
+Unforkable(q) == VersionGone(q.v)
 
 \* The restore q, to C, begun on h: first C's record, saying it is being made (forksPending), then
 \* its reference (forksRecordFirst), before it reads what it forks (forksReferFirst); without
 \* forksRecordFirst, the reference first.
 Restoring(h, q) ==
-    LET refers == R("forksReferFirst") /\ PointForkRefs(q) # {}
+    LET refers == R("forksReferFirst") /\ ForkRefs(q) # {}
         first == refers /\ ~R("forksRecordFirst")
     IN /\ IF first THEN
-             /\ refs' = refs \cup PointForkRefs(q)
+             /\ refs' = refs \cup ForkRefs(q)
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = "fork"]]
              /\ UNCHANGED rec
           ELSE
@@ -1382,21 +1376,11 @@ Restoring(h, q) ==
        /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, truthVars, countVars>>
 
-\* A fork of point P to C (fork_point), of the origin P names, from a host's copy of P, stale
-\* perhaps. C is an ID an allocator gives (Given), or one a guest names; never one given before,
-\* its cell removed (gone).
-StartRestore(h, c, p) ==
-    /\ "restore" \in Can /\ proc[h] = None
-    /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p} \cup gone
-    /\ Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0,
-                     ep |-> 0, o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c],
-                     fs |-> {}, ws |-> {}, og |-> rec[p].origin, bs |-> rec[p].base, v |-> <<>>])
-
 \* A restore of a version of b to C (TASK-476): of b at the version's segment, its base the
 \* version's cut, a version b's head names as the restore begins (one named and dropped since is
-\* a restore begun before the drop). Its record names the version, not a point.
-StartRestoreVersion(h, c, b) ==
-    /\ "restoreVersion" \in Can /\ proc[h] = None
+\* a restore begun before the drop). Its record names the version.
+StartRestore(h, c, b) ==
+    /\ "restore" \in Can /\ proc[h] = None
     /\ rec[c] = None /\ c \notin {Root, b} \cup gone
     /\ \E v \in HeadVers(b) :
          Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> 0, at |-> 0,
@@ -1404,17 +1388,17 @@ StartRestoreVersion(h, c, b) ==
                        fs |-> {}, ws |-> {}, og |-> <<b, v.at>>, bs |-> v.id,
                        v |-> <<b, v.id>>])
 
-\* With "resume", the fork of a point to c, being made, resumed by another than the restore that
+\* With "resume", the fork of a version to c, being made, resumed by another than the restore that
 \* began it: a store opening c, its restore's host dead or slow (upload.rs's record). Its record
 \* said resumed first, with a condition, unless made or deleted (resumesMarked); then, as a
-\* restore goes on, its reference (resumesRefer), the point's record read, and the fork made.
-\* Without resumesRefer, no reference: the fork made as the point is read.
+\* restore goes on, its reference (resumesRefer), the head naming the version read, and the fork made.
+\* Without resumesRefer, no reference: the fork made as the version is read.
 ResumeRestore(h, c) ==
     LET r == rec[c]
-        q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> r.point, at |-> 0,
+        q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> 0, at |-> 0,
               ep |-> 0, o |-> r.maker, live |-> FALSE, tk |-> tok[h][c], fs |-> {}, ws |-> {},
               og |-> r.origin, bs |-> r.base, v |-> r.ver]
-        refers == R("resumesRefer") /\ R("forksReferFirst") /\ PointForkRefs(q) # {}
+        refers == R("resumesRefer") /\ R("forksReferFirst") /\ ForkRefs(q) # {}
     IN /\ "resume" \in Can /\ proc[h] = None
        /\ r # None /\ r.kind = "forking" /\ ~r.deleted
        /\ rec' = [rec EXCEPT ![c].resumed = TRUE]
@@ -1453,7 +1437,7 @@ ProcStep(h) ==
                  LET r == rec[b] IN
                  /\ IF r = None THEN
                        /\ rec' = [rec EXCEPT ![b] =
-                                    [Record("fork", <<>>, 0, <<"deletion", h>>, 0)
+                                    [Record("fork", <<>>, <<"deletion", h>>, 0)
                                          EXCEPT !.deleted = TRUE]]
                        /\ Done(h)
                     ELSE IF r.deleted THEN UNCHANGED rec /\ Done(h)
@@ -1464,7 +1448,7 @@ ProcStep(h) ==
                          /\ UNCHANGED rec
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "recover" /\ rec[b] = None ->
-                 \* Its record removed since, with its cell, as a given root's or point's fork's is
+                 \* Its record removed since, with its cell, as a given root's or version's fork's is
                  \* (recordsKept): done, as by another deletion.
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
@@ -1530,7 +1514,7 @@ ProcStep(h) ==
                  LET live == ~R("forkClaimsLanded") \/ Holds(q.p, q.at, q.ep)
                      kind == IF R("forkClaimsLanded") /\ live THEN "claim" ELSE "fork"
                  IN IF rec[b] = None THEN
-                       /\ rec' = [rec EXCEPT ![b] = [Record(kind, <<q.p, q.at>>, 0, q.o, q.o[2])
+                       /\ rec' = [rec EXCEPT ![b] = [Record(kind, <<q.p, q.at>>, q.o, q.o[2])
                                                         EXCEPT !.deleted = ~live]]
                        /\ proc' = [proc EXCEPT ![h].pc = "end", ![h].live = live,
                                                ![h].op = "unforkEnd"]
@@ -1551,7 +1535,7 @@ ProcStep(h) ==
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "refer" ->
-                 \* Its reference, its record made (forksRecordFirst), before the point's read.
+                 \* Its reference, its record made (forksRecordFirst), before the version's read.
                  /\ proc' = [proc EXCEPT ![h].pc = "check"]
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "fork" ->
@@ -1563,28 +1547,28 @@ ProcStep(h) ==
                     ELSE Done(h) /\ UNCHANGED rec
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "check" ->
-                 \* The point's record, or the version's branch's head, read after the child's
-                 \* record (forksCheckPoints): the point deleted, or the version named no more,
+                 \* The version's head, or the version's branch's head, read after the child's
+                 \* record (forksCheckPoints): the version dropped, or the version named no more,
                  \* the fork fails, and its host deletes the child.
-                 /\ IF R("forksCheckPoints") /\ Unforkable(q)
+                 /\ IF R("forksCheck") /\ Unforkable(q)
                     THEN Deleting(h)
                     ELSE proc' = [proc EXCEPT ![h].pc = "make"]
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "make" ->
                  \* No longer being made, with a condition: unless deleted, given up on. Without
-                 \* forksReferFirst, its reference made now, after the point's read.
+                 \* forksReferFirst, its reference made now, after the version's read.
                  /\ IF rec[b] # None /\ ~rec[b].deleted THEN
                        /\ rec' = [rec EXCEPT ![b].kind = IF @ = "forking" THEN "fork" ELSE @]
                        /\ makers' = [makers EXCEPT ![b] = @ \cup {q.o}]
                     ELSE UNCHANGED <<rec, makers>>
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, errors>>
-       /\ doomed' = IF q.op = "restore" /\ q.pc = "check" /\ R("forksCheckPoints")
+       /\ doomed' = IF q.op = "restore" /\ q.pc = "check" /\ R("forksCheck")
                        /\ Unforkable(q)
                     THEN doomed \cup {q.o} ELSE doomed
        \* A deletion's references of the forks it found, as their records read (record_fork):
        \* taken back, those records another's (referencesTakenBack), or written, in a step after,
-       \* those with none; and taken back as it records the children; a point's fork's. Taken back,
+       \* those with none; and taken back as it records the children; a version's fork's. Taken back,
        \* marked (retirementsMarked).
        /\ LET back == CASE q.op = "delete" /\ q.pc = "refs" -> RefsTakenBack(b, q.fs)
                          [] q.op = "delete" /\ q.pc = "record" ->
@@ -1596,10 +1580,10 @@ ProcStep(h) ==
                        \cup CASE q.op = "delete" /\ q.pc = "refs" /\ ~R("referencesFirst") ->
                                   RefsWritten(b, q.fs)
                                [] q.op = "delete" /\ q.pc = "write" -> RefsOf(b, q.ws)
-                               [] q.op = "restore" /\ q.pc = "refer" -> PointForkRefs(q)
+                               [] q.op = "restore" /\ q.pc = "refer" -> ForkRefs(q)
                                [] (/\ q.op = "restore" /\ q.pc = "make"
                                    /\ ~R("forksReferFirst") /\ rec[b] # None
-                                   /\ ~rec[b].deleted) -> PointForkRefs(q)
+                                   /\ ~rec[b].deleted) -> ForkRefs(q)
                                [] OTHER -> {}
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
@@ -1610,7 +1594,7 @@ HostNext ==
     \/ \E h \in Hosts : Crash(h) \/ ProcStep(h)
     \/ \E h \in Hosts, b \in Branches : Place(h, b) \/ StartDelete(h, b) \/ StartUnfork(h, b)
                                      \/ StartDeleteEarly(h, b) \/ ResumeRestore(h, b)
-    \/ \E h \in Hosts, c, p \in Branches : StartRestore(h, c, p) \/ StartRestoreVersion(h, c, p)
+    \/ \E h \in Hosts, c, p \in Branches : StartRestore(h, c, p)
     \/ \E c \in Branches : Contest(c)
     \/ \E m \in inflight : Land(m)
 
@@ -1619,7 +1603,7 @@ HostNext ==
 
 NoRecs == [b \in Branches |-> None]
 \* A pass: its cell, what it listed, the records it read, the branches it recovered, whether one
-\* was from a checkpoint, the references it listed, and the fork points' states it keeps, each
+\* was from a checkpoint, the references it listed, and the origins' states it keeps, each
 \* [ext, touched]. Idle, a pass keeps its cell: its epoch is that cell's collector lease's.
 GcIdle == [pc |-> "idle", cell |-> 0, objs |-> {}, recs |-> NoRecs, live |-> Nothing,
            fromCkpt |-> FALSE, refs |-> {}, pts |-> {}, stale |-> {}]
@@ -1638,22 +1622,22 @@ Listing(c) ==
     \cup {k \in {<<"moves", b, s, e, p>> : b \in B, s \in Seqs, e \in Epochs, p \in Ways} :
             moves[k[2]][k[3]][k[4]][k[5]] # None}
 
-\* The state of p at its fork point at, as a pass keeps it for a fork to another cell: the extents
-\* it names, and what recovering it reads (forkPointsKept); without the rule, the extents alone.
-ForkPoint(p, at) ==
+\* The state of p at its origin at, as a pass keeps it for a fork to another cell: the extents
+\* it names, and what recovering it reads (originsKept); without the rule, the extents alone.
+Origin(p, at) ==
     LET r == StateAt(p, at) IN
-    [ok |-> r.ok, ext |-> r.st.ext, touched |-> IF R("forkPointsKept") THEN r.touched ELSE {}]
+    [ok |-> r.ok, ext |-> r.st.ext, touched |-> IF R("originsKept") THEN r.touched ELSE {}]
 Kept(fp) == [ext |-> fp.ext, touched |-> fp.touched]
 
-\* The fork points of the references Rs: the states kept, and whether one is lost that a live
-\* child of theirs needs. A child not live (deleted, being made of a deleted point, a claim, or
+\* The origins of the references Rs: the states kept, and whether one is lost that a live
+\* child of theirs needs. A child not live (deleted, being made of a dropped version, a claim, or
 \* no record yet, or another's, its reference to be named or taken back: ReferencesNamed) loses
 \* nothing.
-RefPoints(Rs) ==
+RefOrigins(Rs) ==
     LET P == {<<r.p, r.at>> : r \in Rs}
-        lost(pt) == /\ ~ForkPoint(pt[1], pt[2]).ok
+        lost(pt) == /\ ~Origin(pt[1], pt[2]).ok
                     /\ \E r \in Rs : <<r.p, r.at>> = pt /\ LiveRec(r.c)
-    IN [pts |-> {Kept(ForkPoint(pt[1], pt[2])) : pt \in {pt \in P : ForkPoint(pt[1], pt[2]).ok}},
+    IN [pts |-> {Kept(Origin(pt[1], pt[2])) : pt \in {pt \in P : Origin(pt[1], pt[2]).ok}},
         lost |-> \E pt \in P : lost(pt)]
 
 \* Whether the writer of b may name the extents of its state, recovered from its head's checkpoint
@@ -1673,7 +1657,7 @@ RECURSIVE RecoverAll(_, _, _)
 \* (recoveriesByOrigins), and the children of their forks with no record read (forksFromStates):
 \* a child recovered by its parent's state is recovered again by a record found after naming
 \* another origin, a restore's that took the ID (TASK-173). Of the forks to other cells, the
-\* parent's state at each fork point is kept instead (forksFromStates too): the child's cell's
+\* parent's state at each origin is kept instead (forksFromStates too): the child's cell's
 \* pass recovers the child. A failure that loses nothing (deleted since, a claim no writer has) is
 \* skipped, the claim given up on; any other loses the pass. Each recovery keeps what its head
 \* may yet name: of its epoch, the segments from its end and the checkpoints after its own.
@@ -1686,10 +1670,10 @@ RecoverAll(queue, recs, acc) ==
              found == IF R("forksFromStates") THEN r.st.forks ELSE {}
              kids == {<<f.child, <<b, f.at>>>> :
                         f \in {f \in found : ~Cross(b, f.child) /\ recs[f.child] = None}}
-             \* Its fork points to other cells, and its versions the head it recovered from
+             \* Its origins to other cells, and its versions the head it recovered from
              \* names (versionsKept), each a state kept whole.
-             fps == {ForkPoint(b, f.at) : f \in {f \in found : Cross(b, f.child)}}
-                    \cup (IF R("versionsKept") THEN {ForkPoint(b, v.at) : v \in HeadVers(b)}
+             fps == {Origin(b, f.at) : f \in {f \in found : Cross(b, f.child)}}
+                    \cup (IF R("versionsKept") THEN {Origin(b, v.at) : v \in HeadVers(b)}
                           ELSE {})
          IN IF Recovered(acc, q) THEN RecoverAll(rest, recs, acc)
             ELSE IF r.ok /\ \E fp \in fps : ~fp.ok THEN [acc EXCEPT !.lost = TRUE]
@@ -1744,17 +1728,15 @@ GcRecords(i) ==
                         ![i].pc = IF Unread(i) = {} THEN "recover" ELSE "records"]
     /\ UNCHANGED <<bucketVars, hostVars, truthVars, countVars>>
 
-\* The forks being made of points deleted given up on (collectorAbandons), then the live
+\* The forks being made of versions dropped given up on (collectorAbandons), then the live
 \* branches recovered from their heads. Finding what one needs lost, a pass a later one took the
 \* lease from stops (passesFencedStop): what it read may be older than what that pass, deleting
-\* since, read. A point of another cell's is read now.
+\* since, read. A version of another cell's is read now.
 GcRecover(i) ==
     LET g == gc[i]
-        pointRec(p) == IF CellOf[p] = g.cell THEN g.recs[p] ELSE rec[p]
-        pointGone(p) == pointRec(p) = None \/ pointRec(p).deleted
-        \* What a fork being made forks gone: its point's record deleted, or its version named by
+        \* What a fork being made forks gone: its version's head deleted, or its version named by
         \* its branch's head no more, a GET of that head (TASK-476).
-        forkedGone(r) == IF r.ver # <<>> THEN VersionGone(r.ver) ELSE pointGone(r.point)
+        forkedGone(r) == VersionGone(r.ver)
         ab == IF R("collectorAbandons")
               THEN {b \in Branches : g.recs[b] # None /\ ~g.recs[b].deleted
                                      /\ g.recs[b].kind = "forking" /\ forkedGone(g.recs[b])}
@@ -1785,18 +1767,18 @@ GcRecover(i) ==
 
 \* After the states: the cell's records listed again (recordsRelisted), while what it recovered
 \* has a checkpoint of its own, new ones recovered too; and its references listed
-\* (referencesRelisted), each fork point's state kept. A reference written after this listing
-\* is of a fork whose parent's state at its fork point this pass kept, or never listed: a
+\* (referencesRelisted), each origin's state kept. A reference written after this listing
+\* is of a fork whose parent's state at its origin this pass kept, or never listed: a
 \* writable fork's child is recorded, with its reference first, before its parent's deletion
 \* marks it, which the pass read live, its state naming the fork, or deleted, after; and a
-\* point's fork writes its reference before it reads the point's record, so that one reading
-\* it live made its reference before the point's deletion, before the pass read the point
+\* version's fork writes its reference before it reads the head naming the version, so that one reading
+\* it live made its reference before the version's drop, before the pass read the version
 \* deleted, or its own reference retired by its cell's pass, after.
 GcRelist(i) ==
     LET g == gc[i]
         recs == IF g.fromCkpt /\ R("recordsRelisted") THEN CellRecs(g.cell) ELSE g.recs
         listed == IF R("referencesRelisted") THEN RefsUnder(g.cell) ELSE g.refs
-        kept == RefPoints(listed)
+        kept == RefOrigins(listed)
     IN /\ g.pc = "relist"
        /\ IF \E b \in Branches : recs[b] # None /\ g.recs[b] = None THEN
              /\ gc' = [gc EXCEPT ![i].recs = recs, ![i].pc = "records"]
@@ -1813,33 +1795,33 @@ GcRelist(i) ==
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
 \* Whether a dead cell may be removed with b's record r (recordsKept): deleted, a given root's, or a
-\* given point's fork's made, its restore's alone, which no recorder makes again, no fork naming its
-\* ID (idsGivenOnce). A writable fork's child's, a point's, a claim's, a deletion's of no record, or
-\* a point's fork's never made, its restore perhaps yet to write its reference, stays. Without the
+\* given version's fork's made, its restore's alone, which no recorder makes again, no fork naming its
+\* ID (idsGivenOnce). A writable fork's child's, a version's, a claim's, a deletion's of no record, or
+\* a version's fork's never made, its restore perhaps yet to write its reference, stays. Without the
 \* rule, any.
 Removable(b, r) ==
     /\ r.deleted
-    /\ ~R("recordsKept") \/ (b \in Given /\ (r.kind = "root" \/ (r.kind = "fork" /\ r.point # 0)))
+    /\ ~R("recordsKept") \/ (b \in Given /\ (r.kind = "root" \/ (r.kind = "fork" /\ r.ver # <<>>)))
 
-\* Whether the reference of the deleted point's fork c, whose record is r, is retired unmarked
+\* Whether the reference of the dropped version's fork c, whose record is r, is retired unmarked
 \* (forksMadeUnmarked): c given and made, by the restore that began it alone, the reference's one
 \* writer, having written it before it made it; not one another resumed (resumesMarked), which the
-\* restore that began it, slow, may write after. Without the rule, any point's fork's, made or not;
+\* restore that began it, slow, may write after. Without the rule, any version's fork's, made or not;
 \* without resumesMarked, a resumed one's too.
 Unmarked(c, r) ==
-    /\ r.point # 0
+    /\ r.ver # <<>>
     /\ R("forksMadeUnmarked") =>
           (c \in Given /\ r.kind = "fork" /\ (R("resumesMarked") => ~r.resumed))
 
 \* Compaction, then deletion, unless a later pass of the cell took its lease: of what was listed,
-\* what the live branches and the fork points kept do not need, nor their heads may yet name
-\* (collectorEpochs). A fork point's state is behind (waysFromSeals): the child names what it
+\* what the live branches and the origins kept do not need, nor their heads may yet name
+\* (collectorEpochs). An origin's state is behind (waysFromSeals): the child names what it
 \* inherited where it read it. Then the references of the cell's deleted children retired, under
 \* their parents' cells, once the cell has no live branch and no reference of its own
 \* (referencesHeld): no branch anywhere inherits from them, a fork of one in the cell by its record,
 \* in another cell by its reference. Without the rule, once the child is deleted. A dead cell, no
 \* mark under it, its records each Removable, goes whole (TASK-455): its records and heads too, the
-\* rest of it doomed already; a given point's fork's reference is retired unmarked (Unmarked).
+\* rest of it doomed already; a given version's fork's reference is retired unmarked (Unmarked).
 GcFinish(i) ==
     LET g == gc[i]
         objs == IF R("candidatesFirst") THEN g.objs ELSE Listing(g.cell)
@@ -1984,7 +1966,7 @@ Init ==
     /\ seg = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
     /\ own = {}
     /\ ckpt = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
-    /\ rec = [b \in Branches |-> IF b = Root THEN Record("root", <<>>, 0, <<"root", Root>>, 0)
+    /\ rec = [b \in Branches |-> IF b = Root THEN Record("root", <<>>, <<"root", Root>>, 0)
                                  ELSE None]
     /\ head = [b \in Branches |-> None]
     /\ moves = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |-> None]]]]
@@ -2023,7 +2005,7 @@ HostPerms == Permutations(Hosts)
 -----------------------------------------------------------------------------
 (* What must hold. *)
 
-\* The branches whose records say they live: roots, forks' children, points.
+\* The branches whose records say they live: roots, forks' children.
 LiveRecs == {b \in Branches : LiveRec(b)}
 
 \* Nothing a live branch needs is deleted: it recovers from its head, every extent it names reads
@@ -2084,12 +2066,6 @@ NoAckedLost ==
 \* No extent ID is minted twice.
 NoIdTwice == ~twice
 
-\* Nothing writes a point: no segment, checkpoint or writer's head of one.
-PointsUnwritten ==
-    \A b \in Branches : rec[b] # None /\ rec[b].kind = "point" =>
-        /\ \A s \in Seqs, e \in Epochs : seg[b][s][e] = None /\ ckpt[b][s][e] = None
-        /\ head[b] = None \/ head[b].epoch = Final
-
 \* No placement takes a branch back from a later one.
 HeadsCurrent == \A b \in Branches : head[b] # None /\ head[b].epoch # Final =>
                                         head[b].token >= taken[b]
@@ -2112,11 +2088,11 @@ NoErrors == errors = {}
 \* the one object.
 KeysWrittenOnce == \A p, q \in written : p[1] = q[1] => p[2] = q[2]
 
-\* Every reference is named by its child's record, its origin the reference's fork point, which
+\* Every reference is named by its child's record, its origin the reference's origin, which
 \* the child's cell's pass retires it by once the child is deleted (TASK-395.10); or is of a fork
 \* whose records' writers are yet to name or take it back: a live parent's state names the fork,
 \* whose next writer or deletion records it again; a writer or a deletion of it records it now; a
-\* fork of a point is being made; or it is marked, retired or taken back before, a stale writer's,
+\* fork of a version is being made; or it is marked, retired or taken back before, a stale writer's,
 \* which its parent's cell's next pass deletes (retirementsMarked). Any other no pass retires, for
 \* ever.
 RefPending(r) ==
@@ -2156,19 +2132,19 @@ DeletedUntaken ==
 \* A segment a head names keeps its epoch while the head stands (TASK-449): an acknowledgement names
 \* more, a takeover goes on from the head's end, a deletion keeps what it names, and nothing
 \* renames one; only a removal deletes a head, with its cell (recordsKept). So a host keeps the
-\* epoch of a fork point's segment once it read it (extent_bucket::known), and reads the
+\* epoch of an origin's segment once it read it (extent_bucket::known), and reads the
 \* checkpoint there by its key, with no read of its origin's head, whenever after.
 NamedEpochsStay ==
     [][\A b \in Branches :
           head'[b] # None => \A s \in 0..(End(b) - 1) : s < End(b)' /\ Chain(b)'[s + 1] = Chain(b)[s + 1]
       ]_vars
 
-\* Every live branch forked from another cell, and every point's fork, has its reference under
-\* its origin's cell, naming its fork point (TASK-395): written before its record, retired only
+\* Every live branch forked from another cell, and every version's fork, has its reference under
+\* its origin's cell, naming its origin (TASK-395): written before its record, retired only
 \* once it is deleted.
 ReferencesStand ==
     \A b \in LiveRecs :
         rec[b].origin # <<>>
-        /\ (Cross(rec[b].origin[1], b) \/ rec[b].point # 0 \/ rec[b].ver # <<>>) =>
+        /\ (Cross(rec[b].origin[1], b) \/ rec[b].ver # <<>>) =>
             RefOf(rec[b].origin[1], rec[b].origin[2], b) \in refs
 =============================================================================

@@ -163,7 +163,7 @@ export const invariants: Invariant[] = [
       "An extent's ID is minted once, by its branch's writer. A fork is a new branch that " +
       "inherits its parent's extents as of an uploaded commit, without copying them.",
     why: "IDs never collide across writers or forks, so nothing inherited ever needs renaming or copying.",
-    enforcedBy: ["extent_id", "es_fork", "fork_point", "store_commit_fork"],
+    enforcedBy: ["extent_id", "es_fork", "origin", "store_commit_fork"],
     evidence: [
       { kind: "doc", id: "doc-7" },
       { kind: "mutation", spec: "bucket", name: "NoEpochSequences" },

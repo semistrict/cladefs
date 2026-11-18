@@ -5,8 +5,9 @@
 //! Branches' records: creating a branch, forking one, taking one over, deleting one.
 //!
 //! A fork of a branch with a writer is the writer's commit ([`record_fork`] gives its child its
-//! record once the commit is acknowledged). A fork of a point is its child's record alone, which
-//! writes nothing of the point's, so that any number of hosts fork one at once ([`fork_point`]).
+//! record once the commit is acknowledged). A fork of a version is its child's record alone, which
+//! writes nothing of the version's branch's, so that any number of hosts fork one at once
+//! ([`fork_version`]).
 //!
 //! cladefs: every change of a record, a cell's object or a collector lease is a [`transition`],
 //! one compare-and-swap loop, of what it found to what it writes (TASK-160.14).
@@ -280,7 +281,7 @@ async fn retire_one(bucket: &impl Bucket, key: &str) {
 /// Whoever finds it so takes it back: every writer of the child's record, and of a clone's; one
 /// dying first leaves it to the next, the parent's next writer or its deletion recording the fork
 /// again. One whose record names the fork's origin, another making's of the same fork, a clone of
-/// a point there, stays: its retirement is that record's. Marked ([`retire`]): a writer that read
+/// a version there, stays: its retirement is that record's. Marked ([`retire`]): a writer that read
 /// no record before the take-back writes it after, and may die before its own (TASK-395.13).
 async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &Record) {
     if rules().references && rules().references_taken_back && found.origin() != Some(origin) {
@@ -288,14 +289,14 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
     }
 }
 
-/// Gives `child`, a fork's, its record, forked from `origin`, of its owner, a point if it is one,
+/// Gives `child`, a fork's, its record, forked from `origin`, of its owner, a version if it is one,
 /// unless it has one: the same, whoever gives it, as the fork's footer names it. A fork's child
 /// gets it once the fork is acknowledged, from the parent's writer, or the next one, or the
 /// parent's deletion. One of another owner is another branch's ([`Error::IdTaken`]).
 ///
 /// cladefs: a child of another cell than its parent's gets its reference first, under the parent's
 /// cell, of the fork's owner (TASK-395.3): the pass over the parent's cell lists nothing of the
-/// child's, and keeps the parent's state at the fork point by the reference, which a pass reading
+/// child's, and keeps the parent's state at the origin by the reference, which a pass reading
 /// the parent deleted lists after its deletion marked it, after this. A child of the parent's own
 /// cell needs none: that cell's pass reads its record. Its record is read first, so that a child
 /// deleted, or another's, whose ID the fork's guest named, gets none: nothing inherits through
@@ -311,10 +312,10 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
 /// took it back, the child's ID taken (TASK-395.13): every retirement is marked, and the pass over
 /// the parent's cell, whose listing the write changes, deletes it ([`retire`]).
 ///
-/// cladefs: before both, for a child of another cell, the parent's checkpoint at the fork point
+/// cladefs: before both, for a child of another cell, the parent's checkpoint at the origin
 /// ([`recovery::checkpoint_at`]): what the child's recovery reads of its parent by its key alone,
-/// so that a pass over the child's cell lists nothing of the parent's (TASK-395.4). A point's
-/// clones, of any cell, read the same, which its own recording wrote: a point in its origin's own
+/// so that a pass over the child's cell lists nothing of the parent's (TASK-395.4). A version's
+/// clones, of any cell, read the same, which its own recording wrote: a version in its origin's own
 /// cell, which no host makes, has none, and its clones into other cells recover not. The parent's
 /// state there is gone only once the child was deleted, since this read found it with no record
 /// (TASK-395.11): nothing else lets a pass go of it, the parent's state naming the fork until a
@@ -326,7 +327,7 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
 /// after: the writer once it recorded the fork, the deletion once it marked the parent deleted, as
 /// specs/bucket's NoReferencesFirst has it.
 ///
-/// cladefs: the parent's checkpoint at the fork point authenticated under the DEK `keys` give, the
+/// cladefs: the parent's checkpoint at the origin authenticated under the DEK `keys` give, the
 /// parent's: its writer's ring, or its deletion's ([`crate::keys::Parents`], TASK-411.4).
 pub async fn record_fork(
     bucket: &impl Bucket,
@@ -346,8 +347,8 @@ pub async fn record_fork(
             // Read again, as the checkpoint may take long: a record made meanwhile, the child
             // deleted or its ID taken, is taken back from now rather than after the reference
             // (TASK-395.10; a writer dying between the reference and its create still leaves
-            // one written after another's take-back: TASK-395.13). The state at the fork point
-            // gone, the child was deleted since the read, its fork dropped and its fork point let
+            // one written after another's take-back: TASK-395.13). The state at the origin
+            // gone, the child was deleted since the read, its fork dropped and its origin let
             // go of (TASK-395.11): its record says so.
             found = bucket::get(bucket, &layout::record(child.branch)).await;
             match checkpointed {
@@ -550,11 +551,11 @@ async fn finish_fork(
     start: Start,
 ) -> Result<Option<Record>, Error> {
     let branch = origin.parent;
-    if rules().forks_check_points || branch.cell.tenant != child.cell.tenant {
+    if rules().forks_check_versions || branch.cell.tenant != child.cell.tenant {
         let head = head::get(bucket, branch).await?;
         let named = head.as_ref().and_then(|head| head.version(version));
         let named = named.filter(|named| named.at == origin.at);
-        if rules().forks_check_points && named.is_none() {
+        if rules().forks_check_versions && named.is_none() {
             return Err(Error::Deleted);
         }
         if branch.cell.tenant != child.cell.tenant && !named.is_some_and(|named| named.shared) {
@@ -607,7 +608,7 @@ pub(crate) async fn abandon_claim(bucket: &impl Bucket, branch: Branch) -> Resul
     mark_deleted(bucket, branch).await
 }
 
-/// Gives up on `child`, a fork being made of a point that was deleted ([`Kind::Forking`]), so
+/// Gives up on `child`, a fork being made of a version that was deleted ([`Kind::Forking`]), so
 /// that nothing keeps what it names, unless the fork was made first: returns its record as it then
 /// stands. Its fork, which fails then, wrote nothing: a branch that holds nothing and that nothing
 /// relies on, what it names perhaps gone, which recovering it would stop the collector on.
@@ -631,7 +632,7 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: Branch) -> Result<Recor
 /// (TASK-45.1).
 ///
 /// cladefs: by a host whose KMS is `kms`: the branch's forks to other cells it records get its
-/// checkpoint at their fork points authenticated under its DEK, its cell's KEK unwrapped by `kms`
+/// checkpoint at their origins authenticated under its DEK, its cell's KEK unwrapped by `kms`
 /// ([`crate::keys::writing`], TASK-411.4), asked only then.
 pub async fn delete(
     bucket: &impl Bucket,
@@ -654,7 +655,7 @@ pub async fn delete(
     // live branch needs, the collector may have deleted since (TASK-79.78).
     let Some(record) = found.filter(|record| !record.deleted) else { return Ok(()) };
     // Its children get their records, so that the collector finds them without its state. A fork
-    // of a point still being made has none, and may name what is gone; so may a claim, with
+    // of a version still being made has none, and may name what is gone; so may a claim, with
     // neither a writer nor a child, if it does. Recovered from the head it ended, which nothing
     // swaps after: every deletion of it finds the same forks (TASK-183).
     if record.forking().is_none() {
@@ -672,7 +673,7 @@ pub async fn delete(
             Err(Error::Lost(_)) if lost_is_ok(bucket, branch, &record).await? => Vec::new(),
             Err(error) => return Err(error),
         };
-        // cladefs: under its keys, for its checkpoints at the fork points of its forks to other
+        // cladefs: under its keys, for its checkpoints at the origins of its forks to other
         // cells, as they are written (TASK-411.4).
         let keys = crate::keys::Parents::Kms(kms, Some(&record));
         for fork in &forks {
@@ -756,7 +757,7 @@ async fn mark_deleted(bucket: &impl Bucket, branch: Branch) -> Result<(), Error>
 /// has not. `forked` is the kind of record the fork gives its child, as its host knows: a branch of
 /// its own ([`Kind::Own`]), its fork's segment never having gone to object storage; a fork at a
 /// segment, which may have landed, and whose branch's writers then give the child a record; a
-/// point, so, whatever record it gets saying so, whoever gives it; or a fork of a point, which
+/// version, so, whatever record it gets saying so, whoever gives it; or a fork of a version, which
 /// nothing but the fork itself gives its child a record. A branch of another's, whose ID the
 /// fork's child was given, as a guest may give any, another fork's to the same ID among them, is
 /// left as it is (TASK-79.82); so is a branch deleted already, whoever's. Returns whether the
@@ -774,13 +775,13 @@ async fn mark_deleted(bucket: &impl Bucket, branch: Branch) -> Result<(), Error>
 /// holds a segment of that number is no proof it is the fork's, and nothing keeps what it names
 /// until the record lands, a dead host's perhaps, long after. Otherwise it is deleted from the
 /// first, for good: no other placement took a branch nothing of which landed; and a segment
-/// landing after finds it so. So is a fork of a point with no record, which holds nothing, a
-/// create of its record, a dead host's landing late, finding it so too; and a point with none: no
+/// landing after finds it so. So is a fork of a version with no record, which holds nothing, a
+/// create of its record, a dead host's landing late, finding it so too; and a version with none: no
 /// placement refuses a deletion of what has no head, and a stale copy finds no live record naming
 /// a segment that may not be its fork's.
 ///
 /// cladefs: by a host whose KMS is `kms`: a claim of another cell than its parent's gets the
-/// parent's checkpoint at the fork point authenticated under the parent's DEK, as
+/// parent's checkpoint at the origin authenticated under the parent's DEK, as
 /// [`record_fork`] writes it (TASK-411.4).
 pub async fn delete_fork(
     bucket: &impl Bucket,
@@ -810,7 +811,7 @@ pub async fn delete_fork(
         }
         Kind::Fork(origin) | Kind::Claim(origin) => {
             // cladefs: a claim of another cell than its parent's lives only with the parent's
-            // checkpoint at the fork point, which is what its recovery reads of the parent there
+            // checkpoint at the origin, which is what its recovery reads of the parent there
             // (TASK-395.4), as [`record_fork`] writes it: what is going since the parent's branch
             // was found holding the segment, as a pass takes it, reads as not held, as there.
             let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
@@ -863,7 +864,7 @@ mod tests {
 
     /// TASK-79.82: a fork's child is deleted only if its branch is the fork's: one with no record,
     /// or whose record names the fork's owner. One whose record names another owner, a branch of no
-    /// parent's, or another fork's, at another point of the fork's parent or whose segment never
+    /// parent's, or another fork's, at another version of the fork's parent or whose segment never
     /// went, is left as it is. One deleted is gone already.
     #[test]
     fn forks_delete_only_their_own_branches() {
@@ -1226,7 +1227,13 @@ mod tests {
             (
                 "fork_version",
                 &|bucket, owner| {
-                    said(&block_on(fork_version(bucket, test_branch(child), VERSION, origin, owner)))
+                    said(&block_on(fork_version(
+                        bucket,
+                        test_branch(child),
+                        VERSION,
+                        origin,
+                        owner,
+                    )))
                 },
                 taken,
             ),

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: a branch's record: what made it, which is what it is ([`Kind`]), whose it is, whether
-//! it was deleted (doc-7, Layout; TASK-160.14), and, of a point, whether other tenants may fork it
+//! it was deleted (doc-7, Layout; TASK-160.14), and, of a version, whether other tenants may fork it
 //! ([`Record::shared`], TASK-395.7); cladefs: and its DEKs, wrapped by its cell's KEK, if its cell
 //! is encrypted ([`Record::deks`], doc-16, TASK-411.3).
 //!
@@ -68,9 +68,7 @@ impl Kind {
     pub fn origin(self) -> Option<Origin> {
         match self {
             Self::Root | Self::Own => None,
-            Self::Fork(origin)
-            | Self::Clone(origin)
-            | Self::Claim(origin) => Some(origin),
+            Self::Fork(origin) | Self::Clone(origin) | Self::Claim(origin) => Some(origin),
             Self::Forking { origin, .. } => Some(origin),
         }
     }
@@ -109,7 +107,7 @@ pub struct Record {
     /// the record: the parent's writers recording a fork write none, so that they write the same.
     pub deks: Vec<Dek>,
     /// cladefs: the DEKs of every ancestor of another cell whose objects the branch reads, each
-    /// generation, rewrapped under its own cell's KEK (doc-16, Forks and shared points;
+    /// generation, rewrapped under its own cell's KEK (doc-16, Forks and shared versions;
     /// TASK-411.4): given with its first DEK, in one conditional update, so that a record with
     /// DEKs holds all it inherits from other cells, its readers needing no other cell's KEK, nor
     /// another tenant's KMS. By its fork's host, as it makes the fork
@@ -307,16 +305,16 @@ mod tests {
             Err(Error::Format { branch: test_branch(3), format: FORMAT + 1 })
         );
         // Format 1's and 2's records, whose footers and checkpoints this format reads wrong; 7's,
-        // whose points say nothing of being shared (TASK-395.7); 8's, whose collector's lease
+        // whose versions say nothing of being shared (TASK-395.7); 8's, whose collector's lease
         // and moves are at the bucket's root, its cells' collection under their own prefixes
         // reading neither (TASK-395.2); and 9's, whose records and cells keep no keys, their
         // objects framed in FORMAT 1 of extent_frame (TASK-411.3); and
         // 10's, whose keys name no epochs, and whose branches have leases, not heads (TASK-407);
         // and 11's, whose clones made say they are forks a recorder may record (TASK-455); and
-        // 12's, whose forks of points say nothing of being resumed (TASK-455's review); and 13's,
+        // 12's, whose forks of versions say nothing of being resumed (TASK-455's review); and 13's,
         // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
         // 14's, whose keys' numbers are in hexadecimal (TASK-504); 15's, whose cells name maps
-        // of vdisks (TASK-508.1); and 16's, whose records name points (TASK-508.2).
+        // of vdisks (TASK-508.1); and 16's, whose records name versions (TASK-508.2).
         assert_eq!(FORMAT, 17);
         for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             let mut older = bytes.clone();

@@ -261,7 +261,7 @@ pub(crate) fn evict_arena(arena: ArenaId) {
 /// store holds goes from the cache, its pages evicted, unmapped from every window that maps them
 /// first, so that what the stores' keys decrypted is no longer in memory, nor read in again: a
 /// window that maps it, faulting, finds no store to read it through. An extent another store open
-/// holds stays, its pages theirs to read (another tenant's fork of a shared point, a public
+/// holds stays, its pages theirs to read (another tenant's fork of a shared version, a public
 /// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
 /// extents.
 pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {

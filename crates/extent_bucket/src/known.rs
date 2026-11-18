@@ -3,14 +3,14 @@
 // found in the LICENSE file.
 
 //! cladefs: what a host knows of its bucket without asking it again (TASK-449): a restore, a fork
-//! of a point and its child's first open, asked the bucket 14 requests, 13 one after another, for
+//! of a version and its child's first open, asked the bucket 14 requests, 13 one after another, for
 //! what the host had just read or written itself. Two kinds of knowledge, each safe for its own
 //! reason (doc-7, What a host knows):
 //!
 //! - **Facts that never change once seen**: the epoch of the writer of a branch's segment, once a
 //!   head names it ([`Known::epoch`]). A head's runs of epochs only grow: a takeover goes on from
 //!   its end, a deletion keeps what it names, and nothing renames a segment named (specs/bucket's
-//!   NamedEpochsStay). So a fork point's checkpoint, at the key of that epoch, is found by its key
+//!   NamedEpochsStay). So an origin's checkpoint, at the key of that epoch, is found by its key
 //!   with no read of the origin's head, whichever host or however long after.
 //! - **What a host learned of a branch it is about to open** ([`Learned`]): its record as its own
 //!   fork or take left it, its cell's object as its fork held it, and whether it has no head. The
@@ -51,7 +51,7 @@ pub struct Known {
 }
 
 impl Known {
-    /// How many segments' epochs it keeps: a fork point each, of the points (bases, VM snapshots') the
+    /// How many segments' epochs it keeps: an origin each, of the versions (bases, VM snapshots') the
     /// host forks.
     const EPOCHS: usize = 1 << 16;
 

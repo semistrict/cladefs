@@ -169,7 +169,7 @@ impl Hosts {
                 ExtentStore::create_copy(&path, (&url, kind), description, version).unwrap();
             }
             let copy = reopened(&path, options()).unwrap();
-            assert_eq!(copy.access().role, StoreRole::Point, "host {host} holds no copy");
+            assert_eq!(copy.access().role, StoreRole::Version, "host {host} holds no copy");
             copies.push(Some(Arc::new(copy)));
         }
         let segments = segments_of(&bucket, source.branch());
@@ -433,7 +433,7 @@ impl Hosts {
         let source = self.source.take().unwrap();
         let branch = source.branch();
         drop(source);
-        for (host, disk) in self.disks.iter().enumerate() {
+        for disk in &self.disks {
             let copy = copy_at(disk);
             if copy.exists() {
                 ExtentStore::delete(&copy, None).unwrap();
@@ -588,7 +588,7 @@ fn versions_dropped_at_each_step_of_a_restore() {
 #[test]
 fn versions_dropped_as_hosts_die_in_the_middle_of_a_restore() {
     host();
-    let steps = ["point::record", "point::recorded", "point::referred", "point::checked"];
+    let steps = ["version::record", "version::recorded", "version::referred", "version::checked"];
     all(steps.into_iter().flat_map(|step| on_each_host(Fault::DeletedAndDies(step))));
 }
 

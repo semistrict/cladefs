@@ -4,7 +4,7 @@
 
 //! cladefs: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
 //! uploader uploading and acknowledging on a runtime's threads as the workload goes, crashes at a
-//! random point; then the branch is taken from the bucket alone, its disk lost, and the store is
+//! random version; then the branch is taken from the bucket alone, its disk lost, and the store is
 //! opened again from what the crash left. Taken from the bucket, it holds a prefix of the commits
 //! at least as late as the last its uploader acknowledged; opened from its disk, one at least as
 //! late as the last made durable, its write-ahead log following the branch, which the store
@@ -268,7 +268,7 @@ const DESCRIPTION: Description =
     Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
 
 /// A store made on `host`, kept in its bucket, its uploader uploading every `interval`, crashing
-/// in a random workload, as `rng` says, as its file system fails from a random point on.
+/// in a random workload, as `rng` says, as its file system fails from a random version on.
 fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Crashed {
     let dir = MemDir::new();
     Store::make(&dir, DESCRIPTION, Some(URL), None).unwrap();

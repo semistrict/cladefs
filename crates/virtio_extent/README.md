@@ -25,7 +25,7 @@ adapter) and libmachine.
   `Workers`, a thread each queue, take them off the VMM's `RequestQueue`s as the driver notifies
   them.
 - **Snapshots** (`persist`): the device's state as plain serializable values, and doc-4's
-  freeze, point and fork protocol (`Device::take_snapshot`, `Device::restore`).
+  freeze, version and fork protocol (`Device::take_snapshot`, `Device::restore`).
 
 Nothing in its public API is Firecracker's or KVM's, and it depends on no VMM's crates, nor on
 vm-memory: guest memory reaches it as host addresses and lengths.

@@ -85,16 +85,16 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     std::fs::create_dir(&other).unwrap();
     let second_socket = other.join("cladefsd.sock");
     let _second = daemon(&second_socket, &bucket, 2);
-    let point: PathBuf = other.join("point");
-    // TASK-364: its VM manager makes the point's store there first, of the branch its tenant, cell
+    let version: PathBuf = other.join("version");
+    // TASK-364: its VM manager makes the version's store there first, of the branch its tenant, cell
     // and ID name, as a snapshot names it by its ID alone; taken from the bucket.
     let full = extent_store::host_branch(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
-    ExtentStore::take(&point, 1 << 28, full, Some(2)).unwrap();
+    ExtentStore::take(&version, 1 << 28, full, Some(2)).unwrap();
     let restored = other.join("restored");
     let restored =
-        DaemonExtentStore::connect_forked(&second_socket, &restored, &point, branch, 1 << 28);
+        DaemonExtentStore::connect_forked(&second_socket, &restored, &version, branch, 1 << 28);
     let restored = restored.unwrap();
     assert_eq!(restored.root().unwrap(), b"drained");
     assert_eq!(read(&restored, extent), [7; BLOCK]);

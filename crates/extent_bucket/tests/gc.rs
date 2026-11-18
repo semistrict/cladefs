@@ -521,7 +521,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 
 /// TASK-411.14: `--delete-branch` of an encrypted branch whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
-/// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
+/// checkpoint at the origin authenticated under the branch's DEK, its cell's KEK unwrapped by
 /// the KMS `CLADEFS_KMS` names. TASK-411.28: without a KMS, it refuses to start, naming
 /// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the branch as it was; run again with one, it deletes it.
 #[test]

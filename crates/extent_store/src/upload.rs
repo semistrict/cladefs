@@ -17,9 +17,9 @@
 //! one that plainly diverged before the head is taken refuses before, fencing no writer. A branch
 //! with no record is made, a root (`extent_bucket::branch::create`).
 //!
-//! **A point** takes no head (doc-7, Points): its store holds its state, recovered, which nothing
-//! writes, and no log; nothing it does goes to the bucket but its forks' records
-//! ([`Uploader::forked`], `extent_bucket::branch::fork_point`). Any number of hosts hold one at
+//! **A copy of a version** takes no head (doc-20): its store holds the version's state, recovered,
+//! which nothing writes, and no log; nothing it does goes to the bucket but its forks' records
+//! ([`Uploader::forked`], `extent_bucket::branch::fork_version`). Any number of hosts hold one at
 //! once.
 //!
 //! **The uploader** hands the store's write-ahead log's segments, framed, whose commits are durable
@@ -52,7 +52,7 @@ use extent_bucket::keys::{self, CellKeys, Ring, RingHold};
 use extent_bucket::known::Learned;
 use extent_bucket::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_bucket::object_bucket::ObjectBucket;
-use extent_bucket::record::{Forked, Kind, Record};
+use extent_bucket::record::{Kind, Record};
 use extent_bucket::wal::TakenBranch;
 use extent_bucket::{Body, Objects, Recovered, Taker, Writer, branch, cell};
 use futures::StreamExt as _;
@@ -185,7 +185,7 @@ impl<T> Retried<T> {
 /// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
 /// taken out of the cell (`extent_bucket::cell::forget`, TASK-364). An encrypted branch's forks to
-/// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
+/// other cells it records get its checkpoint at their origins under its keys, its cell's KEK
 /// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
     bucket: &ObjectBucket,
@@ -210,9 +210,9 @@ pub enum Failure {
     /// needs is gone or corrupt.
     #[error(transparent)]
     Bucket(#[from] extent_bucket::Error),
-    /// The point a store is of was deleted: it forks no more, and its forks live on.
-    #[error("the point was deleted")]
-    PointDeleted,
+    /// The version a store is of was deleted: it forks no more, and its forks live on.
+    #[error("the version was dropped")]
+    VersionDropped,
     /// This host's own: its files, a runtime, the uploader gone, as the error says.
     #[error("{0:#}")]
     Local(Arc<anyhow::Error>),
@@ -238,11 +238,11 @@ impl PartialEq for Failure {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Bucket(error), Self::Bucket(other)) => error == other,
-            (Self::PointDeleted, Self::PointDeleted) => true,
+            (Self::VersionDropped, Self::VersionDropped) => true,
             (Self::Local(error), Self::Local(other)) => {
                 format!("{error:#}") == format!("{other:#}")
             }
-            (Self::Bucket(_) | Self::PointDeleted | Self::Local(_), _) => false,
+            (Self::Bucket(_) | Self::VersionDropped | Self::Local(_), _) => false,
         }
     }
 }
@@ -378,8 +378,8 @@ pub(crate) struct Shared<D: Dir, B: extent_bucket::Bucket = ObjectBucket> {
     writer: Mutex<Option<Arc<Writer<B>>>>,
     /// The fencing token its writers take the branch's head with, once one did.
     token: std::sync::OnceLock<u64>,
-    /// The point the store is of, if it is one.
-    point: std::sync::OnceLock<Point>,
+    /// cladefs: the version the store is a copy of, if it is one (TASK-476).
+    copy: std::sync::OnceLock<Copy>,
     /// The origins of the forks of the segments the uploader took, by their children: what a fork
     /// that fails deletes its child by (TASK-165.7).
     forks: Mutex<std::collections::BTreeMap<Branch, Origin>>,
@@ -433,15 +433,14 @@ fn blocking<T>(work: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(work)
 }
 
-/// A point a store holds: what its record names, and the point. cladefs: or a version of its
-/// branch, of which it is a copy, and the segment its branch's head names it at (TASK-476): its
-/// forks fork the version, which its branch's head must name still.
-struct Point {
+/// cladefs: a version of its branch a store is a copy of, and the segment its branch's head names
+/// it at (TASK-476): its forks fork the version, which its branch's head must name still.
+struct Copy {
     origin: Origin,
-    of: Forked,
-    /// cladefs: a version's: the ring its forks' checkpoints at the version are sealed under, its
-    /// branch's newest DEK, which the forks inherit (TASK-476).
-    sealing: Option<Arc<Ring>>,
+    version: u64,
+    /// The ring its forks' checkpoints at the version are sealed under, its branch's newest DEK,
+    /// which the forks inherit.
+    sealing: Arc<Ring>,
 }
 
 /// cladefs: what a commit stalled behind object storage waits for, said as it stalls: the bytes not
@@ -616,15 +615,15 @@ impl<D: Dir> Uploader<D> {
     /// took it after [`Uploader::child_free`] found it free (`extent_bucket::Error::IdTaken`): the
     /// fork failed, and the uploader goes on.
     ///
-    /// A fork of a point commits nothing: the child's record is the fork, and fails if the point
-    /// was deleted ([`Failure::PointDeleted`]; `branch::fork_point`).
+    /// A fork of a copy of a version commits nothing: the child's record is the fork, and fails if
+    /// the version was dropped ([`Failure::VersionDropped`]; `branch::fork_version`).
     ///
     /// cladefs: a fork into another cell, `inheriting` given ([`Uploader::inheriting`]), then gives
     /// its child its keys, once its record is made: its cell made with the KEK from the host's
     /// pool, its record given its DEK and those it inherits, rewrapped under that KEK
     /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
     ///
-    /// cladefs: a fork of a point this host made says what it left of the child to the child's
+    /// cladefs: a fork of a version this host made says what it left of the child to the child's
     /// store's first opening here ([`Learned`], TASK-449): its record, and that it has no head. Its
     /// cell the child's store makes, encrypted, as it opens (every cell is, TASK-411.28; a fork
     /// holding it, made, at once with the reference's write is TASK-485's).
@@ -648,32 +647,26 @@ impl<D: Dir> Uploader<D> {
     }
 
     /// Makes the fork the store made of its branch with its commit `epoch` a fork of the branch in
-    /// object storage, its child's record and checkpoint ([`Uploader::forked`]). A fork of a point
-    /// says what it made.
+    /// object storage, its child's record and checkpoint ([`Uploader::forked`]). A fork of a copy
+    /// of a version says what it made: its checkpoint at the version, for a child of another cell,
+    /// sealed under the version's branch's keys (TASK-476).
     fn fork_made(&self, epoch: u64, child: Child) -> Result<Made, Failure> {
         let shared = &self.shared;
-        if let Some(point) = shared.point.get() {
-            let origin = point.origin;
+        if let Some(copy) = shared.copy.get() {
             let holding = async { None };
-            let bucket = &*self.bucket;
             let (child, owner) = (child.branch, child.owner);
-            let forking = async {
-                match point.of {
-                    Forked::Point(of) => {
-                        branch::fork_point_with(bucket, child, of, origin, owner, holding).await
-                    }
-                    // cladefs: a version's, its checkpoint at the version, for a child of another
-                    // cell, sealed under the store's keys, its branch's (TASK-476).
-                    Forked::Version(id) => {
-                        let ring = point.sealing.clone().unwrap_or_else(|| self.store().keys().clone());
-                        let keys = keys::Parents::Held(&ring);
-                        branch::fork_version_with(bucket, child, id, origin, owner, keys, holding)
-                            .await
-                    }
-                }
-            };
+            let keys = keys::Parents::Held(&copy.sealing);
+            let forking = branch::fork_version_with(
+                &*self.bucket,
+                child,
+                copy.version,
+                copy.origin,
+                owner,
+                keys,
+                holding,
+            );
             return match block_on(forking)? {
-                Err(extent_bucket::Error::Deleted) => Err(Failure::PointDeleted),
+                Err(extent_bucket::Error::Deleted) => Err(Failure::VersionDropped),
                 Err(err) => Err(err.into()),
                 Ok((record, cell)) => Ok(Made { record, cell: cell.flatten() }),
             };
@@ -695,7 +688,7 @@ impl<D: Dir> Uploader<D> {
 
     /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
     /// fork is made, its commit or its record, so that a fork refused makes nothing (TASK-411.4):
-    /// if `child` is of another cell, no point, and the store's keys, which it inherits, are of
+    /// if `child` is of another cell, no version, and the store's keys, which it inherits, are of
     /// branches of other cells than its own, those keys and a KEK for the child's cell from the
     /// host's pool; none otherwise. Refused if the host's KMS last heard a tenant of theirs
     /// revoked or destroyed, or as the KMS refuses a KEK (`keys::inheriting`). No KMS call is made
@@ -716,17 +709,16 @@ impl<D: Dir> Uploader<D> {
     /// the fork's segment gave the child its origin, if the uploader took it; or of no parent, if
     /// it never did. It is deleted as the host's placement (`Options::token`).
     ///
-    /// cladefs: a fork of a point, this store a copy of it, as a fork of the point, naming the point's
+    /// cladefs: a fork of a version, this store a copy of it, as a fork of the version, naming its
     /// origin: its record deleted then names it, so that its cell's pass of the collector retires
     /// the reference the fork wrote under the origin's cell (TASK-395.3). As a branch of its own,
     /// naming none, the reference would stay for ever.
     pub fn unfork(&self, child: Child) -> Result<(), Failure> {
         let origin = self.shared.fork_origin(child.branch);
-        let forked = match (self.shared.point.get(), origin, child.point) {
-            (Some(point), ..) => Kind::Forking { origin: point.origin, of: point.of },
-            (None, None, _) => Kind::Own,
-            (None, Some(origin), true) => Kind::Point(origin),
-            (None, Some(origin), false) => Kind::Fork(origin),
+        let forked = match (self.shared.copy.get(), origin) {
+            (Some(copy), _) => Kind::Forking { origin: copy.origin, version: copy.version },
+            (None, None) => Kind::Own,
+            (None, Some(origin)) => Kind::Fork(origin),
         };
         let (holder, token) = (self.shared.holder(), self.shared.options.token);
         let deleting = branch::delete_fork(
@@ -750,8 +742,8 @@ impl<D: Dir> Uploader<D> {
     /// Whether `child`'s ID is free in object storage for a fork the store is making of its
     /// branch, before the fork's commit: unless another branch has it, as a guest may give any,
     /// whose record its parent's writers, finding it another's, would fail on for ever. One GET of
-    /// the child's record. cladefs: a fork of a point needs none: its child's record's create finds
-    /// any there, and refuses it alike (`branch::fork_point`, TASK-449).
+    /// the child's record. cladefs: a fork of a copy of a version needs none: its child's record's
+    /// create finds any there, and refuses it alike (`branch::fork_version`, TASK-449).
     pub fn child_free(&self, child: Branch) -> Result<bool, Failure> {
         let found = block_on(branch::record(&*self.bucket, child))??;
         failing!("upload::child_free");
@@ -761,7 +753,7 @@ impl<D: Dir> Uploader<D> {
     /// cladefs: the store's versions (doc-18, TASK-476): those its branch's head names, uploaded,
     /// as its writer last swapped it, oldest first; then those its commits cut that the head names
     /// not yet, local, each by its commit's number, which [`Remote::uploaded`] waits for. None of a
-    /// point's or a version's copy, which has no writer.
+    /// version's or a version's copy, which has no writer.
     pub fn versions(&self) -> Versions {
         let uploaded = match self.shared.writer() {
             Some(writer) => block_on(writer.versions()).unwrap_or_default(),
@@ -776,7 +768,7 @@ impl<D: Dir> Uploader<D> {
 
     /// cladefs: drops the versions `ids` names, uploaded or local: the head swapped to name them
     /// no more, and no acknowledgement naming those local (`Writer::drop_versions`, TASK-476).
-    /// Fails with no writer, of a point's or a version's copy.
+    /// Fails with no writer, of a version's or a version's copy.
     pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
         self.store().forget_versions(ids);
@@ -790,10 +782,10 @@ impl<D: Dir> Uploader<D> {
         Ok(block_on(writer.share_version(id, shared))??)
     }
 
-    /// Whether the store holds a point: nothing it does goes to object storage but its forks'
-    /// records.
-    pub fn is_point(&self) -> bool {
-        self.shared.point.get().is_some()
+    /// Whether the store is a copy of a version: nothing it does goes to object storage but its
+    /// forks' records.
+    pub fn is_copy(&self) -> bool {
+        self.shared.copy.get().is_some()
     }
 
     /// The lowest sequence number the store's guest may mint extents' IDs from, which the writer's
@@ -863,7 +855,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             store: std::sync::OnceLock::new(),
             writer: Default::default(),
             token: Default::default(),
-            point: Default::default(),
+            copy: Default::default(),
             forks: Default::default(),
             progress: Mutex::new(Progress::default()),
             changed: Event::new(),
@@ -884,7 +876,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     }
 
     /// cladefs: the keys of `cell` as read now, to be held by `placement` next
-    /// ([`CellKeys::to_hold`]): none, of a cell with no object, a point's.
+    /// ([`CellKeys::to_hold`]): none, of a cell with no object, a version's.
     async fn cell_keys(
         &self,
         bucket: &B,
@@ -1044,7 +1036,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             }
             Err(err) => return started.send(Err(err)).unwrap(),
         };
-        // A point's store has nothing to upload.
+        // A version's store has nothing to upload.
         let Some(writer) = writer else {
             while !self.progress.lock().unwrap().stop {
                 self.wake.notified().await;
@@ -1141,7 +1133,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     }
 
     /// Opens the store `recovering` recovered, as the bucket holds its branch (see the module's
-    /// docs), and returns its writer, none for a point. Its log is checked to follow the branch as
+    /// docs), and returns its writer, none for a version. Its log is checked to follow the branch as
     /// recovery finds it before the head is taken, so that a store plainly stale fences no writer;
     /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the store opens
     /// as the writer found its end, which another writer may have moved on meanwhile.
@@ -1165,11 +1157,9 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             }
             // cladefs: made once its cell is held, which gives it its DEK (TASK-411.3).
             None => None,
-            Some(record) if record.is_point() || recovering.version().is_some() => {
-                let (Recovered { state, layer, .. }, keys) = match recovering.version() {
-                    Some(id) => self.version(bucket, branch, record, read.head()?, id).await?,
-                    None => self.point(bucket, branch, record, read.head()?).await?,
-                };
+            Some(record) if let Some(id) = recovering.version() => {
+                let (Recovered { state, layer, .. }, keys) =
+                    self.version(bucket, branch, record, read.head()?, id).await?;
                 let opening =
                     Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
                 let store = blocking(|| recovering.open(options, opening))?;
@@ -1222,7 +1212,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         // no writer (`Deleted`). The store's branch is its cell's from now on, of its kind, unless
         // the cell has another (`CellHasBranch`, doc-20): all in one compare-and-swap of the cell's
         // object, a read alone when nothing changes. Not
-        // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
+        // a version's, which no writer takes, and any number of hosts open at once. cladefs: a cell
         // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
         // of a branch with DEKs is there already (TASK-411.3).
         let given = recovering.kind().map(|kind| (branch.id, kind));
@@ -1329,49 +1319,11 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         self.changed.notify(usize::MAX);
     }
 
-    /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
-    /// changes, as recovered, with the decoded state it shares (TASK-453). No taking: nothing the
-    /// store does goes to the bucket but its forks' records.
-    /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
-    /// (TASK-411.3).
-    /// cladefs: recovered from `head`, what a read of its head found, or what the host knows it
-    /// has, none (TASK-449).
-    async fn point(
-        &self,
-        bucket: &Arc<B>,
-        branch: Branch,
-        record: Record,
-        head: Option<extent_bucket::layout::Head>,
-    ) -> Result<(Recovered, Arc<Ring>), Failure> {
-        if record.deleted {
-            return Err(Failure::PointDeleted);
-        }
-        let Kind::Point(origin) = record.kind else {
-            return Err(Failure::msg(format!("branch {branch} is no point")));
-        };
-        let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
-        let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
-        let recovering = extent_bucket::recovery::recover_under_from(
-            &**bucket,
-            branch,
-            Some(origin),
-            head,
-            &keys,
-        );
-        let recovered = recovering.await?;
-        // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
-        // (TASK-411.28).
-        let keys = keys.for_point(branch);
-        let _ = self.point.set(Point { origin, of: Forked::Point(branch), sealing: None });
-        Ok((recovered, keys))
-    }
-
     /// cladefs: opens the store of `branch`, whose record is `record`, as a copy of its version
     /// `id`, which `head`, what a read of its head found, must name (TASK-476): its state at the
     /// version, which never changes, as recovered, with its keys, its branch's, under its cell's
-    /// KEK as read, taking it not. No lease, as for a point's: nothing the store does goes to the
-    /// bucket but its forks' records. Fails as a point's opening does if the version is named no
-    /// more ([`Failure::PointDeleted`]).
+    /// KEK as read, taking it not. No taking: nothing the store does goes to the bucket but its
+    /// forks' records. Fails if the version is named no more ([`Failure::VersionDropped`]).
     async fn version(
         &self,
         bucket: &Arc<B>,
@@ -1382,7 +1334,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     ) -> Result<(Recovered, Arc<Ring>), Failure> {
         let named = head.as_ref().and_then(|head| head.version(id).copied());
         let Some(version) = named.filter(|_| !record.deleted) else {
-            return Err(Failure::PointDeleted);
+            return Err(Failure::VersionDropped);
         };
         let origin = Origin { parent: branch, at: version.at };
         let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
@@ -1390,10 +1342,11 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         let recovering =
             extent_bucket::recovery::recover_version(&**bucket, branch, version.at, &keys);
         let recovered = recovering.await?;
-        // cladefs: as a point's (TASK-411.28); its forks' checkpoints sealed under its branch's.
-        let sealing = Some(keys.clone());
-        let keys = keys.for_point(branch);
-        let _ = self.point.set(Point { origin, of: Forked::Version(id), sealing });
+        // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
+        // (TASK-411.28); its forks' checkpoints sealed under its branch's.
+        let sealing = keys.clone();
+        let keys = keys.for_copy(branch);
+        let _ = self.copy.set(Copy { origin, version: id, sealing });
         Ok((recovered, keys))
     }
 
@@ -1516,7 +1469,7 @@ fn learned<B: extent_bucket::Bucket, D: Dir>(
 /// from, and its cell's object, which its holding goes on from, returning what the holding starts
 /// from. Of a branch this host has just made or taken, `learned` ([`learned`]) stands for those
 /// reads: its record as it left it, its cell's object, if it held it, and its head, none, if it
-/// knows it has none, a clone made or a point. Each is as a read made then: the head's taking is
+/// knows it has none, a clone made or a version. Each is as a read made then: the head's taking is
 /// conditional on what it starts from, and so is the cell's holding if it writes; the record is
 /// read again once the head is taken, and the cell too if its holding wrote nothing
 /// ([`CellFrom::Remembered`]; `Writer::take`).
@@ -1537,22 +1490,15 @@ async fn first_reads<B: extent_bucket::Bucket>(
         );
         return Ok((found?, read, CellFrom::Read(cell)));
     };
-    // A point, which no writer takes, holds no cell: its opening reads none.
-    let point = record.is_point();
-    let none = match headless {
-        true => Some(Read::absent()),
-        false => point.then(Read::of_point).flatten(),
-    };
     let reading = async {
-        match none {
-            Some(none) => none,
-            None => head::read(bucket, branch).await,
+        match headless {
+            true => Read::absent(),
+            false => head::read(bucket, branch).await,
         }
     };
     let holding = async {
         match cell {
             Some(cell) => CellFrom::Remembered(cell),
-            None if point => CellFrom::Unread,
             None => CellFrom::Read(cell_read().await),
         }
     };
@@ -1561,9 +1507,9 @@ async fn first_reads<B: extent_bucket::Bucket>(
     Ok((found?, read, cell))
 }
 
-/// The record of `branch`, `found`, if it has one: a fork of a point its host crashed in the middle
-/// of, its record saying so, resumed first ([`branch::resume_point_fork`]: its reference written,
-/// the fork made), which fails if the point was deleted. So the store takes no state of a fork
+/// The record of `branch`, `found`, if it has one: a fork of a version its host crashed in the
+/// middle of, its record saying so, resumed first ([`branch::resume_version_fork`]: its reference
+/// written, the fork made), which fails if the version was dropped. So the store takes no state of a fork
 /// not made.
 async fn resumed<B: extent_bucket::Bucket>(
     bucket: &B,
@@ -1576,7 +1522,7 @@ async fn resumed<B: extent_bucket::Bucket>(
     }
     // cladefs: a version's restore into another cell writes its checkpoint at the version under
     // the version's branch's keys, unwrapped by the host's KMS (TASK-476).
-    branch::resume_point_fork(bucket, branch, keys::Parents::Kms(kms, None)).await?;
+    branch::resume_version_fork(bucket, branch, keys::Parents::Kms(kms, None)).await?;
     Ok(branch::record(bucket, branch).await?)
 }
 
@@ -1598,8 +1544,6 @@ enum CellFrom {
     /// checks; so the writer's taking reads the cell once the head is taken, which another's
     /// holding since refuses (`extent_bucket::Taker::remembered`, TASK-449's review).
     Remembered(extent_bucket::bucket::Object),
-    /// Nothing: a point's, which holds no cell; read, if held.
-    Unread,
 }
 
 impl CellFrom {
@@ -1607,12 +1551,11 @@ impl CellFrom {
         match self {
             Self::Read(found) => branch::Start::Found(found),
             Self::Remembered(found) => branch::Start::Found(Some(found)),
-            Self::Unread => branch::Start::Read,
         }
     }
 }
 
-/// cladefs: what a fork made ([`Uploader::forked`]): of a point's, the child's record as it left
+/// cladefs: what a fork made ([`Uploader::forked`]): of a version's, the child's record as it left
 /// it, a clone made, and its cell's object, if it held it.
 #[derive(Default)]
 struct Made {

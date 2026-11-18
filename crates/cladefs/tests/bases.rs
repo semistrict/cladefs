@@ -62,7 +62,7 @@ fn vms_read_what_is_attached_as_they_run() {
 }
 
 /// What is attached to a store stopped is there for its next VM, as for the VM after, for its
-/// forks' and for a VM restored from a point of it.
+/// forks' and for a VM restored from a version of it.
 #[test]
 fn stores_keep_what_is_attached() {
     let dir = tempfile::tempdir().unwrap();

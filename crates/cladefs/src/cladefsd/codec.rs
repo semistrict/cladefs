@@ -65,7 +65,7 @@ pub(crate) enum Request<'a> {
     Window { size: u64, private_max: Option<u64>, budget: u64 },
     /// [`FAULT`].
     Fault(Fault),
-    /// [`FORK`]: to `branch`, a new directory at `path`; a point if `quiescent`.
+    /// [`FORK`]: to `branch`, a new directory at `path`; a version if `quiescent`.
     Fork { path: PathBuf, quiescent: bool },
     /// [`RESIZED`]: the guest's answer to a shrink to `capacity` bytes.
     Resized { capacity: u64, took: bool },

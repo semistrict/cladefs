@@ -314,7 +314,7 @@ impl Drop for Param {
     }
 }
 
-/// cladefs: pause points (cladefs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
+/// cladefs: pause versions (cladefs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
 /// for a task to wait at `step`.
 struct Pauses;
 

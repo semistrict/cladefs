@@ -601,7 +601,7 @@ pub const SWEEPS: u64 = 32;
 /// was the simulation's end checks; TASK-293's compressed segments, never compacted, went unseen
 /// by every test outside it.
 ///
-/// cladefs: per cell and conservatively, as doc-7 has the collector since TASK-395: each fork point
+/// cladefs: per cell and conservatively, as doc-7 has the collector since TASK-395: each origin
 /// a reference names, or a live branch's fork to another cell, is needed whole, its state's extents
 /// along their ways from where they were sealed, and what recovering it reads, whatever its
 /// children hold of it; a reference is garbage once its child is deleted, of that origin, in
@@ -694,7 +694,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut needed = fences.clone();
     let mut touched = BTreeSet::new();
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
-    let mut points: BTreeSet<Origin> = BTreeSet::new();
+    let mut versions: BTreeSet<Origin> = BTreeSet::new();
     let mut retirable = BTreeSet::new();
     // The forks of live branches to other cells: their records and references to come, or to be
     // taken back, from the branches' next writers or deletions (TASK-395.10).
@@ -721,14 +721,14 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         // Its forks to other cells, whose children may have no references yet.
         for fork in &recovered.state.forks {
             if fork.child.cell != branch.cell {
-                points.insert(Origin { parent: branch, at: fork.at });
+                versions.insert(Origin { parent: branch, at: fork.at });
                 pending.insert((branch, fork.at, fork.child));
             }
         }
         // cladefs: its versions, each its state at the segment its head names it at, kept whole as
-        // a fork point is (TASK-476).
+        // an origin is (TASK-476).
         for version in recovered.head.iter().flat_map(|head| &head.versions) {
-            points.insert(Origin { parent: branch, at: version.at });
+            versions.insert(Origin { parent: branch, at: version.at });
         }
         touched.extend(recovered.touched.iter().cloned());
         needed.extend(recovered.touched);
@@ -774,7 +774,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     // A reference stays while its child's record names its origin, until its cell's pass may
     // retire it, or while a live branch's fork may yet name it or take it back; any other is one
-    // no pass retires, kept for ever with its fork point (TASK-395.10), and garbage.
+    // no pass retires, kept for ever with its origin (TASK-395.10), and garbage.
     let mut unnamed = BTreeSet::new();
     for &(key, parent, at, child) in &references {
         let origin = Origin { parent, at };
@@ -787,14 +787,14 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         if retired {
             retirable.insert(key.clone());
         } else if !marked && (named || pending.contains(&(parent, at, child))) {
-            points.insert(origin);
+            versions.insert(origin);
         } else {
             unnamed.insert(key.clone());
         }
     }
-    // Each fork point kept whole, once (TASK-395.4).
+    // Each origin kept whole, once (TASK-395.4).
     let checkpoints = crate::recovery::Checkpoints::new(bucket, 0);
-    for origin in points {
+    for origin in versions {
         let Ok((state, read)) =
             crate::recovery::recover_at(&checkpoints, origin.parent, origin.at).await
         else {

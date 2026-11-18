@@ -15,7 +15,7 @@
 //! has of that URL ([`bucket`]). A store made by older code, of an older format, is refused
 //! (`extent_store::Format`), opened or deleted alike: nothing reads or converts it.
 //!
-//! A store's directory holds its branch alone. Forks, points and deletions are the bucket's
+//! A store's directory holds its branch alone. Forks, versions and deletions are the bucket's
 //! (TASK-165.7): a fork is a commit of its parent's naming the child, made once its segment is
 //! acknowledged, which gives the child its record; the child's directory is made only then, a
 //! store of its own taking the child's state from the bucket ([`fork`]).
@@ -42,46 +42,44 @@ pub(crate) const BLOCK_SIZE: u32 = 4096;
 /// fork into other tenants' cells ([`may_fork_into`], TASK-395.9).
 pub(crate) const DEFAULT_TENANT: u64 = 0;
 
-/// A new cell of `tenant`'s, for a store made alone or a fork (TASK-364): random, so that cells
-/// made apart are apart.
-pub fn new_cell(tenant: u64) -> Cell {
-    Cell { tenant, id: rand::random::<u64>().max(1) }
-}
-
-/// The cell of a fork of `parent`, a new one of its tenant's, whose one vdisk the fork is.
-pub(crate) fn fork_cell(parent: Branch) -> Cell {
-    new_cell(parent.cell.tenant)
-}
-
-/// cladefs: whether a fork of `parent` by `uploader`, its uploader, may make a branch of `cell`
+/// cladefs: whether a fork of `parent` by `uploader`, its uploader, may make a new cell of `tenant`'s
 /// (TASK-395.9): `EACCES` if `parent` has a writer and `cell` is another tenant's than its own,
 /// unless its own is the default tenant's ([`DEFAULT_TENANT`]), as the daemon's own stores and
-/// public bases are. Inheritance across tenants is the default tenant's and shared points' alone: a
-/// fork of a point is checked at the read of the point's record its child's making makes instead
+/// public bases are. Inheritance across tenants is the default tenant's and shared versions' alone: a
+/// fork of a version is checked at the read of the head naming the version its child's making makes instead
 /// (`branch::finish_point_fork`, TASK-395.7).
 pub(crate) fn may_fork_into(
     parent: Branch,
     uploader: &Uploader<HostDir>,
-    cell: Cell,
+    tenant: u64,
 ) -> Result<(), Error> {
-    let tenant = parent.cell.tenant;
-    if uploader.is_point() || tenant == DEFAULT_TENANT || tenant == cell.tenant {
+    let own = parent.cell.tenant;
+    if uploader.is_copy() || own == DEFAULT_TENANT || own == tenant {
         return Ok(());
     }
     let refused = format!(
-        "forking branch {parent} to a cell of tenant {}: a branch with a writer forks to another \
-         tenant's cell only from the default tenant's",
-        cell.tenant
+        "forking branch {parent} to a cell of tenant {tenant}: a branch with a writer forks to \
+         another tenant's cell only from the default tenant's"
     );
     Err(Error::new(anyhow::Error::new(Errno::EACCES).context(refused)))
 }
 
-/// A new branch of `cell`, of `bucket`: its ID one no other branch of the bucket has, nor will
-/// (`extent_bucket::objectid`), so that stores made apart, and the forks of one, mint extent IDs
-/// of their own (backlog doc-4), which a host's cache of extents keys them by (TASK-364).
-pub(crate) fn new_branch(bucket: &ObjectBucket, cell: Cell) -> Result<Branch, Failure> {
+/// The branch of a new cell of `tenant`'s, of `bucket`: the cell's ID and its branch's one no
+/// other cell of the bucket has, nor will (`extent_bucket::objectid`), so that stores made apart,
+/// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
+/// extents keys them by (TASK-364). A cell's ID is its branch's: no caller names a new one.
+pub(crate) fn new_branch(bucket: &ObjectBucket, tenant: u64) -> Result<Branch, Failure> {
     let id = upload::block_on(bucket.new_objectid())?;
-    Ok(Branch { cell, id })
+    Ok(Branch { cell: Cell { tenant, id }, id })
+}
+
+/// A new cell of `tenant`'s, of the bucket at `url`, its ID given as [`new_branch`] gives it: for a
+/// cell made before its branch, which takes its ID ([`BranchOf::Cell`]), as the FUSE mount's are. It
+/// blocks.
+#[cfg(target_os = "linux")]
+pub(crate) fn new_cell(url: &str, tenant: u64) -> Result<Cell, Failure> {
+    let id = upload::block_on(bucket(url)?.new_objectid())?;
+    Ok(Cell { tenant, id })
 }
 
 /// A branch of a new cell of the default tenant's, of a random ID no allocator gave: for tests
@@ -89,24 +87,34 @@ pub(crate) fn new_branch(bucket: &ObjectBucket, cell: Cell) -> Result<Branch, Fa
 /// (`ExtentStore::fork_to`).
 #[cfg(test)]
 pub(crate) fn new_alone() -> Branch {
-    Branch { cell: new_cell(DEFAULT_TENANT), id: rand::random::<u64>().max(1) }
+    named(DEFAULT_TENANT)
+}
+
+/// The branch of a new cell of `tenant`'s, of a random ID no allocator gave, the cell's too.
+#[cfg(test)]
+pub(crate) fn named(tenant: u64) -> Branch {
+    let id = rand::random::<u64>().max(1);
+    Branch { cell: Cell { tenant, id }, id }
 }
 
 /// A child of a fork of `parent`, of a random ID no allocator gave, for tests that name it
-/// (`ExtentStore::fork_to`): the one vdisk of a new cell of its tenant's. Random, not next to its
-/// parent's: an allocator gives the IDs of its block in order, the next to another store.
+/// (`ExtentStore::fork_to`): of a new cell of its tenant's. Random, not next to its parent's: an
+/// allocator gives the IDs of its block in order, the next to another store.
 #[cfg(test)]
 pub(crate) fn fork_child(parent: Branch) -> Branch {
-    Branch { cell: fork_cell(parent), id: rand::random::<u64>().max(1) }
+    named(parent.cell.tenant)
 }
 
 /// The branch a store is made of (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchOf {
-    /// A new branch of the cell, its ID the store's bucket's to give ([`new_branch`]).
-    New(Cell),
+    /// The branch of a new cell of the tenant's, its ID the store's bucket's to give
+    /// ([`new_branch`]).
+    New(u64),
+    /// The branch of `Cell`, made with its ID the bucket gave ([`new_cell`]), the branch's too.
+    Cell(Cell),
     /// A branch the store's bucket has (`ENOENT` otherwise), which the store takes as it opens, or
-    /// reads, if a point.
+    /// reads, if a version.
     Taken(Branch),
     /// A new branch of an ID a test chose, no allocator's: for tests that write extents of a
     /// branch they name.
@@ -209,7 +217,7 @@ pub(crate) fn keeping() -> Result<upload::Options, Failure> {
 }
 
 /// A store opened ([`open`]), with the bucket its description names, which its branch is kept in,
-/// and its uploader, which took the branch's head, or holds its point (TASK-165.9).
+/// and its uploader, which took the branch's head, or holds its version (TASK-165.9).
 pub(crate) struct Opened {
     pub store: Arc<Store<HostDir>>,
     pub bucket: Arc<ObjectBucket>,
@@ -274,7 +282,8 @@ pub(crate) fn create_unmade(
     let made = || -> Result<Opened, Failure> {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let branch = match of {
-            BranchOf::New(cell) => new_branch(&*self::bucket(&url)?, cell)?,
+            BranchOf::New(tenant) => new_branch(&*self::bucket(&url)?, tenant)?,
+            BranchOf::Cell(cell) => Branch { cell, id: cell.id },
             // Its record, read to see the bucket has it, is what the store's opening, next, would
             // read first: learned for it, a read less (`extent_bucket::known`, TASK-449).
             BranchOf::Taken(branch) => {
@@ -385,9 +394,9 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// bucket as the fork's alone (`Uploader::unfork`), so that its segment, landing late, makes
 /// nothing (TASK-79.78); its host crashing, it stands, or never was, as the bucket has it.
 ///
-/// A fork of a point commits nothing: its child's record is the fork, which fails with `ENOENT`
-/// once the point is deleted (`Uploader::forked`), and with `EACCES` if the child is of another
-/// tenant's cell than the point, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
+/// A fork of a version commits nothing: its child's record is the fork, which fails with `ENOENT`
+/// once the version is deleted (`Uploader::forked`), and with `EACCES` if the child is of another
+/// tenant's cell than the version, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
 /// made, unless the store is the default tenant's ([`may_fork_into`], TASK-395.9).
 ///
@@ -404,7 +413,7 @@ pub(crate) fn fork<H>(
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
-    may_fork_into(store.description().branch, uploader, child.branch.cell)?;
+    may_fork_into(store.description().branch, uploader, child.branch.cell.tenant)?;
     let inheriting = uploader.inheriting(child)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
@@ -432,23 +441,21 @@ fn fork_in<H>(
     let branch = child.branch;
     let failed = |err: Failure| match err {
         Failure::Bucket(extent_bucket::Error::IdTaken(_)) => taken(branch),
-        Failure::PointDeleted => anyhow::Error::new(Errno::ENOENT)
-            .context(format!("forking to branch {branch}: the point was deleted")),
-        // cladefs: another tenant's point, not shared (TASK-395.7).
+        Failure::VersionDropped => anyhow::Error::new(Errno::ENOENT)
+            .context(format!("forking to branch {branch}: the version was deleted")),
+        // cladefs: another tenant's version, not shared (TASK-395.7).
         Failure::Bucket(refused @ extent_bucket::Error::NotShared(_)) => {
             anyhow::Error::new(Errno::EACCES)
                 .context(format!("forking to branch {branch}: {refused}"))
         }
         err => anyhow::anyhow!("forking to branch {branch}: {err}"),
     };
-    // A fork of a point needs no look first: its child's record's create refuses a record there
+    // A fork of a version needs no look first: its child's record's create refuses a record there
     // alike (`Uploader::child_free`, TASK-449).
-    if !uploader.is_point()
-        && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?
-    {
+    if !uploader.is_copy() && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))? {
         return Err(Error::new(taken(branch)));
     }
-    let made = match uploader.is_point() {
+    let made = match uploader.is_copy() {
         true => {
             drop(held);
             uploader.forked(0, child, inheriting).map_err(failed)
@@ -575,7 +582,7 @@ mod tests {
 
     /// A new branch of a new cell of the default tenant's.
     fn new() -> BranchOf {
-        BranchOf::New(new_cell(DEFAULT_TENANT))
+        BranchOf::New(DEFAULT_TENANT)
     }
 
     /// TASK-196: a store its maker never made whole is no store: it refuses to open, and
@@ -614,12 +621,14 @@ mod tests {
         let first = made(&one, new());
         let second = made(&two, new());
         assert_eq!(second.id, first.id + 1);
+        assert_eq!((first.cell.id, second.cell.id), (first.id, second.id));
         let block = first.id / extent_bucket::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = extent_bucket::layout::objectid_block(block);
         assert!(upload::block_on(extent_bucket::bucket::get(&*bucket, &taken)).unwrap().is_some());
 
-        let absent = Branch { cell: new_cell(DEFAULT_TENANT), id: second.id + 1 };
+        let absent =
+            Branch { cell: Cell { tenant: DEFAULT_TENANT, id: second.id + 1 }, id: second.id + 1 };
         let path = dir.path().join("absent");
         let refused = create_unmade(
             &path,
@@ -653,7 +662,7 @@ mod tests {
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
         let Opened { store, bucket, uploader } =
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
-        let forked = new_branch(&bucket, fork_cell(store.description().branch)).unwrap();
+        let forked = new_branch(&bucket, store.description().branch.cell.tenant).unwrap();
         let child = Child { branch: forked, owner: 1 };
         super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");

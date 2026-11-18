@@ -197,7 +197,7 @@ pub use extents::{
     StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
-pub use host_store::{BranchOf, new_cell};
+pub use host_store::BranchOf;
 pub use image::{Compactions, Image, TreeCompactions, VolumeMetadata};
 pub use memory::{VolatileSlice, VolatileSliceMut};
 pub use node::{

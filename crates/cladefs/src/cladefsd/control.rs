@@ -304,7 +304,7 @@ struct Control {
 impl Control {
     /// The tenant of a new cell whose store is made at `path`, that the caller names `tenant`
     /// (TASK-364): in a granted tenant's directory, that tenant's, which `tenant` is or is 0 for
-    /// (`EPERM` otherwise); elsewhere, `tenant`. A store of a cell there already, a point the VM
+    /// (`EPERM` otherwise); elsewhere, `tenant`. A store of a cell there already, a version the VM
     /// manager gives a tenant to restore from (TASK-154), may be another tenant's: the tenant's VM
     /// processes write no store of it (`Tenant::reaches`), and its restores are of their own.
     fn new_cell_at(&self, path: &Path, tenant: u64) -> Result<u64, Status> {

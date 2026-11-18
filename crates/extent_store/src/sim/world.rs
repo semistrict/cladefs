@@ -16,7 +16,7 @@ use base32_id::Short;
 use extent_bucket::collector::{self, Options};
 use extent_bucket::fetch::{Budget, Limits};
 use extent_bucket::layout::{self, Child, Origin, epoch_of, writer_of};
-use extent_bucket::record::{Forked, Kind};
+use extent_bucket::record::Kind;
 use extent_bucket::testing::{Direct, Fault, SimBucket};
 use extent_bucket::{Error, Recovered, Writer, branch, recovery, rules};
 use extent_frame::spent::Spent;
@@ -73,12 +73,6 @@ pub struct Weights {
     /// segment landing: each takes a record of its own for it, and the one that lost deletes its
     /// fork (TASK-79.82).
     pub twins: u32,
-    /// A fork to a point (doc-7, Points).
-    pub point: u32,
-    /// A host restores a point it took a copy of, which may be deleted by now: a fork of it.
-    pub restore: u32,
-    /// A host's stale copy of a point tries to take it as a writer, which must fail.
-    pub write_point: u32,
     /// A root takes the ID of a fork's child whose segment is not yet acknowledged, as a guest may
     /// name any, and is deleted (TASK-174).
     pub usurp: u32,
@@ -89,8 +83,8 @@ pub struct Weights {
     pub version: u32,
     /// cladefs: a branch's writer drops one of its versions, uploaded or local.
     pub drop_version: u32,
-    /// cladefs: a host restores a version a branch's head names: a fork of it, its child's record
-    /// alone, as a point's restore.
+    /// cladefs: a host restores a version a branch's head names, which may be dropped by now: a fork
+    /// of it, its child's record alone, as many hosts do at once.
     pub restore_version: u32,
     /// The store's clock advances.
     pub tick: u32,
@@ -113,7 +107,7 @@ pub struct Profile {
     /// cladefs: the chance that a collector's pass is over one branch's cell alone, not a sweep over
     /// every cell (TASK-395.4): none draws nothing of the seed's.
     pub one_cell: f64,
-    /// cladefs: the chance that a fork of a point a crash stopped is forgotten, not finished nor
+    /// cladefs: the chance that a fork of a version a crash stopped is forgotten, not finished nor
     /// deleted: its host's directory, left unmade, names no child, and deleting it touches nothing
     /// in the bucket (TASK-395.10). None draws nothing of the seed's.
     pub forget: f64,
@@ -151,9 +145,6 @@ impl Default for Profile {
                 unfork: 0,
                 contest: 0,
                 twins: 0,
-                point: 0,
-                restore: 0,
-                write_point: 0,
                 usurp: 0,
                 stale_checkpoint: 0,
                 version: 0,
@@ -255,17 +246,14 @@ struct Branch {
     deleting: bool,
     /// The highest fencing token a writer took it with: its latest placement's.
     taken: u64,
-    /// Whether it is a point, which nothing writes.
-    point: bool,
     /// Its owner, which its maker chose: its fork's, if it is a fork's child.
     owner: u64,
 }
 
 impl Branch {
-    /// A branch forked from `origin`, its parent's fork commit `base`, a point if `point`, of
-    /// `owner`.
-    fn forked(origin: Option<Origin>, base: Option<u64>, point: bool, owner: u64) -> Self {
-        Self { origin, base, acked: BTreeSet::new(), deleting: false, taken: 0, point, owner }
+    /// A branch forked from `origin`, its parent's fork commit `base`, of `owner`.
+    fn forked(origin: Option<Origin>, base: Option<u64>, owner: u64) -> Self {
+        Self { origin, base, acked: BTreeSet::new(), deleting: false, taken: 0, owner }
     }
 }
 
@@ -387,7 +375,7 @@ enum Event {
         child: u64,
         result: Result<bool, Error>,
     },
-    /// What a host's fork of a point gave.
+    /// What a host's fork of a version gave.
     Restored {
         child: u64,
         result: Result<(), Error>,
@@ -405,11 +393,6 @@ enum Event {
         id: u64,
         result: Result<(), Error>,
     },
-    /// A writer took a point, which must not happen.
-    PointTaken {
-        point: u64,
-        result: Result<(), Error>,
-    },
 }
 
 /// A failed fork's deletion, until it is done: the record its fork gives its child, as its host
@@ -424,11 +407,11 @@ struct Unfork {
     taken: Option<Branch>,
 }
 
-/// A fork of a point, until it is done: of which, naming what, on which host, and the task, unless
-/// a crash stopped it, for its host's next start to finish or delete.
+/// A fork of a version, until it is done: of which, naming what, on which host, and the task,
+/// unless a crash stopped it, for its host's next start to finish or delete.
 struct Restore {
-    /// cladefs: the point, or a version of the branch `origin` names (TASK-476).
-    of: Forked,
+    /// cladefs: the version of the branch `origin` names (TASK-476).
+    version: u64,
     origin: Origin,
     /// The commit the fork's child starts from.
     base: Option<u64>,
@@ -549,7 +532,7 @@ impl World {
         };
         let (root, owner) = (world.id(), world.id());
         block_on(branch::create(&Direct(world.bucket.clone()), sim_branch(root), owner)).unwrap();
-        world.branches.insert(root, Branch::forked(None, None, false, owner));
+        world.branches.insert(root, Branch::forked(None, None, owner));
         world
     }
 
@@ -591,9 +574,6 @@ impl World {
             w.unfork,
             w.contest,
             w.twins,
-            w.point,
-            w.restore,
-            w.write_point,
             w.usurp,
             w.write,
             w.stale_checkpoint,
@@ -613,7 +593,7 @@ impl World {
             1 => self.commit(),
             2 => self.close(),
             3 => self.checkpoint(),
-            4 => self.fork(false),
+            4 => self.fork(),
             5 => self.open(false),
             6 => self.open(true),
             7 => self.crash(),
@@ -626,15 +606,12 @@ impl World {
             14 => self.unfork(),
             15 => self.contest(),
             16 => self.twins(),
-            17 => self.fork(true),
-            18 => self.restore(),
-            19 => self.write_point(),
-            20 => self.usurp(),
-            21 => self.write(),
-            22 => self.stale_checkpoint(),
-            23 => self.cut_version(),
-            24 => self.drop_version(),
-            25 => self.restore_version(),
+            17 => self.usurp(),
+            18 => self.write(),
+            19 => self.stale_checkpoint(),
+            20 => self.cut_version(),
+            21 => self.drop_version(),
+            22 => self.restore_version(),
             _ => {
                 let ticks = self.rng.random_range(1..=self.profile.options.grace);
                 self.bucket.advance(ticks);
@@ -732,7 +709,7 @@ impl World {
                 (Ok(true), Err(Error::Corrupt(_))) => {}
                 // The other branch did: it lives on.
                 (Ok(false), Ok(_)) => {
-                    self.branches.insert(child, Branch::forked(None, None, false, owner));
+                    self.branches.insert(child, Branch::forked(None, None, owner));
                 }
                 (deleted, taken) => self.violation(format!(
                     "deleting the failed fork to {child} gave {deleted:?}, another branch taking \
@@ -751,7 +728,7 @@ impl World {
                 | [(lost, Err(Error::IdTaken(_))), (owner, Ok(()))] => {
                     // Its fork's VM manager told: a branch from now on. The other's host deletes
                     // what it thinks its fork made.
-                    self.branches.insert(child, Branch::forked(None, None, false, owner));
+                    self.branches.insert(child, Branch::forked(None, None, owner));
                     self.untwin(child, lost);
                 }
                 taken => self.violation(format!(
@@ -793,12 +770,13 @@ impl World {
             }
             Event::Restored { child, result } => {
                 let Some(mut restore) = self.restores.remove(&child) else { return };
-                let (point, origin, owner) = (restore.of, Some(restore.origin), restore.owner);
+                let (version, origin, owner) =
+                    (restore.version, Some(restore.origin), restore.owner);
                 let base = restore.base;
                 match result {
-                    // Told to its VM's manager: a branch from now on, whatever comes of the point.
+                    // Told to its VM's manager: a branch from now on, whatever comes of the version.
                     Ok(()) => {
-                        let found = Branch::forked(origin, base, false, owner);
+                        let found = Branch::forked(origin, base, owner);
                         drop(self.branches.insert(child, found))
                     }
                     // The fork whose child's ID it took recorded it first: the fork's child, as it
@@ -806,16 +784,16 @@ impl World {
                     Err(Error::IdTaken(_)) if restore.taken.is_some() => {
                         drop(self.branches.insert(child, restore.taken.take().unwrap()))
                     }
-                    // The point went, or the fork was given up on: its host deletes it.
+                    // The version went, or the fork was given up on: its host deletes it.
                     Err(Error::Deleted) => self.fail_restore(child, restore, base),
-                    Err(error) => self.violation(format!("forking {point:?}: {error}")),
+                    Err(error) => self.violation(format!("forking version {version}: {error}")),
                 }
             }
             Event::Usurped { child, owner, created, deleted } => match (created, deleted) {
                 // The root took the ID, and is gone.
                 (Ok(()), Some(Ok(()))) => {
                     self.usurped.remove(&child);
-                    let mut found = Branch::forked(None, None, false, owner);
+                    let mut found = Branch::forked(None, None, owner);
                     found.deleting = true;
                     drop(self.branches.insert(child, found))
                 }
@@ -828,14 +806,6 @@ impl World {
                     "a root taking the ID of the fork to {child} gave {created:?}, deleting it \
                      {deleted:?}",
                     child = Short(child)
-                )),
-            },
-            Event::PointTaken { point, result } => match result {
-                // A fork's child is no branch until it has its record, nor a point.
-                Err(Error::Point | Error::Deleted | Error::NoBranch) => {}
-                result => self.violation(format!(
-                    "a writer of point {point}: {result:?}",
-                    point = Short(point)
                 )),
             },
         }
@@ -1460,15 +1430,15 @@ impl World {
         });
     }
 
-    /// Forks a branch with a writer, as that writer's store's commit: to a point if `point`. Its
-    /// uploader is asked for the commit, as a fork waits for it to be uploaded.
-    fn fork(&mut self, point: bool) {
+    /// Forks a branch with a writer, as that writer's store's commit. Its uploader is asked for the
+    /// commit, as a fork waits for it to be uploaded.
+    fn fork(&mut self) {
         let Some((host, branch)) = self.ready() else { return };
         let (child, owner, tag) = (self.id(), self.id(), self.id());
         let session = &self.hosts[host].sessions[&branch];
         let (store, uploader, parent) =
             (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
-        let forked = Child { branch: sim_branch(child), owner, point };
+        let forked = Child { branch: sim_branch(child), owner };
         let before =
             store.last_commit().and_then(|before| store.commit_fork(forked).map(|_| before));
         let before = match before {
@@ -1483,7 +1453,7 @@ impl World {
         let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
         let made = Truth { branch, parent, extents, frees: Vec::new(), root: None, capacity: None };
         self.made(host, branch, tag, epoch, made);
-        self.branches.insert(child, Branch::forked(None, Some(tag), point, owner));
+        self.branches.insert(child, Branch::forked(None, Some(tag), owner));
         self.forking.insert(child, (branch, forked));
         let _ = uploader.ask(epoch, false);
     }
@@ -1496,7 +1466,7 @@ impl World {
         let candidates: Vec<u64> = self
             .branches
             .iter()
-            .filter(|(_, found)| !found.deleting && !found.point)
+            .filter(|(_, found)| !found.deleting)
             .filter(|(branch, _)| {
                 let open = self.hosts.iter().any(|host| host.sessions.contains_key(branch));
                 open == takeover
@@ -1595,53 +1565,16 @@ impl World {
             .find(|found| found.owner == child.owner)
     }
 
-    /// `child`, a fork of a point that failed, or a crash left, goes as its host's cleanup deletes
+    /// `child`, a fork of a version that failed, or a crash left, goes as its host's cleanup deletes
     /// it, or an operator does what no host held: which nothing relies on.
     fn fail_restore(&mut self, child: u64, restore: Restore, base: Option<u64>) {
-        let Restore { of, origin, owner, taken, .. } = restore;
-        let mut found = Branch::forked(Some(origin), base, false, owner);
+        let Restore { version, origin, owner, taken, .. } = restore;
+        let mut found = Branch::forked(Some(origin), base, owner);
         found.deleting = true;
         self.branches.insert(child, found);
-        let forked = Kind::Forking { origin, of };
+        let forked = Kind::Forking { origin, version };
         self.unforks.insert(child, Unfork { forked, owner, running: None, taken });
         self.spawn_unfork(child);
-    }
-
-    /// The points with records, as a host took its copy of one: deleted since, perhaps, which the
-    /// copy can't tell.
-    fn points(&self) -> Vec<(u64, Origin)> {
-        let direct = Direct(self.bucket.clone());
-        (self.branches.iter())
-            .filter(|(_, found)| found.point)
-            .filter_map(|(&point, _)| {
-                let record = block_on(branch::record(&direct, sim_branch(point))).ok()??;
-                Some((point, record.origin()?))
-            })
-            .collect()
-    }
-
-    /// A host restores a point, as many do at once: writing nothing but its child's record.
-    fn restore(&mut self) {
-        let points = self.points();
-        if points.is_empty() {
-            return;
-        }
-        let (point, origin) = points[self.rng.random_range(0..points.len())];
-        let (child, owner) = (self.id(), self.id());
-        // Or, now and then, a child's ID a guest named that a fork's guest named too, its
-        // segment not yet acknowledged: whichever's record comes first takes it (TASK-173).
-        let (child, taken) = match self.pending_forks() {
-            pending if !pending.is_empty() && self.rng.random_bool(0.5) => {
-                let child = pending[self.rng.random_range(0..pending.len())];
-                (child, self.branches.remove(&child))
-            }
-            _ => (child, None),
-        };
-        let host = self.rng.random_range(0..self.hosts.len());
-        let (of, base) = (Forked::Point(sim_branch(point)), self.branches[&point].base);
-        let restore = Restore { of, origin, base, host, owner, running: None, taken };
-        self.restores.insert(child, restore);
-        self.spawn_restore(child);
     }
 
     /// The children of forks at segments, made and not yet recorded, nor acknowledged, opened or
@@ -1650,7 +1583,7 @@ impl World {
         let direct = Direct(self.bucket.clone());
         let held = |branch| self.hosts.iter().any(|host| host.sessions.contains_key(branch));
         (self.branches.iter())
-            .filter(|(_, found)| found.origin.is_some() && !found.point && !found.deleting)
+            .filter(|(_, found)| found.origin.is_some() && !found.deleting)
             .filter(|(child, found)| found.acked.is_empty() && found.taken == 0 && !held(child))
             .filter(|&(&child, _)| {
                 matches!(block_on(branch::record(&direct, sim_branch(child))), Ok(None))
@@ -1661,39 +1594,17 @@ impl World {
 
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
     fn spawn_restore(&mut self, child: u64) {
-        let Restore { of, origin, owner, .. } = self.restores[&child];
+        let Restore { version, origin, owner, .. } = self.restores[&child];
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
             let child = sim_branch(child);
-            let result = match of {
-                Forked::Point(point) => {
-                    branch::fork_point(&*bucket, child, point, origin, owner).await
-                }
-                Forked::Version(id) => {
-                    let kms = extent_bucket::keys::testing::host_kms();
-                    let keys = extent_bucket::keys::Parents::Kms(&kms, None);
-                    branch::fork_version(&*bucket, child, id, origin, owner, keys).await
-                }
-            };
+            let kms = extent_bucket::keys::testing::host_kms();
+            let keys = extent_bucket::keys::Parents::Kms(&kms, None);
+            let result = branch::fork_version(&*bucket, child, version, origin, owner, keys).await;
             let child = child.id;
             events.borrow_mut().push(Event::Restored { child, result });
         });
         self.restores.get_mut(&child).unwrap().running = Some(running);
-    }
-
-    /// A host's stale copy of a point tries to write it, as `extent_bucket` allows no one to.
-    fn write_point(&mut self) {
-        let points = self.points();
-        if points.is_empty() {
-            return;
-        }
-        let (point, _) = points[self.rng.random_range(0..points.len())];
-        let holder = self.id();
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
-        self.spawn(async move {
-            let result = Writer::open(bucket, sim_branch(point), holder, holder).await.map(drop);
-            events.borrow_mut().push(Event::PointTaken { point, result });
-        });
     }
 
     /// cladefs: a branch's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
@@ -1780,7 +1691,9 @@ impl World {
     }
 
     /// cladefs: a host restores a version a branch's head names: its child's record, its reference,
-    /// the head read again, the fork made (`branch::fork_version`), as a point's restore.
+    /// the head read again, the fork made (`branch::fork_version`), as many hosts do at once. Or,
+    /// now and then, a child's ID a guest named that a fork's guest named too, its segment not yet
+    /// acknowledged: whichever's record comes first takes it (TASK-173).
     fn restore_version(&mut self) {
         let named = self.named_versions();
         if named.is_empty() {
@@ -1788,11 +1701,17 @@ impl World {
         }
         let (id, branch, at, tag) = named[self.rng.random_range(0..named.len())];
         let (child, owner) = (self.id(), self.id());
+        let (child, taken) = match self.pending_forks() {
+            pending if !pending.is_empty() && self.rng.random_bool(0.5) => {
+                let child = pending[self.rng.random_range(0..pending.len())];
+                (child, self.branches.remove(&child))
+            }
+            _ => (child, None),
+        };
         let host = self.rng.random_range(0..self.hosts.len());
         let origin = Origin { parent: sim_branch(branch), at };
-        let of = Forked::Version(id);
         let restore =
-            Restore { of, origin, base: Some(tag), host, owner, running: None, taken: None };
+            Restore { version: id, origin, base: Some(tag), host, owner, running: None, taken };
         self.restores.insert(child, restore);
         self.spawn_restore(child);
     }
@@ -1827,7 +1746,7 @@ impl World {
         if let Some((&child, _)) = stopped {
             return self.spawn_unfork(child);
         }
-        // What a crash left of a fork of a point: its handle opened, or deleted.
+        // What a crash left of a fork of a version: its handle opened, or deleted.
         let stopped = self.restores.iter().find(|(_, restore)| restore.running.is_none());
         if let Some((&child, _)) = stopped {
             // One that took a fork's child's ID is the fork's or the restore's by which record
@@ -1860,7 +1779,6 @@ impl World {
         let found = self.branches.get_mut(&child).unwrap();
         found.deleting = true;
         let forked = match found.origin {
-            Some(origin) if found.point => Kind::Point(origin),
             Some(origin) => Kind::Fork(origin),
             None => Kind::Own,
         };
@@ -1869,7 +1787,7 @@ impl World {
         self.spawn_unfork(child);
     }
 
-    /// Deletes what a crash left of the fork of a point to `child`.
+    /// Deletes what a crash left of the fork of a version to `child`.
     fn give_up_restore(&mut self, child: u64) {
         let restore = self.restores.remove(&child).unwrap();
         let base = restore.base;
@@ -2448,20 +2366,6 @@ impl World {
         let direct = Arc::new(Direct(self.bucket.clone()));
         let mut violations = Vec::new();
         let keys: BTreeSet<String> = self.bucket.keys().into_iter().collect();
-        // Nothing writes a point: no segment of its, no checkpoint, no head but its deletion's.
-        for (&id, _) in self.branches.iter().filter(|(_, branch)| branch.point) {
-            let written = |prefix: String| keys.iter().any(|key| key.starts_with(&prefix));
-            if written(layout::segments(sim_branch(id)))
-                || written(layout::checkpoints(sim_branch(id)))
-            {
-                violations.push(format!("point {id} was written", id = Short(id)));
-            }
-            if let Ok(Some(head)) = block_on(extent_bucket::head::get(&*direct, sim_branch(id)))
-                && head.epoch != layout::Head::FINAL
-            {
-                violations.push(format!("point {id} has a writer's head", id = Short(id)));
-            }
-        }
         for (&id, branch) in &self.branches {
             // A failed fork's, being deleted: no guest knows of it.
             if self.unforks.contains_key(&id) {
@@ -2486,13 +2390,6 @@ impl World {
                 violations.push(format!(
                     "branch {id}'s record says {:?}",
                     record.origin(),
-                    id = Short(id)
-                ));
-            }
-            if record.is_point() != branch.point {
-                violations.push(format!(
-                    "branch {id}'s record says {:?}",
-                    record.kind,
                     id = Short(id)
                 ));
             }
@@ -2831,7 +2728,7 @@ impl World {
         trace!("quiescing");
         self.faults = false;
         self.settle();
-        // Forks of points a crash stopped, or a lost disk left with no host: deleted.
+        // Forks of versions a crash stopped, or a lost disk left with no host: deleted.
         let stopped = self.restores.keys().copied().collect::<Vec<_>>();
         for child in stopped {
             self.give_up_restore(child);
@@ -2856,7 +2753,7 @@ impl World {
             for _ in 0..2 {
                 for branch in self.live() {
                     let held = self.hosts.iter().any(|host| host.sessions.contains_key(&branch));
-                    if held || self.branches[&branch].point {
+                    if held {
                         continue;
                     }
                     let host = self
@@ -2916,7 +2813,7 @@ impl World {
             self.sweep_alone();
         }
         // cladefs: then sweeps until two in a row delete and compact nothing: a dead cell's pass
-        // retires the references its parents' cells keep fork points for, which their next passes
+        // retires the references its parents' cells keep origins for, which their next passes
         // reclaim, a sweep a generation of a chain (TASK-395.4).
         let mut quiet = 0;
         for _ in 0..16 {

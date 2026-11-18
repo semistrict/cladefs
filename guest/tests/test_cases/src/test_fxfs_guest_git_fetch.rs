@@ -12,7 +12,7 @@
 //! In the consumer, its checkout at A, with a commit of its own, a change staged, one not and a
 //! file untracked:
 //!
-//! - `git fetch`, through `git-remote-fxfs`, points the checkout's alternates at the second
+//! - `git fetch`, through `git-remote-fxfs`, versions the checkout's alternates at the second
 //!   generation's objects, and receives exactly the objects C added, none the generation holds;
 //! - `git pull --ff-only` writes the files B and C changed, and no other, and the next `git status`
 //!   reads no other file than those and the one changed and unstaged;

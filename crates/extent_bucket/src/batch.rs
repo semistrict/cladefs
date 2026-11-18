@@ -254,8 +254,8 @@ impl SegmentBuilder {
     }
 
     /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the branch to
-    /// `child` at its end, of its owner, a point if it says so: a fork ends its segment, which its
-    /// child inherits the whole of (doc-7, Forks, Points).
+    /// `child` at its end, of its owner, a version if it says so: a fork ends its segment, which its
+    /// child inherits the whole of (doc-7, Forks, Versions).
     pub fn fork(self, child: Child, chain: &mut Chain) -> Unframed {
         self.close_ending(chain, vec![child], Vec::new())
     }

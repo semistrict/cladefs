@@ -523,7 +523,7 @@ in place of `MAP_SHARED` + `UFFDIO_WRITEPROTECT`.
   CoW the same way, so no tid bookkeeping for them.
 - Private pages are PTE-level anonymous CoW pages inside the file VMA: no mapping per private page,
   so they don't count against `vm.max_map_count` (the runs still do, TASK-12).
-- Costs and open points: private pages are anonymous memory of the VM process (charged to its
+- Costs and open versions: private pages are anonymous memory of the VM process (charged to its
   cgroup, consistent with the 2026-11-15 decision that memory windows reserve nothing in extentd),
   outside `PrivateMemory`, so counting and snapshotting them needs `/proc/pid/pagemap` or
   `PAGEMAP_SCAN`, or KVM dirty logging; the daemon must not punch or evict memfd pages under live
@@ -600,7 +600,7 @@ in place of `MAP_SHARED` + `UFFDIO_WRITEPROTECT`.
 
 Every fault on a restored VM's memory window logged (thread, access, write-protect flag, whether the
 page was installed), branch t456-measure, fxfs-guest-snapshot-memory-volume-dax: a 512 MiB VM
-snapshotted, its memory file imported into a memory volume, two VMs restored from its point one after
+snapshotted, its memory file imported into a memory volume, two VMs restored from its version one after
 the other, each running the case's guest workload (thaw, reads, writes of a few MiB, remount).
 
 | Faults on the memory window | VM a | VM b (restored after a) |

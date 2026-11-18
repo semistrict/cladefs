@@ -185,10 +185,10 @@ def mounted(host, path):
     for line in host.text("/proc/self/mountinfo").splitlines():
         mount, _, filesystem = line.partition(" - ")
         fields = mount.split()
-        point = re.sub(r"\\([0-7]{3})", lambda octal: chr(int(octal[1], 8)), fields[4])
-        if path == point or path.startswith(point.rstrip("/") + "/"):
-            if best is None or len(point) >= len(best[0]):
-                best = (point, fields[2], *filesystem.split()[:2])
+        version = re.sub(r"\\([0-7]{3})", lambda octal: chr(int(octal[1], 8)), fields[4])
+        if path == version or path.startswith(version.rstrip("/") + "/"):
+            if best is None or len(version) >= len(best[0]):
+                best = (version, fields[2], *filesystem.split()[:2])
     return best and best[1:]
 
 

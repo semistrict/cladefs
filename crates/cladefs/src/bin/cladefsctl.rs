@@ -54,7 +54,7 @@
 //! cladefsd opens it,
 //! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
-//! point, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
+//! version, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
 //! `place` places the store at DIR at the placement whose fencing token,
 //! its boot ID, is TOKEN (TASK-39.7): its writer takes its branch in object storage with that token
 //! from then on, which a later placement's exceeds, so that a placement cut off takes no branch
@@ -612,8 +612,8 @@ impl Command {
             Self::Fork { src, dst } => {
                 let store = ExtentStore::open(&src)?;
                 // A new cell of the store's tenant's (TASK-364).
-                let cell = cladefs::new_cell(store.branch().cell.tenant);
-                println!("{}", store.fork(&dst, cell)?);
+                let tenant = store.branch().cell.tenant;
+                println!("{}", store.fork(&dst, tenant)?);
             }
             Self::Version { dir, copy } => {
                 let store = ExtentStore::open(&dir)?;
@@ -642,7 +642,7 @@ impl Command {
             Self::Drop { dir } => ExtentStore::delete(&dir, None)?,
             Self::Resize { dir, capacity } => {
                 let store = ExtentStore::open(&dir)?;
-                // Opened, it says whether it is a point, whose capacity changes nowhere
+                // Opened, it says whether it is a version, whose capacity changes nowhere
                 // (TASK-160.10).
                 if capacity < store.info()?.capacity {
                     bail!(

@@ -376,7 +376,7 @@ pub(crate) fn prefixes<B: Bucket>(
 
 /// cladefs: the whole listing of `prefix` by delimiter, its pages one after another, each retried
 /// while it fails: for a level of a cell's, whose keys are few (its parents with references, a
-/// parent's fork points), never one of every cell's.
+/// parent's origins), never one of every cell's.
 pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listing {
     let mut whole = Listing::default();
     let mut after = None;

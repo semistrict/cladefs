@@ -330,7 +330,7 @@ pub(super) fn test_map_failed() {
 /// cladefs: a writer killed before its copy, its pages made private and dirty, of a file read in
 /// again from sealed extents (created here, it is a page-cache inode until then, doc-13,
 /// TASK-164.3): the kernel's copy stops at the signal, and the pages hold what they held,
-/// written back as it was. Played out with a pause point. On writable DAX, a writer killed
+/// written back as it was. Played out with a pause version. On writable DAX, a writer killed
 /// once its blocks moved left zeros where the file's data was (TASK-153.5). Fails if the copy
 /// went on after the signal, or if the private pages read as anything but the file's (zeros, a
 /// page not copied from its extent's).

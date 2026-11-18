@@ -59,7 +59,8 @@ type AttachRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The tenant.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, or 0 for a new cell of the tenant's.
+	// Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket and its branch's
+	// too, the bucket gives.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The fencing token of the placement to take the cell at, if any: as CreateStore's.
 	Token *uint64 `protobuf:"varint,3,opt,name=token,proto3,oneof" json:"token,omitempty"`

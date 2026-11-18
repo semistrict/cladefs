@@ -6,12 +6,12 @@
 //! to and frozen, is snapshotted, the VM goes, and the snapshot is restored (`Mode`):
 //!
 //! - **Zygote:** twice, as a zygote's children are, each into a store of its own, forked from the
-//!   snapshot's point; the host then checks each store holds what its guest wrote, and not the
+//!   snapshot's version; the host then checks each store holds what its guest wrote, and not the
 //!   other's.
 //! - **Suspend:** once, into the store the VM had, which nothing changed meanwhile but its size:
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
-//!   restore names a point and a store it doesn't have here, so it takes the point's branch from
+//!   restore names a version and a store it doesn't have here, so it takes the version's branch from
 //!   the bucket, and forks the store from it. The bucket is CLADEFSD_BUCKET's, if set, or one
 //!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
 //!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
@@ -19,9 +19,9 @@
 //!   `target`, on another host, which has nothing of the store, restores it from there, at the
 //!   same paths, the root filesystem's too, which the restored VM goes on reading.
 //! - **TenantMigrate:** as Migrate, for a tenant's VM (TASK-154): the tenant's VM process names no
-//!   branch, so that the host's VM manager makes the point in the tenant's directory first, of the
+//!   branch, so that the host's VM manager makes the version in the tenant's directory first, of the
 //!   branch the daemon says it is, and Firecracker restores through the tenant's socket. Several
-//!   times at once (TASK-158), each from a copy of the point of its own, as on hosts of their own,
+//!   times at once (TASK-158), each from a copy of the version of its own, as on hosts of their own,
 //!   for tenants of their own, and once from the snapshot's own copy, all at the same moment: each
 //!   copy a read-only ancestor, which no restore takes from the others.
 //!
@@ -35,7 +35,7 @@
 //! The host says how long each restore (`/snapshot/load`) took, which maps the window's mappings
 //! again. The mapping is writable, and every eighth page stored to through it before the freeze:
 //! frozen, the guest counts no private page nor dirty one, nor does the host hold one, which a
-//! snapshot's point requires. KVM's worker, writing for the guest's loads through the mapping,
+//! snapshot's version requires. KVM's worker, writing for the guest's loads through the mapping,
 //! once left the host a private page or two the guest never counted, and the snapshot was refused
 //! (TASK-191). Restored, the mapping and the file read what was stored.
 //!
@@ -51,7 +51,7 @@
 //!
 //! fxfs-guest-snapshot-memory-vdisk-dax: as fxfs-guest-snapshot-dax, the snapshot's memory then
 //! imported into a memory vdisk of a cell (`Memory::Vdisk`, TASK-456.3), its zero pages holes, a
-//! point made of it; the two VMs restored from the point, each its memory a fork of it, as a
+//! version made of it; the two VMs restored from the version, each its memory a fork of it, as a
 //! copy-on-write window the extent daemon serves, their pages shared but those each writes.
 //!
 //! The VMs run in Firecracker driven through its API. Their root filesystem's disk is read-only,
@@ -255,14 +255,14 @@ mod host {
     }
 
     /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
-    /// point isn't (TASK-154): the tenant granted `dir`, and the point's branch, as the daemon says
-    /// it, not as the snapshot does, made a store at `point` in it. Returns the tenant's socket,
+    /// version isn't (TASK-154): the tenant granted `dir`, and the version's branch, as the daemon says
+    /// it, not as the snapshot does, made a store at `version` in it. Returns the tenant's socket,
     /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
-    /// (TASK-364); the point stays the snapshot's tenant's, and the restores are the tenant's.
+    /// (TASK-364); the version stays the snapshot's tenant's, and the restores are the tenant's.
     fn take_for_tenant(
         cladefsd: &Path,
         snapshot: &Path,
-        point: &Path,
+        version: &Path,
         dir: &Path,
         tenant: u64,
     ) -> anyhow::Result<PathBuf> {
@@ -274,7 +274,7 @@ mod host {
         let id = |name: &str| std::env::var(name).ok().map(|id| id.parse()).transpose();
         let socket =
             control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?;
-        control.create_store(point, CAPACITY, branch, None)?;
+        control.create_store(version, CAPACITY, branch, None)?;
         Ok(socket)
     }
 
@@ -387,22 +387,22 @@ mod host {
                 )?;
                 source.kill()?;
             }
-            // The snapshot's memory as a memory vdisk's point, its file imported into it.
-            let memory_point = dir.join("memory-point");
+            // The snapshot's memory as a memory vdisk's version, its file imported into it.
+            let memory_point = dir.join("memory-version");
             if self.memory == Memory::Vdisk {
                 let size = std::fs::metadata(&memory)?.len();
                 let vdisk = MemoryVdisk::open(&cladefsd, &dir.join("memory-vdisk"), size)?;
                 let start = std::time::Instant::now();
                 vdisk.import(&memory)?;
                 eprintln!("memory: imported in {:?}", start.elapsed());
-                vdisk.point(&memory_point)?;
+                vdisk.version_copy(&memory_point)?;
                 vdisk.close()?;
                 // The import left the memory's pages in the daemon's memory: evicted, so that the
                 // restores page in what they read, the first of them at least.
                 crate::common::control(&cladefsd)?.shrink_memory(None, 0)?;
             }
             if phase == Some(Phase::Source) {
-                // For another host to restore: the point's branch is in the bucket.
+                // For another host to restore: the version's branch is in the bucket.
                 let bundle = bundle()?;
                 std::fs::create_dir_all(&bundle)?;
                 for name in BUNDLED {
@@ -431,7 +431,7 @@ mod host {
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),
-                            "point_on_host": elsewhere.join("point"),
+                            "copy_on_host": elsewhere.join("version"),
                             "cladefsd_socket": cladefsd,
                         }])
                     }
@@ -441,13 +441,13 @@ mod host {
                     ]),
                     Mode::TenantMigrate => {
                         std::fs::create_dir_all(&elsewhere)?;
-                        let point = elsewhere.join("point");
+                        let version = elsewhere.join("version");
                         let socket =
-                            take_for_tenant(&cladefsd, &snapshot, &point, &elsewhere, id)?;
+                            take_for_tenant(&cladefsd, &snapshot, &version, &elsewhere, id)?;
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),
-                            "point_on_host": point,
+                            "copy_on_host": version,
                             "cladefsd_socket": socket,
                         }])
                     }
@@ -468,7 +468,7 @@ mod host {
                         "backend_path": dir.join(format!("memory-{name}")),
                     });
                     load["memory_vdisk"] = serde_json::json!({
-                        "point_on_host": memory_point,
+                        "copy_on_host": memory_point,
                         "cladefsd_socket": cladefsd,
                     });
                 }
@@ -544,7 +544,7 @@ mod host {
                 );
                 return Ok(());
             }
-            // All at once: no restore of one point waits for another's. cladefs: each timed, as it
+            // All at once: no restore of one version waits for another's. cladefs: each timed, as it
             // maps the window's mappings again before the VM resumes (TASK-92.14).
             std::thread::scope(|scope| {
                 let loading: Vec<_> = (restored.iter().zip(&loads).zip(self.restores(phase)))
@@ -622,16 +622,16 @@ mod host {
                 Mode::Suspend => vec![(restores[0], store(&test_setup.tmp_dir, "source"))],
                 Mode::Migrate | Mode::TenantMigrate => vec![],
             };
-            // The daemon keeps the snapshot's point open for the restores after these (TASK-92.5),
+            // The daemon keeps the snapshot's version open for the restores after these (TASK-92.5),
             // and with it the directory of the stores forked from it, which this process may not
-            // open meanwhile: a look at the point through the daemon's control API, which works
-            // on the point alone, closes it first.
+            // open meanwhile: a look at the version through the daemon's control API, which works
+            // on the version alone, closes it first.
             if !stores.is_empty() {
                 let cladefsd = std::env::var_os("CLADEFSD").expect("CLADEFSD");
-                let mut point = test_setup.tmp_dir.join("snapshot").into_os_string();
-                point.push(".extent-extents");
+                let mut version = test_setup.tmp_dir.join("snapshot").into_os_string();
+                version.push(".extent-extents");
                 let control = crate::common::control(Path::new(&cladefsd)).expect("control API");
-                control.stat_store(Path::new(&point)).expect("the snapshot's point");
+                control.stat_store(Path::new(&version)).expect("the snapshot's version");
             }
             for (name, path) in stores {
                 let storage = Storage::open(path).expect("open store");

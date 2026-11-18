@@ -95,10 +95,10 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 /// Opens the store at the path the payload holds, creating it with `args[0]` bytes of capacity if
 /// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK_FROM`], forking it from the store at
 /// the path after the payload's first NUL byte if it doesn't exist (TASK-39.1: a VM restored from a
-/// snapshot, whose store point that is), or is a fork that failed, whose deletion it finishes first
-/// (TASK-79.84). That point, if it doesn't exist either, is taken from the daemon's bucket: a store
+/// snapshot, whose store version that is), or is a fork that failed, whose deletion it finishes first
+/// (TASK-79.84). That version, if it doesn't exist either, is taken from the daemon's bucket: a store
 /// of branch `args[1]`, of `args[0]` bytes, as on another host than the snapshot's: `ENOENT` for a
-/// tenant's VM process, whose `args[1]` is ignored, its VM manager making the point first
+/// tenant's VM process, whose `args[1]` is ignored, its VM manager making the version first
 /// (TASK-154). The reply's `args[0]` is its branch, and it carries the kernel's physical memory.
 /// cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog doc-8), as of its latest
 /// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
@@ -151,8 +151,8 @@ pub(crate) const ACK: u32 = 12;
 /// pages with the store's. cladefs: the one vdisk of a new cell of the store's tenant's, its ID the
 /// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
 /// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
-/// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a point
-/// ([`ExtentStore::point`](crate::ExtentStore::point)): what a snapshot of the VM is taken at,
+/// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a version
+/// ([`ExtentStore::version`](crate::ExtentStore::version)): what a snapshot of the VM is taken at,
 /// which any number of hosts fork at once, and none writes.
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it

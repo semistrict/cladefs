@@ -252,7 +252,7 @@ impl<B: Bucket> Writer<B> {
         Taker { holder, token, remembered }: Taker,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
-        // Before the head: a point has none, and nothing writes it, whoever asks.
+        // Before the head: a version has none, and nothing writes it, whoever asks.
         record.writable()?;
         let held = match read {
             Some(read) => head::take_from(&*bucket, branch, read, holder, token).await?,
@@ -586,7 +586,7 @@ impl<B: Bucket> Writer<B> {
     }
 
     /// cladefs: shares the version `id`, if `shared`, or no longer, if the branch's head names it:
-    /// forks of it may be of other tenants' cells while it is (doc-7, Shared points). Fails with
+    /// forks of it may be of other tenants' cells while it is (doc-7, Shared versions). Fails with
     /// [`Error::NoBranch`] if the head names no such version.
     pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
         if self.held.lock().await.head.version(id).is_none() {

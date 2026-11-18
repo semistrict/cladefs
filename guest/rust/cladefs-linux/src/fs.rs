@@ -272,7 +272,7 @@ impl Filesystem {
     /// cladefs: freezes the filesystem, each of whose volumes the VFS has synced and stopped the
     /// writers of (fsfreeze): holds its journal's compactions, syncs, holds its commits, journals
     /// what committed meanwhile, and closes the device to writes, frees and commits, sealing what
-    /// is open: the point a snapshot of the VM is taken at, which nothing changes until it thaws
+    /// is open: the moment a snapshot of the VM is taken at, which nothing changes until it thaws
     /// (TASK-39.1). Its other background work, freeing and unlinking, waits at the device or to
     /// commit. One that writes nothing, opened read-only, has none of those to stop: it closes and
     /// tells the device alone (TASK-202).

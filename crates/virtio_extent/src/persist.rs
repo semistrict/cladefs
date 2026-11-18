@@ -8,9 +8,9 @@
 //!
 //! The protocol (doc-4, Snapshots): the guest's filesystem is frozen, nothing open on the device
 //! (`VIRTIO_EXTENT_T_FREEZE`), and the VM paused, its requests in flight served; the device forks
-//! its store then, to the point the snapshot holds of it, and records the window's mappings
+//! its store then, to the version the snapshot holds of it, and records the window's mappings
 //! ([`Device::take_snapshot`](crate::Device::take_snapshot)). A VM restored from the snapshot opens
-//! a store of its own, forked from that point if it doesn't exist (each restore its own, given
+//! a store of its own, forked from that version if it doesn't exist (each restore its own, given
 //! its path as it loads), and maps the window as it was, where it was in guest memory
 //! ([`Device::restore`](crate::Device::restore)); its guest learns its store's branch as its
 //! filesystem thaws.
@@ -33,10 +33,10 @@ pub struct State {
     pub config: ConfigState,
     /// Where the window was in guest memory, if the device has one.
     pub window_addr: Option<u64>,
-    /// The point the snapshot holds of the store: a fork of it.
-    pub point: PathBuf,
-    /// The point's branch, which a restore on another host takes from the extent daemon's bucket.
-    pub point_branch: u64,
+    /// The copy of the version of the store's cell the snapshot holds, which restores fork.
+    pub copy: PathBuf,
+    /// The cell's branch, which a restore on another host makes its copy of the version of.
+    pub branch: u64,
     /// The window's mappings.
     pub mappings: Vec<MappingState>,
     /// Whether the guest's filesystem was frozen: it is, as a snapshot is taken.
@@ -149,22 +149,22 @@ impl From<&MappingState> for cladefs::WindowMapping {
     }
 }
 
-/// What a snapshot of the device holds of its store (TASK-39.1): the point it was taken at, a fork
+/// What a snapshot of the device holds of its store (TASK-39.1): the version it was taken at, a fork
 /// of the store, which each VM restored from it forks again, and the window's mappings then, which
 /// the restored VM's window maps again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    pub point: PathBuf,
-    /// The point's branch: a restore on another host takes it from the extent daemon's bucket.
-    pub point_branch: u64,
+    pub copy: PathBuf,
+    /// The cell's branch, which a restore on another host makes its copy of the version of.
+    pub branch: u64,
     pub mappings: Vec<cladefs::WindowMapping>,
 }
 
 impl From<&State> for Snapshot {
     fn from(state: &State) -> Self {
         Self {
-            point: state.point.clone(),
-            point_branch: state.point_branch,
+            copy: state.copy.clone(),
+            branch: state.branch,
             mappings: state.mappings.iter().map(cladefs::WindowMapping::from).collect(),
         }
     }

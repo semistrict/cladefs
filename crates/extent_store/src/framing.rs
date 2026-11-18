@@ -342,7 +342,7 @@ static AHEAD: Ahead =
 /// their own priority, and holds up no framing. Packing ahead on the framer's thread, then on
 /// threads of the framer's priority, all the host's CPUs' worth, while the guests wrote and
 /// committed, took from the daemon's flushes (sandboxes short mode: durable lag within 50 ms down
-/// by 10-30 points). Skipped, if too many wait already ([`WAITING_MOST`]).
+/// by 10-30 versions). Skipped, if too many wait already ([`WAITING_MOST`]).
 pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
     let mut waiting = AHEAD.waiting.lock().unwrap();
     if waiting.0.len() >= WAITING_MOST {

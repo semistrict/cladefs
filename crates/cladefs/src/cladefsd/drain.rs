@@ -20,7 +20,7 @@
 //! 3. It waits for the connections to be gone and the control API's calls in flight to be done
 //!    ([`Work`]); closes its FUSE mount of cells, if it has one, unmounted lazily, its vdisks
 //!    written back and their stores closed once nothing uses it ([`super::mount::close`],
-//!    TASK-475.2); closes the points it keeps open for forks; and waits for every store's uploader
+//!    TASK-475.2); closes the versions it keeps open for forks; and waits for every store's uploader
 //!    to have uploaded what its store made durable, and stopped, as each does as its store closes
 //!    ([`crate::bucket::uploaders`]).
 //!

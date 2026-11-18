@@ -8,7 +8,7 @@
 //! their stores left:
 //!
 //! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a branch
-//!   that wrote anything, but points' and deleted ones', has a DEK; every framed object (segments,
+//!   that wrote anything, but versions' and deleted ones', has a DEK; every framed object (segments,
 //!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
 //! - **The stores' directories**: no framed file in the clear, no segment's log headed so
@@ -268,7 +268,6 @@ async fn bucket(
         report.records += 1;
         let Some(record) = extent_bucket::branch::record(&store, branch).await? else { continue };
         if record.deks.is_empty()
-            && !record.is_point()
             && !record.deleted
             && written.contains(&branch)
         {

@@ -444,14 +444,14 @@ impl DaemonExtentStore {
         Ok(Forked::from_args(reply.header.args).branch)
     }
 
-    /// Makes a point of the store ([`ExtentStore::point`](crate::ExtentStore::point)), at `path`,
-    /// and returns its branch's ID, once nothing is open
+    /// Makes a version of the store's cell and a copy of it at `path`
+    /// ([`ExtentStore::copy_version`](crate::ExtentStore::copy_version)), once nothing is open
     /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), as with its guest's
-    /// filesystem frozen, `EBUSY` otherwise: what a snapshot of the VM is taken at, which any
-    /// number of hosts fork at once, and none writes.
-    pub fn fork_quiescent(&self, path: &Path) -> Result<u64> {
-        let point = Request::Fork { path: path.to_owned(), quiescent: true };
-        let reply = self.client.request_blocking(&point)?;
+    /// filesystem frozen, `EBUSY` otherwise, and returns the cell's branch: what a VM snapshot
+    /// holds, which any number of hosts fork at once, and none writes.
+    pub fn version_copy(&self, path: &Path) -> Result<u64> {
+        let version = Request::Fork { path: path.to_owned(), quiescent: true };
+        let reply = self.client.request_blocking(&version)?;
         Ok(Forked::from_args(reply.header.args).branch)
     }
 
@@ -767,8 +767,8 @@ impl DaemonConnection {
     }
 
     /// The store at `store`, forked from the store at `from` if it doesn't exist: of a VM restored
-    /// from a snapshot, whose store point `from` is (TASK-39.1). cladefs: the daemon opens it once
-    /// for the restores of one snapshot, and keeps it open for them (TASK-92.5). A point that
+    /// from a snapshot, whose store version `from` is (TASK-39.1). cladefs: the daemon opens it once
+    /// for the restores of one snapshot, and keeps it open for them (TASK-92.5). A version that
     /// doesn't exist is taken from the daemon's bucket, a store of its branch, `from_branch`, of
     /// `capacity` bytes: the snapshot's restored on another host.
     pub fn open_forked(

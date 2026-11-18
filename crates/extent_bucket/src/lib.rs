@@ -114,10 +114,6 @@ pub enum Error {
     Stale,
     #[error("no such branch")]
     NoBranch,
-    /// The branch is a point, which no writer takes: a point's state never changes
-    /// ([`record::Kind::Point`]).
-    #[error("the branch is a point, which nothing writes")]
-    Point,
     /// A fork's child has a record naming another origin: another branch has the ID the fork's
     /// guest gave it, which that branch took while the fork was made (TASK-79.82). The fork failed;
     /// its parent's branch is as sound as before.
@@ -167,13 +163,10 @@ pub enum Error {
     /// cladefs: the cell has another branch, this one: a cell has one (doc-20).
     #[error("the cell has branch {0:x}")]
     CellHasBranch(u64),
-    /// cladefs: a fork of the point to a branch of another tenant's cell than the point's, which the
-    /// point's record doesn't say is shared ([`record::Record::shared`], TASK-395.7).
-    #[error("branch {0} is a point of another tenant's, not shared")]
+    /// cladefs: a fork of a version to a branch of another tenant's cell than the version's
+    /// branch's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
+    #[error("branch {0}'s version is another tenant's, not shared")]
     NotShared(layout::Branch),
-    /// cladefs: what only a point is, shared, asked of a branch that is none ([`branch::share`]).
-    #[error("branch {0} is no point")]
-    NotPoint(layout::Branch),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]
@@ -261,18 +254,15 @@ pub struct Rules {
     /// segment, which reading it needs; and that it is a claim, which that proves no more than.
     /// TLA+: `specs/bucket/mutations/NoForkClaimsLanded.cfg`.
     pub fork_claims_landed: bool,
-    /// No writer takes a point (doc-7, Points).
-    /// TLA+: `specs/bucket/mutations/NoPointsTakeNoWriter.cfg`.
-    pub points_take_no_writer: bool,
-    /// A fork of a point reads the point's record after it creates its own: a point deleted before
-    /// that fails it, its pass of the collector not having seen the child.
-    /// TLA+: `specs/bucket/mutations/NoForksCheckPoints.cfg`.
-    pub forks_check_points: bool,
-    /// A fork of a point's record says it is being made until that read found the point live, so
-    /// that what never was made holds up no pass of the collector, whatever it names.
+    /// A fork of a version reads its branch's head after it creates its own record: a version
+    /// dropped before that fails it, its pass of the collector not having seen the child.
+    /// TLA+: `specs/bucket/mutations/NoForksCheckVersions.cfg`.
+    pub forks_check_versions: bool,
+    /// A fork of a version's record says it is being made until that read found the version named,
+    /// so that what never was made holds up no pass of the collector, whatever it names.
     /// TLA+: `specs/bucket/mutations/NoForksPending.cfg`.
     pub forks_pending: bool,
-    /// The collector gives up on the forks being made of points deleted.
+    /// The collector gives up on the forks being made of versions dropped.
     /// TLA+: `specs/bucket/mutations/NoCollectorAbandons.cfg`.
     pub collector_abandons: bool,
     /// The collector lists the records again after it read the branches' states: a state it read
@@ -328,9 +318,9 @@ pub struct Rules {
     /// what the log holds, and it diverged (doc-14, Opening a store).
     /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
     pub wal_follows: bool,
-    /// cladefs: a fork of a branch to a child in another cell, a writable fork or a point's clone,
+    /// cladefs: a fork of a branch to a child in another cell, a writable fork or a version's clone,
     /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
-    /// keep the parent's state at the fork point: a pass lists nothing of the child's cell, and,
+    /// keep the parent's state at the origin: a pass lists nothing of the child's cell, and,
     /// the parent deleted, would delete what the child inherits (TASK-395.3).
     /// TLA+: `specs/bucket/mutations/NoReferences.cfg`.
     pub references: bool,
@@ -340,11 +330,10 @@ pub struct Rules {
     /// no reference.
     /// TLA+: `specs/bucket/mutations/NoReferencesFirst.cfg`.
     pub references_first: bool,
-    /// A point's clone writes its reference before it reads the point's record (and after its own,
-    /// [`Rules::clones_record_first`]), whatever its cell, its origin's own too
-    /// ([`branch::fork_point`]): one that read the
-    /// point live then wrote it before the point's deletion, which a pass reading the point
-    /// deleted, or finding its reference retired, read after.
+    /// A version's clone writes its reference before it reads its branch's head (and after its own
+    /// record, [`Rules::clones_record_first`]), whatever its cell, its origin's own too
+    /// ([`branch::fork_version`]): one that read the version named then wrote it before the
+    /// version's drop, which a pass reading the version dropped read after.
     /// TLA+: `specs/bucket/mutations/NoForksReferFirst.cfg`.
     pub clones_refer_first: bool,
     /// A reference is retired, by a pass over its child's cell, only once that cell holds no live
@@ -353,17 +342,17 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoReferencesHeld.cfg`.
     pub references_held: bool,
     /// A pass lists its cell's references after it read the states, as it lists the records
-    /// again, not with its candidates: listed then, it misses a clone's of a point a checkpoint
-    /// of the point's origin dropped since (TASK-395.4).
+    /// again, not with its candidates: listed then, it misses a clone's of a version a checkpoint
+    /// of the version's branch dropped since (TASK-395.4).
     /// TLA+: `specs/bucket/mutations/NoReferencesRelisted.cfg`.
     pub references_relisted: bool,
-    /// A pass keeps, of the parent's state at a referenced fork point, what recovering it reads,
+    /// A pass keeps, of the parent's state at a referenced origin, what recovering it reads,
     /// not only the objects holding its extents: a child with no checkpoint of its own recovers
     /// through it (TASK-395.4).
     /// TLA+: `specs/bucket/mutations/NoForkPointsKept.cfg`.
-    pub fork_points_kept: bool,
-    /// A point's clone creates its record, saying it is being made, before its reference
-    /// ([`branch::fork_point`]): a reference then always has a record naming its origin, by which
+    pub origins_kept: bool,
+    /// A version's clone creates its record, saying it is being made, before its reference
+    /// ([`branch::fork_version`]): a reference then always has a record naming its origin, by which
     /// its child's cell's pass retires it, the clone's host dying or not; and a clone refused by a
     /// record there writes none. The other way round, a host dying between the two leaves a
     /// reference no record names, which no pass retires (TASK-395.10).
@@ -406,22 +395,22 @@ pub struct Rules {
     /// writer records it, and the deletion, going on, marks it deleted under that writer.
     /// TLA+: `specs/bucket/mutations/NoFencesKept.cfg`.
     pub fences_kept: bool,
-    /// cladefs: a fork of a point resumed by another than its host, a store opening its child,
-    /// writes its reference before it makes it, as its host does ([`branch::resume_point_fork`]).
+    /// cladefs: a fork of a version resumed by another than its host, a store opening its child,
+    /// writes its reference before it makes it, as its host does ([`branch::resume_version_fork`]).
     /// Without it, as a test shows it needed, a host dying between the fork's record and its
-    /// reference leaves a clone made of no reference, whose origin's state at the fork point no
-    /// pass keeps once the point is gone.
+    /// reference leaves a clone made of no reference, whose origin's state at the origin no
+    /// pass keeps once the version is gone.
     /// TLA+: `specs/bucket/mutations/NoResumesRefer.cfg`.
     pub resumes_refer: bool,
-    /// cladefs: a fork of a point resumed says so in its record ([`record::Record::resumed`]), with
+    /// cladefs: a fork of a version resumed says so in its record ([`record::Record::resumed`]), with
     /// a condition, before its reference is written again, and a clone made so retires its
     /// reference marked: its host, slow, may write it after the clone was made, deleted and its
     /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference
-    /// stands for good, keeping its base's state at the fork point (TASK-455's review).
+    /// stands for good, keeping its base's state at the origin (TASK-455's review).
     /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
     pub resumes_marked: bool,
     /// cladefs: a pass keeps, for each version a live branch's head names, the branch's whole state
-    /// at it and what recovering it reads, as for a fork point (doc-18, TASK-476). Without it, as a
+    /// at it and what recovering it reads, as for an origin (doc-18, TASK-476). Without it, as a
     /// test shows it needed, a checkpoint since covers the version's segments, which the pass
     /// deletes, and the version recovers not.
     /// TLA+: `specs/bucket/mutations/NoVersionsKept.cfg`.
@@ -453,8 +442,7 @@ impl Rules {
         delete_tokens: true,
         fork_claims_ids: true,
         fork_claims_landed: true,
-        points_take_no_writer: true,
-        forks_check_points: true,
+        forks_check_versions: true,
         forks_pending: true,
         collector_abandons: true,
         records_relisted: true,
@@ -471,7 +459,7 @@ impl Rules {
         clones_refer_first: true,
         references_held: true,
         references_relisted: true,
-        fork_points_kept: true,
+        origins_kept: true,
         clones_record_first: true,
         references_taken_back: true,
         retirements_marked: true,

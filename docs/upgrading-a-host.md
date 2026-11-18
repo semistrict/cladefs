@@ -56,7 +56,7 @@ otherwise. A store or bucket format change means its stores are made again, not 
    - its VM sockets refuse connections, and its control API refuses calls with `UNAVAILABLE`;
    - any VM still connected is cut off and exits 158, its last commits made local and its store
      closed;
-   - the points it kept open for forks are closed;
+   - the versions it kept open for forks are closed;
    - every store's uploader uploads what its store made local, and stops.
 
    It does all of that within `CLADEFSD_DRAIN` seconds (60 by default). If it finishes, it logs

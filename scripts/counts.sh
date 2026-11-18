@@ -16,7 +16,7 @@
 # - fork-memory: the heap an open, idle fork holds, by its base's extents (TASK-443.2,
 #   `bucket::tests::bench_fork_extent_memory`), counted by the test binary's allocator, at
 #   CLADEFS_COUNTS_FORK_EXTENTS extents (1024,32768) and CLADEFS_COUNTS_FORKS forks (20: forks of
-#   a point cost the same from the first, 100 of 300,000 extents would hold 12 GB);
+#   a version cost the same from the first, 100 of 300,000 extents would hold 12 GB);
 # - gc-deleted and gc-clones: the requests cladefs-gc's sweeps make of 100 dead cells, and of 100
 #   deleted clones of a base, and its passes over that base (TASK-443.4, scripts/gc-sweep.sh,
 #   this tree's, building TREE's cladefs-gc into WORK).

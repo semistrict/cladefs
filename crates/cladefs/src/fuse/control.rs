@@ -128,7 +128,7 @@ fn mount_cell(
     (of, capacity): (BranchOf, u64),
     token: Option<u64>,
 ) -> Result<Filesystem, Error> {
-    let new = matches!(of, BranchOf::New(_));
+    let new = matches!(of, BranchOf::New(_) | BranchOf::Cell(_));
     // Its tenant's directory, made once for all its cells.
     if let Some(tenant) = path.parent() {
         std::fs::create_dir_all(tenant)
@@ -174,7 +174,7 @@ impl Control {
             return Err(Errno::ENOTCONN.into());
         };
         let of = match (new, object.branch, object.kind) {
-            (true, ..) => (BranchOf::New(cell), capacity),
+            (true, ..) => (BranchOf::Cell(cell), capacity),
             (false, Some(branch), Some(Kind::Fxfs)) => {
                 (BranchOf::Taken(Branch { cell, id: branch }), TAKEN_CAPACITY)
             }
@@ -212,8 +212,15 @@ impl proto::mount_server::Mount for Control {
         if make && capacity == 0 {
             return Err(failed(Errno::EINVAL.into()));
         }
+        // A new cell's ID is the bucket's to give, its branch's too (TASK-364).
         let cell = match cell {
-            0 => crate::host_store::new_cell(tenant),
+            0 => {
+                let url = self.stores.bucket.clone();
+                let made = tokio::task::spawn_blocking(move || {
+                    crate::host_store::new_cell(&url, tenant).map_err(Error::new)
+                });
+                made.await.map_err(|err| failed(Error::new(err)))?.map_err(failed)?
+            }
             id => Cell { tenant, id },
         };
         reserve(&self.cells, (cell, Attaching::Busy), |found| match found {

@@ -287,7 +287,7 @@ where
 
 /// The requests under Shuttle: a VM's connection opening a store, committing, its guest
 /// answering shrinks, and closing once its manager's resizes are done; a fork of the store at any
-/// point; and the VM restored, opening the store as the first lets it go: every interleaving of
+/// version; and the VM restored, opening the store as the first lets it go: every interleaving of
 /// them the scheduler chooses. Invariants: the store is open once at a time, by a connection or
 /// here; the resizes end with the store's capacity and its guest's view agreeing, the guest never
 /// shrunk below what it holds without agreeing; no fork misses a commit made before it. Each rule
@@ -358,7 +358,7 @@ mod shuttle_tests {
         Here(Arc<Model>, Option<ModelHold<'a>>),
     }
 
-    /// The table of the store, which holds no store open for connections, nor points.
+    /// The table of the store, which holds no store open for connections, nor versions.
     type Table = StoreTable<Conn, (), ()>;
     type ModelHold<'a> = Hold<'a, Conn, (), ()>;
 

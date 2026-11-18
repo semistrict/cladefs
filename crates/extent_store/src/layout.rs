@@ -67,7 +67,7 @@ pub(crate) struct StoreFile {
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
     /// cladefs: the version of its branch it is a copy of, if it is one: its branch's state at the
-    /// version, which nothing writes, as a point's copy (doc-18, TASK-476).
+    /// version, which nothing writes, as a version's copy (doc-18, TASK-476).
     pub version: Option<u64>,
 }
 

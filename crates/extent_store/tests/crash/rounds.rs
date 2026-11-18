@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The crash tests' rounds: a store's random workloads, crashing at random points, and what it
+//! The crash tests' rounds: a store's random workloads, crashing at random versions, and what it
 //! recovers checked; each a function of its seed and of the directory it is given, as long as the
 //! directory's file system fails, and its crashes keep, what the store's calls decide alone. The
 //! crash tests run them in a serial directory ([`MemDir::serial`]); the Shuttle tests with the
@@ -226,7 +226,7 @@ fn contents(store: &Store<MemDir>) -> Model {
 }
 
 /// Round `round`'s first crash: a store made in `dir`, a random workload run on it until its file
-/// system fails, from a random point on, as the host crashes, and the directory that crash leaves.
+/// system fails, from a random version on, as the host crashes, and the directory that crash leaves.
 /// Returns that, what each commit began with, the last made durable, and the round's RNG, to carry
 /// on.
 fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng) {

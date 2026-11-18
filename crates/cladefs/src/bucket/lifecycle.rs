@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 //! TASK-443.5, TASK-443.14: what a sandbox's life asks of its bucket, by phase: a restore (a fork
-//! of a point and the fork's first open) on a host that never saw the point and on one that has it
-//! open, a small write and its commit, a clean close, a reopen, a snapshot (a point) of the written
+//! of a version and the fork's first open) on a host that never saw the version and on one that has it
+//! open, a small write and its commit, a clean close, a reopen, a snapshot (a version) of the written
 //! fork, and its deletion, on a base of as many extents as asked for. A measurement, not a check.
 //!
 //! The bucket is one in memory behind [`Recording`], which notes every request that reaches the
@@ -21,7 +21,7 @@
 
 use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::extents::Opening;
-use crate::host_store::{self, DEFAULT_TENANT, new_cell};
+use crate::host_store::{self, DEFAULT_TENANT};
 use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
 use base32_id::Padded;
 use extent_bucket::faults::{Fault, Faults, Faulty};
@@ -491,7 +491,7 @@ fn based(
 fn host(bucket: &Arc<ObjectBucket>) {
     unsafe { std::env::set_var("CLADEFSD_BUCKET", url_of(bucket)) };
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_store::new_branch(bucket, new_cell(DEFAULT_TENANT)).unwrap();
+    host_store::new_branch(bucket, DEFAULT_TENANT).unwrap();
 }
 
 /// A bucket's objects in memory.
@@ -535,12 +535,11 @@ fn lifecycle(extents: u64, latency: Duration) {
     // A restore on a host that never saw the version: a copy of it made, as the daemon's
     // `CreateStore` with a version does, opened, forked, the fork opened.
     let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    let unwritten =
-        run.phase("cold fork", || taken.fork(at("cold"), new_cell(DEFAULT_TENANT)).unwrap());
+    let unwritten = run.phase("cold fork", || taken.fork(at("cold"), DEFAULT_TENANT).unwrap());
     run.names.name(unwritten, "cold-fork");
     let cold = run.phase("cold fork-open", || open(&at("cold")));
     // And on one that has it open, as the daemon keeps a copy open for the restores after.
-    let fork = run.phase("warm fork", || taken.fork(at("vm"), new_cell(DEFAULT_TENANT)).unwrap());
+    let fork = run.phase("warm fork", || taken.fork(at("vm"), DEFAULT_TENANT).unwrap());
     run.names.name(fork, "fork");
     let vm = run.phase("warm fork-open", || open(&at("vm")));
 
@@ -554,7 +553,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     let deleting = |name: &str| host_store::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
     run.phase("delete", || deleting("vm"));
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
-    let short = taken.fork(at("short"), new_cell(DEFAULT_TENANT)).unwrap();
+    let short = taken.fork(at("short"), DEFAULT_TENANT).unwrap();
     run.names.name(short, "short");
     let lived = open(&at("short"));
     write_and_commit(&lived);
@@ -588,7 +587,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.late(false);
     let restore = |run: &Run, name: &str| {
         let (_, asked, events) = run.asked(|| {
-            taken.fork(at(name), new_cell(DEFAULT_TENANT)).unwrap();
+            taken.fork(at(name), DEFAULT_TENANT).unwrap();
             drop(open(&at(name)));
         });
         let checkpoints = events.iter().filter(|event| {
@@ -607,7 +606,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     said(0, restore(&run, "restore-0"));
     for resumes in 1..=RESUMES {
         let name = format!("resumed-{resumes}");
-        taken.fork(at(&name), new_cell(DEFAULT_TENANT)).unwrap();
+        taken.fork(at(&name), DEFAULT_TENANT).unwrap();
         let resumed = open(&at(&name));
         write_and_commit(&resumed);
         drop(resumed);
@@ -632,21 +631,21 @@ fn bucket_lifecycle_by_phase() {
     }
 }
 
-/// TASK-449: a restore, a fork of a point and its child's first open, asks the bucket what the
+/// TASK-449: a restore, a fork of a version and its child's first open, asks the bucket what the
 /// protocol needs, at once where it can: a fork, its child's record created, then its reference and
-/// its cell held at once, the point's record read, the record made from the version its create left
+/// its cell held at once, the head naming the version read, the record made from the version its create left
 /// (4 round trips, one after another); the child's open, its head taken from none, then its record
 /// and its cell read again at once (2), all else known from the fork (`extent_bucket::known`; the
 /// cell read once the head is taken, as its holding from what the fork left writes nothing:
 /// `restores_refused_to_placements_superseded_since_their_forks`). 8 requests in 6 round trips,
-/// where they were 14 in 13. On a host that never saw the point, its store taken first, opened
+/// where they were 14 in 13. On a host that never saw the version, its store taken first, opened
 /// once, its record read as the take finds it, at once with the collector's marking looked at, then
-/// the base's head and the checkpoint the point names (3): 12 in 9, where they were 25 in 21.
+/// the base's head and the checkpoint the version names (3): 12 in 9, where they were 25 in 21.
 /// Requests are counted as they reach the object store, round trips as the longest chain of them
 /// each begun once the one before it was answered.
 ///
 /// cladefs: those counts were a clear restore's. Every restore is encrypted since TASK-411.28, and
-/// asks more, pinned here as it is: the point's open reads the point's cell and the base's record
+/// asks more, pinned here as it is: the version's open reads the version's cell and the base's record
 /// and cell, for the keys its recovery unwraps (7 requests in 6); the fork gives the child its keys
 /// after its record is made, the cell made with a KEK of the host's pool and the record given its
 /// DEKs (7 in 6); and the child's open holds the cell then, reading it twice and the base's record
@@ -660,9 +659,9 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     let at = |name: &str| made.at(name);
     run.late(true);
     let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
-    run.phase("cold fork", || taken.fork(at("cold"), new_cell(DEFAULT_TENANT)).unwrap());
+    run.phase("cold fork", || taken.fork(at("cold"), DEFAULT_TENANT).unwrap());
     let cold = run.phase("cold fork-open", || open(&at("cold")));
-    run.phase("warm fork", || taken.fork(at("vm"), new_cell(DEFAULT_TENANT)).unwrap());
+    run.phase("warm fork", || taken.fork(at("vm"), DEFAULT_TENANT).unwrap());
     let vm = run.phase("warm fork-open", || open(&at("vm")));
     let costs: Vec<_> =
         (run.phases.iter()).map(|(phase, asked, _)| (*phase, asked.cost())).collect();
@@ -694,7 +693,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
     host(&bucket);
     let taken = made.copied(&bucket, "copy");
-    let clone = taken.fork(made.at("vm"), new_cell(DEFAULT_TENANT)).unwrap();
+    let clone = taken.fork(made.at("vm"), DEFAULT_TENANT).unwrap();
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_store::keeping().unwrap().token + 1;
@@ -726,14 +725,14 @@ fn uploads_after_restores() {
     let taken = made.copied(&bucket, "copy");
     for restore in 0..restores {
         let at = made.at(&format!("restore-{restore}"));
-        taken.fork(&at, new_cell(DEFAULT_TENANT)).unwrap();
+        taken.fork(&at, DEFAULT_TENANT).unwrap();
         drop(open(&at));
     }
     let connected = server.connections();
     let extent = pattern(9, 1 << 20);
     for round in 0..3 {
         let at = made.at(&format!("writer-{round}"));
-        taken.fork(&at, new_cell(DEFAULT_TENANT)).unwrap();
+        taken.fork(&at, DEFAULT_TENANT).unwrap();
         let writer = open(&at);
         let info = writer.info().unwrap();
         let first = info.next_sequence.max(info.sequence_floor);
@@ -756,7 +755,7 @@ fn uploads_after_restores() {
     drop(taken);
 }
 
-/// TASK-449: a restore on a host that has the point open opens no connection to the bucket: those
+/// TASK-449: a restore on a host that has the version open opens no connection to the bucket: those
 /// its requests went on before stay in the bucket's pool, the fork's too, on the bucket
 /// runtime, which the calls from no runtime's task run in, and which lives on
 /// (`extent_store::upload::block_on`). On a runtime of
@@ -777,7 +776,7 @@ fn restores_connect_to_the_bucket_no_more() {
     let taken = made.copied(&bucket, "copy");
     let restore = |name: &str| {
         let before = server.connections();
-        taken.fork(made.at(name), new_cell(DEFAULT_TENANT)).unwrap();
+        taken.fork(made.at(name), DEFAULT_TENANT).unwrap();
         let forked = server.connections();
         drop(open(&made.at(name)));
         (forked - before, server.connections() - forked)

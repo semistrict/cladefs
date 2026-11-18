@@ -174,15 +174,15 @@ fn tenants_restore_versions_given_them_into_cells_of_their_own() {
     let socket = here.daemon.grant(2, &globex, None).unwrap();
     let vm = DaemonExtentStore::connect(&socket, globex.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(5), b"globex");
-    vm.fork_quiescent(&globex.join("copy")).unwrap();
+    vm.version_copy(&globex.join("copy")).unwrap();
     drop(vm);
     here.daemon.sync(&globex.join("vm")).unwrap();
-    let point = here.daemon.branch(&globex.join("copy")).unwrap();
+    let version = here.daemon.branch(&globex.join("copy")).unwrap();
     let version = here.daemon.stat(&globex.join("copy")).unwrap().version;
-    assert_eq!(point.cell.tenant, 2);
+    assert_eq!(version.cell.tenant, 2);
 
     let given = there.acme.join("given");
-    assert_eq!(there.daemon.copy(&given, point, version).unwrap(), point);
+    assert_eq!(there.daemon.copy(&given, version, version).unwrap(), version);
     let refused = there.acme.join("refused");
     assert_eq!(restore(&there.socket, &refused, &given, 0).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
@@ -212,23 +212,23 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     let vm = DaemonExtentStore::connect(&here.socket, &base, CAPACITY).unwrap();
     write(&vm, &pattern(8), b"base");
     drop(vm);
-    let point = here.acme.join("copy");
-    let version = here.daemon.version(&base, &point).unwrap();
-    assert_eq!(here.daemon.branch(&point).unwrap().cell.tenant, 1);
+    let version = here.acme.join("copy");
+    let version = here.daemon.version(&base, &version).unwrap();
+    assert_eq!(here.daemon.branch(&version).unwrap().cell.tenant, 1);
     let fork = |daemon: &mut Daemon, from: &Path, to: &Path| daemon.fork(from, to).map(drop);
 
     let refused = globex.join("refused");
-    let forked = fork(&mut here.daemon, &point, &refused);
+    let forked = fork(&mut here.daemon, &version, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     assert!(!refused.exists(), "a refused fork made a store");
-    fork(&mut here.daemon, &point, &here.acme.join("ours")).unwrap();
+    fork(&mut here.daemon, &version, &here.acme.join("ours")).unwrap();
     here.daemon.share(&base, version, true).unwrap();
-    assert_eq!(here.daemon.fork(&point, &globex.join("theirs")).unwrap().cell.tenant, 2);
+    assert_eq!(here.daemon.fork(&version, &globex.join("theirs")).unwrap().cell.tenant, 2);
     let vm = DaemonExtentStore::connect(&theirs, globex.join("theirs"), CAPACITY).unwrap();
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
     here.daemon.share(&base, version, false).unwrap();
-    let forked = fork(&mut here.daemon, &point, &refused);
+    let forked = fork(&mut here.daemon, &version, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     let unnamed = here.daemon.share(&base, version + 1, true);
     assert_eq!(failure(unnamed), (Code::NotFound, Errno::ENOENT));
@@ -398,13 +398,13 @@ impl Host {
         let vm = DaemonExtentStore::connect(&self.socket, self.acme.join("vm"), CAPACITY).unwrap();
         write(&vm, &pattern(5), b"snapshotted");
         let extent = ExtentId { branch: vm.branch(), sequence: 1 };
-        let point = self.acme.join("point");
-        vm.fork_quiescent(&point).unwrap();
+        let version = self.acme.join("version");
+        vm.version_copy(&version).unwrap();
         drop(vm);
         // Local once taken: in the bucket once synced, for other hosts. As the VM manager reads
         // it: not the snapshot's word for it, which a VM process wrote.
         self.daemon.sync(&self.acme.join("vm")).unwrap();
-        let stat = self.daemon.stat(&point).unwrap();
+        let stat = self.daemon.stat(&version).unwrap();
         let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
         let branch = cladefs::Branch { cell, id: stat.branch };
         Snapshot { branch, version: stat.version, extent }
@@ -420,14 +420,14 @@ struct Snapshot {
 }
 
 /// A VM process's restore through `socket`, into a store of its own at `store`, of the snapshot
-/// whose point it names `point`, of `branch`: the request Firecracker's restore makes.
+/// whose version it names `version`, of `branch`: the request Firecracker's restore makes.
 fn restore(
     socket: &Path,
     store: &Path,
-    point: &Path,
+    version: &Path,
     branch: u64,
 ) -> Result<DaemonExtentStore, Option<Errno>> {
-    DaemonExtentStore::connect_forked(socket, store, point, branch, CAPACITY)
+    DaemonExtentStore::connect_forked(socket, store, version, branch, CAPACITY)
         .map_err(|err| err.errno())
 }
 
@@ -444,7 +444,7 @@ fn read(store: &DaemonExtentStore, extent: ExtentId) -> Vec<u8> {
 }
 
 /// TASK-154: a tenant's snapshot restores on another host, which has nothing of it, through the
-/// request every restore makes: refused until the VM manager makes the point in the tenant's
+/// request every restore makes: refused until the VM manager makes the version in the tenant's
 /// directory, then served, what it reads coming from the bucket, as many restores as there are.
 #[test]
 fn tenants_restore_on_another_host_what_their_vm_manager_took() {
@@ -454,14 +454,14 @@ fn tenants_restore_on_another_host_what_their_vm_manager_took() {
     here.forget_what_it_read();
     let fetched = there.daemon.counters().fetched_bytes;
 
-    let (point, vm) = (there.acme.join("point"), there.acme.join("vm"));
-    let refused = restore(&there.socket, &vm, &point, snapshot.branch.id);
+    let (version, vm) = (there.acme.join("version"), there.acme.join("vm"));
+    let refused = restore(&there.socket, &vm, &version, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));
-    assert!(!point.exists(), "a point was taken for the branch a VM process named");
+    assert!(!version.exists(), "a version was taken for the branch a VM process named");
 
-    let copied = there.daemon.copy(&point, snapshot.branch, snapshot.version).unwrap();
+    let copied = there.daemon.copy(&version, snapshot.branch, snapshot.version).unwrap();
     assert_eq!(copied, snapshot.branch);
-    let restored = restore(&there.socket, &vm, &point, snapshot.branch.id).unwrap();
+    let restored = restore(&there.socket, &vm, &version, snapshot.branch.id).unwrap();
     assert_ne!(restored.branch(), snapshot.branch.id);
     assert_eq!(restored.root().unwrap(), b"snapshotted");
     assert!(snapshotted(&restored, snapshot.extent), "the restored VM reads other bytes");
@@ -470,29 +470,29 @@ fn tenants_restore_on_another_host_what_their_vm_manager_took() {
     write(&restored, &pattern(6), b"restored");
 
     // A zygote's other child, whatever it names, and the first's writes none of its.
-    let other = restore(&there.socket, &there.acme.join("other"), &point, 0).unwrap();
+    let other = restore(&there.socket, &there.acme.join("other"), &version, 0).unwrap();
     assert_eq!(other.root().unwrap(), b"snapshotted");
     assert_eq!(restored.root().unwrap(), b"restored");
 }
 
 /// TASK-154: the VM manager's taking a branch for a tenant gives another tenant nothing: on one
-/// host, the same request, naming that branch and a point in its own directory, is refused, and
-/// its naming the first tenant's point too.
+/// host, the same request, naming that branch and a version in its own directory, is refused, and
+/// its naming the first tenant's copy too.
 #[test]
 fn tenants_take_no_branch_given_to_another() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
-    let given = there.acme.join("point");
+    let given = there.acme.join("version");
     there.daemon.copy(&given, snapshot.branch, snapshot.version).unwrap();
 
     let globex = dir.path().join("there/globex");
     std::fs::create_dir(&globex).unwrap();
     let socket = there.daemon.grant(2, &globex, None).unwrap();
-    let (vm, point) = (globex.join("vm"), globex.join("point"));
-    let refused = restore(&socket, &vm, &point, snapshot.branch.id);
+    let (vm, version) = (globex.join("vm"), globex.join("version"));
+    let refused = restore(&socket, &vm, &version, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));
-    assert!(!point.exists(), "a point was taken for the branch a VM process named");
+    assert!(!version.exists(), "a version was taken for the branch a VM process named");
     let refused = restore(&socket, &vm, &given, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::EACCES)));
 
@@ -500,12 +500,12 @@ fn tenants_take_no_branch_given_to_another() {
     assert_eq!(restored.root().unwrap(), b"snapshotted");
 }
 
-/// TASK-154: what the VM manager reads of a point, the branch to give a tenant elsewhere, a VM
+/// TASK-154: what the VM manager reads of a version, the branch to give a tenant elsewhere, a VM
 /// process can't make another tenant's: a fork names no branch, the daemon giving it one no other
 /// branch of the bucket has (TASK-364), holding what the VM's store held, which the VM manager
-/// reads as the point's.
+/// reads as the version's.
 #[test]
-fn vm_processes_make_no_point_of_another_branch() {
+fn vm_processes_make_no_version_of_another_branch() {
     let dir = tempfile::tempdir().unwrap();
     let mut here = Host::new(dir.path(), "here");
     let vm = DaemonExtentStore::connect(&here.socket, here.acme.join("vm"), CAPACITY).unwrap();
@@ -514,12 +514,12 @@ fn vm_processes_make_no_point_of_another_branch() {
     let theirs = here.daemon.open(&theirs_path, CAPACITY);
     write(&theirs, &pattern(2), b"theirs");
 
-    let point = here.acme.join("point");
-    let made = vm.fork_quiescent(&point).unwrap();
-    let (named, theirs) = (here.daemon.branch(&point).unwrap(), here.daemon.branch(&theirs_path));
+    let version = here.acme.join("version");
+    let made = vm.version_copy(&version).unwrap();
+    let (named, theirs) = (here.daemon.branch(&version).unwrap(), here.daemon.branch(&theirs_path));
     assert_eq!(named.id, made);
-    assert_ne!(named.id, theirs.unwrap().id, "the point has another branch's ID");
-    let restored = restore(&here.socket, &here.acme.join("restored"), &point, 0).unwrap();
+    assert_ne!(named.id, theirs.unwrap().id, "the version has another branch's ID");
+    let restored = restore(&here.socket, &here.acme.join("restored"), &version, 0).unwrap();
     assert_eq!(restored.root().unwrap(), b"ours");
 }
 
@@ -527,52 +527,52 @@ fn vm_processes_make_no_point_of_another_branch() {
 /// and after, those restored going on; the branch stays, which DeleteStore would have deleted, so
 /// that a host takes it again.
 #[test]
-fn points_dropped_restore_no_more_and_leave_the_snapshot() {
+fn versions_dropped_restore_no_more_and_leave_the_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
-    let (socket, point, vm) = (&there.socket, there.acme.join("point"), there.acme.join("vm"));
+    let (socket, version, vm) = (&there.socket, there.acme.join("version"), there.acme.join("vm"));
 
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    there.daemon.drop_store(&point).unwrap();
-    assert!(!point.exists(), "the copy stayed");
-    let refused = restore(socket, &vm, &point, snapshot.branch.id);
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    there.daemon.drop_store(&version).unwrap();
+    assert!(!version.exists(), "the copy stayed");
+    let refused = restore(socket, &vm, &version, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));
 
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    let restored = restore(socket, &vm, &point, snapshot.branch.id).unwrap();
-    there.daemon.drop_store(&point).unwrap();
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    let restored = restore(socket, &vm, &version, snapshot.branch.id).unwrap();
+    there.daemon.drop_store(&version).unwrap();
     // Gone, though forks of it live, which hold none of its directory (TASK-165.7).
-    assert!(!point.exists(), "the copy stayed");
+    assert!(!version.exists(), "the copy stayed");
     let other = there.acme.join("other");
-    let refused = restore(socket, &other, &point, snapshot.branch.id);
+    let refused = restore(socket, &other, &version, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));
-    assert!(snapshotted(&restored, snapshot.extent), "what was restored went with the point");
+    assert!(snapshotted(&restored, snapshot.extent), "what was restored went with the version");
     write(&restored, &pattern(6), b"restored");
 
     // At another path.
-    let again = there.acme.join("point-again");
+    let again = there.acme.join("version-again");
     there.daemon.create(&again, snapshot.branch, None).unwrap();
     assert_eq!(restore(socket, &other, &again, 0).unwrap().root().unwrap(), b"snapshotted");
 }
 
-/// TASK-158: a point is read by any number of hosts and written by none: copies of it on hosts
+/// TASK-158: a version is read by any number of hosts and written by none: copies of it on hosts
 /// that forked it, in any order, restore on, the snapshot's own host's too, and none went stale.
 /// (It pinned the limit this removed, as `copies_of_a_point_another_host_forked_are_taken_anew`:
 /// the other hosts' copies failing with EIO until DropStore and CreateStore.)
 #[test]
-fn copies_of_a_point_another_host_forked_restore_on() {
+fn copies_of_a_version_another_host_forked_restore_on() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
-    let point = there.acme.join("point");
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    let restored = restore(&there.socket, &there.acme.join("vm"), &point, 0).unwrap();
+    let version = there.acme.join("version");
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    let restored = restore(&there.socket, &there.acme.join("vm"), &version, 0).unwrap();
 
-    let (own, vm) = (here.acme.join("point"), here.acme.join("restored"));
+    let (own, vm) = (here.acme.join("version"), here.acme.join("restored"));
     let again = restore(&here.socket, &vm, &own, 0).unwrap();
     assert_eq!(again.root().unwrap(), b"snapshotted");
-    let other = restore(&there.socket, &there.acme.join("other"), &point, 0).unwrap();
+    let other = restore(&there.socket, &there.acme.join("other"), &version, 0).unwrap();
     assert_eq!(other.root().unwrap(), b"snapshotted");
     assert!(snapshotted(&restored, snapshot.extent), "the first restore lost what it holds");
 }
@@ -588,7 +588,7 @@ fn several_hosts_restore_one_snapshot_at_once() {
         (0..HOSTS).map(|host| Host::new(dir.path(), &format!("host{host}"))).collect();
     let snapshot = hosts[0].snapshot();
     for host in &mut hosts[1..] {
-        host.daemon.create(&host.acme.join("point"), snapshot.branch, None).unwrap();
+        host.daemon.create(&host.acme.join("version"), snapshot.branch, None).unwrap();
     }
     let restored: Vec<_> = std::thread::scope(|scope| {
         let hosts = &hosts;
@@ -596,7 +596,7 @@ fn several_hosts_restore_one_snapshot_at_once() {
             .map(|at| {
                 let host = &hosts[at % HOSTS];
                 let vm = host.acme.join(format!("restored{at}"));
-                scope.spawn(move || restore(&host.socket, &vm, &host.acme.join("point"), 0))
+                scope.spawn(move || restore(&host.socket, &vm, &host.acme.join("version"), 0))
             })
             .collect();
         restores.into_iter().map(|restore| restore.join().unwrap().unwrap()).collect()
@@ -615,61 +615,63 @@ fn several_hosts_restore_one_snapshot_at_once() {
     }
 }
 
-/// TASK-158: a point has no writer: a VM process opening one to write it, on its snapshot's host
+/// TASK-158: a version has no writer: a VM process opening one to write it, on its snapshot's host
 /// or another, is refused, and the snapshot stays as it was. Before, it could write it.
 #[test]
-fn vm_processes_write_no_point() {
+fn vm_processes_write_no_copy() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
-    let point = there.acme.join("point");
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    for (socket, point) in [(&here.socket, &here.acme.join("point")), (&there.socket, &point)] {
-        assert_eq!(refused(socket, point), Some(Errno::EROFS));
-        let restored = restore(socket, &point.with_file_name("vm-after"), point, 0).unwrap();
+    let version = there.acme.join("version");
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    for (socket, version) in [(&here.socket, &here.acme.join("version")), (&there.socket, &version)]
+    {
+        assert_eq!(refused(socket, version), Some(Errno::EROFS));
+        let restored = restore(socket, &version.with_file_name("vm-after"), version, 0).unwrap();
         assert_eq!(restored.root().unwrap(), b"snapshotted");
     }
 }
 
-/// TASK-160.10: a point's capacity, as all else of it, changes on no host: ResizeStore of one is
+/// TASK-160.10: a version's capacity, as all else of it, changes on no host: ResizeStore of one is
 /// refused (`EROFS`), closed on its snapshot's host, kept open for restores on another, and the
 /// restores after it have the capacity it had. Before, the daemon opened it to resize it without
-/// its uploader, which says it is a point, and grew it.
+/// its uploader, which says it is a version, and grew it.
 #[test]
-fn points_are_resized_nowhere() {
+fn copies_are_resized_nowhere() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
-    let point = there.acme.join("point");
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    drop(restore(&there.socket, &there.acme.join("vm"), &point, 0).unwrap());
-    let (refused, own) = ((Code::FailedPrecondition, Errno::EROFS), here.acme.join("point"));
-    for (host, point) in [(&mut here, own), (&mut there, point)] {
-        assert_eq!(failure(host.daemon.resize(&point, 2 * CAPACITY)), refused);
-        assert_eq!(host.daemon.stat(&point).unwrap().capacity, CAPACITY);
-        let restored = restore(&host.socket, &point.with_file_name("after"), &point, 0).unwrap();
+    let version = there.acme.join("version");
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    drop(restore(&there.socket, &there.acme.join("vm"), &version, 0).unwrap());
+    let (refused, own) = ((Code::FailedPrecondition, Errno::EROFS), here.acme.join("version"));
+    for (host, version) in [(&mut here, own), (&mut there, version)] {
+        assert_eq!(failure(host.daemon.resize(&version, 2 * CAPACITY)), refused);
+        assert_eq!(host.daemon.stat(&version).unwrap().capacity, CAPACITY);
+        let restored =
+            restore(&host.socket, &version.with_file_name("after"), &version, 0).unwrap();
         assert_eq!(restored.info().unwrap().capacity, CAPACITY);
     }
 }
 
-/// TASK-158: a point has no head, so that a host needs no placement to restore it, however late
+/// TASK-158: a version has no head, so that a host needs no placement to restore it, however late
 /// the placement that took it. (It pinned the limit this removed, as
 /// `points_of_later_placements_are_taken_placed`: a restore refused with ESTALE until CreateStore
 /// named the token.) Placing a copy changes nothing.
 #[test]
-fn points_restore_whatever_placement_took_them() {
+fn versions_restore_whatever_placement_took_them() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
     let later = 7;
-    here.daemon.place(&here.acme.join("point"), later).unwrap();
-    here.daemon.sync(&here.acme.join("point")).unwrap();
+    here.daemon.place(&here.acme.join("version"), later).unwrap();
+    here.daemon.sync(&here.acme.join("version")).unwrap();
 
-    let (point, vm) = (there.acme.join("point"), there.acme.join("vm"));
-    there.daemon.create(&point, snapshot.branch, None).unwrap();
-    let restored = restore(&there.socket, &vm, &point, snapshot.branch.id).unwrap();
+    let (version, vm) = (there.acme.join("version"), there.acme.join("vm"));
+    there.daemon.create(&version, snapshot.branch, None).unwrap();
+    let restored = restore(&there.socket, &vm, &version, snapshot.branch.id).unwrap();
     assert_eq!(restored.root().unwrap(), b"snapshotted");
-    let own = restore(&here.socket, &here.acme.join("restored"), &here.acme.join("point"), 0);
+    let own = restore(&here.socket, &here.acme.join("restored"), &here.acme.join("version"), 0);
     assert_eq!(own.unwrap().root().unwrap(), b"snapshotted");
 }
 
@@ -690,19 +692,19 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
     write(&vm, &pattern(7), b"base");
     let extent = ExtentId { branch: vm.branch(), sequence: 1 };
     drop(vm);
-    let point = hosts[0].acme.join("point");
-    let version = hosts[0].daemon.version(&base, &point).unwrap();
-    let branch = hosts[0].daemon.branch(&point).unwrap();
+    let version = hosts[0].acme.join("version");
+    let version = hosts[0].daemon.version(&base, &version).unwrap();
+    let branch = hosts[0].daemon.branch(&version).unwrap();
     hosts[0].daemon.sync(&base).unwrap();
     for host in &mut hosts[1..] {
-        host.daemon.copy(&host.acme.join("point"), branch, version).unwrap();
+        host.daemon.copy(&host.acme.join("version"), branch, version).unwrap();
     }
 
     let forks: Vec<(usize, PathBuf, cladefs::Branch)> = std::thread::scope(|scope| {
         let forking: Vec<_> = (hosts.iter_mut().enumerate())
             .map(|(at, host)| {
                 scope.spawn(move || {
-                    let copy = host.acme.join("point");
+                    let copy = host.acme.join("version");
                     let fork = |n| {
                         let to = host.acme.join(format!("fork{n}"));
                         let branch = host.daemon.fork(&copy, &to).unwrap();
@@ -733,7 +735,7 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
     vm.commit(Some(b"base, later")).unwrap();
     drop(vm);
     let other = &mut hosts[1];
-    let (copy, later) = (other.acme.join("point"), other.acme.join("later"));
+    let (copy, later) = (other.acme.join("version"), other.acme.join("later"));
     other.daemon.fork(&copy, &later).unwrap();
     assert_eq!(other.daemon.open(&later, CAPACITY).root().unwrap(), b"base");
 

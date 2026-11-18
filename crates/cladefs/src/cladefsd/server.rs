@@ -200,10 +200,10 @@ pub struct Tenant {
 struct Policy {
     /// Where they name stores.
     stores: Stores,
-    /// Whether the branch one names, of a point it restores from that isn't here, counts. Not a
-    /// granted tenant's: nothing in the bucket says whose a branch is, so a point not here it
+    /// Whether the branch one names, of a version it restores from that isn't here, counts. Not a
+    /// granted tenant's: nothing in the bucket says whose a branch is, so a version not here it
     /// finds absent, whatever branch it names (TASK-150.4); its VM manager, which knows what the
-    /// tenant may restore, takes a point for it first (`CreateStore`, TASK-154). The default
+    /// tenant may restore, takes a version for it first (`CreateStore`, TASK-154). The default
     /// tenant's, whose VM processes are the daemon's user's (TASK-155), does.
     names_branches: bool,
     /// Whether they follow a public base (backlog doc-8): the default tenant's do; a granted
@@ -340,7 +340,7 @@ impl Tenant {
     /// cladefs: `EACCES` if it is granted and the store at `path` is a vdisk of another tenant's
     /// cell (TASK-364), as its description says, read before it is opened, which would take its
     /// branch from its writer: the daemon makes its own cells' stores alone in its directory, but
-    /// for the points of others' its VM manager gives it, which it restores from, as forks of its
+    /// for the versions of others' its VM manager gives it, which it restores from, as forks of its
     /// own; and a store put there by other means is no more its than it was.
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
@@ -1180,7 +1180,7 @@ impl Connection {
     /// [`Pool`], in turn with every other connection's: whether serving it returned or panicked,
     /// which would otherwise leave it counted running for good (TASK-79.1). cladefs: a fault, and a
     /// writer's opening, are futures, deferred as they wait ([`serve_future`]): for the pager
-    /// (TASK-92.20), and for a connection going to let the store go, or a restore's point
+    /// (TASK-92.20), and for a connection going to let the store go, or a restore's version
     /// (TASK-92.5). A request its kind gives no meaning ([`Request::decode`]), or naming a store
     /// its tenant's VM processes don't ([`Connection::authorize`]), is refused, whatever it is, in
     /// one place (TASK-160.9).
@@ -1321,8 +1321,8 @@ impl Connection {
         // `cladefsd::map=1%return(5)` fails one MAP in a hundred with EIO, `cladefsd::commit=
         // sleep(50)` delays each COMMIT 50 ms.
         #[cfg(feature = "failpoints")]
-        if let Some(point) = failpoint(request.kind()) {
-            fail::fail_point!(point, |errno: Option<String>| {
+        if let Some(version) = failpoint(request.kind()) {
+            fail::fail_point!(version, |errno: Option<String>| {
                 let errno = errno.and_then(|errno| errno.parse().ok());
                 Err(Errno::from_raw(errno.unwrap_or(Errno::EIO.raw())))
             });
@@ -1385,19 +1385,17 @@ impl Connection {
             Request::Fork { path, quiescent } => {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
-                // cladefs: a VM snapshot's point, refused while the window holds private pages,
-                // whose bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
-                // here, as the VMM's error can't (TASK-92.14).
-                // cladefs: the one vdisk of a new cell of the store's tenant, of an ID of the
-                // bucket's giving, which the reply says (TASK-364).
-                let cell = crate::host_store::fork_cell(store.branch());
-                // cladefs: a VM snapshot's: a version of the store's cell, made here, and a copy of
-                // it at `path`, which the VM's restores fork (doc-20).
+                // A VM snapshot's, if `quiescent`: a version of the store's cell, made here, and a
+                // copy of it at `path`, which the VM's restores fork (doc-20), refused while the
+                // window holds private pages, whose bytes no extent holds (TASK-203). Otherwise a
+                // fork into a new cell of the store's tenant (TASK-364). Each refusal says why here,
+                // as the VMM's error can't (TASK-92.14).
+                let tenant = store.branch().cell.tenant;
                 let forked = match quiescent {
                     true => (store.make_version(None))
                         .and_then(|id| store.copy_version(path, id))
                         .map(|()| store.branch()),
-                    false => store.fork(path, cell),
+                    false => store.fork(path, tenant),
                 };
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
@@ -1576,7 +1574,7 @@ impl Connection {
     /// forking it from the store `how` names if it doesn't exist ([`stores::fork_from`]); unless
     /// another connection has it open; and returns its branch. cladefs: a store followers have open,
     /// it takes over ([`stores::take_over`]). Its waits, for a connection whose VM process is gone
-    /// to let the store go, and for a restore's point ([`stores::fork_from`]), hold no thread
+    /// to let the store go, and for a restore's version ([`stores::fork_from`]), hold no thread
     /// (TASK-92.5); its I/O blocks.
     async fn open(&self, path: &Path, mut how: codec::Opening) -> Result<u64, Errno> {
         // cladefs: the branch it names, if its tenant's word for one counts (TASK-150.4).
@@ -1600,7 +1598,7 @@ impl Connection {
         // A VM process opens no store to write that its writer may not write
         // ([`crate::StoreAccess::may_write`]): a public base, only forks of it (TASK-43), what it
         // wrote being every tenant's, its pages the default arena's, which every VM process holds
-        // (TASK-79.17); cladefs: nor a point, which nothing writes (doc-7, Points).
+        // (TASK-79.17); cladefs: nor a version, which nothing writes (doc-7, Versions).
         store.access().may_write()?;
         let flushed = store.clone();
         self.start_behind(move |stopped| flush_behind(flushed, stopped));
@@ -1624,7 +1622,7 @@ impl Connection {
     ) -> Result<Arc<ExtentStore>, Errno> {
         let arena = self.arena();
         // cladefs: a restore's store there already, which the snapshot was taken of or an earlier
-        // restore forked, holds the point's state, or is refused, as it is (TASK-194).
+        // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
         if let codec::Opening::ForkFrom { from, capacity, .. } = how
             && path.exists()

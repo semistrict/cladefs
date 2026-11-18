@@ -454,7 +454,7 @@ fn run_with(Run { steps, follow }: Run) {
     let held: Vec<_> = store.extents().unwrap().into_iter().map(|(extent, _)| extent).collect();
     assert_eq!(held, holds.keys().copied().collect::<Vec<_>>());
 
-    // Crashed, at any of these points, the store recovers at least what the uploader took.
+    // Crashed, at any of these versions, the store recovers at least what the uploader took.
     let taken = *taken.lock().unwrap();
     for seed in 0..4 {
         let crashed = bucket.reopen(dir.crash(seed));

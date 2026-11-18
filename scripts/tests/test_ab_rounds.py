@@ -204,13 +204,13 @@ class Timings(unittest.TestCase):
 # 2026-11-15 did (docs/measurements/macos-bucket-lifecycle-2026-11-15,
 # macos-fork-extent-memory-2026-11-15), and gc-sweep.sh's tables (macos-gc-dead-cells-2026-11-15).
 LIFECYCLE = """\
-SETUP extents=1024 point of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000/cells/point's/branches/point x4]
+SETUP extents=1024 version of the base: requests=19 in-series=- at-once=1 wall-ms=971 bucket-ms=0 up=1712036 down=856271 [create=6 get=7 get-range=1 list=3 update=2] again=[get tenants/0000000000000/cells/version's/branches/version x4]
 PHASE extents=1024 cold fork: requests=6 in-series=6.4 at-once=1 wall-ms=370 bucket-ms=192 up=170 down=158 [create=2 get=3 update=1] again=[get tenants/0000000000000/cells/cold-fork's/branches/cold-fork x2]
   REQUEST +0..32ms get tenants/0000000000000/cells/cold-fork's/branches/cold-fork up=0 down=0
 """
 FORK_MEMORY = """\
-fork memory: extents=1024 parent=point forks=20 held=5475939 per-fork=273796 marginal-per-fork=274175 marginal-per-fork-per-extent=267.7 open=125.29ms
-fork memory: extents=1024 parent=point of a fork: store-map=242696 (keys=109568 table=133128) writer-map-unshared=234144 (keys=109568 nodes=124576); left-after-close=73541
+fork memory: extents=1024 parent=version forks=20 held=5475939 per-fork=273796 marginal-per-fork=274175 marginal-per-fork-per-extent=267.7 open=125.29ms
+fork memory: extents=1024 parent=version of a fork: store-map=242696 (keys=109568 table=133128) writer-map-unshared=234144 (keys=109568 nodes=124576); left-after-close=73541
 """
 SWEEPS = """\
 | side | at once | round | sweep | seconds | passed | skipped | get | get-range | list | list-delimited | create | update | delete-batch | objects left | peak MiB |
@@ -246,14 +246,14 @@ class Counts(unittest.TestCase):
         counts_dir(self.results / "base-counts")
         found, statuses = ab_rounds.counted(self.results / "base-counts")
         self.assertEqual(found["lifecycle"], {
-            "SETUP extents=1024 point of the base: requests": 19,
-            "SETUP extents=1024 point of the base: up": 1712036,
-            "SETUP extents=1024 point of the base: down": 856271,
-            "SETUP extents=1024 point of the base: create": 6,
-            "SETUP extents=1024 point of the base: get": 7,
-            "SETUP extents=1024 point of the base: get-range": 1,
-            "SETUP extents=1024 point of the base: list": 3,
-            "SETUP extents=1024 point of the base: update": 2,
+            "SETUP extents=1024 version of the base: requests": 19,
+            "SETUP extents=1024 version of the base: up": 1712036,
+            "SETUP extents=1024 version of the base: down": 856271,
+            "SETUP extents=1024 version of the base: create": 6,
+            "SETUP extents=1024 version of the base: get": 7,
+            "SETUP extents=1024 version of the base: get-range": 1,
+            "SETUP extents=1024 version of the base: list": 3,
+            "SETUP extents=1024 version of the base: update": 2,
             "PHASE extents=1024 cold fork: requests": 6,
             "PHASE extents=1024 cold fork: up": 170,
             "PHASE extents=1024 cold fork: down": 158,
@@ -262,16 +262,16 @@ class Counts(unittest.TestCase):
             "PHASE extents=1024 cold fork: update": 1,
         })
         self.assertEqual(found["fork-memory"], {
-            "extents=1024 parent=point forks=20 held": 5475939,
-            "extents=1024 parent=point forks=20 per-fork": 273796,
-            "extents=1024 parent=point forks=20 marginal-per-fork": 274175,
-            "extents=1024 parent=point of a fork: store-map": 242696,
-            "extents=1024 parent=point of a fork: store-map.keys": 109568,
-            "extents=1024 parent=point of a fork: store-map.table": 133128,
-            "extents=1024 parent=point of a fork: writer-map-unshared": 234144,
-            "extents=1024 parent=point of a fork: writer-map-unshared.keys": 109568,
-            "extents=1024 parent=point of a fork: writer-map-unshared.nodes": 124576,
-            "extents=1024 parent=point of a fork: left-after-close": 73541,
+            "extents=1024 parent=version forks=20 held": 5475939,
+            "extents=1024 parent=version forks=20 per-fork": 273796,
+            "extents=1024 parent=version forks=20 marginal-per-fork": 274175,
+            "extents=1024 parent=version of a fork: store-map": 242696,
+            "extents=1024 parent=version of a fork: store-map.keys": 109568,
+            "extents=1024 parent=version of a fork: store-map.table": 133128,
+            "extents=1024 parent=version of a fork: writer-map-unshared": 234144,
+            "extents=1024 parent=version of a fork: writer-map-unshared.keys": 109568,
+            "extents=1024 parent=version of a fork: writer-map-unshared.nodes": 124576,
+            "extents=1024 parent=version of a fork: left-after-close": 73541,
         })
         self.assertEqual(found["gc-deleted"], {
             f"sweep side=this at once=16 round=1 sweep=3 {column}": value
@@ -300,7 +300,7 @@ class Counts(unittest.TestCase):
         comparison = ab_rounds.compare(self.results, "base", "head")
         self.assertEqual(
             self.rows(comparison, {"not measured"})[
-                ("fork-memory", "extents=1024 parent=point forks=20 held")], "not measured")
+                ("fork-memory", "extents=1024 parent=version forks=20 held")], "not measured")
         self.assertEqual(comparison["broken"], [{
             "what": "count benchmark lifecycle failed",
             "said": "scripts/counts.sh's lifecycle ended 101 on head, not on base (see "

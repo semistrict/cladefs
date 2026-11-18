@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Live forks (cladefs's TASK-39.3): a running VM's store forks at a point its guest's Fxfs agrees
+//! Live forks (cladefs's TASK-39.3): a running VM's store forks at a version its guest's Fxfs agrees
 //! to, frozen, while the VM goes on. The guest writes a file, freezes, and tells the host over
 //! vsock; the host forks the store through the extent daemon, live, and tells the guest, which
 //! thaws, writes another, and remounts, finding both. A second VM boots on the fork and finds the

@@ -6,7 +6,7 @@
 //! collector's sweeps over many cells (TASK-395.5; `scripts/gc-sweep.sh`).
 //!
 //! ```sh
-//! cladefs-gc-fill DIR TENANTS CELLS SEGMENTS [LARGEST] [--vm EXTENTS POINTS | --deleted | --clones EXTENTS]
+//! cladefs-gc-fill DIR TENANTS CELLS SEGMENTS [LARGEST] [--vm EXTENTS VERSIONS | --deleted | --clones EXTENTS]
 //! ```
 //!
 //! DIR, a directory, made if missing and empty, becomes a bucket of files (`file:///DIR/`) of
@@ -19,38 +19,37 @@
 //!
 //! With `--vm`, the largest cell is a running VM's, snapshotted many times (TASK-395.12): each of
 //! its segments seals EXTENTS extents of 16 to 112 bytes and frees none, a disk filling, its checkpoints
-//! naming every extent sealed before them, and its branch is forked to POINTS points, at segments
-//! evenly apart, the last at its last, each a point of a cell of its own after the tenant's CELLS
-//! (`1/CELLS+1` on), with the checkpoint at its fork point and its reference that recording it
-//! writes: what a pass in full over the VM's cell recovers, a state a point.
+//! naming every extent sealed before them, and its branch has VERSIONS versions, at segments evenly
+//! apart, the last at its last: what a pass in full over the VM's cell recovers, a state a version.
 //!
 //! With `--deleted`, every cell's branch is deleted once written, as its host deletes it
 //! (TASK-443.4): cells nothing lives in, which a pass removes whole (TASK-455).
 //!
 //! With `--clones`, the cells are sandboxes made and deleted (TASK-443.4). Each tenant's first cell
-//! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, forked at its last
-//! to a point, the tenant's second cell; and CELLS sandboxes after them (`T/3` on), each a cell
-//! whose branch is a clone of the point, as a host makes one (`branch::fork_point`: its record,
-//! then its reference under the base's cell), which wrote SEGMENTS segments of garbage and a
+//! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, with a version at
+//! its last, and the checkpoint there that its first restore into another cell writes; and CELLS
+//! sandboxes after it (`T/2` on), each a cell whose branch is a clone of the version, as a host makes
+//! one (`branch::fork_version`: its record, then its reference under the base's cell), which wrote
+//! SEGMENTS segments of garbage and a
 //! checkpoint and was deleted. The pass over each retires its reference, unmarked, and removes its
 //! cell (TASK-455): what a pass over a popular base's cell lists is its live clones' alone.
 //!
-//! Every cell's branch but a VM's or a base's, of ID 1, and their points', is of an ID an
+//! Every cell's branch but a VM's or a base's, of ID 1, is of an ID an
 //! allocator gave, as hosts give them (`extent_bucket::objectid`).
 //!
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
-//! a thread; a sandbox's memory starting from its base's and its point's objects, which it reads.
+//! a thread; a sandbox's memory starting from its base's objects, which it reads.
 //! Encrypted, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
 //! it (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
 //! `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to start.
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
-//! largest cell's share, a base's with its point's.
+//! largest cell's share.
 
 use extent_bucket::batch::{Commit, SegmentBuilder};
 use extent_bucket::bucket::Bucket as _;
 use extent_bucket::keys::{self, CachingKms};
-use extent_bucket::layout::{Branch, Cell, Child, Origin};
+use extent_bucket::layout::{Branch, Cell, NewVersion, Origin};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::objectid::Allocator;
 use extent_bucket::{Bytes, Writer, branch, cell};
@@ -93,10 +92,10 @@ enum Kind {
     Garbage,
     /// The same, each deleted once written (TASK-443.4).
     Deleted,
-    /// The largest a running VM's, of segments of `extents` extents, forked to `points` points
+    /// The largest a running VM's, of segments of `extents` extents, with `versions` versions
     /// (TASK-395.12).
-    Vm { extents: u64, points: u64 },
-    /// Sandboxes made and deleted, clones of a point of their tenant's base, whose segments hold
+    Vm { extents: u64, versions: u64 },
+    /// Sandboxes made and deleted, clones of a version of their tenant's base, whose segments hold
     /// `extents` extents (TASK-443.4).
     Clones { extents: u64 },
 }
@@ -130,14 +129,16 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let kind = match flags[..] {
         [] => Kind::Garbage,
         ["--deleted"] => Kind::Deleted,
-        ["--vm", extents, points] => Kind::Vm { extents: count(extents)?, points: count(points)? },
+        ["--vm", extents, versions] => {
+            Kind::Vm { extents: count(extents)?, versions: count(versions)? }
+        }
         ["--clones", extents] => Kind::Clones { extents: count(extents)? },
         _ => return Err(usage()),
     };
-    if let Kind::Vm { points, .. } = kind
-        && points > largest
+    if let Kind::Vm { versions, .. } = kind
+        && versions > largest
     {
-        return Err(format!("{largest} segments fork to {largest} points at most"));
+        return Err(format!("{largest} segments end in {largest} versions at most"));
     }
     Ok(Args { dir: dir.into(), tenants, cells, segments, largest, kind })
 }
@@ -147,9 +148,9 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
 enum Shape {
     /// `segments` segments of garbage, and then deleted, if `deleted`.
     Garbage { segments: u64, deleted: bool },
-    /// A VM's: `segments` segments of `extents` extents each, freeing none, forked to `points`
-    /// points at segments evenly apart, each of a cell of the tenant's own, IDs from `first` on.
-    Vm { segments: u64, extents: u64, points: u64, first: u64 },
+    /// A VM's: `segments` segments of `extents` extents each, freeing none, with `versions`
+    /// versions at segments evenly apart, the last at the last.
+    Vm { segments: u64, extents: u64, versions: u64 },
 }
 
 /// What a cell's objects take.
@@ -166,16 +167,16 @@ impl std::ops::AddAssign for Sum {
     }
 }
 
-/// A base's point, as its clones find it ([`Kind::Clones`]): the point, the fork of the base it
-/// is, and every object of the base's and the point's cells, in the order of their keys, which a
-/// clone's bucket in memory starts from.
-struct Point {
-    branch: Branch,
+/// A base's version, as its clones find it ([`Kind::Clones`]): its ID, its origin, and every
+/// object of the base's cell, in the order of their keys, which a clone's bucket in memory starts
+/// from.
+struct Version {
+    id: u64,
     origin: Origin,
     objects: Vec<(String, Bytes)>,
 }
 
-impl Point {
+impl Version {
     /// Whether the object at `key` is one of its own, which a clone of it never writes.
     fn holds(&self, key: &str) -> bool {
         self.objects.binary_search_by(|(held, _)| held.as_str().cmp(key)).is_ok()
@@ -186,10 +187,10 @@ impl Point {
 struct Filled {
     cells: u64,
     total: Sum,
-    /// The largest cell's share: tenant 1's first, a base's with its point's.
+    /// The largest cell's share: tenant 1's first.
     largest: Sum,
-    /// Each tenant's base's point, in the tenants' order ([`Kind::Clones`]).
-    points: Vec<Point>,
+    /// Each tenant's base's version, in the tenants' order ([`Kind::Clones`]).
+    bases: Vec<Version>,
 }
 
 fn main() -> Result<(), String> {
@@ -228,34 +229,34 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     let files = LocalFileSystem::new_with_prefix(dir).map_err(|err| err.to_string())?;
     let first = Cell { tenant: 1, id: 1 };
     let mut filled =
-        Filled { cells: 0, total: Sum::default(), largest: Sum::default(), points: Vec::new() };
-    // The bases first, each with its point, which their tenants' sandboxes are clones of.
+        Filled { cells: 0, total: Sum::default(), largest: Sum::default(), bases: Vec::new() };
+    // The bases first, each with its version, which their tenants' sandboxes are clones of.
     if let Kind::Clones { extents } = kind {
-        let base = Shape::Vm { segments: largest, extents, points: 1, first: 2 };
+        let base = Shape::Vm { segments: largest, extents, versions: 1 };
         for tenant in 1..=tenants {
             let cell = Cell { tenant, id: 1 };
-            let (sum, point) = futures::executor::block_on(fill_base(&files, kms, cell, base))
+            let (sum, version) = futures::executor::block_on(fill_base(&files, kms, cell, base))
                 .map_err(|err| format!("cell {cell}: {err}"))?;
-            filled.cells += 2;
+            filled.cells += 1;
             filled.total += sum;
             if cell == first {
                 filled.largest = sum;
             }
-            filled.points.push(point);
+            filled.bases.push(version);
         }
     }
-    let points = &filled.points;
-    let shapes: Vec<(Cell, Shape, Option<&Point>)> = (1..=tenants)
+    let bases = &filled.bases;
+    let shapes: Vec<(Cell, Shape, Option<&Version>)> = (1..=tenants)
         .flat_map(|tenant| (1..=cells).map(move |id| (tenant, id)))
         .map(|(tenant, id)| {
             let cell = Cell { tenant, id };
             match kind {
                 Kind::Clones { .. } => {
                     let sandbox = Shape::Garbage { segments, deleted: true };
-                    (Cell { tenant, id: id + 2 }, sandbox, Some(&points[tenant as usize - 1]))
+                    (Cell { tenant, id: id + 1 }, sandbox, Some(&bases[tenant as usize - 1]))
                 }
-                Kind::Vm { extents, points } if cell == first => {
-                    (cell, Shape::Vm { segments: largest, extents, points, first: cells + 1 }, None)
+                Kind::Vm { extents, versions } if cell == first => {
+                    (cell, Shape::Vm { segments: largest, extents, versions }, None)
                 }
                 Kind::Garbage | Kind::Deleted | Kind::Vm { .. } => {
                     let segments = if cell == first { largest } else { segments };
@@ -296,9 +297,6 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
         }
     }
     filled.cells += shapes.len() as u64;
-    if let Kind::Vm { points, .. } = kind {
-        filled.cells += points;
-    }
     filled.total += total;
     if let Some(biggest) = biggest {
         filled.largest = biggest;
@@ -306,53 +304,58 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     Ok(filled)
 }
 
-/// A cell written into memory ([`write`]): its bucket, and the last point its branch was forked
-/// to, if any, with the fork.
+/// A cell written into memory ([`write`]): its bucket, and its branch's last version, if any, by
+/// its ID and origin.
 struct Written {
     bucket: Arc<ObjectBucket>,
-    point: Option<(Branch, Origin)>,
+    version: Option<(u64, Origin)>,
 }
 
-/// Writes `cell`, its branch as `shape` says, a clone of `of` if given, and a VM's points' cells,
-/// into memory, then into `files`: what it took, `of`'s own objects apart.
+/// Writes `cell`, its branch as `shape` says, a clone of `of` if given, into memory, then into
+/// `files`: what it took, `of`'s own objects apart.
 async fn fill(
     files: &LocalFileSystem,
     kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
-    of: Option<&Point>,
+    of: Option<&Version>,
     ids: &Allocator,
 ) -> Result<Sum, String> {
     let written = write(kms, cell, shape, of, ids).await?;
     Ok(copy(&written.bucket, files, of).await?.0)
 }
 
-/// Writes the base `cell`, its branch as `shape` says, forked to a point, into memory, then into
-/// `files`: what it took, and its point, for its clones.
+/// Writes the base `cell`, its branch as `shape` says, with a version, into memory, and the
+/// checkpoint at the version that its first restore into another cell writes, then into `files`:
+/// what it took, and its version, for its clones.
 async fn fill_base(
     files: &LocalFileSystem,
     kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
-) -> Result<(Sum, Point), String> {
+) -> Result<(Sum, Version), String> {
     let written = write(kms, cell, shape, None, &Allocator::new()).await?;
-    let (branch, origin) = written.point.ok_or("a base forked to no point")?;
+    let (id, origin) = written.version.ok_or("a base of no version")?;
+    let keys = keys::Parents::Kms(kms, None);
+    extent_bucket::recovery::checkpoint_at(&*written.bucket, origin.parent, origin.at, keys)
+        .await
+        .map_err(|err| err.to_string())?;
     let (sum, objects) = copy(&written.bucket, files, None).await?;
-    Ok((sum, Point { branch, origin, objects }))
+    Ok((sum, Version { id, origin, objects }))
 }
 
-/// Writes `cell`, its branch as `shape` says, and a VM's points' cells, into a bucket in memory:
-/// one starting from `of`'s objects, the branch a clone of that point, if given.
+/// Writes `cell`, its branch as `shape` says, into a bucket in memory: one starting from `of`'s
+/// objects, the branch a clone of that version, if given.
 /// Its branch's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
     kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
-    of: Option<&Point>,
+    of: Option<&Version>,
     ids: &Allocator,
 ) -> Result<Written, String> {
     let memory = Arc::new(InMemory::new());
-    for (key, bytes) in of.into_iter().flat_map(|point| &point.objects) {
+    for (key, bytes) in of.into_iter().flat_map(|version| &version.objects) {
         let (path, payload) = (Path::from(key.as_str()), PutPayload::from(bytes.clone()));
         memory
             .put_opts(&path, payload, PutOptions::default())
@@ -368,9 +371,12 @@ async fn write(
     };
     match of {
         None => branch::create(&*bucket, id, 0).await.map_err(failed)?,
-        Some(point) => branch::fork_point(&*bucket, id, point.branch, point.origin, WRITER.0)
-            .await
-            .map_err(failed)?,
+        Some(version) => {
+            let keys = keys::Parents::Kms(kms, None);
+            branch::fork_version(&*bucket, id, version.id, version.origin, WRITER.0, keys)
+                .await
+                .map_err(failed)?
+        }
     }
     let writer = Writer::open_under(bucket.clone(), id, WRITER, kms).await.map_err(failed)?;
     let (segments, per_segment) = match shape {
@@ -378,7 +384,7 @@ async fn write(
         Shape::Vm { segments, extents, .. } => (segments, extents),
     };
     let mut held: Vec<ExtentId> = Vec::new();
-    let mut forked = None;
+    let mut versioned = None;
     for n in 0..segments {
         let first = writer.chain().next_sequence();
         let extents: Vec<(ExtentId, Vec<u8>)> = (0..per_segment)
@@ -404,20 +410,17 @@ async fn write(
                 SegmentBuilder::from(Commit { tag: n + 1, extents, ..Commit::default() })
             }
         };
-        let point = point_at(shape, cell.tenant, n);
-        let closed = match point {
-            Some(point) => {
-                make_cell(&bucket, kms, point.cell).await.map_err(failed)?;
-                batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
-            }
+        let version = version_at(shape, n);
+        let closed = match version {
+            Some(id) => batch.cut(NewVersion { id, keep_last: None }, &mut writer.chain()),
             None => batch.close(&mut writer.chain()),
         };
         let segment =
             writer.add_segment(closed.frame(writer.keys().encrypting())).map_err(failed)?;
         writer.upload(segment).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
-        if let Some(point) = point {
-            forked = Some((point, Origin { parent: id, at: segment }));
+        if let Some(version) = version {
+            versioned = Some((version, Origin { parent: id, at: segment }));
         }
     }
     writer.checkpoint().await.map_err(failed)?;
@@ -427,7 +430,7 @@ async fn write(
         branch::delete(&*bucket, id, DELETER, WRITER.1, kms).await.map_err(failed)?;
         cell::forget(&*bucket, cell, id.id).await.map_err(failed)?;
     }
-    Ok(Written { bucket, point: forked })
+    Ok(Written { bucket, version: versioned })
 }
 
 /// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its branch's record is given its DEK
@@ -446,12 +449,12 @@ async fn make_cell(
 async fn copy(
     bucket: &ObjectBucket,
     files: &LocalFileSystem,
-    but: Option<&Point>,
+    but: Option<&Version>,
 ) -> Result<(Sum, Vec<(String, Bytes)>), String> {
     let mut sum = Sum::default();
     let mut objects = Vec::new();
     for meta in bucket.list("").await.map_err(|err| err.to_string())? {
-        if but.is_some_and(|point| point.holds(&meta.key)) {
+        if but.is_some_and(|version| version.holds(&meta.key)) {
             continue;
         }
         let object = bucket.get(&meta.key).await.map_err(|err| err.to_string())?;
@@ -468,15 +471,15 @@ async fn copy(
     Ok((sum, objects))
 }
 
-/// The point a VM's branch, as `shape` says, of a cell of `tenant`'s, is forked to at the end of
-/// its segment `n`, counting from 0, if any: the `points` of its `segments` evenly apart, the last
-/// at the last.
-fn point_at(shape: Shape, tenant: u64, n: u64) -> Option<Branch> {
-    let Shape::Vm { segments, points, first, .. } = shape else { return None };
-    // The points the segments up to n's end have forked to, which steps up `points` times over
+/// The ID of the version a VM's branch, as `shape` says, has at the end of its segment `n`,
+/// counting from 0, if any: the `versions` of its `segments` evenly apart, the last at the last,
+/// numbered from 1.
+fn version_at(shape: Shape, n: u64) -> Option<u64> {
+    let Shape::Vm { segments, versions, .. } = shape else { return None };
+    // The versions the segments up to n's end have, which steps up `versions` times over
     // `segments`, the last time at the last.
-    let (before, after) = (n * points / segments, (n + 1) * points / segments);
-    (after > before).then(|| Branch { cell: Cell { tenant, id: first + after - 1 }, id: 1 })
+    let (before, after) = (n * versions / segments, (n + 1) * versions / segments);
+    (after > before).then_some(after)
 }
 
 #[cfg(test)]
@@ -506,7 +509,7 @@ mod tests {
         );
         assert_eq!(
             parsed(&["d", "1", "1", "1", "160", "--vm", "1024", "100"]),
-            Ok(args([1, 1, 1, 160], Kind::Vm { extents: 1024, points: 100 }))
+            Ok(args([1, 1, 1, 160], Kind::Vm { extents: 1024, versions: 100 }))
         );
         assert_eq!(
             parsed(&["d", "1", "3", "4", "--clones", "16"]),
@@ -514,7 +517,7 @@ mod tests {
         );
         assert_eq!(
             parsed(&["d", "1", "1", "1", "2", "--vm", "8", "3"]),
-            Err("2 segments fork to 2 points at most".into())
+            Err("2 segments end in 2 versions at most".into())
         );
         let refused: [&[&str]; 9] = [
             &[],
@@ -573,8 +576,8 @@ mod tests {
     /// TASK-443.4, TASK-455: what `--deleted` and `--clones` fill, as sweeps find it. A dead cell,
     /// its branch a root or a clone of an ID an allocator gave, is removed whole by its first pass,
     /// and costs the sweeps after it nothing: they list no cell of it. A sandbox's reference is
-    /// retired unmarked, leaving its base's cell nothing of it: that cell's pass lists the point's
-    /// reference alone, and skips once a sweep went by without a sandbox made or retired, a look
+    /// retired unmarked, leaving its base's cell nothing of it: that cell's pass lists no
+    /// reference, and skips once a sweep went by without a sandbox made or retired, a look
     /// costing the lease's read and the listing.
     #[test]
     fn dead_cells_are_removed_whole_and_cost_later_sweeps_nothing() {
@@ -593,22 +596,22 @@ mod tests {
         assert_eq!(requests(&swept[2]), [0, 0, 0, 1, 1]);
         assert_eq!(keys(&bucket, "tenants/"), Vec::<String>::new());
 
-        // Sandboxes of a point of a base, deleted: the base's cell 1, the point's 2, theirs after.
+        // Sandboxes of a version of a base, deleted: the base's cell 1, theirs after.
         let clones = Args {
             dir: directory.path().join("clones"),
             ..args([1, 3, 2, 2], Kind::Clones { extents: 4 })
         };
         let filled = run(&clones, &kms()).unwrap();
-        assert_eq!(filled.cells, 5);
+        assert_eq!(filled.cells, 4);
         let bucket = Arc::new(ObjectBucket::from_url(&url(&clones.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [3, 0, 0]);
         // The base's second pass in full, for its sandboxes' retirements after its first.
         assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 1, 2]);
         assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [3, 0, 0]);
-        // A look at each of the base's and the point's cells: its lease read, its listing.
+        // A look at the base's cell: its lease read, its listing.
         assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
-        for id in 3..=5 {
+        for id in 2..=4 {
             let cell = Cell { tenant: 1, id };
             assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
         }
@@ -623,33 +626,33 @@ mod tests {
                 count(|kind| matches!(kind, Key::Retired { .. })),
             ]
         };
-        // The point's reference alone, no mark of a sandbox.
-        assert_eq!(of_base(&bucket), [1, 0]);
+        // No reference, no mark of a sandbox.
+        assert_eq!(of_base(&bucket), [0, 0]);
 
         // A sandbox more, made and deleted: the base's pass goes in full for its reference, then
         // for its retirement; the sandbox's removes it.
         let files = LocalFileSystem::new_with_prefix(&clones.dir).unwrap();
         let sandbox = Shape::Garbage { segments: 2, deleted: true };
-        let cell = Cell { tenant: 1, id: 6 };
+        let cell = Cell { tenant: 1, id: 5 };
         let ids = Allocator::new();
         let sum = futures::executor::block_on(fill(
             &files,
             &kms(),
             cell,
             sandbox,
-            Some(&filled.points[0]),
+            Some(&filled.bases[0]),
             &ids,
         ));
         // Its cell's object, its record, its head, two segments, a checkpoint, its reference, and
         // the block of IDs its allocator took.
         assert_eq!(sum.unwrap().objects, 8);
-        assert_eq!(of_base(&bucket), [2, 0]);
+        assert_eq!(of_base(&bucket), [1, 0]);
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [1, 0, 0]);
         assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [1, 1, 2]);
         assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [1, 0, 0]);
         assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
         assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
-        assert_eq!(of_base(&bucket), [1, 0]);
+        assert_eq!(of_base(&bucket), [0, 0]);
     }
 }

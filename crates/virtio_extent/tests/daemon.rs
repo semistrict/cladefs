@@ -633,7 +633,7 @@ fn serve_with(device: &Device, readable: &[u8], writable: usize) -> (u32, u32) {
 
 /// A writer's device opens its store, says its version, tag, queues, branch and capacity in its
 /// configuration, takes its guest's freezing, refuses a snapshot unfrozen, and, frozen, forks its
-/// store to a point, which a device restored from its state opens a store of its own from, as
+/// store to a version, which a device restored from its state opens a store of its own from, as
 /// frozen as it was.
 #[test]
 fn devices_are_snapshotted_and_restored() {
@@ -656,8 +656,8 @@ fn devices_are_snapshotted_and_restored() {
 
     let interrupt = Arc::new(Counted::default());
     device.activate(device.features() | (1 << 32), interrupt.clone()).unwrap();
-    let point = dir.0.join("point");
-    let refused = device.take_snapshot(&point, || panic!("quiesced unfrozen")).unwrap_err();
+    let version = dir.0.join("version");
+    let refused = device.take_snapshot(&version, || panic!("quiesced unfrozen")).unwrap_err();
     assert_eq!(
         refused.to_string(),
         "Extent device extents: its guest's filesystem is not frozen (fsfreeze it before the \
@@ -666,14 +666,14 @@ fn devices_are_snapshotted_and_restored() {
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
     assert_eq!(serve_with(&device, &freeze, RESPONSE), (RESPONSE as u32, 0));
     let mut quiesced = false;
-    device.take_snapshot(&point, || quiesced = true).unwrap();
+    device.take_snapshot(&version, || quiesced = true).unwrap();
     assert!(quiesced);
     let state = device.state();
     assert_eq!(
-        (state.point.as_path(), state.frozen, state.window_addr),
-        (point.as_path(), true, None)
+        (state.copy.as_path(), state.frozen, state.window_addr),
+        (version.as_path(), true, None)
     );
-    assert_eq!(state.point_branch, device.snapshot().unwrap().point_branch);
+    assert_eq!(state.branch, device.snapshot().unwrap().branch);
 
     let mut restored_state = state.clone();
     restored_state.config.path_on_host = dir.0.join("restored").display().to_string();
@@ -707,7 +707,7 @@ fn windows_are_where_snapshots_had_them() {
 
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
     assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
-    device.take_snapshot(&dir.0.join("point"), || {}).unwrap();
+    device.take_snapshot(&dir.0.join("version"), || {}).unwrap();
     let mut state = device.state();
     assert_eq!(state.window_addr, Some(1 << 40));
     drop(device);

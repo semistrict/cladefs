@@ -184,8 +184,7 @@ fn one() {
             "delete_tokens" => rules.delete_tokens = false,
             "fork_claims_ids" => rules.fork_claims_ids = false,
             "fork_claims_landed" => rules.fork_claims_landed = false,
-            "points_take_no_writer" => rules.points_take_no_writer = false,
-            "forks_check_points" => rules.forks_check_points = false,
+            "forks_check_versions" => rules.forks_check_versions = false,
             "forks_pending" => rules.forks_pending = false,
             "collector_abandons" => rules.collector_abandons = false,
             "records_relisted" => rules.records_relisted = false,
@@ -205,7 +204,7 @@ fn one() {
             "retirements_marked" => rules.retirements_marked = false,
             "references_held" => rules.references_held = false,
             "references_relisted" => rules.references_relisted = false,
-            "fork_points_kept" => rules.fork_points_kept = false,
+            "origins_kept" => rules.origins_kept = false,
             "ids_given" => rules.ids_given = false,
             "clones_made_unmarked" => rules.clones_made_unmarked = false,
             "fences_kept" => rules.fences_kept = false,
@@ -610,16 +609,16 @@ test_needs!(failed_forks_need_claims_of_what_landed, fork_claims_landed, failed_
 
 test_needs!(forks_to_one_child_need_records_owned, records_owned, failed_forks());
 
-/// Case 11: one point restored on several hosts at once (doc-7, Points): forks of it racing each
-/// other, passes of the collector, and the point's deletion, on hosts' stale copies, whose hosts
-/// die at each step, what they leave opened or deleted; while the branch it names goes on, frees
-/// what it held, and is deleted in turn. Requests land late, after their hosts die.
+/// Case 11: versions restored on several hosts at once (doc-20): forks of one racing each other,
+/// passes of the collector, and the version's drop, whose hosts die at each step, what they leave
+/// opened or deleted; while the branch it names goes on, frees what it held, and is deleted in
+/// turn. Requests land late, after their hosts die.
 fn restores() -> Profile {
     let mut profile = weights(|weights| {
         weights.fork = 1;
-        weights.point = 4;
-        weights.restore = 10;
-        weights.write_point = 1;
+        weights.version = 4;
+        weights.drop_version = 1;
+        weights.restore_version = 10;
         weights.open = 8;
         weights.delete = 3;
         weights.delete_base = 2;
@@ -636,11 +635,9 @@ fn restores() -> Profile {
     profile
 }
 
-test_holds!(points_restored_on_many_hosts_at_once, restores());
+test_holds!(versions_restored_on_many_hosts_at_once, restores());
 
-test_needs!(points_need_refuse_writers, points_take_no_writer, restores());
-
-test_needs!(restores_need_points_read_after_their_records, forks_check_points, restores());
+test_needs!(restores_need_versions_read_after_their_records, forks_check_versions, restores());
 
 test_needs!(restores_need_records_saying_they_are_being_made, forks_pending, restores());
 
@@ -648,7 +645,7 @@ test_needs!(collection_needs_abandoning_restores, collector_abandons, restores()
 
 /// cladefs: restores as [`restores`] makes them, half of those a crash stopped forgotten, as a host
 /// deleting the directory it left unmade knows nothing of the child (TASK-395.10): what they wrote
-/// is the collector's alone, a record being made given up on once its point goes, and the
+/// is the collector's alone, a record being made given up on once its version goes, and the
 /// reference written after it retired by it.
 fn forgotten_restores() -> Profile {
     let mut profile = restores();
@@ -679,11 +676,11 @@ test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores());
 
 // cladefs: a clone a store resumed, its host having died after its record, made with no reference:
-// once its point goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
+// once its version goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
 // direct test is extent_bucket's `clones_resumed_need_resumes_refer`; its model specs/bucket's
 // NoResumesRefer. cladefs: ignored until the simulation resumes a fork at all (TASK-497): its
 // restores profile resumes none in 20,000 seeds, and the seed that found the rule needed, 2655,
-// found TASK-462's lost fork point, fixed since, with every rule on.
+// found TASK-462's lost origin, fixed since, with every rule on.
 #[test]
 #[ignore = "TASK-497: the simulation resumes no fork; the direct test is clones_resumed_need_resumes_refer"]
 fn restores_need_resumes_refer() {
@@ -693,14 +690,14 @@ fn restores_need_resumes_refer() {
 /// Restores as [`restores`] makes them, fewer and among more forks, so that more take the IDs of
 /// forks' children whose segments are not yet acknowledged, as guests may name any: whichever's
 /// record comes first takes the ID, the other refused (TASK-173). Its rule,
-/// `recoveries_by_origins`, needs a pass to list the records before the point's record and read
-/// the parent's state after the restore, the point's deletion and a checkpoint, which no seed of
-/// 0..20,000 of this profile or [`restores`] does: the direct test
-/// `children_restored_from_points_keeping_their_origins_need_recoveries_by_origins` shows it.
+/// `recoveries_by_origins`, needs a pass to list the records before the version's branch's head
+/// and read the parent's state after the restore, the version's drop and a checkpoint, which no
+/// seed of 0..20,000 of this profile or [`restores`] does: the direct test
+/// `children_restored_from_versions_keeping_their_origins_need_recoveries_by_origins` shows it.
 fn restores_taking_ids() -> Profile {
     let mut profile = restores();
     profile.weights.fork = 4;
-    profile.weights.restore = 2;
+    profile.weights.restore_version = 2;
     profile.weights.crash = 1;
     profile
 }
@@ -735,18 +732,18 @@ test_needs!(collection_needs_ids_given, ids_given, usurped());
 // by their references...
 test_needs!(collection_needs_references, references, deleted_bases());
 
-// ...and its state at their fork points whole, what recovering it reads too: a fork with no
+// ...and its state at their origins whole, what recovering it reads too: a fork with no
 // checkpoint of its own recovers through it...
-test_needs!(collection_needs_fork_points_kept, fork_points_kept, deleted_bases());
+test_needs!(collection_needs_origins_kept, origins_kept, deleted_bases());
 
 // ...and a reference stays while its child's cell holds references of its own, a generation's
 // forks inheriting through it.
 test_needs!(collection_needs_references_held, references_held, forks());
 
 // A deletion's references written before it marks the parent deleted, and a clone's before it
-// reads its point, have no search here: collector::tests' direct ones show them needed
+// reads its version, have no search here: collector::tests' direct ones show them needed
 // (`deletions_referring_before_they_mark_parents_deleted_need_references_first`,
-// `clones_keeping_what_they_inherit_as_their_points_go_need_clones_refer_first`), as do
+// `clones_keeping_what_they_inherit_as_their_versions_go_need_clones_refer_first`), as do
 // specs/bucket's NoReferencesFirst and NoForksReferFirst; references listed after the states,
 // NoReferencesRelisted alone.
 
@@ -807,7 +804,7 @@ test_holds!(recoveries_racing_collection, recovering());
 
 /// cladefs: versions (doc-18, TASK-476): cut by branches' writers, their stores quiescent,
 /// acknowledged with their segments, carried by takeovers, dropped, uploaded or local, restored on
-/// any host as points are, while their branches go on, free what they held, checkpoint past them,
+/// any host, while their branches go on, free what they held, checkpoint past them,
 /// crash and are deleted, and collectors run.
 fn versions() -> Profile {
     let mut profile = weights(|weights| {
@@ -838,4 +835,4 @@ test_needs!(versions_need_takeovers_to_carry_them, versions_carried, versions())
 
 test_needs!(versions_need_naming_with_their_segments, versions_acked, versions());
 
-test_needs!(restores_of_versions_need_their_heads_read, forks_check_points, versions());
+test_needs!(restores_of_versions_need_their_heads_read, forks_check_versions, versions());

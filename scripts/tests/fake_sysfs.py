@@ -71,10 +71,10 @@ class Tree:
         (self.root / "sys/class/block" / name / "stat").write_text(
             f"   91    4 {read // SECTOR}  120   77   13 {written // SECTOR}  340 0 500 460\n")
 
-    def mount(self, point, number, filesystem, source):
+    def mount(self, version, number, filesystem, source):
         """A mount at POINT of SOURCE, a FILESYSTEM, on the device NUMBER."""
         with (self.root / "proc/self/mountinfo").open("a") as mounts:
-            mounts.write(f"36 25 {number} / {point} rw,relatime shared:1 - {filesystem} {source} "
+            mounts.write(f"36 25 {number} / {version} rw,relatime shared:1 - {filesystem} {source} "
                          "rw\n")
 
     def dataset(self, objset, name, read, written):

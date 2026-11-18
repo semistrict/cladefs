@@ -110,8 +110,8 @@ impl KeptImage {
     /// cell of its tenant's (TASK-364), whose handle is a new directory at `path`, in its bucket
     /// too ([`host_store::fork`]): `held` is let go of once the fork's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
-        let cell = host_store::fork_cell(self.store.description().branch);
-        let branch = host_store::new_branch(self.uploader.bucket(), cell).map_err(Error::from)?;
+        let tenant = self.store.description().branch.cell.tenant;
+        let branch = host_store::new_branch(self.uploader.bucket(), tenant).map_err(Error::from)?;
         let child = Child { branch, owner: rand::random() };
         host_store::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
     }

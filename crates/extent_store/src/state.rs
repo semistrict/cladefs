@@ -69,8 +69,8 @@ pub(crate) struct State<F> {
     /// cladefs: its write-ahead log's segments not yet acknowledged in the bucket, which the
     /// uploader takes (TASK-165.9).
     pub wal: Queue,
-    /// cladefs: whether it holds a point, which nothing writes (doc-7, Points).
-    pub point: bool,
+    /// cladefs: whether it holds a version, which nothing writes (doc-7, Versions).
+    pub version: bool,
     /// cladefs: the extents freed whose data stays.
     pub kept: KeptExtents,
     /// cladefs: the extents views refuse, sealed after their commits.
@@ -482,7 +482,7 @@ impl Holds for Whole {
     }
 }
 
-/// cladefs: a store not failed, nor closed, its branch no point: what changing it takes
+/// cladefs: a store not failed, nor closed, its branch no version: what changing it takes
 /// ([`Writable`]).
 pub(crate) struct Changeable;
 
@@ -490,7 +490,7 @@ impl Holds for Changeable {
     fn check<F: File>(state: &State<F>, branch: Branch) -> Result<(), Error> {
         state.standing.whole()?;
         anyhow::ensure!(!state.standing.is_closed(), "branch {branch} is closed");
-        anyhow::ensure!(!state.point, "branch {branch} is a point, which nothing writes");
+        anyhow::ensure!(!state.version, "branch {branch} is a version, which nothing writes");
         Ok(())
     }
 }

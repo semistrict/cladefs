@@ -587,7 +587,7 @@ mod tests {
     /// cladefs: an image of an encrypted cell (TASK-411.5): its device writes extents' data, in its
     /// open segment's raw file and a large extent's own, by I/O of its own, encrypted
     /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
-    /// of the image holds them in the clear at any of those points, each once the image does
+    /// of the image holds them in the clear at any of those versions, each once the image does
     /// nothing behind its device's callers ([`quiesced`]).
     #[test]
     fn encrypted_images_hold_no_plaintext() {
@@ -597,8 +597,7 @@ mod tests {
         crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
-        let cell = crate::host_store::new_cell(5);
-        let made = (64 * MIB as u64, crate::host_store::BranchOf::New(cell), true);
+        let made = (64 * MIB as u64, crate::host_store::BranchOf::New(5), true);
         let keeping = crate::host_store::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
         assert!(device.store.keys().encrypts());

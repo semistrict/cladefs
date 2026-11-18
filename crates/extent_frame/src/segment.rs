@@ -149,7 +149,7 @@ impl Footer {
 /// number as of them, at least; the forks made at its end, by their children; and the branch's
 /// capacity, the most bytes its extents may hold, if they set it: a resize is a commit's, ordered
 /// with the others, so that the branch has it wherever it is taken, its forks inherit it, and a
-/// point keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
+/// version keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
 /// inside of, if it does, which the next segment goes on with ([`Continued`], TASK-92.41).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contents {

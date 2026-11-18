@@ -147,7 +147,7 @@ pub trait Dir: Send + Sync + 'static {
     /// callers': framing a closed segment off the commit that closed it (TASK-41), and syncing a
     /// flush's files at once (TASK-92.42). Without, its callers' threads do all of it, one
     /// operation at a time, in an order their calls alone decide: as a directory needs that fails
-    /// from a number of operations on, as a crash would, at the same point each time it is run
+    /// from a number of operations on, as a crash would, at the same version each time it is run
     /// ([`MemDir::serial`](crate::MemDir::serial), TASK-79.79).
     fn concurrent(&self) -> bool {
         true

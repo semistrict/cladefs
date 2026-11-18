@@ -26,7 +26,7 @@
 //! ([`Ring::of`], `extent_frame::Keys::encrypted`). A host's fetchers, which share what they keep for
 //! all its stores, open parts with the union of its stores' rings ([`HostRing`]).
 //!
-//! **Forks into other cells** (doc-16, Forks and shared points; TASK-411.4). A branch's record
+//! **Forks into other cells** (doc-16, Forks and shared versions; TASK-411.4). A branch's record
 //! keeps, beside its own DEKs, the DEKs of every ancestor of another cell whose objects it reads,
 //! each generation, rewrapped under its own cell's KEK ([`InheritedDek`],
 //! [`crate::record::Record::inherited`]), given with its first DEK, in one conditional update: a
@@ -34,7 +34,7 @@
 //! cell's KEK, nor another tenant's KMS, and shredding a parent leaves it what it inherited. A
 //! fork's host gives them as it makes the fork, from the keys its parent's store holds, its
 //! child's cell made with a KEK of its pool ([`inheriting`], [`give_inherited`]): no KMS call on
-//! the fork's path. A record without them yet (a fork's child before its keys, a point) is read by
+//! the fork's path. A record without them yet (a fork's child before its keys, a version) is read by
 //! crossing into its ancestors' cells, their KEKs unwrapped by the KMS, which its first writer
 //! then rewraps ([`with_dek`]).
 //!
@@ -198,7 +198,7 @@ pub struct Ring {
     places: HashMap<u64, Branch>,
     encrypted: BTreeSet<u64>,
     encrypting: Option<KeyId>,
-    /// cladefs: a point's, the DEK it encrypts what nothing writes under ([`Ring::for_point`]): none of
+    /// cladefs: a copy's, the DEK it encrypts what nothing writes under ([`Ring::for_copy`]): none of
     /// its DEKs, which nothing inherits nor any host's fetchers hold.
     unwritten: Option<Arc<Secret>>,
     /// The branch whose store it was opened for ([`ring`]): what a host forgetting a tenant's or a
@@ -266,11 +266,11 @@ impl Ring {
         Arc::new(ring)
     }
 
-    /// cladefs: this ring, a point's store's, `branch`'s, given a key to encrypt what nothing writes
-    /// under (TASK-411.28): a point's store's open segment, which no write reaches (a point is
-    /// read-only), is encrypted as every store's is, under a DEK drawn for it alone, of generation
-    /// 0, which no record keeps, never written out.
-    pub fn for_point(&self, branch: Branch) -> Arc<Self> {
+    /// cladefs: this ring, a version's copy's store's, `branch`'s, given a key to encrypt what
+    /// nothing writes under (TASK-411.28): a copy's store's open segment, which no write reaches (a
+    /// copy is read-only), is encrypted as every store's is, under a DEK drawn for it alone, of
+    /// generation 0, which no record keeps, never written out.
+    pub fn for_copy(&self, branch: Branch) -> Arc<Self> {
         let id = KeyId { branch: branch.id, generation: 0 };
         let unwritten = Some(Arc::new(Secret::random()));
         let (deks, places, encrypted) =
@@ -497,7 +497,7 @@ type Unwrap = Shared<BoxFuture<'static, Unwrapped>>;
 /// none for a cell this host made and has not taken yet, whose first taking here it serves.
 type Takings = HashMap<(Cell, u32), (Option<(u64, u64)>, Unwrap)>;
 
-/// How a host keeps its pools of new cell KEKs (doc-16, Forks and shared points; TASK-411.4): a
+/// How a host keeps its pools of new cell KEKs (doc-16, Forks and shared versions; TASK-411.4): a
 /// tenant's refilled in batches, on `handle`, off the paths that take from it, once a take leaves
 /// fewer than `low`, or an encrypted store of the tenant opens.
 #[derive(Clone, Debug)]
@@ -623,7 +623,7 @@ impl CachingKms {
     }
 
     /// `tenant`'s KEK is revoked or destroyed, or none, as `why` says: the KMS said so, or the control API
-    /// (doc-16, Forks and shared points). Its pool is dropped, a refill of it going adding nothing,
+    /// (doc-16, Forks and shared versions). Its pool is dropped, a refill of it going adding nothing,
     /// so that it makes no cell more; its cells' KEKs unwrapped are forgotten, so that no taking
     /// of them goes on unasked, and what the KMS keeps of its KEK (`kms::Kms::forget`); and no fork
     /// inherits its keys ([`inheriting`]), until the KMS answers a call for it again.
@@ -862,7 +862,7 @@ impl CellKeys {
         Self::taken(cell, object, taking, kms)
     }
 
-    /// The keys of `cell`, which has no object: none, as a point's cell, which no host makes,
+    /// The keys of `cell`, which has no object: none, as a version's cell, which no host makes,
     /// nothing writing it, its ancestors' read under the cells they are of. Not a cell in the
     /// clear: none is (TASK-411.28).
     pub fn objectless(cell: Cell, kms: Arc<CachingKms>) -> Self {
@@ -912,7 +912,7 @@ impl CellKeys {
     }
 
     /// Its newest KEK, unwrapped, and its generation: every cell's object has one, but a
-    /// shredded one's, refused. A cell with no object (a point's) has none to write under.
+    /// shredded one's, refused. A cell with no object (a version's) has none to write under.
     async fn newest_kek(&self) -> Result<(Arc<Secret>, u32), Error> {
         if self.shredded {
             return Err(crate::cell::shredded(self.cell));
@@ -1120,7 +1120,7 @@ pub async fn rotate(
 /// An ancestor of its cell's is unwrapped under its cell's KEK. One of another cell (TASK-411.4):
 /// a record with its keys holds those of every one it reads, as they were given it with them
 /// ([`with_dek`]), so that it needs no other cell's KEK, an encrypted ancestor it holds not refused
-/// ([`Error::Inherited`]). A record without them yet, a point's, a fork's child's before they are
+/// ([`Error::Inherited`]). A record without them yet, a version's, a fork's child's before they are
 /// given, is read by crossing into that ancestor's cell, its object read, its KEK unwrapped by the
 /// KMS, its keys and those it inherits taken from there on.
 pub async fn ring(
@@ -1201,7 +1201,7 @@ pub async fn compacting<'a>(
 /// The ring `branch`'s writer would hold, its record `record`, to encrypt what it writes of the
 /// branch's under: its cell's object read, its KEK unwrapped by `kms`, the host's; its record
 /// given its first DEK if it has none, as its writer gives it ([`with_dek`]). What another than
-/// its writer encrypts the branch's objects under: its deletion's checkpoints at the fork points of
+/// its writer encrypts the branch's objects under: its deletion's checkpoints at the origins of
 /// its forks to other cells ([`crate::branch::delete`], TASK-411.4).
 pub async fn writing(
     bucket: &impl Bucket,
@@ -1247,10 +1247,10 @@ pub async fn taking(
 }
 
 /// The keys of a fork's parent that whoever records the fork authenticates the parent's checkpoint
-/// at the fork point under, if the child is of another cell (TASK-411.4): those its writer holds;
+/// at the origin under, if the child is of another cell (TASK-411.4): those its writer holds;
 /// or, for its deletion, or a failed fork's claim, the host's KMS, with the parent's record if
-/// read, asked only once a checkpoint is to be written ([`writing`]); or none, for a fork of a
-/// point, which writes no checkpoint of its parent's (`branch::fork_point`).
+/// read, asked only once a checkpoint is to be written ([`writing`]); or none, for a fork within
+/// its parent's cell, which writes no checkpoint of its parent's.
 #[derive(Clone, Copy)]
 pub enum Parents<'a> {
     Held(&'a Arc<Ring>),
@@ -1271,14 +1271,14 @@ impl Parents<'_> {
                 writing(bucket, kms, parent, &record).await
             }
             Self::Unasked => Err(Error::Corrupt(format!(
-                "branch {parent}'s keys, asked of a fork of a point, which writes no checkpoint of \
+                "branch {parent}'s keys, asked of a fork of a version, which writes no checkpoint of \
                  its parent's"
             ))),
         }
     }
 }
 
-/// What a fork into another cell gives its child (doc-16, Forks and shared points; TASK-411.4),
+/// What a fork into another cell gives its child (doc-16, Forks and shared versions; TASK-411.4),
 /// made before anything of the fork is ([`inheriting`]): the keys its parent's store holds, which
 /// its child inherits, and a KEK for its child's cell from the host's pool, given back if no cell
 /// is made with it.
@@ -1299,9 +1299,7 @@ impl Drop for Inheriting {
 
 /// What a fork of `parent`, whose store holds `source`, to `child` gives its child, if it is of
 /// another cell, and `source` holds keys of branches of other cells than the child's: none for a
-/// fork within a cell, whose child's writer gives its keys as it opens ([`with_dek`]); nor for a
-/// point, which nothing writes, whose readers read what it names under the keys of the cells it is
-/// of, and whose forks rewrap them ([`ring`]). Asked for before anything of the fork is made, so
+/// fork within a cell, whose child's writer gives its keys as it opens ([`with_dek`]). Asked for before anything of the fork is made, so
 /// that a fork refused makes nothing: refused if `kms`, the host's, last heard that a tenant of
 /// those branches' KEK is revoked or destroyed ([`Kms::revoked`]); or as the KMS refuses a KEK
 /// for the child's cell, which comes from the host's pool, no call made then ([`new_cell_kek`]).
@@ -1311,10 +1309,10 @@ pub async fn inheriting(
     parent: Branch,
     child: layout::Child,
 ) -> Result<Option<Inheriting>, Error> {
-    let layout::Child { branch: child, point, .. } = child;
+    let layout::Child { branch: child, .. } = child;
     let outside: BTreeSet<Branch> =
         source.places.values().copied().filter(|of| of.cell != child.cell).collect();
-    if outside.is_empty() || child.cell == parent.cell || point {
+    if outside.is_empty() || child.cell == parent.cell {
         return Ok(None);
     }
     for tenant in outside.iter().map(|of| of.cell.tenant).collect::<BTreeSet<_>>() {
@@ -1539,7 +1537,7 @@ mod tests {
 
     /// A cell made with a KEK from the host's pool keeps it wrapped; a taking of it by another
     /// host unwraps it once, however many of its branches it opens at once, and a taking after
-    /// that once more; a fork's child of the cell and a point there read their parent's DEK, of
+    /// that once more; a fork's child of the cell and a version there read their parent's DEK, of
     /// the cell's; a writer of a branch of a cell with no object (no KEK) is refused its DEK, and
     /// a writer's ring of a record with no DEK is refused (TASK-411.28: nothing in the clear).
     #[test]

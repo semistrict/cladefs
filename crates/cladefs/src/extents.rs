@@ -37,7 +37,7 @@ use crate::profile::{self, Recorder};
 use crate::stats::{self, Counter};
 use crate::store_dir;
 use extent_bucket::cell::Kind;
-use extent_bucket::layout::{Branch, Cell};
+use extent_bucket::layout::Branch;
 use extent_bucket::trace;
 use extent_store::{
     HostDir, NoSpace, NotHeld, NotQuiescent, SpentExtent, Store, TooLong, TooSmall, Unaligned,
@@ -117,7 +117,7 @@ pub enum MappingContents {
 
 /// cladefs: what a store opened is: who writes it, and whether every tenant reads it. It says what
 /// may be done to it, which each of its methods that changes it checks, rather than each caller
-/// (TASK-160.10). Fixed once it is open, with its uploader, which says whether it is a point, as
+/// (TASK-160.10). Fixed once it is open, with its uploader, which says whether it is a version, as
 /// the extent daemon has it before anything asks it to do anything (`cladefsd::stores`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreAccess {
@@ -136,41 +136,41 @@ pub enum StoreRole {
     Writer,
     /// None: it is a follower's (backlog doc-8), reading its writer's commits through a view.
     Follower,
-    /// None: it is a point (doc-7, Points), the name of a state, which any number of hosts read
+    /// None: it is a version (doc-7, Versions), the name of a state, which any number of hosts read
     /// and fork at once.
-    Point,
+    Version,
 }
 
 impl StoreAccess {
     /// `Ok` if what the store holds may change: its extents and commits, which only its writer's
-    /// do, and of no public base. A follower's and a point refuse with `EROFS`; a
+    /// do, and of no public base. A follower's and a version refuse with `EROFS`; a
     /// public base with `EPERM`, as what changed would be every tenant's that forks it (TASK-43).
     pub fn may_write(self) -> Result<()> {
         match self {
             Self { role: StoreRole::Follower, .. } => Err(Errno::EROFS),
             Self { public: true, .. } => Err(Errno::EPERM),
-            Self { role: StoreRole::Point, .. } => Err(Errno::EROFS),
+            Self { role: StoreRole::Version, .. } => Err(Errno::EROFS),
             Self { role: StoreRole::Writer, public: false } => Ok(()),
         }
     }
 
     /// `Ok` if the store's capacity may change, its writer's alone: `EROFS` for a follower's, and
-    /// for a point, whose forks take it as it is. A public base's grows, as no fork it made shares
+    /// for a version, whose forks take it as it is. A public base's grows, as no fork it made shares
     /// it.
     pub fn may_resize(self) -> Result<()> {
         match self.role {
             StoreRole::Writer => Ok(()),
-            StoreRole::Follower | StoreRole::Point => Err(Errno::EROFS),
+            StoreRole::Follower | StoreRole::Version => Err(Errno::EROFS),
         }
     }
 
     /// `Ok` if the store may be forked, made public or have a base attached, which changes none of
-    /// its extents, as a point and a public base may: `EROFS` for a follower's, whose view is all
+    /// its extents, as a version and a public base may: `EROFS` for a follower's, whose view is all
     /// it has of the store.
     pub fn may_manage(self) -> Result<()> {
         match self.role {
             StoreRole::Follower => Err(Errno::EROFS),
-            StoreRole::Writer | StoreRole::Point => Ok(()),
+            StoreRole::Writer | StoreRole::Version => Ok(()),
         }
     }
 }
@@ -192,7 +192,7 @@ pub struct ExtentStore {
     /// cladefs: the stores it was forked from, nearest first, as of the forks ([`store_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
     /// cladefs: the uploader of the store's branch to object storage, which opened it, taking its
-    /// head, or holds its point: what doc-4's `COMMIT_UPLOADED` commits wait for.
+    /// head, or holds its version: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
     uploader: Option<extent_store::upload::Uploader<HostDir>>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
@@ -522,13 +522,13 @@ impl ExtentStore {
     /// file bucket of its own, which its description names (`host_store::create`, TASK-165.6),
     /// opened as this process opens stores ([`Opening::here`]).
     pub fn create(path: impl AsRef<Path>, capacity: u64) -> Result<Self, Error> {
-        Self::create_in(path, capacity, host_store::new_cell(host_store::DEFAULT_TENANT))
+        Self::create_in(path, capacity, host_store::DEFAULT_TENANT)
     }
 
-    /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of a new branch of `cell`,
+    /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of a new cell of `tenant`'s,
     /// its ID its bucket's to give (`extent_bucket::objectid`, TASK-364).
-    pub fn create_in(path: impl AsRef<Path>, capacity: u64, cell: Cell) -> Result<Self, Error> {
-        Self::create_with(path, capacity, BranchOf::New(cell), Opening::here()?)
+    pub fn create_in(path: impl AsRef<Path>, capacity: u64, tenant: u64) -> Result<Self, Error> {
+        Self::create_with(path, capacity, BranchOf::New(tenant), Opening::here()?)
     }
 
     /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of `branch`, which its
@@ -613,7 +613,7 @@ impl ExtentStore {
         url: &str,
     ) -> Result<Self, Error> {
         let (path, opening) = (path.as_ref(), Opening::here()?);
-        let (of, keeping) = (BranchOf::New(host_store::new_cell(0)), opening.keeping.clone());
+        let (of, keeping) = (BranchOf::New(0), opening.keeping.clone());
         let opened = host_store::create_unmade(path, capacity, of, Kind::Fxfs, Some(url), keeping)?;
         opened.made().map_err(Error::new)?;
         Self::new(path, opened, opening)
@@ -749,12 +749,8 @@ impl ExtentStore {
     pub fn access(&self) -> StoreAccess {
         let role = match &self.following {
             Some(_) => StoreRole::Follower,
-            None if self
-                .uploader
-                .as_ref()
-                .is_some_and(extent_store::upload::Uploader::is_point) =>
-            {
-                StoreRole::Point
+            None if self.uploader.as_ref().is_some_and(extent_store::upload::Uploader::is_copy) => {
+                StoreRole::Version
             }
             None => StoreRole::Writer,
         };
@@ -969,24 +965,25 @@ impl ExtentStore {
     /// A fork that fails is deleted in the bucket, as the fork's alone, and leaves nothing at
     /// `path`.
     ///
-    /// A fork of a point commits nothing in object storage: its child's record is the fork, which
-    /// fails with `ENOENT` once the point is deleted (`Uploader::forked`).
+    /// A fork of a version commits nothing in object storage: its child's record is the fork, which
+    /// fails with `ENOENT` once the version is deleted (`Uploader::forked`).
     ///
     /// cladefs: in a span of its own, `store.fork` (`extent_bucket::trace`, TASK-258).
-    pub fn fork(&self, path: impl AsRef<Path>, cell: Cell) -> Result<Branch, Error> {
-        let branch = self.new_child(cell)?;
+    pub fn fork(&self, path: impl AsRef<Path>, tenant: u64) -> Result<Branch, Error> {
+        let branch = self.new_child(tenant)?;
         self.fork_to(path, branch)?;
         Ok(branch)
     }
 
-    /// cladefs: a fork's child, a new branch of `cell` of the store's bucket's. A follower's uploader
+    /// cladefs: a fork's child, the branch of a new cell of `tenant`'s, its ID the store's bucket's
+    /// to give. A follower's uploader
     /// is its writer's, which forks nothing of it (`EROFS`). A store with a writer forks to no cell
     /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_store::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
-    fn new_child(&self, cell: Cell) -> Result<Branch, Error> {
+    fn new_child(&self, tenant: u64) -> Result<Branch, Error> {
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
-        host_store::may_fork_into(self.branch(), uploader, cell)?;
-        Ok(host_store::new_branch(uploader.bucket(), cell).map_err(upload_errno)?)
+        host_store::may_fork_into(self.branch(), uploader, tenant)?;
+        Ok(host_store::new_branch(uploader.bucket(), tenant).map_err(upload_errno)?)
     }
 
     /// cladefs: forks the store as [`ExtentStore::fork`] does, to `branch`, whatever its ID: so the
@@ -1013,7 +1010,7 @@ impl ExtentStore {
 
     /// cladefs: forks the store, as [`ExtentStore::fork`] says, its commits made uploaded:
     /// `opening`, if given, held until the fork's commit is made, and not as the fork's upload
-    /// goes. The child is a point if `point`.
+    /// goes. The child is a version if `version`.
     fn fork_uploaded(
         &self,
         path: &Path,
@@ -1489,7 +1486,7 @@ impl ExtentStore {
     /// cladefs: what the store's uploader has done, and has left to do, if it has one
     /// (TASK-50.5).
     pub fn upload_status(&self) -> Result<Option<extent_store::upload::UploadStatus>> {
-        let uploading = self.uploader.as_ref().filter(|uploader| !uploader.is_point());
+        let uploading = self.uploader.as_ref().filter(|uploader| !uploader.is_copy());
         uploading.map(|uploader| uploader.status().map_err(upload_errno)).transpose()
     }
 
@@ -1588,7 +1585,7 @@ impl ExtentStore {
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
     /// that copies on write (backlog doc-13): a store to a page gives the page a private copy, of
     /// which it holds `private_max` pages at most, its second stage's memory, not the daemon's: none
-    /// is reserved for them (TASK-501). A store whose extents can't change, a follower's, a point
+    /// is reserved for them (TASK-501). A store whose extents can't change, a follower's, a version
     /// or a public base, takes none (as [`StoreAccess::may_write`]).
     pub fn create_copying_dax_window(
         &self,
@@ -1808,7 +1805,7 @@ impl ExtentStore {
     /// The DAX window's mappings, in order: what a snapshot of the VM records, to map them again
     /// where it is restored, at the same offsets, with [`ExtentStore::map_many`]. Without a
     /// window, none. cladefs: `EBUSY` while the window holds private pages, which no mapping names
-    /// the bytes of, as a snapshot's point is refused then (TASK-203).
+    /// the bytes of, as a snapshot's version is refused then (TASK-203).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
         let dax = self.dax.lock(&self.halt)?;
         match dax.as_ref() {
@@ -1869,8 +1866,8 @@ impl ExtentStore {
     /// ([`ExtentStore::is_quiescent`]), and no write comes between that and the fork, which would
     /// seal it under its writer: `EBUSY` otherwise. So a running VM's store forks,
     /// its guest's filesystem frozen (TASK-39.3), as a snapshot of the VM does (TASK-39.1).
-    pub fn fork_quiescent(&self, path: impl AsRef<Path>, cell: Cell) -> Result<Branch, Error> {
-        let branch = self.new_child(cell)?;
+    pub fn fork_quiescent(&self, path: impl AsRef<Path>, tenant: u64) -> Result<Branch, Error> {
+        let branch = self.new_child(tenant)?;
         self.fork_at_rest(path.as_ref(), branch)?;
         Ok(branch)
     }
@@ -2011,9 +2008,9 @@ impl ExtentStore {
         then()
     }
 
-    /// cladefs: forks the store as [`ExtentStore::fork_quiescent`] says, a point if `point`. Not
-    /// while its window holds private pages (`EBUSY`), whose bytes are the VM's, held by no
-    /// extent: a fork, a snapshot's point, would name their sources, and a VM restored from it
+    /// cladefs: forks the store as [`ExtentStore::fork_quiescent`] says. Not while its window holds
+    /// private pages (`EBUSY`), whose bytes are the VM's, held by no extent: a fork, or a VM
+    /// snapshot's version, would name their sources, and a VM restored from it
     /// read their old bytes (TASK-203, backlog doc-13). The guest's freeze writes them back and
     /// rebinds them first; one it couldn't, as a writeback that found no memory leaves (TASK-207)
     /// or a rebind refused, it says it left. Checked before the fork's lock, which no write of the
@@ -2032,9 +2029,9 @@ impl ExtentStore {
     }
 
     /// cladefs: whether the store holds what `other` does, as of their last commits: the same root,
-    /// and the same extents, of the same lengths, its ancestors' among them. As a store a point
-    /// was taken of does, written nothing since, and a fork of the point that wrote nothing: what
-    /// a VM restored from a snapshot at the point may run on, its memory the point's (TASK-194).
+    /// and the same extents, of the same lengths, its ancestors' among them. As a store a version
+    /// was taken of does, written nothing since, and a fork of the version that wrote nothing: what
+    /// a VM restored from a snapshot at the version may run on, its memory the version's (TASK-194).
     pub fn holds_what(&self, other: &ExtentStore) -> Result<bool> {
         let held =
             |store: &Store<HostDir>| -> anyhow::Result<_> { Ok((store.root()?, store.extents()?)) };
@@ -2042,7 +2039,7 @@ impl ExtentStore {
     }
 
     /// Whether nothing is open: no extent written since the last commit, which a fork of the
-    /// store as of that commit would not hold; as with its guest's filesystem frozen, a point a
+    /// store as of that commit would not hold; as with its guest's filesystem frozen, a version a
     /// snapshot of its VM is taken at.
     pub fn is_quiescent(&self) -> Result<bool> {
         // cladefs: not, as far as anyone knows, once a panic went through it (`crate::halt`).
@@ -2385,11 +2382,10 @@ mod tests {
         let cases = [
             (Failure::Bucket(Error::Fenced), Errno::EROFS),
             (Failure::Bucket(Error::Deleted), Errno::EROFS),
-            (Failure::Bucket(Error::Point), Errno::EROFS),
             (Failure::Bucket(Error::Stale), Errno::ESTALE),
             (Failure::Bucket(Error::Diverged), Errno::ESTALE),
             (Failure::Bucket(Error::NoBranch), Errno::ENOENT),
-            (Failure::PointDeleted, Errno::ENOENT),
+            (Failure::VersionDropped, Errno::ENOENT),
             (Failure::Bucket(Error::IdTaken(extent_bucket::layout::test_branch(3))), Errno::EEXIST),
             (
                 Failure::Bucket(Error::Format {
@@ -2646,7 +2642,7 @@ mod tests {
         crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
+        let store = ExtentStore::create_in(&path, 1 << 20, 5).unwrap();
         assert!(!store.store.keys().is_empty());
         let store = Arc::new(store);
         let a = id(&store, 1);
@@ -2692,25 +2688,19 @@ mod tests {
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
 
         // A store of a tenant with no KEK there: none, its cell refused, as destroyed.
-        let none =
-            ExtentStore::create_in(dir.path().join("none"), 1 << 20, host_store::new_cell(6));
+        let none = ExtentStore::create_in(dir.path().join("none"), 1 << 20, 6);
         let refused = none.err().expect("a store of a tenant with no KEK");
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
         // The default tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
-        let common = ExtentStore::create_in(
-            &common,
-            1 << 20,
-            host_store::new_cell(host_store::DEFAULT_TENANT),
-        );
+        let common = ExtentStore::create_in(&common, 1 << 20, host_store::DEFAULT_TENANT);
         let common = common.unwrap();
         assert!(!common.store.keys().is_empty());
         write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
         common.commit(None).unwrap();
-        let into =
-            crate::Branch { cell: host_store::new_cell(6), id: rand::random::<u64>().max(1) };
+        let into = crate::host_store::named(6);
         let refused = common.fork_to(dir.path().join("into-none"), into).unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(!dir.path().join("into-none").exists());
@@ -2735,7 +2725,7 @@ mod tests {
         unsafe { std::env::set_var("CLADEFS_KMS", &url) };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
+        let store = ExtentStore::create_in(&path, 1 << 20, 5).unwrap();
         let dek = *store.store.keys().encrypting().0.expose();
         let a = id(&store, 1);
         let data = crate::test_data::noise(1, 2 * BLOCK);

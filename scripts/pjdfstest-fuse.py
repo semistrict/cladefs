@@ -156,7 +156,7 @@ def encrypted_env(dir):
 
 def mounted(cladefs_mount, dir):
     """cladefs-mount of a new store in `dir`, once it says it is mounted: the process, the mount
-    point and its log."""
+    version and its log."""
     store, mountpoint = dir / "store", dir / "mnt"
     mountpoint.mkdir()
     log = open(dir / "cladefs-mount.log", "w")

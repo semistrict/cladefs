@@ -62,7 +62,8 @@ service Mount {
 message AttachRequest {
   // The tenant.
   uint64 tenant = 1;
-  // Its cell, or 0 for a new cell of the tenant's.
+  // Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket and its branch's
+  // too, the bucket gives.
   uint64 cell = 2;
   // The fencing token of the placement to take the cell at, if any: as CreateStore's.
   optional uint64 token = 3;

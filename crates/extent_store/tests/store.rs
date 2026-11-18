@@ -650,10 +650,7 @@ fn closed_segments_hold_the_branchs_history() {
     // At a fork.
     store.write(extent(51), 0, &pattern(51, 0, BLOCK)).unwrap();
     store
-        .commit_fork(Child {
-            branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
-            owner: 0,
-        })
+        .commit_fork(Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 })
         .unwrap();
     let places = store.places().unwrap();
     let (reopened, _) = reopened_state(store, &dir);
@@ -1052,10 +1049,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     // The next follows it; a fork's names the fork.
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
     store
-        .commit_fork(Child {
-            branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
-            owner: 0,
-        })
+        .commit_fork(Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 })
         .unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
@@ -1064,10 +1058,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         (second.footer.contents.commits.clone(), second.footer.contents.forks.clone()),
         (
             vec![tag(3, 2)],
-            vec![Child {
-                branch: extent_bucket::layout::test_branch(BRANCH.id + 1),
-                owner: 0
-            }]
+            vec![Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 }]
         )
     );
 
@@ -3331,8 +3322,7 @@ fn forks_give_their_commits_epoch() {
     let store = create(MemDir::new(), 1 << 20);
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
-    let forked =
-        Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 };
+    let forked = Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0 };
     assert_eq!(store.commit_fork(forked).unwrap(), 2);
     assert_eq!(store.last_commit().unwrap(), 2);
     let forking = closed_one(&store);

@@ -6,8 +6,8 @@
 //! (`cladefsd::stores::store_key`): one table, whose entry for a key says all there is of its store
 //! (TASK-160.8). Who holds it: a connection writing it, or the daemon working on it. And what is
 //! open of it for others: the store its writer's connection, or its followers', have open, or a
-//! point the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
-//! holders, the stores open for connections and whether retired, the points kept, a connection's
+//! copy the daemon keeps open for forks. Five owners said so before, kept in step by hand: the
+//! holders, the stores open for connections and whether retired, the copies kept, a connection's
 //! own fields, and a store's following of its writer's; which TASK-79.34, 150.5, 54, 79.84,
 //! 79.95, 92.5, 79.103 and 79.36 came of.
 //!
@@ -17,13 +17,13 @@
 //! gone, still holding its store, lets it go to the next that asks, as a VM restored from a
 //! snapshot at once opens its VM's store (TASK-39.1). What is open of a store outlives its holder:
 //! a store followers follow, read-only (backlog doc-8), as long as one has it, which a writer
-//! holding it then takes over, unless its writer retired it, gone with writes uncommitted; a point
+//! holding it then takes over, unless its writer retired it, gone with writes uncommitted; a copy
 //! kept open for forks, until a writer holds the store, which closes it first (TASK-92.5). A
-//! connection holds no point: its entry ([`Entry::Writer`]) has no room for one.
+//! connection holds no copy: its entry ([`Entry::Writer`]) has no room for one.
 //!
-//! Generic over its connections, stores and points, so that its tests run it with models of them:
+//! Generic over its connections, stores and copies, so that its tests run it with models of them:
 //! under Shuttle (awslabs/shuttle), with the `shuttle` feature, whose scheduler chooses every
-//! interleaving of the threads writing, following, retiring and keeping points of a store as its
+//! interleaving of the threads writing, following, retiring and keeping copies of a store as its
 //! writer's VM process goes (TASK-44.6).
 
 use crate::Errno;
@@ -46,7 +46,7 @@ pub(crate) struct Rules {
     pub one_holder: bool,
     /// Letting a store go wakes those waiting to hold it.
     pub release_wakes: bool,
-    /// What is open of a store, the store followers have open or a point kept, stays as its holder
+    /// What is open of a store, the store followers have open or a copy kept, stays as its holder
     /// lets the store go.
     pub open_outlives_holders: bool,
     /// A store retired stays so while followers have it.
@@ -163,8 +163,8 @@ enum Open<S, P> {
     Nothing,
     /// The store connections have open, its followers', its writer gone or never there.
     Followed(Instance<S>),
-    /// A point kept open for forks (TASK-92.5).
-    Point(P),
+    /// A copy kept open for forks (TASK-92.5).
+    Copy(P),
 }
 
 /// What a connection holding a store has done as a writer waits for it to let the store go, its
@@ -191,11 +191,11 @@ enum Claim<C> {
     Mount,
 }
 
-/// What a claim got: the store held, with the point kept open of it that a writer's claim took
+/// What a claim got: the store held, with the copy kept open of it that a writer's claim took
 /// out, to close, and, past [`Rules::one_holder`], the connection holding it, which it passed:
 /// dropped once the table's lock is, as a [`Refused`]'s; or the connection writing it.
 enum Claimed<C, P> {
-    Held { point: Option<P>, _passed: Option<Arc<C>> },
+    Held { copy: Option<P>, _passed: Option<Arc<C>> },
     Writer(Arc<C>),
 }
 
@@ -222,7 +222,7 @@ pub(crate) struct Hold<'t, C, S, P> {
     key: PathBuf,
 }
 
-/// A store held, with the point kept open of it that the claim took out, to close, if one was:
+/// A store held, with the copy kept open of it that the claim took out, to close, if one was:
 /// what a writer's claim, and the mount's, get.
 pub(crate) type HeldTaking<'t, C, S, P> = (Hold<'t, C, S, P>, Option<P>);
 
@@ -262,7 +262,7 @@ impl<S, P> Open<S, P> {
         match self {
             Open::Nothing => true,
             Open::Followed(instance) => instance.store.strong_count() == 0,
-            Open::Point(_) => false,
+            Open::Copy(_) => false,
         }
     }
 }
@@ -303,10 +303,10 @@ impl<C, S, P> Entry<C, S, P> {
         }
     }
 
-    /// The point kept open of the store, if one is.
-    fn point(&mut self) -> Option<&mut P> {
+    /// The copy kept open of the store, if one is.
+    fn copy(&mut self) -> Option<&mut P> {
         match self {
-            Entry::Daemon(Open::Point(point)) | Entry::Unheld(Open::Point(point)) => Some(point),
+            Entry::Daemon(Open::Copy(copy)) | Entry::Unheld(Open::Copy(copy)) => Some(copy),
             _ => None,
         }
     }
@@ -320,7 +320,7 @@ impl<C, S, P> Entry<C, S, P> {
 impl<C: Writer, S, P> Inner<C, S, P> {
     /// Holds the store `key` names for `claim`, if it may now: unless a connection not going
     /// writes it, which fails, or a connection going holds it, or the daemon, which is waited for.
-    /// A writer takes over the store followers have open, and the point kept open, to close.
+    /// A writer takes over the store followers have open, and the copy kept open, to close.
     fn claim(&mut self, key: &Path, claim: &Claim<C>) -> Result<Claimed<C, P>, Refused<C>> {
         let passed = match (self.entries.get(key).and_then(Entry::holder), claim) {
             (Some(Refused::Busy(writer)), Claim::DaemonOrWriter) => {
@@ -349,9 +349,9 @@ impl<C: Writer, S, P> Inner<C, S, P> {
                     Open::Followed(store) => {
                         (Entry::Writer { connection, store, wanted: None }, None)
                     }
-                    Open::Point(point) => {
+                    Open::Copy(copy) => {
                         let store = Instance::none();
-                        (Entry::Writer { connection, store, wanted: None }, Some(point))
+                        (Entry::Writer { connection, store, wanted: None }, Some(copy))
                     }
                     Open::Nothing => {
                         let store = Instance::none();
@@ -361,12 +361,12 @@ impl<C: Writer, S, P> Inner<C, S, P> {
             }
             Claim::Daemon | Claim::DaemonOrWriter => (Entry::Daemon(open), None),
             Claim::Mount => match open {
-                Open::Point(point) => (Entry::Mounted, Some(point)),
+                Open::Copy(copy) => (Entry::Mounted, Some(copy)),
                 Open::Nothing | Open::Followed(_) => (Entry::Mounted, None),
             },
         };
         self.entries.insert(key.to_owned(), entry);
-        Ok(Claimed::Held { point: evicted, _passed: passed })
+        Ok(Claimed::Held { copy: evicted, _passed: passed })
     }
 }
 
@@ -409,10 +409,10 @@ impl<C, S, P> StoreTable<C, S, P> {
         Ok(Some(follower))
     }
 
-    /// `f`'s of the point kept open at `key`, if one is: under the table's lock, which `f` takes
+    /// `f`'s of the copy kept open at `key`, if one is: under the table's lock, which `f` takes
     /// for no longer than to look at it.
-    pub fn point<R>(&self, key: &Path, f: impl FnOnce(&mut P) -> R) -> Option<R> {
-        self.inner.lock().unwrap().entries.get_mut(key)?.point().map(f)
+    pub fn copy<R>(&self, key: &Path, f: impl FnOnce(&mut P) -> R) -> Option<R> {
+        self.inner.lock().unwrap().entries.get_mut(key)?.copy().map(f)
     }
 
     /// The stores connections have open, writers' and followers', by their keys.
@@ -423,11 +423,11 @@ impl<C, S, P> StoreTable<C, S, P> {
             .collect()
     }
 
-    /// cladefs: the keys of the stores a point is kept open of (TASK-141.4).
-    pub fn points(&self) -> Vec<PathBuf> {
+    /// cladefs: the keys of the stores a copy is kept open of (TASK-141.4).
+    pub fn copies(&self) -> Vec<PathBuf> {
         let mut inner = self.inner.lock().unwrap();
-        let points = inner.entries.iter_mut().filter_map(|(key, entry)| entry.point().map(|_| key));
-        points.cloned().collect()
+        let copies = inner.entries.iter_mut().filter_map(|(key, entry)| entry.copy().map(|_| key));
+        copies.cloned().collect()
     }
 
     /// How many stores connections write.
@@ -469,7 +469,7 @@ impl<C, S, P> StoreTable<C, S, P> {
             released.notify(usize::MAX);
         }
         drop(inner);
-        // Without the lock: a point closes as it is dropped.
+        // Without the lock: a copy closes as it is dropped.
         drop(discarded);
     }
 }
@@ -497,7 +497,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
     }
 
     /// Holds the store `key` names, for `connection` to write it, as [`StoreTable::hold_async`]
-    /// does; with the point kept open of it, if one was, which the connection closes before it
+    /// does; with the copy kept open of it, if one was, which the connection closes before it
     /// opens the store. The store followers have open, it takes over, or finds retired
     /// ([`Hold::instance`]).
     pub async fn hold_to_write(
@@ -507,7 +507,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
         wait: Duration,
     ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
         match self.claim_async(key, Claim::Writer(connection), wait).await? {
-            Claimed::Held { point, .. } => Ok((self.held(key), point)),
+            Claimed::Held { copy, .. } => Ok((self.held(key), copy)),
             Claimed::Writer(_) => unreachable!("a writer's claim got a writer"),
         }
     }
@@ -537,7 +537,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
     /// cladefs: holds the store `key` names for the daemon's FUSE mount, to attach it (TASK-475.3),
     /// as [`StoreTable::hold`] holds it for the daemon, waiting at most `wait`: `EBUSY` at once if a
     /// connection not going writes it, followers have it open, or the mount has it already. With
-    /// the point kept open of it, if one was, to close. Until the hold is dropped, every claim of
+    /// the copy kept open of it, if one was, to close. Until the hold is dropped, every claim of
     /// it fails with `EBUSY` at once, waiting for nothing: the mount lets it go only as it
     /// detaches its cell. It blocks.
     pub fn hold_mounted(
@@ -547,7 +547,7 @@ impl<C: Writer, S, P> StoreTable<C, S, P> {
     ) -> Result<HeldTaking<'_, C, S, P>, Errno> {
         let deadline = Instant::now().checked_add(wait);
         match self.claim_blocking(key, &Claim::Mount, deadline)? {
-            Claimed::Held { point, .. } => Ok((self.held(key), point)),
+            Claimed::Held { copy, .. } => Ok((self.held(key), copy)),
             Claimed::Writer(_) => unreachable!("the mount's claim got a writer"),
         }
     }
@@ -651,7 +651,7 @@ impl<C, S, P> Hold<'_, C, S, P> {
 
     /// `store` is the store connections have open at its key from now on, while one has it: the
     /// writer's holding it, or, held by the daemon, followers'. `EBUSY`, and nothing changed, if
-    /// a store is open there, or a point kept: what holds the store opens it only where it found
+    /// a store is open there, or a copy kept: what holds the store opens it only where it found
     /// nothing open, or takes over what it found ([`Hold::instance`]).
     ///
     /// Its methods change its entry only if it is its holder's, which nothing but a claim past
@@ -706,27 +706,27 @@ impl<C, S, P> Hold<'_, C, S, P> {
         cut.map(|cut| cut());
     }
 
-    /// Keeps `point` open at its key for forks, after its hold too: the daemon's, which found
-    /// nothing open there. Refused, `point` given back, if a store is open there or a point kept
+    /// Keeps `copy` open at its key for forks, after its hold too: the daemon's, which found
+    /// nothing open there. Refused, `copy` given back, if a store is open there or a copy kept
     /// already, or a writer holds it.
-    pub fn keep(&self, point: P) -> Result<(), P> {
+    pub fn keep(&self, copy: P) -> Result<(), P> {
         let mut inner = self.table.inner.lock().unwrap();
         match inner.entries.get_mut(&self.key) {
             Some(Entry::Daemon(open)) if open.is_closed() => {
-                *open = Open::Point(point);
+                *open = Open::Copy(copy);
                 Ok(())
             }
-            // Dropped without the lock: a point closes as it is dropped.
-            _ => Err(point),
+            // Dropped without the lock: a copy closes as it is dropped.
+            _ => Err(copy),
         }
     }
 
-    /// Takes the point kept open at its key, if one is, to close it.
-    pub fn take_point(&self) -> Option<P> {
+    /// Takes the copy kept open at its key, if one is, to close it.
+    pub fn take_copy(&self) -> Option<P> {
         let mut inner = self.table.inner.lock().unwrap();
         match inner.entries.get_mut(&self.key) {
             Some(Entry::Daemon(open)) => match std::mem::replace(open, Open::Nothing) {
-                Open::Point(point) => Some(point),
+                Open::Copy(copy) => Some(copy),
                 other => {
                     *open = other;
                     None
@@ -747,11 +747,11 @@ impl<C, S, P> Drop for Hold<'_, C, S, P> {
 /// The table under Shuttle: a VM's connection writing a store, whose VM process goes, with
 /// writes uncommitted or not; as it goes, the VM restored from its snapshot opening the store to
 /// write it, and followers following it, before and after it went; and a fork of the store at any
-/// point, which keeps it open as a point if nothing has it open. Every interleaving of them
+/// copy, which keeps it open as a copy if nothing has it open. Every interleaving of them
 /// Shuttle's scheduler chooses (TASK-160.8). Waits are unbounded, so that a holder that never
 /// wakes those waiting is a deadlock, which Shuttle reports, rather than a wait of `CLOSING_WAIT`.
 /// Invariants: one holder at a time; the store open once at a time, as a writer's, followers' or a
-/// point; no follower following the store once its writer retired it. Each rule turned off fails.
+/// copy; no follower following the store once its writer retired it. Each rule turned off fails.
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use super::*;
@@ -815,7 +815,7 @@ mod shuttle_tests {
     }
 
     /// The store, opened: counted open until it is dropped, closed; dirty once its writer went
-    /// with writes uncommitted; and how many times its followers were cut off. A point's says it
+    /// with writes uncommitted; and how many times its followers were cut off. A copy's says it
     /// is closed, dropping what does.
     struct Store {
         counts: Arc<Counts>,
@@ -843,32 +843,32 @@ mod shuttle_tests {
         }
     }
 
-    /// A point kept open, as `cladefsd::stores::Point` is: the store opened, which each fork of it
+    /// A copy kept open, as `cladefsd::stores::Copy` is: the store opened, which each fork of it
     /// holds while it forks it, and what says it is closed, once the last lets it go.
-    struct Point {
+    struct Copy {
         store: Arc<Store>,
         closed: mpsc::Receiver<()>,
     }
 
-    impl Point {
+    impl Copy {
         fn open(counts: &Arc<Counts>) -> Self {
             let (closing, closed) = mpsc::channel();
-            Point { store: Store::opened(counts, Some(closing)), closed }
+            Copy { store: Store::opened(counts, Some(closing)), closed }
         }
     }
 
-    /// Closes `point`, if given, and returns once it is closed: once the forks forking it are
-    /// done, as `cladefsd::stores::close_point` does.
-    fn close(point: Option<Point>) {
-        let Some(Point { store, closed }) = point else { return };
+    /// Closes `copy`, if given, and returns once it is closed: once the forks forking it are
+    /// done, as `cladefsd::stores::close_copy` does.
+    fn close(copy: Option<Copy>) {
+        let Some(Copy { store, closed }) = copy else { return };
         drop(store);
         if closed.try_recv() == Err(mpsc::TryRecvError::Empty) {
-            reached("a point closed waited for a fork of it");
+            reached("a copy closed waited for a fork of it");
         }
         let _ = closed.recv();
     }
 
-    type Table = StoreTable<Conn, Store, Point>;
+    type Table = StoreTable<Conn, Store, Copy>;
 
     /// What the runs reached, of the ways through the table a test is to take
     /// ([`reaching`]): across runs, outside Shuttle's.
@@ -891,18 +891,18 @@ mod shuttle_tests {
     /// A hold counted among the store's holders, which none other may be, until dropped.
     struct Counted<'t> {
         counts: Arc<Counts>,
-        _hold: Hold<'t, Conn, Store, Point>,
+        _hold: Hold<'t, Conn, Store, Copy>,
     }
 
     impl<'t> Counted<'t> {
-        fn new(counts: &Arc<Counts>, hold: Hold<'t, Conn, Store, Point>) -> Self {
+        fn new(counts: &Arc<Counts>, hold: Hold<'t, Conn, Store, Copy>) -> Self {
             if counts.holders.fetch_add(1, Ordering::SeqCst) > 0 {
                 counts.two_holders.store(true, Ordering::SeqCst);
             }
             Self { counts: counts.clone(), _hold: hold }
         }
 
-        fn hold(&self) -> &Hold<'t, Conn, Store, Point> {
+        fn hold(&self) -> &Hold<'t, Conn, Store, Copy> {
             &self._hold
         }
 
@@ -934,17 +934,17 @@ mod shuttle_tests {
     }
 
     /// Opens the store for `conn` to write, as a connection does (`cladefsd::server`): holding it,
-    /// closing the point kept of it, taking over the store followers have open, unless it is
+    /// closing the copy kept of it, taking over the store followers have open, unless it is
     /// retired, or not quiescent, its writer gone with writes uncommitted (`ExtentStore::take_over`);
     /// or opening it. The connection has it from then on.
     fn write(table: &'static Table, counts: &Arc<Counts>, conn: &Arc<Conn>) -> Result<(), Errno> {
-        let (hold, point) =
+        let (hold, copy) =
             block_on(table.hold_to_write(Path::new(KEY), Arc::downgrade(conn), Duration::MAX))?;
         let hold = Counted::new(counts, hold);
-        if point.is_some() {
-            reached("a writer closed a point kept");
+        if copy.is_some() {
+            reached("a writer closed a copy kept");
         }
-        close(point);
+        close(copy);
         let store = match hold.hold().instance() {
             Some((_, true)) => {
                 reached("a writer found the store retired");
@@ -990,7 +990,7 @@ mod shuttle_tests {
 
     /// Follows the store, as a follower does (`cladefsd::stores::followed`): the store connections
     /// have open, unless retired ([`StoreTable::follow`]); or, held by the daemon, which no writer
-    /// retires a store under, its point closed, the store opened.
+    /// retires a store under, its copy closed, the store opened.
     fn follow(table: &Table, counts: &Arc<Counts>) -> Result<Follower, Errno> {
         let open = |found: Option<(Arc<Store>, bool)>| match found {
             Some((_, true)) => Err(Errno::EBUSY),
@@ -1003,7 +1003,7 @@ mod shuttle_tests {
             return Ok(follower);
         }
         let hold = Counted::new(counts, table.hold(Path::new(KEY), None)?);
-        close(hold.hold().take_point());
+        close(hold.hold().take_copy());
         if let Some(store) = open(hold.hold().instance())? {
             return Ok(Follower::of(store));
         }
@@ -1014,11 +1014,11 @@ mod shuttle_tests {
     }
 
     /// Forks the store, as the daemon does (`cladefsd::stores::fork`): through its writer, or the
-    /// store followers have open, live; or the point kept, or else the store opened, kept open as
-    /// a point, which it holds while it forks it, as a restore's fork does, its hold let go.
+    /// store followers have open, live; or the copy kept, or else the store opened, kept open as
+    /// a copy, which it holds while it forks it, as a restore's fork does, its hold let go.
     fn fork(table: &Table, counts: &Arc<Counts>) -> Result<(), Errno> {
-        let kept = |point: &mut Point| point.store.clone();
-        let forking = match table.point(Path::new(KEY), kept) {
+        let kept = |copy: &mut Copy| copy.store.clone();
+        let forking = match table.copy(Path::new(KEY), kept) {
             Some(forking) => forking,
             None => {
                 let hold =
@@ -1029,14 +1029,14 @@ mod shuttle_tests {
                 if hold.hold().instance().is_some() {
                     return Ok(());
                 }
-                match table.point(Path::new(KEY), kept) {
+                match table.copy(Path::new(KEY), kept) {
                     Some(forking) => forking,
                     None => {
-                        reached("a fork kept a point");
-                        let point = Point::open(counts);
-                        let forking = point.store.clone();
+                        reached("a fork kept a copy");
+                        let copy = Copy::open(counts);
+                        let forking = copy.store.clone();
                         // Refused only past one holder, which the run then fails for.
-                        let _ = hold.hold().keep(point);
+                        let _ = hold.hold().keep(copy);
                         forking
                     }
                 }
@@ -1139,7 +1139,7 @@ mod shuttle_tests {
                 }
             })
         };
-        // A fork of the store, at any point.
+        // A fork of the store, at any copy.
         let forking = {
             let counts = counts.clone();
             thread::spawn(move || fork(table, &counts).unwrap())
@@ -1147,9 +1147,9 @@ mod shuttle_tests {
         for thread in [first, second, follower, following_later, forking] {
             thread.join().unwrap();
         }
-        // The point a fork kept, closed, as it is once no fork forks it.
+        // The copy a fork kept, closed, as it is once no fork forks it.
         let hold = table.hold(Path::new(KEY), None).unwrap();
-        close(hold.take_point());
+        close(hold.take_copy());
         drop(hold);
         let two = counts.two_holders.load(Ordering::SeqCst);
         assert!(!two, "two holders hold the store at once");
@@ -1166,16 +1166,16 @@ mod shuttle_tests {
         Runner::new(PctScheduler::new(3, runs(3000)), config()).run(move || run(dirty));
     }
 
-    /// What runs of a writer going quiescent reach: its store taken over, followed, and points
+    /// What runs of a writer going quiescent reach: its store taken over, followed, and copies
     /// kept and closed.
     const QUIESCENT: &[&str] = &[
         "a writer took the store over",
-        "a writer closed a point kept",
-        "a point closed waited for a fork of it",
+        "a writer closed a copy kept",
+        "a copy closed waited for a fork of it",
         "a claim waited for a writer gone",
         "a follower followed the store open",
         "a follower opened the store",
-        "a fork kept a point",
+        "a fork kept a copy",
     ];
 
     /// What runs of a writer going with writes uncommitted reach besides: its store retired.
@@ -1287,7 +1287,7 @@ mod tests {
         Arc::new(Connection(AtomicBool::new(going)))
     }
 
-    /// A store, and a point kept open, each named.
+    /// A store, and a copy kept open, each named.
     type Table = StoreTable<Connection, &'static str, &'static str>;
 
     /// Holds `key` for `connection` to write it, at once.
@@ -1434,32 +1434,32 @@ mod tests {
         assert!(table.is_empty());
     }
 
-    /// A point kept open outlives the daemon's hold, which forks see; the daemon's next holds keep
+    /// A copy kept open outlives the daemon's hold, which forks see; the daemon's next holds keep
     /// it, unless they take it; a writer's takes it, to close.
     #[test]
-    fn points_kept_go_to_writers() {
+    fn copies_kept_go_to_writers() {
         let table = Table::new();
-        let key = Path::new("point");
+        let key = Path::new("copy");
         let held = table.hold(key, None).unwrap();
-        held.keep("point").unwrap();
+        held.keep("copy").unwrap();
         drop(held);
-        assert_eq!(table.point(key, |point| *point), Some("point"));
+        assert_eq!(table.copy(key, |copy| *copy), Some("copy"));
         let held = table.hold(key, None).unwrap();
-        assert_eq!(table.point(key, |point| *point), Some("point"));
+        assert_eq!(table.copy(key, |copy| *copy), Some("copy"));
         drop(held);
         let (held, evicted) = write(&table, key, &connection(false)).unwrap();
-        assert_eq!(evicted, Some("point"));
-        assert_eq!(table.point(key, |point| *point), None);
+        assert_eq!(evicted, Some("copy"));
+        assert_eq!(table.copy(key, |copy| *copy), None);
         drop(held);
         assert!(table.is_empty());
         let held = table.hold(key, None).unwrap();
         held.keep("again").unwrap();
-        assert_eq!(held.take_point(), Some("again"));
+        assert_eq!(held.take_copy(), Some("again"));
         drop(held);
         assert!(table.is_empty());
     }
 
-    /// A store opened where one is open, or a point kept, is refused, and changes nothing: its
+    /// A store opened where one is open, or a copy kept, is refused, and changes nothing: its
     /// holder takes over what it found, or works on it, rather than open it twice.
     #[test]
     fn stores_opened_where_something_is_open_are_refused() {
@@ -1475,32 +1475,32 @@ mod tests {
         assert!(Arc::ptr_eq(&held.instance().unwrap().0, &first));
         drop((held, first));
         let held = table.hold(key, None).unwrap();
-        held.keep("point").unwrap();
+        held.keep("copy").unwrap();
         assert_eq!(held.open(&second), Err(Errno::EBUSY));
         assert_eq!(held.instance(), None);
-        assert_eq!(held.take_point(), Some("point"));
+        assert_eq!(held.take_copy(), Some("copy"));
         held.open(&second).unwrap();
         assert!(Arc::ptr_eq(&held.instance().unwrap().0, &second));
     }
 
-    /// A point kept where one is kept already, or a store is open, or by a writer, is refused,
+    /// A copy kept where one is kept already, or a store is open, or by a writer, is refused,
     /// given back, and changes nothing.
     #[test]
-    fn points_kept_where_something_is_open_are_refused() {
+    fn copies_kept_where_something_is_open_are_refused() {
         let table = Table::new();
-        let key = Path::new("point");
+        let key = Path::new("copy");
         let held = table.hold(key, None).unwrap();
         held.keep("first").unwrap();
         assert_eq!(held.keep("second"), Err("second"));
-        assert_eq!(table.point(key, |point| *point), Some("first"));
-        assert_eq!(held.take_point(), Some("first"));
+        assert_eq!(table.copy(key, |copy| *copy), Some("first"));
+        assert_eq!(held.take_copy(), Some("first"));
         let store = Arc::new("store");
         held.open(&store).unwrap();
         assert_eq!(held.keep("second"), Err("second"));
         drop((held, store));
         let (held, _) = write(&table, key, &connection(false)).unwrap();
         assert_eq!(held.keep("second"), Err("second"));
-        assert_eq!(table.point(key, |point| *point), None);
+        assert_eq!(table.copy(key, |copy| *copy), None);
     }
 
     /// TASK-475.3: a store the mount has attached is its alone: a writer, the daemon, and the
@@ -1510,8 +1510,8 @@ mod tests {
     fn stores_mounted_are_the_mounts_alone() {
         let table = Table::new();
         let key = Path::new("store");
-        let (held, point) = table.hold_mounted(key, Duration::ZERO).unwrap();
-        assert_eq!(point, None);
+        let (held, copy) = table.hold_mounted(key, Duration::ZERO).unwrap();
+        assert_eq!(copy, None);
         let writer = connection(false);
         let wait = Duration::from_secs(60);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     /// TASK-475.3: the mount attaches no store a writer writes, nor one followers have open; it
-    /// takes the point kept open of a store, to close, as a writer does.
+    /// takes the copy kept open of a store, to close, as a writer does.
     #[test]
     fn the_mount_attaches_stores_nothing_else_has() {
         let table = Table::new();
@@ -1542,10 +1542,10 @@ mod tests {
         drop(store);
         let other = Path::new("other");
         let held = table.hold(other, None).unwrap();
-        held.keep("point").unwrap();
+        held.keep("copy").unwrap();
         drop(held);
-        let (_mounted, point) = table.hold_mounted(other, Duration::ZERO).unwrap();
-        assert_eq!(point, Some("point"));
+        let (_mounted, copy) = table.hold_mounted(other, Duration::ZERO).unwrap();
+        assert_eq!(copy, Some("copy"));
         assert!(table.hold_mounted(key, Duration::ZERO).is_ok());
     }
 }

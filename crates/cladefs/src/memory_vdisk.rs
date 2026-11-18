@@ -66,18 +66,18 @@ impl MemoryVdisk {
         Self::over(daemon.open_memory(store, capacity(size))?, size)
     }
 
-    /// The memory vdisk at `store`, forked from the memory vdisk at `point` if it doesn't
-    /// exist: a VM's memory restored from a snapshot, whose memory `point` is, which must exist
+    /// The memory vdisk at `store`, forked from the memory vdisk at `version` if it doesn't
+    /// exist: a VM's memory restored from a snapshot, whose memory `version` is, which must exist
     /// (`ENOENT` otherwise): its VM manager makes it on a host that restores the snapshot, as a
-    /// disk's point (docs/integrator-guide.md). `EINVAL` for a memory of another size.
+    /// disk's version (docs/integrator-guide.md). `EINVAL` for a memory of another size.
     pub fn open_forked(
         socket: &Path,
         store: &Path,
-        point: &Path,
+        version: &Path,
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_forked(store, point, 0, capacity(size))?, size)
+        Self::over(daemon.open_forked(store, version, 0, capacity(size))?, size)
     }
 
     /// The memory vdisk `opened` is, of a memory of `size` bytes, made one of zeros if new.
@@ -176,10 +176,10 @@ impl MemoryVdisk {
         self.commit()
     }
 
-    /// Makes a point of the vdisk at `path`, as of its last commit: a snapshot's memory, which
-    /// any number of hosts restore at once, and none writes; its branch.
-    pub fn point(&self, path: &Path) -> Result<u64, Error> {
-        self.store.fork_quiescent(path).map_err(Error::new)
+    /// Makes a version of the cell as of its last commit, and a copy of it at `path`: a VM
+    /// snapshot's memory, which any number of hosts restore at once, and none writes; its branch.
+    pub fn version_copy(&self, path: &Path) -> Result<u64, Error> {
+        self.store.version_copy(path).map_err(Error::new)
     }
 
     /// Forks the vdisk, as of its last commit, to a new store at `path`, a memory vdisk of a

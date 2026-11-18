@@ -164,8 +164,8 @@ fn copies_are_dropped_through_the_daemon() {
     copies_are_dropped(Cladefsctl::through_daemon(dir.path(), &[]), dir.path());
 }
 
-/// TASK-395.7: `cladefsctl point --shared` makes a point shared, as its record in its bucket says,
-/// which `unshare` and `share` change; a store of no point is refused.
+/// TASK-395.7: `cladefsctl version --shared` makes a version shared, as its record in its bucket says,
+/// which `unshare` and `share` change; a store of no version is refused.
 #[test]
 fn versions_are_shared_and_unshared_locally() {
     let dir = tempfile::tempdir().unwrap();

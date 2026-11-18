@@ -65,7 +65,7 @@ impl Drop for CowMapping {
 /// cladefs: has the budget's worker write back, seal and rebind every private page it can
 /// (cladefs.dax_rebind_now), and waits for it: until the rounds it served (dax_rebinds_done)
 /// reach the asks, as read after this one (dax_rebinds_asked). The write doesn't wait: a
-/// setter that did held the module parameters' lock through a rebind a pause point held.
+/// setter that did held the module parameters' lock through a rebind a pause version held.
 fn cow_rebind_now() {
     fs::write("/sys/module/cladefs/parameters/dax_rebind_now", b"1").unwrap();
     let asked = stats()["dax_rebinds_asked"];

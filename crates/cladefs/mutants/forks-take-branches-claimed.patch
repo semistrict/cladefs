@@ -1,23 +1,23 @@
 # A fork takes its branch ID whatever has it in the bucket: neither the look that it is free nor
 # its child's record refuses another's: a fork to another branch's ID, which no ID the bucket gives
 # is (TASK-364) but a fork's named so is, wedges that branch's writer (TASK-79.82, TASK-165.7).
-# A writable fork's: a point's makes no look since TASK-449, its record's create refusing alike.
+# A writable fork's: a version's makes no look since TASK-449, its record's create refusing alike.
 # Kind: commits wedged
 # Killer: bucket::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist
 --- a/crates/cladefs/src/host_store.rs
 +++ b/crates/cladefs/src/host_store.rs
 @@ -470,10 +470,8 @@
      };
-     // A fork of a point needs no look first: its child's record's create refuses a record there
+     // A fork of a version needs no look first: its child's record's create refuses a record there
      // alike (`Uploader::child_free`, TASK-449).
--    if !uploader.is_point()
+-    if !uploader.is_copy()
 -        && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?
 -    {
 -        return Err(Error::new(taken(branch)));
-+    if !uploader.is_point() {
++    if !uploader.is_copy() {
 +        let _ = uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?;
      }
-     let made = match uploader.is_point() {
+     let made = match uploader.is_copy() {
          true => {
 --- a/crates/extent_bucket/src/branch.rs
 +++ b/crates/extent_bucket/src/branch.rs

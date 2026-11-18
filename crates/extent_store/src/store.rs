@@ -750,12 +750,12 @@ pub struct Unmade;
 /// cladefs: what the bucket holds of the branch a store opens (doc-14, Opening a store;
 /// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
 /// found taking it ([`extent_bucket::TakenBranch`]), the head, which the store's write-ahead log is put after,
-/// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
+/// and its writer's chain there, which stamps the store's footers from then on; or, for a version,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
 /// one, which what the bucket acknowledged of the store's goes into. cladefs: and the store's keys,
 /// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
 /// encrypted and read under (`extent_bucket::keys`, TASK-411.3): a writer's, which encrypts, but a
-/// point's. And what holds
+/// version's. And what holds
 /// the parts of its segments packed as they fill, which the process's stores share, so that what
 /// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
 /// one of the store's own, which nothing makes let go. An encrypted store holds none (TASK-411.5).
@@ -907,7 +907,7 @@ impl<D: Dir> Recovering<D> {
     /// writer's chain ([`Wal::rebase`]), its start written first; or refused, if the branch moved
     /// on from it ([`extent_bucket::Error::Diverged`]). The branch's state is the bucket's, its
     /// extents there, with the log's segments' footers applied over it, their extents here; and
-    /// another segment opens, past them. A point's store holds its state alone, and no log.
+    /// another segment opens, past them. A version's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, kind, version, .. } = file;
@@ -951,7 +951,7 @@ impl<D: Dir> Recovering<D> {
                 (rebased, chain)
             }
             None => {
-                ensure!(wal.is_empty(), "the store of point {branch} holds commits of its own");
+                ensure!(wal.is_empty(), "the store of version {branch} holds commits of its own");
                 (Rebased { landed: Vec::new() }, Chain::new(branch, 0, 0, 0))
             }
         };
@@ -1094,7 +1094,7 @@ impl<D: Dir> Recovering<D> {
                     ),
                     unreferenced: Unreferenced::default(),
                     wal: Queue::new(wal.start(), queued),
-                    point: found.is_none(),
+                    version: found.is_none(),
                     kept: KeptExtents::default(),
                     sealed: Sealed::default(),
                     standing: Standing::Open,
@@ -1197,7 +1197,7 @@ impl<D: Dir> Store<D> {
 
     /// cladefs: makes a new store's directory in `dir`, as [`Store::make`] does, a copy of the
     /// version `version` of its branch, if given: its branch's state at the version, which nothing
-    /// writes, as a point's copy holds the point's (doc-18, TASK-476).
+    /// writes, as a version's copy holds the version's (doc-18, TASK-476).
     pub fn make_copy(
         dir: &D,
         description: Description,
@@ -1349,7 +1349,7 @@ impl<D: Dir> Store<D> {
     }
 
     /// cladefs: commits, durably, a commit whose segment's footer names `child`, a fork of the
-    /// branch, which its owner and whether it is a point say (doc-7, Forks): the fork is made where
+    /// branch, which its owner and whether it is a version say (doc-7, Forks): the fork is made where
     /// the branch's segments go, as they go, and nowhere here (TASK-165.7). Its segment closes at
     /// the commit. Returns the commit's epoch. One that fails once its commit was made fails with
     /// [`ForkCommitted`]: the segment names the fork, as a host crashing then would leave it.
@@ -1442,7 +1442,7 @@ impl<D: Dir> Store<D> {
         Readable::check(self.lock(), self.branch)
     }
 
-    /// The state, to change: unless the store failed, or the branch is closed, or a point
+    /// The state, to change: unless the store failed, or the branch is closed, or a version
     /// ([`Writable`]), checked again by its waits, which let it go meanwhile (TASK-83).
     fn writable(&self) -> Result<Writable<'_, D::File>, Error> {
         Writable::check(self.lock(), self.branch)

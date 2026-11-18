@@ -254,7 +254,7 @@ impl World {
 
     /// Sweeps of the collector over every cell, deleting what is free at once, until two in a row
     /// delete nothing: a dead cell's pass retires the references its parent's cell keeps the fork
-    /// point for, which that cell's next pass reclaims (TASK-395.4).
+    /// version for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(&self, case: &str) {
         let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
         let collected = extent_bucket::testing::collect_until_quiet(&*self.bucket, &options);
@@ -689,11 +689,11 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
         )),
         Ok(())
     );
-    // TASK-395.4: the fork in a cell of its own, the parent's cell keeps the fork point while the
+    // TASK-395.4: the fork in a cell of its own, the parent's cell keeps the origin while the
     // parent's state names the fork, as the fork may lack its reference yet: until the parent's
     // writer checkpoints, which drops the fork, its child deleted.
     world.collect("deleted");
-    assert!(stored(), "the fork point went while the parent's state names the fork");
+    assert!(stored(), "the origin went while the parent's state names the fork");
     let parent = world.open(&reopen).unwrap();
     crate::test_checkpoints::checkpointed(&parent, &world.bucket);
     drop(parent);

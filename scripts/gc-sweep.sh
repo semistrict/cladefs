@@ -15,7 +15,7 @@
 #
 # CLADEFS_GC_FILL is what else the filling is told, the cells' kind (cladefs-gc-fill: `--deleted`,
 # cells whose branches are all deleted; `--clones EXTENTS`, sandboxes made and deleted, clones of a
-# point of their tenant's base, the tenant's first cell; TASK-443.4). With CLADEFS_GC_CELL, a cell
+# version of their tenant's base, the tenant's first cell; TASK-443.4). With CLADEFS_GC_CELL, a cell
 # as cladefs-gc names it (`1/1`, a base's), each bucket swept is then passed over at that cell
 # alone, twice, each pass a process of its own: with the sweeps' options, which skips the cell if
 # nothing changed it since its last pass; and with another grace period, which no pass before

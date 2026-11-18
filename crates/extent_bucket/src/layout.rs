@@ -30,7 +30,7 @@ pub use extent_frame::segment::{
 /// forks and origins name branches with their cells ([`Branch`], TASK-364); nothing reads 4's. 6: a
 /// checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose fences lack
 /// them. 7: a checkpoint names the branch's strays apart from its fences, each void or late
-/// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
+/// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a version's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
 /// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
@@ -43,18 +43,18 @@ pub use extent_frame::segment::{
 /// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints'
 /// keys name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it
 /// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
-/// nothing reads 10's. 12: a fork of a point, made, says so
+/// nothing reads 10's. 12: a fork of a version, made, says so
 /// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
-/// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a point says whether
+/// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a version says whether
 /// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
 /// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a branch's head
 /// names its versions, and a footer those made at its end ([`Head::versions`], [`NewVersion`];
-/// doc-18, TASK-476); a fork being made says whether it is of a point or a version; nothing reads
+/// doc-18, TASK-476); a fork being made says whether it is of a version or a version; nothing reads
 /// 13's. 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`Branch`] is
 /// displayed in its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one
 /// kind (doc-20, TASK-508.1): its object names its one branch and kind, not a map of vdisks,
 /// and a version names no cut of a cell's vdisks; nothing reads 15's. 17: forks are of versions
-/// alone: a record names no point, nor a point it is being forked from (TASK-508.2); nothing reads
+/// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
 /// 16's.
 pub const FORMAT: u32 = 17;
 
@@ -260,25 +260,25 @@ pub fn references(cell: Cell) -> String {
 }
 
 /// cladefs: the prefix of the references of forks of `parent`: listed by delimiter, its distinct fork
-/// points, which a pass over its cell keeps the states of ([`fork_point`]).
+/// versions, which a pass over its cell keeps the states of ([`origin`]).
 pub fn references_of(parent: Branch) -> String {
     format!("{}{}/", references(parent.cell), Padded(parent.id))
 }
 
 /// cladefs: the prefix of the references of the forks of `parent` at the end of its segment `at`:
 /// listed, their children.
-pub fn fork_point(parent: Branch, at: u64) -> String {
+pub fn origin(parent: Branch, at: u64) -> String {
     format!("{}{}/", references_of(parent), Padded(at))
 }
 
 /// cladefs: the reference of the fork of `parent` at the end of its segment `at` to `child`, under
 /// the parent's cell, the cell holding what the child inherits, whatever the child's (doc-7,
 /// References; TASK-395.2): while it stands, the parent's cell's passes keep the parent's whole
-/// state at the fork point. Its bytes are a [`Reference`], unique to the fork, so that every writer
+/// state at the origin. Its bytes are a [`Reference`], unique to the fork, so that every writer
 /// of it writes the same; the child's cell's passes retire it, computing it from the child's
 /// record's origin, never listing it.
 pub fn reference(parent: Branch, at: u64, child: Branch) -> String {
-    format!("{}{}", fork_point(parent, at), child_name(child))
+    format!("{}{}", origin(parent, at), child_name(child))
 }
 
 /// cladefs: `child` as the last part of a reference's key, or its mark's: `TENANT.CELL.ID`.
@@ -314,7 +314,7 @@ pub fn referenced_parent(cell: Cell, prefix: &str) -> Option<Branch> {
     Some(Branch { cell, id: number(rest)? })
 }
 
-/// cladefs: the fork point a prefix of `parent`'s references names, `<C>refs/<parent>/<at>/`, as a
+/// cladefs: the origin a prefix of `parent`'s references names, `<C>refs/<parent>/<at>/`, as a
 /// delimiter listing of [`references_of`] gives it.
 pub fn referenced_at(parent: Branch, prefix: &str) -> Option<u64> {
     number(prefix.strip_prefix(&references_of(parent))?.strip_suffix('/')?)
@@ -623,7 +623,7 @@ pub struct Head {
 
 /// cladefs: a version a head names ([`Head::versions`], doc-18, doc-20): its ID, which the footer
 /// of the segment making it named ([`NewVersion`]); the segment it is at, its cell's state as of
-/// which it names; and whether forks of it may be of other tenants' cells (doc-7, Shared points).
+/// which it names; and whether forks of it may be of other tenants' cells (doc-7, Shared versions).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Version {
     pub id: u64,
@@ -712,7 +712,7 @@ impl Head {
     }
 
     /// cladefs: the head with its version of ID `id` shared, if `shared`, or no longer: other
-    /// tenants' cells may fork it while it is (doc-7, Shared points).
+    /// tenants' cells may fork it while it is (doc-7, Shared versions).
     pub fn sharing(mut self, id: u64, shared: bool) -> Self {
         for version in self.versions.iter_mut().filter(|version| version.id == id) {
             version.shared = shared;
@@ -949,20 +949,20 @@ mod tests {
     }
 
     /// TASK-395.2: a delimiter listing of a cell's references gives the parents with forks, and one
-    /// of a parent's, its distinct fork points: each prefix read back as what it names, and no
+    /// of a parent's, its distinct origins: each prefix read back as what it names, and no
     /// other.
     #[test]
-    fn references_list_by_parent_then_fork_point() {
+    fn references_list_by_parent_then_origin() {
         let cell = Cell { tenant: 0xa, id: 0xc };
         let (parent, child) =
             (Branch { cell, id: 3 }, Branch { cell: Cell { tenant: 1, id: 2 }, id: 5 });
         let key = reference(parent, 7, child);
-        assert!(key.starts_with(&fork_point(parent, 7)));
-        assert!(fork_point(parent, 7).starts_with(&references_of(parent)));
+        assert!(key.starts_with(&origin(parent, 7)));
+        assert!(origin(parent, 7).starts_with(&references_of(parent)));
         assert!(references_of(parent).starts_with(&references(cell)));
         assert_eq!(referenced_parent(cell, &references_of(parent)), Some(parent));
-        assert_eq!(referenced_at(parent, &fork_point(parent, 7)), Some(7));
-        assert_eq!(referenced_parent(cell, &fork_point(parent, 7)), None);
+        assert_eq!(referenced_at(parent, &origin(parent, 7)), Some(7));
+        assert_eq!(referenced_parent(cell, &origin(parent, 7)), None);
         assert_eq!(referenced_at(parent, &references_of(parent)), None);
         let other = Cell { tenant: 0xa, id: 0xd };
         assert_eq!(referenced_parent(other, &references_of(parent)), None);
@@ -1065,8 +1065,8 @@ mod tests {
         assert_eq!(retired_of(&reference(branch, 7, child)), Some(retired(branch, 7, child)));
         assert_eq!(retired_of(&retired(branch, 7, child)), None);
         assert!(!retired(branch, 7, child).starts_with(&references(cell)));
-        assert_eq!(kind(&format!("{}2", fork_point(branch, 7))), Kind::Unknown);
-        assert_eq!(kind(&fork_point(branch, 7)), Kind::Unknown);
+        assert_eq!(kind(&format!("{}2", origin(branch, 7))), Kind::Unknown);
+        assert_eq!(kind(&origin(branch, 7)), Kind::Unknown);
         // The layout before cells, and keys of cells' prefixes malformed, are no objects of a
         // branch; nor the collector's lease, marks and moves at the bucket's root, as format 8 had
         // them (TASK-395.2).

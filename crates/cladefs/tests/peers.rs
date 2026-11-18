@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Two extent daemons sharing a bucket, as two hosts do (TASK-406.2): a point made on one, forked
+//! Two extent daemons sharing a bucket, as two hosts do (TASK-406.2): a version made on one, forked
 //! and read on the other, whose fetchers ask the first for the parts it owns. The second fetches
 //! from the bucket only the parts it owns itself, and the first serves the rest from its part
 //! cache, which its uploads left them in, fetching nothing; without peers, the second fetches
@@ -114,7 +114,7 @@ fn settled(file: &Path) {
 }
 
 /// What the second host's GETs of ranges, the first's, the parts the second's peers gave it, and
-/// the parts the first served came to: a point made on the first host, of [`EXTENTS`] extents,
+/// the parts the first served came to: a version made on the first host, of [`EXTENTS`] extents,
 /// forked and read whole on the second; each asking the other if `peered`.
 fn run(peered: bool) -> (u64, u64, u64, u64) {
     let dir = tempfile::tempdir().unwrap();
@@ -141,14 +141,14 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     first.control.sync_store(&base).unwrap();
     let version = first.control.make_version(&base, None, None).unwrap();
     first.control.sync_store(&base).unwrap();
-    let point = first.control.stat_store(&base).unwrap();
-    let point = cladefs::Branch {
-        cell: cladefs::Cell { tenant: point.tenant, id: point.cell },
-        id: point.branch,
+    let version = first.control.stat_store(&base).unwrap();
+    let version = cladefs::Branch {
+        cell: cladefs::Cell { tenant: version.tenant, id: version.cell },
+        id: version.branch,
     };
 
     let (copy, fork) = (hosts[1].join("copy"), hosts[1].join("fork"));
-    second.control.copy_version(&copy, CAPACITY, point, version).unwrap();
+    second.control.copy_version(&copy, CAPACITY, version, version).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
     let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
@@ -169,10 +169,10 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
 }
 
 /// The second host fetches from the bucket only the parts it owns: the first gives it the rest,
-/// from its part cache, fetching none of them: no GET more than it makes alone. A point's base read
+/// from its part cache, fetching none of them: no GET more than it makes alone. A version's base read
 /// on another host comes from the bucket once, not once on each host that reads it.
 #[test]
-fn a_point_read_on_another_host_comes_from_its_peer() {
+fn a_copy_read_on_another_host_comes_from_its_peer() {
     let (alone, first_alone, _, _) = run(false);
     let (second, first, given, served) = run(true);
     assert!(given > 0, "the first host owned none of the parts read");

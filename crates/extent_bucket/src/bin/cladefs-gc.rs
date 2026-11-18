@@ -79,7 +79,7 @@
 //! every branch every host holds, those left are no host's, or newer than FILE. `--delete-branch`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
 //! frees what only it held (TASK-79.85). A branch's deletion that records a fork of it into another
-//! cell, whose child has no record yet, authenticates its checkpoint at the fork point under the
+//! cell, whose child has no record yet, authenticates its checkpoint at the origin under the
 //! branch's DEK, through the host's KMS (TASK-411.14).
 //!
 //! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as
@@ -455,7 +455,7 @@ async fn collect(
 /// `extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names; else, given a master key,
 /// the bucket KMS over `bucket`, the one collected (TASK-411.27). What passes unwrap their cells'
 /// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
-/// fork points under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
+/// origins under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
 /// collects or deletes anything (TASK-411.28).
 fn kms(bucket: &Arc<ObjectBucket>) -> Result<extent_keys::kms::Shared, String> {
     let chosen = extent_bucket::bucket_kms::from_env(|| Ok(bucket.clone()))?;
@@ -496,7 +496,7 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
 /// Deletes `branch` of `bucket`, whichever placement took it last, as an operator does, under
 /// `kms`, the host's (TASK-411.14): a branch's forks into other cells that it records, their
 /// children having no record yet (their writer died between the fork's acknowledgement and
-/// recording it), get its checkpoint at their fork points authenticated under its DEK, its cell's
+/// recording it), get its checkpoint at their origins authenticated under its DEK, its cell's
 /// KEK unwrapped by the KMS, as their children refuse one under another key. The KMS refusing it,
 /// such a deletion fails, naming the tenant, the branch left as a deletion stopped partway, its
 /// lease ended: running it again once the KMS answers finishes it.

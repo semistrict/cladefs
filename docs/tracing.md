@@ -47,7 +47,7 @@ cladefsd /run/cladefs/cladefsd.sock
 
 Then open `http://localhost:16686` and choose the service `cladefsd`. To route spans through
 the OpenTelemetry Collector instead (`otel/opentelemetry-collector`, Apache-2.0), give it an `otlp`
-receiver with the `http` protocol and point `OTEL_EXPORTER_OTLP_ENDPOINT` at that receiver.
+receiver with the `http` protocol and version `OTEL_EXPORTER_OTLP_ENDPOINT` at that receiver.
 
 ## Spans
 
@@ -64,7 +64,7 @@ request also has `cladefs.errno`.
 | `store.flush` | making ordered commits local: syncs and log appends | `store.commit` if the commit waits for local or uploaded; root for the daemon's 50 ms flushes | `branch`, `commits` |
 | `commit.upload_wait` | a commit waiting for the bucket (uploaded: until uploaded; otherwise: within its lag) | `store.commit` | `epoch` |
 | `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `branch` |
-| `store.fork` | a fork or point of a store | the request or control call | `branch`, `child`, `point` |
+| `store.fork` | a fork or version of a store | the request or control call | `branch`, `child`, `version` |
 | `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `branch`, `extent`, `arena`, `bytes` |
 | `cache.relief` | an eviction pass freeing memory for an arena under pressure | root | `arena`, `bytes` evicted, `extents` evicted |
 | `upload.segment` | uploading a segment, its large extents first | root, on the uploader | `branch`, `segment`, `extents`, `bytes` |

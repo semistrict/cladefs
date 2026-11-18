@@ -37,13 +37,6 @@ impl Read {
         Self(None)
     }
 
-    /// cladefs: what a read of a point's head finds, if it is known without the read: none, no
-    /// writer taking a point (rule `points_take_no_writer`; specs/bucket's PointsUnwritten); not
-    /// known without the rule (TASK-449).
-    pub fn of_point() -> Option<Self> {
-        rules().points_take_no_writer.then(Self::absent)
-    }
-
     /// The head read, if there was one.
     pub fn head(&self) -> Result<Option<Head>, Error> {
         self.0.as_ref().map(|object| Head::decode(&object.bytes)).transpose()

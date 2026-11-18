@@ -35,15 +35,15 @@
 //! be uploaded and not yet in it. Segments go only once a checkpoint covers them, so that a reader
 //! that finds one missing knows, from the checkpoints, whether it is the branch's end.
 //!
-//! cladefs: a fork of a branch of the cell to a child in another cell is kept by the fork point: the
+//! cladefs: a fork of a branch of the cell to a child in another cell is kept by the origin: the
 //! parent's whole state at the end of the segment it was forked at, the objects and moves holding
 //! the extents it names along their ways from where they were sealed, and what recovering it reads
 //! (TASK-395.4). It is kept while a reference names it, whatever the child frees of it since: the
 //! collector is conservative, reclaiming late rather than reading other cells to find what their
-//! branches still hold. A fork point shared by many references, a point cloned many times, is
-//! recovered once. The references are listed after the states, by their fork points' prefixes
+//! branches still hold. An origin shared by many references, a version cloned many times, is
+//! recovered once. The references are listed after the states, by their origins' prefixes
 //! ([`referenced`]). Forks in the live
-//! branches' states to other cells keep their fork points too, as a fork's child may lack its
+//! branches' states to other cells keep their origins too, as a fork's child may lack its
 //! reference yet. A cell with no live branch and no reference is reclaimed whole, but its records
 //! and its object; and its pass retires the references of its deleted children under their
 //! parents' cells, computing them from the records' origins, never listing them: the one delete a
@@ -52,11 +52,11 @@
 //! no recorder makes again; and a clone's reference retires unmarked ([`Pass::removal`],
 //! TASK-455).
 //!
-//! A fork of a point is its child's record alone (doc-7, Points): its child names what the point
-//! names, and a pass that read the point deleted lists the records after that, and so finds every
-//! child whose fork can succeed ([`branch::fork_point`]). A child still being made of a point
-//! deleted the pass gives up on, first ([`abandon`]): nothing relies on it, and it may name what is
-//! gone, which would stop this pass and every other.
+//! A fork of a version is its child's record alone (doc-20): its child names what the version
+//! names, and a pass that read the version dropped lists the records after that, and so finds
+//! every child whose fork can succeed ([`branch::fork_version`]). A child still being made of a
+//! version dropped the pass gives up on, first ([`abandon`]): nothing relies on it, and it may name
+//! what is gone, which would stop this pass and every other.
 //!
 //! A state read names no fork deleted before it, a writer's checkpoint dropping those, and the
 //! fork's record and its children's may have come after the pass listed the records. So it lists
@@ -138,7 +138,7 @@ const RECORDS_AT_ONCE: usize = 32;
 /// How many objects' trailers a pass reads at once, to learn their data's lengths.
 const TRAILERS_AT_ONCE: usize = 32;
 
-/// How many branches a pass recovers at once, and how many fork points' states.
+/// How many branches a pass recovers at once, and how many origins' states.
 const RECOVERIES_AT_ONCE: usize = 16;
 
 /// How many of the checkpoints a pass read whole it keeps for the recoveries after: those of forks
@@ -748,7 +748,7 @@ impl Collector {
     /// pass would compact, it says apart ([`DryRun::compactable`]), and what references it would
     /// retire ([`DryRun::retired`]). It goes by the lease's epoch as it starts, as a pass by the
     /// epoch it takes, to tell whether a pass that deletes ran meanwhile ([`DryRun::fenced`]).
-    /// Where a pass would give up on a fork of a point deleted, writing its record, it takes the
+    /// Where a pass would give up on a fork of a version deleted, writing its record, it takes the
     /// fork as given up on, as a pass mostly finds it. It goes over the cell in full, whatever the
     /// last pass recorded.
     pub async fn dry_run_cell(&self, bucket: &impl Bucket, cell: Cell) -> Result<DryRun, Error> {
@@ -790,7 +790,7 @@ enum PassEnd {
 impl Remembered {
     /// What a pass over `cell` of the cell's collector lease's `epoch` finds: every object of the
     /// cell `listed` before it read anything else ([`first_listing`]), and what the live branches
-    /// and the fork points referred to need of them; none if a later pass took the lease from it as
+    /// and the origins referred to need of them; none if a later pass took the lease from it as
     /// it found what a live branch needs lost (TASK-180). It writes what giving up on forks needs,
     /// if `writes` says so.
     async fn survey(
@@ -821,8 +821,8 @@ impl Remembered {
                         Some(listed) => listed,
                         None => referenced(bucket, cell).await,
                     };
-                    let by = Points::Referred;
-                    keep_points(bucket, &checkpoints, &mut live, &referenced, by)
+                    let by = KeptBy::Referred;
+                    keep_origins(bucket, &checkpoints, &mut live, &referenced, by)
                         .await
                         .map(|()| referenced)
                 }
@@ -831,7 +831,7 @@ impl Remembered {
         let referenced = match read {
             Ok(referenced) => referenced,
             // Fenced, it read what the pass that fenced it, deleting since, may have found no live
-            // branch needs: a point deleted, read live before, and its fork being made, read after
+            // branch needs: a version deleted, read live before, and its fork being made, read after
             // (TASK-180). It stops, as it would before deleting.
             Err(Error::Lost(_))
                 if rules().passes_fenced_stop && fenced(bucket, cell, epoch).await? =>
@@ -842,7 +842,7 @@ impl Remembered {
         };
         drop(checkpoints);
         // What a pass listing the cell as it did decides as it did, unless it went by more than the
-        // cell: a point of another cell's record, or a version's branch's head, read for a clone
+        // cell: a version of another cell's record, or a version's branch's head, read for a clone
         // being made.
         let forking_elsewhere = (records.iter()).any(|(_, record)| {
             !record.deleted && forked_from(record).is_some_and(|from| from.cell != cell)
@@ -859,7 +859,7 @@ impl Remembered {
         Ok(Some(Pass::new(bucket, (cell, epoch), found).await?))
     }
 
-    /// Reads the states of `cell`'s live branches into `live`, and of the fork points of their forks
+    /// Reads the states of `cell`'s live branches into `live`, and of the origins of their forks
     /// to other cells, then lists `records` again, going on with the new ones, while a state it
     /// read is from a checkpoint, until no new one appears. A pass fenced as it found what a live
     /// branch needs lost stops, where its caller sees it.
@@ -876,9 +876,9 @@ impl Remembered {
             if rules().collector_abandons {
                 abandon(bucket, records, writes).await?;
             }
-            let (checkpointed, points) =
+            let (checkpointed, origins) =
                 recover_live(bucket, cell, checkpoints, records, live, writes).await?;
-            keep_points(bucket, checkpoints, live, &points, Points::Forked).await?;
+            keep_origins(bucket, checkpoints, live, &origins, KeptBy::Forked).await?;
             if !checkpointed || !rules().records_relisted {
                 return Ok(());
             }
@@ -1106,54 +1106,54 @@ async fn read_record(
     Ok(Some((object.meta.version.e_tag, Record::decode(branch, &object.bytes)?)))
 }
 
-/// cladefs: the fork points the references under `cell` name, by delimiter listings: the parents
-/// with references, then each one's fork points, none of their children (doc-7, The layout). Once:
-/// a listing's pages are read one after another, but what it shows is a fork point's prefix, not a
-/// reference, and a clone's reference and its point's own share it, `<C>refs/<origin>/<at>/`, the
-/// clone's written before the point's is retired; so the prefix holds a key all along, and a
+/// cladefs: the origins the references under `cell` name, by delimiter listings: the parents
+/// with references, then each one's origins, none of their children (doc-7, The layout). Once:
+/// a listing's pages are read one after another, but what it shows is an origin's prefix, not a
+/// reference, and a clone's reference and its version's own share it, `<C>refs/<origin>/<at>/`, the
+/// clone's written before the version's is retired; so the prefix holds a key all along, and a
 /// listing reaching it at any time shows it (a listing of the references whole would not: the
-/// clone's behind its cursor, the point's ahead, retired).
+/// clone's behind its cursor, the version's ahead, retired).
 async fn referenced(bucket: &impl Bucket, cell: Cell) -> BTreeSet<Origin> {
-    let mut points = BTreeSet::new();
+    let mut origins = BTreeSet::new();
     for prefix in bucket::list_delimited(bucket, &layout::references(cell)).await.prefixes {
         let Some(parent) = layout::referenced_parent(cell, &prefix) else { continue };
         for at in bucket::list_delimited(bucket, &prefix).await.prefixes {
             if let Some(at) = layout::referenced_at(parent, &at) {
-                points.insert(Origin { parent, at });
+                origins.insert(Origin { parent, at });
             }
         }
     }
-    points
+    origins
 }
 
-/// cladefs: what keeps a fork point a pass keeps ([`keep_points`]).
+/// cladefs: what keeps an origin a pass keeps ([`keep_origins`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Points {
+enum KeptBy {
     /// A fork of a live branch's state to a child in another cell, which may have no reference
     /// yet: its state lost is what the fork's child needs lost, which stops the pass.
     Forked,
     /// A reference: its state lost stops the pass if a child named under it lives, its record, read
-    /// then, naming the fork point as its origin; else nothing was lost, the children deleted,
-    /// being made of a point deleted, claims, or having no record.
+    /// then, naming the origin as its origin; else nothing was lost, the children deleted,
+    /// being made of a version deleted, claims, or having no record.
     Referred,
 }
 
-/// cladefs: keeps in `live` the states of the fork points `points` it keeps none of yet, each
-/// recovered once, however many forks name it, several at once ([`Live::keep_point`]): the
+/// cladefs: keeps in `live` the states of the origins `origins` it keeps none of yet, each
+/// recovered once, however many forks name it, several at once ([`Live::keep_origin`]): the
 /// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
 /// other cells are read there. A branch's are recovered in one walk where they share a checkpoint,
 /// each footer read once for them all (`recovery::recover_ats`, TASK-476): a vdisk's versions are
 /// up to 256 states of one history. A walk finding one lost, each is recovered alone, to tell
 /// which.
-async fn keep_points(
+async fn keep_origins(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
     live: &mut Live,
-    points: &BTreeSet<Origin>,
-    by: Points,
+    origins: &BTreeSet<Origin>,
+    by: KeptBy,
 ) -> Result<(), Error> {
     let mut unkept: BTreeMap<Branch, BTreeSet<u64>> = BTreeMap::new();
-    for &origin in points.iter().filter(|&origin| live.points.insert(*origin)) {
+    for &origin in origins.iter().filter(|&origin| live.origins.insert(*origin)) {
         unkept.entry(origin.parent).or_default().insert(origin.at);
     }
     let walks = futures::stream::iter(unkept)
@@ -1167,7 +1167,7 @@ async fn keep_points(
     for (parent, ats, walked) in walks {
         match walked {
             Ok((walked, touched)) => live.keep_walked(walked, touched),
-            Err(Error::Lost(_)) if by == Points::Referred => {
+            Err(Error::Lost(_)) if by == KeptBy::Referred => {
                 for at in ats {
                     keep_referred(bucket, checkpoints, live, Origin { parent, at }).await?;
                 }
@@ -1178,9 +1178,9 @@ async fn keep_points(
     Ok(())
 }
 
-/// cladefs: keeps in `live` the state of the fork point `origin` a reference names, recovered
+/// cladefs: keeps in `live` the state of the origin `origin` a reference names, recovered
 /// alone: if it is lost, a child named under it living on it stops the pass; with none, nothing
-/// was lost, the children deleted, being made of a point deleted, claims, or having no record.
+/// was lost, the children deleted, being made of a version deleted, claims, or having no record.
 async fn keep_referred(
     bucket: &impl Bucket,
     checkpoints: &Checkpoints<'_, impl Bucket>,
@@ -1188,7 +1188,7 @@ async fn keep_referred(
     origin: Origin,
 ) -> Result<(), Error> {
     match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
-        Ok((state, touched)) => live.keep_point(&state, touched),
+        Ok((state, touched)) => live.keep_origin(&state, touched),
         Err(Error::Lost(_)) => {
             let Some(child) = needing(bucket, origin).await? else {
                 // Decided by its children's records, in other cells.
@@ -1196,14 +1196,14 @@ async fn keep_referred(
                 return Ok(());
             };
             // Recovered again, after the child's record was read: its fork checkpointed the
-            // state at its point before it wrote its reference and the record
+            // state at its version before it wrote its reference and the record
             // (`branch::record_fork`), so this finds it, listing anew. What the first found
             // lost may be another fork at the same segment number, a writer's that a
             // takeover's dropped, the takeover's writer forking the child there since, after
-            // the first read the head (TASK-462): references name a fork point by its segment
+            // the first read the head (TASK-462): references name an origin by its segment
             // number alone.
             match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
-                Ok((state, touched)) => live.keep_point(&state, touched),
+                Ok((state, touched)) => live.keep_origin(&state, touched),
                 Err(Error::Lost(lost)) => {
                     return Err(Error::Lost(format!("{lost}, which {child} lives on")));
                 }
@@ -1215,11 +1215,11 @@ async fn keep_referred(
     Ok(())
 }
 
-/// cladefs: a child the references of the fork point `origin` name that lives on it: its record not
+/// cladefs: a child the references of the origin `origin` name that lives on it: its record not
 /// deleted, a fork's, naming `origin` as its origin. Its references listed, and their
-/// children's records read, in their cells: asked only of a fork point whose state is lost.
+/// children's records read, in their cells: asked only of an origin whose state is lost.
 async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<Branch>, Error> {
-    let listed = bucket::list(bucket, &layout::fork_point(origin.parent, origin.at)).await;
+    let listed = bucket::list(bucket, &layout::origin(origin.parent, origin.at)).await;
     for meta in listed {
         let Kind::Reference { child, .. } = layout::kind(&meta.key) else { continue };
         let Some(record) = branch::record(bucket, child).await? else { continue };
@@ -1237,7 +1237,7 @@ async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<Branch>,
 /// Recovers the live branches of `cell` `live` has not yet, several at once, folding them into it:
 /// those whose records are not deleted, and the children of forks in their states that have no
 /// records yet, of the cell. Returns whether one has a checkpoint of its own, which a fork deleted
-/// may have gone from; and the fork points of the forks in their states to children of other cells,
+/// may have gone from; and the origins of the forks in their states to children of other cells,
 /// whose states the pass keeps, as those children may have no references yet. Forks of a branch at
 /// one segment are recovered together, those without checkpoints of their own starting from the
 /// branch's state there, read once for them ([`Checkpoints`]); and the states are folded into what
@@ -1250,8 +1250,8 @@ async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<Branch>,
 /// the record's origin needs is what the child does (TASK-173).
 ///
 /// A failed fork's claim no writer has, whose recovery finds what it names lost, it gives up,
-/// writing its record so if `writes` says so; and so a fork of a point still being made, its point
-/// deleted, read again then (TASK-395.4): what the pass read of it before, the point live, may be
+/// writing its record so if `writes` says so; and so a fork of a version still being made, its version
+/// deleted, read again then (TASK-395.4): what the pass read of it before, the version live, may be
 /// older than what recovering it read.
 async fn recover_live(
     bucket: &impl Bucket,
@@ -1262,7 +1262,7 @@ async fn recover_live(
     writes: Writes,
 ) -> Result<(bool, BTreeSet<Origin>), Error> {
     let mut checkpointed = false;
-    let mut points = BTreeSet::new();
+    let mut origins = BTreeSet::new();
     // Forks made at the same segment next to each other, in the same rounds.
     let mut queue: BTreeSet<(Option<Origin>, Branch)> = records
         .iter()
@@ -1286,7 +1286,7 @@ async fn recover_live(
             let recovered = match recovered {
                 Ok(recovered) => recovered,
                 Err(Error::Lost(lost)) => match lost_is_ok(bucket, branch, writes).await? {
-                    // Decided by what it read again, a point's record in another cell among it.
+                    // Decided by what it read again, a version's record in another cell among it.
                     true => {
                         live.unsettled = true;
                         continue;
@@ -1297,7 +1297,7 @@ async fn recover_live(
             };
             // A child with a record is queued by it, as it says: one whose ID another branch took
             // as the fork was made has another origin than its parent's state says (TASK-79.82).
-            // cladefs: one of another cell's, its fork point kept, which its reference, if it has one
+            // cladefs: one of another cell's, its origin kept, which its reference, if it has one
             // yet, keeps too: the child's cell's pass recovers it (TASK-395.4).
             for fork in &recovered.state.forks {
                 let origin = Origin { parent: branch, at: fork.at };
@@ -1305,7 +1305,7 @@ async fn recover_live(
                     continue;
                 }
                 if fork.child.cell != cell {
-                    points.insert(origin);
+                    origins.insert(origin);
                     continue;
                 }
                 if records.contains_key(&fork.child) || live.recovered(fork.child, Some(origin)) {
@@ -1313,12 +1313,12 @@ async fn recover_live(
                 }
                 queue.insert((Some(origin), fork.child));
             }
-            // cladefs: its versions' states, kept as fork points' are (rule `versions_kept`,
+            // cladefs: its versions' states, kept as origins' are (rule `versions_kept`,
             // TASK-476): each the branch's state at the segment its head names it at.
             if rules().versions_kept
                 && let Some(head) = &recovered.head
             {
-                points.extend(
+                origins.extend(
                     head.versions.iter().map(|version| Origin { parent: branch, at: version.at }),
                 );
             }
@@ -1327,12 +1327,12 @@ async fn recover_live(
         }
         live.inherit(inherited);
     }
-    Ok((checkpointed, points))
+    Ok((checkpointed, origins))
 }
 
 /// Whether recovering `branch` finding what it needs lost lost nothing, as its record, read again,
 /// says: deleted since it was read, what it needed may be gone; a failed fork's claim no writer
-/// has, which nothing ever read, given up on; cladefs: a fork of a point still being made, its point
+/// has, which nothing ever read, given up on; cladefs: a fork of a version still being made, its version
 /// deleted, given up on (TASK-395.4), unless it was made first, as [`abandon`] would have: the rule
 /// `collector_abandons` both. Gives up on them, writing their
 /// records so, if `writes` says so.
@@ -1391,13 +1391,13 @@ struct Live {
     behind: BTreeSet<String>,
     /// cladefs: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
     /// key parsed once, not once an extent in it (TASK-395.12). Parsing them took most of a pass
-    /// over a cell whose branch was forked at many points, each a state of every extent of it.
+    /// over a cell whose branch was forked at many versions, each a state of every extent of it.
     moves: rustc_hash::FxHashMap<String, bool>,
-    /// cladefs: the fork points whose states it keeps, each once ([`Live::keep_point`]).
-    points: BTreeSet<Origin>,
+    /// cladefs: the origins whose states it keeps, each once ([`Live::keep_origin`]).
+    origins: BTreeSet<Origin>,
     /// cladefs: whether what it found went by more than the cell holds, which may change with nothing
     /// of the cell's changing: a recovery that found what it needs lost, and then nothing lost; a
-    /// fork point found lost, its children's records read (TASK-395.6).
+    /// origin found lost, its children's records read (TASK-395.6).
     unsettled: bool,
 }
 
@@ -1504,18 +1504,18 @@ impl Live {
         }
     }
 
-    /// cladefs: keeps `state`, a fork point's, whole, for the forks of it to other cells, which
+    /// cladefs: keeps `state`, an origin's, whole, for the forks of it to other cells, which
     /// `touched` was read to recover (TASK-395.4): the extents it names, along their ways from where
     /// they were sealed, as a child with no checkpoint of its own names them where it read them;
     /// and what recovering it read, through which such a child recovers, unless the rule that it is
     /// kept is off, as a test shows it needed. What its forks freed of it since is no matter: the
     /// collector is conservative.
-    fn keep_point(&mut self, state: &State, touched: BTreeSet<String>) {
+    fn keep_origin(&mut self, state: &State, touched: BTreeSet<String>) {
         self.keep_read(touched);
         self.keep_places(&state.extents);
     }
 
-    /// cladefs: keeps the fork points' states `walked`, a branch's, as [`Live::keep_point`] keeps
+    /// cladefs: keeps the origins' states `walked`, a branch's, as [`Live::keep_origin`] keeps
     /// one: each whole, and the places at which those after each name what changed since.
     fn keep_walked(&mut self, walked: recovery::Walked, touched: BTreeSet<String>) {
         self.keep_read(touched);
@@ -1525,10 +1525,10 @@ impl Live {
         self.keep_places(walked.changed.iter().map(|(extent, location)| (extent, location)));
     }
 
-    /// cladefs: keeps `touched`, what recovering fork points' states read, unless the rule that it
+    /// cladefs: keeps `touched`, what recovering origins' states read, unless the rule that it
     /// is kept is off, as a test shows it needed.
     fn keep_read(&mut self, touched: BTreeSet<String>) {
-        if rules().fork_points_kept {
+        if rules().origins_kept {
             self.touched.extend(touched);
         }
     }
@@ -1729,7 +1729,7 @@ impl Fate {
 }
 
 /// What a pass over a cell found: every object of the cell listed, and what the live branches and
-/// the fork points it keeps need of them.
+/// the origins it keeps need of them.
 struct Pass {
     cell: Cell,
     /// cladefs: its epoch, its taking of the cell's collector lease, which its moves' keys name
@@ -1739,16 +1739,16 @@ struct Pass {
     records: BTreeMap<Branch, Record>,
     /// Where each recovery of each live branch ended.
     branches: BTreeMap<Branch, Vec<Ended>>,
-    /// What recovering the live branches and the fork points read.
+    /// What recovering the live branches and the origins read.
     touched: BTreeSet<String>,
-    /// The objects holding the extents the live branches and the fork points name, and those
+    /// The objects holding the extents the live branches and the origins name, and those
     /// extents in them.
     named: BTreeMap<String, BTreeMap<ExtentId, Location>>,
     /// The moves the way to those extents goes through, whose maps are needed even once their
     /// data moved on: from where the states name them, or, where a writer may name them before
     /// that, from where they were sealed.
     hops: BTreeSet<String>,
-    /// cladefs: the fork points the references under the cell name, as listed after the states.
+    /// cladefs: the origins the references under the cell name, as listed after the states.
     referenced: BTreeSet<Origin>,
     /// cladefs: what it records of its listing (TASK-395.6, TASK-395.8).
     recording: Recording,
@@ -1772,7 +1772,7 @@ struct Recording {
 
 impl Pass {
     /// The pass over `cell` of `epoch`, which listed `objects`, and found `records`, what the live
-    /// branches and the fork points need (`live`), the fork points `referenced`, and what it
+    /// branches and the origins need (`live`), the origins `referenced`, and what it
     /// records as it ends: its ways to the extents they name worked out.
     async fn new(
         bucket: &impl Bucket,
@@ -1987,7 +1987,7 @@ impl Pass {
         }
     }
 
-    /// What goes: everything listed that the live branches and the fork points kept do not need, in
+    /// What goes: everything listed that the live branches and the origins kept do not need, in
     /// the order of its keys ([`Pass::fates`]).
     /// cladefs: the cell's removal too, if it goes whole ([`Pass::removal`], TASK-455).
     async fn doomed(&self, bucket: &impl Bucket, options: &Options) -> Result<Vec<&Meta>, Error> {
@@ -2521,7 +2521,7 @@ mod tests {
 
     /// TASK-175, as specs/bucket's NoWaysFromSeals finds it since the head (TASK-407): a fork's
     /// writer recovers its parent's state at the fork, naming an extent where it was sealed; a
-    /// pass compacts that segment, and the parent's writer checkpoints at the fork point, naming
+    /// pass compacts that segment, and the parent's writer checkpoints at the origin, naming
     /// the moves, which the fork's recovery reads since. The collector compacts the moves in turn
     /// and deletes what it can, and the fork's writer still reads the extent, the moves on its way
     /// from where it was sealed kept. (Before the head, a writer taken over checkpointing late did
@@ -2542,7 +2542,7 @@ mod tests {
     }
 
     /// What the fork's writer reads of the extent [`writers_read_past_checkpoints_landing_after_they_took_over`]
-    /// keeps: its parent's writer checkpointing at the fork point, the collector having moved it,
+    /// keeps: its parent's writer checkpointing at the origin, the collector having moved it,
     /// after the fork's writer recovered the parent's state there from the checkpoint before; the
     /// moves then compacted in turn, and passes run until they delete nothing more.
     async fn read_past_a_late_checkpoint() -> Result<Vec<u8>, Error> {
@@ -2575,7 +2575,7 @@ mod tests {
         assert_eq!(writer.location(kept).unwrap().key, sealed);
         let compacting = Options { compact_below: 0.6, ..KEEP };
         assert_eq!(collect(&*bucket, 1, &compacting).await.unwrap().compacted, 1);
-        // The parent's writer checkpoints at the fork point, following the moves.
+        // The parent's writer checkpoints at the origin, following the moves.
         assert_eq!(before.checkpoint().await, Ok(Some(at)));
         let tag = writer.chain().tag(1);
         commit(&before, Commit { tag: 3, frees: vec![moved], ..Commit::default() }).await;
@@ -2978,8 +2978,8 @@ mod tests {
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             let direct = raced_on;
             let origin = Origin { parent: test_branch(1), at };
-            let dropping = writer.drop_versions(&BTreeSet::from([VERSION]));
-            dropping.now_or_never().unwrap().unwrap();
+            let dropped = BTreeSet::from([VERSION]);
+            writer.drop_versions(&dropped).now_or_never().unwrap().unwrap();
             collect(&*direct, 2, &KEEP).now_or_never().unwrap().unwrap();
             let left = keys(&*direct).now_or_never().unwrap();
             assert!(
@@ -3029,7 +3029,7 @@ mod tests {
     /// child needs, which fails every pass after, unless the restore's reference keeps it.
     #[test]
     fn children_restored_from_versions_keeping_their_origins_need_recoveries_by_origins() {
-        // TASK-395.1: the restore's reference keeps its origin's state at the fork point too: with
+        // TASK-395.1: the restore's reference keeps its origin's state at the origin too: with
         // references gone, as specs/bucket's NoRecoveriesByOrigins has it.
         let rules =
             crate::Rules { recoveries_by_origins: false, references: false, ..crate::Rules::ALL };
@@ -3045,8 +3045,8 @@ mod tests {
     /// then drops the version and checkpoints.
     async fn pass_as_a_child_is_restored() -> Result<Report, Error> {
         use crate::layout::{Contents, Segment};
-        use crate::writer::Objects;
         use crate::testing::{VERSION, fork_version, versioned_by};
+        use crate::writer::Objects;
         const PARENT: u64 = 1;
         const CHILD: u64 = 3;
         const EARLIER: u64 = 4;
@@ -3078,8 +3078,7 @@ mod tests {
                 let at = versioned_by(&writer, Vec::new(), VERSION).await;
                 let origin = Origin { parent: test_branch(PARENT), at };
                 fork_version(&*restoring, test_branch(CHILD), VERSION, origin, 0x33).await.unwrap();
-                fork(&writer, Child { branch: test_branch(CHILD), owner: 0x34 })
-                    .await;
+                fork(&writer, Child { branch: test_branch(CHILD), owner: 0x34 }).await;
                 assert!(writer.refused(test_branch(CHILD)));
                 writer.drop_versions(&BTreeSet::from([VERSION])).await.unwrap();
                 writer.checkpoint().await.unwrap();
@@ -3355,8 +3354,11 @@ mod tests {
         branch::create(&*bucket, origin_branch, 0).await.unwrap();
         let writer = Writer::open(bucket, origin_branch, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
-        commit(&writer, Commit { tag: 1, extents: vec![(extent, b"held".to_vec())], ..Commit::default() })
-            .await;
+        commit(
+            &writer,
+            Commit { tag: 1, extents: vec![(extent, b"held".to_vec())], ..Commit::default() },
+        )
+        .await;
         let at = crate::testing::versioned_by(&writer, Vec::new(), crate::testing::VERSION).await;
         (writer, extent, Origin { parent: origin_branch, at })
     }
@@ -3395,7 +3397,7 @@ mod tests {
 
     /// TASK-455's review: a clone whose host died after its record, before its reference, which a
     /// store resumed: the resume writes its reference, which keeps the base's state at the fork
-    /// point once the base freed it and the version was dropped, and the clone holds what it did.
+    /// version once the base freed it and the version was dropped, and the clone holds what it did.
     #[test]
     fn clones_resumed_keep_their_references() {
         let (referred, held) = block_on(clone_resumed_after_its_host_died());
@@ -3409,7 +3411,7 @@ mod tests {
         crate::set_rules(crate::Rules { resumes_refer: false, ..crate::Rules::ALL });
         let (referred, held) = block_on(clone_resumed_after_its_host_died());
         crate::set_rules(crate::Rules::ALL);
-        // The base's checkpoint at the fork point, which the clone recovers from.
+        // The base's checkpoint at the origin, which the clone recovers from.
         let lost = layout::checkpoint(celled(1, 1), 1, 1);
         assert_eq!((referred, held), (false, Err(Error::Lost(lost))));
     }
@@ -4565,7 +4567,8 @@ mod tests {
     /// well, the rule shows needed only with references gone too, as specs/bucket's
     /// NoRecordsRelisted has it.
     #[test]
-    fn forks_of_versions_made_and_gone_within_a_pass_keeping_what_they_hold_need_records_relisted() {
+    fn forks_of_versions_made_and_gone_within_a_pass_keeping_what_they_hold_need_records_relisted()
+    {
         let rules =
             crate::Rules { records_relisted: false, references: false, ..crate::Rules::ALL };
         crate::set_rules(rules);
@@ -4602,9 +4605,15 @@ mod tests {
                     let version = crate::testing::VERSION;
                     let segment = crate::testing::versioned_by(&writer, Vec::new(), version).await;
                     let origin = Origin { parent: test_branch(1), at: segment };
-                    crate::testing::fork_version(&*direct, test_branch(RESTORED), version, origin, 0)
-                        .await
-                        .unwrap();
+                    crate::testing::fork_version(
+                        &*direct,
+                        test_branch(RESTORED),
+                        version,
+                        origin,
+                        0,
+                    )
+                    .await
+                    .unwrap();
                     writer.drop_versions(&BTreeSet::from([version])).await.unwrap();
                     let frees = vec![extent];
                     let batch = SegmentBuilder::from(Commit { tag: 3, frees, ..Commit::default() });
@@ -5076,11 +5085,11 @@ mod tests {
         assert_eq!(references, [reference]);
     }
 
-    /// TASK-395.3, TASK-395.10: a clone of a point writes its reference, under the cell of the
-    /// point's origin, after its record and before it reads the point's; whatever its cell, the
+    /// TASK-395.3, TASK-395.10: a clone of a version writes its reference, under the cell of the
+    /// version's origin, after its record and before it reads the version's; whatever its cell, the
     /// origin's own too.
     #[test]
-    fn clones_refer_between_their_records_and_their_points_read() {
+    fn clones_refer_between_their_records_and_their_versions_read() {
         assert_eq!(clones_requests(), ["record", "reference", "read"]);
     }
 
@@ -5117,8 +5126,7 @@ mod tests {
         bucket.served(bucket::create(&*bucket, &key, layout::encode(&head)));
         let mut orders = Vec::new();
         for clone in [celled(1, 4), celled(3, 3)] {
-            let (_, asked) =
-                bucket.served(fork_version(&*bucket, clone, VERSION, origin, 0x33));
+            let (_, asked) = bucket.served(fork_version(&*bucket, clone, VERSION, origin, 0x33));
             let reference = layout::reference(origin.parent, origin.at, clone);
             let mut steps = [
                 (position(&asked, &format!("put {reference}")), "reference"),
@@ -5154,44 +5162,44 @@ mod tests {
         crate::testing::collect_until_quiet(bucket, &now).await.map(drop)
     }
 
-    /// TASK-395.4: a fork to another cell keeps its parent's state at the fork point in the
+    /// TASK-395.4: a fork to another cell keeps its parent's state at the origin in the
     /// parent's cell, by its reference, the parent deleted and having freed what the child
     /// inherited, its checkpoint covering the segments the child, with no checkpoint of its own,
     /// recovers through.
     #[test]
-    fn fork_points_keep_what_children_in_other_cells_inherit() {
+    fn fork_versions_keep_what_children_in_other_cells_inherit() {
         assert_eq!(block_on(read_forked_from_a_deleted_parent()), Ok(b"held".to_vec()));
     }
 
     /// Without references, the parent's cell's pass reclaims what the child inherited: it reads its
     /// parent deleted, and lists nothing of the child's cell.
     #[test]
-    fn fork_points_kept_for_children_in_other_cells_need_references() {
+    fn fork_versions_kept_for_children_in_other_cells_need_references() {
         crate::set_rules(crate::Rules { references: false, ..crate::Rules::ALL });
         let read = block_on(read_forked_from_a_deleted_parent());
         crate::set_rules(crate::Rules::ALL);
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// Keeping the extents of a fork point's state alone, not what recovering it reads: the child,
+    /// Keeping the extents of an origin's state alone, not what recovering it reads: the child,
     /// with no checkpoint of its own, recovers through the parent's segments, which the parent's
     /// checkpoint covers, gone.
     #[test]
-    fn fork_points_kept_for_children_in_other_cells_need_what_recovering_them_reads() {
-        crate::set_rules(crate::Rules { fork_points_kept: false, ..crate::Rules::ALL });
+    fn fork_versions_kept_for_children_in_other_cells_need_what_recovering_them_reads() {
+        crate::set_rules(crate::Rules { origins_kept: false, ..crate::Rules::ALL });
         let read = block_on(read_forked_from_a_deleted_parent());
         crate::set_rules(crate::Rules::ALL);
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// TASK-462: a pass finds a fork point's state lost, the head it read naming no segment there:
+    /// TASK-462: a pass finds an origin's state lost, the head it read naming no segment there:
     /// a fork's reference at that segment number, the fork dropped, its writer taken over. Then,
-    /// before it lists the point's references, the branch's writer forks a child there, in another
-    /// cell: the pass finds the child living on the point, and recovering the state again, after
+    /// before it lists the version's references, the branch's writer forks a child there, in another
+    /// cell: the pass finds the child living on the version, and recovering the state again, after
     /// the child's record was read, finds it, the fork having checkpointed it before it referred;
     /// so the pass keeps it, rather than stopping as though the child's state were lost.
     #[test]
-    fn passes_finding_a_fork_point_lost_then_a_child_forked_there_recover_it_again() {
+    fn passes_finding_a_fork_version_lost_then_a_child_forked_there_recover_it_again() {
         let sim = SimBucket::new();
         let direct = Arc::new(Direct(sim.clone()));
         let (parent, dropped, child) = (celled(1, 1), celled(3, 3), celled(2, 2));
@@ -5209,7 +5217,7 @@ mod tests {
         let now = Options { compact_below: 0.0, grace: 0 };
         let mut pass = std::pin::pin!(collect_cell(&*sim, parent.cell, 7, &now));
         let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
-        let listing = format!("list {}", layout::fork_point(parent, 1));
+        let listing = format!("list {}", layout::origin(parent, 1));
         loop {
             assert!(pass.as_mut().poll(&mut context).is_pending(), "the pass ended first");
             if sim.describe(0) == listing {
@@ -5456,7 +5464,7 @@ mod tests {
 
     /// TASK-395.3, TASK-395.4: a chain of forks across cells, a root's, its child's, its
     /// grandchild's: the child deleted, its cell keeps its own state at the grandchild's fork
-    /// point, and its reference under the root's cell stays, the child's cell holding the
+    /// version, and its reference under the root's cell stays, the child's cell holding the
     /// grandchild's; the root frees and checkpoints, and the grandchild, with no checkpoint, reads
     /// what it inherited through both. The grandchild deleted too, the passes retire the
     /// references down the chain, and the cells of the dead are reclaimed whole but their records,
@@ -5533,7 +5541,7 @@ mod tests {
     /// TASK-395.3: a deletion that records the child of a fork across cells, its writer having
     /// recorded none, dying after its head named the fork's segment, writes its reference before
     /// it marks the parent deleted: a pass over the parent's cell between the two keeps the fork
-    /// point, by the parent's state; after, by the reference.
+    /// version, by the parent's state; after, by the reference.
     #[test]
     fn deletions_refer_before_they_mark_parents_deleted() {
         assert_eq!(block_on(read_as_a_deletion_refers()), Ok(b"held".to_vec()));
@@ -5773,11 +5781,11 @@ mod tests {
         assert_eq!(lists(three), listed(three));
     }
 
-    /// TASK-395.4's AC #2: a fork point many references name, a version cloned many times, is
+    /// TASK-395.4's AC #2: an origin many references name, a version cloned many times, is
     /// recovered once a pass: the pass over its cell asks the same, its references listed by
     /// delimiter, however many clones there are.
     #[test]
-    fn fork_points_shared_by_many_references_are_recovered_once() {
+    fn fork_versions_shared_by_many_references_are_recovered_once() {
         use crate::layout::Origin;
         let asked = |clones: u64| {
             let bucket = SimBucket::new();
@@ -5804,22 +5812,22 @@ mod tests {
             let (report, asked) =
                 bucket.served(collect_cell(&*bucket, origin_branch.cell, 7, &options));
             report.unwrap();
-            // The fork point's state, the checkpoint at it the first clone into another cell wrote.
-            let point = format!("get {}", layout::checkpoint(origin_branch, at, 1));
-            let read = asked.iter().filter(|asked| **asked == point).count();
+            // The origin's state, the checkpoint at it the first clone into another cell wrote.
+            let version = format!("get {}", layout::checkpoint(origin_branch, at, 1));
+            let read = asked.iter().filter(|asked| **asked == version).count();
             (asked.len(), read)
         };
         let (one, read) = asked(1);
-        assert_eq!(read, 1, "the fork point's checkpoint");
+        assert_eq!(read, 1, "the origin's checkpoint");
         assert_eq!(asked(8), (one, read));
     }
 
     /// TASK-395.12: a pass over a cell whose branch was forked at many versions to other cells, a
     /// VM snapshotted many times, lists none of the branch's checkpoints: its recovery reads what
-    /// its head names (TASK-407), and the listing of the cell serves each fork point's; and it reads
-    /// each fork point's checkpoint, which the restore into another cell wrote, once. Before, it listed them
+    /// its head names (TASK-407), and the listing of the cell serves each origin's; and it reads
+    /// each origin's checkpoint, which the restore into another cell wrote, once. Before, it listed them
     /// once after the branch's segments (`newest_checkpoint`), and before that once more a fork
-    /// point.
+    /// version.
     #[test]
     fn passes_list_a_branchs_checkpoints_once_however_many_versions_it_was_forked_at() {
         let parent = celled(1, 1);
@@ -5840,7 +5848,7 @@ mod tests {
                         .unwrap();
                     ats.push(at);
                 }
-                // Written on, its own checkpoint past the last fork point's.
+                // Written on, its own checkpoint past the last origin's.
                 commit(&writer, Commit { tag: 3, ..Commit::default() }).await;
                 writer.checkpoint().await.unwrap();
                 ats
@@ -5858,13 +5866,13 @@ mod tests {
         assert_eq!(asked(6), (0, vec![1; 6]));
     }
 
-    /// TASK-407: the checkpoint at a fork point to another cell, which the fork's child reads by
+    /// TASK-407: the checkpoint at an origin to another cell, which the fork's child reads by
     /// its key alone, of the epoch of the fork's segment, stands through passes over the parent's
     /// cell, though a later writer checkpointed at the same segment, at its own key, which the
-    /// pass's recovery of the fork point reads instead. Before, the pass kept the later writer's
+    /// pass's recovery of the origin reads instead. Before, the pass kept the later writer's
     /// alone, deleting the child's, which then failed to open (the simulation's `everything`).
     #[test]
-    fn fork_points_to_other_cells_keep_their_checkpoints_past_later_writers() {
+    fn fork_versions_to_other_cells_keep_their_checkpoints_past_later_writers() {
         use crate::layout::Origin;
         let bucket = store();
         let (parent, child) = (celled(1, 1), celled(2, 2));
@@ -5919,7 +5927,7 @@ mod tests {
 
     /// TASK-395.4's AC #1, a live fork's cell (TASK-395.4's review): a pass over the cell of a
     /// fork of a branch in another cell, the fork live with no checkpoint of its own, lists nothing
-    /// outside its cell, reading its parent's state by the checkpoint at the fork point alone,
+    /// outside its cell, reading its parent's state by the checkpoint at the origin alone,
     /// which recording the fork wrote; whether the parent had a checkpoint before the fork, or
     /// none. The fork reads what it inherited.
     #[test]
@@ -5949,8 +5957,8 @@ mod tests {
                 .filter(|asked| !asked.split(' ').nth(1).unwrap().starts_with(&prefix))
                 .collect();
             assert_eq!(outside, Vec::<&String>::new(), "checkpointed {checkpointed}");
-            let point = format!("get {}", layout::checkpoint(parent, at, 1));
-            assert!(asked.contains(&point), "{asked:#?}");
+            let version = format!("get {}", layout::checkpoint(parent, at, 1));
+            assert!(asked.contains(&version), "{asked:#?}");
             let direct = Arc::new(Direct(bucket.clone()));
             assert_eq!(block_on(read_inherited(&direct, child, extent)), Ok(b"held".to_vec()));
         }
@@ -5958,7 +5966,7 @@ mod tests {
 
     /// TASK-395.10: a clone refused by a record of its child's ID there before, of another origin,
     /// deleted with none, or of its own origin, writes no reference, as it writes it after its own
-    /// record. Each another's, its ID taken: a deleted one too, which is no point deleted
+    /// record. Each another's, its ID taken: a deleted one too, which is no version deleted
     /// (TASK-449: no look at the record comes first any more, which refused it so).
     #[test]
     fn clones_refused_by_records_there_write_no_references() {
@@ -6032,10 +6040,10 @@ mod tests {
 
     /// TASK-395.4's review, found by the simulation (seed 11 of `restores`): a fork across cells
     /// recorded again, by a later writer of its parent or the parent's deletion, after the parent
-    /// checkpointed past the fork point and passes reclaimed its segments up to there, the
-    /// checkpoint at the fork point kept: it records nothing more, recovering nothing of the
+    /// checkpointed past the origin and passes reclaimed its segments up to there, the
+    /// checkpoint at the origin kept: it records nothing more, recovering nothing of the
     /// parent there, which it could not. Before, recording it again recovered the parent at the
-    /// fork point from its segments, gone, and failed the writer's acknowledgement.
+    /// origin from its segments, gone, and failed the writer's acknowledgement.
     #[test]
     fn forks_across_cells_recorded_again_recover_nothing_of_their_parents() {
         block_on(async {
@@ -6051,7 +6059,7 @@ mod tests {
             sweep(&*bucket).await.unwrap();
             let left = keys(&*bucket).await;
             assert!(!left.contains(&layout::segment(parent, at, 1)), "the fork's segment went");
-            assert!(left.contains(&layout::checkpoint(parent, at, 1)), "the fork point kept");
+            assert!(left.contains(&layout::checkpoint(parent, at, 1)), "the origin kept");
             let origin = crate::layout::Origin { parent, at };
             assert_eq!(
                 branch::record_fork(
@@ -6063,10 +6071,10 @@ mod tests {
                 .await,
                 Ok(())
             );
-            // Its checkpoint at the fork point gone too, as nothing keeps it for a record of the
+            // Its checkpoint at the origin gone too, as nothing keeps it for a record of the
             // fork's owner no reference keeps, a failed fork's claim landing late (seed 11's).
-            let point = layout::checkpoint(parent, at, 1);
-            bucket::delete_all(&*bucket, &[point.as_str()]).await;
+            let version = layout::checkpoint(parent, at, 1);
+            bucket::delete_all(&*bucket, &[version.as_str()]).await;
             assert_eq!(
                 branch::record_fork(
                     &*bucket,
@@ -6086,7 +6094,7 @@ mod tests {
     }
 
     /// TASK-395.4's review (sim seed 143): a failed fork to another cell whose parent's state at
-    /// the fork point is gone is deleted from the first, not claimed: no reader recovers it.
+    /// the origin is gone is deleted from the first, not claimed: no reader recovers it.
     #[test]
     fn failed_forks_across_cells_of_a_state_gone_are_deleted_from_the_first() {
         block_on(async {
@@ -6104,8 +6112,8 @@ mod tests {
             writer.checkpoint().await.unwrap();
             sweep(&*bucket).await.unwrap();
             let left = keys(&*bucket).await;
-            assert!(!left.contains(&layout::segment(parent, at, 1)), "the fork point let go of");
-            assert!(!left.contains(&layout::checkpoint(parent, at, 1)), "the fork point let go of");
+            assert!(!left.contains(&layout::segment(parent, at, 1)), "the origin let go of");
+            assert!(!left.contains(&layout::checkpoint(parent, at, 1)), "the origin let go of");
             let origin = crate::layout::Origin { parent, at };
             let owner = forked(failed).owner;
             let kms = crate::keys::testing::host_kms();
@@ -6124,9 +6132,9 @@ mod tests {
 
     /// TASK-395.11, found by the simulation (restores, seed 11, then 2545 once the seeds moved): a
     /// writer of the parent records an acknowledged fork across cells, its read finding the child
-    /// with no record; before it writes the parent's checkpoint at the fork point, the child is
-    /// deleted, its host's fork failing, the parent's next writer checkpoints past the fork point,
-    /// dropping the fork of a child deleted, and a sweep lets the fork point go. The parent's state
+    /// with no record; before it writes the parent's checkpoint at the origin, the child is
+    /// deleted, its host's fork failing, the parent's next writer checkpoints past the origin,
+    /// dropping the fork of a child deleted, and a sweep lets the origin go. The parent's state
     /// there gone, the writer reads the record again: deleted, it writes nothing, no reference, no
     /// checkpoint, no record, nor fails. Before, it recorded the child deleted, which the record
     /// there refused, and before TASK-395.4's review it failed the writer.
@@ -6175,7 +6183,7 @@ mod tests {
             assert_eq!(writer.acknowledge().await.map(drop), Ok(()));
             assert!(bucket.then.lock().unwrap().is_none(), "the child went");
             let left = keys(&*direct).await;
-            assert!(!left.contains(&layout::segment(parent, at, 1)), "the fork point let go of");
+            assert!(!left.contains(&layout::segment(parent, at, 1)), "the origin let go of");
             assert!(!left.contains(&layout::checkpoint(parent, at, 1)), "{left:#?}");
             assert!(!left.contains(&layout::reference(parent, at, child)), "{left:#?}");
             let record = branch::record(&*direct, child).await.unwrap().unwrap();
@@ -6402,12 +6410,12 @@ mod tests {
     }
 
     /// TASK-395.10: a clone's host dying at each step of the clone, before its reference, before
-    /// its read of the point, before it makes its record made, its directory then deleted
-    /// knowing nothing of the child, as a host's left unmade does: once the point and its origin
+    /// its read of the version, before it makes its record made, its directory then deleted
+    /// knowing nothing of the child, as a host's left unmade does: once the version and its origin
     /// are deleted and passes ran, nothing is left of either, nor of the clone but its record,
     /// deleted, which names the origin its reference was retired by.
     #[test]
-    fn clones_whose_hosts_die_leave_nothing_once_their_points_go() {
+    fn clones_whose_hosts_die_leave_nothing_once_their_versions_go() {
         for (step, nth) in [("reference", 1), ("read", 1), ("record", 2)] {
             let (left, references) = left_by_a_clone_dying_before(step, nth);
             assert_eq!((left, references), (Vec::<String>::new(), 0), "before its {step}");
@@ -6574,7 +6582,7 @@ mod tests {
         // Each write, the cell it is in, and what the pass over it in full asks that a pass skipping
         // it never does.
         let garbage = |cell: u64| celled(cell, cell);
-        // At the garbage branch's checkpoint, its state there whole: a fork point found lost would
+        // At the garbage branch's checkpoint, its state there whole: an origin found lost would
         // have its pass read its children's records, in other cells, and skip it never.
         let at = (bucket.keys().iter())
             .find_map(|key| match layout::kind(key) {
@@ -6640,7 +6648,7 @@ mod tests {
             // records what its deletes leave, which the one after it finds (TASK-455).
             assert_eq!(sweep(&mut collector), all_idle, "{write}");
         }
-        // The fork point the reference names, its cell's pass keeps (TASK-395.10's space).
+        // The origin the reference names, its cell's pass keeps (TASK-395.10's space).
         let kept = bucket.keys();
         assert!(
             kept.contains(&reference) && kept.contains(&layout::checkpoint(garbage(0x100), at, 1))
@@ -6700,7 +6708,7 @@ mod tests {
     }
 
     /// TASK-395.6: a pass skips nothing it went by more than the cell for. A clone being made in the
-    /// cell, of a point in another, its pass reads the point's record for: deleted then, with
+    /// cell, of a version in another, its pass reads the version's record for: deleted then, with
     /// nothing of the cell's changed, the next pass gives the clone up, as a pass in full does. The
     /// cell dead, the pass in full retires the clone's reference, marking it, and passes that skip
     /// the cell after ask its lease and listing alone (TASK-395.14): the reference written again,

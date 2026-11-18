@@ -15,49 +15,45 @@
 // VM may as well be of one tenant, or of none, on the daemon's own VM socket. Grants are not kept
 // across restarts of the daemon: the caller grants again.
 //
-// A point is immutable (TASK-158): any number of hosts read it, none writes it, no writer takes it,
-// and a restore's fork is a new branch's record alone, so that a restore on one host changes
-// nothing another sees, and no host's copy goes stale.
+// A version is a named state of a cell, made by its writer as one local commit (MakeVersion) and
+// uploaded behind. Forks are made of versions, through a copy of one: a store at the version,
+// which nothing writes and no writer takes, so that a restore on one host changes nothing another
+// sees, and no host's copy goes stale.
 //
-// A tenant's restore on a host without the point (TASK-154). A VM process names no branch: what a
-// tenant's says in OPEN is ignored, as anyone's ID would take that branch's data. A tenant's stores
-// are what is in its directory, which only this API puts a branch of the bucket in, so that the
-// caller's CreateStore of a branch in a tenant's directory grants it, and DropStore ends that. A
-// VM snapshot of a tenant's VM, which makes a point as it is taken, restores so, on any number of
-// hosts at once:
+// A VM snapshot of a tenant's VM makes a version of each of its cells, with a copy of each at the
+// path the snapshot names, and restores on any number of hosts at once (TASK-154):
 //
-// - On the snapshot's host, once it is taken: StatStore's `branch` of the point it made, kept with
-//   the snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which
-//   a VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
-//   (ALREADY_EXISTS).
+// - On the snapshot's host, once it is taken: StatStore of the copy says its `branch` and
+//   `version`, kept with the snapshot. The version is in the bucket once SyncStore of the VM's
+//   store returns.
 // - On each host to restore it, once, before the VMM's first `PUT /snapshot/load`: CreateStore at a
-//   path in the tenant's directory, of that branch, which that host's daemon reads as the first
-//   restore forks it. ALREADY_EXISTS means a store is there, a VM process's perhaps: use it only if
-//   StatStore's `branch` is the branch. A point needs no `token`.
-// - Then each load, whose `cladefs_overrides` name that path as `point_on_host`, the VM's store in
+//   path in the tenant's directory, of that branch and `version`, which makes a copy there.
+//   ALREADY_EXISTS means a store is there, a VM process's perhaps: use it only if StatStore says
+//   that branch and version. A copy needs no `token`.
+// - Then each load, whose `cladefs_overrides` name the copy as `copy_on_host`, the VM's store in
 //   the tenant's directory as `path_on_host`, and the tenant's socket as `cladefsd_socket`. Each
-//   restore forks the point, on as many hosts at once as there are. Without the CreateStore, it
-//   fails with ENOENT, whatever the VMM names; so does one of a point deleted since.
-// - Once this host restores it no more: DropStore of the point, optional, which ends the grant here
-//   and frees the copy. DeleteStore deletes the point, which the snapshot restores from, on every
-//   host: VMs restored from it keep what they inherited.
+//   restore forks the copy into a new cell, on as many hosts at once as there are. Without the
+//   CreateStore, it fails with ENOENT, whatever the VMM names; so does one of a version dropped
+//   since.
+// - Once this host restores it no more: DropStore of the copy, optional, which ends the grant here
+//   and frees it. DropVersions drops the version on every host: VMs restored from it keep what
+//   they inherited.
 //
-// A branch so granted is the tenant's to read and restore: a VM process opening a point to write
-// it fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
+// A copy so granted is the tenant's to read and restore: a VM process opening one to write it
+// fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
 //
-// Shared points (TASK-395.7): a point forks only into cells of its own tenant's, unless it is
-// shared (SharePoint, or ForkStore's `shared`): a base image or a VM snapshot's point that many
-// tenants fork.
-// A restore, or a ForkStore, of a point of another tenant's that isn't shared fails with
-// PERMISSION_DENIED (EACCES), making nothing; each fork reads whether the point is shared, in the
-// bucket, as it is made, so that unsharing it stops new forks on every host, and those made live
-// on. A store with a writer forks into cells of other tenants' only if it is the default tenant's,
-// as the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's
-// into another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
+// Shared versions (TASK-395.7): a version forks only into cells of its own tenant's, unless it is
+// shared (ShareVersion): a base image's or a VM snapshot's that many tenants fork. A restore, or a
+// ForkStore, of another tenant's version that isn't shared fails with PERMISSION_DENIED (EACCES),
+// making nothing; each fork reads whether the version is shared, in the bucket, as it is made, so
+// that unsharing it stops new forks on every host, and those made live on. A store with a writer
+// forks into cells of other tenants' only if it is the default tenant's, as the daemon's own
+// stores and public bases are (TASK-395.9): a ForkStore of another tenant's into another tenant's
+// directory fails with PERMISSION_DENIED (EACCES), making nothing.
 //
-// A fork of anything but a point is a commit of its branch, which takes its branch's writer: a
-// store forks on one host at a time. A base, or any store, forked on several hosts is made a point
-// first, by ForkStore's `point`, and forked as a VM snapshot's point is, from a copy on each host.
+// A fork of a store with a writer is a commit of its cell, which takes its writer: such a store
+// forks on one host at a time. A base, or any store, forked on several hosts is given a version
+// first, and forked from a copy of it on each host, as a VM snapshot's is.
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -147,33 +143,33 @@ const (
 //
 // The extent daemon's control API.
 type CladefsdClient interface {
-	// Makes an empty store: of a new branch; or of a branch kept in the daemon's bucket, which the
-	// daemon takes once it opens the store (a VM on another host than the branch's), or reads, if it
-	// is a point, a VM snapshot's or ForkStore's, which any number of hosts hold at once.
+	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
+	// takes once it opens the store (a VM on another host than the cell's); or a copy of a version
+	// of one (`version`), which any number of hosts hold at once.
 	CreateStore(ctx context.Context, in *CreateStoreRequest, opts ...grpc.CallOption) (*CreateStoreResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(ctx context.Context, in *ImportImageRequest, opts ...grpc.CallOption) (*ImportImageResponse, error)
-	// Forks a store to a new branch, a new store sharing its data: live, if a VM has it open, at a
-	// point nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
-	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its branch, made where that
-	// writer is, one host at a time; a fork of a point is its child's record alone, made on any
-	// number of hosts at once. So a base forked on many hosts is made a point first (`point`).
+	// Forks a store to a new cell, a new store sharing its data: live, if a VM has it open, at a
+	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
+	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
+	// writer is, one host at a time; a fork of a version's copy is its child's record alone, made on
+	// any number of hosts at once.
 	ForkStore(ctx context.Context, in *ForkStoreRequest, opts ...grpc.CallOption) (*ForkStoreResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
-	// other branches share of it, which stays until the last of them goes. A point deleted restores
-	// no more, on any host (NOT_FOUND), and what was restored from it lives on.
+	// other cells share of it, which stays until the last of them goes. What was forked from it
+	// lives on.
 	DeleteStore(ctx context.Context, in *DeleteStoreRequest, opts ...grpc.CallOption) (*DeleteStoreResponse, error)
 	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
-	// daemon's bucket, which stays, with what else holds it: a point this host read for a tenant,
-	// which that tenant's VM processes restore no more here, the point living on. A store whose
+	// daemon's bucket, which stays, with what else holds it: a version's copy this host made for a
+	// tenant, which that tenant's VM processes restore no more here, the version living on. A store whose
 	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
 	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
 	DropStore(ctx context.Context, in *DropStoreRequest, opts ...grpc.CallOption) (*DropStoreResponse, error)
 	// Sets a store's capacity, the size of the disk its guest sees: a store a VM has open grows at
 	// once, the guest seeing it mounted, and shrinks if its guest's filesystem agrees, no lower than
-	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows. A point, which
-	// nothing writes, is resized nowhere (FAILED_PRECONDITION, EROFS).
+	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows. A version's copy,
+	// which nothing writes, is resized nowhere (FAILED_PRECONDITION, EROFS).
 	ResizeStore(ctx context.Context, in *ResizeStoreRequest, opts ...grpc.CallOption) (*ResizeStoreResponse, error)
 	// Places a store at a placement whose fencing token, its boot ID, is `token`: its writer takes
 	// its branch in object storage with that token from then on, which a later placement's exceeds,
@@ -276,7 +272,7 @@ type CladefsdClient interface {
 	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
 	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
 	// here are halted, each request of their VM processes failing with EACCES, as their openings do;
-	// their extents' pages leave the cache, but those other stores hold too (a shared point's fork,
+	// their extents' pages leave the cache, but those other stores hold too (a shared version's fork,
 	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
 	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
 	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
@@ -608,33 +604,33 @@ func (c *cladefsdClient) ShredTenant(ctx context.Context, in *ShredTenantRequest
 //
 // The extent daemon's control API.
 type CladefsdServer interface {
-	// Makes an empty store: of a new branch; or of a branch kept in the daemon's bucket, which the
-	// daemon takes once it opens the store (a VM on another host than the branch's), or reads, if it
-	// is a point, a VM snapshot's or ForkStore's, which any number of hosts hold at once.
+	// Makes an empty store: of a new cell; or of a cell kept in the daemon's bucket, which the daemon
+	// takes once it opens the store (a VM on another host than the cell's); or a copy of a version
+	// of one (`version`), which any number of hosts hold at once.
 	CreateStore(context.Context, *CreateStoreRequest) (*CreateStoreResponse, error)
 	// Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
 	ImportImage(context.Context, *ImportImageRequest) (*ImportImageResponse, error)
-	// Forks a store to a new branch, a new store sharing its data: live, if a VM has it open, at a
-	// point nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
-	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its branch, made where that
-	// writer is, one host at a time; a fork of a point is its child's record alone, made on any
-	// number of hosts at once. So a base forked on many hosts is made a point first (`point`).
+	// Forks a store to a new cell, a new store sharing its data: live, if a VM has it open, at a
+	// moment nothing is open on it (as with its guest's filesystem frozen), FAILED_PRECONDITION
+	// (EBUSY) otherwise. A fork of a store with a writer is a commit of its cell, made where that
+	// writer is, one host at a time; a fork of a version's copy is its child's record alone, made on
+	// any number of hosts at once.
 	ForkStore(context.Context, *ForkStoreRequest) (*ForkStoreResponse, error)
 	// Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
-	// other branches share of it, which stays until the last of them goes. A point deleted restores
-	// no more, on any host (NOT_FOUND), and what was restored from it lives on.
+	// other cells share of it, which stays until the last of them goes. What was forked from it
+	// lives on.
 	DeleteStore(context.Context, *DeleteStoreRequest) (*DeleteStoreResponse, error)
 	// Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
-	// daemon's bucket, which stays, with what else holds it: a point this host read for a tenant,
-	// which that tenant's VM processes restore no more here, the point living on. A store whose
+	// daemon's bucket, which stays, with what else holds it: a version's copy this host made for a
+	// tenant, which that tenant's VM processes restore no more here, the version living on. A store whose
 	// forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
 	// last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
 	// to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
 	DropStore(context.Context, *DropStoreRequest) (*DropStoreResponse, error)
 	// Sets a store's capacity, the size of the disk its guest sees: a store a VM has open grows at
 	// once, the guest seeing it mounted, and shrinks if its guest's filesystem agrees, no lower than
-	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows. A point, which
-	// nothing writes, is resized nowhere (FAILED_PRECONDITION, EROFS).
+	// what it holds (RESOURCE_EXHAUSTED otherwise); one none has open only grows. A version's copy,
+	// which nothing writes, is resized nowhere (FAILED_PRECONDITION, EROFS).
 	ResizeStore(context.Context, *ResizeStoreRequest) (*ResizeStoreResponse, error)
 	// Places a store at a placement whose fencing token, its boot ID, is `token`: its writer takes
 	// its branch in object storage with that token from then on, which a later placement's exceeds,
@@ -737,7 +733,7 @@ type CladefsdServer interface {
 	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
 	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
 	// here are halted, each request of their VM processes failing with EACCES, as their openings do;
-	// their extents' pages leave the cache, but those other stores hold too (a shared point's fork,
+	// their extents' pages leave the cache, but those other stores hold too (a shared version's fork,
 	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
 	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
 	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until

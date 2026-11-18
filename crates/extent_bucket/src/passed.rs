@@ -105,8 +105,8 @@ const GC_LEASE: &str = "gc-lease";
 pub struct Passed {
     /// The digest of the listing of the cell it decided by, but the collector's own objects under
     /// it ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
-    /// by more than the cell holds, which may change with no object of the cell's changing: a point
-    /// of another cell's record, read for a clone of it being made; a fork point found lost; a
+    /// by more than the cell holds, which may change with no object of the cell's changing: a version
+    /// of another cell's record, read for a clone of it being made; an origin found lost; a
     /// branch's recovery that found what it needs lost, and then nothing lost. Or if it deleted
     /// only what a pass before deferred, without deciding anew what goes once that is gone.
     pub listing: Option<[u8; 32]>,

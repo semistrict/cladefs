@@ -186,7 +186,7 @@ host_need() {
 }
 
 # host_tree NAME copies the source to the tree NAME, which persists between
-# runs so that a run builds only what changed, and points repo at it. By
+# runs so that a run builds only what changed, and versions repo at it. By
 # content, not times, which a tree unpacked from another checkout's has: only
 # what differs is written, which makes it newer than what was built from it, as
 # cargo and make need. That holds only against what the tree itself built, so
@@ -221,7 +221,7 @@ host_tree() {
 # (KASAN, KFENCE, lockdep); coverage (gcov of fs/cladefs); or rust-checks (its Rust's debug
 # assertions and overflow checks). It builds in the work directory WORK (default
 # $work/guest-kernel-KIND), its log host_kernel_log (default RESULTS/guest-kernel.log), and
-# refuses to inside a measurement (measurement.sh), and points host_kernel_image at the
+# refuses to inside a measurement (measurement.sh), and versions host_kernel_image at the
 # kernel and host_kernel_work at where it was built. The kernel's Rust builds on guest/rust's own
 # toolchain, not the host's.
 #

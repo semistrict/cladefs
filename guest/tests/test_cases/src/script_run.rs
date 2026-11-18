@@ -1127,7 +1127,7 @@ impl Run {
     /// then stores `data` at `at` through it, maybe to a page only read, whose store must fault and
     /// make it private (TASK-149.42). The mprotects and the move not under fault injection: a
     /// mapping left read-only would kill the next store's process, and the PTEs they change are
-    /// the point, not the calls' refusals.
+    /// the version, not the calls' refusals.
     fn remap_kept(
         &mut self,
         step: &Step,

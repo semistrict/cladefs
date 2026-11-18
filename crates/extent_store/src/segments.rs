@@ -581,7 +581,7 @@ impl<F: File> Segments<F> {
 
     /// Has the next commit fork `child` at its end, which its contents name, and close the open
     /// segment, whose footer names the fork (doc-7, Forks): with its owner, and whether it is a
-    /// point (doc-7, Points).
+    /// version (doc-7, Versions).
     pub fn close_for_fork(&mut self, child: Child) {
         self.close_wanted = true;
         self.forking.push(child);

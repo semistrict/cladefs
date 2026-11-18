@@ -126,7 +126,7 @@ impl Device {
     }
 
     /// The device a snapshot's `state` holds, with `queues` request queues, as many as it had: its
-    /// store opened, or forked from the snapshot's point if it doesn't exist; its window in guest
+    /// store opened, or forked from the snapshot's version if it doesn't exist; its window in guest
     /// memory where the snapshot had it; the guest's filesystem frozen as it was, and its window's
     /// mappings mapped again as the driver activates it, as it was. The VMM checks the
     /// snapshot's protocol version first ([`check_version`](crate::protocol::check_version)), and
@@ -147,7 +147,7 @@ impl Device {
     }
 
     /// A device as `config` describes, with `queues` request queues, made as `making` says: its
-    /// store opened, or, restored from a snapshot, forked from the snapshot's point if it doesn't
+    /// store opened, or, restored from a snapshot, forked from the snapshot's version if it doesn't
     /// exist; its window in guest memory where the snapshot had it.
     fn make(
         config: Config,
@@ -188,8 +188,8 @@ impl Device {
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
                 Making::Restore { snapshot, .. } => daemon.open_forked(
                     &config.path_on_host,
-                    &snapshot.point,
-                    snapshot.point_branch,
+                    &snapshot.copy,
+                    snapshot.branch,
                     config.capacity,
                 ),
             })
@@ -420,11 +420,12 @@ impl Device {
     /// cladefs: takes a snapshot of the device's store, for a snapshot of the VM, paused, whose
     /// guest's filesystem is frozen, with nothing open (TASK-39.1): `quiesce` has the VMM's
     /// workers serve the requests they took and stop, as they do for the snapshot, so that none
-    /// changes the window meanwhile; then the store is forked to `point`, and the window's mappings
-    /// recorded, which [`Device::state`] says.
+    /// changes the window meanwhile; then a version of the store's cell is made, with a copy of it
+    /// at `copy`, which restores fork, and the window's mappings recorded, which [`Device::state`]
+    /// says.
     pub fn take_snapshot(
         &mut self,
-        point: &Path,
+        copy: &Path,
         quiesce: impl FnOnce(),
     ) -> Result<(), SnapshotError> {
         let id = self.config.id.clone();
@@ -435,15 +436,14 @@ impl Device {
             return Err(SnapshotError::NotFrozen(id));
         }
         quiesce();
-        // cladefs: the point's branch, the extent daemon's to name, its ID one no other branch of its
-        // bucket has (TASK-364).
+        // cladefs: the cell's branch, which a restore on another host makes its copy of the version of.
         let branch = self
             .store()
-            .fork_quiescent(point)
-            .map_err(|errno| SnapshotError::Fork(id.clone(), point.display().to_string(), errno))?;
+            .version_copy(copy)
+            .map_err(|errno| SnapshotError::Fork(id.clone(), copy.display().to_string(), errno))?;
         let mappings =
             self.store().window_mappings().map_err(|errno| SnapshotError::Mappings(id, errno))?;
-        self.snapshot = Some(Snapshot { point: point.to_owned(), point_branch: branch, mappings });
+        self.snapshot = Some(Snapshot { copy: copy.to_owned(), branch, mappings });
         Ok(())
     }
 
@@ -461,8 +461,8 @@ impl Device {
         State {
             config: ConfigState::from(&self.config),
             window_addr: self.window.as_ref().map(WindowMemory::guest_addr),
-            point: snapshot.point.clone(),
-            point_branch: snapshot.point_branch,
+            copy: snapshot.copy.clone(),
+            branch: snapshot.branch,
             mappings: snapshot.mappings.iter().map(MappingState::from).collect(),
             frozen: self.notices.frozen(),
         }

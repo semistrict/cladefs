@@ -1,5 +1,5 @@
-# A tenant's VM process restoring a point it hasn't names any branch for it: the daemon takes the
-# branch from the bucket, another tenant's, as the point (TASK-150.4).
+# A tenant's VM process restoring a version it hasn't names any branch for it: the daemon takes the
+# branch from the bucket, another tenant's, as the version's copy (TASK-150.4).
 # Kind: another tenant's
 # Killer: cladefsd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it
 --- a/crates/cladefs/src/cladefsd/server.rs
