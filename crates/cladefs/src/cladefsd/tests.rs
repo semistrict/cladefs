@@ -2450,10 +2450,8 @@ fn stores_made_are_cells_of_their_kinds() {
             (db_cell, "db.sqlite", Kind::Sqlite),
             (memory_cell, "memory", Kind::Memory),
         ] {
-            let object = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
-            assert_eq!((object.kind, object.deleted), (Some(kind), false), "{name}");
             let head = bucket_cell::head::get(&*bucket, cell).await.unwrap().unwrap();
-            assert_eq!(head.token, object.epoch, "{name}: its head taken with its cell's epoch");
+            assert_eq!((head.kind, head.deleted(), head.epoch), (Some(kind), false, 1), "{name}");
         }
     });
 }
@@ -2624,9 +2622,8 @@ fn deleted_stores_cells_keep_what_their_forks_need() {
 
     let bucket = super::cells::daemon_bucket().unwrap();
     futures::executor::block_on(async {
-        use bucket_cell::lifecycle;
         let deleted = bucket_cell::head::get(&*bucket, base_cell).await.unwrap().unwrap();
-        assert!(deleted.deleted);
+        assert!(deleted.deleted());
         let record = bucket_cell::head::get(&*bucket, fork_cell).await.unwrap().unwrap();
         assert!(!record.deleted());
         let options = bucket_cell::collector::Options { compact_below: 0.5, grace: 0 };
@@ -4970,7 +4967,8 @@ fn a_zygotes_restores_open_its_copy_once() {
     // How many writers took the version's cell: its head's epoch.
     let bucket = super::cells::daemon_bucket().unwrap();
     let cell = version_cell(version);
-    let takings = || control(bucket_cell::head::epoch(&*bucket, cell)).unwrap();
+    let takings =
+        || control(bucket_cell::head::get(&*bucket, cell)).unwrap().map_or(0, |head| head.epoch);
     let taken = takings();
 
     let restoring: Vec<_> = (0..RESTORES)

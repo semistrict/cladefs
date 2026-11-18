@@ -84,9 +84,9 @@ fn peers_asking_wrongly_are_refused() {
     let (asked, _) = asked(&bucket, &location, 0);
     let refused = |url: &str, asked: Asked| ask(&address, url, asked).unwrap_err();
 
-    let record = layout::record(layout::test_cell(1));
-    let not_served = Asked { key: record.clone(), ..asked.clone() };
-    assert_eq!(refused(URL, not_served), format!("InvalidArgument: {record}: no parts served"));
+    let head = layout::head(layout::test_cell(1));
+    let not_served = Asked { key: head.clone(), ..asked.clone() };
+    assert_eq!(refused(URL, not_served), format!("InvalidArgument: {head}: no parts served"));
     let other = "memory:///other";
     assert_eq!(
         refused(other, asked),
