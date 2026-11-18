@@ -4,7 +4,7 @@ title: Disk governor metrics and stats
 status: Done
 assignee: []
 created_date: '2026-11-18 14:17'
-updated_date: '2026-11-18 16:49'
+updated_date: '2026-11-18 16:50'
 labels:
   - extentd
   - disk
@@ -29,7 +29,7 @@ Operators and tests must see the budget, and an uncounted writer must show up as
 - [ ] #1 The per-device gauges of doc-22 §10 are exported and appear in GetStats through gauges(). cladefsd_part_cache_capacity_bytes reports the governed limit.
 - [x] #2 cladefsd_tenant_disk_weight and cladefsd_tenant_disk_share_bytes are exported.
 - [x] #3 The stats file gains a disk: line per device.
-- [ ] #4 A metrics test asserts each value after a govern_once on known footprints, including other_bytes = used − stores − cache.
+- [x] #4 A metrics test asserts each value after a govern_once on known footprints, including other_bytes = used − stores − cache.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -43,6 +43,8 @@ Operators and tests must see the budget, and an uncounted writer must show up as
 
 <!-- SECTION:NOTES:BEGIN -->
 Deviation: Per-device gauges are in /metrics and the stats file, not GetStats' unlabelled gauges; a metrics test of every value (AC #4) not written.
+
+AC #4 done: weights_share_a_disk_under_pressure checks every cladefsd_host_disk_* gauge of its disk against its counters after a govern_once (ubu1).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
