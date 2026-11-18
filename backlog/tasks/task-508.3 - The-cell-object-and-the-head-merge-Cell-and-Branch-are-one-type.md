@@ -4,10 +4,11 @@ title: 'One concept, one type: a cell'
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 00:24'
+updated_date: '2026-11-18 01:38'
 labels:
   - bucket
-dependencies: []
+dependencies:
+  - TASK-508.2
 documentation:
   - doc-20
 parent_task_id: TASK-508
@@ -32,3 +33,9 @@ Today three types name what is one thing, a cell: one filesystem with a kind, a 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18: not started. One swapped object per cell needs points gone first: a point is a branch of its own in a cell with no object (keys.rs: 'a point's cell, which no host makes'), so while points stand, cells still hold branches the cell object doesn't name, and the head (Head::versions) is also the ground TASK-476 is changing. Order: TASK-476's daemon versions, TASK-508.2, then this, with specs/bucket's cell and placement models.
+<!-- SECTION:NOTES:END -->
