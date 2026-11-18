@@ -43,9 +43,61 @@ pub struct Asked {
 
 /// How a peer is reached.
 pub trait Link: Send + Sync {
-    /// The stored bytes of the part `asked` names, from the peer: none if it has no such part; an
-    /// error if it failed to say, or refused.
-    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>>;
+    /// The stored bytes of the part `asked` names, from the peer: none if it has no such part; a
+    /// refusal if it failed to say, or refused.
+    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, Refusal>>;
+}
+
+/// cladefs: why a peer gave no part ([`Link::get`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// It failed, or refused for a while: asked nothing for [`DOWN`].
+    Failed(String),
+    /// It is of another cloud region, or another system of buckets ([`admits`], TASK-633.4): asked
+    /// nothing again, and owning no part.
+    Foreign(String),
+}
+
+/// cladefs: a host's region, as peers say it to each other (TASK-633.4, backlog doc-23): its home
+/// bucket's number, and the root bucket's identity's ID, which names the system of buckets. Peers
+/// never serve across regions: the user's rule, 2026-11-18.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Its home bucket's number.
+    pub home: u16,
+    /// Its root bucket's identity's ID.
+    pub root: u64,
+}
+
+/// cladefs: the region of the host whose bucket is `bucket` ([`Region`]): none until it has a number
+/// and a registry naming the root bucket.
+pub async fn region(
+    bucket: &bucket_cell::object_bucket::ObjectBucket,
+) -> Result<Option<Region>, bucket_cell::Error> {
+    use bucket_cell::identity::{self, ROOT};
+    let Some(identity) = identity::get(bucket).await? else { return Ok(None) };
+    let registry = identity::registry(bucket).await?;
+    let root = registry.and_then(|registry| registry.bucket(ROOT).map(|entry| entry.id));
+    Ok(root.map(|root| Region { home: identity.number, root }))
+}
+
+/// cladefs: whether a host of region `ours`, whose bucket is at `our_url`, serves a peer asking from
+/// region `theirs` with its bucket at `their_url` (TASK-633.4): both of a region, the same one
+/// alone; otherwise, as for hosts whose buckets have no number yet, the same bucket's URL alone.
+pub fn admits(
+    (ours, our_url): (Option<Region>, &str),
+    (theirs, their_url): (Option<Region>, &str),
+) -> Result<(), String> {
+    match (ours, theirs) {
+        (Some(ours), Some(theirs)) if ours == theirs => Ok(()),
+        (Some(ours), Some(theirs)) => Err(format!(
+            "asked from bucket {} of root {:x}, another region than this host's, bucket {} of root \
+             {:x}: peers never serve across regions",
+            theirs.home, theirs.root, ours.home, ours.root
+        )),
+        _ if their_url == our_url => Ok(()),
+        _ => Err(format!("asked of {their_url}, this host's bucket being {our_url}")),
+    }
 }
 
 /// What a host's asking of its peers did, since its start.
@@ -91,6 +143,8 @@ struct Member {
 struct Health {
     address: String,
     down_until: Mutex<Option<Instant>>,
+    /// cladefs: whether it said it is of another region ([`Refusal::Foreign`]): asked nothing again.
+    foreign: std::sync::atomic::AtomicBool,
     counters: Arc<Counters>,
 }
 
@@ -128,7 +182,9 @@ impl Peers {
             let member = had.remove(&address).unwrap_or_else(|| {
                 let link = (self.connect)(&address);
                 let down_until = Mutex::new(None);
-                let health = Health { address, down_until, counters: self.counters.clone() };
+                let foreign = Default::default();
+                let counters = self.counters.clone();
+                let health = Health { address, down_until, foreign, counters };
                 Arc::new(Member { link, health: Arc::new(health) })
             });
             others.push(member);
@@ -162,8 +218,10 @@ impl peer::Peers for Peers {
             return None;
         }
         let others = self.others.read().unwrap();
+        // A peer of another region owns nothing: its parts' owners are this region's alone.
+        let ours = others.iter().filter(|member| !member.health.is_foreign());
         let addresses = std::iter::once(self.me.as_str())
-            .chain(others.iter().map(|member| member.health.address.as_str()));
+            .chain(ours.map(|member| member.health.address.as_str()));
         let owner = owner_of(addresses, key, part)?;
         let member = others.iter().find(|member| member.health.address == owner)?;
         member.health.up_at(Instant::now()).then(|| member.clone() as Arc<dyn Peer>)
@@ -174,6 +232,19 @@ impl Health {
     /// Whether it may be asked at `now`.
     fn up_at(&self, now: Instant) -> bool {
         self.down_until.lock().unwrap().is_none_or(|until| now >= until)
+    }
+
+    /// cladefs: whether it said it is of another region.
+    fn is_foreign(&self) -> bool {
+        self.foreign.load(Ordering::Relaxed)
+    }
+
+    /// cladefs: it said it is of another region, as `why` says: asked nothing again.
+    fn foreign(&self, why: &str) {
+        if !self.foreign.swap(true, Ordering::Relaxed) {
+            log::warn!("cladefsd: peer {}: {why}: asked nothing again", self.address);
+        }
+        self.counters.failed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// It failed, as `why` says: asked nothing for [`DOWN`].
@@ -199,8 +270,12 @@ impl Peer for Member {
                     health.counters.missing.fetch_add(1, Ordering::Relaxed);
                     None
                 }
-                Err(err) => {
+                Err(Refusal::Failed(err)) => {
                     health.down(&err);
+                    None
+                }
+                Err(Refusal::Foreign(err)) => {
+                    health.foreign(&err);
                     None
                 }
             }

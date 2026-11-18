@@ -9,7 +9,7 @@
 //! What it serves comes from the host's memory and part cache, which it needs, or from the bucket
 //! once, however many hosts ask at once ([`crate::bucket::serving_peers`]).
 
-use crate::bucket::peers::{Asked, Link, Peers};
+use crate::bucket::peers::{Asked, Link, Peers, Refusal, Region, admits};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use local_cell::HostDir;
@@ -85,10 +85,14 @@ pub fn start(
          part cache, which keeps what the daemon serves its peers"
             .to_owned()
     })?;
+    // cladefs: its region, which peers of another never serve, nor it them (TASK-633.4).
+    let region = local_cell::upload::block_on(crate::bucket::peers::region(&bucket));
+    let region = region.map_err(|err| failed(&err.to_string()))?;
+    let region = region.map_err(|err| failed(&err.to_string()))?;
     let linked = url.clone();
     let runtime = crate::bucket::bucket_runtime().map_err(|err| failed(&err.to_string()))?;
     let linking = runtime.clone();
-    let asking = Peers::new(address, move |peer| link(&linking, peer, &linked));
+    let asking = Peers::new(address, move |peer| link(&linking, peer, (&linked, region)));
     asking.set(peers);
     crate::bucket::ask_peers(bucket.clone(), asking)?;
     let replicas = match std::env::var_os("CLADEFSD_REPLICAS") {
@@ -107,7 +111,7 @@ pub fn start(
     }
     let serving = crate::bucket::serving_peers(bucket, cache);
     let serving = serving.map_err(|err| failed(&err.to_string()))?;
-    let server = Server { bucket: url, serving, replicas };
+    let server = Server { bucket: url, region, serving, replicas };
     listener.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
     let serving = std::thread::Builder::new().name("cladefsd peers".into()).spawn(move || {
         if let Err(err) = serve(listener, server) {
@@ -255,10 +259,11 @@ pub(super) async fn sweep(
     Ok(())
 }
 
-/// What serves the daemon's peers: the parts of `bucket`, by URL, which `serving` reads; and, if
-/// it has a replica directory, the logs of the cells it is a member of (doc-21).
+/// What serves the daemon's peers, of its region alone: the parts `serving` reads, of any bucket;
+/// and, if it has a replica directory, the logs of the cells it is a member of (doc-21).
 struct Server {
     bucket: String,
+    region: Option<Region>,
     serving: crate::bucket::Serving,
     replicas: Option<Arc<Replicas<HostDir>>>,
 }
@@ -453,10 +458,12 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<GetPartRequest>,
     ) -> Result<Response<GetPartResponse>, Status> {
-        let GetPartRequest { bucket, key, part } = request.into_inner();
-        if bucket != self.bucket {
-            let theirs = format!("asked of {bucket}, this host's bucket being {}", self.bucket);
-            return Err(Status::failed_precondition(theirs));
+        let GetPartRequest { bucket, key, part, home, root } = request.into_inner();
+        let theirs = (root != 0)
+            .then_some(())
+            .and_then(|()| Some(Region { home: u16::try_from(home).ok()?, root }));
+        if let Err(refused) = admits((self.region, &self.bucket), (theirs, &bucket)) {
+            return Err(Status::failed_precondition(refused));
         }
         if !bucket_cell::peer::served(&key) {
             return Err(Status::invalid_argument(format!("{key}: no parts served")));
@@ -479,9 +486,14 @@ impl proto::peer_server::Peer for Server {
     }
 }
 
-/// The link to the peer at `address`, a daemon serving the parts of the bucket at `bucket`, by URL,
-/// connected when first asked, on `runtime`, the bucket runtime.
-fn link(runtime: &tokio::runtime::Handle, address: &str, bucket: &str) -> Arc<dyn Link> {
+/// The link to the peer at `address`, a daemon serving the hosts of its region, asked as the host
+/// whose bucket is at `bucket`, of `region`, connected when first asked, on `runtime`, the bucket
+/// runtime.
+fn link(
+    runtime: &tokio::runtime::Handle,
+    address: &str,
+    (bucket, region): (&str, Option<Region>),
+) -> Arc<dyn Link> {
     let _entered = runtime.enter();
     let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
         .expect("a peer's address checked")
@@ -489,7 +501,7 @@ fn link(runtime: &tokio::runtime::Handle, address: &str, bucket: &str) -> Arc<dy
         .timeout(DEADLINE)
         .tcp_nodelay(true);
     let client = PeerClient::new(endpoint.connect_lazy());
-    Arc::new(Grpc { client, bucket: bucket.to_owned() })
+    Arc::new(Grpc { client, bucket: bucket.to_owned(), region })
 }
 
 /// cladefs: a client of the member at `address` (doc-21), on `runtime`, the bucket runtime: with
@@ -761,18 +773,27 @@ impl local_cell::replicate::MemberLink for GrpcMember {
 struct Grpc {
     client: PeerClient<tonic::transport::Channel>,
     bucket: String,
+    region: Option<Region>,
 }
 
 impl Link for Grpc {
-    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>> {
+    fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, Refusal>> {
         let Asked { key, part } = asked;
-        let request = GetPartRequest { bucket: self.bucket.clone(), key, part };
+        let (home, root) =
+            self.region.map_or((0, 0), |region| (u32::from(region.home), region.root));
+        let request = GetPartRequest { bucket: self.bucket.clone(), key, part, home, root };
         let mut client = self.client.clone();
         async move {
             match client.get_part(request).await {
                 Ok(response) => Ok(Some(response.into_inner().bytes)),
                 Err(status) if status.code() == Code::NotFound => Ok(None),
-                Err(status) => Err(format!("{:?}: {}", status.code(), status.message())),
+                // Of another region, or another bucket: asked nothing again (TASK-633.4).
+                Err(status) if status.code() == Code::FailedPrecondition => {
+                    Err(Refusal::Foreign(status.message().to_owned()))
+                }
+                Err(status) => {
+                    Err(Refusal::Failed(format!("{:?}: {}", status.code(), status.message())))
+                }
             }
         }
         .boxed()
