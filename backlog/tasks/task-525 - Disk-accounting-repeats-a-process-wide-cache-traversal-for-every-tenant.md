@@ -1,9 +1,10 @@
 ---
 id: TASK-525
 title: Disk accounting repeats a process-wide cache traversal for every tenant
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18 12:24'
+updated_date: '2026-11-18 16:49'
 labels: []
 dependencies: []
 priority: medium
@@ -32,3 +33,9 @@ Evidence is from source inspection. Runtime reproduction is outstanding.
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Gone with TASK-539.5: tenants are counted from their stores' footprints as they write; nothing walks a directory or writes back the stores' page cache to count. TASK-520's test (failed_writeback_preserves_disk_admission) and TASK-538's (cladefsd::disk::tests::counting_tenants_writes_back_nothing) pass on ubu1.
+<!-- SECTION:FINAL_SUMMARY:END -->

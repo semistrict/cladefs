@@ -622,6 +622,31 @@ mod tests {
         assert_eq!(refused, Err(DiskFull::Share));
         assert!(heavy_store.footprint().admit(4096, 0).is_ok());
         assert!(super::line().contains(" pressure=1"), "{}", super::line());
+        // Each of its disk's gauges, as its counters say them.
+        let dev = disk.dev().unwrap() as libc::dev_t;
+        let device = format!("{}:{}", libc::major(dev), libc::minor(dev));
+        let gauge = |name: &str| {
+            let (_, _, values) = (super::host_disks().into_iter())
+                .find(|(named, _, _)| *named == name)
+                .unwrap_or_else(|| panic!("no {name}"));
+            values.into_iter().find(|(of, _)| *of == device).unwrap().1
+        };
+        let sample = disk.sample().unwrap();
+        assert_eq!(gauge("cladefsd_host_disk_size_bytes"), sample.size);
+        assert_eq!(gauge("cladefsd_host_disk_allowance_bytes"), committed + MIB / 2);
+        assert_eq!(gauge("cladefsd_host_disk_headroom_bytes"), MIB);
+        assert_eq!(gauge("cladefsd_host_disk_stores_bytes"), disk.stores.bytes());
+        assert_eq!(gauge("cladefsd_host_disk_unframed_bytes"), disk.stores.unframed());
+        assert_eq!(gauge("cladefsd_host_disk_reserved_bytes"), disk.stores.reserved());
+        assert_eq!(gauge("cladefsd_host_disk_pledged_bytes"), disk.stores.pledged());
+        assert_eq!(gauge("cladefsd_host_disk_cache_bytes"), disk.cache.get());
+        let spare = (committed + MIB / 2).saturating_sub(disk.stores.committed());
+        assert_eq!(gauge("cladefsd_host_disk_spare_bytes"), spare);
+        assert_eq!(gauge("cladefsd_host_disk_pressure"), 1);
+        // What its filesystem holds of others': within what others wrote between the samples.
+        let other = gauge("cladefsd_host_disk_other_bytes");
+        let used = disk.sample().unwrap().used;
+        assert!(other.abs_diff(used.saturating_sub(disk.held())) < 64 * MIB, "{other}");
         let rendered = super::super::metrics::render();
         for line in
             ["cladefsd_tenant_disk_weight{tenant=\"3\"} 3", "cladefsd_host_disk_pressure{device="]

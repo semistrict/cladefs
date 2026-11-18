@@ -1,9 +1,10 @@
 ---
 id: TASK-538
 title: Each tenant's disk recount writes back every tenant's dirty pages
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18 13:00'
+updated_date: '2026-11-18 16:49'
 labels:
   - extentd
   - performance
@@ -32,3 +33,9 @@ Disk::recount (crates/cladefs/src/cladefsd/disk.rs) calls local_cell::pages::sha
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Gone with TASK-539.5: tenants are counted from their stores' footprints as they write; nothing walks a directory or writes back the stores' page cache to count. TASK-520's test (failed_writeback_preserves_disk_admission) and TASK-538's (cladefsd::disk::tests::counting_tenants_writes_back_nothing) pass on ubu1.
+<!-- SECTION:FINAL_SUMMARY:END -->
