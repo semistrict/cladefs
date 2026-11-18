@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-16 11:47'
+updated_date: '2026-11-18 19:31'
 labels:
   - bug
   - fuse
@@ -32,3 +33,9 @@ Found 2026-11-16 on ubu1 (Linux workspace run of t493-int = main 4a3283a59 + TAS
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18 (TASK-539's pre-push runs on ubu1): seen again as a symlink: 'call 6: Symlink { target: x, path: c }: of ., on the reference it mtime changed, ctime changed; on the mount, mtime changed, ctime stayed', once in 6 runs of the branch; and once as fusermount3 -u 'Device or resource busy' under the full suite's load. origin/main passed 3 of 3 and the branch 4 of 4 after, alone.
+<!-- SECTION:NOTES:END -->
