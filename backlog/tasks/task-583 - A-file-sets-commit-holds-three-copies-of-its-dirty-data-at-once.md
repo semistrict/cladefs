@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:29'
-updated_date: '2026-11-18 22:36'
+updated_date: '2026-11-18 22:58'
 labels: []
 dependencies: []
 priority: medium
@@ -31,9 +31,9 @@ Pages::plan deep-clones every dirty chunk (`self.dirty.clone()` clones each Box<
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 FileSet::sync of a file with 64 MiB dirty allocates at peak under about 1.1x the dirty bytes beyond the dirty data itself (about 2x now), measured with a counting allocator.
+- [x] #1 FileSet::sync of a file with 64 MiB dirty allocates at peak under about 1.1x the dirty bytes beyond the dirty data itself (about 2x now), measured with a counting allocator.
 - [ ] #2 MemoryCell::import of an image with D bytes of non-zero pages peaks under about 2.1x D in the importing process.
-- [ ] #3 A counting-allocator test in extent_files around FileSet::sync holds the bound and goes red with the fix reverted.
+- [x] #3 A counting-allocator test in extent_files around FileSet::sync holds the bound and goes red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -47,4 +47,6 @@ Pages::plan deep-clones every dirty chunk (`self.dirty.clone()` clones each Box<
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+
+Fixed: plan borrows the dirty chunks (and owns only the sparse extents' rewritten ones), and Plan::write copies each piece from the plan's data and the owners straight into the device's buffer, with no per-extent copy. Test: extent_files/tests/memory.rs a_commit_copies_its_data_once (counting allocator, 64 MiB): what sync holds beyond the device's copy is under 1.1x the data; fails with one extra copy in write. AC2 (MemoryCell::import under 2.1x) is not measured: import commits through the same sync, so its peak should be the dirty data plus the plan's copy, but no Linux measurement was made.
 <!-- SECTION:NOTES:END -->

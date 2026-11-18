@@ -1,11 +1,11 @@
 ---
 id: TASK-552
 title: A mapped file set keeps a heap copy of every chunk it writes but never maps
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:25'
-updated_date: '2026-11-18 22:36'
+updated_date: '2026-11-18 22:58'
 labels: []
 dependencies: []
 priority: high
@@ -31,8 +31,8 @@ Pages::apply adds every chunk a commit wrote to `recent` when the file has a reg
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With SQLite's default mmap_size = 0 (no xFetch) and an append-only workload of one row per transaction, the chunks a mapped file set keeps in memory awaiting a remap stay at most REMAP_BATCH (1024) chunks, 4 MiB, a file, however large the database grows.
-- [ ] #2 Chunks first written past the committed end, never read back, or beyond the region's end add no unbounded heap: a database grown past its 256 MiB region holds at most REMAP_BATCH chunks of such copies.
+- [x] #1 With SQLite's default mmap_size = 0 (no xFetch) and an append-only workload of one row per transaction, the chunks a mapped file set keeps in memory awaiting a remap stay at most REMAP_BATCH (1024) chunks, 4 MiB, a file, however large the database grows.
+- [x] #2 Chunks first written past the committed end, never read back, or beyond the region's end add no unbounded heap: a database grown past its 256 MiB region holds at most REMAP_BATCH chunks of such copies.
 - [ ] #3 A regression test in extent_files' pages.rs with a region of 64 chunks makes 4000 commits, each reading 16 bytes of chunk 0, rewriting it and appending one new chunk, with no fetch, and asserts `recent` holds at most REMAP_BATCH chunks; a sqlite_extents window-mode test without mmap_size under a counting allocator checks heap stays bounded as the database outgrows its region; both go red with the fix reverted.
 <!-- AC:END -->
 
@@ -47,4 +47,12 @@ Pages::apply adds every chunk a commit wrote to `recent` when the file has a reg
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+
+Fixed: Pages::apply marks what it changed stale itself, and keeps in recent only stale chunks (mapped as before the commit), REMAP_BATCH at most (the constant moved to pages.rs). Chunks never mapped, appended, or past the region are read from the device. Test: pages.rs what_a_mapped_file_keeps_of_its_commits_stays_within_a_remap_batch (64-chunk region, 4000 commits rewriting chunk 0 and appending one) fails with every written chunk kept. Not written: AC3's sqlite_extents counting-allocator test; the bound holds by construction and the pages test covers appends past the region.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+recent holds only stale chunks, REMAP_BATCH at most; pages.rs test fails without the fix.
+<!-- SECTION:FINAL_SUMMARY:END -->

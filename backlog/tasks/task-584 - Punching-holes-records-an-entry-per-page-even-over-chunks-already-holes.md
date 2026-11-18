@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:29'
-updated_date: '2026-11-18 22:36'
+updated_date: '2026-11-18 22:58'
 labels: []
 dependencies: []
 priority: medium
@@ -31,9 +31,9 @@ Pages::punch inserts a `None` into `dirty` for every chunk in the range, whether
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Punching a range the last commit already held as holes leaves nothing to commit: changed() is false and sync allocates O(tree nodes), not O(chunks), for a 1 GiB all-hole file punched whole.
+- [x] #1 Punching a range the last commit already held as holes leaves nothing to commit: changed() is false and sync allocates O(tree nodes), not O(chunks), for a 1 GiB all-hole file punched whole.
 - [ ] #2 Punching 1 GiB over committed data keeps the commit's peak heap within the written data plus O(tree nodes): punched ranges are not kept as one entry per page, and a memory cell's import of a mostly-zero VM snapshot's memory file stays within that bound.
-- [ ] #3 A counting-allocator regression test in extent_files' pages.rs covers both cases and goes red with the fix reverted.
+- [x] #3 A counting-allocator regression test in extent_files' pages.rs covers both cases and goes red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -47,4 +47,6 @@ Pages::punch inserts a `None` into `dirty` for every chunk in the range, whether
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+
+Partly fixed: Pages keeps punched chunks as ranges (holes) of what the last commit holds data in, found by Tree::visit over the range, which reads no node of holes; a punch of holes changes nothing (changed() false), and dirty chunks in the range are dropped. Tests: pages.rs punching_holes_already_holes_changes_nothing; extent_files/tests/memory.rs punching_holds_what_holds_data_alone (1 GiB of holes punched and synced, and 64 MiB of data punched, each under 64 KiB). Both fail with the old behaviour (holes per page, or ranges noted regardless of the tree). Open: AC2's commit still expands punched data chunks one entry each in plan (placed, left, released), O(chunks released), not O(tree nodes).
 <!-- SECTION:NOTES:END -->

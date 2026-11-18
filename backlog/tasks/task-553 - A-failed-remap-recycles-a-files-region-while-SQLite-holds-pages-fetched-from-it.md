@@ -3,11 +3,11 @@ id: TASK-553
 title: >-
   A failed remap recycles a file's region while SQLite holds pages fetched from
   it
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:25'
-updated_date: '2026-11-18 22:36'
+updated_date: '2026-11-18 22:58'
 labels: []
 dependencies: []
 priority: high
@@ -30,8 +30,8 @@ FileSet::remap's error branch (crates/extent_files/src/file_set.rs) takes the re
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 While a file has fetched pages held, a failed remap (a window map or a tree-node read failing) leaves the file's region mapped and owned by that file. The held pointer still reads the file's committed bytes, and the process does not fault.
-- [ ] #2 A file opened after such a failure never gets a region whose fetched pages are still held.
+- [x] #1 While a file has fetched pages held, a failed remap (a window map or a tree-node read failing) leaves the file's region mapped and owned by that file. The held pointer still reads the file's committed bytes, and the process does not fault.
+- [x] #2 A file opened after such a failure never gets a region whose fetched pages are still held.
 - [ ] #3 A test in crates/sqlite_extents/tests/sqlite.rs (Mode::Window) makes the window map or a device read fail on demand. It holds a fetched page of file A across the failure, then opens and reads file B, and asserts that A's pointer still reads A's bytes. It goes red (0xab) with the fix reverted.
 <!-- AC:END -->
 
@@ -46,4 +46,12 @@ FileSet::remap's error branch (crates/extent_files/src/file_set.rs) takes the re
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+
+Fixed: FileSet::remap keeps the region when the map fails while file.fetches > 0, leaving what it was mapping unmapped, to map as reads reach it again; it is released as before when no page is held. CopyingWindow::failing() makes its maps fail on demand. Test (in extent_files/tests/model.rs, not sqlite.rs: at the file set's layer, where the region is): a_failed_map_leaves_a_file_its_region_while_its_pages_are_held, one region, a held page of a across a failed map, b opened and read after: fails (0xab) with the region released.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A failed remap with pages held keeps the region; extent_files test fails without the fix.
+<!-- SECTION:FINAL_SUMMARY:END -->
