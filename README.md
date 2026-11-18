@@ -1,10 +1,12 @@
 # cladefs
 
 cladefs is storage for fleets of virtual machines that start from the same few images: sandboxes
-for agents, CI jobs, development environments. Each VM gets a disk that is a fork of a base image,
-made in constant time and written privately. What the forks have in common is kept once: once in
-object storage, once on each host's disk, and once in each host's memory, where every VM that reads
-a file maps the same pages.
+for agents, CI jobs, development environments. Object storage holds every disk durably; each host
+keeps a cache of it on its disk and in its memory, as an operating system's page cache sits over a
+disk. Each VM's disk is a cell: a small, independent object with one writer, its own log and its own
+versions, forked from a base in constant time and written privately. What the forks have in common
+is kept once: once in object storage, once on each host's disk, and once in each host's memory,
+where every VM that reads a file maps the same pages.
 
 A clade is an ancestor and all its descendants. Here it is a base image and every fork grown from
 it, at any depth.
@@ -48,13 +50,19 @@ cladefs splits the filesystem where each half is cheap:
 
 ## What it does
 
-- **Forks in constant time**: of a base, of a running VM's disk, of a VM snapshot. A snapshot's
-  disk is a *point*, an immutable named state, which any number of hosts restore at once.
+- **Many small, independent cells.** Every disk is a cell: one writer at a time, its own log,
+  head, key and versions, kept under its own prefix in the bucket. A cell has a kind: an Fxfs
+  filesystem, a SQLite database (`crates/sqlite_extents`) or a VM's memory image. Cells share
+  nothing but the extents a fork inherits, so any host can take any cell, whole.
+- **Versions, local at once.** A version is a named state of a cell: one commit on the host that
+  holds it, uploaded in the background. Only the cell's writer makes or drops one.
+- **Forks in constant time**, from a version: a new cell that names its parent's version and copies
+  nothing. Any number of hosts fork one version at once.
 - **One copy of file data per host**, in the daemon's memory, shared by every VM that maps it and
   evicted under one memory budget.
 - **Object storage as the home of the data.** A commit is on the host's disk within a second and
   in the bucket soon after; `sync` waits for the bucket. A host is disposable: another takes its
-  disks from the bucket, and a fencing token keeps a host that was cut off from writing them again.
+  cells from the bucket, and a fencing token keeps a host that was cut off from writing them again.
 - **Container images as bases.** `cladefsctl import` makes a base from an OCI image layout or a
   `docker export` tarball, for VMs to boot forks of.
 - **Many tenants on one host.** Each tenant has a socket, a memory arena, memory and disk limits
@@ -66,8 +74,6 @@ cladefs splits the filesystem where each half is cheap:
   idmapped mounts, freezing, online resize. `docs/code.md` lists what the guest's Fxfs does not do.
 - **Access from the host.** `cladefs-mount` mounts a disk with FUSE, and the `cladefs` crate is a
   library that formats, fills and checks filesystems.
-- **Disks that are not filesystems.** A SQLite database (`crates/sqlite_extents`) or a VM's memory
-  image is kept straight on extents, with the same forks and the same bucket.
 - **Shared volumes.** A read-only base, such as a Git checkout kept current, attached to a running
   VM under a writable layer of its own (backlog doc-10).
 - **A control API** for the service that manages a host's VMs: gRPC on a Unix socket, with a Go
@@ -84,7 +90,7 @@ cladefsd                 crates/cladefs: the extent daemon, its extent cache
   │
 local disk               crates/extent_store: each store's write-ahead log; the part cache
   │
-bucket                   crates/extent_bucket: every branch's durable copy
+bucket                   crates/extent_bucket: every cell's durable copy
 ```
 
 - **A read.** The guest asks the device to `MAP` part of a sealed extent into its DAX window, a
@@ -99,9 +105,10 @@ bucket                   crates/extent_bucket: every branch's durable copy
   local disk within a second (50 ms at the median), then packs sealed extents into segments and
   uploads them. A crash loses a suffix of recent history and recovers to a commit, never to a
   torn state (backlog doc-12).
-- **A fork.** A disk is a *branch*: a line of commits with one writer at a time. Forking makes a
-  new branch that names its parent's commit. The collector deletes an extent from the bucket once
-  no branch holds it.
+- **A version and a fork.** A cell is a line of commits with one writer at a time. A version names
+  one of them, made by a local commit and uploaded in the background. Forking makes a new cell that
+  names a parent's version and copies nothing. The collector deletes an extent from the bucket once
+  no cell or version holds it.
 
 `docs/architecture.md` has the detail, and `CONTEXT.md` defines every term.
 
@@ -122,7 +129,6 @@ candidate for the next pin is qualified against the current one under their load
 - **No single-node mode.** The daemon needs a bucket and a fencing token to start. For development
   the bucket may be a directory (`file:///DIR`).
 - **Built but frozen:** live read-only followers of a mounted disk (backlog doc-8).
-  **In progress:** versions, cheap named states of a disk taken often (backlog doc-18).
 
 ## Try it
 
@@ -163,7 +169,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 | Path | What |
 |---|---|
 | `crates/cladefs` | The extent daemon (`cladefsd`), `cladefsctl`, `cladefs-mount`, and the host's library. |
-| `crates/extent_store`, `crates/extent_bucket` | An extent store on local disk, and branches in the bucket. |
+| `crates/extent_store`, `crates/extent_bucket` | An extent store on local disk, and cells in the bucket. |
 | `crates/physmem` | The daemon's physical memory: arenas of shared memory. |
 | `crates/virtio_extent` | The extent store device, for a VMM to host. |
 | `crates/fxfs`, `crates/fxfs-posix` | Fxfs, copied from Fuchsia, and the POSIX layer the guest and the host both call. |
@@ -178,7 +184,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 
 ## Documentation
 
-- `CONTEXT.md`: the glossary. One word per concept, and the words to avoid.
+- `CONTEXT.md`: the glossary. One word per concept.
 - `docs/architecture.md`: requests, the DAX window, the extent daemon and whom it trusts.
 - `docs/operating-a-host.md`: the daemon's memory and disk, the bucket, encryption and shredding,
   VM processes' exit statuses.
