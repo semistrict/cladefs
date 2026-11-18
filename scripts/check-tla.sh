@@ -19,6 +19,9 @@
 #   flushed, which the objects' offsets read after the device's flush broke (TASK-149.5);
 # - specs/replication: replicated commits (doc-21, TASK-537.2): a cell's commits on f+1 of 2f+1
 #   hosts' disks before the bucket, takes fencing and recovering them, members replaced, disks lost;
+# - specs/buckets: forks across buckets and their mirrors (doc-23, TASK-633.2): children in one
+#   bucket of a parent's versions in another, the automatic mirror a host may die in, both buckets'
+#   collectors, buckets going down;
 #
 #   check-tla.sh [MODEL...|deep]
 #   check-tla.sh cover MODEL [NAME=VALUE...]
