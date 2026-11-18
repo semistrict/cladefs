@@ -18,10 +18,12 @@
 //! of the extents it leaves blocks of, to know which live on (TASK-440).
 //!
 //! **The root.** [`ROOT_MAGIC`], a version, the sequence number minting goes on from, the extents
-//! to free once the root is durable, and the extent listing more of them, if any (a device's root
-//! is small: the extent daemon's holds 4 KiB), and each file: its name, size, its tree's height,
-//! the ref to its top node, and the extents its last commit left less than half live, to be
-//! compacted by its next, at most [`SPARSE_KEPT`].
+//! to free once the root is durable, and the extent listing more of them, if any, and each file
+//! ([`encode_files`]): its name, size, its tree's height, the ref to its top node, and the extents
+//! its last commit left less than half live, to be compacted by its next, at most
+//! [`SPARSE_KEPT`]. A device's root is small ([`storage_device::MAX_ROOT`], the extent daemon's
+//! 4 KiB): files that don't fit are listed in an extent of their own, which the root names
+//! (TASK-551), as the dying extents are.
 
 use anyhow::{Error, ensure};
 use std::collections::BTreeMap;
@@ -41,7 +43,7 @@ const ROOT_MAGIC: &[u8; 8] = b"FXSQLVOL";
 
 /// The version of the root's format: 3 since extents end with their blocks' owners, and files
 /// name the extents to compact (TASK-440).
-const ROOT_VERSION: u32 = 3;
+const ROOT_VERSION: u32 = 4;
 
 /// The most extents a file names to compact at its next commit: more are left as they are until a
 /// later commit leaves blocks of them again.
@@ -193,7 +195,42 @@ pub(crate) struct Root {
     pub dying: Vec<ExtentId>,
     /// An extent listing more of them, and how many ([`encode_list`]).
     pub dying_list: Option<(ExtentId, u64)>,
+    /// The files, here or listed in an extent of their own ([`Root::files_list`]).
     pub files: BTreeMap<String, FileRoot>,
+    /// An extent listing the files, if they would make the root too long, and the bytes of the
+    /// list ([`encode_files`]): `files` is empty then.
+    pub files_list: Option<(ExtentId, u64)>,
+}
+
+/// The bytes of `files`, as a root or an extent listing them holds them.
+pub(crate) fn encode_files(files: &BTreeMap<String, FileRoot>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(files.len() as u64).to_le_bytes());
+    for (name, file) in files {
+        out.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&file.size.to_le_bytes());
+        out.extend_from_slice(&file.height.to_le_bytes());
+        let mut top = [0; REF_BYTES];
+        encode_ref(&mut top, file.top);
+        out.extend_from_slice(&top);
+        assert!(file.sparse.len() <= SPARSE_KEPT, "{} extents to compact", file.sparse.len());
+        out.extend_from_slice(&(file.sparse.len() as u64).to_le_bytes());
+        for (extent, blocks) in &file.sparse {
+            out.extend_from_slice(&extent.cell.to_le_bytes());
+            out.extend_from_slice(&extent.sequence.to_le_bytes());
+            out.extend_from_slice(&blocks.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// The files `bytes`, as [`encode_files`] made them, hold: past them, `bytes` holds zeros alone.
+pub(crate) fn decode_files(bytes: &[u8]) -> Result<BTreeMap<String, FileRoot>, Error> {
+    let mut reader = Reader(bytes);
+    let files = reader.files()?;
+    ensure!(reader.0.iter().all(|byte| *byte == 0), "bytes past the files listed");
+    Ok(files)
 }
 
 /// The bytes of an extent listing `count` extents, in blocks of `block_size`.
@@ -228,27 +265,14 @@ impl Root {
             out.extend_from_slice(&extent.cell.to_le_bytes());
             out.extend_from_slice(&extent.sequence.to_le_bytes());
         }
-        let (list, count) = self.dying_list.unwrap_or((ExtentId::new(0, 0), 0));
-        for word in [list.cell, list.sequence, count] {
-            out.extend_from_slice(&word.to_le_bytes());
-        }
-        out.extend_from_slice(&(self.files.len() as u64).to_le_bytes());
-        for (name, file) in &self.files {
-            out.extend_from_slice(&(name.len() as u64).to_le_bytes());
-            out.extend_from_slice(name.as_bytes());
-            out.extend_from_slice(&file.size.to_le_bytes());
-            out.extend_from_slice(&file.height.to_le_bytes());
-            let mut top = [0; REF_BYTES];
-            encode_ref(&mut top, file.top);
-            out.extend_from_slice(&top);
-            assert!(file.sparse.len() <= SPARSE_KEPT, "{} extents to compact", file.sparse.len());
-            out.extend_from_slice(&(file.sparse.len() as u64).to_le_bytes());
-            for (extent, blocks) in &file.sparse {
-                out.extend_from_slice(&extent.cell.to_le_bytes());
-                out.extend_from_slice(&extent.sequence.to_le_bytes());
-                out.extend_from_slice(&blocks.to_le_bytes());
+        for listed in [self.dying_list, self.files_list] {
+            let (list, count) = listed.unwrap_or((ExtentId::new(0, 0), 0));
+            for word in [list.cell, list.sequence, count] {
+                out.extend_from_slice(&word.to_le_bytes());
             }
         }
+        assert!(self.files_list.is_none() || self.files.is_empty(), "files here and listed");
+        out.extend(encode_files(&self.files));
         out
     }
 
@@ -265,30 +289,40 @@ impl Root {
         let dying = (0..reader.u64()?)
             .map(|_| Ok(ExtentId::new(reader.u64()?, reader.u64()?)))
             .collect::<Result<_, Error>>()?;
-        let (list, count) = (ExtentId::new(reader.u64()?, reader.u64()?), reader.u64()?);
-        let dying_list = (count > 0).then_some((list, count));
-        let mut files = BTreeMap::new();
-        for _ in 0..reader.u64()? {
-            let len = reader.u64()? as usize;
-            let name = String::from_utf8(reader.take(len)?.to_vec())?;
-            let size = reader.u64()?;
-            let height = reader.u32()?;
-            let top = decode_ref(reader.take(REF_BYTES)?.try_into().unwrap())?;
-            let count = reader.u64()?;
-            ensure!(count as usize <= SPARSE_KEPT, "{name} names {count} extents to compact");
-            let sparse = (0..count)
-                .map(|_| Ok((ExtentId::new(reader.u64()?, reader.u64()?), reader.u32()?)))
-                .collect::<Result<_, Error>>()?;
-            files.insert(name, FileRoot { size, height, top, sparse });
-        }
+        let mut listed = || -> Result<_, Error> {
+            let (list, count) = (ExtentId::new(reader.u64()?, reader.u64()?), reader.u64()?);
+            Ok((count > 0).then_some((list, count)))
+        };
+        let (dying_list, files_list) = (listed()?, listed()?);
+        let files = reader.files()?;
         ensure!(reader.0.is_empty(), "{} bytes past the root", reader.0.len());
-        Ok(Some(Self { minted, dying, dying_list, files }))
+        ensure!(files_list.is_none() || files.is_empty(), "files in the root and listed");
+        Ok(Some(Self { minted, dying, dying_list, files, files_list }))
     }
 }
 
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
+    /// Files, as [`encode_files`] wrote them.
+    fn files(&mut self) -> Result<BTreeMap<String, FileRoot>, Error> {
+        let mut files = BTreeMap::new();
+        for _ in 0..self.u64()? {
+            let len = self.u64()? as usize;
+            let name = String::from_utf8(self.take(len)?.to_vec())?;
+            let size = self.u64()?;
+            let height = self.u32()?;
+            let top = decode_ref(self.take(REF_BYTES)?.try_into().unwrap())?;
+            let count = self.u64()?;
+            ensure!(count as usize <= SPARSE_KEPT, "{name} names {count} extents to compact");
+            let sparse = (0..count)
+                .map(|_| Ok((ExtentId::new(self.u64()?, self.u64()?), self.u32()?)))
+                .collect::<Result<_, Error>>()?;
+            files.insert(name, FileRoot { size, height, top, sparse });
+        }
+        Ok(files)
+    }
+
     fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
         ensure!(self.0.len() >= len, "the root ends early");
         let (taken, rest) = self.0.split_at(len);
@@ -364,8 +398,18 @@ mod tests {
                 ),
                 ("b.db".into(), FileRoot::default()),
             ]),
+            files_list: None,
         };
-        assert_eq!(Root::decode(&root.encode()).unwrap(), Some(root));
+        assert_eq!(Root::decode(&root.encode()).unwrap(), Some(root.clone()));
+        let mut files = encode_files(&root.files);
+        files.resize(4096, 0);
+        assert_eq!(decode_files(&files).unwrap(), root.files);
+        let listed = Root {
+            files: BTreeMap::new(),
+            files_list: Some((ExtentId::new(1, 10), files.len() as u64)),
+            ..root
+        };
+        assert_eq!(Root::decode(&listed.encode()).unwrap(), Some(listed));
         assert_eq!(Root::decode(&[]).unwrap(), None);
         let listed: Vec<_> = (0..300).map(|n| ExtentId::new(1, n)).collect();
         let list = encode_list(&listed, 4096);

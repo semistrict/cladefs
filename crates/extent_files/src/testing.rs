@@ -6,6 +6,8 @@
 
 use std::alloc::Layout;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::executor::block_on;
 use storage_device::Device;
@@ -20,6 +22,8 @@ pub const UNMAPPED: u8 = 0xab;
 pub struct CopyingWindow {
     memory: NonNull<u8>,
     layout: Layout,
+    /// Whether its maps fail, as a daemon's do when the bucket is out of reach.
+    failing: Arc<AtomicBool>,
 }
 
 // SAFETY: written only as the file set maps, under its lock.
@@ -38,7 +42,13 @@ impl CopyingWindow {
         let memory = NonNull::new(unsafe { std::alloc::alloc(layout) }).expect("memory");
         // SAFETY: the memory allocated, `size` bytes.
         unsafe { memory.as_ptr().write_bytes(UNMAPPED, layout.size()) };
-        Self { memory, layout }
+        Self { memory, layout, failing: Arc::default() }
+    }
+
+    /// What makes its maps fail while it is set, which the test keeps once the window is the file
+    /// set's.
+    pub fn failing(&self) -> Arc<AtomicBool> {
+        self.failing.clone()
     }
 
     fn size(&self) -> u64 {
@@ -68,6 +78,7 @@ impl FileSetWindow for CopyingWindow {
     }
 
     fn map(&self, device: &dyn Device, runs: &[Run]) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.failing.load(Ordering::Relaxed), "a map made to fail");
         for run in runs {
             match run.contents {
                 Contents::Extent { extent, offset } => {

@@ -253,3 +253,42 @@ fn a_database_is_fenced_with_its_cell() {
         "{refused}"
     );
 }
+
+/// TASK-551: a SQLite cell on the daemon holding more databases than its root holds the names of
+/// (80 of 30-byte names, past the daemon's 4 KiB root) commits each, and every one reads back
+/// after the file set is closed and opened again: the root lists its files in an extent of their
+/// own, where it once failed the file set, every database's connections getting SQLITE_IOERR.
+#[test]
+fn a_cell_of_many_databases_commits_each_and_opens_again() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (_sockets, socket) = serve();
+    let store = dir.path().join("store");
+    let names: Vec<String> = (0..80).map(|n| format!("{n:0>27}.db")).collect();
+    assert!(names.iter().all(|name| name.len() == 30));
+    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let registration = register("cladefs-many", file_set.clone()).unwrap();
+    for (n, name) in names.iter().enumerate() {
+        let connection =
+            Connection::open_with_flags_and_vfs(name, OpenFlags::default(), "cladefs-many")
+                .unwrap();
+        connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v INTEGER)").unwrap();
+        connection.execute("INSERT INTO t VALUES (1, ?1)", params![n as i64]).unwrap();
+    }
+    assert_eq!(file_set.files().unwrap().len(), names.len());
+    drop(registration);
+    file_set.close().unwrap();
+    drop(file_set);
+
+    let file_set = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
+    let _registration = register("cladefs-many-again", file_set.clone()).unwrap();
+    for (n, name) in names.iter().enumerate() {
+        let connection =
+            Connection::open_with_flags_and_vfs(name, OpenFlags::default(), "cladefs-many-again")
+                .unwrap();
+        let v: i64 =
+            connection.query_row("SELECT v FROM t WHERE k = 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(v, n as i64, "{name}");
+        // And commits again, its root still listing its files.
+        connection.execute("UPDATE t SET v = v + 1", []).unwrap();
+    }
+}

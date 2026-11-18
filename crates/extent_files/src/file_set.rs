@@ -35,7 +35,7 @@
 //! calls do: a file set is not to be called from a thread whose executor the device needs.
 
 use crate::format::{self, Root};
-use crate::pages::{Failure, Pages, Plan};
+use crate::pages::{Failure, Pages, Plan, REMAP_BATCH};
 use crate::window::{Contents, FileSetWindow, Run};
 use anyhow::{Context as _, Error, bail};
 use futures::executor::block_on;
@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use storage_device::{Device, DeviceHolder, ExtentId};
+use storage_device::{Device, DeviceHolder, ExtentId, MAX_ROOT};
 
 /// The most sequence numbers an opening frees from either end of what a crash may have left
 /// (Fxfs's `MAX_ORPHANS_SOUGHT`).
@@ -51,11 +51,6 @@ const MAX_ORPHANS_SOUGHT: u64 = 1 << 16;
 
 /// The most extents freed in one request.
 const FREES_AT_ONCE: usize = 4096;
-
-/// How many chunks commits change before the window maps them again, one request for them all
-/// rather than one a commit, each chunk once however often changed: what they wrote is read from
-/// memory meanwhile, 4 MiB at most a file.
-const REMAP_BATCH: u64 = 1024;
 
 /// The most dying extents a root names itself, and how many wait to be freed at once: 16 bytes
 /// each.
@@ -114,9 +109,10 @@ struct Inner {
     mint: u64,
     /// Extents left unreferenced whose frees failed, or have not been made yet.
     dying: Vec<ExtentId>,
-    /// The extent listing dying extents that the last root names, which the next opening reads:
-    /// dying once a root that names it not is durable, as the next commit's (TASK-540).
-    list: Option<ExtentId>,
+    /// The extents listing what the last root holds too much of to hold itself, dying extents or
+    /// files, which the next opening reads: dying once a root that names them not is durable, as
+    /// the next commit's (TASK-540, TASK-551).
+    lists: Vec<ExtentId>,
     failed: Option<String>,
     /// The window's regions no file holds.
     regions: Vec<u64>,
@@ -197,7 +193,7 @@ impl FileSet {
             files: BTreeMap::new(),
             mint: next.max(floor),
             dying: Vec::new(),
-            list: None,
+            lists: Vec::new(),
             failed: None,
             regions: Vec::new(),
         };
@@ -207,7 +203,16 @@ impl FileSet {
             return Ok(inner);
         };
         inner.mint = inner.mint.max(root.minted);
-        for (name, file) in &root.files {
+        let files = match root.files_list {
+            Some((list, len)) => {
+                let blocks = (len as usize).div_ceil(block_size).max(1);
+                let mut buffer = device.allocate_buffer(blocks * block_size).await;
+                device.read(list, 0, buffer.as_mut()).await.context("reading the files' list")?;
+                format::decode_files(&buffer.as_ref().to_vec())?
+            }
+            None => root.files,
+        };
+        for (name, file) in &files {
             let pages = Pages::open(block_size, file).with_context(|| format!("opening {name}"))?;
             inner.files.insert(name.clone(), File::new(pages, true));
         }
@@ -227,7 +232,8 @@ impl FileSet {
             // Sealed before anything is written past them.
             device.flush().await.context("sealing the frees of what a crash left")?;
         }
-        inner.list = root.dying_list.map(|(list, _)| list);
+        let lists = [root.dying_list, root.files_list].into_iter().flatten();
+        inner.lists = lists.map(|(list, _)| list).collect();
         Ok(inner)
     }
 
@@ -236,7 +242,7 @@ impl FileSet {
     pub fn close(&self) -> Result<(), Error> {
         let mut inner = self.lock()?;
         // What waits to be freed, which the last root names, so that a crash before the device's
-        // closing seals the frees frees them again; not the list it names, which the next opening
+        // closing seals the frees frees them again; not the lists it names, which the next opening
         // reads.
         let dying = std::mem::take(&mut inner.dying);
         inner.dying = block_on(free(&**self.device, &dying));
@@ -265,7 +271,7 @@ impl FileSet {
     /// tree read whole for it, and those it has yet to free.
     pub fn extents(&self) -> Result<Vec<ExtentId>, Error> {
         let inner = self.lock()?;
-        let mut extents: Vec<_> = inner.dying.iter().chain(&inner.list).copied().collect();
+        let mut extents: Vec<_> = inner.dying.iter().chain(&inner.lists).copied().collect();
         for file in inner.files.values() {
             extents.extend(block_on(file.pages.extents(&**self.device))?);
         }
@@ -306,7 +312,9 @@ impl FileSet {
 
     /// Maps `changed`, ranges of file `name`'s chunks, into its region of the window as its last
     /// commit has them. A failure is logged, and the file reads from the device from then on, its
-    /// region given back.
+    /// region given back; but not while pages of it are held, fetched, which read the region in
+    /// place: it keeps the region then, what it mapped of `changed` left unmapped, to be mapped
+    /// as reads reach it again (TASK-553).
     fn remap(
         &self,
         name: &str,
@@ -339,6 +347,9 @@ impl FileSet {
             .and_then(|()| unmapped.iter().try_for_each(|(at, len)| window.unmap(*at, *len)));
         match made {
             Ok(()) => file.pages.mark_mapped(marked),
+            Err(error) if file.fetches > 0 => {
+                log::error!("extent_files: mapping {name}, its pages held: {error:#}");
+            }
             Err(error) => {
                 log::error!(
                     "extent_files: mapping {name}, read from the device from now on: {error:#}"
@@ -496,8 +507,8 @@ impl FileSet {
         }
         let mut inner = self.lock()?;
         let file = Self::file(&mut inner, name);
-        file.pages.punch(offset / block_size..(offset + len) / block_size);
-        Ok(())
+        let chunks = offset / block_size..(offset + len) / block_size;
+        block_on(file.pages.punch(&**self.device, chunks))
     }
 
     pub fn truncate(&self, name: &str, size: u64) -> Result<(), Error> {
@@ -557,10 +568,9 @@ impl FileSet {
         committed.with_context(|| format!("committing {name}"))?;
         let inner = &mut *inner;
         let file = inner.files.get_mut(name).expect("a file open");
-        let changed = file.pages.apply(plan);
+        file.pages.apply(plan);
         file.committed = true;
-        // Mapped again a batch at a time: read from the device meanwhile.
-        file.pages.mark_stale(changed);
+        // Mapped again a batch at a time: read from memory or the device meanwhile.
         if file.pages.stale_chunks() >= REMAP_BATCH {
             self.refresh(name, file, &mut inner.regions);
         }
@@ -588,32 +598,40 @@ impl FileSet {
         } else {
             files.remove(name);
         }
-        // The last root's list among them: the root this commits names it not.
+        // The last root's lists among them: the root this commits names them not.
         let carried = std::mem::take(&mut inner.dying);
-        let named = inner.list.take();
+        let named = std::mem::take(&mut inner.lists);
         let dying: Vec<_> = carried.iter().chain(&named).copied().chain(dead).collect();
-        // Too many for the root: listed in an extent of their own.
-        let list = (dying.len() > FREE_BATCH).then(|| {
+        let block_size = device.block_size() as usize;
+        let mut mint = || {
             inner.mint += 1;
             ExtentId::new(device.cell(), inner.mint - 1)
-        });
-        let root = match list {
-            Some(list) => Root {
-                minted: inner.mint,
-                dying: Vec::new(),
-                dying_list: Some((list, dying.len() as u64)),
-                files,
-            },
-            None => Root { minted: inner.mint, dying: dying.clone(), dying_list: None, files },
         };
+        // What the root holds too much of, listed in extents of its own, written with it: too many
+        // dying extents, and files too many or too long for a device's root.
+        let mut lists: Vec<(ExtentId, Vec<u8>)> = Vec::new();
+        let mut root = Root { dying: dying.clone(), files, ..Root::default() };
+        if dying.len() > FREE_BATCH {
+            let list = mint();
+            (root.dying, root.dying_list) = (Vec::new(), Some((list, dying.len() as u64)));
+            lists.push((list, format::encode_list(&dying, block_size)));
+        }
+        if root.encode().len() > MAX_ROOT {
+            let list = mint();
+            let mut bytes = format::encode_files(&std::mem::take(&mut root.files));
+            root.files_list = Some((list, bytes.len() as u64));
+            bytes.resize(bytes.len().div_ceil(block_size) * block_size, 0);
+            lists.push((list, bytes));
+        }
+        root.minted = inner.mint;
         let encoded = root.encode();
+        assert!(encoded.len() <= MAX_ROOT, "a root of {} bytes", encoded.len());
         let written = block_on(async {
-            if let Some(list) = list {
-                let bytes = format::encode_list(&dying, device.block_size() as usize);
+            for (list, bytes) in &lists {
                 let mut buffer = device.allocate_buffer(bytes.len()).await;
-                buffer.as_mut().copy_from_slice(&bytes);
-                let listed = device.write(list, 0, buffer.as_ref()).await;
-                listed.context("writing the dying extents' list").map_err(Failure::Writing)?;
+                buffer.as_mut().copy_from_slice(bytes);
+                let listed = device.write(*list, 0, buffer.as_ref()).await;
+                listed.context("writing the root's lists").map_err(Failure::Writing)?;
             }
             match plan {
                 Some(plan) => plan.write(device, Some(&encoded)).await,
@@ -624,9 +642,10 @@ impl FileSet {
             Ok(()) => {}
             Err(Failure::Writing(error)) => {
                 // Nothing names what it wrote: freed, or, failing that, dying.
-                let wrote: Vec<_> =
-                    list.into_iter().chain(plan.into_iter().flat_map(Plan::extents)).collect();
-                (inner.dying, inner.list) = (carried, named);
+                let wrote: Vec<_> = (lists.iter().map(|(list, _)| *list))
+                    .chain(plan.into_iter().flat_map(Plan::extents))
+                    .collect();
+                (inner.dying, inner.lists) = (carried, named);
                 inner.dying.extend(block_on(free(device, &wrote)));
                 return Err(error);
             }
@@ -636,11 +655,11 @@ impl FileSet {
                 return Err(error);
             }
         }
-        inner.dying = match list.is_some() || dying.len() >= FREE_BATCH {
+        inner.dying = match root.dying_list.is_some() || dying.len() >= FREE_BATCH {
             true => block_on(free(device, &dying)),
             false => dying,
         };
-        inner.list = list;
+        inner.lists = lists.into_iter().map(|(list, _)| list).collect();
         Ok(())
     }
 

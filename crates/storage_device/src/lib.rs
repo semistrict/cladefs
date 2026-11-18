@@ -45,6 +45,12 @@ pub use splittable_buffer::{SplittableBuffer, SubHandle};
 
 pub mod fake_device;
 
+/// cladefs: the most bytes a device's root holds ([`Device::commit_root`]): an extent device's,
+/// doc-4's `max_root`, which the extent daemon refuses roots past (`EINVAL`) and Firecracker's
+/// extent device carries no more of (TASK-149.17). A filesystem on extents keeps its root within it
+/// (TASK-551).
+pub const MAX_ROOT: usize = 4096;
+
 #[async_trait]
 /// Device is an abstract representation of an underlying block device.
 pub trait Device: Send + Sync {

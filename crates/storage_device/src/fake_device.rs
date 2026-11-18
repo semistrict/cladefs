@@ -813,6 +813,12 @@ impl FakeDevice {
         );
         Ok(())
     }
+
+    /// Refuses a root longer than an extent device's, as the extent daemon does (TASK-551).
+    fn check_root(root: &[u8]) -> Result<(), Error> {
+        ensure!(root.len() <= crate::MAX_ROOT, "a root of {} bytes", root.len());
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -884,6 +890,9 @@ impl Device for FakeDevice {
         ensure!(!self.closed.load(Ordering::Relaxed));
         ensure!(!self.read_only.load(Ordering::Relaxed));
         self.check_alignment(offset, buffer.len())?;
+        if let Some(root) = write_opts.root {
+            Self::check_root(root)?;
+        }
         let _in_flight = match &self.round_trips {
             Some(trips) => Some(trips.writes.issue().await),
             None => None,
@@ -1011,6 +1020,7 @@ impl Device for FakeDevice {
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
         ensure!(!self.closed.load(Ordering::Relaxed));
         ensure!(!self.read_only.load(Ordering::Relaxed));
+        Self::check_root(root)?;
         (self.operation_closure)(Op::Flush)?;
         let _passage = self.passage(true).await;
         let mut inner = self.inner.lock();

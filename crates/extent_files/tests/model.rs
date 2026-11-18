@@ -467,3 +467,86 @@ fn a_fetched_page_reads_as_it_was_until_given_back() {
     run.run([Op::Unfetch { file: 0 }, Op::Unfetch { file: 0 }, Op::Fetch { file: 0, pick: 0 }]);
     assert_eq!(run.held.len(), 1, "{}: page 0 fetched again", run.context());
 }
+
+/// TASK-551: a file set of more files, or longer names, than a device's root holds commits each,
+/// and opens again, closed or crashed, holding them all: its root lists them in an extent of its
+/// own. Deleted down to one, the root holds its file again, and its list dies.
+#[test]
+fn a_file_set_of_more_files_than_a_root_holds_commits_each_and_opens_again() {
+    for (count, len) in [(80, 30), (300, 400)] {
+        let device = DeviceHolder::new(FakeDevice::new(1 << 18, PAGE as u32));
+        let mut file_set = FileSet::open(device, OPTIONS).unwrap();
+        let names: Vec<String> = (0..count).map(|n| format!("{n:0>len$}")).collect();
+        let contents = |n: usize| bytes(n as u8, 0, 2 * PAGE);
+        for (n, name) in names.iter().enumerate() {
+            file_set.open_file(name, true).unwrap();
+            file_set.write(name, 0, &contents(n)).unwrap();
+            file_set.sync(name).unwrap();
+            file_set.close_file(name);
+        }
+        let reopened = |file_set: &Arc<FileSet>, close: bool| {
+            if close {
+                file_set.close().unwrap();
+            }
+            FileSet::open(file_set.device().snapshot().unwrap(), OPTIONS).unwrap()
+        };
+        for close in [true, false] {
+            file_set = reopened(&file_set, close);
+            assert_eq!(file_set.files().unwrap().len(), count, "{count} of {len} bytes");
+            for (n, name) in names.iter().enumerate() {
+                file_set.open_file(name, false).unwrap();
+                let mut read = vec![0; 2 * PAGE];
+                assert_eq!(file_set.read(name, 0, &mut read).unwrap(), 2 * PAGE);
+                assert!(read == contents(n), "{name} as committed");
+                file_set.close_file(name);
+            }
+            assert_eq!(file_set.device().extents(), file_set.extents().unwrap());
+        }
+        for name in &names[1..] {
+            assert!(file_set.delete(name).unwrap());
+        }
+        file_set = reopened(&file_set, true);
+        assert_eq!(file_set.files().unwrap(), &names[..1]);
+        assert_eq!(file_set.device().extents(), file_set.extents().unwrap());
+    }
+}
+
+/// TASK-553: a map that fails while a page of a file is held, fetched, leaves the file its region,
+/// which the page reads in place: the page reads as it was, and a file opened after gets no
+/// region of it, to map its own pages under the held one.
+#[test]
+fn a_failed_map_leaves_a_file_its_region_while_its_pages_are_held() {
+    let device = DeviceHolder::new(FakeDevice::new(1 << 18, PAGE as u32));
+    let window = CopyingWindow::new(WINDOW, PAGE as u32);
+    let failing = window.failing();
+    let options = Options { window_regions: 1, ..OPTIONS };
+    let file_set = FileSet::open_mapped(device, Box::new(window), options).unwrap();
+    let (a, b) = (bytes(1, 0, 8 * PAGE), bytes(2, 0, 8 * PAGE));
+    file_set.open_file("a", true).unwrap();
+    file_set.write("a", 0, &a).unwrap();
+    file_set.sync("a").unwrap();
+    let held = file_set.fetch("a", 0, PAGE as u64).unwrap().expect("a's first page mapped");
+    // SAFETY: a page fetched and not given back, which the window keeps mapped.
+    let read_held = || unsafe { std::slice::from_raw_parts(held, PAGE) }.to_vec();
+    assert!(read_held() == a[..PAGE]);
+
+    // A read reaching a page the region maps not yet maps it, which fails: the device's.
+    failing.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut page = vec![0; PAGE];
+    file_set.read("a", 4 * PAGE as u64, &mut page).unwrap();
+    assert!(page == a[4 * PAGE..5 * PAGE]);
+    assert!(read_held() == a[..PAGE], "a's held page, its map failed");
+    failing.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    file_set.open_file("b", true).unwrap();
+    file_set.write("b", 0, &b).unwrap();
+    file_set.sync("b").unwrap();
+    let mut read = vec![0; 8 * PAGE];
+    file_set.read("b", 0, &mut read).unwrap();
+    assert!(read == b);
+    assert!(read_held() == a[..PAGE], "a's held page, b opened and read");
+    // Given back, a reads, its region mapping what it reaches again.
+    file_set.unfetch("a");
+    file_set.read("a", 0, &mut read).unwrap();
+    assert!(read == a);
+}
