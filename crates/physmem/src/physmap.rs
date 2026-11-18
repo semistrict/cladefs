@@ -116,6 +116,8 @@ pub struct PhysMemory {
 
 // SAFETY: The mapping is plain memory owned for the life of the process.
 unsafe impl Send for PhysMemory {}
+// SAFETY: as Send's: what threads share is the mapping's address, never unmapped; the pages'
+// owners, not this, order what they write in them.
 unsafe impl Sync for PhysMemory {}
 
 /// Creates an anonymous shared memory object.
@@ -206,6 +208,7 @@ fn resize(fd: &OwnedFd, slots: u64) {
         // SAFETY: A stat buffer the call fills, of an object of the caller's.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         assert_eq!(
+            // SAFETY: an open descriptor of the caller's, and the buffer above.
             unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) },
             0,
             "fstat an arena: {}",

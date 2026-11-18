@@ -9,6 +9,9 @@
 //! Its tests need the `shuttle` feature, which puts Fxfs's executor, tasks, timers and locks, and
 //! the store's, on Shuttle's.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod device;
 #[cfg(feature = "shuttle")]
 pub mod history;

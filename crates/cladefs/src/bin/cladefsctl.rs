@@ -119,6 +119,9 @@
 //! its stores there are fenced, their pages leave the cache, its fetchers' and KMS's keys of it
 //! go. Each prints what the daemon forgot, one `name value` a line.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::{Context as _, bail};
 use cladefs::ExtentStore;
 use std::path::{Path, PathBuf};

@@ -95,6 +95,9 @@
 //! skips a cell unchanged since the last measures it not again: its usage is as of the last pass
 //! that went over it in full, which nothing under its prefix changed since.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use extent_remote::bucket::Meta;
 use extent_remote::collector::{Collector, DryRun, Marking, Options, Report};
 use extent_remote::layout;

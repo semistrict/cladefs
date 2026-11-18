@@ -6,6 +6,9 @@
 //! `sha2` crate: the `bssl_crypto::digest::Sha256` API and the C `SHA256_*`
 //! functions it calls directly on targets without the ARMv8 SHA extension.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod digest {
     use sha2::Digest as _;
 

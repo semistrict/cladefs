@@ -917,6 +917,7 @@ impl Files {
     fn free(&self) -> io::Result<u64> {
         let path = std::ffi::CString::new(self.dir.as_os_str().as_encoded_bytes())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        // SAFETY: statvfs is plain data, valid all zeros.
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         // SAFETY: `path` is a C string and `stat` a statvfs, which the call fills.
         if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
@@ -1364,6 +1365,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path(), 0, 0).unwrap();
         let path = std::ffi::CString::new(cache.files.dir.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: statvfs is plain data, valid all zeros.
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         // SAFETY: `path` is a C string and `stat` a statvfs, which the call fills.
         assert_eq!(unsafe { libc::statvfs(path.as_ptr(), &mut stat) }, 0);

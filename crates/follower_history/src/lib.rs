@@ -22,6 +22,9 @@
 //! Files are named by `N`s and hold `C`s. The models are kept as each name's and each object's
 //! versions, so that a history of many operations costs what they changed, not what they left.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::ops::RangeInclusive;

@@ -111,6 +111,8 @@
 //! copies it, whatever it holds, and of its branch in its bucket, which the clone shares.
 
 #![deny(missing_docs)]
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 mod cache;
 mod dax;

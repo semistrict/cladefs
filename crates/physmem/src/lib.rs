@@ -18,6 +18,9 @@
 //! Physical memory is created on first use, of the size [`configure`] gave it, or
 //! [`DEFAULT_MEMORY_BYTES`]. A page is a [`Page`], which frees itself as it is dropped.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod frames;
 mod physmap;
 mod pmm;

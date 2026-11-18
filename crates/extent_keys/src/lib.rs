@@ -11,6 +11,9 @@
 //! here, over aws-lc-rs, but AES-256-XTS, which it has not (`storage_xts` over `aes`), so that one
 //! crate holds what is secret and how it is used.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use aws_lc_rs::key_wrap::{AES_256, KeyEncryptionKey, KeyWrap};
 use aws_lc_rs::{hkdf, hmac, rand};

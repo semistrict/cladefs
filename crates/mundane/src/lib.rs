@@ -4,6 +4,9 @@
 
 //! The subset of `mundane::hash` that Fxfs uses, implemented with `sha2`.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod hash {
     use sha2::Digest as _;
 

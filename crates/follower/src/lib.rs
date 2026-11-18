@@ -36,6 +36,9 @@
 //!
 //! Each of its rules ([`Rules`]) is shown to be needed by a test that fails with it turned off.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use anyhow::Error;
 use std::fmt;
 use std::future::Future;

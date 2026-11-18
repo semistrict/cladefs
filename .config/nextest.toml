@@ -1,0 +1,7 @@
+# cargo nextest's profiles for cladefs.
+
+# Miri (TASK-444.4): the tests run under the interpreter, a hundred times slower or more; one that
+# takes over two minutes is ended, and counted as not running under Miri, not as failing.
+[profile.miri]
+slow-timeout = { period = "60s", terminate-after = 2 }
+fail-fast = false

@@ -93,6 +93,9 @@
 //! A record about a VM's request names it, `request_id`, the guest's number of it, with its
 //! `store` (TASK-260).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;

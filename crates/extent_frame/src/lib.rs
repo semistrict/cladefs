@@ -42,6 +42,9 @@
 //! [`Error::Clear`], TASK-411.3): its trailer's seal is not authenticated, and one who can write the
 //! bucket could otherwise zero an object's seal, MACs and tags, and have it read as its branch's.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod segment;
 pub mod spent;
 pub mod table;

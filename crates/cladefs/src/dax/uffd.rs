@@ -524,6 +524,8 @@ struct WindowPages {
 
 // SAFETY: The memory is the value's alone, as a Vec's is.
 unsafe impl Send for WindowPages {}
+// SAFETY: as a Box<[PageChanges]>'s: `&self` only reads it (Deref), writes take `&mut self`
+// (DerefMut), and PageChanges is plain data.
 unsafe impl Sync for WindowPages {}
 
 impl WindowPages {

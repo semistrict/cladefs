@@ -42,6 +42,9 @@
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use extent_remote::batch::{Batch, Commit};
 use extent_remote::bucket::Bucket as _;
 use extent_remote::layout::{Branch, Cell, Child, Origin};

@@ -16,6 +16,9 @@
 //!
 //! What a VFS gives its callers for an error is [`errno`]'s, the one table of Fxfs's errors'.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod errno;
 
 pub use errno::{Errno, device_error, errno, xattr_errno};

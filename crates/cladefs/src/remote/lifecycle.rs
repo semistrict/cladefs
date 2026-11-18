@@ -400,6 +400,11 @@ fn lifecycle(extents: u64, latency: Duration) {
         objects: Arc::new(Faulty::new(memory, faults.clone())),
         log: log.clone(),
     });
+    // The host measured's bucket, over the same objects: made now, as the variable naming it is
+    // set before any thread that may read the environment starts (stores', uploads').
+    let bucket = Arc::new(Bucket::new(objects.clone(), ""));
+    // SAFETY: nextest runs each test in a process of its own, and no other thread runs yet.
+    unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", url_of(&bucket)) };
     let mut run =
         Run { extents, latency, log, faults, names: Names::default(), phases: Vec::new() };
 
@@ -431,12 +436,9 @@ fn lifecycle(extents: u64, latency: Duration) {
     println!("SETUP extents={extents} point of the base: {line}");
     drop(base);
 
-    // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
-    // directories of its own. What it does once, not for each restore, done first: its
-    // conditional writes probed, a block of object IDs taken.
-    let bucket = Arc::new(Bucket::new(objects, ""));
-    // The bucket the daemon's stores are made in, as a point taken from it is.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", url_of(&bucket)) };
+    // The host measured: its bucket (made above), which decoded nothing yet, and directories of
+    // its own. What it does once, not for each restore, done first: its conditional writes probed,
+    // a block of object IDs taken.
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
     host_store::new_branch(&bucket, new_cell(NO_TENANT)).unwrap();
     let host = dir.path().join("host");
