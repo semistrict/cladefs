@@ -3,11 +3,11 @@ id: TASK-540
 title: >-
   Closing a file set frees the dying list its root names, so it never opens
   again
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:23'
-updated_date: '2026-11-18 19:23'
+updated_date: '2026-11-18 22:06'
 labels: []
 dependencies: []
 priority: high
@@ -40,7 +40,7 @@ When a commit leaves more than FREE_BATCH (64) extents dying, commit_root mints 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -68,6 +68,8 @@ Checked with the code temporarily changed:
 Not covered: memory cells (crates/cladefs/src/memory_cell.rs is Linux-only and needs the daemon) have no close-then-reopen test yet. FakeDevice::close only sets a flag, while DaemonDevice and ImageDevice commit on close, so crash images never include what close freed.
 
 Fixed: Inner::list holds the list extent the last root names, apart from inner.dying; close() frees only inner.dying; the next commit counts the list among its dying (restored on a failed write); extents() names it. Verified: macOS scripts/test.sh clippy+workspace, 2622 passed. ubu1 (fxjob): extent_files, sqlite_extents and cladefs memory tests, 68 passed. New cladefsd test a_memory_cell_opens_again_after_a_commit_freeing_many_extents fails with 'reading the dying extents' list' on the old file_set.rs and passes with the fix. The extent_files model and the sqlite test were red before the fix and are green after it. upstream-changes.py --check passes; extent_files is cladefs's own code, so no upstream deviation. Linux full workspace: left to CI on main.
+
+Linux: CI run 44384073802 (bef96fd9f) test (workspace) passed the new tests: a_memory_cell_opens_again_after_a_commit_freeing_many_extents, the extent_files model, and the SQLite close/reopen rounds. Its 4 failures are the cladefsd EBUSY race filed as TASK-644, failing on main before this change too. The model then took 210 s on CI and 138 s on ubu1, against 5.5 s on macOS. perf showed 80% in BufferSource::new's alloc_zeroed: a page-aligned layout can't use calloc, so Linux zeroed all 64 MiB of each FakeDevice made at every snapshot. Fixed in 97f0dead8 (host BufferSource is anonymous mmap, guest keeps alloc_zeroed) and 1ab... (CopyingWindow sized by its test): the model now takes 5.4 s on ubu1, and the memory-cell tests are no slower (A/B, three rounds).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
