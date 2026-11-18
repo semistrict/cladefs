@@ -135,8 +135,13 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     // What the bucket has of a base, 600 MiB, adopted by the part cache as it uploads.
     let base = tenant.join("base");
     let vm = CellClient::connect(&socket, &base, CAPACITY).unwrap();
+    // Committed as a guest's filesystem commits, every 16 MiB: what is written and not committed
+    // is admitted with what its commit may copy of it, six times more (doc-22's reserve).
     for sequence in 1..=600 {
         write(&vm, sequence, sequence).unwrap();
+        if sequence % 16 == 0 {
+            vm.commit(None).unwrap();
+        }
     }
     vm.commit(None).unwrap();
     drop(vm);
