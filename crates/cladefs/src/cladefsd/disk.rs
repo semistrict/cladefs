@@ -459,6 +459,7 @@ fn share(disk: &Arc<HostDisk>, allowance: u64, pressure: bool) {
 mod tests {
     use super::{Disk, set_limit};
     use local_cell::{Dir as _, File as _, HostDir};
+    use std::sync::Arc;
 
     const MIB: u64 = 1 << 20;
 
@@ -511,5 +512,110 @@ mod tests {
         assert_eq!(cache.usage().dirty, dirty);
         assert_eq!(theirs.used(), 4 << 12);
         drop(file);
+    }
+
+    /// What urges it counts its urgings ([`super::host_disk::Urge`]).
+    #[derive(Default)]
+    struct Urged(std::sync::atomic::AtomicUsize);
+
+    impl super::host_disk::Urge for Urged {
+        fn urge(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A governor allowed `fixed` bytes in all, leaving a MiB of each disk.
+    fn governing(fixed: u64) {
+        let headroom = Some(super::DiskHeadroom::Bytes(MIB));
+        super::govern_once(
+            super::DiskConfig { headroom, fixed: Some(fixed) },
+            &mut Default::default(),
+        );
+    }
+
+    /// TASK-539.9: the governor sizes the part cache to what its disk's stores leave of what it
+    /// allows; urges the stores' uploaders as the disk comes under pressure, its stores leaving it
+    /// less than its headroom, and not again while it stays so; and lets it go a quarter of the
+    /// headroom past it (doc-22).
+    #[test]
+    fn the_governor_sizes_the_cache_to_what_stores_leave_and_urges_under_pressure() {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
+        // the environment yet.
+        unsafe { std::env::set_var("CLADEFSD_PART_CACHE", dir.path().join("cache")) };
+        std::fs::create_dir(dir.path().join("cache")).unwrap();
+        let cache = super::super::cells::part_cache().unwrap().unwrap();
+        let disk = cache.disk().clone();
+        let store = dir.path().join("store");
+        std::fs::create_dir(&store).unwrap();
+        let opened = HostDir::new(&store).unwrap();
+        opened.create("data", true).unwrap().write_at(&vec![1; MIB as usize], 0).unwrap();
+        let urged = Arc::new(Urged::default());
+        let weak: std::sync::Weak<dyn super::host_disk::Urge> = Arc::downgrade(&urged) as _;
+        disk.on_pressure(weak);
+        let urgings = || urged.0.load(std::sync::atomic::Ordering::Relaxed);
+        let committed = disk.stores.committed();
+
+        governing(committed + 10 * MIB);
+        assert_eq!((cache.capacity(), disk.under_pressure(), urgings()), (10 * MIB, false, 0));
+        assert_eq!(disk.allowance(), committed + 10 * MIB);
+        governing(committed + MIB / 2);
+        assert_eq!((cache.capacity(), disk.under_pressure(), urgings()), (MIB / 2, true, 1));
+        governing(committed + MIB / 2);
+        assert_eq!(urgings(), 1, "urged as pressure began alone");
+        governing(committed + MIB + MIB / 8);
+        assert!(disk.under_pressure(), "let go within a quarter past the headroom");
+        governing(committed + 2 * MIB);
+        assert!(!disk.under_pressure());
+    }
+
+    /// TASK-539.10: under pressure, the governor shares what the disk's allowance leaves by the
+    /// tenants' weights, a tenant past its share refused while one within its own writes; out of it,
+    /// no share holds any. The metrics show the disk, and the tenants' weights and shares.
+    #[test]
+    fn weights_share_a_disk_under_pressure() {
+        use local_cell::footprint::DiskFull;
+        let dir = tempfile::tempdir().unwrap();
+        let (heavy, light) = (dir.path().join("heavy"), dir.path().join("light"));
+        std::fs::create_dir_all(heavy.join("store")).unwrap();
+        std::fs::create_dir_all(light.join("store")).unwrap();
+        let (heavy_disk, light_disk) =
+            (Disk::new(0x3, &heavy).unwrap(), Disk::new(0x1, &light).unwrap());
+        super::set_weight(0x3, 3).unwrap();
+        let (heavy_store, light_store) = (
+            HostDir::new(&heavy.join("store")).unwrap(),
+            HostDir::new(&light.join("store")).unwrap(),
+        );
+        let disk = heavy_store.footprint().disk().unwrap().clone();
+        let committed = disk.stores.committed();
+        let others =
+            committed - heavy_disk.allotment.committed() - light_disk.allotment.committed();
+
+        governing(committed + MIB / 2);
+        assert!(disk.under_pressure());
+        let base = committed + MIB / 2 - others;
+        assert_eq!(heavy_disk.allotment.share(), Some(base * 3 / 4));
+        assert_eq!(light_disk.allotment.share(), Some(base / 4));
+        let light_room = base / 4 - light_disk.allotment.committed();
+        let past = light_room / (1 + bucket_cell::host_disk::RESERVE_FACTOR) + MIB / 64;
+        let refused = light_store.footprint().admit(past, 0).map(drop);
+        assert_eq!(refused, Err(DiskFull::Share));
+        assert!(heavy_store.footprint().admit(4096, 0).is_ok());
+        let rendered = super::super::metrics::render();
+        for line in
+            ["cladefsd_tenant_disk_weight{tenant=\"3\"} 3", "cladefsd_host_disk_pressure{device="]
+        {
+            assert!(rendered.contains(line), "no {line} in\n{rendered}");
+        }
+        assert!(
+            rendered.contains(&format!(
+                "cladefsd_tenant_disk_share_bytes{{tenant=\"1\"}} {}",
+                base / 4
+            ))
+        );
+
+        governing(committed + 64 * MIB);
+        assert_eq!((heavy_disk.allotment.share(), light_disk.allotment.share()), (None, None));
+        assert!(light_store.footprint().admit(past, 0).is_ok());
     }
 }
