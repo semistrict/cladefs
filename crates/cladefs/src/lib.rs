@@ -194,7 +194,7 @@ pub use error::{Errno, Error, Result};
 pub use extent_bucket::layout::{Branch, Cell};
 pub use extents::{
     Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
-    StoreRole, Whose, WindowMapping, WriteBarriers,
+    StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::{BranchOf, new_cell};

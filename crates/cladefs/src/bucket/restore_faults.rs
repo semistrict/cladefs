@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Restores of one snapshot on several hosts with something going wrong at each of their steps
-//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of a point failing, on
-//! each host; its host dying there; or, there, other hosts restoring the point and a pass of the
-//! collector running, or the point being deleted; or a write of it going wrong. Then, whatever came
-//! of it, what [`Hosts::settle`] checks: no fork told it was made lost anything, though only the
-//! point keeps what it holds, the branch it was taken of having freed all of it; nothing wrote the
-//! point; every other host restores it still; and nothing is left once everything is deleted.
+//! Restores of one version on several hosts with something going wrong at each of their steps
+//! (TASK-158), as [`super::fork_faults`] has it for a fork: a step of a fork of a version's copy
+//! failing, on each host; its host dying there; or, there, other hosts restoring the version and a
+//! pass of the collector running, or the version being dropped; or a write of it going wrong.
+//! Then, whatever came of it, what [`Hosts::settle`] checks: no fork told it was made lost
+//! anything, though only the version keeps what it holds, its cell having freed all of it since;
+//! no restore wrote a segment of the cell's; every other host restores it still; and nothing is
+//! left once everything is deleted.
 
 use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
@@ -24,8 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// How many hosts hold the point: the snapshot's own, whose copy the point's fork made, then
-/// others.
+/// How many hosts hold a copy of the version: its cell's own, then others.
 const HOSTS: usize = 3;
 
 /// What goes wrong in a restore on one of the hosts.
@@ -35,10 +35,10 @@ enum Fault {
     Fails(&'static str),
     /// The host dies at the step of this name.
     Dies(&'static str),
-    /// At the step of this name, every other host restores the point, and a pass of the collector
+    /// At the step of this name, every other host restores the version, and a pass of the collector
     /// runs, deleting what is free at once.
     Raced(&'static str),
-    /// At the step of this name, the point is deleted, and a pass of the collector runs.
+    /// At the step of this name, the version is dropped, and a pass of the collector runs.
     Deleted(&'static str),
     /// So, and then the host dies: what it leaves, in the middle of its fork, nothing keeps.
     DeletedAndDies(&'static str),
@@ -46,34 +46,45 @@ enum Fault {
     Write(usize, Mishap),
 }
 
-/// A bucket, and the hosts of one point in it: the branch it was taken of has freed what it held.
+/// A bucket, and the hosts of one version in it: its cell has freed what it held since.
 struct Hosts {
     temp: tempfile::TempDir,
     bucket: Arc<ObjectBucket>,
     gated: Vec<Arc<Gated>>,
     /// Each host's disk: a dead host's, its copy, restarted.
     disks: Vec<PathBuf>,
-    /// Each host's copy of the point, open, but for one that died.
+    /// Each host's copy of the version, open, but for one that died.
     copies: Vec<Option<Arc<ExtentStore>>>,
-    /// The store the point was taken of, and its branch.
-    source: Option<ExtentStore>,
-    point: crate::Branch,
-    /// What the point holds, and its root.
+    /// The store whose cell's version it is, and the version.
+    source: Option<Arc<ExtentStore>>,
+    version: u64,
+    /// The segments of its cell's in the bucket as the hosts were made, which no restore adds to.
+    segments: Vec<String>,
+    /// What the version holds, and its root.
     held: Vec<(ExtentId, Vec<u8>)>,
     /// The forks made, by their branches, with their stores' paths.
     children: Arc<Mutex<Vec<(crate::Branch, PathBuf)>>>,
     /// Whether a host died.
     dead: Arc<AtomicBool>,
-    /// Whether the point was deleted.
+    /// Whether the version was dropped.
     deleted: Arc<AtomicBool>,
 }
 
-/// Where a host's copy of the point is on its disk.
+/// Where a host's copy of the version is on its disk.
 fn copy_at(host: usize, disk: &Path) -> PathBuf {
-    disk.join(if host == 0 { "point" } else { "parent" })
+    disk.join(if host == 0 { "copy" } else { "parent" })
 }
 
-/// The bytes the point's extents hold, as `bucket` has them for the fork `child`: read under the
+/// The keys of the segments of `branch` in `bucket`.
+fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::Branch) -> Vec<String> {
+    let keys = block_on(extent_bucket::Bucket::list(&**bucket, "")).unwrap();
+    let segments = keys.into_iter().map(|meta| meta.key);
+    segments
+        .filter(|key| matches!(layout::kind(key), Kind::Segment { branch, .. } if branch == of))
+        .collect()
+}
+
+/// The bytes the version's extents hold, as `bucket` has them for the fork `child`: read under the
 /// keys its record keeps, its cell's KEK unwrapped by the host's KMS, if it has one
 /// (TASK-411.4).
 fn in_bucket(
@@ -130,36 +141,46 @@ impl Hosts {
         let source = source.unwrap();
         let lens = [fork_faults::BLOCK, 4 << 20];
         let held = commit(&source, 1, &lens, b"root");
-        let point = crate::host_store::new_alone();
-        source.point_to(disks[0].join("point"), point).unwrap();
+        let version = source.copy_uploaded(disks[0].join("copy")).unwrap();
         for (extent, _) in &held {
             source.free(*extent).unwrap();
         }
         source.commit(Some(b"later")).unwrap();
-        // Another fork, gone: a checkpoint past the point's, so that only the point keeps that, and
-        // what the point names is all gone once nothing keeps it: its state too, not just its data.
+        // Another fork, gone: a checkpoint past the version's, so that only the version keeps
+        // that, and what it names is all gone once nothing keeps it: its state too, not just its
+        // data.
         let later = disks[0].join("later");
         source.fork_to(&later, crate::host_store::new_alone()).unwrap();
         ExtentStore::delete(&later, Some(&bucket)).unwrap();
 
+        source.wait_uploaded().unwrap();
         let mut copies = Vec::new();
         for (host, disk) in disks.iter().enumerate() {
             let path = copy_at(host, disk);
-            let copy = match host {
-                0 => reopened(&path, options()).unwrap(),
-                _ => kept_in(&path, (1 << 30, Some(point)), &reached(host), options()).unwrap(),
-            };
-            assert_eq!(copy.access().role, StoreRole::Point, "host {host} holds no point");
+            if host > 0 {
+                let url = super::tests::url_of(&reached(host));
+                let description = extent_store::Description {
+                    block_size: ExtentStore::BLOCK_SIZE,
+                    capacity: 1 << 30,
+                    branch: source.branch(),
+                };
+                let kind = extent_bucket::cell::Kind::Fxfs;
+                ExtentStore::create_copy(&path, (&url, kind), description, version).unwrap();
+            }
+            let copy = reopened(&path, options()).unwrap();
+            assert_eq!(copy.access().role, StoreRole::Point, "host {host} holds no copy");
             copies.push(Some(Arc::new(copy)));
         }
+        let segments = segments_of(&bucket, source.branch());
         Self {
             temp,
             bucket,
             gated,
             disks,
             copies,
-            source: Some(source),
-            point,
+            source: Some(Arc::new(source)),
+            version,
+            segments,
             held,
             children: Default::default(),
             dead: Default::default(),
@@ -168,27 +189,25 @@ impl Hosts {
     }
 
     /// Sweeps of the collector over every cell, deleting what is free at once, until two in a row
-    /// delete nothing: a dead cell's pass retires the references the point's origin's cell keeps
-    /// the fork point for, which that cell's next pass reclaims (TASK-395.4).
+    /// delete nothing: a dead cell's pass retires the references the version's cell keeps its
+    /// state for, which that cell's next pass reclaims (TASK-395.4).
     fn collect(bucket: &Arc<ObjectBucket>, case: &str) {
         let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
         let collected = extent_bucket::testing::collect_until_quiet(&**bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
-    /// Asserts nothing wrote the point: no head, but its deletion's, no segment, no checkpoint.
+    /// Asserts no restore wrote a segment of the version's cell: those there were there as the
+    /// hosts were made, the collector having reclaimed some since.
     fn check_unwritten(&self, case: &str) {
-        let keys = block_on(extent_bucket::Bucket::list(&*self.bucket, "")).unwrap();
-        let written = keys.iter().filter(|meta| match layout::kind(&meta.key) {
-            Kind::Segment { branch, .. } | Kind::Checkpoint { branch, .. } => branch == self.point,
-            Kind::Head { branch } => branch == self.point && !self.deleted.load(Ordering::SeqCst),
-            _ => false,
-        });
-        let written: Vec<_> = written.map(|meta| &meta.key).collect();
-        assert_eq!(written, Vec::<&String>::new(), "{case}: the point was written");
+        let branch = self.source.as_ref().unwrap().branch();
+        let written: Vec<_> = (segments_of(&self.bucket, branch).into_iter())
+            .filter(|segment| !self.segments.contains(segment))
+            .collect();
+        assert_eq!(written, Vec::<String>::new(), "{case}: the cell was written");
     }
 
-    /// Asserts the fork `child` holds what the point held, in the bucket, and, its store at
+    /// Asserts the fork `child` holds what the version held, in the bucket, and, its store at
     /// `path`, opened, reads it and goes on.
     fn check_fork(&self, child: crate::Branch, path: &Path, case: &str) {
         let mut read = in_bucket(&self.bucket, child).unwrap_or_else(|err| panic!("{case}: {err}"));
@@ -204,7 +223,7 @@ impl Hosts {
         assert!(fork_faults::read(&store, own[0].0, fork_faults::BLOCK) == own[0].1, "{case}");
     }
 
-    /// Restores the point on `host`, to a new child at `name` on its disk, and gives what that
+    /// Restores the version on `host`, to a new child at `name` on its disk, and gives what that
     /// gave: the child noted, if made.
     fn restore(&mut self, host: usize, name: &str) -> Result<(), Option<Errno>> {
         let path = self.disks[host].join(name);
@@ -252,18 +271,19 @@ impl Hosts {
                 })
             }
             Fault::Deleted(step) | Fault::DeletedAndDies(step) => {
-                let (bucket, point) = (self.bucket.clone(), self.point);
+                let (bucket, version) = (self.bucket.clone(), self.version);
+                let source = self.source.clone().unwrap();
                 let deleted = self.deleted.clone();
                 let die = matches!(fault, Fault::DeletedAndDies(_)).then(|| self.death(host));
                 FailGuard::with_callback(step, move || {
                     if once.swap(true, Ordering::SeqCst) {
                         return;
                     }
-                    let bucket = bucket.clone();
+                    let (bucket, source) = (bucket.clone(), source.clone());
                     deleted.store(true, Ordering::SeqCst);
                     let deleting = std::thread::spawn(move || {
-                        block_on(operator_delete(&bucket, point, rand::random())).unwrap();
-                        Self::collect(&bucket, "the point deleted");
+                        source.drop_versions(&[version].into()).unwrap();
+                        Self::collect(&bucket, "the version dropped");
                     });
                     deleting.join().unwrap();
                     if let Some(die) = &die {
@@ -361,7 +381,7 @@ impl Hosts {
         self.check_unwritten(case);
         // What a restore whose host died left standing in the bucket, no store holding it, an
         // operator finds among the live branches, and deletes (TASK-165.7).
-        let mut named = vec![self.point, self.source.as_ref().unwrap().branch()];
+        let mut named = vec![self.source.as_ref().unwrap().branch()];
         named.extend(self.children.lock().unwrap().iter().map(|(child, _)| *child));
         let live = block_on(extent_bucket::testing::live(&*self.bucket)).unwrap();
         let orphans: Vec<_> = live.into_keys().filter(|live| !named.contains(live)).collect();
@@ -373,7 +393,7 @@ impl Hosts {
             Self::collect(&self.bucket, case);
         }
 
-        // Every host restores it still: none's copy went stale. None, once it is deleted, of
+        // Every host restores it still: none's copy went stale. None, once it is dropped, of
         // which what the fork leaves goes with it.
         let deleted = self.deleted.load(Ordering::SeqCst);
         for other in 0..HOSTS {
@@ -391,12 +411,12 @@ impl Hosts {
             self.check_fork(*child, path, case);
         }
 
-        // The point goes: what its forks hold stays, for as long as they live.
+        // The version goes: what its forks hold stays, for as long as they live.
         self.copies.clear();
         if !deleted {
-            let holder = rand::random();
-            let gone = block_on(operator_delete(&self.bucket, self.point, holder));
-            assert_eq!(gone, Ok(()), "{case}");
+            let source = self.source.as_ref().unwrap();
+            let dropped = source.drop_versions(&[self.version].into()).map_err(|err| err.errno());
+            assert_eq!(dropped, Ok(()), "{case}");
         }
         Self::collect(&self.bucket, case);
         for (child, _) in &children {
@@ -412,6 +432,12 @@ impl Hosts {
         let source = self.source.take().unwrap();
         let branch = source.branch();
         drop(source);
+        for (host, disk) in self.disks.iter().enumerate() {
+            let copy = copy_at(host, disk);
+            if copy.exists() {
+                ExtentStore::delete(&copy, None).unwrap();
+            }
+        }
         let gone = block_on(operator_delete(&self.bucket, branch, rand::random()));
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
@@ -532,7 +558,7 @@ fn hosts_dying_at_each_step_of_a_restore() {
     all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step))));
 }
 
-/// At each step of a restore, every other host restoring the point and a pass of the collector
+/// At each step of a restore, every other host restoring the version and a pass of the collector
 /// take nothing from it, and it restores.
 #[test]
 fn restores_racing_others_and_the_collector_at_each_step() {
@@ -541,25 +567,25 @@ fn restores_racing_others_and_the_collector_at_each_step() {
     assert!(restored.iter().all(Result::is_ok), "{restored:?}");
 }
 
-/// The point deleted, and a pass of the collector, at each step of a restore: it fails with
+/// The version dropped, and a pass of the collector, at each step of a restore: it fails with
 /// `ENOENT`, leaving nothing, if it hadn't been made; and if it had, it holds all it held.
 #[test]
-fn points_deleted_at_each_step_of_a_restore() {
+fn versions_dropped_at_each_step_of_a_restore() {
     host();
     let restored =
         all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Deleted(step))));
     let unexpected =
         restored.iter().filter(|result| !matches!(result, Ok(()) | Err(Some(Errno::ENOENT))));
     assert_eq!(unexpected.collect::<Vec<_>>(), Vec::<&Result<(), Option<Errno>>>::new());
-    assert!(restored.iter().any(Result::is_ok), "no restore outlived the point's deletion");
+    assert!(restored.iter().any(Result::is_ok), "no restore outlived the version's dropping");
     assert!(restored.iter().any(Result::is_err), "no restore failed for it");
 }
 
-/// A point deleted, and what it named collected, with a fork of it being made whose host dies
+/// A version dropped, and what it named collected, with a fork of it being made whose host dies
 /// there, on any host: its record, being made, names what is gone, which must stop no pass of the
 /// collector, and what it left goes, or fails to open, whatever is done with it.
 #[test]
-fn points_deleted_as_hosts_die_in_the_middle_of_a_restore() {
+fn versions_dropped_as_hosts_die_in_the_middle_of_a_restore() {
     host();
     let steps = ["point::record", "point::recorded", "point::referred", "point::checked"];
     all(steps.into_iter().flat_map(|step| on_each_host(Fault::DeletedAndDies(step))));
@@ -580,7 +606,7 @@ fn each_write_of_a_restore_going_wrong() {
     }));
 }
 
-/// TASK-411.4: the host's KMS holding the default tenant's KEK, which every store, point and
+/// TASK-411.4: the host's KMS holding the default tenant's KEK, which every store, copy and
 /// restore here is of: their cells encrypted, each restore's child keeping the keys it inherits
 /// rewrapped under its own cell's KEK. Returns what keeps the KMS's directory.
 fn encrypted() -> tempfile::TempDir {

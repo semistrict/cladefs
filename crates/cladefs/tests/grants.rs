@@ -161,12 +161,12 @@ fn tenants_reach_no_memory_vdisk_of_another_tenants_cell() {
     their_memory.close().unwrap();
 }
 
-/// TASK-364: a point of another tenant's, which its VM manager gives a tenant (TASK-154), the
+/// TASK-364: a version of another tenant's, which its VM manager gives a tenant (TASK-154), the
 /// tenant's VM processes restore from, each restore a store of a cell of the tenant's own.
 /// TASK-395.7: while it is shared: before, and once unshared, a restore is refused (EACCES),
 /// making nothing, and the restores made live on.
 #[test]
-fn tenants_restore_points_given_them_into_cells_of_their_own() {
+fn tenants_restore_versions_given_them_into_cells_of_their_own() {
     let dir = tempfile::tempdir().unwrap();
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let globex = dir.path().join("here/globex");
@@ -174,32 +174,35 @@ fn tenants_restore_points_given_them_into_cells_of_their_own() {
     let socket = here.daemon.grant(2, &globex, None).unwrap();
     let vm = DaemonExtentStore::connect(&socket, globex.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(5), b"globex");
-    vm.fork_quiescent(&globex.join("point")).unwrap();
+    vm.fork_quiescent(&globex.join("copy")).unwrap();
     drop(vm);
-    let point = here.daemon.branch(&globex.join("point")).unwrap();
+    here.daemon.sync(&globex.join("vm")).unwrap();
+    let point = here.daemon.branch(&globex.join("copy")).unwrap();
+    let version = here.daemon.stat(&globex.join("copy")).unwrap().version;
     assert_eq!(point.cell.tenant, 2);
 
     let given = there.acme.join("given");
-    assert_eq!(there.daemon.create(&given, point, None).unwrap(), point);
+    assert_eq!(there.daemon.copy(&given, point, version).unwrap(), point);
     let refused = there.acme.join("refused");
     assert_eq!(restore(&there.socket, &refused, &given, 0).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
-    here.daemon.share(&globex.join("point"), true).unwrap();
+    here.daemon.share(&globex.join("vm"), version, true).unwrap();
     let restored = restore(&there.socket, &there.acme.join("restored"), &given, 0).unwrap();
     assert_eq!(restored.root().unwrap(), b"globex");
     let made = there.daemon.branch(&there.acme.join("restored")).unwrap();
     assert_eq!((made.cell.tenant, made.id), (1, restored.branch()));
-    here.daemon.share(&globex.join("point"), false).unwrap();
+    here.daemon.share(&globex.join("vm"), version, false).unwrap();
     assert_eq!(restore(&there.socket, &refused, &given, 0).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
     assert_eq!(restored.root().unwrap(), b"globex");
 }
 
-/// TASK-395.7: a base made a point forks into another tenant's directory, a cell of that
-/// tenant's, only while shared (SharePoint, or ForkStore's `shared`): refused otherwise (EACCES),
-/// making nothing. Into its own tenant's it forks either way. Only a point is shared (EINVAL).
+/// TASK-395.7: a version of a base forks into another tenant's directory, a cell of that
+/// tenant's, only while shared (ShareVersion): refused otherwise (EACCES), making nothing. Into
+/// its own tenant's it forks either way. A version the cell's head names not is not shared
+/// (NOT_FOUND).
 #[test]
-fn bases_made_shared_points_fork_into_other_tenants() {
+fn shared_versions_of_bases_fork_into_other_tenants() {
     let dir = tempfile::tempdir().unwrap();
     let mut here = Host::new(dir.path(), "here");
     let globex = dir.path().join("here/globex");
@@ -209,8 +212,9 @@ fn bases_made_shared_points_fork_into_other_tenants() {
     let vm = DaemonExtentStore::connect(&here.socket, &base, CAPACITY).unwrap();
     write(&vm, &pattern(8), b"base");
     drop(vm);
-    let (point, shared) = (here.acme.join("point"), here.acme.join("shared"));
-    assert_eq!(here.daemon.point(&base, &point).unwrap().cell.tenant, 1);
+    let point = here.acme.join("copy");
+    let version = here.daemon.version(&base, &point).unwrap();
+    assert_eq!(here.daemon.branch(&point).unwrap().cell.tenant, 1);
     let fork = |daemon: &mut Daemon, from: &Path, to: &Path| daemon.fork(from, to).map(drop);
 
     let refused = globex.join("refused");
@@ -218,24 +222,20 @@ fn bases_made_shared_points_fork_into_other_tenants() {
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     assert!(!refused.exists(), "a refused fork made a store");
     fork(&mut here.daemon, &point, &here.acme.join("ours")).unwrap();
-    here.daemon.share(&point, true).unwrap();
+    here.daemon.share(&base, version, true).unwrap();
     assert_eq!(here.daemon.fork(&point, &globex.join("theirs")).unwrap().cell.tenant, 2);
     let vm = DaemonExtentStore::connect(&theirs, globex.join("theirs"), CAPACITY).unwrap();
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
-    here.daemon.share(&point, false).unwrap();
+    here.daemon.share(&base, version, false).unwrap();
     let forked = fork(&mut here.daemon, &point, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
-
-    here.daemon.fork_store(&base, &shared, (true, true)).unwrap();
-    assert_eq!(here.daemon.fork(&shared, &globex.join("later")).unwrap().cell.tenant, 2);
-    let forked = here.daemon.fork_store(&base, &here.acme.join("no-point"), (false, true));
-    assert_eq!(failure(forked), (Code::InvalidArgument, Errno::EINVAL));
-    assert_eq!(failure(here.daemon.share(&base, true)), (Code::InvalidArgument, Errno::EINVAL));
+    let unnamed = here.daemon.share(&base, version + 1, true);
+    assert_eq!(failure(unnamed), (Code::NotFound, Errno::ENOENT));
 }
 
-/// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory, a fork nor a
-/// point (ForkStore), refused with EACCES, making nothing; into its own tenant's it forks. A store
+/// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory (ForkStore),
+/// refused with EACCES, making nothing; into its own tenant's it forks. A store
 /// of the default tenant's (0) forks into both tenants' directories, a cell of each's.
 #[test]
 fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
@@ -247,12 +247,10 @@ fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
     let vm = here.acme.join("vm");
     write(&DaemonExtentStore::connect(&here.socket, &vm, CAPACITY).unwrap(), &pattern(9), b"vm");
 
-    for (point, shared) in [(false, false), (true, false), (true, true)] {
-        let refused = globex.join("refused");
-        let forked = here.daemon.fork_store(&vm, &refused, (point, shared));
-        assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES), "point {point}");
-        assert!(!refused.exists(), "a refused fork made a store");
-    }
+    let refused = globex.join("refused");
+    let forked = here.daemon.fork(&vm, &refused);
+    assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
+    assert!(!refused.exists(), "a refused fork made a store");
     assert_eq!(here.daemon.fork(&vm, &here.acme.join("ours")).unwrap().cell.tenant, 1);
 
     let base = dir.path().join("here/base");
@@ -403,18 +401,21 @@ impl Host {
         let point = self.acme.join("point");
         vm.fork_quiescent(&point).unwrap();
         drop(vm);
-        // In the bucket once taken, with no sync. As the VM manager reads it: not the snapshot's
-        // word for it, which a VM process wrote.
+        // Local once taken: in the bucket once synced, for other hosts. As the VM manager reads
+        // it: not the snapshot's word for it, which a VM process wrote.
+        self.daemon.sync(&self.acme.join("vm")).unwrap();
         let stat = self.daemon.stat(&point).unwrap();
         let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
-        Snapshot { branch: cladefs::Branch { cell, id: stat.branch }, extent }
+        let branch = cladefs::Branch { cell, id: stat.branch };
+        Snapshot { branch, version: stat.version, extent }
     }
 }
 
-/// What the VM manager keeps of a snapshot: its point's branch, in its cell (TASK-364). And the
-/// extent the VM wrote.
+/// What the VM manager keeps of a snapshot: its VM's cell and the version of it (TASK-364). And
+/// the extent the VM wrote.
 struct Snapshot {
     branch: cladefs::Branch,
+    version: u64,
     extent: ExtentId,
 }
 
@@ -458,7 +459,8 @@ fn tenants_restore_on_another_host_what_their_vm_manager_took() {
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));
     assert!(!point.exists(), "a point was taken for the branch a VM process named");
 
-    assert_eq!(there.daemon.create(&point, snapshot.branch, None).unwrap(), snapshot.branch);
+    let copied = there.daemon.copy(&point, snapshot.branch, snapshot.version).unwrap();
+    assert_eq!(copied, snapshot.branch);
     let restored = restore(&there.socket, &vm, &point, snapshot.branch.id).unwrap();
     assert_ne!(restored.branch(), snapshot.branch.id);
     assert_eq!(restored.root().unwrap(), b"snapshotted");
@@ -482,7 +484,7 @@ fn tenants_take_no_branch_given_to_another() {
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
     let given = there.acme.join("point");
-    there.daemon.create(&given, snapshot.branch, None).unwrap();
+    there.daemon.copy(&given, snapshot.branch, snapshot.version).unwrap();
 
     let globex = dir.path().join("there/globex");
     std::fs::create_dir(&globex).unwrap();
@@ -671,13 +673,13 @@ fn points_restore_whatever_placement_took_them() {
     assert_eq!(own.unwrap().root().unwrap(), b"snapshotted");
 }
 
-/// TASK-158: a base, as any store, made a point by ForkStore's `point`, forks on several hosts at
-/// once, as a snapshot's point restores: every host's copy forks while the others' do, into
-/// branches of their own, which read the base and write on their own. The base is its writer's
-/// still: what it writes after reaches no fork of the point. No point makes one of its own, and no
-/// VM process opens one to write it.
+/// TASK-158: a version of a base, as of any store, forks on several hosts at once, as a
+/// snapshot's restores do: every host's copy forks while the others' do, into branches of their
+/// own, which read the base and write on their own. The base is its writer's still: what it
+/// writes after reaches no fork of the version. No copy makes a version of its own, and no VM
+/// process opens one to write it.
 #[test]
-fn bases_made_points_fork_on_several_hosts_at_once() {
+fn versions_of_bases_fork_on_several_hosts_at_once() {
     const HOSTS: usize = 3;
     const FORKS: usize = 3;
     let dir = tempfile::tempdir().unwrap();
@@ -689,9 +691,11 @@ fn bases_made_points_fork_on_several_hosts_at_once() {
     let extent = ExtentId { branch: vm.branch(), sequence: 1 };
     drop(vm);
     let point = hosts[0].acme.join("point");
-    let branch = hosts[0].daemon.point(&base, &point).unwrap();
+    let version = hosts[0].daemon.version(&base, &point).unwrap();
+    let branch = hosts[0].daemon.branch(&point).unwrap();
+    hosts[0].daemon.sync(&base).unwrap();
     for host in &mut hosts[1..] {
-        host.daemon.create(&host.acme.join("point"), branch, None).unwrap();
+        host.daemon.copy(&host.acme.join("point"), branch, version).unwrap();
     }
 
     let forks: Vec<(usize, PathBuf, cladefs::Branch)> = std::thread::scope(|scope| {
@@ -733,8 +737,8 @@ fn bases_made_points_fork_on_several_hosts_at_once() {
     other.daemon.fork(&copy, &later).unwrap();
     assert_eq!(other.daemon.open(&later, CAPACITY).root().unwrap(), b"base");
 
-    let again = other.daemon.point(&copy, &other.acme.join("again"));
-    assert_eq!(failure(again), (Code::InvalidArgument, Errno::EINVAL));
+    let again = other.daemon.version(&copy, &other.acme.join("again"));
+    assert_eq!(failure(again), (Code::FailedPrecondition, Errno::EROFS));
     assert_eq!(refused(&other.daemon.vms, &copy), Some(Errno::EROFS));
 }
 

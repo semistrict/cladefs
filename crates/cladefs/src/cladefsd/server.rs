@@ -1391,8 +1391,14 @@ impl Connection {
                 // cladefs: the one vdisk of a new cell of the store's tenant, of an ID of the
                 // bucket's giving, which the reply says (TASK-364).
                 let cell = crate::host_store::fork_cell(store.branch());
-                let forked =
-                    if *quiescent { store.point(path, cell) } else { store.fork(path, cell) };
+                // cladefs: a VM snapshot's: a version of the store's cell, made here, and a copy of
+                // it at `path`, which the VM's restores fork (doc-20).
+                let forked = match quiescent {
+                    true => (store.make_version(None))
+                        .and_then(|id| store.copy_version(path, id))
+                        .map(|()| store.branch()),
+                    false => store.fork(path, cell),
+                };
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {

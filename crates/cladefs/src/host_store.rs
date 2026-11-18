@@ -163,7 +163,7 @@ pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
 /// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
 /// if it is a host of cladefs's system (`CLADEFSD_BUCKET`, as [`crate::bucket::Host`] has
 /// it); else a file bucket of the store's own ([`bucket_named`]).
-fn bucket_for(path: &Path) -> anyhow::Result<String> {
+pub(crate) fn bucket_for(path: &Path) -> anyhow::Result<String> {
     let host = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
     bucket_named(host, path)
 }
@@ -232,22 +232,6 @@ pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<ObjectBucket>>
         Err(err) if err.is::<extent_store::Format>() => Err(err),
         Ok(None) | Err(_) => Ok(None),
     }
-}
-
-/// cladefs: shares the point the store at `path` is of, if `shared`, or no longer, in the bucket its
-/// description names (`branch::share`, TASK-395.7): `ENOENT` if no store is there, or its point
-/// was deleted; `EINVAL` if it is of no point. Nothing of the store here changes: every host's
-/// fork of the point reads its record as it is made.
-pub(crate) fn share(path: &Path, shared: bool) -> Result<(), Error> {
-    let bucket = bucket_at(path).map_err(Error::new)?;
-    let (Ok(point), Some(bucket)) = (extent_store::host_branch(path), bucket) else {
-        return Err(Errno::ENOENT.into());
-    };
-    let sharing = upload::block_on(branch::share(&*bucket, point, shared))?;
-    Ok(sharing.map_err(|err| match err {
-        extent_bucket::Error::Deleted => Failure::PointDeleted,
-        err => Failure::Bucket(err),
-    })?)
 }
 
 /// The options stores are opened with: their extents hold at most what the guest's device says
@@ -542,7 +526,9 @@ pub(crate) fn delete(
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
+    // A version's copy deletes nothing in the bucket: the version is its cell's.
     delete_with(path, |dir, branch| match bucket {
+        Some(_) if extent_store::host_version(dir)?.is_some() => Ok(()),
         Some(bucket) => {
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;

@@ -31,6 +31,19 @@ pub fn create_host(
     Store::make(&HostDir::new(path)?, description, Some(bucket), Some(kind))
 }
 
+/// cladefs: makes a new store at `path` as [`create_host`] does, a copy of the version `version` of
+/// its branch: the branch's state at the version, which nothing writes, and which forks fork
+/// (doc-18, doc-20). Opening it reads the version from the bucket, once the cell's head names it.
+pub fn create_host_copy(
+    path: &Path,
+    description: Description,
+    bucket: &str,
+    kind: Kind,
+    version: u64,
+) -> Result<(), Error> {
+    Store::make_copy(&HostDir::new(path)?, description, Some(bucket), Some(kind), Some(version))
+}
+
 /// cladefs: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
 /// saying it is not goes, durably, its maker having let it go.
 pub fn made_host(path: &Path) -> Result<(), Error> {
@@ -230,6 +243,11 @@ pub fn host_branch(path: &Path) -> Result<Branch, Error> {
 /// it: none for a store of memory's, which names none (TASK-165.6).
 pub fn host_bucket(path: &Path) -> Result<Option<String>, Error> {
     Ok(store_file(path)?.bucket)
+}
+
+/// cladefs: the version of its branch the store at `path` is a copy of, if it is one.
+pub fn host_version(path: &Path) -> Result<Option<u64>, Error> {
+    Ok(store_file(path)?.version)
 }
 
 /// The description of the store whose directory is `store`.

@@ -58,6 +58,7 @@ impl Daemon {
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
             kind: 0,
+            version: 0,
         };
         let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
         let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
@@ -76,25 +77,39 @@ impl Daemon {
         Ok(self.runtime.block_on(self.client.stat_store(request))?.into_inner())
     }
 
+    /// Forks the store at `from` to `to` (ForkStore): a copy of a version forks the version.
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
-        self.fork_store(from, to, (false, false))
-    }
-
-    /// Makes a point of the store at `from`, at `to` (ForkStore's `point`).
-    pub fn point(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
-        self.fork_store(from, to, (true, false))
-    }
-
-    /// Forks the store at `from` to `to` (ForkStore): a point if `point`, shared if `shared`
-    /// (TASK-395.7).
-    pub fn fork_store(
-        &mut self,
-        from: &Path,
-        to: &Path,
-        (point, shared): (bool, bool),
-    ) -> Result<cladefs::Branch, tonic::Status> {
-        let request = ForkStoreRequest { from: name(from), to: name(to), point, shared };
+        let request = ForkStoreRequest { from: name(from), to: name(to) };
         let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
+        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::Branch { cell, id: response.branch })
+    }
+
+    /// Makes a version of the cell of the store at `from`, and a copy of it at `copy`
+    /// (MakeVersion), and returns its ID.
+    pub fn version(&mut self, from: &Path, copy: &Path) -> Result<u64, tonic::Status> {
+        let request = MakeVersionRequest { path: name(from), keep_last: 0, copy: name(copy) };
+        Ok(self.runtime.block_on(self.client.make_version(request))?.into_inner().version)
+    }
+
+    /// Makes a copy at `path` of the version `version` of `branch` (CreateStore's `version`).
+    pub fn copy(
+        &mut self,
+        path: &Path,
+        branch: cladefs::Branch,
+        version: u64,
+    ) -> Result<cladefs::Branch, tonic::Status> {
+        let request = CreateStoreRequest {
+            path: name(path),
+            capacity: 1 << 30,
+            branch: branch.id,
+            token: None,
+            tenant: branch.cell.tenant,
+            cell: branch.cell.id,
+            kind: 0,
+            version,
+        };
+        let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
         let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
         Ok(cladefs::Branch { cell, id: response.branch })
     }
@@ -109,10 +124,11 @@ impl Daemon {
         self.runtime.block_on(self.client.place_store(request)).map(drop)
     }
 
-    /// Shares the point the store at `path` is of, or no longer (SharePoint, TASK-395.7).
-    pub fn share(&mut self, path: &Path, shared: bool) -> Result<(), tonic::Status> {
-        let request = SharePointRequest { path: name(path), shared };
-        self.runtime.block_on(self.client.share_point(request)).map(drop)
+    /// Shares the version `version` of the cell of the store at `path`, or no longer
+    /// (ShareVersion, TASK-395.7).
+    pub fn share(&mut self, path: &Path, version: u64, shared: bool) -> Result<(), tonic::Status> {
+        let request = ShareVersionRequest { path: name(path), version, shared };
+        self.runtime.block_on(self.client.share_version(request)).map(drop)
     }
 
     pub fn make_public(&mut self, path: &Path) -> Result<(), tonic::Status> {

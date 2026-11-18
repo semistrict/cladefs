@@ -275,6 +275,7 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
+        version: state.version.unwrap_or(0),
     }
 }
 
@@ -323,8 +324,16 @@ impl Cladefsd for Control {
         &self,
         request: Request<CreateStoreRequest>,
     ) -> Result<Response<CreateStoreResponse>, Status> {
-        let CreateStoreRequest { path: store, capacity, branch, token, tenant, cell, kind } =
-            request.into_inner();
+        let CreateStoreRequest {
+            path: store,
+            capacity,
+            branch,
+            token,
+            tenant,
+            cell,
+            kind,
+            version,
+        } = request.into_inner();
         let store = path(store)?;
         let kind = match VdiskKind::try_from(kind) {
             Ok(VdiskKind::Fxfs) => Kind::Fxfs,
@@ -337,7 +346,11 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let branch = crate::Branch { cell: crate::Cell { tenant, id: cell }, id: branch };
-        let made = stores::create(store, capacity, branch, (token, kind)).await;
+        let made = match version {
+            0 => stores::create(store, capacity, branch, (token, kind)).await,
+            _ if branch.id == 0 || cell == 0 => Err(Errno::EINVAL),
+            _ => stores::create_copy(store, capacity, (branch, version), kind).await,
+        };
         reply(made.map(|made| CreateStoreResponse {
             branch: made.id,
             tenant: made.cell.tenant,
@@ -366,10 +379,10 @@ impl Cladefsd for Control {
         &self,
         request: Request<ForkStoreRequest>,
     ) -> Result<Response<ForkStoreResponse>, Status> {
-        let ForkStoreRequest { from, to, point, shared } = request.into_inner();
+        let ForkStoreRequest { from, to } = request.into_inner();
         let (from, to) = (path(from)?, path(to)?);
         let tenant = self.grants.tenant_at(&to);
-        let forked = stores::fork(from, to, tenant, (point, shared)).await;
+        let forked = stores::fork(from, to, tenant).await;
         reply(forked.map(|forked| ForkStoreResponse {
             branch: forked.id,
             tenant: forked.cell.tenant,
@@ -420,13 +433,57 @@ impl Cladefsd for Control {
         reply(stores::make_public(store, attach_only).await.map(|()| MakePublicResponse {}))
     }
 
-    async fn share_point(
+    async fn make_version(
         &self,
-        request: Request<SharePointRequest>,
-    ) -> Result<Response<SharePointResponse>, Status> {
-        let SharePointRequest { path: store, shared } = request.into_inner();
+        request: Request<MakeVersionRequest>,
+    ) -> Result<Response<MakeVersionResponse>, Status> {
+        let MakeVersionRequest { path: store, keep_last, copy } = request.into_inner();
         let store = path(store)?;
-        reply(stores::share(store, shared).await.map(|()| SharePointResponse {}))
+        let copy = match copy.is_empty() {
+            true => None,
+            false => Some(path(copy)?),
+        };
+        let keep_last = Some(keep_last).filter(|&keep| keep > 0);
+        let made = stores::make_version(store, keep_last, copy).await;
+        reply(made.map(|version| MakeVersionResponse { version }))
+    }
+
+    async fn list_versions(
+        &self,
+        request: Request<ListVersionsRequest>,
+    ) -> Result<Response<ListVersionsResponse>, Status> {
+        let store = path(request.into_inner().path)?;
+        reply(stores::versions(store).await.map(|versions| {
+            ListVersionsResponse {
+                versions: (versions.into_iter())
+                    .map(|crate::VersionInfo { id, uploaded, shared }| Version {
+                        id,
+                        uploaded,
+                        shared,
+                    })
+                    .collect(),
+            }
+        }))
+    }
+
+    async fn drop_versions(
+        &self,
+        request: Request<DropVersionsRequest>,
+    ) -> Result<Response<DropVersionsResponse>, Status> {
+        let DropVersionsRequest { path: store, versions } = request.into_inner();
+        let store = path(store)?;
+        let dropped = stores::drop_versions(store, versions.into_iter().collect()).await;
+        reply(dropped.map(|()| DropVersionsResponse {}))
+    }
+
+    async fn share_version(
+        &self,
+        request: Request<ShareVersionRequest>,
+    ) -> Result<Response<ShareVersionResponse>, Status> {
+        let ShareVersionRequest { path: store, version, shared } = request.into_inner();
+        let store = path(store)?;
+        let shared = stores::share_version(store, version, shared).await;
+        reply(shared.map(|()| ShareVersionResponse {}))
     }
 
     async fn attach_base(
@@ -759,11 +816,36 @@ impl Client {
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
             kind: VdiskKind::Fxfs.into(),
+            version: 0,
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
                 c.create_store(request).await
             })?;
+        Ok(branched(response.tenant, response.cell, response.branch))
+    }
+
+    /// Makes a copy at `path`, of `capacity` bytes, of the version `version` of the Fxfs cell
+    /// `branch` names, kept in the daemon's bucket, which forks fork (`CreateStore` with `version`).
+    pub fn copy_version(
+        &self,
+        path: &Path,
+        capacity: u64,
+        branch: crate::Branch,
+        version: u64,
+    ) -> Result<crate::Branch, crate::Error> {
+        let request = CreateStoreRequest {
+            path: name(path)?,
+            capacity,
+            branch: branch.id,
+            token: None,
+            tenant: branch.cell.tenant,
+            cell: branch.cell.id,
+            kind: VdiskKind::Fxfs.into(),
+            version,
+        };
+        let what = format!("copying version {version} to {}", path.display());
+        let response = self.call(what, |mut c| async move { c.create_store(request).await })?;
         Ok(branched(response.tenant, response.cell, response.branch))
     }
 
@@ -790,33 +872,53 @@ impl Client {
         Ok(branched(response.tenant, response.cell, response.branch))
     }
 
-    /// Forks the store at `from` to a new branch at `to`, and returns the branch (`ForkStore`).
+    /// Forks the store at `from` to a new branch at `to`, and returns the branch (`ForkStore`): a
+    /// copy of a version forks the version.
     pub fn fork_store(&self, from: &Path, to: &Path) -> Result<crate::Branch, crate::Error> {
-        self.fork_or_point(from, to, (false, false))
-    }
-
-    /// Makes a point of the store at `from`, at `to`, and returns its branch (`ForkStore` with
-    /// `point`): which any number of hosts fork at once, from copies of it (TASK-158); shared, if
-    /// `shared`, as [`Client::share_point`] shares it (TASK-395.7).
-    pub fn point_store(
-        &self,
-        from: &Path,
-        to: &Path,
-        shared: bool,
-    ) -> Result<crate::Branch, crate::Error> {
-        self.fork_or_point(from, to, (true, shared))
-    }
-
-    fn fork_or_point(
-        &self,
-        from: &Path,
-        to: &Path,
-        (point, shared): (bool, bool),
-    ) -> Result<crate::Branch, crate::Error> {
-        let request = ForkStoreRequest { from: name(from)?, to: name(to)?, point, shared };
+        let request = ForkStoreRequest { from: name(from)?, to: name(to)? };
         let what = format!("forking the store at {} to {}", from.display(), to.display());
         let response = self.call(what, |mut c| async move { c.fork_store(request).await })?;
         Ok(branched(response.tenant, response.cell, response.branch))
+    }
+
+    /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
+    /// and a copy of it at `copy` if given, and returns its ID (`MakeVersion`).
+    pub fn make_version(
+        &self,
+        path: &Path,
+        keep_last: Option<u32>,
+        copy: Option<&Path>,
+    ) -> Result<u64, crate::Error> {
+        let copy = copy.map(name).transpose()?.unwrap_or_default();
+        let request =
+            MakeVersionRequest { path: name(path)?, keep_last: keep_last.unwrap_or(0), copy };
+        let what = format!("making a version of the store at {}", path.display());
+        let response = self.call(what, |mut c| async move { c.make_version(request).await })?;
+        Ok(response.version)
+    }
+
+    /// The versions of the cell of the store at `path` (`ListVersions`).
+    pub fn list_versions(&self, path: &Path) -> Result<Vec<crate::VersionInfo>, crate::Error> {
+        let request = ListVersionsRequest { path: name(path)? };
+        let what = format!("listing the versions of the store at {}", path.display());
+        let response = self.call(what, |mut c| async move { c.list_versions(request).await })?;
+        Ok((response.versions.into_iter())
+            .map(|Version { id, uploaded, shared }| crate::VersionInfo { id, uploaded, shared })
+            .collect())
+    }
+
+    /// Drops the versions `ids` of the cell of the store at `path` (`DropVersions`).
+    pub fn drop_versions(&self, path: &Path, ids: &[u64]) -> Result<(), crate::Error> {
+        let request = DropVersionsRequest { path: name(path)?, versions: ids.to_vec() };
+        let what = format!("dropping versions of the store at {}", path.display());
+        self.call(what, |mut c| async move { c.drop_versions(request).await }).map(drop)
+    }
+
+    /// Shares the version `id` of the cell of the store at `path`, or no longer (`ShareVersion`).
+    pub fn share_version(&self, path: &Path, id: u64, shared: bool) -> Result<(), crate::Error> {
+        let request = ShareVersionRequest { path: name(path)?, version: id, shared };
+        let what = format!("sharing version {id} of the store at {}", path.display());
+        self.call(what, |mut c| async move { c.share_version(request).await }).map(drop)
     }
 
     /// Deletes the store at `path` (`DeleteStore`).
@@ -861,17 +963,6 @@ impl Client {
         let request = MakePublicRequest { path: name(path)?, attach_only: true };
         let what = format!("making the fork at {} public to attach", path.display());
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
-    }
-
-    /// Shares the point the store at `path` is of, if `shared`, or no longer (`SharePoint`,
-    /// TASK-395.7): other tenants' forks of it are made while it is shared.
-    pub fn share_point(&self, path: &Path, shared: bool) -> Result<(), crate::Error> {
-        let request = SharePointRequest { path: name(path)?, shared };
-        let what = match shared {
-            true => format!("sharing the point at {}", path.display()),
-            false => format!("unsharing the point at {}", path.display()),
-        };
-        self.call(what, |mut c| async move { c.share_point(request).await }).map(drop)
     }
 
     /// Attaches the fork at `base` to the store at `path` (`AttachBase`).

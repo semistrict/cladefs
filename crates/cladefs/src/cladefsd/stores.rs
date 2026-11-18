@@ -30,6 +30,7 @@ use extent_bucket::cache::Cache;
 use extent_bucket::cell::Kind;
 use extent_bucket::object_bucket::Stats;
 use std::borrow::Borrow;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -756,6 +757,7 @@ pub(super) async fn fork_from(
     capacity: u64,
     (path, tenant): (&Path, Option<u64>),
 ) -> Result<(), Errno> {
+    uploaded_source(from).await?;
     match fork_point(from, capacity, (path, tenant)).await {
         (Err(errno), Opened::Before) if store_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
@@ -763,6 +765,19 @@ pub(super) async fn fork_from(
             fork_point(from, capacity, (path, tenant)).await.0
         }
         (forked, _) => forked,
+    }
+}
+
+/// cladefs: if the store at `from` is a version's copy made here, of a store here, returns once that
+/// store's commits are uploaded, the version's among them, which the copy's opening reads from the
+/// bucket: a version is local as it is made, and uploaded behind.
+async fn uploaded_source(from: &Path) -> Result<(), Errno> {
+    if kept(&store_key(from)).is_some() {
+        return Ok(());
+    }
+    match crate::store_dir::source(from)? {
+        Some(source) if source.exists() => sync(source).await,
+        _ => Ok(()),
     }
 }
 
@@ -872,64 +887,29 @@ async fn point(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), E
 /// tenant's than its own (`EACCES`, TASK-395.7); nor does a store with a writer, unless it is the
 /// default tenant's, as the daemon's own stores and public bases are (`EACCES`, TASK-395.9),
 /// refused before anything is made. Only a point is shared (`EINVAL`).
-pub(super) async fn fork(
-    from: PathBuf,
-    to: PathBuf,
-    tenant: Option<u64>,
-    (point, shared): (bool, bool),
-) -> Result<Branch, Errno> {
-    if shared && !point {
-        return Err(Errno::EINVAL);
-    }
-    let forked = fork_from_store(&from, &to, tenant, point).await?;
-    if shared {
-        share(to, true).await?;
-    }
-    Ok(forked)
+pub(super) async fn fork(from: PathBuf, to: PathBuf, tenant: Option<u64>) -> Result<Branch, Errno> {
+    uploaded_source(&from).await?;
+    fork_from_store(&from, &to, tenant).await
 }
 
-/// cladefs: forks the store at `from` to `to` as [`fork`] does, a point if `point`.
-async fn fork_from_store(
-    from: &Path,
-    to: &Path,
-    tenant: Option<u64>,
-    point: bool,
-) -> Result<Branch, Errno> {
+/// cladefs: forks the store at `from` to `to` as [`fork`] does.
+async fn fork_from_store(from: &Path, to: &Path, tenant: Option<u64>) -> Result<Branch, Errno> {
     let _child = hold_to_fork(to).await?;
     let key = store_key(from);
     // cladefs: the one vdisk of a new cell of `tenant`'s, or the store's tenant's (TASK-364).
     let from_branch = extent_store::host_branch(from).map_err(|_| Errno::ENOENT)?;
     let cell = || crate::host_store::new_cell(tenant.unwrap_or(from_branch.cell.tenant));
     let was_kept = kept(&key).is_some();
-    match fork_held(from, to, cell(), point, &key).await {
-        Err(errno) if was_kept && store_at_fault(errno) => {
-            fork_held(from, to, cell(), point, &key).await
-        }
+    match fork_held(from, to, cell(), &key).await {
+        Err(errno) if was_kept && store_at_fault(errno) => fork_held(from, to, cell(), &key).await,
         forked => forked,
     }
-}
-
-/// cladefs: shares the point the store at `path` is of, if `shared`, or no longer
-/// ([`ExtentStore::share`], TASK-395.7): `EINVAL` if it is no point; `ENOENT` if no store is
-/// there, or its point was deleted. Nothing of the store here changes, open or not.
-pub(super) async fn share(path: PathBuf, shared: bool) -> Result<(), Errno> {
-    blocking(move || {
-        ExtentStore::share(&path, shared)
-            .map_err(|err| errno_of(format_args!("sharing {}", path.display()), err))
-    })
-    .await
 }
 
 /// cladefs: forks the store at `from`, whose key is `key`, to `to`, which the caller holds, as
 /// [`fork`] does, once, to a new branch of `cell`, making a point if `point`, and returns the
 /// branch. A point whose fork fails is let go of ([`let_go_failed`]).
-async fn fork_held(
-    from: &Path,
-    to: &Path,
-    cell: Cell,
-    point: bool,
-    key: &Path,
-) -> Result<Branch, Errno> {
+async fn fork_held(from: &Path, to: &Path, cell: Cell, key: &Path) -> Result<Branch, Errno> {
     let live = |connection: &Connection| {
         Some(Forked { store: Here::of(connection.store()?.clone(), None), live: true })
     };
@@ -962,10 +942,9 @@ async fn fork_held(
         fail::fail_point!("cladefsd::fork_uploaded", |_| Err(Errno::EIO));
         blocking(move || {
             let store = &store.store;
-            let forked = match (point, live) {
-                (true, _) => store.point(&to, cell),
-                (false, true) => store.fork_quiescent(&to, cell),
-                (false, false) => store.fork(&to, cell),
+            let forked = match live {
+                true => store.fork_quiescent(&to, cell),
+                false => store.fork(&to, cell),
             };
             forked.map_err(|err| errno_of(format_args!("forking to {}", to.display()), err))
         })
@@ -977,6 +956,106 @@ async fn fork_held(
         let_go_failed(key, held).await;
     }
     forked
+}
+
+/// cladefs: runs `work` on a blocking thread with the store at `path`: the one a connection has
+/// open, if one has; or opened here, which no connection opens meanwhile, and closed after.
+async fn with_store<T: Send + 'static>(
+    path: &Path,
+    work: impl FnOnce(&ExtentStore) -> Result<T, Errno> + Send + 'static,
+) -> Result<T, Errno> {
+    if let Some(store) = open_by_connection(path) {
+        return blocking(move || work(&store)).await;
+    }
+    let here = Here::open(path, hold(path).await?).await?;
+    let store = here.store().clone();
+    let done = blocking(move || work(&store.store)).await;
+    here.close().await;
+    done
+}
+
+/// cladefs: makes a version of the cell of the store at `path` ([`ExtentStore::make_version`]),
+/// keeping its newest `keep_last` if given, and a copy of it at `copy`, if given, which forks
+/// fork; returns its ID.
+pub(super) async fn make_version(
+    path: PathBuf,
+    keep_last: Option<u32>,
+    copy: Option<PathBuf>,
+) -> Result<u64, Errno> {
+    let _copy = match &copy {
+        Some(copy) => Some(hold(copy).await?),
+        None => None,
+    };
+    let at = path.clone();
+    with_store(&path, move |store| {
+        let what = || format!("making a version of {}", at.display());
+        let id = store
+            .make_version(keep_last)
+            .map_err(|err| errno_of(format_args!("{}", what()), err))?;
+        if let Some(copy) = copy {
+            store.copy_version(&copy, id).map_err(|err| {
+                errno_of(format_args!("copying version {id} to {}", copy.display()), err)
+            })?;
+        }
+        Ok(id)
+    })
+    .await
+}
+
+/// cladefs: the versions of the cell of the store at `path` ([`ExtentStore::versions`]).
+pub(super) async fn versions(path: PathBuf) -> Result<Vec<crate::VersionInfo>, Errno> {
+    with_store(&path, |store| Ok(store.versions())).await
+}
+
+/// cladefs: drops the versions `ids` of the cell of the store at `path`
+/// ([`ExtentStore::drop_versions`]).
+pub(super) async fn drop_versions(path: PathBuf, ids: BTreeSet<u64>) -> Result<(), Errno> {
+    let at = path.clone();
+    with_store(&path, move |store| {
+        store
+            .drop_versions(&ids)
+            .map_err(|err| errno_of(format_args!("dropping versions of {}", at.display()), err))
+    })
+    .await
+}
+
+/// cladefs: shares the version `id` of the cell of the store at `path`, or no longer
+/// ([`ExtentStore::share_version`]).
+pub(super) async fn share_version(path: PathBuf, id: u64, shared: bool) -> Result<(), Errno> {
+    let at = path.clone();
+    with_store(&path, move |store| {
+        store
+            .share_version(id, shared)
+            .map_err(|err| errno_of(format_args!("sharing version {id} of {}", at.display()), err))
+    })
+    .await
+}
+
+/// cladefs: makes a copy at `path`, which must not exist (`EEXIST`), of the version `version` of
+/// `branch`, kept in the daemon's bucket, of `kind` and `capacity` bytes: what forks fork on a
+/// host the version wasn't made on.
+pub(super) async fn create_copy(
+    path: PathBuf,
+    capacity: u64,
+    (branch, version): (Branch, u64),
+    kind: Kind,
+) -> Result<Branch, Errno> {
+    let held = hold(&path).await?;
+    blocking(move || {
+        let _held = held;
+        removed_if_unmade(&path)?;
+        let url = crate::host_store::bucket_for(&path).map_err(|err| {
+            log::error!("cladefsd: the bucket of {}: {err:#}", path.display());
+            Errno::EIO
+        })?;
+        let description =
+            extent_store::Description { block_size: ExtentStore::BLOCK_SIZE, capacity, branch };
+        ExtentStore::create_copy(&path, (&url, kind), description, version).map_err(|err| {
+            errno_of(format_args!("copying version {version} to {}", path.display()), err)
+        })?;
+        Ok(branch)
+    })
+    .await
 }
 
 /// Waits until every commit of the store at `path` is in the daemon's bucket, holding no thread:
@@ -1109,6 +1188,8 @@ pub(super) struct StoreState {
     pub committed: u64,
     /// What its uploader has done and has left to do, if its commits upload now.
     pub upload: Option<extent_store::upload::UploadStatus>,
+    /// The version of its cell it is a copy of, if it is one.
+    pub version: Option<u64>,
 }
 
 /// What `store` is, and holds; `open` if a connection has it open.
@@ -1121,6 +1202,7 @@ fn state_of(store: &ExtentStore, open: bool) -> Result<StoreState, Errno> {
         open,
         committed: store.committed()?,
         upload: store.upload_status()?,
+        version: store.version(),
     })
 }
 

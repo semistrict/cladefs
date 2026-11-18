@@ -415,11 +415,12 @@ fn open(path: &Path) -> ExtentStore {
     reopened(path, idle()).unwrap()
 }
 
-/// A base of `extents` extents and a point of it, made on one host, kept in `objects`, and the
+/// A base of `extents` extents and a version of it, made on one host, kept in `objects`, and the
 /// directory of another, measured, which saw neither: what the phases run on.
 struct Made {
     dir: tempfile::TempDir,
-    point: Branch,
+    /// The base's cell, and the version.
+    version: (Branch, u64),
     capacity: u64,
 }
 
@@ -427,14 +428,25 @@ impl Made {
     /// Makes them, their requests noted in `run`.
     fn new(extents: u64, objects: &Arc<dyn ObjectStore>, run: &mut Run) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        // The host the base is made on, and its point: another's than the one measured.
+        // The host the base is made on, and its version: another's than the one measured.
         let elsewhere = Arc::new(ObjectBucket::new(objects.clone(), ""));
         let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
         let made = dir.path().join("made");
         std::fs::create_dir(&made).unwrap();
-        let point = based(extents, &made, (capacity, &elsewhere), run);
+        let version = based(extents, &made, (capacity, &elsewhere), run);
         std::fs::create_dir(dir.path().join("host")).unwrap();
-        Self { dir, point, capacity }
+        Self { dir, version, capacity }
+    }
+
+    /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
+    /// as the daemon's `CreateStore` with a version, then the store's opening, make it.
+    fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> ExtentStore {
+        let ((branch, version), capacity) = (self.version, self.capacity);
+        let url = super::tests::url_of(bucket);
+        let description = extent_store::Description { block_size: BLOCK as u32, capacity, branch };
+        let kind = extent_bucket::cell::Kind::Fxfs;
+        ExtentStore::create_copy(&self.at(name), (&url, kind), description, version).unwrap();
+        ExtentStore::take_with(self.at(name), (capacity, branch, None), opening()).unwrap()
     }
 
     /// The path of the store `name` on the host measured.
@@ -444,13 +456,13 @@ impl Made {
 }
 
 /// Makes a base of `extents` extents, of `capacity` bytes, in `made` and kept in `bucket`, and a
-/// point of it, its requests noted in `run`, and returns the point.
+/// version of it, its requests noted in `run`, and returns the base's cell and the version.
 fn based(
     extents: u64,
     made: &Path,
     (capacity, bucket): (u64, &Arc<ObjectBucket>),
     run: &mut Run,
-) -> Branch {
+) -> (Branch, u64) {
     let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).unwrap();
     run.names.name(base.branch(), "base");
     // Extents of one to four blocks, so that their lengths and places in their segments vary, as
@@ -467,12 +479,10 @@ fn based(
     base.commit(None).unwrap();
     drop(base);
     let base = open(&made.join("base"));
-    let (point, asked, _) =
-        run.asked(|| base.point(made.join("point"), new_cell(DEFAULT_TENANT)).unwrap());
-    run.names.name(point, "point");
+    let (version, asked, _) = run.asked(|| base.copy_uploaded(made.join("copy")).unwrap());
     let line = asked.line(Duration::ZERO, &run.names);
-    println!("SETUP extents={extents} point of the base: {line}");
-    point
+    println!("SETUP extents={extents} version of the base: {line}");
+    (base.branch(), version)
 }
 
 /// Has `bucket` be the measured host's, as the daemon's stores are made in it, and does what a
@@ -515,7 +525,6 @@ fn recorded(
 fn lifecycle(extents: u64, latency: Duration) {
     let (objects, mut run) = recorded(memory(), extents, latency);
     let made = Made::new(extents, &objects, &mut run);
-    let (point, capacity) = (made.point, made.capacity);
     // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
     // directories of its own.
     let bucket = Arc::new(ObjectBucket::new(objects, ""));
@@ -523,16 +532,14 @@ fn lifecycle(extents: u64, latency: Duration) {
     let at = |name: &str| made.at(name);
     run.late(true);
 
-    // A restore on a host that never saw the point: its store taken from the bucket, as the
-    // daemon's `take_store` does, forked, the fork opened.
-    let taken = run.phase("cold point-open", || {
-        ExtentStore::take_with(at("point"), (capacity, point, None), opening()).unwrap()
-    });
+    // A restore on a host that never saw the version: a copy of it made, as the daemon's
+    // `CreateStore` with a version does, opened, forked, the fork opened.
+    let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
     let unwritten =
         run.phase("cold fork", || taken.fork(at("cold"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(unwritten, "cold-fork");
     let cold = run.phase("cold fork-open", || open(&at("cold")));
-    // And on one that has it open, as the daemon keeps a point open for the restores after.
+    // And on one that has it open, as the daemon keeps a copy open for the restores after.
     let fork = run.phase("warm fork", || taken.fork(at("vm"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(fork, "fork");
     let vm = run.phase("warm fork-open", || open(&at("vm")));
@@ -541,13 +548,11 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.phase("close", || drop(vm));
     let vm = run.phase("reopen", || open(&at("vm")));
     run.phase("write-commit again", || write_and_commit(&vm));
-    let snapshot =
-        run.phase("snapshot", || vm.point(at("snapshot"), new_cell(DEFAULT_TENANT)).unwrap());
-    run.names.name(snapshot, "snapshot");
+    let snapshot = run.phase("snapshot", || vm.make_version(None).unwrap());
+    run.phase("drop snapshot", || vm.drop_versions(&[snapshot].into()).unwrap());
     run.phase("close after snapshot", || drop(vm));
     let deleting = |name: &str| host_store::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
     run.phase("delete", || deleting("vm"));
-    run.phase("delete snapshot", || deleting("snapshot"));
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
     let short = taken.fork(at("short"), new_cell(DEFAULT_TENANT)).unwrap();
     run.names.name(short, "short");
@@ -560,7 +565,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.phase("delete unwritten", || deleting("cold"));
 
     run.report();
-    run.total("restore, cold", &["cold point-open", "cold fork", "cold fork-open"]);
+    run.total("restore, cold", &["cold copy-open", "cold fork", "cold fork-open"]);
     run.total("restore, warm", &["warm fork", "warm fork-open"]);
     let life = ["warm fork", "warm fork-open", "write-commit", "close", "delete after close"];
     run.total("life (restore warm, a write, close, delete)", &life);
@@ -572,9 +577,9 @@ fn lifecycle(extents: u64, latency: Duration) {
         "reopen",
         "write-commit again",
         "snapshot",
+        "drop snapshot",
         "close after snapshot",
         "delete",
-        "delete snapshot",
     ];
     run.total("life with a resume and a snapshot", &resumed);
 
@@ -654,10 +659,7 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     host(&bucket);
     let at = |name: &str| made.at(name);
     run.late(true);
-    let taking = (made.capacity, made.point, None);
-    let taken = run.phase("cold point-open", || {
-        ExtentStore::take_with(at("point"), taking, opening()).unwrap()
-    });
+    let taken = run.phase("cold copy-open", || made.copied(&bucket, "copy"));
     run.phase("cold fork", || taken.fork(at("cold"), new_cell(DEFAULT_TENANT)).unwrap());
     let cold = run.phase("cold fork-open", || open(&at("cold")));
     run.phase("warm fork", || taken.fork(at("vm"), new_cell(DEFAULT_TENANT)).unwrap());
@@ -668,10 +670,10 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold point-open", (7, 6)),
-            ("cold fork", (7, 6)),
+            ("cold copy-open", (8, 5)),
+            ("cold fork", (9, 8)),
             ("cold fork-open", (7, 7)),
-            ("warm fork", (7, 6)),
+            ("warm fork", (9, 8)),
             ("warm fork-open", (7, 7)),
         ]
     );
@@ -691,8 +693,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     let made = Made::new(16, &objects, &mut run);
     let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
     host(&bucket);
-    let taking = (made.capacity, made.point, None);
-    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    let taken = made.copied(&bucket, "copy");
     let clone = taken.fork(made.at("vm"), new_cell(DEFAULT_TENANT)).unwrap();
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
@@ -722,8 +723,7 @@ fn uploads_after_restores() {
     let made = Made::new(16, &objects, &mut run);
     let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
     host(&bucket);
-    let taking = (made.capacity, made.point, None);
-    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    let taken = made.copied(&bucket, "copy");
     for restore in 0..restores {
         let at = made.at(&format!("restore-{restore}"));
         taken.fork(&at, new_cell(DEFAULT_TENANT)).unwrap();
@@ -774,8 +774,7 @@ fn restores_connect_to_the_bucket_no_more() {
     // The host measured: a client of its own, its own pool of connections, as another host's.
     let bucket = Arc::new(ObjectBucket::new(server.objects(), ""));
     host(&bucket);
-    let taking = (made.capacity, made.point, None);
-    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    let taken = made.copied(&bucket, "copy");
     let restore = |name: &str| {
         let before = server.connections();
         taken.fork(made.at(name), new_cell(DEFAULT_TENANT)).unwrap();

@@ -1274,8 +1274,8 @@ mod tests {
         let parent = match point {
             false => base,
             true => {
-                let path = dir.path().join("point");
-                base.point_to(&path, fork_child(base.branch())).unwrap();
+                let path = dir.path().join("copy");
+                base.copy_uploaded(&path).unwrap();
                 drop(base);
                 reopened(&path, idle()).unwrap()
             }
@@ -1492,8 +1492,8 @@ mod tests {
             let parent = match point {
                 false => base,
                 true => {
-                    let path = dir.path().join("point");
-                    base.point_to(&path, fork_child(base.branch())).unwrap();
+                    let path = dir.path().join("copy");
+                    base.copy_uploaded(&path).unwrap();
                     reopened(&path, idle()).unwrap()
                 }
             };
@@ -3045,27 +3045,25 @@ mod tests {
     /// A fork of a store kept in object storage is a fork of its branch there, recorded once the
     /// parent uploaded through it: it inherits the parent's extents rather than upload them again,
     /// and what either commits after is its own.
-    /// TASK-160.10: a point's store, which its bucket says is one, refuses all that
-    /// would change what it holds, with `EROFS`, whoever asks: writes, frees, commits, a resize,
-    /// a writer taking it over. What changes none of its extents it
-    /// does: it forks, and is made public. Before, it refused none of these itself, and a resize
-    /// of one grew it.
+    /// TASK-160.10: a version's copy refuses all that would change what it holds, with `EROFS`,
+    /// whoever asks: writes, frees, commits, a resize, a writer taking it over. What changes none
+    /// of its extents it does: it forks, and is made public.
     #[test]
-    fn points_refuse_what_would_change_them() {
+    fn copies_of_versions_refuse_what_would_change_them() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let source =
             kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"root")).unwrap();
-        let path = dir.path().join("point");
-        source.point_to(&path, crate::host_store::fork_child(source.branch())).unwrap();
+        let path = dir.path().join("copy");
+        source.copy_uploaded(&path).unwrap();
         drop(source);
 
         let point = reopened(&path, idle()).unwrap();
         assert_eq!(point.access().role, crate::StoreRole::Point);
         let capacity = point.info().unwrap().capacity;
-        let own = ExtentId { branch: point.branch().id, sequence: 1 };
+        let own = ExtentId { branch: point.branch().id, sequence: 2 };
         let refused = [
             ("set_capacity", point.set_capacity(2 * capacity)),
             ("write", point.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
@@ -3085,13 +3083,14 @@ mod tests {
         point.make_public().unwrap();
     }
 
-    /// TASK-395.7: a point forks into a cell of another tenant's only while shared: refused with
+    /// TASK-395.7: a version forks into a cell of another tenant's only while shared: refused with
     /// `EACCES` before, leaving nothing at the fork's path; shared, the fork is made; unshared, new
-    /// forks are refused again. Forks into its own tenant's cells need no sharing. The point deleted
-    /// once its branch freed what it held, and the collector run, the other tenant's fork, the one
-    /// left, still reads all it inherited.
+    /// forks are refused again. Forks into its own tenant's cells need no sharing; sharing a
+    /// version the head names not is `ENOENT`. The version dropped once its cell freed what it
+    /// held, and the collector run, the other tenant's fork, the one left, still reads all it
+    /// inherited.
     #[test]
-    fn points_fork_into_other_tenants_cells_while_shared() {
+    fn versions_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
@@ -3102,11 +3101,11 @@ mod tests {
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"base")).unwrap();
-        let path = dir.path().join("point");
-        source.point_to(&path, crate::host_store::fork_child(source.branch())).unwrap();
+        let path = dir.path().join("copy");
+        let version = source.copy_uploaded(&path).unwrap();
         source.free(extent).unwrap();
         source.commit(Some(b"later")).unwrap();
-        // Another fork, gone: a checkpoint past the point's, so that only the point, and its
+        // Another fork, gone: a checkpoint past the version's, so that only the version, and its
         // forks, keep what it names.
         // Deleted as this process, no host, deletes them, of the first placement.
         let delete = |path: &std::path::Path| {
@@ -3124,16 +3123,17 @@ mod tests {
 
         assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
         assert_eq!(fork("ours", 1), (Ok(()), true));
-        ExtentStore::share(&path, true).unwrap();
+        source.share_version(version, true).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
-        ExtentStore::share(&path, false).unwrap();
+        source.share_version(version, false).unwrap();
         assert_eq!(fork("unshared", 2), (Err(Some(crate::Errno::EACCES)), false));
-        let refused = ExtentStore::share(dir.path().join("theirs"), true);
-        assert_eq!(refused.map_err(|err| err.errno()), Err(Some(crate::Errno::EINVAL)));
+        let refused = source.share_version(version + 1, true);
+        assert_eq!(refused.map_err(|err| err.errno()), Err(Some(crate::Errno::ENOENT)));
 
         drop(point);
         delete(&dir.path().join("ours"));
         delete(&path);
+        source.drop_versions(&[version].into()).unwrap();
         let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
             let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
@@ -3155,7 +3155,7 @@ mod tests {
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
     /// no more.
     #[test]
-    fn encrypted_points_fork_into_other_tenants_cells_while_shared() {
+    fn encrypted_versions_fork_into_other_tenants_cells_while_shared() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {
@@ -3172,8 +3172,8 @@ mod tests {
         let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
         source.commit(Some(b"base")).unwrap();
-        let path = dir.path().join("point");
-        source.point_to(&path, crate::host_store::fork_child(source.branch())).unwrap();
+        let path = dir.path().join("copy");
+        let version = source.copy_uploaded(&path).unwrap();
         source.free(extent).unwrap();
         source.commit(Some(b"later")).unwrap();
         let delete = |path: &std::path::Path| {
@@ -3187,7 +3187,7 @@ mod tests {
         };
         assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
         assert_eq!(fork("ours", 1), (Ok(()), true));
-        ExtentStore::share(&path, true).unwrap();
+        source.share_version(version, true).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         let record = futures::executor::block_on(branch::record(&*bucket, theirs.branch()));
@@ -3199,6 +3199,7 @@ mod tests {
         drop(point);
         delete(&dir.path().join("ours"));
         delete(&path);
+        source.drop_versions(&[version].into()).unwrap();
         let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
             let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
@@ -3468,9 +3469,7 @@ mod tests {
             let refused = [
                 ("fork", errno(acme.fork(&to, cell(tenant)).map(drop))),
                 ("fork_quiescent", errno(acme.fork_quiescent(&to, cell(tenant)).map(drop))),
-                ("point", errno(acme.point(&to, cell(tenant)).map(drop))),
                 ("fork_to", errno(acme.fork_to(&to, of(tenant)))),
-                ("point_to", errno(acme.point_to(&to, of(tenant)))),
             ];
             for (how, refused) in refused {
                 assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{how} to tenant {tenant}");

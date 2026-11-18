@@ -117,7 +117,10 @@ const (
 	Cladefsd_ResizeStore_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/ResizeStore"
 	Cladefsd_PlaceStore_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/PlaceStore"
 	Cladefsd_MakePublic_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/MakePublic"
-	Cladefsd_SharePoint_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/SharePoint"
+	Cladefsd_MakeVersion_FullMethodName       = "/cladefs.cladefsd.v1.Cladefsd/MakeVersion"
+	Cladefsd_ListVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ListVersions"
+	Cladefsd_DropVersions_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/DropVersions"
+	Cladefsd_ShareVersion_FullMethodName      = "/cladefs.cladefsd.v1.Cladefsd/ShareVersion"
 	Cladefsd_AttachBase_FullMethodName        = "/cladefs.cladefsd.v1.Cladefsd/AttachBase"
 	Cladefsd_SyncStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/SyncStore"
 	Cladefsd_StatStore_FullMethodName         = "/cladefs.cladefsd.v1.Cladefsd/StatStore"
@@ -179,12 +182,21 @@ type CladefsdClient interface {
 	// Makes a store a public base, and the branches it inherited from: their pages are cached once,
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(ctx context.Context, in *MakePublicRequest, opts ...grpc.CallOption) (*MakePublicResponse, error)
-	// Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-	// than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
-	// fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
-	// (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
-	// store on this host changes: the point's record in the daemon's bucket says it, for every host.
-	SharePoint(ctx context.Context, in *SharePointRequest, opts ...grpc.CallOption) (*SharePointResponse, error)
+	// Makes a version of a store's cell: a name for its state as of its last commit, with nothing
+	// open on it (FAILED_PRECONDITION, EBUSY, otherwise), as with its guest's filesystem frozen. It
+	// is one commit on this host, durable once this returns, and asks nothing of the daemon's
+	// bucket: the cell's head names it once its commit is uploaded, behind. Forks are made of a
+	// version, through a copy of it (`copy`, or CreateStore's `version` on another host).
+	MakeVersion(ctx context.Context, in *MakeVersionRequest, opts ...grpc.CallOption) (*MakeVersionResponse, error)
+	// Lists the versions of a store's cell: those its head names, then those made here not yet
+	// uploaded.
+	ListVersions(ctx context.Context, in *ListVersionsRequest, opts ...grpc.CallOption) (*ListVersionsResponse, error)
+	// Drops versions of a store's cell. What forks of one inherited stays until they go.
+	DropVersions(ctx context.Context, in *DropVersionsRequest, opts ...grpc.CallOption) (*DropVersionsResponse, error)
+	// Shares an uploaded version, or no longer: while shared, it forks into cells of other tenants'
+	// than its own, as a base image many tenants fork; unshared, such forks fail
+	// (PERMISSION_DENIED, EACCES), and those made live on.
+	ShareVersion(ctx context.Context, in *ShareVersionRequest, opts ...grpc.CallOption) (*ShareVersionResponse, error)
 	// Attaches a fork of a store to a store, a VM's or stopped, and so to its forks and the VMs
 	// restored from them: reads and maps of the fork's extents the store doesn't hold read through
 	// to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
@@ -370,10 +382,40 @@ func (c *cladefsdClient) MakePublic(ctx context.Context, in *MakePublicRequest, 
 	return out, nil
 }
 
-func (c *cladefsdClient) SharePoint(ctx context.Context, in *SharePointRequest, opts ...grpc.CallOption) (*SharePointResponse, error) {
+func (c *cladefsdClient) MakeVersion(ctx context.Context, in *MakeVersionRequest, opts ...grpc.CallOption) (*MakeVersionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SharePointResponse)
-	err := c.cc.Invoke(ctx, Cladefsd_SharePoint_FullMethodName, in, out, cOpts...)
+	out := new(MakeVersionResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_MakeVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) ListVersions(ctx context.Context, in *ListVersionsRequest, opts ...grpc.CallOption) (*ListVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVersionsResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ListVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) DropVersions(ctx context.Context, in *DropVersionsRequest, opts ...grpc.CallOption) (*DropVersionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DropVersionsResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_DropVersions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cladefsdClient) ShareVersion(ctx context.Context, in *ShareVersionRequest, opts ...grpc.CallOption) (*ShareVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShareVersionResponse)
+	err := c.cc.Invoke(ctx, Cladefsd_ShareVersion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -601,12 +643,21 @@ type CladefsdServer interface {
 	// Makes a store a public base, and the branches it inherited from: their pages are cached once,
 	// in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
 	MakePublic(context.Context, *MakePublicRequest) (*MakePublicResponse, error)
-	// Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-	// than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
-	// fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
-	// (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
-	// store on this host changes: the point's record in the daemon's bucket says it, for every host.
-	SharePoint(context.Context, *SharePointRequest) (*SharePointResponse, error)
+	// Makes a version of a store's cell: a name for its state as of its last commit, with nothing
+	// open on it (FAILED_PRECONDITION, EBUSY, otherwise), as with its guest's filesystem frozen. It
+	// is one commit on this host, durable once this returns, and asks nothing of the daemon's
+	// bucket: the cell's head names it once its commit is uploaded, behind. Forks are made of a
+	// version, through a copy of it (`copy`, or CreateStore's `version` on another host).
+	MakeVersion(context.Context, *MakeVersionRequest) (*MakeVersionResponse, error)
+	// Lists the versions of a store's cell: those its head names, then those made here not yet
+	// uploaded.
+	ListVersions(context.Context, *ListVersionsRequest) (*ListVersionsResponse, error)
+	// Drops versions of a store's cell. What forks of one inherited stays until they go.
+	DropVersions(context.Context, *DropVersionsRequest) (*DropVersionsResponse, error)
+	// Shares an uploaded version, or no longer: while shared, it forks into cells of other tenants'
+	// than its own, as a base image many tenants fork; unshared, such forks fail
+	// (PERMISSION_DENIED, EACCES), and those made live on.
+	ShareVersion(context.Context, *ShareVersionRequest) (*ShareVersionResponse, error)
 	// Attaches a fork of a store to a store, a VM's or stopped, and so to its forks and the VMs
 	// restored from them: reads and maps of the fork's extents the store doesn't hold read through
 	// to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
@@ -736,8 +787,17 @@ func (UnimplementedCladefsdServer) PlaceStore(context.Context, *PlaceStoreReques
 func (UnimplementedCladefsdServer) MakePublic(context.Context, *MakePublicRequest) (*MakePublicResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method MakePublic not implemented")
 }
-func (UnimplementedCladefsdServer) SharePoint(context.Context, *SharePointRequest) (*SharePointResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method SharePoint not implemented")
+func (UnimplementedCladefsdServer) MakeVersion(context.Context, *MakeVersionRequest) (*MakeVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MakeVersion not implemented")
+}
+func (UnimplementedCladefsdServer) ListVersions(context.Context, *ListVersionsRequest) (*ListVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVersions not implemented")
+}
+func (UnimplementedCladefsdServer) DropVersions(context.Context, *DropVersionsRequest) (*DropVersionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropVersions not implemented")
+}
+func (UnimplementedCladefsdServer) ShareVersion(context.Context, *ShareVersionRequest) (*ShareVersionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShareVersion not implemented")
 }
 func (UnimplementedCladefsdServer) AttachBase(context.Context, *AttachBaseRequest) (*AttachBaseResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AttachBase not implemented")
@@ -958,20 +1018,74 @@ func _Cladefsd_MakePublic_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Cladefsd_SharePoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SharePointRequest)
+func _Cladefsd_MakeVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MakeVersionRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CladefsdServer).SharePoint(ctx, in)
+		return srv.(CladefsdServer).MakeVersion(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Cladefsd_SharePoint_FullMethodName,
+		FullMethod: Cladefsd_MakeVersion_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CladefsdServer).SharePoint(ctx, req.(*SharePointRequest))
+		return srv.(CladefsdServer).MakeVersion(ctx, req.(*MakeVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_ListVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ListVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ListVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ListVersions(ctx, req.(*ListVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_DropVersions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropVersionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).DropVersions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_DropVersions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).DropVersions(ctx, req.(*DropVersionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Cladefsd_ShareVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShareVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CladefsdServer).ShareVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Cladefsd_ShareVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CladefsdServer).ShareVersion(ctx, req.(*ShareVersionRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1340,8 +1454,20 @@ var Cladefsd_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Cladefsd_MakePublic_Handler,
 		},
 		{
-			MethodName: "SharePoint",
-			Handler:    _Cladefsd_SharePoint_Handler,
+			MethodName: "MakeVersion",
+			Handler:    _Cladefsd_MakeVersion_Handler,
+		},
+		{
+			MethodName: "ListVersions",
+			Handler:    _Cladefsd_ListVersions_Handler,
+		},
+		{
+			MethodName: "DropVersions",
+			Handler:    _Cladefsd_DropVersions_Handler,
+		},
+		{
+			MethodName: "ShareVersion",
+			Handler:    _Cladefsd_ShareVersion_Handler,
 		},
 		{
 			MethodName: "AttachBase",

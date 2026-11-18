@@ -13,9 +13,12 @@
 //! cladefsctl sync DIR
 //! cladefsctl import DIR CAPACITY IMAGE [REF]
 //! cladefsctl fork SRC DST
-//! cladefsctl point SRC DST [--shared]
-//! cladefsctl share DIR
-//! cladefsctl unshare DIR
+//! cladefsctl version DIR [COPY]
+//! cladefsctl versions DIR
+//! cladefsctl drop-versions DIR VERSION...
+//! cladefsctl share DIR VERSION
+//! cladefsctl unshare DIR VERSION
+//! cladefsctl copy DIR CAPACITY BRANCH VERSION
 //! cladefsctl delete DIR
 //! cladefsctl drop DIR
 //! cladefsctl resize DIR CAPACITY
@@ -67,13 +70,15 @@
 //! nothing is open on it, as with the guest's filesystem frozen (fsfreeze), and refused otherwise
 //! (TASK-39.3). The new branch is a fork of SRC's in its bucket, made once SRC's commits are
 //! uploaded, holding its extents without uploading them again; DST is a store of its own, which
-//! reads them there (TASK-165.7). `point` forks so, once nothing is open, to a point (TASK-158): a name of SRC's
-//! state as it is, written by none, which any number of hosts fork at once, each from a copy `take`
-//! makes of its branch, as a VM snapshot's restores do; for a base forked on several hosts; with
-//! `--shared`, shared once made, as `share` shares it. `share` shares the point the store at DIR
-//! is of (TASK-395.7): it forks into cells of other tenants' than its own, as a base image or a
-//! VM snapshot's point many tenants fork, which a point not shared refuses (`EACCES`); `unshare`
-//! stops such forks, those made living on. The point's record in its bucket says it, for every
+//! reads them there (TASK-165.7). `version` makes a version of the cell of the store at DIR, once
+//! nothing is open on it: one commit here, uploaded behind, which it prints the ID of, in
+//! hexadecimal; with COPY, a copy of it there too, which `fork` forks, here at once, the version
+//! uploaded first. `copy` makes such a copy on another host, of the version VERSION of BRANCH
+//! (TENANT/CELL/ID), as many hosts at once as wanted. `versions` lists the cell's versions,
+//! `drop-versions` drops some, what forks of them inherited staying until they go. `share` shares
+//! a version (TASK-395.7): it forks into cells of other tenants' than its own, as a base image
+//! many tenants fork, which a version not shared refuses (`EACCES`); `unshare` stops such forks,
+//! those made living on. The cell's head says it, for every
 //! host. `delete` deletes a store, a fork or not: its branch in its bucket, its forks' living on,
 //! and its directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
 //! host's copy of it, its branch staying in the bucket (TASK-154): what `take` made, once this host
@@ -153,12 +158,28 @@ fn id(what: &str, given: &str) -> anyhow::Result<u64> {
     base32_id::parse(given).with_context(|| format!("{what} must be in base 32"))
 }
 
+/// A version's ID, in hexadecimal, as `version` prints it.
+fn version(id: &str) -> anyhow::Result<u64> {
+    u64::from_str_radix(id, 16).map_err(|_| anyhow::anyhow!("bad version {id:?}: hexadecimal"))
+}
+
+/// Prints `versions`, one a line: its ID, in hexadecimal, and whether it is uploaded and shared.
+fn print_versions(versions: &[cladefs::VersionInfo]) {
+    for cladefs::VersionInfo { id, uploaded, shared } in versions {
+        let uploaded = if *uploaded { "uploaded" } else { "local" };
+        let shared = if *shared { " shared" } else { "" };
+        println!("{id:x} {uploaded}{shared}");
+    }
+}
+
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
         "usage: cladefsctl take DIR CAPACITY BRANCH [TOKEN] | cladefsctl create DIR CAPACITY | \
          cladefsctl place DIR TOKEN | \
          cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | cladefsctl fork SRC DST | \
-         cladefsctl point SRC DST [--shared] | cladefsctl share DIR | cladefsctl unshare DIR | \
+         cladefsctl version DIR [COPY] | cladefsctl versions DIR | \
+         cladefsctl drop-versions DIR VERSION... | cladefsctl share DIR VERSION | \
+         cladefsctl unshare DIR VERSION | cladefsctl copy DIR CAPACITY BRANCH VERSION | \
          cladefsctl delete DIR | cladefsctl drop DIR | \
          cladefsctl resize DIR CAPACITY | cladefsctl public DIR | \
          cladefsctl public-attach-only DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
@@ -209,17 +230,34 @@ enum Command {
         image: PathBuf,
         reference: Option<String>,
     },
-    /// A fork, a point if `point`, shared if `shared` (TASK-395.7).
     Fork {
         src: PathBuf,
         dst: PathBuf,
-        point: bool,
-        shared: bool,
     },
-    /// cladefs: a point shared, or no longer (TASK-395.7).
+    /// cladefs: a version made, and a copy of it if `copy` is given (doc-20).
+    Version {
+        dir: PathBuf,
+        copy: Option<PathBuf>,
+    },
+    Versions {
+        dir: PathBuf,
+    },
+    DropVersions {
+        dir: PathBuf,
+        versions: Vec<u64>,
+    },
+    /// cladefs: a version shared, or no longer (TASK-395.7).
     Share {
         dir: PathBuf,
+        version: u64,
         shared: bool,
+    },
+    /// cladefs: a copy of a version, made on any host.
+    Copy {
+        dir: PathBuf,
+        capacity: u64,
+        branch: cladefs::Branch,
+        version: u64,
     },
     Delete {
         dir: PathBuf,
@@ -380,17 +418,26 @@ impl Command {
                 image: image.into(),
                 reference: rest.first().map(|reference| reference.to_string()),
             },
-            ["fork", src, dst] => {
-                Self::Fork { src: src.into(), dst: dst.into(), point: false, shared: false }
+            ["fork", src, dst] => Self::Fork { src: src.into(), dst: dst.into() },
+            ["version", dir] => Self::Version { dir: dir.into(), copy: None },
+            ["version", dir, copy] => Self::Version { dir: dir.into(), copy: Some(copy.into()) },
+            ["versions", dir] => Self::Versions { dir: dir.into() },
+            ["drop-versions", dir, ref ids @ ..] if !ids.is_empty() => Self::DropVersions {
+                dir: dir.into(),
+                versions: ids.iter().map(|id| version(id)).collect::<anyhow::Result<_>>()?,
+            },
+            ["share", dir, id] => {
+                Self::Share { dir: dir.into(), version: version(id)?, shared: true }
             }
-            ["point", src, dst] => {
-                Self::Fork { src: src.into(), dst: dst.into(), point: true, shared: false }
+            ["unshare", dir, id] => {
+                Self::Share { dir: dir.into(), version: version(id)?, shared: false }
             }
-            ["point", src, dst, "--shared"] => {
-                Self::Fork { src: src.into(), dst: dst.into(), point: true, shared: true }
-            }
-            ["share", dir] => Self::Share { dir: dir.into(), shared: true },
-            ["unshare", dir] => Self::Share { dir: dir.into(), shared: false },
+            ["copy", dir, size, branch, id] => Self::Copy {
+                dir: dir.into(),
+                capacity: capacity(size)?,
+                branch: branch.parse().map_err(anyhow::Error::msg)?,
+                version: version(id)?,
+            },
             ["delete", dir] => Self::Delete { dir: dir.into() },
             ["drop", dir] => Self::Drop { dir: dir.into() },
             ["resize", dir, size] => Self::Resize { dir: dir.into(), capacity: capacity(size)? },
@@ -442,13 +489,16 @@ impl Command {
             Self::Import { dir, capacity, image, reference } => {
                 daemon.import_image(&dir, capacity, &image, reference.as_deref())?;
             }
-            Self::Fork { src, dst, point: false, .. } => {
-                println!("{}", daemon.fork_store(&src, &dst)?);
+            Self::Fork { src, dst } => println!("{}", daemon.fork_store(&src, &dst)?),
+            Self::Version { dir, copy } => {
+                println!("{:x}", daemon.make_version(&dir, None, copy.as_deref())?);
             }
-            Self::Fork { src, dst, point: true, shared } => {
-                println!("{}", daemon.point_store(&src, &dst, shared)?);
+            Self::Versions { dir } => print_versions(&daemon.list_versions(&dir)?),
+            Self::DropVersions { dir, versions } => daemon.drop_versions(&dir, &versions)?,
+            Self::Share { dir, version, shared } => daemon.share_version(&dir, version, shared)?,
+            Self::Copy { dir, capacity, branch, version } => {
+                daemon.copy_version(&dir, capacity, branch, version)?;
             }
-            Self::Share { dir, shared } => daemon.share_point(&dir, shared)?,
             Self::Delete { dir } => daemon.delete_store(&dir)?,
             Self::Drop { dir } => daemon.drop_store(&dir)?,
             Self::Resize { dir, capacity } => daemon.resize_store(&dir, capacity)?,
@@ -559,20 +609,32 @@ impl Command {
                 futures::executor::block_on(made)
                     .with_context(|| format!("importing {}", image.display()))?;
             }
-            Self::Fork { src, dst, point, shared } => {
+            Self::Fork { src, dst } => {
                 let store = ExtentStore::open(&src)?;
-                // The one vdisk of a new cell of the store's tenant's (TASK-364).
+                // A new cell of the store's tenant's (TASK-364).
                 let cell = cladefs::new_cell(store.branch().cell.tenant);
-                let branch = match point {
-                    true => store.point(&dst, cell)?,
-                    false => store.fork(&dst, cell)?,
-                };
-                if shared {
-                    ExtentStore::share(&dst, true)?;
-                }
-                println!("{branch}");
+                println!("{}", store.fork(&dst, cell)?);
             }
-            Self::Share { dir, shared } => ExtentStore::share(&dir, shared)?,
+            Self::Version { dir, copy } => {
+                let store = ExtentStore::open(&dir)?;
+                let id = store.make_version(None)?;
+                if let Some(copy) = copy {
+                    store.copy_version(&copy, id)?;
+                }
+                println!("{id:x}");
+            }
+            Self::Versions { dir } => print_versions(&ExtentStore::open(&dir)?.versions()),
+            Self::DropVersions { dir, versions } => {
+                ExtentStore::open(&dir)?.drop_versions(&versions.into_iter().collect())?;
+            }
+            Self::Share { dir, version, shared } => {
+                ExtentStore::open(&dir)?.share_version(version, shared)?;
+            }
+            Self::Copy { dir, capacity, branch, version } => bail!(
+                "copying version {version:x} of {branch} to {} ({capacity} bytes) needs the extent \
+                 daemon (CLADEFSD_GRPC)",
+                dir.display()
+            ),
             Self::Delete { dir } => {
                 let bucket = ExtentStore::bucket_at(&dir)?;
                 ExtentStore::delete(&dir, bucket.as_deref())?

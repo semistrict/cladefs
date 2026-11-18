@@ -167,28 +167,26 @@ fn copies_are_dropped_through_the_daemon() {
 /// TASK-395.7: `cladefsctl point --shared` makes a point shared, as its record in its bucket says,
 /// which `unshare` and `share` change; a store of no point is refused.
 #[test]
-fn points_are_shared_and_unshared_locally() {
+fn versions_are_shared_and_unshared_locally() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
     let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket), ("CLADEFSD_TOKEN", "1")]);
-    let (base, point) = (dir.path().join("base"), dir.path().join("point"));
+    let (base, copy) = (dir.path().join("base"), dir.path().join("copy"));
     cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
-    let printed =
-        cladefsctl.run(&[Path::new("point"), &base, &point, Path::new("--shared")]).unwrap();
-    let branch: cladefs::Branch = printed.trim().parse().unwrap();
-    let bucket = ExtentStore::bucket_at(&point).unwrap().unwrap();
-    let shared = || {
-        let record = extent_bucket::branch::record(&*bucket, branch);
-        futures::executor::block_on(record).unwrap().unwrap().shared
-    };
-    assert!(shared(), "made a point not shared");
-    cladefsctl.run(&[Path::new("unshare"), &point]).unwrap();
-    assert!(!shared(), "left shared");
-    cladefsctl.run(&[Path::new("share"), &point]).unwrap();
-    assert!(shared(), "left unshared");
-    let error = cladefsctl.run(&[Path::new("share"), &base]).expect_err("shared what is no point");
-    assert!(error.contains("is no point"), "{error}");
+    let printed = cladefsctl.run(&[Path::new("version"), &base, &copy]).unwrap();
+    let version = printed.trim().to_owned();
+    let listed = || cladefsctl.run(&[Path::new("versions"), &base]).unwrap();
+    assert_eq!(listed(), format!("{version} uploaded\n"));
+    let id = Path::new(&version);
+    cladefsctl.run(&[Path::new("share"), &base, id]).unwrap();
+    assert_eq!(listed(), format!("{version} uploaded shared\n"));
+    cladefsctl.run(&[Path::new("unshare"), &base, id]).unwrap();
+    assert_eq!(listed(), format!("{version} uploaded\n"));
+    let forked = cladefsctl.run(&[Path::new("fork"), &copy, &dir.path().join("fork")]);
+    assert!(forked.is_ok(), "{forked:?}");
+    cladefsctl.run(&[Path::new("drop-versions"), &base, id]).unwrap();
+    assert_eq!(listed(), "");
 }
 
 #[test]

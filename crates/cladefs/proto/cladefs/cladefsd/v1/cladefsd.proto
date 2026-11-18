@@ -132,12 +132,21 @@ service Cladefsd {
   // Makes a store a public base, and the branches it inherited from: their pages are cached once,
   // in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
   rpc MakePublic(MakePublicRequest) returns (MakePublicResponse);
-  // Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-  // than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
-  // fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
-  // (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
-  // store on this host changes: the point's record in the daemon's bucket says it, for every host.
-  rpc SharePoint(SharePointRequest) returns (SharePointResponse);
+  // Makes a version of a store's cell: a name for its state as of its last commit, with nothing
+  // open on it (FAILED_PRECONDITION, EBUSY, otherwise), as with its guest's filesystem frozen. It
+  // is one commit on this host, durable once this returns, and asks nothing of the daemon's
+  // bucket: the cell's head names it once its commit is uploaded, behind. Forks are made of a
+  // version, through a copy of it (`copy`, or CreateStore's `version` on another host).
+  rpc MakeVersion(MakeVersionRequest) returns (MakeVersionResponse);
+  // Lists the versions of a store's cell: those its head names, then those made here not yet
+  // uploaded.
+  rpc ListVersions(ListVersionsRequest) returns (ListVersionsResponse);
+  // Drops versions of a store's cell. What forks of one inherited stays until they go.
+  rpc DropVersions(DropVersionsRequest) returns (DropVersionsResponse);
+  // Shares an uploaded version, or no longer: while shared, it forks into cells of other tenants'
+  // than its own, as a base image many tenants fork; unshared, such forks fail
+  // (PERMISSION_DENIED, EACCES), and those made live on.
+  rpc ShareVersion(ShareVersionRequest) returns (ShareVersionResponse);
   // Attaches a fork of a store to a store, a VM's or stopped, and so to its forks and the VMs
   // restored from them: reads and maps of the fork's extents the store doesn't hold read through
   // to it, read-only. Everything the fork holds is readable to the guest, which names extents, so
@@ -260,6 +269,10 @@ message CreateStoreRequest {
   uint64 cell = 6;
   // What the cell's filesystem is, which says what opens it.
   VdiskKind kind = 7;
+  // If not 0, the store is a copy of this version of `branch`, which must be named: the cell's
+  // state at the version, which nothing writes, and which ForkStore forks, on as many hosts at
+  // once as wanted. Its first fork waits for the cell's head to name the version.
+  uint64 version = 8;
 }
 
 // What a cell's filesystem is (the type's name is renamed with the rest, TASK-508.4).
@@ -325,16 +338,7 @@ message ForkStoreRequest {
   // the filesystem of a new cell of the granted tenant's whose directory `to` is in, or else of
   // `from`'s tenant.
   reserved 3;
-  // Whether the fork is a point (TASK-158): a name of `from`'s state as it is, which any number of
-  // hosts read and fork at once, and none writes, as a VM snapshot's is. Forks of it on another
-  // host: CreateStore of its branch there, then ForkStore from that copy, as many and on as many
-  // hosts at once as wanted. `from` must have nothing open (FAILED_PRECONDITION, EBUSY), as a fork
-  // of a store a VM has open does, and be no point itself (INVALID_ARGUMENT): fork that instead.
-  bool point = 4;
-  // Whether the point is shared once made, as SharePoint shares it (TASK-395.7): only with
-  // `point` (INVALID_ARGUMENT otherwise). If sharing it fails, the point stands, not shared, and
-  // the call fails: SharePoint shares it then.
-  bool shared = 5;
+  reserved 4, 5;
 }
 
 // The fork made.
@@ -387,16 +391,68 @@ message PlaceStoreRequest {
 // The store placed.
 message PlaceStoreResponse {}
 
-// Shares a point, or no longer.
-message SharePointRequest {
-  // A store of the point: the one ForkStore made, or a copy CreateStore made, on this host.
+// Makes a version of a store's cell.
+message MakeVersionRequest {
+  // The store, a VM's or not.
   string path = 1;
-  // Whether other tenants' forks of it are made from now on.
-  bool shared = 2;
+  // If not 0, how many versions of the cell to keep, this one the newest: the rest are dropped
+  // once the head names it.
+  uint32 keep_last = 2;
+  // If not empty, where to make a copy of the version on this host, which must not exist
+  // (ALREADY_EXISTS), for ForkStore to fork.
+  string copy = 3;
 }
 
-// The point shared, or no longer.
-message SharePointResponse {}
+// The version made.
+message MakeVersionResponse {
+  // Its ID, unique in its cell.
+  uint64 version = 1;
+}
+
+// Lists the versions of a store's cell.
+message ListVersionsRequest {
+  // The store.
+  string path = 1;
+}
+
+// A version of a cell.
+message Version {
+  // Its ID.
+  uint64 id = 1;
+  // Whether the cell's head names it: forks of it are made on any host then.
+  bool uploaded = 2;
+  // Whether forks of it into other tenants' cells are made (ShareVersion).
+  bool shared = 3;
+}
+
+// The versions of the cell, oldest first.
+message ListVersionsResponse {
+  repeated Version versions = 1;
+}
+
+// Drops versions of a store's cell.
+message DropVersionsRequest {
+  // The store.
+  string path = 1;
+  // The versions to drop.
+  repeated uint64 versions = 2;
+}
+
+// The versions dropped.
+message DropVersionsResponse {}
+
+// Shares a version, or no longer.
+message ShareVersionRequest {
+  // The store whose cell's version it is.
+  string path = 1;
+  // The version, uploaded.
+  uint64 version = 2;
+  // Whether other tenants' forks of it are made from now on.
+  bool shared = 3;
+}
+
+// The version shared, or no longer.
+message ShareVersionResponse {}
 
 // Makes a store a public base.
 message MakePublicRequest {
@@ -484,6 +540,9 @@ message StatStoreResponse {
   uint64 own_extents = 19;
   // How many it holds that it inherited: those whose bytes are `inherited`.
   uint64 inherited_extents = 20;
+  // The version of its cell it is a copy of (MakeVersion's `copy`, CreateStore's `version`), or
+  // 0 if it is none: what a copy on another host is made of.
+  uint64 version = 21;
 }
 
 // Asks for the stores the daemon serves.

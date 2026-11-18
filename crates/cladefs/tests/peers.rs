@@ -139,10 +139,16 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     store.commit(None).unwrap();
     drop(store);
     first.control.sync_store(&base).unwrap();
-    let point = first.control.point_store(&base, &hosts[0].join("point"), false).unwrap();
+    let version = first.control.make_version(&base, None, None).unwrap();
+    first.control.sync_store(&base).unwrap();
+    let point = first.control.stat_store(&base).unwrap();
+    let point = cladefs::Branch {
+        cell: cladefs::Cell { tenant: point.tenant, id: point.cell },
+        id: point.branch,
+    };
 
-    let (copy, fork) = (hosts[1].join("point"), hosts[1].join("fork"));
-    second.control.create_store(&copy, CAPACITY, point, None).unwrap();
+    let (copy, fork) = (hosts[1].join("copy"), hosts[1].join("fork"));
+    second.control.copy_version(&copy, CAPACITY, point, version).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
     let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
