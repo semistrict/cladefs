@@ -371,7 +371,7 @@ impl DaemonExtentStore {
         payload: &[u8],
         fds: &[std::os::fd::BorrowedFd<'_>],
     ) -> std::result::Result<Message, Errno> {
-        blocking(self.client.call(header, &[payload], fds))
+        blocking(self.client.call(header, &[payload], fds, None))
     }
 
     /// Frees `extent` (`FREE`).
@@ -938,7 +938,7 @@ impl Client {
     fn request_with(&self, request: &Request<'_>, kept: Option<Kept>) -> BoxFuture<'static, Reply> {
         let Encoded { header, payload, fd } = request.encode();
         let payload = payload.each_ref().map(|part| &**part);
-        self.call_with(header, &payload, fd.as_slice(), kept)
+        self.call(header, &payload, fd.as_slice(), kept)
     }
 
     fn request_blocking(&self, request: &Request<'_>) -> Reply {
@@ -947,18 +947,9 @@ impl Client {
 
     /// Sends `header`, `payload`'s parts and `fds`, a request, and returns its reply: once the
     /// protocol's bounds of what is in flight leave room for it, waiting for replies to make it,
-    /// but on the thread receiving them (TASK-79.16).
+    /// but on the thread receiving them (TASK-79.16). `kept` it holds until the daemon answers
+    /// ([`Client::request_keeping`]).
     fn call(
-        &self,
-        header: Header,
-        payload: &[&[u8]],
-        fds: &[std::os::fd::BorrowedFd<'_>],
-    ) -> BoxFuture<'static, Reply> {
-        self.call_with(header, payload, fds, None)
-    }
-
-    /// [`Client::call`], `kept` held until the daemon answers ([`Client::request_keeping`]).
-    fn call_with(
         &self,
         mut header: Header,
         payload: &[&[u8]],
