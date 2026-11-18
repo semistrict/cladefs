@@ -259,23 +259,20 @@ mod host {
     /// it, not as the snapshot does, made a store at `version` in it. Returns the tenant's socket,
     /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
     /// (TASK-364); the version stays the snapshot's tenant's, and the restores are the tenant's.
-    fn take_for_tenant(
+    /// Grants `tenant` a socket in `dir`, and shares the snapshot's version of the VM's store at
+    /// `source` with it, as its VM manager does for another tenant's restores (TASK-395.7).
+    fn share_with_tenant(
         cladefsd: &Path,
-        snapshot: &Path,
-        version: &Path,
+        source: &Path,
         dir: &Path,
         tenant: u64,
     ) -> anyhow::Result<PathBuf> {
         let control = crate::common::control(cladefsd)?;
-        let mut taken = snapshot.as_os_str().to_owned();
-        taken.push(".extent-extents");
-        // In the bucket once taken: no sync.
-        let branch = control.branch(Path::new(&taken))?;
+        let versions = control.list_versions(source)?;
+        let version = versions.last().context("the snapshot made no version")?;
+        control.share_version(source, version.id, true)?;
         let id = |name: &str| std::env::var(name).ok().map(|id| id.parse()).transpose();
-        let socket =
-            control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?;
-        control.create_store(version, CAPACITY, branch, None)?;
-        Ok(socket)
+        Ok(control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?)
     }
 
     fn read_file(fs: &Filesystem, name: &str) -> Vec<u8> {
@@ -387,15 +384,15 @@ mod host {
                 )?;
                 source.kill()?;
             }
-            // The snapshot's memory as a memory memory_cell's version, its file imported into it.
-            let memory_point = dir.join("memory-version");
+            // The snapshot's memory as a memory cell's version, its file imported into it.
+            let mut memory_version = None;
             if self.memory == Memory::Cell {
                 let size = std::fs::metadata(&memory)?.len();
-                let memory_cell = MemoryCell::open(&cladefsd, &dir.join("memory-memory_cell"), size)?;
+                let memory_cell = MemoryCell::open(&cladefsd, &dir.join("memory-cell"), size)?;
                 let start = std::time::Instant::now();
                 memory_cell.import(&memory)?;
                 eprintln!("memory: imported in {:?}", start.elapsed());
-                memory_cell.version_copy(&memory_point)?;
+                memory_version = Some(memory_cell.make_version()?);
                 memory_cell.close()?;
                 // The import left the memory's pages in the daemon's memory: evicted, so that the
                 // restores page in what they read, the first of them at least.
@@ -431,23 +428,20 @@ mod host {
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),
-                            "copy_on_host": elsewhere.join("version"),
                             "cladefsd_socket": cladefsd,
                         }])
                     }
-                    // The snapshot's own copy, where it is: only the store to name.
+                    // The snapshot's own tenant's: only the store to name.
                     Mode::TenantMigrate if name == "here" => serde_json::json!([
                         { "id": "extents", "path_on_host": store(dir, name) },
                     ]),
                     Mode::TenantMigrate => {
                         std::fs::create_dir_all(&elsewhere)?;
-                        let version = elsewhere.join("version");
-                        let socket =
-                            take_for_tenant(&cladefsd, &snapshot, &version, &elsewhere, id)?;
+                        let source = store(dir, "source");
+                        let socket = share_with_tenant(&cladefsd, &source, &elsewhere, id)?;
                         serde_json::json!([{
                             "id": "extents",
                             "path_on_host": store(&elsewhere, name),
-                            "copy_on_host": version,
                             "cladefsd_socket": socket,
                         }])
                     }
@@ -467,8 +461,11 @@ mod host {
                         "backend_type": "Cell",
                         "backend_path": dir.join(format!("memory-{name}")),
                     });
+                    let version = memory_version.context("the memory cell made no version")?;
                     load["memory_cell"] = serde_json::json!({
-                        "copy_on_host": memory_point,
+                        "tenant": version.tenant,
+                        "cell": version.cell,
+                        "version": version.version,
                         "cladefsd_socket": cladefsd,
                     });
                 }

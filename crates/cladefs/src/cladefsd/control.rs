@@ -275,7 +275,6 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
-        version: state.version.unwrap_or(0),
     }
 }
 
@@ -324,16 +323,8 @@ impl Cladefsd for Control {
         &self,
         request: Request<CreateStoreRequest>,
     ) -> Result<Response<CreateStoreResponse>, Status> {
-        let CreateStoreRequest {
-            path: store,
-            capacity,
-            branch,
-            token,
-            tenant,
-            cell,
-            kind,
-            version,
-        } = request.into_inner();
+        let CreateStoreRequest { path: store, capacity, branch, token, tenant, cell, kind } =
+            request.into_inner();
         let store = path(store)?;
         let kind = match CellKind::try_from(kind) {
             Ok(CellKind::Fxfs) => Kind::Fxfs,
@@ -346,11 +337,7 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let branch = crate::Branch { cell: crate::Cell { tenant, id: cell }, id: branch };
-        let made = match version {
-            0 => stores::create(store, capacity, branch, (token, kind)).await,
-            _ if branch.id == 0 || cell == 0 => Err(Errno::EINVAL),
-            _ => stores::create_copy(store, capacity, (branch, version), kind).await,
-        };
+        let made = stores::create(store, capacity, branch, (token, kind)).await;
         reply(made.map(|made| CreateStoreResponse {
             branch: made.id,
             tenant: made.cell.tenant,
@@ -379,10 +366,14 @@ impl Cladefsd for Control {
         &self,
         request: Request<ForkStoreRequest>,
     ) -> Result<Response<ForkStoreResponse>, Status> {
-        let ForkStoreRequest { from, to } = request.into_inner();
-        let (from, to) = (path(from)?, path(to)?);
+        let ForkStoreRequest { from, to, version, tenant: of, cell } = request.into_inner();
+        let to = path(to)?;
         let tenant = self.grants.tenant_at(&to);
-        let forked = stores::fork(from, to, tenant).await;
+        let forked = match version {
+            0 => stores::fork(path(from)?, to, tenant).await,
+            _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
+            _ => stores::fork_of_version(branched(of, cell, cell), version, to, tenant).await,
+        };
         reply(forked.map(|forked| ForkStoreResponse {
             branch: forked.id,
             tenant: forked.cell.tenant,
@@ -437,14 +428,10 @@ impl Cladefsd for Control {
         &self,
         request: Request<MakeVersionRequest>,
     ) -> Result<Response<MakeVersionResponse>, Status> {
-        let MakeVersionRequest { path: store, keep_last, copy } = request.into_inner();
+        let MakeVersionRequest { path: store, keep_last } = request.into_inner();
         let store = path(store)?;
-        let copy = match copy.is_empty() {
-            true => None,
-            false => Some(path(copy)?),
-        };
         let keep_last = Some(keep_last).filter(|&keep| keep > 0);
-        let made = stores::make_version(store, keep_last, copy).await;
+        let made = stores::make_version(store, keep_last).await;
         reply(made.map(|version| MakeVersionResponse { version }))
     }
 
@@ -816,36 +803,11 @@ impl Client {
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
             kind: CellKind::Fxfs.into(),
-            version: 0,
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
                 c.create_store(request).await
             })?;
-        Ok(branched(response.tenant, response.cell, response.branch))
-    }
-
-    /// Makes a copy at `path`, of `capacity` bytes, of the version `version` of the Fxfs cell
-    /// `branch` names, kept in the daemon's bucket, which forks fork (`CreateStore` with `version`).
-    pub fn copy_version(
-        &self,
-        path: &Path,
-        capacity: u64,
-        branch: crate::Branch,
-        version: u64,
-    ) -> Result<crate::Branch, crate::Error> {
-        let request = CreateStoreRequest {
-            path: name(path)?,
-            capacity,
-            branch: branch.id,
-            token: None,
-            tenant: branch.cell.tenant,
-            cell: branch.cell.id,
-            kind: CellKind::Fxfs.into(),
-            version,
-        };
-        let what = format!("copying version {version} to {}", path.display());
-        let response = self.call(what, |mut c| async move { c.create_store(request).await })?;
         Ok(branched(response.tenant, response.cell, response.branch))
     }
 
@@ -872,26 +834,33 @@ impl Client {
         Ok(branched(response.tenant, response.cell, response.branch))
     }
 
-    /// Forks the store at `from` to a new branch at `to`, and returns the branch (`ForkStore`): a
-    /// copy of a version forks the version.
+    /// Forks the store at `from` to a new cell at `to`, and returns its branch (`ForkStore`).
     pub fn fork_store(&self, from: &Path, to: &Path) -> Result<crate::Branch, crate::Error> {
-        let request = ForkStoreRequest { from: name(from)?, to: name(to)? };
+        let request = ForkStoreRequest { from: name(from)?, to: name(to)?, ..Default::default() };
         let what = format!("forking the store at {} to {}", from.display(), to.display());
         let response = self.call(what, |mut c| async move { c.fork_store(request).await })?;
         Ok(branched(response.tenant, response.cell, response.branch))
     }
 
-    /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
-    /// and a copy of it at `copy` if given, and returns its ID (`MakeVersion`).
-    pub fn make_version(
+    /// Forks the version `from` to a new cell at `to`, on any host, and returns its branch
+    /// (`ForkStore`'s `version`).
+    pub fn fork_version(
         &self,
-        path: &Path,
-        keep_last: Option<u32>,
-        copy: Option<&Path>,
-    ) -> Result<u64, crate::Error> {
-        let copy = copy.map(name).transpose()?.unwrap_or_default();
+        from: crate::CellVersion,
+        to: &Path,
+    ) -> Result<crate::Branch, crate::Error> {
+        let crate::CellVersion { tenant, cell, version } = from;
         let request =
-            MakeVersionRequest { path: name(path)?, keep_last: keep_last.unwrap_or(0), copy };
+            ForkStoreRequest { to: name(to)?, version, tenant, cell, ..Default::default() };
+        let what = format!("forking version {version} of cell {cell} to {}", to.display());
+        let response = self.call(what, |mut c| async move { c.fork_store(request).await })?;
+        Ok(branched(response.tenant, response.cell, response.branch))
+    }
+
+    /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
+    /// and returns its ID (`MakeVersion`).
+    pub fn make_version(&self, path: &Path, keep_last: Option<u32>) -> Result<u64, crate::Error> {
+        let request = MakeVersionRequest { path: name(path)?, keep_last: keep_last.unwrap_or(0) };
         let what = format!("making a version of the store at {}", path.display());
         let response = self.call(what, |mut c| async move { c.make_version(request).await })?;
         Ok(response.version)

@@ -656,8 +656,7 @@ fn devices_are_snapshotted_and_restored() {
 
     let interrupt = Arc::new(Counted::default());
     device.activate(device.features() | (1 << 32), interrupt.clone()).unwrap();
-    let version = dir.0.join("version");
-    let refused = device.take_snapshot(&version, || panic!("quiesced unfrozen")).unwrap_err();
+    let refused = device.take_snapshot(|| panic!("quiesced unfrozen")).unwrap_err();
     assert_eq!(
         refused.to_string(),
         "Extent device extents: its guest's filesystem is not frozen (fsfreeze it before the \
@@ -666,14 +665,12 @@ fn devices_are_snapshotted_and_restored() {
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
     assert_eq!(serve_with(&device, &freeze, RESPONSE), (RESPONSE as u32, 0));
     let mut quiesced = false;
-    device.take_snapshot(&version, || quiesced = true).unwrap();
+    device.take_snapshot(|| quiesced = true).unwrap();
     assert!(quiesced);
     let state = device.state();
-    assert_eq!(
-        (state.copy.as_path(), state.frozen, state.window_addr),
-        (version.as_path(), true, None)
-    );
-    assert_eq!(state.branch, device.snapshot().unwrap().branch);
+    assert_eq!((state.frozen, state.window_addr), (true, None));
+    assert_eq!(state.version, device.snapshot().unwrap().version);
+    assert_eq!(state.version.cell, u64::from_le(original.branch));
 
     let mut restored_state = state.clone();
     restored_state.config.path_on_host = dir.0.join("restored").display().to_string();
@@ -707,7 +704,7 @@ fn windows_are_where_snapshots_had_them() {
 
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
     assert_eq!(serve_with(&device, &freeze, RESPONSE).1, 0);
-    device.take_snapshot(&dir.0.join("version"), || {}).unwrap();
+    device.take_snapshot(|| {}).unwrap();
     let mut state = device.state();
     assert_eq!(state.window_addr, Some(1 << 40));
     drop(device);

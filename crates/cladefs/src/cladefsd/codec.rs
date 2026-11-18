@@ -65,8 +65,10 @@ pub(crate) enum Request<'a> {
     Window { size: u64, private_max: Option<u64>, budget: u64 },
     /// [`FAULT`].
     Fault(Fault),
-    /// [`FORK`]: to `branch`, a new directory at `path`; a version if `quiescent`.
-    Fork { path: PathBuf, quiescent: bool },
+    /// [`FORK`]: to `branch`, a new directory at `path`.
+    Fork { path: PathBuf },
+    /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the store's cell, a VM snapshot's.
+    Version,
     /// [`RESIZED`]: the guest's answer to a shrink to `capacity` bytes.
     Resized { capacity: u64, took: bool },
     /// [`MAPPINGS`].
@@ -99,10 +101,9 @@ pub(crate) enum Opening {
     /// To write, created with this many bytes of capacity if it doesn't exist ([`OPEN_CREATE`]),
     /// a new cell of this kind ([`OPEN_SQLITE`], TASK-364).
     Create(u64, Kind),
-    /// To write, forked from the store at `from` if it doesn't exist, of branch `branch` and
-    /// `capacity` bytes, which the daemon takes from its bucket if it doesn't exist either
-    /// ([`OPEN_FORK_FROM`]).
-    ForkFrom { from: PathBuf, branch: u64, capacity: u64 },
+    /// To write, forked from the version `version` of the cell `cell` of `tenant`'s if it doesn't
+    /// exist, of `capacity` bytes ([`OPEN_FORK`]): a VM restored from a snapshot.
+    ForkOf { tenant: u64, cell: u64, version: u64, capacity: u64 },
     /// cladefs: followed, read-only (backlog doc-8, [`OPEN_READ_ONLY`]).
     ReadOnly,
 }
@@ -191,7 +192,7 @@ impl<'a> Encoded<'a> {
 /// The flags requests of `kind` know: `EINVAL` for a kind no request is of.
 fn known_flags(kind: u32) -> Result<u32, Errno> {
     Ok(match kind {
-        OPEN => OPEN_CREATE | OPEN_FORK_FROM | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
+        OPEN => OPEN_CREATE | OPEN_FORK | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
         READ => READ_TRANSFER,
         WRITE => {
             WRITE_BARRIER
@@ -229,7 +230,7 @@ impl<'a> Request<'a> {
             Request::Info => INFO,
             Request::Window { .. } => WINDOW,
             Request::Fault(_) => FAULT,
-            Request::Fork { .. } => FORK,
+            Request::Fork { .. } | Request::Version => FORK,
             Request::Resized { .. } => RESIZED,
             Request::Mappings => MAPPINGS,
             Request::Advance => ADVANCE,
@@ -246,14 +247,11 @@ impl<'a> Request<'a> {
     /// The paths it names, of stores: which the daemon authorizes, all of them, before it serves
     /// it.
     pub fn paths(&self) -> impl Iterator<Item = &Path> {
-        let (path, from) = match self {
-            Request::Open { path, opening: Opening::ForkFrom { from, .. } } => {
-                (Some(path), Some(from))
-            }
-            Request::Open { path, .. } | Request::Fork { path, .. } => (Some(path), None),
-            _ => (None, None),
-        };
-        path.into_iter().chain(from).map(PathBuf::as_path)
+        match self {
+            Request::Open { path, .. } | Request::Fork { path, .. } => Some(path.as_path()),
+            _ => None,
+        }
+        .into_iter()
     }
 
     /// It, as the wire has it.
@@ -271,10 +269,9 @@ impl<'a> Request<'a> {
                             | flag(*kind == Kind::Memory, OPEN_MEMORY);
                         message(flags, [*capacity, 0, 0, 0, 0]).carrying(path)
                     }
-                    Opening::ForkFrom { from, branch, capacity } => {
-                        let from = [&[0][..], from.as_os_str().as_bytes()].concat();
-                        let args = [*capacity, *branch, 0, 0, 0];
-                        message(OPEN_FORK_FROM, args).carrying(path).followed_by(from)
+                    Opening::ForkOf { tenant, cell, version, capacity } => {
+                        let args = [*capacity, *cell, *version, *tenant, 0];
+                        message(OPEN_FORK, args).carrying(path)
                     }
                     Opening::ReadOnly => message(OPEN_READ_ONLY, [0; 5]).carrying(path),
                 };
@@ -344,10 +341,8 @@ impl<'a> Request<'a> {
                     | flag(*probe, FAULT_PROBE);
                 message(flags, [*offset, 0, 0, 0, 0])
             }
-            Request::Fork { path, quiescent } => {
-                let flags = flag(*quiescent, FORK_QUIESCENT);
-                message(flags, [0; 5]).carrying(path.as_os_str().as_bytes())
-            }
+            Request::Fork { path } => message(0, [0; 5]).carrying(path.as_os_str().as_bytes()),
+            Request::Version => message(FORK_QUIESCENT, [0; 5]),
             Request::Resized { capacity, took } => {
                 message(0, [*capacity, u64::from(*took), 0, 0, 0])
             }
@@ -402,12 +397,10 @@ impl<'a> Request<'a> {
                         (&payload[..], Opening::Create(args[0], Kind::Memory))
                     }
                     OPEN_READ_ONLY => (&payload[..], Opening::ReadOnly),
-                    OPEN_FORK_FROM => {
-                        let nul = payload.iter().position(|byte| *byte == 0);
-                        let nul = nul.ok_or(Errno::EINVAL)?;
-                        let from = path(&payload[nul + 1..])?;
-                        let (branch, capacity) = (args[1], args[0]);
-                        (&payload[..nul], Opening::ForkFrom { from, branch, capacity })
+                    OPEN_FORK => {
+                        let (capacity, cell, version, tenant) =
+                            (args[0], args[1], args[2], args[3]);
+                        (&payload[..], Opening::ForkOf { tenant, cell, version, capacity })
                     }
                     // Two ways of opening at once.
                     _ => return Err(Errno::EINVAL),
@@ -531,10 +524,11 @@ impl<'a> Request<'a> {
                 }
                 Request::Fault(Fault { offset: args[0], access, page: has(FAULT_PAGE), probe })
             }
-            FORK => {
-                let quiescent = has(FORK_QUIESCENT);
-                Request::Fork { path: path(payload)?, quiescent }
+            FORK if has(FORK_QUIESCENT) => {
+                nothing()?;
+                Request::Version
             }
+            FORK => Request::Fork { path: path(payload)? },
             RESIZED => {
                 nothing()?;
                 let took = match args[1] {
@@ -928,15 +922,19 @@ pub(crate) struct Advanced {
 /// cladefs: a [`FORK`]'s reply: the fork's branch's ID, the bucket's to give (TASK-364).
 pub(crate) struct Forked {
     pub branch: u64,
+    /// cladefs: of a quiescent [`FORK`], the version of the store's cell made, a VM snapshot's, and
+    /// the cell's tenant; else 0.
+    pub version: u64,
+    pub tenant: u64,
 }
 
 impl Forked {
     pub fn args(&self) -> [u64; 5] {
-        [self.branch, 0, 0, 0, 0]
+        [self.branch, self.version, self.tenant, 0, 0]
     }
 
     pub fn from_args(args: [u64; 5]) -> Self {
-        Self { branch: args[0] }
+        Self { branch: args[0], version: args[1], tenant: args[2] }
     }
 }
 
@@ -1000,7 +998,7 @@ mod tests {
         flags: [bool; 3],
         data: Vec<u8>,
         root: Vec<u8>,
-        paths: [PathBuf; 2],
+        path: PathBuf,
         extents: Vec<ExtentId>,
         build: String,
         /// cladefs: a guest's stats (TASK-111.4).
@@ -1016,25 +1014,14 @@ mod tests {
         let bytes = || proptest::collection::vec(any::<u8>(), 0..64);
         (
             (any::<[u64; 5]>(), any::<[bool; 3]>(), bytes(), bytes()),
-            ([path(), path()], proptest::collection::vec(extent, 0..8)),
+            (path(), proptest::collection::vec(extent, 0..8)),
             ("[a-zA-Z0-9._-]{1,64}", "(\\PC{0,16}\n){0,8}"),
             prop_oneof![Just(Commit::Ordered), Just(Commit::Local), Just(Commit::Uploaded)],
             prop_oneof![Just(Access::Read), Just(Access::Write)],
         )
             .prop_map(
-                |((words, flags, data, root), (paths, extents), (build, stats), commit, access)| {
-                    Fields {
-                        words,
-                        flags,
-                        data,
-                        root,
-                        paths,
-                        extents,
-                        build,
-                        stats,
-                        commit,
-                        access,
-                    }
+                |((words, flags, data, root), (path, extents), (build, stats), commit, access)| {
+                    Fields { words, flags, data, root, path, extents, build, stats, commit, access }
                 },
             )
     }
@@ -1045,7 +1032,7 @@ mod tests {
         let Fields { words: [a, b, c, d, e], flags: [one, two, three], .. } = *fields;
         let extent = ExtentId { branch: a, sequence: b };
         let other = ExtentId { branch: c, sequence: d };
-        let [path, from] = fields.paths.clone();
+        let path = fields.path.clone();
         let commit = fields.commit;
         let root = (one && two).then_some(&fields.root[..]);
         let barriers = WriteBarriers { before: three, after: two.then_some(commit), root };
@@ -1058,7 +1045,7 @@ mod tests {
             open(Opening::Create(a, Kind::Fxfs)),
             open(Opening::Create(a, Kind::Sqlite)),
             open(Opening::Create(a, Kind::Memory)),
-            open(Opening::ForkFrom { from, branch: b, capacity: a }),
+            open(Opening::ForkOf { tenant: c, cell: b, version: d, capacity: a }),
             open(Opening::ReadOnly),
             read(d % (MAX_PAYLOAD + 1), ReadInto::Reply),
             read(d, ReadInto::Transfer { at: e }),
@@ -1088,7 +1075,8 @@ mod tests {
             },
             Request::Fault(Fault { offset: a, access: fields.access, page: one, probe: false }),
             Request::Fault(Fault { offset: a, access: Access::Read, page: true, probe: true }),
-            Request::Fork { path: path.clone(), quiescent: one },
+            Request::Fork { path: path.clone() },
+            Request::Version,
             Request::Resized { capacity: a, took: one },
             Request::Mappings,
             Request::Advance,
@@ -1130,7 +1118,7 @@ mod tests {
             flags: [true, false, false],
             data: (0..64).collect(),
             root: b"root".to_vec(),
-            paths: [PathBuf::from("store"), PathBuf::from("from")],
+            path: PathBuf::from("store"),
             extents: vec![ExtentId { branch: 7, sequence: 9 }],
             build: "build".into(),
             stats: "stats".into(),
@@ -1216,7 +1204,7 @@ mod tests {
             flags: [false; 3],
             data: vec![7; 4096],
             root: Vec::new(),
-            paths: [PathBuf::from("store"), PathBuf::from("from")],
+            path: PathBuf::from("store"),
             extents: vec![ExtentId { branch: 1, sequence: 3 }],
             build: "abc".into(),
             stats: "seals 1\n".into(),
@@ -1243,9 +1231,9 @@ mod tests {
             let message = Message { header, payload: payload.to_vec(), fds: vec![] };
             assert_eq!(Request::decode(&message).err(), Some(Errno::EINVAL), "{kind}, {flags:#x}");
         };
-        refused(OPEN, OPEN_CREATE | OPEN_FORK_FROM, b"store\0from");
+        refused(OPEN, OPEN_CREATE | OPEN_FORK, b"store");
         refused(OPEN, OPEN_CREATE | OPEN_READ_ONLY, b"store");
-        refused(OPEN, OPEN_FORK_FROM | OPEN_READ_ONLY, b"store\0from");
+        refused(OPEN, OPEN_FORK | OPEN_READ_ONLY, b"store");
         refused(WRITE, WRITE_UPLOADED, b"data");
         refused(WRITE, WRITE_LOCAL, b"data");
         refused(WRITE, WRITE_ROOT, b"data");
@@ -1322,8 +1310,12 @@ mod tests {
             refused(Header::new(FORK, 1), path, vec![]);
             refused(open(OPEN_CREATE), path, vec![]);
         }
-        refused(open(OPEN_FORK_FROM), b"no from", vec![]);
-        refused(open(OPEN_FORK_FROM), b"store\0", vec![]);
+        refused(open(OPEN_FORK), b"a\0b", vec![]);
+        refused(
+            Header::new(FORK, 1).with_flags(FORK_QUIESCENT),
+            b"a version names no path",
+            vec![],
+        );
         refused(Header::new(BUILD, 1), b"a\"b", vec![]);
         refused(Header::new(BUILD, 1), &[b'a'; MAX_BUILD + 1], vec![]);
         // cladefs: a guest's stats, without the flag that says it carries them; past their most;
@@ -1352,10 +1344,10 @@ mod tests {
             (
                 Request::Open {
                     path: "s".into(),
-                    opening: Opening::ForkFrom { from: "f".into(), branch: 3, capacity: 4096 },
+                    opening: Opening::ForkOf { tenant: 2, cell: 3, version: 9, capacity: 4096 },
                 },
-                header(OPEN, OPEN_FORK_FROM, &[4096, 3, 0, 0, VERSION]),
-                b"s\0f".to_vec(),
+                header(OPEN, OPEN_FORK, &[4096, 3, 9, 2, VERSION]),
+                b"s".to_vec(),
             ),
             (
                 Request::Open { path: "s".into(), opening: Opening::ReadOnly },
@@ -1447,11 +1439,7 @@ mod tests {
                 header(FAULT, FAULT_PAGE | FAULT_PROBE, &[5]),
                 vec![],
             ),
-            (
-                Request::Fork { path: "p".into(), quiescent: true },
-                header(FORK, FORK_QUIESCENT, &[]),
-                b"p".to_vec(),
-            ),
+            (Request::Version, header(FORK, FORK_QUIESCENT, &[]), vec![]),
             (
                 Request::Resized { capacity: 4096, took: true },
                 header(RESIZED, 0, &[4096, 1]),
@@ -1682,7 +1670,7 @@ mod tests {
             flags: [true, true, false],
             data: (0..64).collect(),
             root: b"root".to_vec(),
-            paths: [PathBuf::from("store"), PathBuf::from("from")],
+            path: PathBuf::from("store"),
             extents: vec![
                 ExtentId { branch: 7, sequence: 9 },
                 ExtentId { branch: 7, sequence: 11 },

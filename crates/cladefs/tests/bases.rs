@@ -88,12 +88,11 @@ fn stores_keep_what_is_attached() {
     drop(forked);
 
     let restored = dir.path().join("restored");
-    let branch = vm.branch();
+    let version = vm.make_version().unwrap();
     drop(vm);
     daemon.sync(&sandbox).unwrap();
     let vm_restored =
-        DaemonExtentStore::connect_forked(&daemon.vms, &restored, &sandbox, branch, CAPACITY)
-            .unwrap();
+        DaemonExtentStore::connect_forked(&daemon.vms, &restored, version, CAPACITY).unwrap();
     assert!(read(&vm_restored, extent).unwrap() == pattern(3), "the restored VM reads other bytes");
 }
 

@@ -18,8 +18,6 @@
 //! [`VIRTIO_EXTENT_VERSION`]: crate::protocol::VIRTIO_EXTENT_VERSION
 //! [`check_version`]: crate::protocol::check_version
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::config::{CacheType, Config};
@@ -33,10 +31,8 @@ pub struct State {
     pub config: ConfigState,
     /// Where the window was in guest memory, if the device has one.
     pub window_addr: Option<u64>,
-    /// The copy of the version of the store's cell the snapshot holds, which restores fork.
-    pub copy: PathBuf,
-    /// The cell's branch, which a restore on another host makes its copy of the version of.
-    pub branch: u64,
+    /// The version of the store's cell the snapshot holds, which its restores fork, on any host.
+    pub version: cladefs::CellVersion,
     /// The window's mappings.
     pub mappings: Vec<MappingState>,
     /// Whether the guest's filesystem was frozen: it is, as a snapshot is taken.
@@ -149,22 +145,19 @@ impl From<&MappingState> for cladefs::WindowMapping {
     }
 }
 
-/// What a snapshot of the device holds of its store (TASK-39.1): the version it was taken at, a fork
-/// of the store, which each VM restored from it forks again, and the window's mappings then, which
-/// the restored VM's window maps again.
+/// What a snapshot of the device holds of its store (TASK-39.1): the version of its cell it was
+/// taken at, which each VM restored from it forks, and the window's mappings then, which the
+/// restored VM's window maps again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    pub copy: PathBuf,
-    /// The cell's branch, which a restore on another host makes its copy of the version of.
-    pub branch: u64,
+    pub version: cladefs::CellVersion,
     pub mappings: Vec<cladefs::WindowMapping>,
 }
 
 impl From<&State> for Snapshot {
     fn from(state: &State) -> Self {
         Self {
-            copy: state.copy.clone(),
-            branch: state.branch,
+            version: state.version,
             mappings: state.mappings.iter().map(cladefs::WindowMapping::from).collect(),
         }
     }
@@ -180,8 +173,8 @@ pub enum SnapshotError {
     NotFrozen(String),
     #[error("Extent device {0}: it follows a store read-only, which a snapshot doesn't hold")]
     ReadOnly(String),
-    #[error("Extent device {0}: cannot fork its store to {1}: {2}")]
-    Fork(String, String, cladefs::Errno),
+    #[error("Extent device {0}: cannot make a version of its store's cell: {1}")]
+    Version(String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]
     Mappings(String, cladefs::Errno),
 }

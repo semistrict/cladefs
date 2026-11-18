@@ -79,8 +79,10 @@ impl Header {
 /// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364). Version 8:
 /// an [`OPEN`] may make a memory cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
-/// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474).
-pub(crate) const VERSION: u64 = 9;
+/// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
+/// version of a cell it names ([`OPEN_FORK`]), and a [`FORK`] of a VM snapshot's makes a version,
+/// which its reply names (doc-20).
+pub(crate) const VERSION: u64 = 10;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -93,13 +95,11 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 // Requests, from a VM process. A reply ([`REPLY`]) answers each, but for [`ACK`].
 
 /// Opens the store at the path the payload holds, creating it with `args[0]` bytes of capacity if
-/// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK_FROM`], forking it from the store at
-/// the path after the payload's first NUL byte if it doesn't exist (TASK-39.1: a VM restored from a
-/// snapshot, whose store version that is), or is a fork that failed, whose deletion it finishes first
-/// (TASK-79.84). That version, if it doesn't exist either, is taken from the daemon's bucket: a store
-/// of branch `args[1]`, of `args[0]` bytes, as on another host than the snapshot's: `ENOENT` for a
-/// tenant's VM process, whose `args[1]` is ignored, its VM manager making the version first
-/// (TASK-154). The reply's `args[0]` is its branch, and it carries the kernel's physical memory.
+/// [`OPEN_CREATE`] and it doesn't exist; or, with [`OPEN_FORK`], forking it from the version
+/// `args[2]` of the cell `args[1]` of tenant `args[3]` if it doesn't exist (TASK-39.1: a VM restored
+/// from a snapshot), or is a fork that failed, whose deletion it finishes first (TASK-79.84), of
+/// `args[0]` bytes: a fork into a cell of the connection's tenant, of another tenant's version only
+/// if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such version. The reply's `args[0]` is its branch, and it carries the kernel's physical memory.
 /// cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog doc-8), as of its latest
 /// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
 /// the host lets a process make, 0 if it doesn't limit them, which a VM process in a jail without
@@ -150,10 +150,10 @@ pub(crate) const ACK: u32 = 12;
 /// ([`ExtentStore::fork`](crate::ExtentStore)): a fork the daemon serves, sharing its extents'
 /// pages with the store's. cladefs: a new cell of the store's tenant's, its ID the
 /// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
-/// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
-/// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a version
-/// ([`ExtentStore::version`](crate::ExtentStore::version)): what a snapshot of the VM is taken at,
-/// which any number of hosts fork at once, and none writes.
+/// [`FORK_QUIESCENT`], no payload, it makes a version of the store's cell instead, a VM
+/// snapshot's, which any number of hosts fork at once and none writes: `EBUSY` unless nothing is
+/// open ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)); the reply's `args[1]`
+/// is its ID.
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.
@@ -259,7 +259,7 @@ pub(crate) const STAGE_PRIVATE_COUNTS: u32 = 33;
 pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
-pub(crate) const OPEN_FORK_FROM: u32 = 1 << 1;
+pub(crate) const OPEN_FORK: u32 = 1 << 1;
 pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
 /// cladefs: with [`OPEN_CREATE`], the store made is a SQLite cell, which the
 /// sqlite_extents VFS alone opens, not an Fxfs one (TASK-364).

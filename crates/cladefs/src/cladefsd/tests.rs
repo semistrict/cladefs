@@ -928,8 +928,7 @@ fn windows_copy_on_write_in_the_vm_process() {
     // Past the window's two private pages.
     assert_eq!(kernel_store(base + ps), Err(libc::EFAULT));
     assert_eq!(window(ps, 2 * ps), pattern(3, ps), "a store refused was made");
-    let version = dir.path().join("version");
-    assert_eq!(store.version_copy(&version), Err(Errno::EBUSY));
+    assert_eq!(store.make_version(), Err(Errno::EBUSY));
     store.unmap(0, ps as u64).unwrap();
     assert_eq!(store.make_private(ps as u64, ps as u64), Ok(()));
     assert_eq!(kernel_store(base + ps), Ok(()));
@@ -937,7 +936,7 @@ fn windows_copy_on_write_in_the_vm_process() {
     store.map(sealed, 0, ps as u64, 3 * ps as u64).unwrap();
     assert_eq!(store.make_private(3 * ps as u64, ps as u64), Err(Errno::ENOMEM));
     store.unmap(0, 4 * ps as u64).unwrap();
-    assert_eq!(store.version_copy(&version).map(drop), Ok(()));
+    assert_eq!(store.make_version().map(drop), Ok(()));
 
     drop(store);
     served.join().unwrap();
@@ -2041,11 +2040,10 @@ fn snapshots_restore_into_forks_of_their_version() {
     };
     store.map_many(&[zeros]).unwrap();
     write(&store, open, 0, &pattern(2, ps)).unwrap();
-    let version = dir.path().join("version");
-    assert_eq!(store.version_copy(&version), Err(Errno::EBUSY));
+    assert_eq!(store.make_version(), Err(Errno::EBUSY));
     store.commit(None).unwrap();
     store.map(open, 0, ps as u64, 3 * ps as u64).unwrap();
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     let mappings = store.window_mappings().unwrap();
     let extent = |extent, offset| crate::MappingContents::Extent { extent, offset };
     assert_eq!(
@@ -2069,7 +2067,7 @@ fn snapshots_restore_into_forks_of_their_version() {
         .into_iter()
         .map(|name| {
             let restored =
-                DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &version, 0, 0)
+                DaemonExtentStore::connect_forked(&socket, dir.path().join(name), version, 0)
                     .unwrap();
             assert_eq!(restored.root().unwrap(), b"root");
             let memory = memory(4);
@@ -2093,11 +2091,7 @@ fn snapshots_restore_into_forks_of_their_version() {
     assert!(read(&restored[1], theirs, 0, BLOCK).is_err());
     assert_eq!(read(&restored[1], open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
-    // TASK-158: no connection opens a point to write it, and it restores on. (Till then, one
-    // could, and a restore then was busy.)
-    let opened = DaemonExtentStore::connect(&socket, &version, 1 << 24);
-    assert_eq!(opened.err().and_then(|error| error.errno()), Some(Errno::EROFS));
-    let forked = DaemonExtentStore::connect_forked(&socket, dir.path().join("c"), &version, 0, 0);
+    let forked = DaemonExtentStore::connect_forked(&socket, dir.path().join("c"), version, 0);
     let root = forked.map(|store| store.root()).map_err(|error| error.errno());
     assert_eq!(root, Ok(Ok(b"root".to_vec())));
 }
@@ -2147,8 +2141,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
         }
     }
     store.map_many(&mapped).unwrap();
-    let version = dir.path().join("version");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     let mappings = store.window_mappings().unwrap();
     assert_eq!(mappings.len(), PAGES + PAGES / 4);
     // The bytes the window's mappings map, in order: the pages between them map nothing, which
@@ -2169,8 +2162,7 @@ fn snapshots_map_their_windows_again_in_one_request() {
 
     let restore = |name: &str, each: bool| {
         let restored =
-            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &version, 0, 0)
-                .unwrap();
+            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), version, 0).unwrap();
         let memory = super::tests::memory(window_pages);
         // SAFETY: As above.
         unsafe {
@@ -2261,8 +2253,7 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
         })
         .collect();
     assert!(window() == expected, "the stores didn't reach the window");
-    let version = dir.path().join("version");
-    assert_eq!(store.version_copy(&version), Err(Errno::EBUSY));
+    assert_eq!(store.make_version(), Err(Errno::EBUSY));
 
     // The freeze: each page stored to written back, to an extent of its own, sealed, and mapped
     // over the private page, which goes.
@@ -2280,12 +2271,12 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     store.commit(None).unwrap();
     store.map_many(&rebound).unwrap();
     assert!(window() == expected, "rebinding changed the window");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     let mappings = store.window_mappings().unwrap();
     assert_eq!(mappings.len(), PAGES);
 
     let restored =
-        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), &version, 0, 0)
+        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), version, 0)
             .unwrap();
     let restored_memory = super::tests::memory(PAGES);
     // SAFETY: As above.
@@ -2300,12 +2291,11 @@ fn snapshots_after_private_pages_are_rebound_restore_their_bytes() {
     assert!(restored_window == expected, "the restored window lost the guest's stores");
 }
 
-/// TASK-39.1: a VM restored on another host than its snapshot's, whose version it doesn't have, forks
-/// its store from the version's branch, taken from the daemon's bucket into a store there. cladefs:
-/// which its VM manager makes first, as the snapshot names the version's branch by its ID alone
-/// (TASK-364).
+/// TASK-39.1: a VM restored where its snapshot's version isn't open, as on another host than the
+/// snapshot's, forks its store from the version, which the daemon opens from its bucket, the cell's
+/// commits uploaded first (TASK-364, doc-20).
 #[test]
-fn snapshot_versions_are_copied_from_the_bucket() {
+fn snapshot_versions_restore_from_the_bucket() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2316,28 +2306,16 @@ fn snapshot_versions_are_copied_from_the_bucket() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let point_branch = store.version_copy(&dir.path().join("version")).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
 
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
-    let (moved, version) = (elsewhere.join("store"), elsewhere.join("version"));
-    // TASK-364: a snapshot names its version's branch by its ID alone, which locates no branch: the
-    // restore is refused until the VM manager makes the version's store there, of the branch its
-    // tenant, cell and ID name, which is taken from the bucket.
-    let refused =
-        DaemonExtentStore::connect_forked(&socket, &moved, &version, point_branch, 1 << 24);
-    assert_eq!(refused.err().and_then(|error| error.errno()), Some(Errno::ENOENT));
-    let made = (None, Kind::Fxfs);
-    let taken = branch_at(&dir.path().join("version"));
-    control(super::stores::create(version.clone(), 1 << 24, taken, made)).unwrap();
-    let restored =
-        DaemonExtentStore::connect_forked(&socket, &moved, &version, point_branch, 1 << 24)
-            .unwrap();
+    let moved = elsewhere.join("store");
+    let restored = DaemonExtentStore::connect_forked(&socket, &moved, version, 1 << 24).unwrap();
     assert_eq!(restored.root().unwrap(), b"root");
     assert_eq!(read(&restored, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
-    assert_ne!(restored.branch(), point_branch);
-    assert!(version.exists(), "the version taken is a store here");
+    assert_ne!(restored.branch(), version.cell);
 }
 
 /// TASK-39.1: a store whose VM process just went opens at once for another, as a VM restored from
@@ -4073,16 +4051,11 @@ fn tenants_take_no_branch_by_naming_it() {
     write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
     store.commit(Some(b"theirs")).unwrap();
 
-    let (restored, version) = (ours.join("restored"), ours.join("version"));
-    let opened = DaemonExtentStore::connect_forked(
-        &our_socket,
-        &restored,
-        &version,
-        store.branch(),
-        1 << 24,
-    );
-    assert_eq!(opened.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOENT)));
-    assert!(!version.exists(), "the version of another tenant's branch was taken");
+    let version = store.make_version().unwrap();
+    let restored = ours.join("restored");
+    let opened = DaemonExtentStore::connect_forked(&our_socket, &restored, version, 1 << 24);
+    assert_eq!(opened.map(drop).map_err(|error| error.errno()), Err(Some(Errno::EACCES)));
+    assert!(!restored.exists(), "a restore of another tenant's version not shared made a store");
     let later = ExtentId { branch: store.branch(), sequence: 2 };
     assert_eq!(write(&store, later, 0, &pattern(5, BLOCK)), Ok(()));
     assert_eq!(store.commit(None), Ok(()));
@@ -4184,15 +4157,14 @@ fn restores_fork_anew_over_forks_left_unmade() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let version = dir.path().join("version");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
 
     // What a fork of the version there leaves, its host crashing before its store's description.
     let restored = dir.path().join("restored");
     std::fs::create_dir_all(restored.join("segments")).unwrap();
     std::fs::write(restored.join("ancestry"), "1 /elsewhere\n").unwrap();
-    let ours = DaemonExtentStore::connect_forked(&socket, &restored, &version, 0, 0).unwrap();
+    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(ours.root(), Ok(b"root".to_vec()));
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(8, BLOCK)));
     assert!(!crate::host_store::unmade(&restored), "the new fork is no store");
@@ -4213,14 +4185,13 @@ fn restores_refuse_a_store_written_since_its_version() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let version = dir.path().join("version");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     // The VM resumes, and goes on: what its snapshot holds it frees, and it commits anew.
     store.free(extent).unwrap();
     store.commit(Some(b"later")).unwrap();
     drop(store);
 
-    let restored = DaemonExtentStore::connect_forked(&socket, &path, &version, 0, 0);
+    let restored = DaemonExtentStore::connect_forked(&socket, &path, version, 0);
     assert_eq!(restored.err().and_then(|err| err.errno()), Some(Errno::EEXIST));
     // Nothing of it changed: opened, it is as the VM left it.
     let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
@@ -4243,10 +4214,9 @@ fn restores_open_stores_still_at_their_version() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(8, BLOCK)).unwrap();
     store.commit(Some(b"root")).unwrap();
-    let version = dir.path().join("version");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
-    let restore = |into: &Path| DaemonExtentStore::connect_forked(&socket, into, &version, 0, 0);
+    let restore = |into: &Path| DaemonExtentStore::connect_forked(&socket, into, version, 0);
     let at_point =
         |store: &DaemonExtentStore| (store.root().ok(), read(store, extent, 0, BLOCK).ok());
     let state = (Some(b"root".to_vec()), Some(pattern(8, BLOCK)));
@@ -4443,21 +4413,27 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let (store, version, restored) =
-        (dir.path().join("store"), dir.path().join("version"), dir.path().join("restored"));
+    let (store, restored) = (dir.path().join("store"), dir.path().join("restored"));
     let made = DaemonExtentStore::connect(&socket, &store, 1 << 24).unwrap();
     let extent = minted(&made);
     write(&made, extent, 0, &pattern(4, BLOCK)).unwrap();
     made.commit(Some(b"root")).unwrap();
-    made.version_copy(&version).unwrap();
+    let version = made.make_version().unwrap();
     drop(made);
 
     let left = ["fork::made", "branch::head_ended"];
     let failing = left.map(|step| fail::FailGuard::new(step, "1*return").unwrap());
-    let forked = fork_store(&version, &restored).map_err(|err| err.errno());
+    let forked = control(super::stores::fork_of_version(
+        version_branch(version),
+        version.version,
+        restored.clone(),
+        None,
+    ))
+    .map(drop)
+    .map_err(Some);
     drop(failing);
     assert_eq!((forked, restored.exists()), (Err(Some(Errno::EIO)), false));
-    let ours = DaemonExtentStore::connect_forked(&socket, &restored, &version, 0, 0).unwrap();
+    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 0).unwrap();
     assert_eq!(read(&ours, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
 }
 
@@ -4956,7 +4932,7 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
     // A store of an extent a page for each fault, written here, whose pages are of an arena no
     // VM process's connection has, made a snapshot's version through the daemon, which keeps its
     // branch in the bucket.
-    let (path, version) = (dir.path().join("store"), dir.path().join("version"));
+    let path = dir.path().join("store");
     let branch = {
         let store = ExtentStore::create(&path, 1 << 24).unwrap();
         let branch = store.branch();
@@ -4974,25 +4950,13 @@ fn faults_waiting_for_object_storage_hold_up_no_request() {
         branch
     };
     let store = DaemonExtentStore::connect(&socket, &path, 1 << 24).unwrap();
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
-    // Its VM restored on another host, which has the version's extents in the bucket alone, its VM
-    // manager having made the version's store there first (TASK-364: a snapshot names its version's
-    // branch by its ID alone, which locates no branch).
+    // Its VM restored on another host, which has the version's extents in the bucket alone.
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
-    let made = (None, Kind::Fxfs);
-    control(super::stores::create(elsewhere.join("version"), 1 << 24, branch_at(&version), made))
-        .unwrap();
     let restored = elsewhere.join("store");
-    let ours = DaemonExtentStore::connect_forked(
-        &socket,
-        &restored,
-        elsewhere.join("version"),
-        branch.id + 1,
-        1 << 24,
-    )
-    .unwrap();
+    let ours = DaemonExtentStore::connect_forked(&socket, &restored, version, 1 << 24).unwrap();
     let memory = memory(FAULTS);
     // SAFETY: The memory is the test's, and outlives the store.
     unsafe { ours.create_dax_window_in_host_memory(memory, (FAULTS * ps) as u64, None, 1) }
@@ -5053,12 +5017,11 @@ fn a_zygotes_restores_open_its_copy_once() {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     write(&store, extent, 0, &pattern(6, BLOCK)).unwrap();
     store.commit(Some(b"zygote")).unwrap();
-    let version = dir.path().join("version");
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
     // How many writers took the version's branch: its head's epoch.
     let bucket = super::stores::daemon_bucket().unwrap();
-    let branch = branch_at(&version);
+    let branch = version_branch(version);
     let takings = || control(extent_bucket::head::epoch(&*bucket, branch)).unwrap();
     let taken = takings();
 
@@ -5068,7 +5031,7 @@ fn a_zygotes_restores_open_its_copy_once() {
             let to = dir.path().join(format!("restore-{n}"));
             std::thread::spawn(move || {
                 let start = std::time::Instant::now();
-                let restored = DaemonExtentStore::connect_forked(&socket, to, version, 0, 0);
+                let restored = DaemonExtentStore::connect_forked(&socket, to, version, 0);
                 let root = restored.map_err(|error| error.errno()).and_then(|store| {
                     assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
                     store.root().map_err(Some)
@@ -5394,76 +5357,6 @@ fn vm_processes_of_any_tenant_write_no_public_base() {
     assert_eq!(opened.map_err(|error| error.errno()), Ok(forked.id));
 }
 
-/// TASK-92.5: a restore from a store that is no version (TASK-158), which the daemon keeps open, once
-/// another writer of its branch has taken it, of this host's placement, as cladefsctl's `take` of it
-/// is, or a VM's opening of a copy of it, forks the store opened anew, taking the branch back, as
-/// each restore did before stores were kept open: not the one kept open, whose fork fails, its
-/// writer fenced.
-#[test]
-fn restores_fork_their_copy_anew_once_another_writer_took_its_branch() {
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || serve(listener));
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
-    write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
-    store.commit(Some(b"version")).unwrap();
-    let version = dir.path().join("version");
-    let forked = super::stores::fork(dir.path().join("store"), version.clone(), None);
-    let point_branch = control(forked).unwrap();
-    drop(store);
-    let restore = |name: &str| {
-        let restored =
-            DaemonExtentStore::connect_forked(&socket, dir.path().join(name), &version, 0, 0);
-        restored.map_err(|error| error.errno()).and_then(|store| store.root().map_err(Some))
-    };
-    assert_eq!(restore("first"), Ok(b"version".to_vec()));
-    // Another copy of the version's branch, which a VM opens, taking the branch.
-    let taken = dir.path().join("taken");
-    let made = (None, Kind::Fxfs);
-    control(super::stores::create(taken.clone(), 1 << 24, point_branch, made)).unwrap();
-    let taking = DaemonExtentStore::connect(&socket, &taken, 1 << 24).unwrap();
-    assert_eq!(read(&taking, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
-    drop(taking);
-    assert_eq!(restore("second"), Ok(b"version".to_vec()));
-}
-
-/// TASK-79.103: as a restore, so a control fork of a store that is no version (TASK-158) kept open:
-/// once another writer took its branch, the fork of the store opened anew takes it back.
-#[test]
-fn control_forks_of_a_copy_fork_it_anew_once_another_writer_took_its_branch() {
-    host();
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("cladefsd.sock");
-    let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || serve(listener));
-    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 24).unwrap();
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
-    write(&store, extent, 0, &pattern(5, BLOCK)).unwrap();
-    store.commit(Some(b"version")).unwrap();
-    let version = dir.path().join("version");
-    let forked = super::stores::fork(dir.path().join("store"), version.clone(), None);
-    let point_branch = control(forked).unwrap();
-    drop(store);
-    // A restore keeps the version open.
-    let restored =
-        DaemonExtentStore::connect_forked(&socket, dir.path().join("restored"), &version, 0, 0);
-    assert_eq!(restored.map_err(|error| error.errno()).map(drop), Ok(()));
-    let taken = dir.path().join("taken");
-    let made = (None, Kind::Fxfs);
-    control(super::stores::create(taken.clone(), 1 << 24, point_branch, made)).unwrap();
-    let taking = DaemonExtentStore::connect(&socket, &taken, 1 << 24).unwrap();
-    assert_eq!(read(&taking, extent, 0, BLOCK), Ok(pattern(5, BLOCK)));
-    drop(taking);
-    let child = dir.path().join("child");
-    let branch = control(super::stores::fork(version, child.clone(), None)).unwrap();
-    let child = DaemonExtentStore::connect(&socket, &child, 1 << 24).unwrap();
-    assert_eq!(child.branch(), branch.id);
-    assert_eq!(child.root(), Ok(b"version".to_vec()));
-}
-
 /// TASK-79.34: a store whose VM process goes while the daemon's work through its connection holds
 /// the connection, here a shrink waiting for its guest's answer, is let go once that work is done,
 /// which its VM process's going ends, not before: deleted once its connection is done, it is open
@@ -5770,6 +5663,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
     const OWN_BRANCH: u64 = 0xb0b0_0001;
     const OTHER_BRANCH: u64 = 0xb0b0_0002;
     const GIVEN_BRANCH: u64 = 0xb0b0_0003;
+    const GIVEN_VERSION: u64 = 0xb0b0_0004;
     const WINDOW_BYTES: u64 = 1 << 20;
     const TRANSFER_BYTES: u64 = 1 << 20;
     /// The ID of the request that ends a sequence.
@@ -5840,16 +5734,14 @@ fn whatever_a_vm_process_says_harms_no_other() {
     other.commit(None).unwrap();
     let their_bytes = std::sync::Arc::new(pattern(9, BLOCK));
 
-    // A snapshot in the bucket, of a branch its VM manager makes a version of in its directory.
+    // A snapshot in the bucket, a version of the other tenant's cell, not shared.
     let given = DaemonExtentStore::connect(&other_socket, dir.path().join("given"), 1 << 24);
     let given = given.unwrap();
     let given_branch = given.branch();
     write(&given, ExtentId { branch: given_branch, sequence: 1 }, 0, &pattern(8, BLOCK)).unwrap();
     given.commit(Some(b"given")).unwrap();
+    let given_version = given.make_version().unwrap().version;
     drop(given);
-    let version = vms.join("version");
-    let given = branch_at(&dir.path().join("given"));
-    control(super::stores::create(version.clone(), 1 << 24, given, (None, Kind::Fxfs))).unwrap();
 
     let ps = page_size();
     let word = prop_oneof![
@@ -5873,7 +5765,6 @@ fn whatever_a_vm_process_says_harms_no_other() {
         vms.join("fork"),
         vms.join("../escaped"),
         other_path.clone(),
-        version.clone(),
         std::path::PathBuf::from("relative"),
     ];
     let payload = prop_oneof![
@@ -5934,9 +5825,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
     // What the other tenant wrote, as a store of its branch would read it.
     let reading_theirs = Just((READ, 0, 0, [OTHER_BRANCH, 1, 0, BLOCK as u64, 0], Vec::new()));
     // On a connection that opened nothing yet, stores any which way: restores of a version of none,
-    // and of the one taken for it, naming a branch of either, or the other tenant's.
-    let nothing = [&[0], vms.join("nothing").as_os_str().as_bytes()].concat();
-    let taken = [&[0], version.as_os_str().as_bytes()].concat();
+    // or of the other tenant's, naming either of its cells.
     let opening = prop_oneof![
         (0u64..4, any::<bool>()).prop_map(|(store, creating)| {
             let flags = if creating { OPEN_CREATE } else { 0 };
@@ -5944,9 +5833,9 @@ fn whatever_a_vm_process_says_harms_no_other() {
         }),
         (0u64..4, any::<bool>(), prop_oneof![Just(OTHER_BRANCH), Just(GIVEN_BRANCH)]).prop_map(
             move |(store, absent, branch)| {
-                let version = if absent { &nothing } else { &taken };
-                let named = [format!("open-{store}").as_bytes(), version].concat();
-                (OPEN, OPEN_FORK_FROM, RESTORE, [1 << 24, branch, 0, 0, VERSION], named)
+                let version = if absent { 7 } else { GIVEN_VERSION };
+                let named = format!("open-{store}").into_bytes();
+                (OPEN, OPEN_FORK, RESTORE, [1 << 24, branch, version, 0, VERSION], named)
             }
         ),
     ];
@@ -6067,6 +5956,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
                 OWN_BRANCH => own.load(Ordering::Relaxed),
                 OTHER_BRANCH => kept.branch,
                 GIVEN_BRANCH => given_branch,
+                GIVEN_VERSION => given_version,
                 word => word,
             };
             // A path a sequence opens at, this case's.
@@ -6584,4 +6474,12 @@ fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
         (sized.background, sized.hard, sized.most),
         (allowance / 10, allowance / 5, allowance)
     );
+}
+
+/// The branch of the cell `version` is of: its ID the cell's (doc-20).
+fn version_branch(version: crate::CellVersion) -> crate::Branch {
+    crate::Branch {
+        cell: crate::Cell { tenant: version.tenant, id: version.cell },
+        id: version.cell,
+    }
 }

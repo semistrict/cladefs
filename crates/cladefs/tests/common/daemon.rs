@@ -58,7 +58,6 @@ impl Daemon {
             tenant: branch.cell.tenant,
             cell: branch.cell.id,
             kind: 0,
-            version: 0,
         };
         let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
         let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
@@ -77,41 +76,44 @@ impl Daemon {
         Ok(self.runtime.block_on(self.client.stat_store(request))?.into_inner())
     }
 
-    /// Forks the store at `from` to `to` (ForkStore): a copy of a version forks the version.
+    /// Forks the store at `from` to `to` (ForkStore).
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
-        let request = ForkStoreRequest { from: name(from), to: name(to) };
+        let request = ForkStoreRequest { from: name(from), to: name(to), ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
         let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
         Ok(cladefs::Branch { cell, id: response.branch })
     }
 
-    /// Makes a version of the cell of the store at `from`, and a copy of it at `copy`
-    /// (MakeVersion), and returns its ID.
-    pub fn version(&mut self, from: &Path, copy: &Path) -> Result<u64, tonic::Status> {
-        let request = MakeVersionRequest { path: name(from), keep_last: 0, copy: name(copy) };
-        Ok(self.runtime.block_on(self.client.make_version(request))?.into_inner().version)
+    /// Makes a version of the cell of the store at `from` (MakeVersion), and returns it.
+    pub fn version(&mut self, from: &Path) -> Result<cladefs::CellVersion, tonic::Status> {
+        let request = MakeVersionRequest { path: name(from), keep_last: 0 };
+        let version = self.runtime.block_on(self.client.make_version(request))?.into_inner();
+        let cell = self.branch(from)?;
+        Ok(cladefs::CellVersion {
+            tenant: cell.cell.tenant,
+            cell: cell.id,
+            version: version.version,
+        })
     }
 
-    /// Makes a copy at `path` of the version `version` of `branch` (CreateStore's `version`).
-    pub fn copy(
+    /// Forks the version `from` to `to`, on this host, whichever made it (ForkStore's `version`).
+    pub fn fork_version(
         &mut self,
-        path: &Path,
-        branch: cladefs::Branch,
-        version: u64,
+        from: cladefs::CellVersion,
+        to: &Path,
     ) -> Result<cladefs::Branch, tonic::Status> {
-        let request = CreateStoreRequest {
-            path: name(path),
-            capacity: 1 << 30,
-            branch: branch.id,
-            token: None,
-            tenant: branch.cell.tenant,
-            cell: branch.cell.id,
-            kind: 0,
-            version,
-        };
-        let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
+        let cladefs::CellVersion { tenant, cell, version } = from;
+        let request =
+            ForkStoreRequest { to: name(to), version, tenant, cell, ..Default::default() };
+        let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
         let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
         Ok(cladefs::Branch { cell, id: response.branch })
+    }
+
+    /// Drops the versions `versions` of the cell of the store at `path` (DropVersions).
+    pub fn drop_versions(&mut self, path: &Path, versions: &[u64]) -> Result<(), tonic::Status> {
+        let request = DropVersionsRequest { path: name(path), versions: versions.to_vec() };
+        self.runtime.block_on(self.client.drop_versions(request)).map(drop)
     }
 
     pub fn resize(&mut self, path: &Path, capacity: u64) -> Result<(), tonic::Status> {

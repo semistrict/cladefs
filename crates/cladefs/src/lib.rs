@@ -193,8 +193,8 @@ pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_bucket::layout::{Branch, Cell};
 pub use extents::{
-    Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
-    StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,
+    CellVersion, Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
+    StoreHolding, StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::BranchOf;

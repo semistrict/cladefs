@@ -66,7 +66,6 @@ fn stores_through_the_control_api() {
             uploaded: 1,
             pending_upload_bytes: 0,
             oldest_pending_ms: 0,
-            version: 0,
         }
     );
 

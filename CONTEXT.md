@@ -191,12 +191,8 @@ The object storage holding every cell's durable copy.
 _Avoid_: remote, object store, S3
 
 **Cell**:
-A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique in its bucket, which gives it; no caller names a new one.
-_Avoid_: volume, disk, store (a store holds a cell)
-
-**Store**:
-A host directory holding one cell: its open segment, its write-ahead log and its own extents.
-_Avoid_: volume, image (an image is a store on the host's own filesystem), object store
+A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique in its bucket, which gives it; no caller names a new one. On a host, a cell is kept in a directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
+_Avoid_: volume, disk
 
 **Volume**:
 One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
@@ -217,9 +213,6 @@ _Avoid_: public (public is a base's)
 **Fork**:
 A new cell made from a version of another, sharing its extents, in O(1). Local on the version's host; on another host it needs the version uploaded first.
 _Avoid_: clone (git's alone), restore (a VM snapshot's alone)
-
-**Copy**:
-A store holding a version of a cell, which nothing writes, made on any host that forks the version: forks of the version are made from it.
 
 **Parent** / **Child**:
 The cell a fork came from, and the cell it made. Dropping a version that has children keeps its data until they go.

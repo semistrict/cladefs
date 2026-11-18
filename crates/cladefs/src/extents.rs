@@ -221,6 +221,19 @@ pub struct ExtentStore {
     fetcher: Arc<crate::bucket::HostFetcher>,
 }
 
+/// cladefs: a version of a cell, as a VM snapshot holds it and its restores fork it
+/// (`DaemonExtentStore::make_version`, `DaemonConnection::open_forked`): the cell's tenant, its
+/// ID and the version's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellVersion {
+    /// The cell's tenant.
+    pub tenant: u64,
+    /// The cell's ID, its branch's.
+    pub cell: u64,
+    /// The version's ID.
+    pub version: u64,
+}
+
 /// cladefs: a version of a store's cell ([`ExtentStore::versions`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VersionInfo {
@@ -1941,22 +1954,20 @@ impl ExtentStore {
         self.store.version()
     }
 
-    /// cladefs: makes a copy of the version `id` of the store's cell at `path`, which must not
-    /// exist: a store nothing writes, of the cell's state at the version, which forks fork
-    /// ([`ExtentStore::fork`]), on this host or, made by [`ExtentStore::create_copy`], on another.
-    /// It records the store as its source, which a fork of it here has upload the version first.
-    pub fn copy_version(&self, path: impl AsRef<Path>, id: u64) -> Result<(), Error> {
+    /// cladefs: opens the version `id` of the store's cell at `path`, which must not exist, as the
+    /// daemon opens a version for forks of it ([`ExtentStore::create_copy`]), once the version is
+    /// uploaded: for tests of forks of versions.
+    #[cfg(test)]
+    pub(crate) fn copy_version(&self, path: impl AsRef<Path>, id: u64) -> Result<(), Error> {
         let path = path.as_ref();
         let kind = self.store.kind().ok_or(Errno::EINVAL)?;
         let url = self.store.bucket().ok_or(Errno::EINVAL)?;
-        let description = self.store.description();
-        Self::create_copy(path, (url, kind), description, id)?;
-        store_dir::record_source(path, &self.path)?;
-        Ok(())
+        Self::create_copy(path, (url, kind), self.store.description(), id)
     }
 
-    /// cladefs: makes a copy, at `path`, which must not exist, of the version `id` of the cell
-    /// `description` names, of `kind`, kept in the bucket at `url` ([`ExtentStore::copy_version`]).
+    /// cladefs: makes a store at `path`, which must not exist, of the version `id` of the cell
+    /// `description` names, of `kind`, kept in the bucket at `url`: what the daemon opens a version
+    /// in for forks of it on a host, nothing writing it.
     pub fn create_copy(
         path: &Path,
         (url, kind): (&str, Kind),
@@ -1976,14 +1987,13 @@ impl ExtentStore {
         Ok(())
     }
 
-    /// cladefs: makes a version, and a copy of it at `path`, as [`ExtentStore::make_version`] and
-    /// [`ExtentStore::copy_version`] do, and returns once the version is uploaded, which forks of
-    /// the copy read: what a daemon's fork of the copy waits for.
+    /// cladefs: makes a version, uploaded, and opens it at `path` as [`ExtentStore::copy_version`]
+    /// does: for tests of forks of versions.
     #[cfg(test)]
     pub(crate) fn copy_uploaded(&self, path: impl AsRef<Path>) -> Result<u64, Error> {
         let id = self.make_version(None)?;
-        self.copy_version(path, id)?;
         self.make_uploaded()?;
+        self.copy_version(path, id)?;
         Ok(id)
     }
 

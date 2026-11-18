@@ -16,44 +16,24 @@
 // across restarts of the daemon: the caller grants again.
 //
 // A version is a named state of a cell, made by its writer as one local commit (MakeVersion) and
-// uploaded behind. Forks are made of versions, through a copy of one: a store at the version,
-// which nothing writes and no writer takes, so that a restore on one host changes nothing another
-// sees, and no host's copy goes stale.
+// uploaded behind. Forks are made of versions, on any number of hosts at once, each making only
+// its child's record, so that a restore on one host changes nothing another sees.
 //
-// A VM snapshot of a tenant's VM makes a version of each of its cells, with a copy of each at the
-// path the snapshot names, and restores on any number of hosts at once (TASK-154):
+// A VM snapshot makes a version of each of the VM's cells, which its file names by tenant, cell
+// and version, and restores on any number of hosts at once (TASK-154): each restore forks the
+// versions into new cells of the restoring VM's tenant's, the daemon opening each version once on
+// its host for every restore of it there. A version of the restoring tenant's own cells forks; one
+// of another tenant's only while shared (ShareVersion; PERMISSION_DENIED, EACCES, otherwise); one
+// dropped since (DropVersions) fails with NOT_FOUND (ENOENT), and what was restored from it lives
+// on. A restore on another host than the snapshot's waits for nothing: the version is in the
+// bucket once SyncStore of the VM's store returns.
 //
-// - On the snapshot's host, once it is taken: StatStore of the copy says its `branch` and
-//   `version`, kept with the snapshot. The version is in the bucket once SyncStore of the VM's
-//   store returns.
-// - On each host to restore it, once, before the VMM's first `PUT /snapshot/load`: CreateStore at a
-//   path in the tenant's directory, of that branch and `version`, which makes a copy there.
-//   ALREADY_EXISTS means a store is there, a VM process's perhaps: use it only if StatStore says
-//   that branch and version. A copy needs no `token`.
-// - Then each load, whose `cladefs_overrides` name the copy as `copy_on_host`, the VM's store in
-//   the tenant's directory as `path_on_host`, and the tenant's socket as `cladefsd_socket`. Each
-//   restore forks the copy into a new cell, on as many hosts at once as there are. Without the
-//   CreateStore, it fails with ENOENT, whatever the VMM names; so does one of a version dropped
-//   since.
-// - Once this host restores it no more: DropStore of the copy, optional, which ends the grant here
-//   and frees it. DropVersions drops the version on every host: VMs restored from it keep what
-//   they inherited.
-//
-// A copy so granted is the tenant's to read and restore: a VM process opening one to write it
-// fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
-//
-// Shared versions (TASK-395.7): a version forks only into cells of its own tenant's, unless it is
-// shared (ShareVersion): a base image's or a VM snapshot's that many tenants fork. A restore, or a
-// ForkStore, of another tenant's version that isn't shared fails with PERMISSION_DENIED (EACCES),
-// making nothing; each fork reads whether the version is shared, in the bucket, as it is made, so
-// that unsharing it stops new forks on every host, and those made live on. A store with a writer
-// forks into cells of other tenants' only if it is the default tenant's, as the daemon's own
-// stores and public bases are (TASK-395.9): a ForkStore of another tenant's into another tenant's
-// directory fails with PERMISSION_DENIED (EACCES), making nothing.
-//
-// A fork of a store with a writer is a commit of its cell, which takes its writer: such a store
-// forks on one host at a time. A base, or any store, forked on several hosts is given a version
-// first, and forked from a copy of it on each host, as a VM snapshot's is.
+// A store with a writer forks into cells of other tenants' only if it is the default tenant's, as
+// the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
+// another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing. A fork of a
+// store with a writer is a commit of its cell, which takes its writer: such a store forks on one
+// host at a time. A base forked on many hosts is given a version first, and its version forked on
+// each (ForkStore's `version`).
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -173,25 +153,18 @@ type CreateStoreRequest struct {
 	// bucket's to give (TASK-364), which the response says.
 	Branch uint64 `protobuf:"varint,3,opt,name=branch,proto3" json:"branch,omitempty"`
 	// The fencing token to place it at (PlaceStore), if any: of a placement no earlier than the
-	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE). A
-	// version's copy has no writer, and needs none.
+	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE).
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
 	// The tenant whose cell's branch it is. Of a new cell in a granted tenant's
 	// directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
-	// (PERMISSION_DENIED, EPERM). A copy of another tenant's version there is the VM manager's to
-	// give: the tenant's VM processes restore from it, each restore a cell of their tenant's, if the
-	// version is shared (ShareVersion); otherwise each restore fails (PERMISSION_DENIED, EACCES).
+	// (PERMISSION_DENIED, EPERM).
 	Tenant uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The cell, or 0 for a new one, whose ID, unique in the daemon's bucket, is its branch's too,
 	// the bucket's to give, which the response says. A cell named takes `branch`, which must be
 	// named: its own (INVALID_ARGUMENT, EINVAL, otherwise).
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The cell's kind, which says what opens it.
-	Kind CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
-	// If not 0, the store is a copy of this version of `branch`, which must be named: the cell's
-	// state at the version, which nothing writes, and which ForkStore forks, on as many hosts at
-	// once as wanted. Its first fork waits for the cell's head to name the version.
-	Version       uint64 `protobuf:"varint,8,opt,name=version,proto3" json:"version,omitempty"`
+	Kind          CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,13 +246,6 @@ func (x *CreateStoreRequest) GetKind() CellKind {
 		return x.Kind
 	}
 	return CellKind_CELL_KIND_FXFS
-}
-
-func (x *CreateStoreRequest) GetVersion() uint64 {
-	if x != nil {
-		return x.Version
-	}
-	return 0
 }
 
 // The store made.
@@ -498,7 +464,7 @@ func (x *ImportImageResponse) GetCell() uint64 {
 // Forks a store.
 type ForkStoreRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The store to fork.
+	// The store to fork; empty to fork `version`.
 	From string `protobuf:"bytes,1,opt,name=from,proto3" json:"from,omitempty"`
 	// Where the fork goes: a directory that must not exist (ALREADY_EXISTS), made a store of its
 	// own, holding the fork's branch alone. The fork is made in the daemon's bucket (backlog doc-7,
@@ -507,7 +473,15 @@ type ForkStoreRequest struct {
 	// branch's state from the bucket. A fork that fails deletes `to`, and its branch in the bucket
 	// if its commit was made; its host crashing part way, `to` is left unmade, which DeleteStore of
 	// `to` deletes, and the fork stands or never was, as the bucket has it.
-	To            string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	To string `protobuf:"bytes,2,opt,name=to,proto3" json:"to,omitempty"`
+	// If not 0, the version to fork, of the cell `cell` of `tenant`'s, on this host or any other: a
+	// base forked on many hosts. One of another tenant's than the fork's forks only if shared
+	// (PERMISSION_DENIED, EACCES); one the cell's head names not, NOT_FOUND.
+	Version uint64 `protobuf:"varint,6,opt,name=version,proto3" json:"version,omitempty"`
+	// The tenant of the cell whose version is forked.
+	Tenant uint64 `protobuf:"varint,7,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	// The cell whose version is forked, by its ID.
+	Cell          uint64 `protobuf:"varint,8,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -554,6 +528,27 @@ func (x *ForkStoreRequest) GetTo() string {
 		return x.To
 	}
 	return ""
+}
+
+func (x *ForkStoreRequest) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *ForkStoreRequest) GetTenant() uint64 {
+	if x != nil {
+		return x.Tenant
+	}
+	return 0
+}
+
+func (x *ForkStoreRequest) GetCell() uint64 {
+	if x != nil {
+		return x.Cell
+	}
+	return 0
 }
 
 // The fork made.
@@ -977,10 +972,7 @@ type MakeVersionRequest struct {
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// If not 0, how many versions of the cell to keep, this one the newest: the rest are dropped
 	// once the head names it.
-	KeepLast uint32 `protobuf:"varint,2,opt,name=keep_last,json=keepLast,proto3" json:"keep_last,omitempty"`
-	// If not empty, where to make a copy of the version on this host, which must not exist
-	// (ALREADY_EXISTS), for ForkStore to fork.
-	Copy          string `protobuf:"bytes,3,opt,name=copy,proto3" json:"copy,omitempty"`
+	KeepLast      uint32 `protobuf:"varint,2,opt,name=keep_last,json=keepLast,proto3" json:"keep_last,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1027,13 +1019,6 @@ func (x *MakeVersionRequest) GetKeepLast() uint32 {
 		return x.KeepLast
 	}
 	return 0
-}
-
-func (x *MakeVersionRequest) GetCopy() string {
-	if x != nil {
-		return x.Copy
-	}
-	return ""
 }
 
 // The version made.
@@ -1794,11 +1779,8 @@ type StatStoreResponse struct {
 	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
 	// How many it holds that it inherited: those whose bytes are `inherited`.
 	InheritedExtents uint64 `protobuf:"varint,20,opt,name=inherited_extents,json=inheritedExtents,proto3" json:"inherited_extents,omitempty"`
-	// The version of its cell it is a copy of (MakeVersion's `copy`, CreateStore's `version`), or
-	// 0 if it is none: what a copy on another host is made of.
-	Version       uint64 `protobuf:"varint,21,opt,name=version,proto3" json:"version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StatStoreResponse) Reset() {
@@ -1967,13 +1949,6 @@ func (x *StatStoreResponse) GetOwnExtents() uint64 {
 func (x *StatStoreResponse) GetInheritedExtents() uint64 {
 	if x != nil {
 		return x.InheritedExtents
-	}
-	return 0
-}
-
-func (x *StatStoreResponse) GetVersion() uint64 {
-	if x != nil {
-		return x.Version
 	}
 	return 0
 }
@@ -4093,7 +4068,7 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xfa\x01\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xe6\x01\n" +
 	"\x12CreateStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
@@ -4101,9 +4076,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x12\x18\n" +
-	"\aversion\x18\b \x01(\x04R\aversionB\b\n" +
-	"\x06_token\"Y\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kindB\b\n" +
+	"\x06_tokenJ\x04\b\b\x10\t\"Y\n" +
 	"\x13CreateStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
@@ -4117,10 +4091,13 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x13ImportImageResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"H\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x8e\x01\n" +
 	"\x10ForkStoreRequest\x12\x12\n" +
 	"\x04from\x18\x01 \x01(\tR\x04from\x12\x0e\n" +
-	"\x02to\x18\x02 \x01(\tR\x02toJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"W\n" +
+	"\x02to\x18\x02 \x01(\tR\x02to\x12\x18\n" +
+	"\aversion\x18\x06 \x01(\x04R\aversion\x12\x16\n" +
+	"\x06tenant\x18\a \x01(\x04R\x06tenant\x12\x12\n" +
+	"\x04cell\x18\b \x01(\x04R\x04cellJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"W\n" +
 	"\x11ForkStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
@@ -4138,11 +4115,10 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x11PlaceStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\x04R\x05token\"\x14\n" +
-	"\x12PlaceStoreResponse\"Y\n" +
+	"\x12PlaceStoreResponse\"K\n" +
 	"\x12MakeVersionRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1b\n" +
-	"\tkeep_last\x18\x02 \x01(\rR\bkeepLast\x12\x12\n" +
-	"\x04copy\x18\x03 \x01(\tR\x04copy\"/\n" +
+	"\tkeep_last\x18\x02 \x01(\rR\bkeepLastJ\x04\b\x03\x10\x04\"/\n" +
 	"\x13MakeVersionResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\")\n" +
 	"\x13ListVersionsRequest\x12\x12\n" +
@@ -4175,7 +4151,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
 	"\x11SyncStoreResponse\"&\n" +
 	"\x10StatStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\x85\x05\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xf1\x04\n" +
 	"\x11StatStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
@@ -4200,8 +4176,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x12\x18\n" +
-	"\aversion\x18\x15 \x01(\x04R\aversion\"\x13\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x15\x10\x16\"\x13\n" +
 	"\x11ListStoresRequest\"N\n" +
 	"\x12ListStoresResponse\x128\n" +
 	"\x06stores\x18\x01 \x03(\v2 .cladefs.cladefsd.v1.ListedStoreR\x06stores\"]\n" +

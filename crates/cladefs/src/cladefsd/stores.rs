@@ -736,70 +736,118 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
     })
 }
 
-/// Forks the store at `from`, the copy of the version a VM snapshot holds, to a new cell at `path`,
-/// which the VM restored from the snapshot opens (TASK-39.1). Restores of one snapshot, a
-/// zygote's, fork its copy at once, kept open for them ([`copy`], TASK-92.5); a connection having
-/// it open makes it busy (`EBUSY`), unless its VM process is gone. A copy that doesn't exist here
-/// is `ENOENT`: a restore on another host than the snapshot's has the copy made first
-/// (`CreateStore` with the version). Its waits hold no thread; its fork blocks. A copy kept open
-/// whose fork fails, as once another host took its cell, is let go of and opened anew for one more
-/// fork. The fork is a new cell of `tenant`'s, if given, the granted tenant's whose VM process
-/// restores, or else of the copy's tenant's (TASK-364).
-pub(super) async fn fork_from(
-    from: &Path,
+/// cladefs: where the daemon keeps the version `version` of `cell`'s branch open for the forks of it
+/// made here: a directory of its own, in the process's temporary directory, made from the bucket
+/// the first time the version is forked here ([`opened_version`]), gone with the process.
+fn version_dir(cell: Branch, version: u64) -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        std::env::temp_dir().join(format!("cladefsd-versions-{}", std::process::id()))
+    });
+    root.join(format!("{:x}.{:x}.{:x}", cell.cell.tenant, cell.id, version))
+}
+
+/// cladefs: the directory the version `version` of `cell` is kept open in for forks here
+/// ([`version_dir`]), made if it isn't, of `capacity` bytes: from the bucket, once the cell's commits
+/// here, if its writer is here, are uploaded, the version's among them, as a version is local as it
+/// is made and uploaded behind. `ENOENT` if the bucket has no such cell.
+async fn opened_version(cell: Branch, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
+    let dir = version_dir(cell, version);
+    let held = hold(&dir).await?;
+    if dir.exists() && !crate::host_store::unmade(&dir) {
+        return Ok(dir);
+    }
+    let writers = table().instances().into_iter().filter(|(_, store)| store.branch() == cell);
+    for (path, _) in writers.collect::<Vec<_>>() {
+        sync(path).await?;
+    }
+    let made = dir.clone();
+    blocking(move || {
+        let _held = held;
+        removed_if_unmade(&made)?;
+        if let Some(root) = made.parent() {
+            std::fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
+        }
+        let bucket = daemon_bucket()?;
+        let found = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, cell.cell));
+        let object = found.map_err(|_| Errno::EIO)?.map_err(|_| Errno::EIO)?;
+        let object = object.ok_or(Errno::ENOENT)?;
+        let kind = object.kind.ok_or(Errno::ENOENT)?;
+        let url = crate::host_store::bucket_for(&made).map_err(|_| Errno::EIO)?;
+        let description = extent_store::Description {
+            block_size: ExtentStore::BLOCK_SIZE,
+            capacity,
+            branch: cell,
+        };
+        ExtentStore::create_copy(&made, (&url, kind), description, version)
+            .map_err(|err| errno_of(format_args!("opening version {version} of {cell} here"), err))
+    })
+    .await?;
+    Ok(dir)
+}
+
+/// Forks the version `version` of `cell`, a VM snapshot's, to a new cell at `path`, which the VM
+/// restored from the snapshot opens (TASK-39.1). Restores of one snapshot, a zygote's, fork the
+/// version at once, kept open for them here ([`opened_version`], TASK-92.5). Its waits hold no
+/// thread; its fork blocks. A version kept open whose fork fails, as once another host took its
+/// cell, is let go of and opened anew for one more fork. The fork is a new cell of `tenant`'s, if
+/// given, the granted tenant's whose VM process restores, or else of `cell`'s tenant's (TASK-364):
+/// one of another tenant's than `cell`'s only if the version is shared (`EACCES` otherwise).
+pub(super) async fn fork_version(
+    (cell, version): (Branch, u64),
     capacity: u64,
     (path, tenant): (&Path, Option<u64>),
 ) -> Result<(), Errno> {
-    uploaded_source(from).await?;
-    match fork_copy(from, capacity, (path, tenant)).await {
+    let from = opened_version(cell, version, capacity).await?;
+    match fork_copy(&from, capacity, (path, tenant)).await {
         (Err(errno), Opened::Before) if store_at_fault(errno) => {
             // What a crash left at `path` goes first, as before any restore's.
             removed_if_unmade(path)?;
-            fork_copy(from, capacity, (path, tenant)).await.0
+            fork_copy(&from, capacity, (path, tenant)).await.0
         }
         (forked, _) => forked,
     }
 }
 
-/// cladefs: if the store at `from` is a version's copy made here, of a store here, returns once that
-/// store's commits are uploaded, the version's among them, which the copy's opening reads from the
-/// bucket: a version is local as it is made, and uploaded behind.
-async fn uploaded_source(from: &Path) -> Result<(), Errno> {
-    if kept(&store_key(from)).is_some() {
-        return Ok(());
-    }
-    match crate::store_dir::source(from)? {
-        Some(source) if source.exists() => sync(source).await,
-        _ => Ok(()),
-    }
+/// cladefs: forks the version `version` of `cell` to a new store at `to`, a new cell of `tenant`'s
+/// if given, else of `cell`'s tenant's, as [`fork_version`] does, the store at `to` held throughout
+/// (`ForkStore`'s `version`): returns its branch.
+pub(super) async fn fork_of_version(
+    cell: Branch,
+    version: u64,
+    to: PathBuf,
+    tenant: Option<u64>,
+) -> Result<Branch, Errno> {
+    let _child = hold_to_fork(&to).await?;
+    fork_version((cell, version), ExtentStore::BLOCK_SIZE as u64, (&to, tenant)).await?;
+    extent_store::host_branch(&to).map_err(|_| Errno::EIO)
 }
 
-/// cladefs: `Ok` if `store`, at a restore's `path` already, holds what the copy at `from` does
-/// ([`ExtentStore::holds_what`]), the copy opened as [`fork_from`] opens it: the store the
-/// snapshot was taken of, written nothing since, or a fork of the copy an earlier restore made,
-/// its VM having written nothing (TASK-194). `EEXIST` otherwise, logged: its guest, of the
-/// snapshot's memory, would read extents freed since and commit over what was written since.
-/// Nothing of the store is changed.
-pub(super) async fn at_copy(
-    from: &Path,
+/// cladefs: `Ok` if `store`, at a restore's `path` already, holds what the version `version` of
+/// `cell` does ([`ExtentStore::holds_what`]): the store the snapshot was taken of, written nothing
+/// since, or a fork of the version an earlier restore made, its VM having written nothing
+/// (TASK-194). `EEXIST` otherwise, logged: its guest, of the snapshot's memory, would read extents
+/// freed since and commit over what was written since. Nothing of the store is changed.
+pub(super) async fn at_version(
+    (cell, version): (Branch, u64),
     capacity: u64,
     path: &Path,
     store: &ExtentStore,
 ) -> Result<(), Errno> {
-    let (copy, _) = copy(from, capacity).await?;
+    let from = opened_version(cell, version, capacity).await?;
+    let (copy, _) = copy(&from, capacity).await?;
     if store.holds_what(&copy.store)? {
         return Ok(());
     }
     log::warn!(
-        "cladefsd: refusing a restore from {} into {}: written since its copy, it holds another \
-         state than the snapshot's",
-        from.display(),
+        "cladefsd: refusing a restore of version {version} of {cell} into {}: written since, it \
+         holds another state than the snapshot's",
         path.display()
     );
     Err(Errno::EEXIST)
 }
 
-/// cladefs: forks the copy at `from` to `path`, as [`fork_from`] does, once: and says when the
+/// cladefs: forks the copy at `from` to `path`, as [`fork_version`] does, once: and says when the
 /// copy was opened. A copy whose fork fails is let go of ([`let_go_failed`]).
 async fn fork_copy(
     from: &Path,
@@ -869,13 +917,12 @@ async fn copy(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), Er
 /// no thread; the fork, as of then, is made on a blocking thread. The store at `to` is held
 /// throughout, so that a connection opens the child only once the fork is made, in the bucket too
 /// (TASK-79.95). A copy kept open whose fork fails, as once another host took its cell, is opened
-/// anew for one more fork ([`fork_from`], TASK-79.103). The child is a new cell of `tenant`'s, if
+/// anew for one more fork ([`fork_version`], TASK-79.103). The child is a new cell of `tenant`'s, if
 /// given: the granted tenant's whose directory `to` is in; or else of `from`'s tenant's (TASK-364).
 /// A version not shared forks to no cell of another tenant's (`EACCES`, TASK-395.7); nor does a
 /// store with a writer, unless it is the default tenant's, as the daemon's own stores and public
 /// bases are (`EACCES`, TASK-395.9), refused before anything is made.
 pub(super) async fn fork(from: PathBuf, to: PathBuf, tenant: Option<u64>) -> Result<Branch, Errno> {
-    uploaded_source(&from).await?;
     fork_from_store(&from, &to, tenant).await
 }
 
@@ -961,29 +1008,13 @@ async fn with_store<T: Send + 'static>(
 }
 
 /// cladefs: makes a version of the cell of the store at `path` ([`ExtentStore::make_version`]),
-/// keeping its newest `keep_last` if given, and a copy of it at `copy`, if given, which forks
-/// fork; returns its ID.
-pub(super) async fn make_version(
-    path: PathBuf,
-    keep_last: Option<u32>,
-    copy: Option<PathBuf>,
-) -> Result<u64, Errno> {
-    let _copy = match &copy {
-        Some(copy) => Some(hold(copy).await?),
-        None => None,
-    };
+/// keeping its newest `keep_last` if given; returns its ID.
+pub(super) async fn make_version(path: PathBuf, keep_last: Option<u32>) -> Result<u64, Errno> {
     let at = path.clone();
     with_store(&path, move |store| {
-        let what = || format!("making a version of {}", at.display());
-        let id = store
+        store
             .make_version(keep_last)
-            .map_err(|err| errno_of(format_args!("{}", what()), err))?;
-        if let Some(copy) = copy {
-            store.copy_version(&copy, id).map_err(|err| {
-                errno_of(format_args!("copying version {id} to {}", copy.display()), err)
-            })?;
-        }
-        Ok(id)
+            .map_err(|err| errno_of(format_args!("making a version of {}", at.display()), err))
     })
     .await
 }
@@ -1013,33 +1044,6 @@ pub(super) async fn share_version(path: PathBuf, id: u64, shared: bool) -> Resul
         store
             .share_version(id, shared)
             .map_err(|err| errno_of(format_args!("sharing version {id} of {}", at.display()), err))
-    })
-    .await
-}
-
-/// cladefs: makes a copy at `path`, which must not exist (`EEXIST`), of the version `version` of
-/// `branch`, kept in the daemon's bucket, of `kind` and `capacity` bytes: what forks fork on a
-/// host the version wasn't made on.
-pub(super) async fn create_copy(
-    path: PathBuf,
-    capacity: u64,
-    (branch, version): (Branch, u64),
-    kind: Kind,
-) -> Result<Branch, Errno> {
-    let held = hold(&path).await?;
-    blocking(move || {
-        let _held = held;
-        removed_if_unmade(&path)?;
-        let url = crate::host_store::bucket_for(&path).map_err(|err| {
-            log::error!("cladefsd: the bucket of {}: {err:#}", path.display());
-            Errno::EIO
-        })?;
-        let description =
-            extent_store::Description { block_size: ExtentStore::BLOCK_SIZE, capacity, branch };
-        ExtentStore::create_copy(&path, (&url, kind), description, version).map_err(|err| {
-            errno_of(format_args!("copying version {version} to {}", path.display()), err)
-        })?;
-        Ok(branch)
     })
     .await
 }
@@ -1174,8 +1178,6 @@ pub(super) struct StoreState {
     pub committed: u64,
     /// What its uploader has done and has left to do, if its commits upload now.
     pub upload: Option<extent_store::upload::UploadStatus>,
-    /// The version of its cell it is a copy of, if it is one.
-    pub version: Option<u64>,
 }
 
 /// What `store` is, and holds; `open` if a connection has it open.
@@ -1188,7 +1190,6 @@ fn state_of(store: &ExtentStore, open: bool) -> Result<StoreState, Errno> {
         open,
         committed: store.committed()?,
         upload: store.upload_status()?,
-        version: store.version(),
     })
 }
 

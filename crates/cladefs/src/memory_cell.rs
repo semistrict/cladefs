@@ -29,8 +29,8 @@
 
 use crate::error::{Errno, Error};
 use crate::{
-    DaemonConnection, DaemonDevice, DaemonExtentStore, MappingContents, Prefault, Unmapped,
-    WindowMapping,
+    CellVersion, DaemonConnection, DaemonDevice, DaemonExtentStore, MappingContents, Prefault,
+    Unmapped, WindowMapping,
 };
 use extent_files::{Contents, FileSet, Options};
 use futures::channel::oneshot;
@@ -66,18 +66,17 @@ impl MemoryCell {
         Self::over(daemon.open_memory(store, capacity(size))?, size)
     }
 
-    /// The memory cell at `store`, forked from the memory cell at `version` if it doesn't
-    /// exist: a VM's memory restored from a snapshot, whose memory `version` is, which must exist
-    /// (`ENOENT` otherwise): its VM manager makes it on a host that restores the snapshot, as a
-    /// disk's version (docs/integrator-guide.md). `EINVAL` for a memory of another size.
+    /// The memory cell at `store`, forked from the version `from` of a memory cell if it doesn't
+    /// exist: a VM's memory restored from a snapshot, on any host, as its disks are
+    /// (docs/integrator-guide.md). `EINVAL` for a memory of another size.
     pub fn open_forked(
         socket: &Path,
         store: &Path,
-        version: &Path,
+        from: CellVersion,
         size: u64,
     ) -> Result<Self, Error> {
         let daemon = DaemonConnection::connect(socket)?;
-        Self::over(daemon.open_forked(store, version, 0, capacity(size))?, size)
+        Self::over(daemon.open_forked(store, from, capacity(size))?, size)
     }
 
     /// The memory cell `opened` is, of a memory of `size` bytes, made one of zeros if new.
@@ -176,10 +175,10 @@ impl MemoryCell {
         self.commit()
     }
 
-    /// Makes a version of the cell as of its last commit, and a copy of it at `path`: a VM
-    /// snapshot's memory, which any number of hosts restore at once, and none writes; its branch.
-    pub fn version_copy(&self, path: &Path) -> Result<u64, Error> {
-        self.store.version_copy(path).map_err(Error::new)
+    /// Makes a version of the cell as of its last commit: a VM snapshot's memory, which any number
+    /// of hosts restore at once ([`MemoryCell::open_forked`]), and none writes.
+    pub fn make_version(&self) -> Result<CellVersion, Error> {
+        self.store.make_version().map_err(Error::new)
     }
 
     /// Forks the cell, as of its last commit, to a new store at `path`, a memory cell of a

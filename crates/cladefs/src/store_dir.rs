@@ -224,19 +224,3 @@ mod tests {
         assert_eq!(ancestry(to.path()), Ok(vec![(4, parent), (3, "/stores/grandparent".into())]));
     }
 }
-
-/// The record naming the store a version's copy was made of, on this host: a line of its directory.
-const SOURCE: &str = "version-source";
-
-/// Records `source` as the store the version's copy in `dir` was made of, durably: a fork of the
-/// copy here has the source upload the version first.
-pub(crate) fn record_source(dir: &Path, source: &Path) -> Result<()> {
-    let text = format!("{}\n", source.display());
-    write(dir, SOURCE, &text).map_err(|err| failed(dir, "recording the version's source", err))
-}
-
-/// The store the version's copy in `dir` was made of on this host, if it was made here.
-pub(crate) fn source(dir: &Path) -> Result<Option<PathBuf>> {
-    let lines = lines(dir, SOURCE, "the version's source", |line| Some(PathBuf::from(line)))?;
-    Ok(lines.into_iter().next())
-}

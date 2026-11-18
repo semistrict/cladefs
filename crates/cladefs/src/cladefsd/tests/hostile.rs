@@ -155,8 +155,11 @@ enum Word {
     Own,
     Alice,
     Bob,
-    /// The branch its VM manager made a version of for it, in its directory.
+    /// The cell of the version it may restore, shared.
     Given,
+    /// That version, and the cell's tenant.
+    GivenVersion,
+    GivenTenant,
 }
 
 /// A path mallory names.
@@ -164,10 +167,6 @@ enum Word {
 enum Place {
     /// A store of its own, of the case's: one of four, which its connections share.
     Own(u8),
-    /// The version its VM manager made for it.
-    Version,
-    /// A version there isn't, in its directory, of the case's, which only restores name.
-    Nothing,
     /// Alice's store she closed, out of its directory by `..`.
     Escaped,
     /// Alice's store she closed, through a link in its directory to hers.
@@ -193,8 +192,6 @@ enum Payload {
     /// So many bytes of one.
     Filled(u8, usize),
     Path(Place),
-    /// A restore's: its store, a NUL, and the version it forks.
-    ForkFrom(Place, Place),
     /// A `FREE_MANY`'s extents, after the first.
     Extents(Vec<(Word, u64)>),
 }
@@ -408,7 +405,6 @@ fn word() -> BoxedStrategy<Word> {
 fn place() -> BoxedStrategy<Place> {
     prop_oneof![
         4 => (0u8..4).prop_map(Place::Own),
-        1 => Just(Place::Version),
         1 => Just(Place::Escaped),
         1 => Just(Place::Linked),
         1 => Just(Place::Alices),
@@ -599,10 +595,10 @@ fn message() -> BoxedStrategy<Said> {
         1 => (place(), 0u32..2).prop_map(|(to, flags)| {
             said(FORK, flags, [Is(0xf0f0), Is(0), Is(0), Is(0), Is(0)], Payload::Path(to))
         }),
-        // Restores, of versions of any branch it names, from anywhere.
-        1 => ((0u8..4).prop_map(Place::Own), prop_oneof![2 => Just(Place::Nothing), 3 => place()], prop_oneof![Just(Alice), Just(Bob), Just(Given)])
-            .prop_map(|(to, from, branch)| {
-                said(OPEN, OPEN_FORK_FROM, [Is(STORE_BYTES), branch, Is(0), Is(0), Is(VERSION)], Payload::ForkFrom(to, from))
+        // Restores, of versions there are or not, of any cell it names, of any tenant's.
+        1 => ((0u8..4).prop_map(Place::Own), prop_oneof![Just(Alice), Just(Bob), Just(Given)], prop_oneof![Just(GivenVersion), any::<u64>().prop_map(Is)], prop_oneof![Just(GivenTenant), (0u64..4).prop_map(Is)])
+            .prop_map(|(to, cell, version, tenant)| {
+                said(OPEN, OPEN_FORK, [Is(STORE_BYTES), cell, version, tenant, Is(VERSION)], Payload::Path(to))
             }),
     ];
     // The protocol's own: acknowledgements forged, what its stage operations cost, its build, a
@@ -1155,6 +1151,8 @@ struct Names {
     bob: PathBuf,
     bobs: u64,
     given: u64,
+    given_version: u64,
+    given_tenant: u64,
     /// Mallory's tenant's arena, whose cached pages a flood of page-ins evicts first.
     arena: ArenaId,
 }
@@ -1164,8 +1162,6 @@ impl Names {
         let alices = self.alices.file_name().unwrap();
         match place {
             Place::Own(store) => self.vms.join(format!("{}-{store}", self.case)),
-            Place::Version => self.vms.join("version"),
-            Place::Nothing => self.vms.join(format!("nothing-{}", self.case)),
             Place::Escaped => self.vms.join("..").join(alices).join("archive"),
             Place::Linked => self.vms.join("link").join("archive"),
             Place::Alices => self.alices.join("archive"),
@@ -1185,6 +1181,8 @@ impl Names {
             Word::Alice => self.alice,
             Word::Bob => self.bobs,
             Word::Given => self.given,
+            Word::GivenVersion => self.given_version,
+            Word::GivenTenant => self.given_tenant,
         }
     }
 
@@ -1193,10 +1191,6 @@ impl Names {
             Payload::Bytes(bytes) => bytes.clone(),
             Payload::Filled(byte, len) => vec![*byte; *len],
             Payload::Path(place) => self.place(*place).as_os_str().as_bytes().to_vec(),
-            Payload::ForkFrom(to, from) => {
-                let (to, from) = (self.place(*to), self.place(*from));
-                [to.as_os_str().as_bytes(), &[0], from.as_os_str().as_bytes()].concat()
-            }
             Payload::Extents(extents) => (extents.iter())
                 .flat_map(|(branch, sequence)| [self.word(*branch, own), *sequence])
                 .flat_map(u64::to_le_bytes)
@@ -1464,7 +1458,7 @@ fn receive(
                         shared.own.store(header.args[0], Ordering::Relaxed);
                         shared.writer.store(true, Ordering::Relaxed);
                         seen.wrote = shared.paths.lock().unwrap().get(&header.id).cloned();
-                        seen.restored += u64::from(request.flags == OPEN_FORK_FROM);
+                        seen.restored += u64::from(request.flags == OPEN_FORK);
                     }
                     Some(request) if request.kind == WINDOW => {
                         let size = request.args[0];
@@ -1596,13 +1590,17 @@ fn run_hostile(
         }
     }
     if hostile.opens == Opens::Restores {
-        let (to, version) =
-            (names.vms.join(format!("{}-r{index}", names.case)), names.place(Place::Version));
-        let named = [to.as_os_str().as_bytes(), &[0], version.as_os_str().as_bytes()];
+        let to = names.vms.join(format!("{}-r{index}", names.case));
         let restore = Header::new(OPEN, id())
-            .with_args(&[STORE_BYTES, names.given, 0, 0, VERSION])
-            .with_flags(OPEN_FORK_FROM);
-        if let Ok(id) = send(restore, &named.concat(), None) {
+            .with_args(&[
+                STORE_BYTES,
+                names.given,
+                names.given_version,
+                names.given_tenant,
+                VERSION,
+            ])
+            .with_flags(OPEN_FORK);
+        if let Ok(id) = send(restore, to.as_os_str().as_bytes(), None) {
             shared.answers.wait(id);
         }
     }
@@ -1679,7 +1677,7 @@ fn run_hostile(
             // longer over it than over all that comes after.
             if let Ok(id) = sent
                 && said.kind == OPEN
-                && said.flags == OPEN_FORK_FROM
+                && said.flags == OPEN_FORK
             {
                 shared.answers.wait(id);
             }
@@ -1807,11 +1805,11 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
         write(&given, extent, 0, &vec![0x88; 1 << 20]).unwrap();
     }
     given.commit(Some(b"given")).unwrap();
+    let given_version = given.make_version().unwrap();
     drop(given);
-    let version = vms.join("version");
-    let given =
-        (super::branch_at(&dir.path().join("given")), (None, extent_bucket::cell::Kind::Fxfs));
-    control(super::super::stores::create(version, STORE_BYTES, given.0, given.1)).unwrap();
+    let shared = (given_version.version, true);
+    control(super::super::stores::share_version(dir.path().join("given"), shared.0, shared.1))
+        .unwrap();
 
     // Alice, on a thread of her own, her guest's, doing what each case asks of her.
     let (asking, asked) = std::sync::mpsc::channel::<Vec<AliceOp>>();
@@ -1871,6 +1869,8 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 bob: bob_path.clone(),
                 bobs: bob.branch(),
                 given: given_branch,
+                given_version: given_version.version,
+                given_tenant: given_version.tenant,
                 arena: mallory.arena(),
             });
             *CASE.lock().unwrap() = format!("case {case}: {hostiles:#?}");
@@ -2235,7 +2235,7 @@ fn page_ins_in_flight_are_bounded() {
     std::thread::spawn(move || serve(listener));
     // A version of the extents, made here, restored on another host, which has them in the bucket
     // alone.
-    let (path, version) = (dir.path().join("store"), dir.path().join("version"));
+    let path = dir.path().join("store");
     let branch = {
         let store = ExtentStore::create(&path, 1 << 30).unwrap();
         let branch = store.branch();
@@ -2253,24 +2253,12 @@ fn page_ins_in_flight_are_bounded() {
         branch
     };
     let store = DaemonExtentStore::connect(&socket, &path, 1 << 30).unwrap();
-    store.version_copy(&version).unwrap();
+    let version = store.make_version().unwrap();
     drop(store);
-    // Its VM manager makes the version's store on the other host first: a snapshot names its version's
-    // branch by its ID alone (TASK-364).
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
-    let point_branch = super::branch_at(&version);
-    let made = (None, extent_bucket::cell::Kind::Fxfs);
-    control(super::super::stores::create(elsewhere.join("version"), 1 << 30, point_branch, made))
-        .unwrap();
     let restored = elsewhere.join("store");
-    let forked = DaemonExtentStore::connect_forked(
-        &socket,
-        &restored,
-        elsewhere.join("version"),
-        branch.id + 1,
-        1 << 30,
-    );
+    let forked = DaemonExtentStore::connect_forked(&socket, &restored, version, 1 << 30);
     drop(forked.unwrap());
 
     let (sender, receiver, _stream, _) = super::raw_connection(&socket, &restored, 1 << 30);

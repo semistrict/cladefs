@@ -200,12 +200,6 @@ pub struct Tenant {
 struct Policy {
     /// Where they name stores.
     stores: Stores,
-    /// Whether the branch one names, of a version it restores from that isn't here, counts. Not a
-    /// granted tenant's: nothing in the bucket says whose a branch is, so a version not here it
-    /// finds absent, whatever branch it names (TASK-150.4); its VM manager, which knows what the
-    /// tenant may restore, takes a version for it first (`CreateStore`, TASK-154). The default
-    /// tenant's, whose VM processes are the daemon's user's (TASK-155), does.
-    names_branches: bool,
     /// Whether they follow a public base (backlog doc-8): the default tenant's do; a granted
     /// tenant's opens no public base, only forks of it (TASK-43).
     follows_public_bases: bool,
@@ -223,12 +217,12 @@ enum Stores {
 impl Policy {
     /// A granted tenant's, whose stores are in `dir`, canonical.
     fn granted(dir: PathBuf) -> Self {
-        Self { stores: Stores::Dir(dir), names_branches: false, follows_public_bases: false }
+        Self { stores: Stores::Dir(dir), follows_public_bases: false }
     }
 
     /// The default tenant's ([`default_tenant`]).
     fn default_tenant() -> Self {
-        Self { stores: Stores::Roots(roots()), names_branches: true, follows_public_bases: true }
+        Self { stores: Stores::Roots(roots()), follows_public_bases: true }
     }
 }
 
@@ -1381,22 +1375,27 @@ impl Connection {
             Request::LetGo { commit } => store.let_go(*commit),
             Request::Pin(extent) => store.pin(*extent),
             Request::Unpin(extent) => store.unpin(*extent),
+            Request::Version => {
+                // A VM snapshot's: a version of the store's cell, made here (doc-20), refused while
+                // the window holds private pages, whose bytes no extent holds (TASK-203). Each
+                // refusal says why here, as the VMM's error can't (TASK-92.14).
+                let version = store.make_version(None).map_err(|err| {
+                    if err.errno() == Some(Errno::EBUSY) {
+                        log::warn!("cladefsd: a version refused: {err:#}");
+                    }
+                    stores::errno_of(format_args!("making a version"), err)
+                })?;
+                let branch = store.branch();
+                reply.args =
+                    Forked { branch: branch.id, version, tenant: branch.cell.tenant }.args();
+                Ok(())
+            }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
-            Request::Fork { path, quiescent } => {
+            Request::Fork { path } => {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
-                // A VM snapshot's, if `quiescent`: a version of the store's cell, made here, and a
-                // copy of it at `path`, which the VM's restores fork (doc-20), refused while the
-                // window holds private pages, whose bytes no extent holds (TASK-203). Otherwise a
-                // fork into a new cell of the store's tenant (TASK-364). Each refusal says why here,
-                // as the VMM's error can't (TASK-92.14).
-                let tenant = store.branch().cell.tenant;
-                let forked = match quiescent {
-                    true => (store.make_version(None))
-                        .and_then(|id| store.copy_version(path, id))
-                        .map(|()| store.branch()),
-                    false => store.fork(path, tenant),
-                };
+                // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
+                let forked = store.fork(path, store.branch().cell.tenant);
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
@@ -1407,7 +1406,7 @@ impl Connection {
                 })?;
                 // cladefs: the fork made, its reply lost: its guest takes it to have failed.
                 fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
-                reply.args = Forked { branch: branch.id }.args();
+                reply.args = Forked { branch: branch.id, version: 0, tenant: 0 }.args();
                 Ok(())
             }
             Request::Info => store.info().map(|info| reply.args = Info(info).args()),
@@ -1571,24 +1570,19 @@ impl Connection {
     }
 
     /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
-    /// forking it from the store `how` names if it doesn't exist ([`stores::fork_from`]); unless
-    /// another connection has it open; and returns its branch. cladefs: a store followers have open,
-    /// it takes over ([`stores::take_over`]). Its waits, for a connection whose VM process is gone
-    /// to let the store go, and for a restore's version ([`stores::fork_from`]), hold no thread
-    /// (TASK-92.5); its I/O blocks.
-    async fn open(&self, path: &Path, mut how: codec::Opening) -> Result<u64, Errno> {
-        // cladefs: the branch it names, if its tenant's word for one counts (TASK-150.4).
-        if let codec::Opening::ForkFrom { branch, .. } = &mut how
-            && !self.tenant.policy.names_branches
-        {
-            *branch = 0;
-        }
+    /// forking it from the version `how` names if it doesn't exist ([`stores::fork_version`]);
+    /// unless another connection has it open; and returns its branch. cladefs: a store followers
+    /// have open, it takes over ([`stores::take_over`]). Its waits, for a connection whose VM
+    /// process is gone to let the store go, and for a restore's version, hold no thread
+    /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
+    /// if it is shared (`EACCES`, TASK-395.7).
+    async fn open(&self, path: &Path, how: codec::Opening) -> Result<u64, Errno> {
         let opening = self.opening()?;
         let hold = stores::hold_to_write(&store_key(path), self.this.clone()).await?;
         // cladefs: nor one of another tenant's cells (TASK-364).
         self.tenant.reaches(path)?;
         // cladefs: a store it makes, within its tenant's disk (TASK-94).
-        let makes = matches!(how, codec::Opening::Create(..) | codec::Opening::ForkFrom { .. });
+        let makes = matches!(how, codec::Opening::Create(..) | codec::Opening::ForkOf { .. });
         let _admitted = match makes && !path.exists() {
             true => self.tenant.admit_to_disk(super::disk::STORE_MADE)?,
             false => None,
@@ -1624,7 +1618,7 @@ impl Connection {
         // cladefs: a restore's store there already, which the snapshot was taken of or an earlier
         // restore forked, holds the version's state, or is refused, as it is (TASK-194).
         let mut there = None;
-        if let codec::Opening::ForkFrom { from, capacity, .. } = how
+        if let codec::Opening::ForkOf { tenant, cell, version, capacity } = *how
             && path.exists()
             && !crate::host_store::unmade(path)
         {
@@ -1632,7 +1626,8 @@ impl Connection {
                 Some((store, _)) => store,
                 None => Arc::new(open_store(path, None, Some(arena))?),
             };
-            stores::at_copy(from, *capacity, path, &store).await?;
+            stores::at_version((version_cell(tenant, cell), version), capacity, path, &store)
+                .await?;
             there = Some(store);
         }
         if let Some(store) = stores::take_over(hold, arena)? {
@@ -1642,9 +1637,10 @@ impl Connection {
             (Some(store), _) => store,
             // cladefs: or where a store's making was left unmade, its host crashing, which is no
             // store: removed first, as deleting it would (TASK-79.84).
-            (None, codec::Opening::ForkFrom { from, capacity, .. }) => {
+            (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
                 stores::removed_if_unmade(path)?;
-                stores::fork_from(from, *capacity, (path, self.tenant.granted())).await?;
+                let forked = (version_cell(tenant, cell), version);
+                stores::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
                 Arc::new(open_store(path, None, Some(arena))?)
             }
             (None, codec::Opening::Create(capacity, kind)) => {
@@ -2771,4 +2767,10 @@ mod in_dir_tests {
             assert!(!in_dir(&path, &ours), "{}", path.display());
         }
     }
+}
+
+/// cladefs: the branch of the cell `id` of `tenant`'s, which a version a restore forks is of: a
+/// cell's ID is its branch's (doc-20).
+fn version_cell(tenant: u64, id: u64) -> crate::Branch {
+    crate::Branch { cell: crate::Cell { tenant, id }, id }
 }

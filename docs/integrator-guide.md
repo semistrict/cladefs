@@ -47,57 +47,35 @@ says what a format change refuses.
 
 ## Restoring a snapshot, on any number of hosts at once
 
-A VM snapshot's version is immutable. Any number of hosts read it, and none writes it: a
-restore on one host changes nothing another host sees, and no copy of it goes stale. Each restore
-is a fork of the version into a new branch of the VM's own.
+A VM snapshot makes a version of each of the VM's cells, and its file names each by tenant, cell
+and version. A version is immutable: any number of hosts fork it, and none writes it, so a restore
+on one host changes nothing another host sees. Each restore is a fork of the version into a new
+cell of the restoring VM's tenant's.
 
-A VM process can't name a branch: cladefsd ignores what it says, or any stolen ID would take another
-tenant's data. The VM manager puts the snapshot's branch in the tenant's directory instead, and that
-is the grant.
+A tenant's VM processes restore versions of their own tenant's cells, and versions of other
+tenants' cells only while those are shared (`ShareVersion`); any other restore fails with
+`PERMISSION_DENIED` (`EACCES`), making nothing.
 
-Without step 2 below, a restore on a host that has no copy fails with `ENOENT`.
-
-### 1. On the snapshot's host, once it's taken
-
-```
-branch = StatStore(version).branch      # keep this with the snapshot
-```
-
-The version is in the bucket by the time the snapshot returns.
-
-Use this `branch`. **Never use `point_branch` from the snapshot file: a VM process wrote it.**
-
-### 2. On each host that will restore it, once, before its first `PUT /snapshot/load`
+### 1. Before restoring on another host than the snapshot's
 
 ```
-CreateStore(path = <tenant's directory>/<version>, capacity, branch)
+SyncStore(<the snapshotted VM's store>)
 ```
 
-| Result | Meaning | Do |
-|---|---|---|
-| OK | The store is made. The daemon takes the point at the first restore | Go on |
-| `ALREADY_EXISTS` | A store is there, perhaps a VM process's | Use it only if `StatStore(path).branch == branch`. Otherwise stop |
+A version is made locally and uploaded behind. Once `SyncStore` returns, it is in the bucket for
+every host.
 
-A version needs no `token`, so ignore `PlaceStore` for it. Keep the copy for as many restores as you
-like.
-
-Only do this for the tenant whose snapshot it is: its VM processes can restore the version and read it.
-They can't write it: opening a point to write fails with `EROFS`.
-
-### 3. Load the snapshot
+### 2. Load the snapshot
 
 In `cladefs_overrides`:
 
 | Field | Value |
 |---|---|
-| `copy_on_host` | The path from step 2 |
 | `path_on_host` | The VM's store, in the tenant's directory |
 | `cladefsd_socket` | The tenant's socket, as the jail sees it |
 
-Do this as often as you like, on any host, at the same time. Each restore makes a new branch for
-the VM.
-
-If a restore fails with `ENOENT` although the copy from step 2 exists, the snapshot was deleted.
+Do this as often as you like, on any host, at the same time. Each restore makes a new cell for the
+VM; the daemon opens the version once on a host for all the restores of it there.
 
 Name a `path_on_host` where no store is yet: the restore forks the version there. A store already
 there is opened only if it holds exactly what the version does: the store the snapshot was taken
@@ -107,27 +85,18 @@ store once it resumed and wrote on, fails the restore with `EEXIST` and is left 
 guest, running from the snapshot's memory, would corrupt it (TASK-194). Without
 `cladefs_overrides`, `path_on_host` is the snapshotted VM's own store.
 
-### 4. When this host won't restore that snapshot any more
+A VM's memory restored from a memory cell names the version in `memory_cell`'s `tenant`, `cell`
+and `version`, as the disk's are named in the snapshot file.
+
+### 3. When the snapshot is finished with, everywhere
 
 ```
-DropStore(version)
+DropVersions(<the snapshotted VM's store>, [version])
 ```
 
-This ends the tenant's access on this host and frees the copy. Nothing needs it for restores to work
-elsewhere, or to work again here: `CreateStore` takes it back.
-
-`DropStore` fails with `FAILED_PRECONDITION` (`EBUSY`) while a VM process has the store open.
-`cladefsctl drop DIR` does the same from a shell.
-
-### 5. When the snapshot is finished with, everywhere
-
-```
-DeleteStore(version)
-```
-
-**This deletes the snapshot on every host.** VMs already restored from it keep running and keep
-their data. New restores fail with `ENOENT`, on every host. A restore racing the deletion either
-fails or succeeds whole: one that succeeded keeps everything it inherited.
+**This drops the snapshot's version on every host.** VMs already restored from it keep running and
+keep their data. New restores fail with `NOT_FOUND` (`ENOENT`), on every host. A restore racing
+the drop either fails or succeeds whole: one that succeeded keeps everything it inherited.
 
 ### Guests' vsock connections across a restore
 
@@ -157,23 +126,21 @@ hang forever.
 
 ## Forking a base on any number of hosts at once
 
-A fork of a store that isn't a version, such as a base from `ImportImage`, is a commit on that
-store's branch, so only the branch's writer makes it, one host at a time. To fork a base on many
-hosts, make a version of it once, then fork the version, as a snapshot's is restored:
+A fork of a store with a writer, such as a base from `ImportImage`, is a commit on its cell, so only
+its writer makes it, one host at a time. To fork a base on many hosts, make a version of it once,
+then fork the version, as a snapshot's is restored:
 
 ```
 # On the base's host, once nothing has it open:
-branch = ForkStore(from = <base>, to = <base version>, version = true).branch
-# On each host that forks it, once:
-CreateStore(path = <base version>, capacity, branch)
+version = MakeVersion(<base>).version
+SyncStore(<base>)
 # Then, as often as you like, on every host at the same time:
-ForkStore(from = <base version>, to = <VM's store>)
+ForkStore(to = <VM's store>, version, tenant, cell)
 ```
 
 The base stays writable on its host. What it writes after reaches no fork of the version: make a new
-point to pass that on. `DeleteStore(<base point>)` ends the point everywhere, and the forks keep
-what they inherited. A version of a version fails with `INVALID_ARGUMENT`: fork the version itself.
-`cladefsctl version SRC DST` makes one from a shell.
+version to pass that on. `DropVersions` drops it everywhere, and the forks keep what they inherited.
+`cladefsctl version DIR` and `cladefsctl fork-version CELL VERSION DST` do the same from a shell.
 
 ## Limits
 

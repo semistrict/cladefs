@@ -116,10 +116,10 @@ mod host {
             oci_layout(&layout, "cladefs/test:import", &layers()?)?;
             let base = dir.join("base");
             block_on(cladefs::import::store(&base, CAPACITY, &layout, Some("cladefs/test:import")))?;
-            // A branch of each case's own, as each fork's is, its ID its bucket's to give: the
+            // A branch of each case's own, as each fork's is, its ID its bucket's to give:
             // a new cell of the base's tenant's (TASK-364).
             let base = cladefs::ExtentStore::open(&base)?;
-            base.fork(dir.join("extents"), cladefs::new_cell(base.branch().cell.tenant))?;
+            base.fork(dir.join("extents"), base.branch().cell.tenant)?;
             drop(base);
 
             let mut vm = Vm::new(2, 512)?;

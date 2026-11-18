@@ -16,8 +16,8 @@ use crate::dax::uffd::{FaultThread, UffdSecondStage};
 use crate::error::{Errno, Error, Result};
 use crate::hearing::{Latest, Occurrence};
 use crate::{
-    Access, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage, VolatileSlice,
-    VolatileSliceMut, WindowMapping, WriteBarriers,
+    Access, CellVersion, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage,
+    VolatileSlice, VolatileSliceMut, WindowMapping, WriteBarriers,
 };
 use extent_bucket::cell::Kind;
 use futures::channel::oneshot;
@@ -68,16 +68,15 @@ impl DaemonExtentStore {
         DaemonConnection::connect(socket)?.open(store, capacity)
     }
 
-    /// The store at `store` that the daemon listening at `socket` serves, forked from the store at
+    /// The store at `store` that the daemon listening at `socket` serves, forked from the version
     /// `from` if it doesn't exist ([`DaemonConnection::open_forked`]).
     pub fn connect_forked(
         socket: impl AsRef<Path>,
         store: impl AsRef<Path>,
-        from: impl AsRef<Path>,
-        from_branch: u64,
+        from: CellVersion,
         capacity: u64,
     ) -> Result<Self, Error> {
-        DaemonConnection::connect(socket)?.open_forked(store, from, from_branch, capacity)
+        DaemonConnection::connect(socket)?.open_forked(store, from, capacity)
     }
 
     /// cladefs: a follower of the store at `store` that the daemon listening at `socket` serves
@@ -439,20 +438,19 @@ impl DaemonExtentStore {
     /// directory at `path`, which the daemon serves sharing the store's pages (`FORK`), and returns
     /// the branch's ID, the bucket's to give (TASK-364).
     pub fn fork(&self, path: &Path) -> Result<u64> {
-        let fork = Request::Fork { path: path.to_owned(), quiescent: false };
+        let fork = Request::Fork { path: path.to_owned() };
         let reply = self.client.request_blocking(&fork)?;
         Ok(Forked::from_args(reply.header.args).branch)
     }
 
-    /// Makes a version of the store's cell and a copy of it at `path`
-    /// ([`ExtentStore::copy_version`](crate::ExtentStore::copy_version)), once nothing is open
+    /// Makes a version of the store's cell, once nothing is open
     /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), as with its guest's
-    /// filesystem frozen, `EBUSY` otherwise, and returns the cell's branch: what a VM snapshot
-    /// holds, which any number of hosts fork at once, and none writes.
-    pub fn version_copy(&self, path: &Path) -> Result<u64> {
-        let version = Request::Fork { path: path.to_owned(), quiescent: true };
-        let reply = self.client.request_blocking(&version)?;
-        Ok(Forked::from_args(reply.header.args).branch)
+    /// filesystem frozen, `EBUSY` otherwise: what a VM snapshot holds, which any number of hosts
+    /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
+    pub fn make_version(&self) -> Result<CellVersion> {
+        let reply = self.client.request_blocking(&Request::Version)?;
+        let Forked { branch, version, tenant } = Forked::from_args(reply.header.args);
+        Ok(CellVersion { tenant, cell: branch, version })
     }
 
     /// The window's mappings, which a snapshot of the VM records (`MAPPINGS`).
@@ -766,20 +764,18 @@ impl DaemonConnection {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Memory))
     }
 
-    /// The store at `store`, forked from the store at `from` if it doesn't exist: of a VM restored
-    /// from a snapshot, whose store version `from` is (TASK-39.1). cladefs: the daemon opens it once
-    /// for the restores of one snapshot, and keeps it open for them (TASK-92.5). A version that
-    /// doesn't exist is taken from the daemon's bucket, a store of its branch, `from_branch`, of
-    /// `capacity` bytes: the snapshot's restored on another host.
+    /// The store at `store`, of `capacity` bytes, forked from the version `from` if it doesn't
+    /// exist: of a VM restored from a snapshot (TASK-39.1), on any host. cladefs: the daemon opens
+    /// the version once for the restores of one snapshot here, and keeps it open for them
+    /// (TASK-92.5).
     pub fn open_forked(
         self,
         store: impl AsRef<Path>,
-        from: impl AsRef<Path>,
-        from_branch: u64,
+        from: CellVersion,
         capacity: u64,
     ) -> Result<DaemonExtentStore, Error> {
-        let from = from.as_ref().to_owned();
-        self.opening(store.as_ref(), Opening::ForkFrom { from, branch: from_branch, capacity })
+        let CellVersion { tenant, cell, version } = from;
+        self.opening(store.as_ref(), Opening::ForkOf { tenant, cell, version, capacity })
     }
 
     /// cladefs: a follower of the store at `store` (backlog doc-8): read-only, as of the latest

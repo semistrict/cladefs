@@ -186,12 +186,9 @@ impl Device {
             .and_then(|daemon| match &making {
                 Making::Boot if config.read_only => daemon.open_read_only(&config.path_on_host),
                 Making::Boot => daemon.open(&config.path_on_host, config.capacity),
-                Making::Restore { snapshot, .. } => daemon.open_forked(
-                    &config.path_on_host,
-                    &snapshot.copy,
-                    snapshot.branch,
-                    config.capacity,
-                ),
+                Making::Restore { snapshot, .. } => {
+                    daemon.open_forked(&config.path_on_host, snapshot.version, config.capacity)
+                }
             })
             .map_err(|err| Error::Store(config.path_on_host.clone(), err))?;
         config_space.branch = store.branch().to_le();
@@ -420,14 +417,9 @@ impl Device {
     /// cladefs: takes a snapshot of the device's store, for a snapshot of the VM, paused, whose
     /// guest's filesystem is frozen, with nothing open (TASK-39.1): `quiesce` has the VMM's
     /// workers serve the requests they took and stop, as they do for the snapshot, so that none
-    /// changes the window meanwhile; then a version of the store's cell is made, with a copy of it
-    /// at `copy`, which restores fork, and the window's mappings recorded, which [`Device::state`]
-    /// says.
-    pub fn take_snapshot(
-        &mut self,
-        copy: &Path,
-        quiesce: impl FnOnce(),
-    ) -> Result<(), SnapshotError> {
+    /// changes the window meanwhile; then a version of the store's cell is made, which restores
+    /// fork, and the window's mappings recorded, which [`Device::state`] says.
+    pub fn take_snapshot(&mut self, quiesce: impl FnOnce()) -> Result<(), SnapshotError> {
         let id = self.config.id.clone();
         if self.config.read_only {
             return Err(SnapshotError::ReadOnly(id));
@@ -436,14 +428,13 @@ impl Device {
             return Err(SnapshotError::NotFrozen(id));
         }
         quiesce();
-        // cladefs: the cell's branch, which a restore on another host makes its copy of the version of.
-        let branch = self
+        let version = self
             .store()
-            .version_copy(copy)
-            .map_err(|errno| SnapshotError::Fork(id.clone(), copy.display().to_string(), errno))?;
+            .make_version()
+            .map_err(|errno| SnapshotError::Version(id.clone(), errno))?;
         let mappings =
             self.store().window_mappings().map_err(|errno| SnapshotError::Mappings(id, errno))?;
-        self.snapshot = Some(Snapshot { copy: copy.to_owned(), branch, mappings });
+        self.snapshot = Some(Snapshot { version, mappings });
         Ok(())
     }
 
@@ -461,8 +452,7 @@ impl Device {
         State {
             config: ConfigState::from(&self.config),
             window_addr: self.window.as_ref().map(WindowMemory::guest_addr),
-            copy: snapshot.copy.clone(),
-            branch: snapshot.branch,
+            version: snapshot.version,
             mappings: snapshot.mappings.iter().map(MappingState::from).collect(),
             frozen: self.notices.frozen(),
         }
