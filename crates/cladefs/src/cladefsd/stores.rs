@@ -925,7 +925,7 @@ async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Br
     let to = to.to_owned();
     let forked = async {
         uploaded(&store).await?;
-        fail::fail_copy!("cladefsd::fork_uploaded", |_| Err(Errno::EIO));
+        fail::fail_point!("cladefsd::fork_uploaded", |_| Err(Errno::EIO));
         blocking(move || {
             let store = &store.store;
             let forked = match live {

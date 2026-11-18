@@ -177,12 +177,12 @@ fn tenants_restore_versions_given_them_into_cells_of_their_own() {
     vm.version_copy(&globex.join("copy")).unwrap();
     drop(vm);
     here.daemon.sync(&globex.join("vm")).unwrap();
-    let version = here.daemon.branch(&globex.join("copy")).unwrap();
+    let copied = here.daemon.branch(&globex.join("copy")).unwrap();
     let version = here.daemon.stat(&globex.join("copy")).unwrap().version;
-    assert_eq!(version.cell.tenant, 2);
+    assert_eq!(copied.cell.tenant, 2);
 
     let given = there.acme.join("given");
-    assert_eq!(there.daemon.copy(&given, version, version).unwrap(), version);
+    assert_eq!(there.daemon.copy(&given, copied, version).unwrap(), copied);
     let refused = there.acme.join("refused");
     assert_eq!(restore(&there.socket, &refused, &given, 0).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
@@ -212,23 +212,23 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     let vm = DaemonExtentStore::connect(&here.socket, &base, CAPACITY).unwrap();
     write(&vm, &pattern(8), b"base");
     drop(vm);
-    let version = here.acme.join("copy");
-    let version = here.daemon.version(&base, &version).unwrap();
-    assert_eq!(here.daemon.branch(&version).unwrap().cell.tenant, 1);
+    let copy = here.acme.join("copy");
+    let version = here.daemon.version(&base, &copy).unwrap();
+    assert_eq!(here.daemon.branch(&copy).unwrap().cell.tenant, 1);
     let fork = |daemon: &mut Daemon, from: &Path, to: &Path| daemon.fork(from, to).map(drop);
 
     let refused = globex.join("refused");
-    let forked = fork(&mut here.daemon, &version, &refused);
+    let forked = fork(&mut here.daemon, &copy, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     assert!(!refused.exists(), "a refused fork made a store");
-    fork(&mut here.daemon, &version, &here.acme.join("ours")).unwrap();
+    fork(&mut here.daemon, &copy, &here.acme.join("ours")).unwrap();
     here.daemon.share(&base, version, true).unwrap();
-    assert_eq!(here.daemon.fork(&version, &globex.join("theirs")).unwrap().cell.tenant, 2);
+    assert_eq!(here.daemon.fork(&copy, &globex.join("theirs")).unwrap().cell.tenant, 2);
     let vm = DaemonExtentStore::connect(&theirs, globex.join("theirs"), CAPACITY).unwrap();
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
     here.daemon.share(&base, version, false).unwrap();
-    let forked = fork(&mut here.daemon, &version, &refused);
+    let forked = fork(&mut here.daemon, &copy, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     let unnamed = here.daemon.share(&base, version + 1, true);
     assert_eq!(failure(unnamed), (Code::NotFound, Errno::ENOENT));
@@ -692,9 +692,9 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
     write(&vm, &pattern(7), b"base");
     let extent = ExtentId { branch: vm.branch(), sequence: 1 };
     drop(vm);
-    let version = hosts[0].acme.join("version");
-    let version = hosts[0].daemon.version(&base, &version).unwrap();
-    let branch = hosts[0].daemon.branch(&version).unwrap();
+    let copy = hosts[0].acme.join("version");
+    let version = hosts[0].daemon.version(&base, &copy).unwrap();
+    let branch = hosts[0].daemon.branch(&copy).unwrap();
     hosts[0].daemon.sync(&base).unwrap();
     for host in &mut hosts[1..] {
         host.daemon.copy(&host.acme.join("version"), branch, version).unwrap();

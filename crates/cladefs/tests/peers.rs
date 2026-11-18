@@ -141,14 +141,14 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     first.control.sync_store(&base).unwrap();
     let version = first.control.make_version(&base, None, None).unwrap();
     first.control.sync_store(&base).unwrap();
-    let version = first.control.stat_store(&base).unwrap();
-    let version = cladefs::Branch {
-        cell: cladefs::Cell { tenant: version.tenant, id: version.cell },
-        id: version.branch,
+    let stated = first.control.stat_store(&base).unwrap();
+    let cell = cladefs::Branch {
+        cell: cladefs::Cell { tenant: stated.tenant, id: stated.cell },
+        id: stated.branch,
     };
 
     let (copy, fork) = (hosts[1].join("copy"), hosts[1].join("fork"));
-    second.control.copy_version(&copy, CAPACITY, version, version).unwrap();
+    second.control.copy_version(&copy, CAPACITY, cell, version).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
     let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {

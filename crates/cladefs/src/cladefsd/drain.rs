@@ -107,7 +107,7 @@ pub fn drain(within: Duration) -> Result<(), Left> {
             if let Err(err) = &mount {
                 log::error!("cladefsd: draining: {err:#}");
             }
-            super::stores::close_points().await;
+            super::stores::close_copies().await;
             let mut uploaders = crate::bucket::uploaders();
             let uploaded = uploaders.wait_for(|uploading| *uploading == 0).await.is_ok();
             mount.is_ok() && uploaded

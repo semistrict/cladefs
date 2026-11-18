@@ -1632,7 +1632,7 @@ impl Connection {
                 Some((store, _)) => store,
                 None => Arc::new(open_store(path, None, Some(arena))?),
             };
-            stores::at_point(from, *capacity, path, &store).await?;
+            stores::at_copy(from, *capacity, path, &store).await?;
             there = Some(store);
         }
         if let Some(store) = stores::take_over(hold, arena)? {
