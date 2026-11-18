@@ -112,13 +112,12 @@ pub fn delete_host(
     removed
 }
 
-/// The name a store's description goes by as its directory goes ([`remove_store_dir`]).
-fn deleted_description() -> String {
-    format!("{DESCRIPTION}.deleted")
-}
+/// The name a store's description goes by as its directory goes ([`remove_store_dir`]): its
+/// [`DESCRIPTION`]'s, `.deleted` after it.
+pub(crate) const DELETED: &str = "store.deleted";
 
 /// Removes the directory of the store at `store`, unless it went already: whole, or so that
-/// removing it again finishes it. Its description goes first, renamed to [`deleted_description`],
+/// removing it again finishes it. Its description goes first, renamed to [`DELETED`],
 /// durably, so that the directory is no store from then on, but one going, which a deletion resumed
 /// finds so; then the rest, then that, then the directory. Then the directory it was in is synced,
 /// so that it is gone durably (TASK-79.77). cladefs: the one way a store's directory goes, whether
@@ -130,8 +129,8 @@ pub fn remove_store_dir(store: &Path) -> Result<(), Error> {
 
 /// Removes the directory of the store at `store`, as [`remove_store_dir`] says.
 fn remove_store(store: &Path) -> Result<(), Error> {
-    let name = deleted_description();
-    let deleted = store.join(&name);
+    let name = DELETED;
+    let deleted = store.join(name);
     let removing = || -> std::io::Result<()> {
         match removals::rename(&store.join(DESCRIPTION), &deleted) {
             Ok(()) => removals::sync_dir(store)?,

@@ -6411,10 +6411,12 @@ fn failed_writeback_preserves_disk_admission() {
     use std::os::fd::AsRawFd;
 
     let root = tempfile::tempdir().unwrap();
-    let dir = local_cell::HostDir::new(root.path()).unwrap();
-    let file = dir.create("data", true).unwrap();
     let tenant = 0x520;
-    let disk = super::disk::Disk::new(tenant, root.path());
+    let disk = super::disk::Disk::new(tenant, root.path()).unwrap();
+    let store = root.path().join("store");
+    std::fs::create_dir(&store).unwrap();
+    let dir = local_cell::HostDir::new(&store).unwrap();
+    let file = dir.create("data", true).unwrap();
     let page = local_cell::pages::PAGE;
     let limit = disk.used() + page;
     super::disk::set_limit(Some(tenant), Some(limit)).unwrap();
@@ -6422,7 +6424,11 @@ fn failed_writeback_preserves_disk_admission() {
     let writing = disk.admit(page).unwrap();
     file.write_at(&vec![0x5a; page as usize], 0).unwrap();
     drop(writing);
-    disk.recount();
+    // Its write-back failing changes nothing of what is counted (TASK-539.5: nothing recounts).
+    assert_eq!(
+        dir.cache().write_back_all().map_err(|err| err.raw_os_error()),
+        Err(Some(libc::EIO))
+    );
     assert_eq!(disk.admit(page).map(drop), Err(Errno::ENOSPC));
 }
 
@@ -6469,7 +6475,7 @@ fn measure_disk_recounts_with_resident_pages() {
             let id = disks.len() as u64 + 1;
             let path = root.path().join(format!("tenant-{id}"));
             std::fs::create_dir(&path).unwrap();
-            disks.push(super::disk::Disk::new(id, &path));
+            disks.push(super::disk::Disk::new(id, &path).unwrap());
         }
         let store = local_cell::HostDir::new(&root.path().join("tenant-1")).unwrap();
         let file = store.create("resident", true).unwrap();

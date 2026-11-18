@@ -312,7 +312,7 @@ impl Tenant {
     /// with an arena of its own.
     pub fn new(id: u64, dir: impl AsRef<Path>) -> std::io::Result<Arc<Self>> {
         let dir = dir.as_ref().canonicalize()?;
-        let disk = Some(super::disk::Disk::new(id, &dir));
+        let disk = Some(super::disk::Disk::new(id, &dir)?);
         let policy = Policy::granted(dir);
         let tenant = Arc::new(Self { id, policy, memory: Memory::new()?, disk });
         super::memory::register(&tenant);
@@ -374,7 +374,7 @@ impl Tenant {
     /// cladefs: admits a write of `bytes` more of its disk, within its limit and every tenant's,
     /// until the write is done, what it returns dropped (TASK-94): `ENOSPC` otherwise. The default
     /// tenant's, uncounted, always.
-    fn admit_to_disk(&self, bytes: u64) -> Result<Option<super::disk::Admitted>, Errno> {
+    fn admit_to_disk(&self, bytes: u64) -> Result<Option<local_cell::footprint::Pledge>, Errno> {
         self.disk.as_ref().map(|disk| disk.admit(bytes)).transpose()
     }
 

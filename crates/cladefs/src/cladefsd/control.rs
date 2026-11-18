@@ -667,9 +667,8 @@ impl Cladefsd for Control {
         request: Request<GetTenantDiskRequest>,
     ) -> Result<Response<GetTenantDiskResponse>, Status> {
         let tenant = request.into_inner().tenant;
-        let counted = cells::blocking(move || disk::count(tenant));
         let response = |(bytes, limit_bytes)| GetTenantDiskResponse { bytes, limit_bytes };
-        reply(counted.await.map(response))
+        reply(disk::count(tenant).map(response))
     }
 
     async fn set_peers(

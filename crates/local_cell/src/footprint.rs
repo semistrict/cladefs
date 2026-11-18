@@ -24,15 +24,22 @@
 //! opening. A store of the host's has one footprint however many times it is opened, by its
 //! directory's device and inode ([`of_host`]); its removal ([`crate::remove_store_dir`]) forgets
 //! it. A directory in memory has one of its own.
+//!
+//! **Allotments.** A directory a tenant is granted is an [`Allotment`]: the footprints of the stores
+//! in it summed, with the tenant's limit, and every allotment's together ([`total`]) with every
+//! tenant's limit (TASK-539.5). A store's footprint is its allotment's whose directory holds it,
+//! the nearest; one in no allotment's is no tenant's, counted on its disk alone. An allotment made
+//! counts the stores in its directory not counted yet, closed, by one listing of each.
 
 use crate::dir::{Dir, DirFile};
 use crate::layout::{OPEN_EXTENTS, OPEN_SEGMENTS};
 use crate::sync::Mutex;
-use bucket_cell::host_disk::{self, Count, HostDisk};
+use bucket_cell::host_disk::{self, Count, HostDisk, Tally};
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// What a store's files take of its disk. See the module docs.
 pub struct Footprint {
@@ -41,9 +48,9 @@ pub struct Footprint {
     /// The disk it charges as it is charged.
     disk: Option<Arc<HostDisk>>,
     /// Its files' lengths and its directories, counted.
-    bytes: Count,
-    /// Of `bytes`, its unframed files'.
-    unframed: Count,
+    tally: Tally,
+    /// The allotment it charges as it is charged, if any's directory holds it.
+    allotment: Mutex<Option<Arc<Allotment>>>,
     /// Its files and directories by name, while its store is open.
     opened: Mutex<Opened>,
 }
@@ -66,20 +73,25 @@ impl Footprint {
         Arc::new(Self {
             path,
             disk,
-            bytes: Count::default(),
-            unframed: Count::default(),
+            tally: Tally::default(),
+            allotment: Mutex::new(None),
             opened: Mutex::default(),
         })
     }
 
     /// The bytes its store's files take, counted.
     pub fn bytes(&self) -> u64 {
-        self.bytes.get()
+        self.tally.bytes()
     }
 
     /// Of those, the bytes of its unframed files.
     pub fn unframed(&self) -> u64 {
-        self.unframed.get()
+        self.tally.unframed()
+    }
+
+    /// The allotment it is in, if any is.
+    pub fn allotment(&self) -> Option<Arc<Allotment>> {
+        self.allotment.lock().unwrap().clone()
     }
 
     /// Its directory's path, canonical, if it is the host's.
@@ -92,39 +104,51 @@ impl Footprint {
         self.disk.as_ref()
     }
 
+    /// Has `change` count in its tally, its allotment's and every allotment's, if it is in one,
+    /// and its disk's: under its allotment's lock, so that a store moved to another allotment
+    /// moves what it counted whole.
+    fn counting(&self, change: impl Fn(&Tally)) {
+        let allotment = self.allotment.lock().unwrap();
+        change(&self.tally);
+        if let Some(allotment) = &*allotment {
+            change(&allotment.tally);
+            change(&TOTAL.tally);
+        }
+        if let Some(disk) = &self.disk {
+            change(&disk.stores);
+        }
+    }
+
     /// Counts `bytes` more, `unframed` if so.
     fn charge(&self, bytes: u64, unframed: bool) {
-        self.bytes.add(bytes);
-        self.disk.iter().for_each(|disk| disk.stores.add(bytes));
-        if unframed {
-            self.unframed.add(bytes);
-            self.disk.iter().for_each(|disk| disk.unframed.add(bytes));
-        }
+        self.counting(|tally| tally.charge(bytes, unframed));
     }
 
     /// Counts `bytes` fewer, `unframed` if so.
     fn discharge(&self, bytes: u64, unframed: bool) {
-        self.bytes.sub(bytes);
-        self.disk.iter().for_each(|disk| disk.stores.sub(bytes));
-        if unframed {
-            self.unframed.sub(bytes);
-            self.disk.iter().for_each(|disk| disk.unframed.sub(bytes));
-        }
+        self.counting(|tally| tally.discharge(bytes, unframed));
     }
 
     /// Counts `bytes` of it unframed, if `unframed`, or framed: they are counted either way.
     fn reframe(&self, bytes: u64, unframed: bool) {
-        let (count, of_disk) = (&self.unframed, self.disk.as_ref().map(|disk| &disk.unframed));
-        match unframed {
-            true => {
-                count.add(bytes);
-                of_disk.iter().for_each(|disk| disk.add(bytes));
-            }
-            false => {
-                count.sub(bytes);
-                of_disk.iter().for_each(|disk| disk.sub(bytes));
-            }
+        self.counting(|tally| tally.reframe(bytes, unframed));
+    }
+
+    /// Counts it in `allotment`'s, in place of the one it was in.
+    fn allot(&self, allotment: &Arc<Allotment>) {
+        let mut allotted = self.allotment.lock().unwrap();
+        let (bytes, unframed) = (self.bytes(), self.unframed());
+        if let Some(was) = allotted.take() {
+            was.tally.discharge(bytes - unframed, false);
+            was.tally.discharge(unframed, true);
+            TOTAL.tally.discharge(bytes - unframed, false);
+            TOTAL.tally.discharge(unframed, true);
         }
+        allotment.tally.charge(bytes - unframed, false);
+        allotment.tally.charge(unframed, true);
+        TOTAL.tally.charge(bytes - unframed, false);
+        TOTAL.tally.charge(unframed, true);
+        *allotted = Some(allotment.clone());
     }
 
     /// Counts its store opened once more, in `dir`: the first opening while none other is alive
@@ -196,6 +220,7 @@ impl Footprint {
         opened.dirs.clear();
         self.reframe(self.unframed(), false);
         self.discharge(self.bytes(), false);
+        *self.allotment.lock().unwrap() = None;
     }
 
     /// The file at `path`, made anew, its length nothing yet.
@@ -285,6 +310,231 @@ impl Footprint {
             file.renamed(self, -1, unframed_path(path));
         }
     }
+}
+
+/// No limit.
+const NONE: u64 = u64::MAX;
+
+/// A directory a tenant is granted, as its stores' files take the host's disk: their footprints
+/// summed, and its tenant's limit (TASK-539.5). See the module docs.
+pub struct Allotment {
+    /// Its directory, canonical.
+    dir: PathBuf,
+    /// Its stores' footprints, summed.
+    tally: Tally,
+    /// What writes admitted and not yet landed hold.
+    pledged: Count,
+    /// Its limit, or [`NONE`].
+    limit: AtomicU64,
+    /// Whether the last write refused was refused by it: logged as it begins to be.
+    full: AtomicBool,
+}
+
+/// Every allotment's together, and every tenant's limit.
+pub struct Total {
+    tally: Tally,
+    pledged: Count,
+    limit: AtomicU64,
+}
+
+/// Every allotment's, together.
+static TOTAL: Total =
+    Total { tally: Tally::new(), pledged: Count::new(), limit: AtomicU64::new(NONE) };
+
+/// Every allotment made: kept for the process's life, as their stores' files are on its disk,
+/// granted or not.
+static ALLOTMENTS: std::sync::Mutex<Vec<Arc<Allotment>>> = std::sync::Mutex::new(Vec::new());
+
+/// The allotment of the directory `dir`, a tenant's: the one made already, or one made now,
+/// counting the stores in it as they were counted, and those not counted yet, closed, as one
+/// listing of each finds them.
+pub fn allotment(dir: &Path) -> io::Result<Arc<Allotment>> {
+    let dir = std::fs::canonicalize(dir)?;
+    let made = {
+        let mut allotments = ALLOTMENTS.lock().unwrap();
+        if let Some(made) = allotments.iter().find(|allotment| allotment.dir == dir) {
+            return Ok(made.clone());
+        }
+        let made = Arc::new(Allotment {
+            dir,
+            tally: Tally::new(),
+            pledged: Count::new(),
+            limit: AtomicU64::new(NONE),
+            full: AtomicBool::new(false),
+        });
+        allotments.push(made.clone());
+        made
+    };
+    let counted: Vec<_> = {
+        let ledger = LEDGER.lock().unwrap();
+        ledger.iter().flat_map(|ledger| ledger.values()).cloned().collect()
+    };
+    for footprint in counted.iter().filter(|footprint| made.holds(footprint)) {
+        allot_nearest(footprint);
+    }
+    count_stores_in(&made.dir)?;
+    Ok(made)
+}
+
+/// Counts the footprint of each store in `dir` not counted yet, at any depth: one listing of each.
+/// A store's directory is one holding its description, or what its deletion or making leaves of it.
+fn count_stores_in(dir: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let store = [crate::layout::DESCRIPTION, crate::host::DELETED, crate::cell::UNMADE]
+            .iter()
+            .any(|name| path.join(name).exists());
+        if !store {
+            count_stores_in(&path)?;
+            continue;
+        }
+        let id = dir_id(&path)?;
+        let counted =
+            LEDGER.lock().unwrap().as_ref().is_some_and(|ledger| ledger.contains_key(&id));
+        if !counted {
+            drop(crate::HostDir::new(&path)?);
+        }
+    }
+    Ok(())
+}
+
+/// Counts `footprint` in the allotment whose directory holds it, the nearest, if any does.
+fn allot_nearest(footprint: &Footprint) {
+    let nearest = {
+        let allotments = ALLOTMENTS.lock().unwrap();
+        let holding = allotments.iter().filter(|allotment| allotment.holds(footprint));
+        holding.max_by_key(|allotment| allotment.dir.as_os_str().len()).cloned()
+    };
+    let Some(nearest) = nearest else { return };
+    if footprint.allotment().is_none_or(|was| !Arc::ptr_eq(&was, &nearest)) {
+        footprint.allot(&nearest);
+    }
+}
+
+impl Allotment {
+    /// Whether its directory holds `footprint`'s store.
+    fn holds(&self, footprint: &Footprint) -> bool {
+        footprint.path().is_some_and(|path| path.starts_with(&self.dir) && path != self.dir)
+    }
+
+    /// Its directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// What its stores' files take, counted.
+    pub fn bytes(&self) -> u64 {
+        self.tally.bytes()
+    }
+
+    /// Of those, unframed files'.
+    pub fn unframed(&self) -> u64 {
+        self.tally.unframed()
+    }
+
+    /// What writes admitted and not yet landed hold.
+    pub fn pledged(&self) -> u64 {
+        self.pledged.get()
+    }
+
+    /// Its limit, if it has one.
+    pub fn limit(&self) -> Option<u64> {
+        Some(self.limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
+    }
+
+    /// Limits it to `bytes`, or lifts its limit, without.
+    pub fn set_limit(&self, bytes: Option<u64>) {
+        self.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
+    }
+
+    /// Whether the last write refused it was refused by its limit or every tenant's.
+    pub fn is_full(&self) -> bool {
+        self.full.load(Ordering::Relaxed)
+    }
+
+    /// Admits a write of `bytes` more, if what it takes and holds admitted leaves room for them
+    /// within its limit, and every allotment's within every tenant's: held until the returned
+    /// pledge goes, the write landed, and counted as it lands. [`Full`] otherwise, logged as its
+    /// refusals begin.
+    pub fn admit(self: &Arc<Self>, bytes: u64) -> Result<Pledge, Full> {
+        // Pledged first, so that two admitted at once each count the other.
+        let pledge = Pledge::new(self.clone(), bytes);
+        let within = |tally: &Tally, pledged: &Count, limit: &AtomicU64| {
+            tally.bytes() + pledged.get() <= limit.load(Ordering::Relaxed)
+        };
+        let full = match () {
+            () if !within(&self.tally, &self.pledged, &self.limit) => Some(Full::Allotment),
+            () if !within(&TOTAL.tally, &TOTAL.pledged, &TOTAL.limit) => Some(Full::Total),
+            () => None,
+        };
+        let Some(full) = full else {
+            self.full.store(false, Ordering::Relaxed);
+            return Ok(pledge);
+        };
+        drop(pledge);
+        if !self.full.swap(true, Ordering::Relaxed) {
+            log::warn!(
+                "cladefs: {} at its disk's limit, its writes refused (ENOSPC): {full}; it takes {} \
+                 bytes of {:?}, every tenant's {} of {:?}",
+                self.dir.display(),
+                self.bytes(),
+                self.limit(),
+                total().bytes(),
+                total_limit()
+            );
+        }
+        Err(full)
+    }
+}
+
+/// What refused a write ([`Allotment::admit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Full {
+    /// Its tenant's limit.
+    #[error("its tenant's limit")]
+    Allotment,
+    /// Every tenant's limit.
+    #[error("every tenant's limit")]
+    Total,
+}
+
+/// A write admitted ([`Allotment::admit`]): what it holds of its allotment until it goes.
+pub struct Pledge {
+    allotment: Arc<Allotment>,
+    bytes: u64,
+}
+
+impl Pledge {
+    fn new(allotment: Arc<Allotment>, bytes: u64) -> Self {
+        allotment.pledged.add(bytes);
+        TOTAL.pledged.add(bytes);
+        Self { allotment, bytes }
+    }
+}
+
+impl Drop for Pledge {
+    fn drop(&mut self) {
+        self.allotment.pledged.sub(self.bytes);
+        TOTAL.pledged.sub(self.bytes);
+    }
+}
+
+/// What every allotment's stores' files take together.
+pub fn total() -> &'static Tally {
+    &TOTAL.tally
+}
+
+/// Every tenant's limit, if set.
+pub fn total_limit() -> Option<u64> {
+    Some(TOTAL.limit.load(Ordering::Relaxed)).filter(|limit| *limit != NONE)
+}
+
+/// Limits every allotment together to `bytes`, or lifts the limit, without.
+pub fn set_total_limit(bytes: Option<u64>) {
+    TOTAL.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
 }
 
 /// Whether `path` is an unframed file's: one under `open-segments/` or `open-extents/`.
@@ -385,6 +635,8 @@ pub(crate) fn of_host(path: &Path, disk: &Arc<HostDisk>) -> io::Result<Arc<Footp
     }
     let footprint = Footprint::new(Some(std::fs::canonicalize(path)?), Some(disk.clone()));
     footprints.insert(id, footprint.clone());
+    drop(ledger);
+    allot_nearest(&footprint);
     Ok(footprint)
 }
 
@@ -511,7 +763,7 @@ mod tests {
         let (bytes, unframed) = listed(dir);
         assert_eq!((footprint.bytes(), footprint.unframed()), (bytes, unframed), "{at}");
         let disk = footprint.disk().unwrap();
-        let counted = (disk.stores.get() - before.0, disk.unframed.get() - before.1);
+        let counted = (disk.stores.bytes() - before.0, disk.stores.unframed() - before.1);
         assert_eq!(counted, (bytes, unframed), "{at}: its disk");
     }
 
@@ -548,7 +800,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let dir = HostDir::new(temp.path()).unwrap();
             let disk = dir.footprint().disk().unwrap();
-            let before = (disk.stores.get(), disk.unframed.get());
+            let before = (disk.stores.bytes(), disk.stores.unframed());
             DIRS.iter().for_each(|path| dir.create_dir(path).unwrap());
             let mut rng = StdRng::seed_from_u64(seed);
             let mut open = Vec::new();
@@ -590,7 +842,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let dir = HostDir::new(&path).unwrap();
         let disk = dir.footprint().disk().unwrap().clone();
-        let before = disk.stores.get();
+        let before = disk.stores.bytes();
         dir.create_dir("segments").unwrap();
         dir.create("segments/1", true).unwrap().write_at(&[1; 100], 0).unwrap();
         let other = HostDir::new(&path).unwrap();
@@ -605,9 +857,9 @@ mod tests {
         std::fs::remove_file(path.join("segments/1")).unwrap();
         let dir = HostDir::new(&path).unwrap();
         assert_eq!(dir.footprint().bytes(), 3 * GRANULE);
-        assert_eq!(disk.stores.get() - before, 3 * GRANULE);
+        assert_eq!(disk.stores.bytes() - before, 3 * GRANULE);
         drop(dir);
         crate::remove_store_dir(&path).unwrap();
-        assert_eq!((footprint.bytes(), disk.stores.get()), (0, before));
+        assert_eq!((footprint.bytes(), disk.stores.bytes()), (0, before));
     }
 }

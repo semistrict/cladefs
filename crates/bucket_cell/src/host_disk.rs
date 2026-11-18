@@ -45,6 +45,11 @@ pub struct Sample {
 pub struct Count(AtomicU64);
 
 impl Count {
+    /// Nothing counted.
+    pub const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
     /// The bytes counted.
     pub fn get(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
@@ -63,6 +68,55 @@ impl Count {
     }
 }
 
+/// Bytes of files counted, and of them unframed files': raw data whose framing, or sealing in
+/// place, is still to come, which a store's own work, never refused, may add to.
+#[derive(Debug, Default)]
+pub struct Tally {
+    bytes: Count,
+    unframed: Count,
+}
+
+impl Tally {
+    /// Nothing counted.
+    pub const fn new() -> Self {
+        Self { bytes: Count::new(), unframed: Count::new() }
+    }
+
+    /// The bytes counted.
+    pub fn bytes(&self) -> u64 {
+        self.bytes.get()
+    }
+
+    /// Of those, unframed files'.
+    pub fn unframed(&self) -> u64 {
+        self.unframed.get()
+    }
+
+    /// Counts `bytes` more, `unframed` if so.
+    pub fn charge(&self, bytes: u64, unframed: bool) {
+        self.bytes.add(bytes);
+        if unframed {
+            self.unframed.add(bytes);
+        }
+    }
+
+    /// Counts `bytes` fewer, `unframed` if so.
+    pub fn discharge(&self, bytes: u64, unframed: bool) {
+        self.bytes.sub(bytes);
+        if unframed {
+            self.unframed.sub(bytes);
+        }
+    }
+
+    /// Counts `bytes` of those counted unframed, if `unframed`, or framed: counted either way.
+    pub fn reframe(&self, bytes: u64, unframed: bool) {
+        match unframed {
+            true => self.unframed.add(bytes),
+            false => self.unframed.sub(bytes),
+        }
+    }
+}
+
 /// How a disk is sampled: a host's filesystem through a descriptor of a directory of it, or a
 /// disk in memory, by what its owner says of it.
 enum Sampler {
@@ -74,11 +128,9 @@ enum Sampler {
 pub struct HostDisk {
     sampler: Sampler,
     /// What the stores on it hold: their files' lengths, counted ([`counted`]), each file once
-    /// however many names it has, and their directories, a [`GRANULE`] each.
-    pub stores: Count,
-    /// Of `stores`, the stores' raw files whose framing is still to come: open segments' and open
-    /// extents', which the stores' own work, never refused, may add to as it frames them.
-    pub unframed: Count,
+    /// however many names it has, and their directories, a [`GRANULE`] each; and of that, their
+    /// unframed files'.
+    pub stores: Tally,
     /// What writes admitted and not yet landed hold.
     pub pledged: Count,
     /// What the part cache on it holds, its fills in flight included.
@@ -123,8 +175,7 @@ impl HostDisk {
     fn with(sampler: Sampler) -> Self {
         Self {
             sampler,
-            stores: Count::default(),
-            unframed: Count::default(),
+            stores: Tally::default(),
             pledged: Count::default(),
             cache: Count::default(),
             cache_writing: Count::default(),
@@ -157,7 +208,7 @@ impl HostDisk {
 
     /// What the daemon keeps on it: its stores' and its part cache's.
     pub fn held(&self) -> u64 {
-        self.stores.get() + self.cache.get()
+        self.stores.bytes() + self.cache.get()
     }
 
     /// What the governor allows the daemon to keep on it: `u64::MAX` while none looks at it.
@@ -189,7 +240,6 @@ impl std::fmt::Debug for HostDisk {
         f.debug_struct("HostDisk")
             .field("dev", &self.dev())
             .field("stores", &self.stores)
-            .field("unframed", &self.unframed)
             .field("pledged", &self.pledged)
             .field("cache", &self.cache)
             .field("allowance", &self.allowance())
@@ -276,9 +326,11 @@ mod tests {
         assert_eq!(disk.sample().unwrap(), Sample { size: 100, free: 60, used: 40 });
         assert_eq!((disk.dev(), disk.allowance(), disk.under_pressure()), (None, u64::MAX, false));
         assert!(!HostDisk::all().iter().any(|alive| Arc::ptr_eq(alive, &disk)));
-        disk.stores.add(3 * GRANULE);
+        disk.stores.charge(3 * GRANULE, true);
         disk.cache.add(GRANULE);
-        disk.stores.sub(GRANULE);
+        disk.stores.discharge(GRANULE, false);
+        disk.stores.reframe(GRANULE, false);
+        assert_eq!((disk.stores.bytes(), disk.stores.unframed()), (2 * GRANULE, 2 * GRANULE));
         assert_eq!(disk.held(), 3 * GRANULE);
         disk.govern(50, 10, true);
         assert_eq!((disk.allowance(), disk.headroom(), disk.under_pressure()), (50, 10, true));

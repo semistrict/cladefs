@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! TASK-94: the host's disk a tenant takes, what is in its directory, counted, and limited at
-//! runtime through the control API, a tenant's and every tenant's together. Past a limit the
+//! TASK-94: the host's disk a tenant takes, what its stores' files take, counted as they write
+//! (TASK-539.5), and limited at runtime through the control API, a tenant's and every tenant's
+//! together. Past a limit the
 //! tenant's writes fail with ENOSPC, and the stores its VMs make; the daemon goes on, and other
 //! tenants' writes do; what leaves the disk lets the tenant write again. Its metrics show each
 //! tenant's disk by its ID.
@@ -44,14 +45,36 @@ fn metric(series: &str) -> u64 {
     line.rsplit(' ').next().unwrap().parse().unwrap()
 }
 
-/// What the files under `dir` take of the disk, as `du -sx` says.
 /// The bytes of a segment's log's header, a block (`local_cell::wal::LOG_RECORDS`).
 const LOG_HEADER: u64 = 4096;
 
-fn du(dir: &Path) -> u64 {
-    let output = std::process::Command::new("du").args(["-sxB1"]).arg(dir).output().unwrap();
-    assert!(output.status.success(), "du: {}", String::from_utf8_lossy(&output.stderr));
-    String::from_utf8(output.stdout).unwrap().split_whitespace().next().unwrap().parse().unwrap()
+/// What a store's files under `dir` take, as its footprint counts them (`local_cell::footprint`):
+/// each file's length rounded up to a granule, once however many names it has, and each
+/// directory under `dir` a granule.
+fn counted(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt as _;
+    let granule = bucket_cell::host_disk::GRANULE;
+    let mut inodes = std::collections::HashSet::new();
+    let (mut bytes, mut dirs) = (0, vec![dir.to_owned()]);
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let (path, metadata) =
+                (entry.as_ref().unwrap().path(), entry.unwrap().metadata().unwrap());
+            if metadata.is_dir() {
+                bytes += granule;
+                dirs.push(path);
+            } else if inodes.insert(metadata.ino()) {
+                bytes += bucket_cell::host_disk::counted(metadata.len());
+            }
+        }
+    }
+    bytes
+}
+
+/// What the stores in a tenant's directory, `dir`, take, as their footprints count them: each
+/// directory in it a store.
+fn stores(dir: &Path) -> u64 {
+    std::fs::read_dir(dir).unwrap().map(|store| counted(&store.unwrap().path())).sum()
 }
 
 /// Waits until `done` says so, polling, a minute at most: what it waits for, as an upload's
@@ -66,8 +89,8 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 
 /// A tenant whose VMs, forks of a base of its, write past its limit is refused with ENOSPC, while
 /// another tenant writes on, past what the first's limit would allow, and the daemon's own VMs do;
-/// and the first's VMs still commit. What it takes is what its directory does, as `du` counts it:
-/// a fork of a base takes little of its own. Once what it wrote leaves the disk, freed and uploaded,
+/// and the first's VMs still commit. What it takes is what its stores' files do, as their
+/// footprints count them: a fork of a base takes little of its own. Once what it wrote leaves the disk, freed and uploaded,
 /// it writes again. Every tenant's limit refuses any tenant past it.
 #[test]
 fn tenants_past_their_disk_limits_are_refused_while_others_write() {
@@ -92,13 +115,13 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     for fork in &forks {
         daemon.fork(&base, fork).unwrap();
     }
-    // What it takes is what is in its directory.
+    // What it takes is what its stores' files do.
     let (taken, limit) = daemon.tenant_disk(Some(1)).unwrap();
-    assert_eq!((taken, limit), (du(&acme), None));
+    assert_eq!((taken, limit), (stores(&acme), None));
     // Each fork takes little of its own, the base's data in the bucket: no more than a store made
     // is admitted as.
     for fork in &forks {
-        assert!(du(fork) <= STORE_MADE, "{} takes {} bytes", fork.display(), du(fork));
+        assert!(counted(fork) <= STORE_MADE, "{} takes {} bytes", fork.display(), counted(fork));
     }
 
     // 16 MiB more, its VMs writing its forks, uncommitted, which none uploads.
@@ -121,9 +144,10 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     // log, which its store makes as it opens to write (backlog doc-14, `wal`), and the header of
     // its open segment's log (TASK-301): its metrics name it by its ID, with its limit.
     let (full, _) = daemon.tenant_disk(Some(1)).unwrap();
-    let wals: u64 = forks.iter().map(|fork| du(&fork.join("wal"))).sum();
+    let granule = bucket_cell::host_disk::GRANULE;
+    let wals: u64 = forks.iter().map(|fork| granule + counted(&fork.join("wal"))).sum();
     let opened = wals + forks.len() as u64 * LOG_HEADER;
-    assert_eq!((full, du(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
+    assert_eq!((full, stores(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
     let tenant = "{tenant=\"1\"}";
     assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
     assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
