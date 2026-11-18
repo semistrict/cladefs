@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18T17:02:00Z'
-updated_date: '2026-11-18T22:39:00Z'
+updated_date: '2026-11-18T23:20:00Z'
 labels:
   - durability
   - peers
@@ -41,6 +41,12 @@ doc-21 step 4. A take on any host must recover every Replicated commit: fence f+
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+verifying-reviewer (9f8ae8dbb): a take with its own WAL ignored members' logs however stale (now members_ahead decides), own extents could trail records (order fixed), an f = 0 take left a stale configuration (now replicates at its f until 537.3.5), promises renamed over (a file per epoch), recovery tests recovered from the bucket (the lost host's runtime now stopped). Blind spot: tests dropped the lost host's uploader, which uploaded on drop; now lose() stops its runtime. Not covered by a test yet: the stale-WAL retake (the reviewer's scratch reproducer) — TASK-537.3.6.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 

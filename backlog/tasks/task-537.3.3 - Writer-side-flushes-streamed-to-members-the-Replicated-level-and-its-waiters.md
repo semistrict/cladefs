@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18T17:02:00Z'
-updated_date: '2026-11-18T21:55:00Z'
+updated_date: '2026-11-18T23:20:00Z'
 labels:
   - durability
   - peers
@@ -60,4 +60,6 @@ doc-21 step 3. The writer must send each flush records (Held) to its members, ke
 2026-11-18 progress: built local_cell::replicate (Replicator: a thread per member, marks per flush, replicated = f-th highest member epoch, base raised by commits in segments started before it; MemberLink, LinkError; Spool trait, MemSpool, the store's DirSpool in replica-spool/<cell>/ — the user asked for no in-memory replica bytes; restore with trimming against the head's last commit), wal::ReplicaLog (Held records, local header, MACs at replica offsets) and replica_commits, the flush hook (LocalCell::replicate, replicate_to marking segments that already hold records unreplicated), Uploader::wait_replicated/waker/replication, OpenCell commit levels (fsync by the head's wish, sync family Replicated), Writer::configure, upload::Members + the first configuration's install at a take (refused if the head names one already: TASK-537.3.4), cladefs ReplicaMembers (rendezvous pick, Incarnation asked) and GrpcMember (one Append stream per member), CreateCell refusing replicas>=1 without members (ENOTSUP). Tests: replicator over fake links (f=1, f=2, base, lost logs resent, pieces, fenced, acknowledged drops, failing spool), gRPC link to a real member, control refusal; 73/74 passed in the first run (the control test, fixed). Found: the recovery test showed members' logs can begin with segments the bucket holds (drops lag the head): restore now trims against the head's last commit, refusing logs that neither reach it nor go on from it. Pending: rerun of the recovery test, then the two reviews.
 
 Pushed to main as 81a4b0200 (the user: push after compile and unit tests): 86 selected tests pass (the recovery test among them), clippy clean. Not done: the verifying-reviewer and Codex reviews, and the full ubu1 suite.
+
+Reviews done: Codex (aca489437: sends before the local sync, a spool failing breaks replication alone, drops race no reads; waiter wake test) and verifying-reviewer (9f8ae8dbb with 537.3.4's: own extents before records). Blind spots: the waiter test only hit the satisfied path; MemDir never fails a rename over a file in tests. Remaining for Done: the full ubu1 suite (sudo).
 <!-- SECTION:NOTES:END -->
