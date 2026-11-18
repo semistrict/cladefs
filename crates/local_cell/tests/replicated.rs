@@ -438,3 +438,97 @@ fn takes_without_enough_members_to_fence_are_refused() {
     let err = refused.expect_err("taken with one member fenced");
     assert!(err.to_string().contains("of the 2 members"), "{err}");
 }
+
+/// A member in memory whose appends wait at a gate until it opens.
+#[derive(Default)]
+struct Gated {
+    member: Member,
+    open: Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl Gated {
+    fn open(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+}
+
+impl MemberLink for Gated {
+    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+        drop(open);
+        self.member.append(log, offset, bytes)
+    }
+
+    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
+        self.member.drop_through(through)
+    }
+}
+
+/// TASK-537.3.3, Codex's review: a waiter for Replicated is woken by its members' answers, waiting
+/// before they come, with nothing uploaded; and, with its members down, by the bucket, the cell
+/// degraded asking for its upload.
+#[test]
+fn replicated_waiters_are_woken_by_members_or_the_bucket() {
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+    let host = Host {
+        runtime: runtime.unwrap(),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+    };
+    let cell = DESCRIPTION.cell;
+    host.runtime.block_on(bucket_cell::lifecycle::create(&*host.bucket, cell, 1)).unwrap();
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let (store, uploader) = host.open(LocalCell::recover_unmade(dir).unwrap(), 1);
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    let base = store.last_commit().unwrap();
+    uploader.wait_uploaded(base).unwrap();
+    let gated = Arc::new(Gated::default());
+    let links: Vec<Arc<dyn MemberLink>> = vec![gated.clone(), Arc::new(Down)];
+    let replicator = Replicator::start(1, base, store.spool().unwrap(), links, uploader.waker());
+    store.replicate_to(replicator.clone());
+
+    let extent = ExtentId { cell: cell.id, sequence: store.info().unwrap().next_sequence };
+    store.write(extent, 0, &common::noise(1, BLOCK)).unwrap();
+    store.commit_ordered(Some(b"one")).unwrap();
+    store.flush().unwrap();
+    let epoch = store.last_commit().unwrap();
+    let uploader = Arc::new(uploader);
+    let waiting = {
+        let uploader = uploader.clone();
+        std::thread::spawn(move || uploader.wait_replicated(epoch))
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!waiting.is_finished(), "told replicated before a member held it");
+    gated.open();
+    waiting.join().unwrap().unwrap();
+    assert!(uploader.last_uploaded() < epoch, "woken by its member, not the bucket");
+
+    // Its members down: degraded, its waiters woken by the bucket.
+    drop(replicator);
+    let links: Vec<Arc<dyn MemberLink>> = vec![Arc::new(Down), Arc::new(Down)];
+    let down = Replicator::start(1, epoch, store.spool().unwrap(), links, uploader.waker());
+    store.replicate_to(down.clone());
+    store.close_segment().unwrap();
+    store
+        .write(
+            ExtentId { cell: cell.id, sequence: extent.sequence + 1 },
+            0,
+            &common::noise(2, BLOCK),
+        )
+        .unwrap();
+    store.commit_ordered(Some(b"two")).unwrap();
+    store.flush().unwrap();
+    let epoch = store.last_commit().unwrap();
+    until("degraded", || down.degraded());
+    uploader.wait_replicated(epoch).unwrap();
+    // The head named it as the waiter was woken: the replicator counts the logs it dropped as the
+    // head named them, the uploader's progress said so a moment after.
+    until("woken by the bucket", || uploader.last_uploaded() >= epoch);
+}

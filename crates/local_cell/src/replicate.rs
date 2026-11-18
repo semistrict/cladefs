@@ -495,6 +495,14 @@ impl Replicator {
         state.fenced.is_some() || state.broken.is_some() || up < self.shared.f
     }
 
+    /// Breaks it, for `why`: nothing more is sent, its commits waiting for the bucket.
+    pub fn break_with(&self, why: String) {
+        log::error!("cladefs: replicating: {why}");
+        self.shared.state.lock().unwrap().broken.get_or_insert(why);
+        self.shared.changed.notify_all();
+        (self.shared.notify)();
+    }
+
     /// Why its spool failed, if it did.
     pub fn broken(&self) -> Option<String> {
         self.shared.state.lock().unwrap().broken.clone()
@@ -537,6 +545,17 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
             Sending::Append { log, offset, len } => match shared.spool.read(*log, *offset, *len) {
                 Ok(bytes) if bytes.len() as u64 == *len => {
                     link.append(*log, *offset, &bytes).map(Some)
+                }
+                // Dropped since it was chosen, the head naming its segment (Codex's review of
+                // TASK-537.3.3): nothing to send, nothing broken.
+                _ if shared
+                    .state
+                    .lock()
+                    .unwrap()
+                    .dropped
+                    .is_some_and(|dropped| *log <= dropped) =>
+                {
+                    continue;
                 }
                 read => {
                     let why = match read {
