@@ -798,9 +798,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     let mut left = Vec::new();
     for key in &keys {
-        // cladefs: blocks of object IDs taken, for good (TASK-364); and the collector's leases and
-        // marks, and references not yet retirable (TASK-395); tenants' KEK objects, for good
-        // (TASK-411.27).
+        // cladefs: blocks of object IDs taken, and the bucket's identity, for good (TASK-364,
+        // TASK-633.9); and the collector's leases and marks, and references not yet retirable
+        // (TASK-395); tenants' KEK objects, for good (TASK-411.27).
         let alone = |cell: layout::CellId| {
             let prefix = cell.prefix();
             keys.iter().filter(|other| other.starts_with(&prefix)).count() == 1
@@ -810,6 +810,8 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             // it, a removal stopped short of it (TASK-455).
             Kind::CollectorLease { cell } => !removed(cell) && (recorded(cell) || !alone(cell)),
             Kind::ObjectIds { .. }
+            | Kind::Identity
+            | Kind::Buckets
             | Kind::Kek { .. }
             | Kind::Marks { .. }
             | Kind::Marking

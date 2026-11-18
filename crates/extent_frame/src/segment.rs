@@ -20,9 +20,9 @@ pub struct Location {
     pub len: u64,
 }
 
-/// cladefs: a tenant's cell: its tenant, and its ID, unique in its bucket, which the bucket's
-/// allocator gives (doc-20): what its keys are under, and what an extent's ID names as the cell
-/// that wrote it. Tenants are IDs alone; what they stand for, their callers keep.
+/// cladefs: a tenant's cell: its tenant, and its ID, unique across buckets, which its bucket's
+/// allocator gives under the bucket's number (doc-20, doc-23): what its keys are under, and what an
+/// extent's ID names as the cell that wrote it. Tenants are IDs alone; what they stand for, their callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CellId {
     pub tenant: u64,

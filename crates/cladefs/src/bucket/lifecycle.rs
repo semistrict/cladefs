@@ -650,6 +650,10 @@ fn bucket_lifecycle_by_phase() {
 /// the host's pool, its DEK and those it inherits, in the head's create (6 requests in 6); and the
 /// child's open takes the head from what the fork left, reading the base's head for its origin (3
 /// in 3). A restore 9 in 9, where it was 14 in 13; the version's open 5 in 4, where it was 8 in 5.
+///
+/// cladefs: since TASK-633.9 the host's first ID, in [`host`], reads its bucket's identity, which
+/// looks at the collector's marking for the minute after, so the version's open, at once with its
+/// record before, asks it no more: 4 in 4.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -669,7 +673,7 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold copy-open", (5, 4)),
+            ("cold copy-open", (4, 4)),
             ("cold fork", (6, 6)),
             ("cold fork-open", (3, 3)),
             ("warm fork", (6, 6)),

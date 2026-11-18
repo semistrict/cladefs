@@ -457,12 +457,15 @@ impl Hosts {
                 Kind::Head { cell } => !block_on(bucket_cell::head::get(&*self.bucket, cell))
                     .unwrap()
                     .is_some_and(|head| head.deleted()),
-                // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
+                // cladefs: a block of object IDs taken stays for good (TASK-364), as does the bucket's
+                // identity (TASK-633.9), a reference's
                 // mark, retired or taken back (TASK-395.13), and a tenant's KEK object
                 // (TASK-411.27).
                 Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Identity
+                | Kind::Buckets
                 | Kind::Kek { .. }
                 | Kind::Retired { .. } => false,
                 _ => true,

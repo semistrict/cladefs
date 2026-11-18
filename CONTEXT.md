@@ -215,8 +215,25 @@ _Avoid_: page cache alone (that is the kernel's)
 The object storage holding every cell's durable copy.
 _Avoid_: remote, object store, S3
 
+**Bucket number**:
+A bucket's 16-bit number, which the high bits of every cell ID it gives carry, so that no two buckets give one ID (doc-23). Sequential from the root bucket's, 1; neither 0, the cells tests name, nor 65535.
+_Avoid_: bucket ID (the identity object's random ID), bucket index
+
+**Root bucket**:
+The bucket numbered 1, whose registry is the authority and whose conditional writes serialize additions.
+_Avoid_: bucket 0, home bucket (a host's own)
+
+**Registry** (of buckets):
+The record of every bucket, its number and details, in the root of every bucket: the root bucket's, and copies of it.
+
+**Formatting** (a bucket):
+Making a bucket never formatted the root of buckets of its own, number 1 (`cladefsctl format-bucket`, or its first allocator).
+
+**Adding** (a bucket):
+Giving a bucket never formatted the next number, by a conditional write of the root bucket's registry, then copying the registry to every bucket (`cladefsctl add-bucket`).
+
 **Cell**:
-A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique in its bucket, which gives it; no caller names a new one. On a host, a cell is kept in a directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
+A tenant's data of one kind (Fxfs, SQLite, or a VM's memory image), with a root and a capacity, one writer at a time, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Its ID is unique across buckets, given by its bucket and carrying its bucket number; no caller names a new one. On a host, a cell is kept in a directory: its open segment, its write-ahead log and the extents not yet uploaded, a write-back cache of the bucket's copy.
 _Avoid_: volume, disk
 
 **Volume**:
@@ -547,6 +564,7 @@ code does not have yet are said so.
 - **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it,
   env vars too (`CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`).
 - **region**: the guest's; virtio's is a **shared memory region**.
+- **format**: a format's version alone (**Format**); making a bucket a root is **formatting** it, and making a filesystem is Fxfs's mkfs.
 - **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **Fxfs** / **cladefs** in the guest: Fxfs is Fuchsia's filesystem, its crates and its format; the guest

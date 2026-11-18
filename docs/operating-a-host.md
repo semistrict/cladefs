@@ -120,6 +120,29 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing stores'
 cells on the same terms, and makes new stores (`take`, `import`) anywhere.
 
+### Buckets and their numbers
+
+Every bucket has a **bucket number**, which the high bits of every cell ID it gives carry, so that
+no two buckets give one ID and a fork's child may later live in another bucket than its parent
+(backlog doc-23, TASK-633.9). Numbers are sequential from the **root bucket**, number 1, whose
+record of every bucket is the authority; a copy of it is in every bucket's root.
+
+```sh
+cladefsctl format-bucket s3://ROOT --region us-east-1 --kms aws-kms://us-east-1   # prints 1
+cladefsctl add-bucket s3://ROOT gs://OTHER --region europe-west1                  # prints 2
+cladefsctl buckets gs://OTHER      # the record: its version, then each bucket's number and details
+```
+
+`format-bucket` makes a bucket never formatted the root of buckets of its own; a bucket never
+formatted is made one by the first host to make a cell in it. `add-bucket` takes a bucket never
+formatted: add it before any host uses it. It gives the next number by a conditional write of the
+root's record, so additions are serialized there, then copies the record to every bucket's root.
+Adding a bucket again keeps its number; a bucket with a number already is refused (`EEXIST`), as is
+a root that is not number 1 (`EINVAL`). The record holds each bucket's provider, cloud region,
+URL, endpoint, KMS and master key's ID, as given with `--region`, `--endpoint`, `--kms` and
+`--master-key-id`: never a key or a credential, which each host keeps. The root's cloud region
+being down blocks only additions.
+
 ## Encryption and shredding
 
 Backlog doc-16 is the design. Every store is encrypted, always:

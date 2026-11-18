@@ -543,9 +543,9 @@ impl ObjectBucket {
         Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids }
     }
 
-    /// cladefs: a new object ID of the bucket's, which no other cell of it has, nor will
-    /// ([`crate::objectid`], TASK-364).
-    pub async fn new_objectid(&self) -> u64 {
+    /// cladefs: a new object ID of the bucket's, which no other cell of any bucket has, nor will
+    /// ([`crate::objectid`], TASK-364, TASK-633.9): refused if the bucket is of another format.
+    pub async fn new_objectid(&self) -> Result<u64, crate::Error> {
         self.objectids.next(self).await
     }
 
@@ -726,6 +726,23 @@ pub(crate) struct Reached {
     pub pages: Pages,
     /// The prefix the URL names in it.
     pub prefix: String,
+}
+
+/// cladefs: the provider of the bucket at `url`, as the registry of buckets records it
+/// ([`crate::identity::Details::provider`]): `file`, `memory`, `s3`, `gcs` or `azure`.
+pub fn provider_of(url: &str) -> Result<&'static str, String> {
+    use object_store::ObjectStoreScheme as Scheme;
+    let parsed = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
+    if parsed.scheme() == "file" {
+        return Ok("file");
+    }
+    match Scheme::parse(&parsed).map_err(|error| format!("{url}: {error}"))?.0 {
+        Scheme::Memory => Ok("memory"),
+        Scheme::AmazonS3 => Ok("s3"),
+        Scheme::GoogleCloudStorage => Ok("gcs"),
+        Scheme::MicrosoftAzure => Ok("azure"),
+        other => Err(format!("{url}: no buckets of {other:?}")),
+    }
 }
 
 /// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a level

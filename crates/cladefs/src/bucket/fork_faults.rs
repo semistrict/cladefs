@@ -448,6 +448,8 @@ impl World {
                 | Kind::Marking
                 | Kind::Retired { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Identity
+                | Kind::Buckets
                 | Kind::Kek { .. } => false,
                 Kind::Moves { .. } | Kind::Unknown => true,
             })

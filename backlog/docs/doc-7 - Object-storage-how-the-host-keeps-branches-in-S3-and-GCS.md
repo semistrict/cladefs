@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-18 17:17'
+updated_date: '2026-11-18 20:23'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -180,6 +180,8 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a point's fork's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good, as is its cell; none for a point's fork's made by its host alone, of an ID an allocator gave (Dead cells removed whole) |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
+| `identity` | cladefs: the bucket's identity: its format, its **bucket number** and a random ID (`bucket_cell::identity`, TASK-633.9, doc-23) | create-only, by the bucket's formatting (`cladefsctl format-bucket`, or an allocator's before its first block) or its addition (`cladefsctl add-bucket`); kept for good |
+| `buckets` | cladefs: the record of every bucket: its version, and each bucket's number, identity ID, provider, cloud region, URL, endpoint, KMS and master key's ID; the root bucket's (number 1) is the authority, every other's a copy (doc-23) | the root's: created by its formatting, then updated with a condition by each addition, which serializes them; a copy: created, or updated with a condition, never by an older version; kept for good |
 | `tenants/<tenant>/kek` | cladefs: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`cladefs-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
@@ -257,11 +259,24 @@ other's pages.
 An allocator, one per bucket in a process, takes a block of 2^24 IDs by creating its object,
 `objectid/<block>`, which only one taking does; it gives the block's IDs in order, each once, an ID
 costing no request but its block's first. A block is chosen at random, so that allocators taking
-blocks at once seldom meet, and kept for good, as an ID is never given again (TASK-455: block 0 no
-allocator takes, its IDs those tests name; an ID of a block taken is *given*, to one making alone,
-which no fork names, `objectid::given`, what removing a dead cell goes by): an allocator going,
-its block's IDs not given go with it. A fork's child takes no ID of a branch its parent holds
-extents of all the same (`extent_store::InheritedId`), as a test's fork may name its child.
+blocks at once seldom meet, and kept for good, as an ID is never given again (an ID of a block taken
+is *given*, to one making alone, which no fork names, `objectid::given`, what removing a dead cell
+goes by): an allocator going, its block's IDs not given go with it. A fork's child takes no ID of a
+branch its parent holds extents of all the same (`extent_store::InheritedId`), as a test's fork may
+name its child.
+
+*Format 20 (TASK-633.9, doc-23):* IDs are unique across buckets, not in one alone, so that a fork's
+child may live in another bucket than its parent. An ID is `bucket << 48 | block << 24 | n`: its
+bucket's **number** (16 bits), a block of that bucket's (24 bits) and its number in the block (24
+bits); a block's object is `objectid/<bucket << 24 | block>`. Numbers are sequential from the
+**root bucket**, number 1: a bucket's number is in its identity object, `identity`, written once by
+its **formatting**, which makes a bucket never formatted a root of its own (`cladefsctl
+format-bucket`, or an allocator before its first block), or by its **addition** to a root's
+buckets (`cladefsctl add-bucket`), which takes the next number by a conditional write of the root's
+record of every bucket, `buckets`, then copies that record to every bucket's root. A bucket of
+another format is refused (`Error::BucketFormat`). No bucket's number is 0, under which are the
+IDs tests name (`objectid::named`; TASK-455's block 0 was its part), nor 65535, so that no ID is
+`u64::MAX`.
 
 doc-2's separate `index/` deltas and `frees/` objects are gone: a segment's footer is its delta,
 and its frees, and a branch's history can be rebuilt from its segments alone. A batch with no data
@@ -276,7 +291,8 @@ its cell's prefix, TASK-364, keys and moves, its collection's, under it, TASK-39
 cells keep keys, TASK-411.3, and a branch's head names what it holds, its keys written once,
 TASK-407), so that a reader of
 any format reads it before the rest: one of another format, newer or older, is refused (`Error::Format`, naming the branch and the format) before anything else of
-the branch is read or written. Every reader of a branch reads its record first: a
+the branch is read or written. A bucket's identity says its format too (`identity`, format 20,
+TASK-633.9), and a bucket of another is refused before its allocator gives an ID. Every reader of a branch reads its record first: a
 writer taking it, a host attaching it, the collector, whose pass stops, deleting nothing in a
 bucket it can't read. Every framed object (segments, extents on their own, checkpoints, moves)
 ends with its frame's format, the last byte of its trailer's magic (`cladefs2` since TASK-411.2), which a reader of

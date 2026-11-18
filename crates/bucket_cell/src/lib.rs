@@ -66,6 +66,7 @@ pub mod head;
 #[cfg(test)]
 mod heap;
 pub mod host_disk;
+pub mod identity;
 pub mod keys;
 pub mod known;
 pub mod layout;
@@ -177,6 +178,24 @@ pub enum Error {
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]
     Left(Left),
+    /// cladefs: the bucket's identity says another format than this one's, newer or older
+    /// ([`identity`], TASK-633.9; doc-11, rule 1).
+    #[error(
+        "the bucket is of format {0}, which this reader, of format {ours}, doesn't read",
+        ours = layout::FORMAT
+    )]
+    BucketFormat(u32),
+    /// cladefs: a bucket to add is a bucket already, of this number ([`identity::add`],
+    /// TASK-633.9).
+    #[error("the bucket is bucket {0} already")]
+    Formatted(u16),
+    /// cladefs: buckets are added to the root bucket alone, not to this one, of this number
+    /// ([`identity::add`]).
+    #[error("bucket {0} is not the root bucket, which adds buckets")]
+    NotRoot(u16),
+    /// cladefs: every bucket number is given ([`identity::add`]).
+    #[error("every bucket number is given")]
+    NoNumbers,
 }
 
 /// cladefs: why a pass of the collector left its cell to another ([`Error::Left`]).

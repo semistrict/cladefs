@@ -19,6 +19,7 @@ use crate::Errno;
 use bucket_cell::bucket_kms::BucketKms;
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
+use bucket_cell::identity::{Details, Identity, Registry};
 use bucket_cell::keys;
 use bucket_cell::layout::Location;
 use bucket_cell::object_bucket::ObjectBucket;
@@ -71,6 +72,56 @@ impl Host {
     }
 }
 
+/// cladefs: `details` of the bucket at `url`, its URL and provider among them, as the registry of
+/// buckets records them (`bucket_cell::identity`, TASK-633.9).
+fn located(url: &str, details: Details) -> Result<Details, crate::Error> {
+    let provider = bucket_cell::object_bucket::provider_of(url)
+        .map_err(|err| crate::Error::new(anyhow::anyhow!(err)))?;
+    Ok(Details { provider: Some(provider.to_owned()), url: Some(url.to_owned()), ..details })
+}
+
+/// cladefs: runs `work` on the bucket runtime, its bucket failure an error with its errno.
+fn on_buckets<T>(
+    work: impl std::future::Future<Output = Result<T, bucket_cell::Error>>,
+) -> Result<T, crate::Error> {
+    Ok(local_cell::upload::block_on(work)?.map_err(Failure::from)?)
+}
+
+/// cladefs: formats the bucket at `url` (`cladefsctl format-bucket`; `bucket_cell::identity`,
+/// TASK-633.9): unless it was formatted or added, the root of buckets of its own, number 1, its
+/// registry recording it, with `details`. Its identity either way.
+pub fn format_bucket(url: &str, details: Details) -> Result<Identity, crate::Error> {
+    let details = located(url, details)?;
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    on_buckets(bucket_cell::identity::format(&*bucket, &details))
+}
+
+/// cladefs: adds the bucket at `url`, with `details`, to the buckets of the root bucket at
+/// `root_url` (`cladefsctl add-bucket`, TASK-633.9): the next number, by a conditional write of the
+/// root's registry, which then goes to every bucket's root. Its identity: refused if it is a
+/// bucket already (`EEXIST`), or the root is another bucket (`EINVAL`), or no number is left
+/// (`ENOSPC`).
+pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identity, crate::Error> {
+    let (root_details, details) = (located(root_url, Details::default())?, located(url, details)?);
+    let open = |url: &str| crate::host_cell::bucket(url).map_err(crate::Error::new);
+    let (root, new) = (open(root_url)?, open(url)?);
+    let (identity, registry) =
+        on_buckets(bucket_cell::identity::add(&*root, &root_details, &*new, details))?;
+    for entry in &registry.buckets {
+        if let Some(url) = &entry.details.url {
+            on_buckets(bucket_cell::identity::spread(&registry, &*open(url)?))?;
+        }
+    }
+    Ok(identity)
+}
+
+/// cladefs: the registry of buckets in the root of the bucket at `url`, if it has one
+/// (`cladefsctl buckets`, TASK-633.9).
+pub fn bucket_registry(url: &str) -> Result<Option<Registry>, crate::Error> {
+    let bucket = crate::host_cell::bucket(url).map_err(crate::Error::new)?;
+    on_buckets(bucket_cell::identity::registry(&*bucket))
+}
+
 /// The errno of `failure`, as doc-4 and doc-7 have them: a cell this writer lost, to another
 /// writer or deleted, or one nothing writes, is one the store takes no more commits for (`EROFS`);
 /// one a later placement holds, which a placement cut off takes back no more, or one another
@@ -96,8 +147,14 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
         // cladefs: an encrypted cell inherited by one whose record holds not its keys (TASK-411.4).
         Failure::Bucket(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
-        // A cell of a newer format than this host reads, until it is upgraded (doc-11).
-        Failure::Bucket(Error::Format { .. }) => Some(Errno::ENOTSUP),
+        // A cell, or a bucket, of a newer format than this host reads, until it is upgraded
+        // (doc-11).
+        Failure::Bucket(Error::Format { .. } | Error::BucketFormat(_)) => Some(Errno::ENOTSUP),
+        // cladefs: a bucket to add that is a bucket already, buckets added to one not the root,
+        // and no bucket number left (TASK-633.9).
+        Failure::Bucket(Error::Formatted(_)) => Some(Errno::EEXIST),
+        Failure::Bucket(Error::NotRoot(_)) => Some(Errno::EINVAL),
+        Failure::Bucket(Error::NoNumbers) => Some(Errno::ENOSPC),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2); and a taking's race for the
         // cell's keys, which it takes again (`bucket_cell::keys::taking`).

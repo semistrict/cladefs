@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 17:02'
+updated_date: '2026-11-18 20:23'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -23,7 +23,8 @@ OPEN_QUESTIONS.md had planned for more than one cloud region before this.
 | Forks across buckets | **Required.** A child in bucket B is forked from a version of a parent in bucket A, and keeps its origin and lineage. A one-way flattened copy into B, a new cell with new IDs, was rejected. |
 | Copies | **Allowed as a mirror.** The parent version's objects are copied byte for byte into B at the same keys, in the background, so that B's children stop depending on A. This is not a flattened copy: no ID, key or record changes. |
 | Cell IDs | Unique across every bucket: a **16-bit bucket number** in a cell ID's high bits. This is a format bump. |
-| Bucket numbers | Given by the **operator**, in a registry in each host's configuration, and checked against an identity object in each bucket. |
+| Bucket numbers | **Sequential**, from the **root bucket**, number 1. Adding a bucket gives it the next number by a conditional write (CAS) of the root's record of every bucket, which serializes additions. Each number is kept in a create-only identity object in its bucket. (Superseded the same day: random numbers, an explicit one as an option, and a registry in each host's configuration.) |
+| Record of buckets | **In the root of every bucket**: each bucket's number, provider, cloud region, URL, endpoint, KMS and master key's ID; never a key or a credential. The root's copy is the authority; every other bucket holds a copy no older than the one before it. |
 | Credentials | Every host and collector may **write to every bucket**: a fork and a pass write across buckets themselves. No proxy through A's hosts. |
 | Not chosen | Hosts of several cloud regions sharing one bucket, as the general shape. Surviving the loss of a bucket's cloud region for the cells it is home to (DR). doc-21's replicas spread across cloud regions. |
 
@@ -71,16 +72,24 @@ A fork rewraps the parent's DEKs, as of the fork, under the child's cell KEK: `I
 ### Bucket numbers and cell IDs
 
 - **A cell ID is `bucket << 48 | block << 24 | n`.** That is a 16-bit bucket number above a 24-bit block, with 2^48 IDs per bucket. `id >> 48` names a cell's home bucket. `Origin`, `Location`, `ExtentId`, `KeyId`, the HKDF bindings, both caches and the proto keep their shapes, and every name becomes unique across buckets.
-- **Bucket number 0** is never given. Its block 0 keeps the IDs tests name (TASK-455), and `u64::MAX` still names no cell.
-- **The allocator** takes blocks within its bucket's number.
+- **Bucket number 0** is never given: IDs under it are the ones tests name (`objectid::named`; TASK-455's block 0 was part of it). Nor is 65535, so `u64::MAX` still names no cell.
+- **The allocator** takes blocks within its bucket's number: `objectid/<bucket << 24 | block>`.
 - **Format bump:** bucket format 19 → 20, or the next number free when this lands. Nothing migrates (README, "Formats change without migration").
 
-### A bucket's identity
+### A bucket's identity and the record of every bucket
 
-- Every bucket holds a create-only object at its root, `bucket`: its format, its **bucket number**, a random ID, its cloud and its cloud region. `layout::kind` must know the object, or it parses as `Kind::Unknown`.
-- A host's configuration holds the **registry**: bucket number → URL and that bucket's options (credentials, cloud region, endpoint), one entry per bucket it may reach, its home bucket among them.
-- A host refuses a bucket whose identity object disagrees with the registry. Its first use creates the object.
-- `CLADEFSD_BUCKET` names the host's home bucket by its number in the registry. Other knobs that take a bucket URL go the same way.
+- Every bucket holds a create-only object at its root, `identity`: its format, its **bucket number** and a random ID (`bucket_cell::identity`). `layout::kind` knows it (`Kind::Identity`), and the collector keeps it.
+- The **root bucket**, number 1, holds the **registry** at `buckets`: its version, and each bucket's number, identity ID and details (provider, cloud region, URL, endpoint, KMS, master key's ID). It is the authority. Every other bucket's root holds a copy (`Kind::Buckets`), which is never replaced by an older one.
+- **Formatting** (`cladefsctl format-bucket URL [DETAILS]`) makes a bucket never formatted a root of its own: identity number 1, and a registry recording it alone. An allocator formats its bucket so before its first block, so every bucket that holds a cell has a number. A formatting that stopped short of the registry is finished by the next.
+- **Adding** (`cladefsctl add-bucket ROOT URL [DETAILS]`) takes a bucket never formatted:
+  1. Read the root's registry, and write it back with the next number added, conditional on its version. A write that loses retries with the number after. Additions are serialized here; nothing else ever writes the root's registry.
+  2. Create the new bucket's identity, of that number.
+  3. Copy the registry to every bucket's root, conditional on each copy's version, never replacing a newer one.
+  - An addition that stopped after step 1 is finished by another of the same URL, which takes the recorded number, not the next. Adding a bucket again keeps its number.
+  - Refused: a bucket that already has a number (`Error::Formatted`, `EEXIST`), a root that is not number 1 (`Error::NotRoot`, `EINVAL`), and no number left (`Error::NoNumbers`, `ENOSPC`).
+- The root bucket's cloud region being down blocks only additions. Hosts read the copy in their own bucket's root, and the root's only for a number their copy lacks.
+- These are TASK-633.9, done before the rest, so that IDs given from then on stay valid once buckets meet.
+- Credentials and other per-host options for each bucket stay in each host's configuration, by bucket number (TASK-633.3). `CLADEFSD_BUCKET` names the host's home bucket.
 
 ### Routing by bucket
 
@@ -191,7 +200,7 @@ Each model runs in under 10 minutes, split by the steps it takes, as Replication
 
 1. **Measure.** How much of a base a child reads (bytes read over the version's object bytes), on real container-image bases. A version's dead-byte share, which a mirror copies. A cold inherited read under injected latency (`CLADEFS_BUCKET_LATENCY_MS`, about 70 ms) on ubu1. The real latency of each cloud pair needs real buckets, which the no-GCP rule forbids without the user's word.
 2. **The spec** (above).
-3. **Bucket numbers in cell IDs,** the identity object and the registry.
+3. **Bucket numbers in cell IDs**, the identity object and the record of buckets in every root (TASK-633.9, done first), then hosts finding buckets by number (TASK-633.3).
 4. **Routing:** options per bucket, the resolver, fetchers, budgets and peers per bucket, and per-bucket stats.
 5. **A take that asks only its own bucket,** and a checkpoint's moves read in their own bucket.
 6. **KMS per bucket,** and the Azure Key Vault backend.

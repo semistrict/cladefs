@@ -2,26 +2,34 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: object IDs, unique in their bucket (TASK-364): a cell's ID is one. An extent's ID names
-//! its cell by the cell's ID alone, as forks share their parents' extents by it, and a host's
-//! cache of extents keys them by it; so no two cells of a bucket may have one ID, whatever their
-//! cells. Records were once keyed by IDs alone, a second cell of an ID refused by its record's
-//! create; under cells, they are not, and this is what keeps IDs apart.
+//! cladefs: object IDs, unique across buckets (TASK-364, TASK-633.9): a cell's ID is one. An
+//! extent's ID names its cell by the cell's ID alone, as forks share their parents' extents by it,
+//! and a host's cache of extents keys them by it; so no two cells may have one ID, whatever their
+//! cells, nor, as a fork's child may live in another bucket than its parent (backlog doc-23),
+//! whatever their buckets. Records were once keyed by IDs alone, a second cell of an ID refused by
+//! its record's create; under cells, they are not, and this is what keeps IDs apart.
 //!
-//! An [`Allocator`] gives IDs out of a block of [`ID_BLOCK`] of them it took: a block is taken by
-//! creating its object, `objectid/<block>` ([`layout::objectid_block`]), which only one taking
-//! does, and kept for good, so that no other allocator takes it again, of any process. The IDs of a
-//! block go in order, each once: an ID costs no request but its block's first, and a block's
-//! object no more than its taking says. An allocator going, its block's IDs not given go with it.
-//! Blocks are chosen at random, so that allocators taking blocks at once seldom meet.
+//! An ID is `bucket << 48 | block << 24 | n`: its bucket's number ([`crate::identity`]), a block
+//! of [`ID_BLOCK`] IDs of the bucket's, and its number in the block. Its bucket is the one that
+//! gave it ([`bucket_of`]), whichever bucket holds its cell's objects.
 //!
-//! cladefs: block 0 no allocator takes: its IDs are those tests name, as a guest might, which no
-//! allocator gives (TASK-455). An ID of a block taken is [`given`] to one making alone, which
-//! no fork names (doc-7, Object IDs): a root's or a clone's record of one, deleted, goes with its
-//! dead cell, no recorder making it again (`record::Record::removable`).
+//! An [`Allocator`] gives IDs out of a block it took: a block is taken by creating its object,
+//! `objectid/<bucket << 24 | block>` ([`layout::objectid_block`]), which only one taking does, and
+//! kept for good, so that no other allocator takes it again, of any process. The IDs of a block go
+//! in order, each once: an ID costs no request but its block's first, and a block's object no more
+//! than its taking says. An allocator going, its block's IDs not given go with it. Blocks are
+//! chosen at random, so that allocators taking blocks at once seldom meet. Before its first block,
+//! an allocator learns its bucket's number, formatting the bucket, the root of buckets of its own,
+//! if it has none ([`identity::format`]).
+//!
+//! cladefs: no bucket's number is 0 ([`identity::NAMED`]): IDs under it are those tests name, as a
+//! guest might ([`named`]), which no allocator gives (TASK-455). An ID of a block taken is
+//! [`given`] to one making alone, which no fork names (doc-7, Object IDs): a root's or a clone's
+//! record of one, deleted, goes with its dead cell, no recorder making it again
+//! (`record::Record::removable`).
 
 use crate::bucket::{self, Bucket, Created};
-use crate::layout;
+use crate::{Error, identity, layout};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -29,9 +37,23 @@ use std::sync::Mutex;
 /// block.
 pub const ID_BLOCK: u64 = 1 << 24;
 
-/// How many blocks there are: none holds `u64::MAX`, which names no cell. Block 0, the IDs tests
-/// name, no allocator takes.
-const ID_BLOCKS: u64 = u64::MAX / ID_BLOCK;
+/// How many blocks a bucket has: the bits of an ID between its bucket's number and its number in
+/// its block.
+const BUCKET_BLOCKS: u64 = 1 << 24;
+
+/// Where an ID's bucket's number begins.
+const BUCKET_SHIFT: u32 = 48;
+
+/// The number of the bucket that gave `id`: [`identity::NAMED`] if no allocator did.
+pub fn bucket_of(id: u64) -> u16 {
+    (id >> BUCKET_SHIFT) as u16
+}
+
+/// A random ID no allocator gives, not 0, for tests that name a cell's ID themselves: under
+/// [`identity::NAMED`], no bucket's number.
+pub fn named() -> u64 {
+    (rand::random::<u64>() >> (u64::BITS - BUCKET_SHIFT)).max(1)
+}
 
 /// What a block's object holds: its taker, a random number its allocator chose, so that the
 /// taking's create, landed though its answer was lost, is its own when tried again
@@ -44,6 +66,8 @@ struct BlockTaker {
 /// Gives object IDs out of blocks it takes in its bucket, each once. One a process has for each
 /// bucket, as every one it makes, at once, takes a block of its own.
 pub struct Allocator {
+    /// Its bucket's number, once learned.
+    number: Mutex<Option<u16>>,
     /// Its block, if it took one, and the number in it of the next ID it gives.
     block: Mutex<Option<(u64, u64)>>,
 }
@@ -57,24 +81,34 @@ impl Default for Allocator {
 impl Allocator {
     /// One with no block yet.
     pub const fn new() -> Self {
-        Self { block: Mutex::new(None) }
+        Self { number: Mutex::new(None), block: Mutex::new(None) }
     }
 
     /// A new ID of `bucket`'s, given by no other: the next of its block, or the first of a block it
-    /// takes, its last given.
-    pub async fn next(&self, bucket: &impl Bucket) -> u64 {
+    /// takes, its last given. Refused if `bucket` is of another format.
+    pub async fn next(&self, bucket: &impl Bucket) -> Result<u64, Error> {
         loop {
             if let Some(id) = self.given() {
-                return id;
+                return Ok(id);
             }
-            let taken = take(bucket).await;
+            let taken = take(bucket, self.number(bucket).await?).await;
             let mut block = self.block.lock().unwrap();
             // Another call's taking may have come first, its block given out by now or not: this
             // one's is given out next, its own wasted otherwise, which no ID of is given.
             if block.is_none_or(|(_, next)| next == ID_BLOCK) {
-                *block = Some((taken, first(taken)));
+                *block = Some((taken, 0));
             }
         }
+    }
+
+    /// Its bucket's number: learned once, the bucket formatted, a root of its own, if it has none.
+    async fn number(&self, bucket: &impl Bucket) -> Result<u16, Error> {
+        if let Some(number) = *self.number.lock().unwrap() {
+            return Ok(number);
+        }
+        let number = identity::format(bucket, &identity::Details::default()).await?.number;
+        *self.number.lock().unwrap() = Some(number);
+        Ok(number)
     }
 
     /// The next ID of its block, if it has one with any left.
@@ -82,23 +116,19 @@ impl Allocator {
         let mut block = self.block.lock().unwrap();
         let (taken, next) = block.as_mut().filter(|(_, next)| *next < ID_BLOCK)?;
         let id = *taken * ID_BLOCK + *next;
-        debug_assert!(id >= ID_BLOCK, "block 0's IDs are named, never given");
+        debug_assert!(identity::given(bucket_of(id)), "{id:x} of no bucket's number");
         *next += 1;
         Some(id)
     }
 }
 
-/// The number in `block` of its first ID.
-fn first(block: u64) -> u64 {
-    assert_ne!(block, 0, "block 0's IDs are named, never given");
-    0
-}
-
-/// Takes a block of `bucket`'s that no allocator took, at random, and returns it.
-async fn take(bucket: &impl Bucket) -> u64 {
+/// Takes a block of the bucket numbered `number`, `bucket`, that no allocator took, at random, and
+/// returns it.
+async fn take(bucket: &impl Bucket, number: u16) -> u64 {
+    assert!(identity::given(number), "bucket number {number} is no bucket's");
     let bytes = layout::encode(&BlockTaker { taker: rand::random() });
     loop {
-        let block = 1 + rand::random::<u64>() % (ID_BLOCKS - 1);
+        let block = u64::from(number) * BUCKET_BLOCKS + rand::random::<u64>() % BUCKET_BLOCKS;
         match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await {
             Created::Created(_) => return block,
             // Another's: another block.
@@ -119,22 +149,27 @@ mod tests {
     }
 
     /// An allocator gives its block's IDs in order, each once, then takes another block; another
-    /// allocator of the bucket takes blocks of its own: no ID is given twice.
+    /// allocator of the bucket takes blocks of its own: no ID is given twice. Every ID carries the
+    /// bucket's number, which the first ID formatted it with.
     #[test]
     fn allocators_give_ids_of_blocks_of_their_own() {
         futures::executor::block_on(async {
             let bucket = memory();
             let (one, other) = (Allocator::new(), Allocator::new());
-            let first = one.next(&bucket).await;
-            assert_eq!(one.next(&bucket).await, first + 1);
-            let theirs = other.next(&bucket).await;
+            let first = one.next(&bucket).await.unwrap();
+            let number = identity::get(&bucket).await.unwrap().unwrap().number;
+            assert_eq!(bucket_of(first), number);
+            assert_eq!(one.next(&bucket).await, Ok(first + 1));
+            let theirs = other.next(&bucket).await.unwrap();
+            assert_eq!(bucket_of(theirs), number);
             assert_ne!(theirs / ID_BLOCK, first / ID_BLOCK, "two allocators took one block");
             // Its block given out, the next ID is another block's.
             one.block.lock().unwrap().as_mut().unwrap().1 = ID_BLOCK - 1;
-            let last = one.next(&bucket).await;
+            let last = one.next(&bucket).await.unwrap();
             assert_eq!(last, first / ID_BLOCK * ID_BLOCK + ID_BLOCK - 1);
-            let next = one.next(&bucket).await;
+            let next = one.next(&bucket).await.unwrap();
             assert_ne!(next / ID_BLOCK, first / ID_BLOCK);
+            assert_eq!(bucket_of(next), number);
             let blocks: BTreeSet<u64> = (bucket::list(&bucket, "objectid/").await.into_iter())
                 .map(|meta| match layout::kind(&meta.key) {
                     layout::Kind::ObjectIds { block } => block,
@@ -146,30 +181,69 @@ mod tests {
         });
     }
 
-    /// A block taken is no other allocator's, though it chooses it: it chooses again.
+    /// A root bucket gives IDs of number 1, and a bucket added to it of number 2: two buckets give
+    /// no ID alike.
+    #[test]
+    fn ids_carry_their_buckets_number() {
+        futures::executor::block_on(async {
+            let (one, other) = (memory(), memory());
+            let details = identity::Details::default();
+            let added =
+                identity::Details { url: Some("memory:///other".into()), ..details.clone() };
+            identity::add(&one, &details, &other, added).await.unwrap();
+            for _ in 0..16 {
+                let id = Allocator::new().next(&one).await.unwrap();
+                assert_eq!(id >> 48, 1, "{id:x}");
+                let id = Allocator::new().next(&other).await.unwrap();
+                assert_eq!(id >> 48, 2, "{id:x}");
+            }
+        });
+    }
+
+    /// A block taken is no other allocator's, though it chooses it: it chooses again. Every block
+    /// is the bucket's number's.
     #[test]
     fn blocks_taken_are_taken_once() {
         futures::executor::block_on(async {
             let bucket = memory();
             let mut taken = BTreeSet::new();
             for _ in 0..64 {
-                taken.insert(take(&bucket).await);
+                taken.insert(take(&bucket, 5).await);
             }
             assert_eq!(taken.len(), 64);
-            assert!(!taken.contains(&0), "block 0 taken");
+            assert!(taken.iter().all(|block| block / BUCKET_BLOCKS == 5), "{taken:x?}");
             assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 64);
         });
     }
 
-    /// No ID of block 0 is given, 0 among them, which names no cell: no allocator takes the
-    /// block, whose IDs tests name, though its object were there (TASK-455).
+    /// No ID an allocator gives is under no bucket's number: not 0, nor any test names
+    /// ([`named`]), nor `u64::MAX`.
     #[test]
-    fn no_id_is_0() {
+    fn no_id_is_named() {
+        futures::executor::block_on(async {
+            for _ in 0..16 {
+                let id = Allocator::new().next(&memory()).await.unwrap();
+                assert!(identity::given(bucket_of(id)), "{id:x}");
+                assert_ne!(id, u64::MAX);
+            }
+            for _ in 0..16 {
+                let named = named();
+                assert_eq!(bucket_of(named), identity::NAMED, "{named:x}");
+                assert_ne!(named, 0);
+            }
+        });
+    }
+
+    /// A bucket of another format gives no ID: its allocator is refused, takes no block.
+    #[test]
+    fn a_bucket_of_another_format_gives_no_id() {
         futures::executor::block_on(async {
             let bucket = memory();
-            bucket::create(&bucket, &layout::objectid_block(0), b"by hand".to_vec()).await;
-            let id = Allocator::new().next(&bucket).await;
-            assert!(id >= ID_BLOCK, "{id} of block 0");
+            let other = identity::Identity { format: layout::FORMAT - 1, number: 3, id: 1 };
+            bucket::create(&bucket, layout::IDENTITY, layout::encode(&other)).await;
+            let refused = Allocator::new().next(&bucket).await;
+            assert_eq!(refused, Err(Error::BucketFormat(layout::FORMAT - 1)));
+            assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 0);
         });
     }
 }

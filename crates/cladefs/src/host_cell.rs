@@ -69,7 +69,7 @@ pub(crate) fn may_fork_into(
 /// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
 /// extents keys them by (TASK-364). A cell's ID is its cell's: no caller names a new one.
 pub(crate) fn new_cell(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
-    let id = upload::block_on(bucket.new_objectid())?;
+    let id = upload::block_on(bucket.new_objectid())??;
     Ok(CellId { tenant, id })
 }
 
@@ -88,10 +88,10 @@ pub(crate) fn new_alone() -> CellId {
     named(DEFAULT_TENANT)
 }
 
-/// A new cell of `tenant`'s, of a random ID no allocator gave.
+/// A new cell of `tenant`'s, of a random ID no allocator gives (`bucket_cell::objectid::named`).
 #[cfg(test)]
 pub(crate) fn named(tenant: u64) -> CellId {
-    CellId { tenant, id: rand::random::<u64>().max(1) }
+    CellId { tenant, id: bucket_cell::objectid::named() }
 }
 
 /// A child of a fork of `parent`, of a random ID no allocator gave, for tests that name it
