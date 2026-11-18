@@ -247,6 +247,25 @@ message CreateCellRequest {
   CellKind kind = 7;
   // Once a version to copy: versions fork straight, ForkCell's `version`.
   reserved 8;
+  // Whether the cell is replicated (doc-21, TASK-537): its f, its commits on f+1 of 2f+1 hosts'
+  // disks before the bucket, the hosts the daemon's peers (SetPeers); 0 for a cell durable off its
+  // host once uploaded alone. At most 3. Unset keeps what the cell's head says, of a cell taken,
+  // and makes a new one not replicated; set, it is the cell's from this taking on, on any host.
+  optional uint32 replicas = 9;
+  // What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
+  // otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
+  FsyncLevel fsync = 10;
+}
+
+// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21). Its sync,
+// syncfs and unmount wait for its commits replicated in a replicated cell, uploaded in any other.
+enum FsyncLevel {
+  // In the daemon's memory, in order: survives what leaves the daemon alive.
+  FSYNC_LEVEL_ORDERED = 0;
+  // On the writer's host's disk.
+  FSYNC_LEVEL_LOCAL = 1;
+  // On f+1 hosts' disks, or uploaded: survives the writer's host.
+  FSYNC_LEVEL_REPLICATED = 2;
 }
 
 // What a cell holds, which says what opens it (the type's name is renamed with the rest,
@@ -522,6 +541,13 @@ message StatCellResponse {
   uint64 inherited_extents = 20;
   // Once the version of its cell a copy was of: versions are forked straight.
   reserved 21;
+  // Whether its cell is replicated, as its writer's taking found its head (doc-21): its f, 0 if
+  // not; with `uploading` alone.
+  uint32 replicas = 22;
+  // What its guest's fsync waits for, as its writer's taking found it.
+  FsyncLevel fsync = 23;
+  // The number of its active configuration, 0 if it has none yet.
+  uint64 configuration = 24;
 }
 
 // Asks for the stores the daemon serves.

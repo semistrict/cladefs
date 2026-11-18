@@ -807,6 +807,7 @@ impl World {
             held: Some(self.hosts[host].held.clone()),
             token,
             checkpoint_every: upload::CHECKPOINT_EVERY,
+            replication: None,
             // The interval closes a segment filled at once, as the first full one closed between
             // commits, its commits uploading, is what the world's clock can't wait for
             // (TASK-92.41).

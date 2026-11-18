@@ -238,6 +238,37 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
     status
 }
 
+/// cladefs: the replication CreateCell's `replicas` and `fsync` ask for (doc-21, TASK-537.3.1):
+/// none, `replicas` unset, which keeps what the cell's head says; refused (`EINVAL`) past
+/// `bucket_cell::layout::MAX_F`, with an fsync level and no `replicas`, or waiting for copies an f
+/// of 0 never makes.
+fn wish(replicas: Option<u32>, fsync: i32) -> Result<Option<bucket_cell::layout::Wish>, Status> {
+    use bucket_cell::layout::{Fsync, Wish};
+    let fsync = match FsyncLevel::try_from(fsync) {
+        Ok(FsyncLevel::Ordered) => Fsync::Ordered,
+        Ok(FsyncLevel::Local) => Fsync::Local,
+        Ok(FsyncLevel::Replicated) => Fsync::Replicated,
+        Err(_) => return Err(status(Errno::EINVAL)),
+    };
+    let Some(replicas) = replicas else {
+        return match fsync {
+            Fsync::Ordered => Ok(None),
+            _ => Err(status(Errno::EINVAL)),
+        };
+    };
+    let f = u8::try_from(replicas).map_err(|_| status(Errno::EINVAL))?;
+    Wish::new(f, fsync).map(Some).ok_or_else(|| status(Errno::EINVAL))
+}
+
+/// What StatCell's FsyncLevel is of `fsync`.
+fn fsync_level(fsync: bucket_cell::layout::Fsync) -> FsyncLevel {
+    match fsync {
+        bucket_cell::layout::Fsync::Ordered => FsyncLevel::Ordered,
+        bucket_cell::layout::Fsync::Local => FsyncLevel::Local,
+        bucket_cell::layout::Fsync::Replicated => FsyncLevel::Replicated,
+    }
+}
+
 /// The reply to a call that did, or failed with an errno.
 /// What StatCell says of a store that is and holds `state`.
 fn stat_response(state: cells::CellState) -> StatCellResponse {
@@ -254,6 +285,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
     let waited = |since: std::time::SystemTime| {
         since.elapsed().map_or(0, |waited| waited.as_millis() as u64)
     };
+    let replicated = upload.taking.and_then(|taking| taking.replication);
     StatCellResponse {
         tenant: state.cell.tenant,
         cell: state.cell.id,
@@ -274,6 +306,10 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
+        replicas: replicated.map_or(0, |replicated| u32::from(replicated.f)),
+        fsync: replicated.map_or(FsyncLevel::Ordered, |replicated| fsync_level(replicated.fsync))
+            as i32,
+        configuration: replicated.and_then(|replicated| replicated.configuration).unwrap_or(0),
     }
 }
 
@@ -317,9 +353,10 @@ impl Cladefsd for Control {
         &self,
         request: Request<CreateCellRequest>,
     ) -> Result<Response<CreateCellResponse>, Status> {
-        let CreateCellRequest { path: store, capacity, token, tenant, cell, kind } =
+        let CreateCellRequest { path: store, capacity, token, tenant, cell, kind, replicas, fsync } =
             request.into_inner();
         let store = path(store)?;
+        let replication = wish(replicas, fsync)?;
         let kind = match CellKind::try_from(kind) {
             Ok(CellKind::Fxfs) => Kind::Fxfs,
             Ok(CellKind::Sqlite) => Kind::Sqlite,
@@ -331,7 +368,7 @@ impl Cladefsd for Control {
             _ => tenant,
         };
         let cell = crate::CellId { tenant, id: cell };
-        let made = cells::create(store, capacity, cell, (token, kind)).await;
+        let made = cells::create(store, capacity, cell, (token, kind, replication)).await;
         reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
@@ -798,6 +835,7 @@ impl Client {
             tenant: cell.tenant,
             cell: cell.id,
             kind: CellKind::Fxfs.into(),
+            ..CreateCellRequest::default()
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {

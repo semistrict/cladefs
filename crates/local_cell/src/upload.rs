@@ -275,6 +275,10 @@ pub struct Options {
     /// 10 s and more each, the interval closing the segments they filled at 10 s, their commits
     /// copying out a segment's worth each.
     pub filling_wait: Duration,
+    /// cladefs: the replication a taking of the store's cell gives it (doc-21, TASK-537.3.1):
+    /// a store made, or taken, by the control API, as its call asked; none keeps what the cell's
+    /// head says.
+    pub replication: Option<bucket_cell::layout::Wish>,
 }
 
 impl Default for Options {
@@ -288,6 +292,7 @@ impl Default for Options {
             token: 0,
             checkpoint_every: CHECKPOINT_EVERY,
             filling_wait: Duration::from_secs(30),
+            replication: None,
         }
     }
 }
@@ -483,6 +488,29 @@ pub struct Taking {
     pub epoch: u64,
     /// When the writer took it.
     pub taken: SystemTime,
+    /// cladefs: its cell's replication as the head it took says (doc-21, TASK-537.3.1): none for
+    /// a cell durable off its host once uploaded alone.
+    pub replication: Option<Replicated>,
+}
+
+/// cladefs: a replicated cell's replication, as a writer's taking found it: its f, what its
+/// guest's fsync waits for, and the number of its active configuration, if it has one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Replicated {
+    pub f: u8,
+    pub fsync: bucket_cell::layout::Fsync,
+    pub configuration: Option<u64>,
+}
+
+impl Replicated {
+    fn of(replication: &bucket_cell::layout::Replication) -> Self {
+        let bucket_cell::layout::Replication { wish, configuration } = replication;
+        Self {
+            f: wish.f,
+            fsync: wish.fsync,
+            configuration: configuration.as_ref().map(|configuration| configuration.number),
+        }
+    }
 }
 
 /// What a store's uploader has done, and has left to do (TASK-50.5).
@@ -1096,7 +1124,13 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // it is of another (`OtherKind`, doc-20). Not a version's, which no writer
         // takes, and any number of hosts open at once. A cell with no head is no cell: its maker
         // makes it, before its store opens (`lifecycle::create`), and no taking does.
-        let taking = head::Taking { holder, token: placement, kind: recovering.kind(), keys: None };
+        let taking = head::Taking {
+            holder,
+            token: placement,
+            kind: recovering.kind(),
+            keys: None,
+            replication: self.options.replication,
+        };
         let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
         // its stores into new cells take, filled off this path (TASK-411.4).
@@ -1128,7 +1162,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
         });
         *self.writer.lock().unwrap() = Some(writer.clone());
-        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now() };
+        let replication = writer.taken().head.replication.as_ref().map(Replicated::of);
+        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now(), replication };
         let mut progress = self.progress.lock().unwrap();
         (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {

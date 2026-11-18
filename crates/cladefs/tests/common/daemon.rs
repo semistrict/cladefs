@@ -61,6 +61,7 @@ impl Daemon {
             tenant: cell.tenant,
             cell: cell.id,
             kind: 0,
+            ..CreateCellRequest::default()
         };
         let response = self.runtime.block_on(self.client.create_cell(request))?.into_inner();
         Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })

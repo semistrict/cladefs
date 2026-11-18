@@ -648,7 +648,7 @@ pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
     cell: CellId,
-    (token, kind): (Option<u64>, Kind),
+    (token, kind, replication): (Option<u64>, Kind, Option<bucket_cell::layout::Wish>),
 ) -> Result<CellId, Errno> {
     let held = hold(&path).await?;
     blocking(move || {
@@ -666,7 +666,10 @@ pub(super) async fn create(
             (_, 0) | (0, _) => return Err(Errno::EINVAL),
             (_, _) => CellOf::Taken(cell),
         };
+        // cladefs: the replication its call asked for, which its taking gives the cell's head
+        // (doc-21, TASK-537.3.1).
         attached(&path, |keeping| {
+            let keeping = local_cell::upload::Options { replication, ..keeping };
             OpenCell::create_placed(&path, (capacity, of, token), kind, keeping)
         })
     })

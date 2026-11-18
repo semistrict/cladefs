@@ -87,6 +87,60 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// What a guest's fsync, fdatasync, msync and O_SYNC wait for in a cell (doc-12, doc-21). Its sync,
+// syncfs and unmount wait for its commits replicated in a replicated cell, uploaded in any other.
+type FsyncLevel int32
+
+const (
+	// In the daemon's memory, in order: survives what leaves the daemon alive.
+	FsyncLevel_FSYNC_LEVEL_ORDERED FsyncLevel = 0
+	// On the writer's host's disk.
+	FsyncLevel_FSYNC_LEVEL_LOCAL FsyncLevel = 1
+	// On f+1 hosts' disks, or uploaded: survives the writer's host.
+	FsyncLevel_FSYNC_LEVEL_REPLICATED FsyncLevel = 2
+)
+
+// Enum value maps for FsyncLevel.
+var (
+	FsyncLevel_name = map[int32]string{
+		0: "FSYNC_LEVEL_ORDERED",
+		1: "FSYNC_LEVEL_LOCAL",
+		2: "FSYNC_LEVEL_REPLICATED",
+	}
+	FsyncLevel_value = map[string]int32{
+		"FSYNC_LEVEL_ORDERED":    0,
+		"FSYNC_LEVEL_LOCAL":      1,
+		"FSYNC_LEVEL_REPLICATED": 2,
+	}
+)
+
+func (x FsyncLevel) Enum() *FsyncLevel {
+	p := new(FsyncLevel)
+	*p = x
+	return p
+}
+
+func (x FsyncLevel) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FsyncLevel) Descriptor() protoreflect.EnumDescriptor {
+	return file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0].Descriptor()
+}
+
+func (FsyncLevel) Type() protoreflect.EnumType {
+	return &file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0]
+}
+
+func (x FsyncLevel) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FsyncLevel.Descriptor instead.
+func (FsyncLevel) EnumDescriptor() ([]byte, []int) {
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{0}
+}
+
 // What a cell holds, which says what opens it (the type's name is renamed with the rest,
 // TASK-508.4).
 type CellKind int32
@@ -125,11 +179,11 @@ func (x CellKind) String() string {
 }
 
 func (CellKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0].Descriptor()
+	return file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[1].Descriptor()
 }
 
 func (CellKind) Type() protoreflect.EnumType {
-	return &file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[0]
+	return &file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes[1]
 }
 
 func (x CellKind) Number() protoreflect.EnumNumber {
@@ -138,7 +192,7 @@ func (x CellKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use CellKind.Descriptor instead.
 func (CellKind) EnumDescriptor() ([]byte, []int) {
-	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{0}
+	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
 }
 
 // Makes an empty store.
@@ -159,7 +213,15 @@ type CreateCellRequest struct {
 	// response says.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The cell's kind, which says what opens it.
-	Kind          CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
+	Kind CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
+	// Whether the cell is replicated (doc-21, TASK-537): its f, its commits on f+1 of 2f+1 hosts'
+	// disks before the bucket, the hosts the daemon's peers (SetPeers); 0 for a cell durable off its
+	// host once uploaded alone. At most 3. Unset keeps what the cell's head says, of a cell taken,
+	// and makes a new one not replicated; set, it is the cell's from this taking on, on any host.
+	Replicas *uint32 `protobuf:"varint,9,opt,name=replicas,proto3,oneof" json:"replicas,omitempty"`
+	// What its guest's fsync waits for (doc-12, doc-21), given with `replicas` alone (INVALID_ARGUMENT
+	// otherwise): FSYNC_LEVEL_REPLICATED needs replicas of 1 or more.
+	Fsync         FsyncLevel `protobuf:"varint,10,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -234,6 +296,20 @@ func (x *CreateCellRequest) GetKind() CellKind {
 		return x.Kind
 	}
 	return CellKind_CELL_KIND_FXFS
+}
+
+func (x *CreateCellRequest) GetReplicas() uint32 {
+	if x != nil && x.Replicas != nil {
+		return *x.Replicas
+	}
+	return 0
+}
+
+func (x *CreateCellRequest) GetFsync() FsyncLevel {
+	if x != nil {
+		return x.Fsync
+	}
+	return FsyncLevel_FSYNC_LEVEL_ORDERED
 }
 
 // The store made.
@@ -1738,8 +1814,15 @@ type StatCellResponse struct {
 	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
 	// How many it holds that it inherited: those whose bytes are `inherited`.
 	InheritedExtents uint64 `protobuf:"varint,20,opt,name=inherited_extents,json=inheritedExtents,proto3" json:"inherited_extents,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Whether its cell is replicated, as its writer's taking found its head (doc-21): its f, 0 if
+	// not; with `uploading` alone.
+	Replicas uint32 `protobuf:"varint,22,opt,name=replicas,proto3" json:"replicas,omitempty"`
+	// What its guest's fsync waits for, as its writer's taking found it.
+	Fsync FsyncLevel `protobuf:"varint,23,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
+	// The number of its active configuration, 0 if it has none yet.
+	Configuration uint64 `protobuf:"varint,24,opt,name=configuration,proto3" json:"configuration,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StatCellResponse) Reset() {
@@ -1901,6 +1984,27 @@ func (x *StatCellResponse) GetOwnExtents() uint64 {
 func (x *StatCellResponse) GetInheritedExtents() uint64 {
 	if x != nil {
 		return x.InheritedExtents
+	}
+	return 0
+}
+
+func (x *StatCellResponse) GetReplicas() uint32 {
+	if x != nil {
+		return x.Replicas
+	}
+	return 0
+}
+
+func (x *StatCellResponse) GetFsync() FsyncLevel {
+	if x != nil {
+		return x.Fsync
+	}
+	return FsyncLevel_FSYNC_LEVEL_ORDERED
+}
+
+func (x *StatCellResponse) GetConfiguration() uint64 {
+	if x != nil {
+		return x.Configuration
 	}
 	return 0
 }
@@ -4123,15 +4227,19 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xd3\x01\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xb8\x02\n" +
 	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kindB\b\n" +
-	"\x06_tokenJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kind\x12\x1f\n" +
+	"\breplicas\x18\t \x01(\rH\x01R\breplicas\x88\x01\x01\x125\n" +
+	"\x05fsync\x18\n" +
+	" \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsyncB\b\n" +
+	"\x06_tokenB\v\n" +
+	"\t_replicasJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
 	"\x12CreateCellResponse\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x90\x01\n" +
@@ -4202,7 +4310,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
 	"\x10SyncCellResponse\"%\n" +
 	"\x0fStatCellRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xde\x04\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xd7\x05\n" +
 	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -4226,7 +4334,10 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x12\x1a\n" +
+	"\breplicas\x18\x16 \x01(\rR\breplicas\x125\n" +
+	"\x05fsync\x18\x17 \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12$\n" +
+	"\rconfiguration\x18\x18 \x01(\x04R\rconfigurationJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"[\n" +
@@ -4405,7 +4516,12 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*J\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*X\n" +
+	"\n" +
+	"FsyncLevel\x12\x17\n" +
+	"\x13FSYNC_LEVEL_ORDERED\x10\x00\x12\x15\n" +
+	"\x11FSYNC_LEVEL_LOCAL\x10\x01\x12\x1a\n" +
+	"\x16FSYNC_LEVEL_REPLICATED\x10\x02*J\n" +
 	"\bCellKind\x12\x12\n" +
 	"\x0eCELL_KIND_FXFS\x10\x00\x12\x14\n" +
 	"\x10CELL_KIND_SQLITE\x10\x01\x12\x14\n" +
@@ -4460,179 +4576,182 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP() []byte {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescData
 }
 
-var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_cladefs_cladefsd_v1_cladefsd_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_cladefs_cladefsd_v1_cladefsd_proto_msgTypes = make([]protoimpl.MessageInfo, 79)
 var file_cladefs_cladefsd_v1_cladefsd_proto_goTypes = []any{
-	(CellKind)(0),                     // 0: cladefs.cladefsd.v1.CellKind
-	(*CreateCellRequest)(nil),         // 1: cladefs.cladefsd.v1.CreateCellRequest
-	(*CreateCellResponse)(nil),        // 2: cladefs.cladefsd.v1.CreateCellResponse
-	(*ImportImageRequest)(nil),        // 3: cladefs.cladefsd.v1.ImportImageRequest
-	(*ImportImageResponse)(nil),       // 4: cladefs.cladefsd.v1.ImportImageResponse
-	(*ForkCellRequest)(nil),           // 5: cladefs.cladefsd.v1.ForkCellRequest
-	(*ForkCellResponse)(nil),          // 6: cladefs.cladefsd.v1.ForkCellResponse
-	(*DeleteCellRequest)(nil),         // 7: cladefs.cladefsd.v1.DeleteCellRequest
-	(*DeleteCellResponse)(nil),        // 8: cladefs.cladefsd.v1.DeleteCellResponse
-	(*DropCellRequest)(nil),           // 9: cladefs.cladefsd.v1.DropCellRequest
-	(*DropCellResponse)(nil),          // 10: cladefs.cladefsd.v1.DropCellResponse
-	(*ResizeCellRequest)(nil),         // 11: cladefs.cladefsd.v1.ResizeCellRequest
-	(*ResizeCellResponse)(nil),        // 12: cladefs.cladefsd.v1.ResizeCellResponse
-	(*PlaceCellRequest)(nil),          // 13: cladefs.cladefsd.v1.PlaceCellRequest
-	(*PlaceCellResponse)(nil),         // 14: cladefs.cladefsd.v1.PlaceCellResponse
-	(*MakeVersionRequest)(nil),        // 15: cladefs.cladefsd.v1.MakeVersionRequest
-	(*MakeVersionResponse)(nil),       // 16: cladefs.cladefsd.v1.MakeVersionResponse
-	(*ListVersionsRequest)(nil),       // 17: cladefs.cladefsd.v1.ListVersionsRequest
-	(*Version)(nil),                   // 18: cladefs.cladefsd.v1.Version
-	(*ListVersionsResponse)(nil),      // 19: cladefs.cladefsd.v1.ListVersionsResponse
-	(*DropVersionsRequest)(nil),       // 20: cladefs.cladefsd.v1.DropVersionsRequest
-	(*DropVersionsResponse)(nil),      // 21: cladefs.cladefsd.v1.DropVersionsResponse
-	(*ShareVersionRequest)(nil),       // 22: cladefs.cladefsd.v1.ShareVersionRequest
-	(*ShareVersionResponse)(nil),      // 23: cladefs.cladefsd.v1.ShareVersionResponse
-	(*MakePublicRequest)(nil),         // 24: cladefs.cladefsd.v1.MakePublicRequest
-	(*MakePublicResponse)(nil),        // 25: cladefs.cladefsd.v1.MakePublicResponse
-	(*AttachBaseRequest)(nil),         // 26: cladefs.cladefsd.v1.AttachBaseRequest
-	(*AttachBaseResponse)(nil),        // 27: cladefs.cladefsd.v1.AttachBaseResponse
-	(*SyncCellRequest)(nil),           // 28: cladefs.cladefsd.v1.SyncCellRequest
-	(*SyncCellResponse)(nil),          // 29: cladefs.cladefsd.v1.SyncCellResponse
-	(*StatCellRequest)(nil),           // 30: cladefs.cladefsd.v1.StatCellRequest
-	(*StatCellResponse)(nil),          // 31: cladefs.cladefsd.v1.StatCellResponse
-	(*ListCellsRequest)(nil),          // 32: cladefs.cladefsd.v1.ListCellsRequest
-	(*ListCellsResponse)(nil),         // 33: cladefs.cladefsd.v1.ListCellsResponse
-	(*ListedCell)(nil),                // 34: cladefs.cladefsd.v1.ListedCell
-	(*GetCountersRequest)(nil),        // 35: cladefs.cladefsd.v1.GetCountersRequest
-	(*GetCountersResponse)(nil),       // 36: cladefs.cladefsd.v1.GetCountersResponse
-	(*GetStatsRequest)(nil),           // 37: cladefs.cladefsd.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),          // 38: cladefs.cladefsd.v1.GetStatsResponse
-	(*VmStats)(nil),                   // 39: cladefs.cladefsd.v1.VmStats
-	(*GuestStats)(nil),                // 40: cladefs.cladefsd.v1.GuestStats
-	(*Histogram)(nil),                 // 41: cladefs.cladefsd.v1.Histogram
-	(*ObjectStorageStats)(nil),        // 42: cladefs.cladefsd.v1.ObjectStorageStats
-	(*GrantRequest)(nil),              // 43: cladefs.cladefsd.v1.GrantRequest
-	(*GrantResponse)(nil),             // 44: cladefs.cladefsd.v1.GrantResponse
-	(*RevokeRequest)(nil),             // 45: cladefs.cladefsd.v1.RevokeRequest
-	(*RevokeResponse)(nil),            // 46: cladefs.cladefsd.v1.RevokeResponse
-	(*SetMemoryLimitRequest)(nil),     // 47: cladefs.cladefsd.v1.SetMemoryLimitRequest
-	(*SetMemoryLimitResponse)(nil),    // 48: cladefs.cladefsd.v1.SetMemoryLimitResponse
-	(*SetMemoryWeightRequest)(nil),    // 49: cladefs.cladefsd.v1.SetMemoryWeightRequest
-	(*SetMemoryWeightResponse)(nil),   // 50: cladefs.cladefsd.v1.SetMemoryWeightResponse
-	(*SetTenantInFlightRequest)(nil),  // 51: cladefs.cladefsd.v1.SetTenantInFlightRequest
-	(*SetTenantInFlightResponse)(nil), // 52: cladefs.cladefsd.v1.SetTenantInFlightResponse
-	(*ShrinkMemoryRequest)(nil),       // 53: cladefs.cladefsd.v1.ShrinkMemoryRequest
-	(*ShrinkMemoryResponse)(nil),      // 54: cladefs.cladefsd.v1.ShrinkMemoryResponse
-	(*SetDiskLimitRequest)(nil),       // 55: cladefs.cladefsd.v1.SetDiskLimitRequest
-	(*SetDiskLimitResponse)(nil),      // 56: cladefs.cladefsd.v1.SetDiskLimitResponse
-	(*SetDiskWeightRequest)(nil),      // 57: cladefs.cladefsd.v1.SetDiskWeightRequest
-	(*SetDiskWeightResponse)(nil),     // 58: cladefs.cladefsd.v1.SetDiskWeightResponse
-	(*SetPeersRequest)(nil),           // 59: cladefs.cladefsd.v1.SetPeersRequest
-	(*SetPeersResponse)(nil),          // 60: cladefs.cladefsd.v1.SetPeersResponse
-	(*GetTenantDiskRequest)(nil),      // 61: cladefs.cladefsd.v1.GetTenantDiskRequest
-	(*GetTenantDiskResponse)(nil),     // 62: cladefs.cladefsd.v1.GetTenantDiskResponse
-	(*ShredCellRequest)(nil),          // 63: cladefs.cladefsd.v1.ShredCellRequest
-	(*ShredCellResponse)(nil),         // 64: cladefs.cladefsd.v1.ShredCellResponse
-	(*ForgetTenantKeysRequest)(nil),   // 65: cladefs.cladefsd.v1.ForgetTenantKeysRequest
-	(*ForgetTenantKeysResponse)(nil),  // 66: cladefs.cladefsd.v1.ForgetTenantKeysResponse
-	(*ShredTenantRequest)(nil),        // 67: cladefs.cladefsd.v1.ShredTenantRequest
-	(*ShredTenantResponse)(nil),       // 68: cladefs.cladefsd.v1.ShredTenantResponse
-	(*Forgotten)(nil),                 // 69: cladefs.cladefsd.v1.Forgotten
-	nil,                               // 70: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
-	nil,                               // 71: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
-	nil,                               // 72: cladefs.cladefsd.v1.VmStats.CountersEntry
-	nil,                               // 73: cladefs.cladefsd.v1.VmStats.GaugesEntry
-	nil,                               // 74: cladefs.cladefsd.v1.VmStats.WindowEntry
-	nil,                               // 75: cladefs.cladefsd.v1.GuestStats.CountersEntry
-	nil,                               // 76: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
-	nil,                               // 77: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
-	nil,                               // 78: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                               // 79: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
+	(FsyncLevel)(0),                   // 0: cladefs.cladefsd.v1.FsyncLevel
+	(CellKind)(0),                     // 1: cladefs.cladefsd.v1.CellKind
+	(*CreateCellRequest)(nil),         // 2: cladefs.cladefsd.v1.CreateCellRequest
+	(*CreateCellResponse)(nil),        // 3: cladefs.cladefsd.v1.CreateCellResponse
+	(*ImportImageRequest)(nil),        // 4: cladefs.cladefsd.v1.ImportImageRequest
+	(*ImportImageResponse)(nil),       // 5: cladefs.cladefsd.v1.ImportImageResponse
+	(*ForkCellRequest)(nil),           // 6: cladefs.cladefsd.v1.ForkCellRequest
+	(*ForkCellResponse)(nil),          // 7: cladefs.cladefsd.v1.ForkCellResponse
+	(*DeleteCellRequest)(nil),         // 8: cladefs.cladefsd.v1.DeleteCellRequest
+	(*DeleteCellResponse)(nil),        // 9: cladefs.cladefsd.v1.DeleteCellResponse
+	(*DropCellRequest)(nil),           // 10: cladefs.cladefsd.v1.DropCellRequest
+	(*DropCellResponse)(nil),          // 11: cladefs.cladefsd.v1.DropCellResponse
+	(*ResizeCellRequest)(nil),         // 12: cladefs.cladefsd.v1.ResizeCellRequest
+	(*ResizeCellResponse)(nil),        // 13: cladefs.cladefsd.v1.ResizeCellResponse
+	(*PlaceCellRequest)(nil),          // 14: cladefs.cladefsd.v1.PlaceCellRequest
+	(*PlaceCellResponse)(nil),         // 15: cladefs.cladefsd.v1.PlaceCellResponse
+	(*MakeVersionRequest)(nil),        // 16: cladefs.cladefsd.v1.MakeVersionRequest
+	(*MakeVersionResponse)(nil),       // 17: cladefs.cladefsd.v1.MakeVersionResponse
+	(*ListVersionsRequest)(nil),       // 18: cladefs.cladefsd.v1.ListVersionsRequest
+	(*Version)(nil),                   // 19: cladefs.cladefsd.v1.Version
+	(*ListVersionsResponse)(nil),      // 20: cladefs.cladefsd.v1.ListVersionsResponse
+	(*DropVersionsRequest)(nil),       // 21: cladefs.cladefsd.v1.DropVersionsRequest
+	(*DropVersionsResponse)(nil),      // 22: cladefs.cladefsd.v1.DropVersionsResponse
+	(*ShareVersionRequest)(nil),       // 23: cladefs.cladefsd.v1.ShareVersionRequest
+	(*ShareVersionResponse)(nil),      // 24: cladefs.cladefsd.v1.ShareVersionResponse
+	(*MakePublicRequest)(nil),         // 25: cladefs.cladefsd.v1.MakePublicRequest
+	(*MakePublicResponse)(nil),        // 26: cladefs.cladefsd.v1.MakePublicResponse
+	(*AttachBaseRequest)(nil),         // 27: cladefs.cladefsd.v1.AttachBaseRequest
+	(*AttachBaseResponse)(nil),        // 28: cladefs.cladefsd.v1.AttachBaseResponse
+	(*SyncCellRequest)(nil),           // 29: cladefs.cladefsd.v1.SyncCellRequest
+	(*SyncCellResponse)(nil),          // 30: cladefs.cladefsd.v1.SyncCellResponse
+	(*StatCellRequest)(nil),           // 31: cladefs.cladefsd.v1.StatCellRequest
+	(*StatCellResponse)(nil),          // 32: cladefs.cladefsd.v1.StatCellResponse
+	(*ListCellsRequest)(nil),          // 33: cladefs.cladefsd.v1.ListCellsRequest
+	(*ListCellsResponse)(nil),         // 34: cladefs.cladefsd.v1.ListCellsResponse
+	(*ListedCell)(nil),                // 35: cladefs.cladefsd.v1.ListedCell
+	(*GetCountersRequest)(nil),        // 36: cladefs.cladefsd.v1.GetCountersRequest
+	(*GetCountersResponse)(nil),       // 37: cladefs.cladefsd.v1.GetCountersResponse
+	(*GetStatsRequest)(nil),           // 38: cladefs.cladefsd.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),          // 39: cladefs.cladefsd.v1.GetStatsResponse
+	(*VmStats)(nil),                   // 40: cladefs.cladefsd.v1.VmStats
+	(*GuestStats)(nil),                // 41: cladefs.cladefsd.v1.GuestStats
+	(*Histogram)(nil),                 // 42: cladefs.cladefsd.v1.Histogram
+	(*ObjectStorageStats)(nil),        // 43: cladefs.cladefsd.v1.ObjectStorageStats
+	(*GrantRequest)(nil),              // 44: cladefs.cladefsd.v1.GrantRequest
+	(*GrantResponse)(nil),             // 45: cladefs.cladefsd.v1.GrantResponse
+	(*RevokeRequest)(nil),             // 46: cladefs.cladefsd.v1.RevokeRequest
+	(*RevokeResponse)(nil),            // 47: cladefs.cladefsd.v1.RevokeResponse
+	(*SetMemoryLimitRequest)(nil),     // 48: cladefs.cladefsd.v1.SetMemoryLimitRequest
+	(*SetMemoryLimitResponse)(nil),    // 49: cladefs.cladefsd.v1.SetMemoryLimitResponse
+	(*SetMemoryWeightRequest)(nil),    // 50: cladefs.cladefsd.v1.SetMemoryWeightRequest
+	(*SetMemoryWeightResponse)(nil),   // 51: cladefs.cladefsd.v1.SetMemoryWeightResponse
+	(*SetTenantInFlightRequest)(nil),  // 52: cladefs.cladefsd.v1.SetTenantInFlightRequest
+	(*SetTenantInFlightResponse)(nil), // 53: cladefs.cladefsd.v1.SetTenantInFlightResponse
+	(*ShrinkMemoryRequest)(nil),       // 54: cladefs.cladefsd.v1.ShrinkMemoryRequest
+	(*ShrinkMemoryResponse)(nil),      // 55: cladefs.cladefsd.v1.ShrinkMemoryResponse
+	(*SetDiskLimitRequest)(nil),       // 56: cladefs.cladefsd.v1.SetDiskLimitRequest
+	(*SetDiskLimitResponse)(nil),      // 57: cladefs.cladefsd.v1.SetDiskLimitResponse
+	(*SetDiskWeightRequest)(nil),      // 58: cladefs.cladefsd.v1.SetDiskWeightRequest
+	(*SetDiskWeightResponse)(nil),     // 59: cladefs.cladefsd.v1.SetDiskWeightResponse
+	(*SetPeersRequest)(nil),           // 60: cladefs.cladefsd.v1.SetPeersRequest
+	(*SetPeersResponse)(nil),          // 61: cladefs.cladefsd.v1.SetPeersResponse
+	(*GetTenantDiskRequest)(nil),      // 62: cladefs.cladefsd.v1.GetTenantDiskRequest
+	(*GetTenantDiskResponse)(nil),     // 63: cladefs.cladefsd.v1.GetTenantDiskResponse
+	(*ShredCellRequest)(nil),          // 64: cladefs.cladefsd.v1.ShredCellRequest
+	(*ShredCellResponse)(nil),         // 65: cladefs.cladefsd.v1.ShredCellResponse
+	(*ForgetTenantKeysRequest)(nil),   // 66: cladefs.cladefsd.v1.ForgetTenantKeysRequest
+	(*ForgetTenantKeysResponse)(nil),  // 67: cladefs.cladefsd.v1.ForgetTenantKeysResponse
+	(*ShredTenantRequest)(nil),        // 68: cladefs.cladefsd.v1.ShredTenantRequest
+	(*ShredTenantResponse)(nil),       // 69: cladefs.cladefsd.v1.ShredTenantResponse
+	(*Forgotten)(nil),                 // 70: cladefs.cladefsd.v1.Forgotten
+	nil,                               // 71: cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
+	nil,                               // 72: cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
+	nil,                               // 73: cladefs.cladefsd.v1.VmStats.CountersEntry
+	nil,                               // 74: cladefs.cladefsd.v1.VmStats.GaugesEntry
+	nil,                               // 75: cladefs.cladefsd.v1.VmStats.WindowEntry
+	nil,                               // 76: cladefs.cladefsd.v1.GuestStats.CountersEntry
+	nil,                               // 77: cladefs.cladefsd.v1.GuestStats.HistogramsEntry
+	nil,                               // 78: cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
+	nil,                               // 79: cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                               // 80: cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_cladefsd_v1_cladefsd_proto_depIdxs = []int32{
-	0,  // 0: cladefs.cladefsd.v1.CreateCellRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
-	18, // 1: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
-	34, // 2: cladefs.cladefsd.v1.ListCellsResponse.stores:type_name -> cladefs.cladefsd.v1.ListedCell
-	31, // 3: cladefs.cladefsd.v1.ListedCell.stat:type_name -> cladefs.cladefsd.v1.StatCellResponse
-	42, // 4: cladefs.cladefsd.v1.GetCountersResponse.object_storage:type_name -> cladefs.cladefsd.v1.ObjectStorageStats
-	70, // 5: cladefs.cladefsd.v1.GetStatsResponse.counters:type_name -> cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
-	71, // 6: cladefs.cladefsd.v1.GetStatsResponse.gauges:type_name -> cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
-	39, // 7: cladefs.cladefsd.v1.GetStatsResponse.vms:type_name -> cladefs.cladefsd.v1.VmStats
-	72, // 8: cladefs.cladefsd.v1.VmStats.counters:type_name -> cladefs.cladefsd.v1.VmStats.CountersEntry
-	73, // 9: cladefs.cladefsd.v1.VmStats.gauges:type_name -> cladefs.cladefsd.v1.VmStats.GaugesEntry
-	74, // 10: cladefs.cladefsd.v1.VmStats.window:type_name -> cladefs.cladefsd.v1.VmStats.WindowEntry
-	40, // 11: cladefs.cladefsd.v1.VmStats.guest:type_name -> cladefs.cladefsd.v1.GuestStats
-	75, // 12: cladefs.cladefsd.v1.GuestStats.counters:type_name -> cladefs.cladefsd.v1.GuestStats.CountersEntry
-	76, // 13: cladefs.cladefsd.v1.GuestStats.histograms:type_name -> cladefs.cladefsd.v1.GuestStats.HistogramsEntry
-	77, // 14: cladefs.cladefsd.v1.ObjectStorageStats.requests:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
-	78, // 15: cladefs.cladefsd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
-	79, // 16: cladefs.cladefsd.v1.ObjectStorageStats.failures:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
-	69, // 17: cladefs.cladefsd.v1.ShredCellResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	69, // 18: cladefs.cladefsd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	69, // 19: cladefs.cladefsd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
-	41, // 20: cladefs.cladefsd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.cladefsd.v1.Histogram
-	1,  // 21: cladefs.cladefsd.v1.Cladefsd.CreateCell:input_type -> cladefs.cladefsd.v1.CreateCellRequest
-	3,  // 22: cladefs.cladefsd.v1.Cladefsd.ImportImage:input_type -> cladefs.cladefsd.v1.ImportImageRequest
-	5,  // 23: cladefs.cladefsd.v1.Cladefsd.ForkCell:input_type -> cladefs.cladefsd.v1.ForkCellRequest
-	7,  // 24: cladefs.cladefsd.v1.Cladefsd.DeleteCell:input_type -> cladefs.cladefsd.v1.DeleteCellRequest
-	9,  // 25: cladefs.cladefsd.v1.Cladefsd.DropCell:input_type -> cladefs.cladefsd.v1.DropCellRequest
-	11, // 26: cladefs.cladefsd.v1.Cladefsd.ResizeCell:input_type -> cladefs.cladefsd.v1.ResizeCellRequest
-	13, // 27: cladefs.cladefsd.v1.Cladefsd.PlaceCell:input_type -> cladefs.cladefsd.v1.PlaceCellRequest
-	24, // 28: cladefs.cladefsd.v1.Cladefsd.MakePublic:input_type -> cladefs.cladefsd.v1.MakePublicRequest
-	15, // 29: cladefs.cladefsd.v1.Cladefsd.MakeVersion:input_type -> cladefs.cladefsd.v1.MakeVersionRequest
-	17, // 30: cladefs.cladefsd.v1.Cladefsd.ListVersions:input_type -> cladefs.cladefsd.v1.ListVersionsRequest
-	20, // 31: cladefs.cladefsd.v1.Cladefsd.DropVersions:input_type -> cladefs.cladefsd.v1.DropVersionsRequest
-	22, // 32: cladefs.cladefsd.v1.Cladefsd.ShareVersion:input_type -> cladefs.cladefsd.v1.ShareVersionRequest
-	26, // 33: cladefs.cladefsd.v1.Cladefsd.AttachBase:input_type -> cladefs.cladefsd.v1.AttachBaseRequest
-	28, // 34: cladefs.cladefsd.v1.Cladefsd.SyncCell:input_type -> cladefs.cladefsd.v1.SyncCellRequest
-	30, // 35: cladefs.cladefsd.v1.Cladefsd.StatCell:input_type -> cladefs.cladefsd.v1.StatCellRequest
-	32, // 36: cladefs.cladefsd.v1.Cladefsd.ListCells:input_type -> cladefs.cladefsd.v1.ListCellsRequest
-	35, // 37: cladefs.cladefsd.v1.Cladefsd.GetCounters:input_type -> cladefs.cladefsd.v1.GetCountersRequest
-	37, // 38: cladefs.cladefsd.v1.Cladefsd.GetStats:input_type -> cladefs.cladefsd.v1.GetStatsRequest
-	43, // 39: cladefs.cladefsd.v1.Cladefsd.Grant:input_type -> cladefs.cladefsd.v1.GrantRequest
-	45, // 40: cladefs.cladefsd.v1.Cladefsd.Revoke:input_type -> cladefs.cladefsd.v1.RevokeRequest
-	47, // 41: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:input_type -> cladefs.cladefsd.v1.SetMemoryLimitRequest
-	49, // 42: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:input_type -> cladefs.cladefsd.v1.SetMemoryWeightRequest
-	51, // 43: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:input_type -> cladefs.cladefsd.v1.SetTenantInFlightRequest
-	53, // 44: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:input_type -> cladefs.cladefsd.v1.ShrinkMemoryRequest
-	55, // 45: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:input_type -> cladefs.cladefsd.v1.SetDiskLimitRequest
-	57, // 46: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:input_type -> cladefs.cladefsd.v1.SetDiskWeightRequest
-	61, // 47: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:input_type -> cladefs.cladefsd.v1.GetTenantDiskRequest
-	59, // 48: cladefs.cladefsd.v1.Cladefsd.SetPeers:input_type -> cladefs.cladefsd.v1.SetPeersRequest
-	63, // 49: cladefs.cladefsd.v1.Cladefsd.ShredCell:input_type -> cladefs.cladefsd.v1.ShredCellRequest
-	65, // 50: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:input_type -> cladefs.cladefsd.v1.ForgetTenantKeysRequest
-	67, // 51: cladefs.cladefsd.v1.Cladefsd.ShredTenant:input_type -> cladefs.cladefsd.v1.ShredTenantRequest
-	2,  // 52: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
-	4,  // 53: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
-	6,  // 54: cladefs.cladefsd.v1.Cladefsd.ForkCell:output_type -> cladefs.cladefsd.v1.ForkCellResponse
-	8,  // 55: cladefs.cladefsd.v1.Cladefsd.DeleteCell:output_type -> cladefs.cladefsd.v1.DeleteCellResponse
-	10, // 56: cladefs.cladefsd.v1.Cladefsd.DropCell:output_type -> cladefs.cladefsd.v1.DropCellResponse
-	12, // 57: cladefs.cladefsd.v1.Cladefsd.ResizeCell:output_type -> cladefs.cladefsd.v1.ResizeCellResponse
-	14, // 58: cladefs.cladefsd.v1.Cladefsd.PlaceCell:output_type -> cladefs.cladefsd.v1.PlaceCellResponse
-	25, // 59: cladefs.cladefsd.v1.Cladefsd.MakePublic:output_type -> cladefs.cladefsd.v1.MakePublicResponse
-	16, // 60: cladefs.cladefsd.v1.Cladefsd.MakeVersion:output_type -> cladefs.cladefsd.v1.MakeVersionResponse
-	19, // 61: cladefs.cladefsd.v1.Cladefsd.ListVersions:output_type -> cladefs.cladefsd.v1.ListVersionsResponse
-	21, // 62: cladefs.cladefsd.v1.Cladefsd.DropVersions:output_type -> cladefs.cladefsd.v1.DropVersionsResponse
-	23, // 63: cladefs.cladefsd.v1.Cladefsd.ShareVersion:output_type -> cladefs.cladefsd.v1.ShareVersionResponse
-	27, // 64: cladefs.cladefsd.v1.Cladefsd.AttachBase:output_type -> cladefs.cladefsd.v1.AttachBaseResponse
-	29, // 65: cladefs.cladefsd.v1.Cladefsd.SyncCell:output_type -> cladefs.cladefsd.v1.SyncCellResponse
-	31, // 66: cladefs.cladefsd.v1.Cladefsd.StatCell:output_type -> cladefs.cladefsd.v1.StatCellResponse
-	33, // 67: cladefs.cladefsd.v1.Cladefsd.ListCells:output_type -> cladefs.cladefsd.v1.ListCellsResponse
-	36, // 68: cladefs.cladefsd.v1.Cladefsd.GetCounters:output_type -> cladefs.cladefsd.v1.GetCountersResponse
-	38, // 69: cladefs.cladefsd.v1.Cladefsd.GetStats:output_type -> cladefs.cladefsd.v1.GetStatsResponse
-	44, // 70: cladefs.cladefsd.v1.Cladefsd.Grant:output_type -> cladefs.cladefsd.v1.GrantResponse
-	46, // 71: cladefs.cladefsd.v1.Cladefsd.Revoke:output_type -> cladefs.cladefsd.v1.RevokeResponse
-	48, // 72: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:output_type -> cladefs.cladefsd.v1.SetMemoryLimitResponse
-	50, // 73: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:output_type -> cladefs.cladefsd.v1.SetMemoryWeightResponse
-	52, // 74: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:output_type -> cladefs.cladefsd.v1.SetTenantInFlightResponse
-	54, // 75: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:output_type -> cladefs.cladefsd.v1.ShrinkMemoryResponse
-	56, // 76: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:output_type -> cladefs.cladefsd.v1.SetDiskLimitResponse
-	58, // 77: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:output_type -> cladefs.cladefsd.v1.SetDiskWeightResponse
-	62, // 78: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:output_type -> cladefs.cladefsd.v1.GetTenantDiskResponse
-	60, // 79: cladefs.cladefsd.v1.Cladefsd.SetPeers:output_type -> cladefs.cladefsd.v1.SetPeersResponse
-	64, // 80: cladefs.cladefsd.v1.Cladefsd.ShredCell:output_type -> cladefs.cladefsd.v1.ShredCellResponse
-	66, // 81: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:output_type -> cladefs.cladefsd.v1.ForgetTenantKeysResponse
-	68, // 82: cladefs.cladefsd.v1.Cladefsd.ShredTenant:output_type -> cladefs.cladefsd.v1.ShredTenantResponse
-	52, // [52:83] is the sub-list for method output_type
-	21, // [21:52] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	1,  // 0: cladefs.cladefsd.v1.CreateCellRequest.kind:type_name -> cladefs.cladefsd.v1.CellKind
+	0,  // 1: cladefs.cladefsd.v1.CreateCellRequest.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
+	19, // 2: cladefs.cladefsd.v1.ListVersionsResponse.versions:type_name -> cladefs.cladefsd.v1.Version
+	0,  // 3: cladefs.cladefsd.v1.StatCellResponse.fsync:type_name -> cladefs.cladefsd.v1.FsyncLevel
+	35, // 4: cladefs.cladefsd.v1.ListCellsResponse.stores:type_name -> cladefs.cladefsd.v1.ListedCell
+	32, // 5: cladefs.cladefsd.v1.ListedCell.stat:type_name -> cladefs.cladefsd.v1.StatCellResponse
+	43, // 6: cladefs.cladefsd.v1.GetCountersResponse.object_storage:type_name -> cladefs.cladefsd.v1.ObjectStorageStats
+	71, // 7: cladefs.cladefsd.v1.GetStatsResponse.counters:type_name -> cladefs.cladefsd.v1.GetStatsResponse.CountersEntry
+	72, // 8: cladefs.cladefsd.v1.GetStatsResponse.gauges:type_name -> cladefs.cladefsd.v1.GetStatsResponse.GaugesEntry
+	40, // 9: cladefs.cladefsd.v1.GetStatsResponse.vms:type_name -> cladefs.cladefsd.v1.VmStats
+	73, // 10: cladefs.cladefsd.v1.VmStats.counters:type_name -> cladefs.cladefsd.v1.VmStats.CountersEntry
+	74, // 11: cladefs.cladefsd.v1.VmStats.gauges:type_name -> cladefs.cladefsd.v1.VmStats.GaugesEntry
+	75, // 12: cladefs.cladefsd.v1.VmStats.window:type_name -> cladefs.cladefsd.v1.VmStats.WindowEntry
+	41, // 13: cladefs.cladefsd.v1.VmStats.guest:type_name -> cladefs.cladefsd.v1.GuestStats
+	76, // 14: cladefs.cladefsd.v1.GuestStats.counters:type_name -> cladefs.cladefsd.v1.GuestStats.CountersEntry
+	77, // 15: cladefs.cladefsd.v1.GuestStats.histograms:type_name -> cladefs.cladefsd.v1.GuestStats.HistogramsEntry
+	78, // 16: cladefs.cladefsd.v1.ObjectStorageStats.requests:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.RequestsEntry
+	79, // 17: cladefs.cladefsd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.UploadedBytesEntry
+	80, // 18: cladefs.cladefsd.v1.ObjectStorageStats.failures:type_name -> cladefs.cladefsd.v1.ObjectStorageStats.FailuresEntry
+	70, // 19: cladefs.cladefsd.v1.ShredCellResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	70, // 20: cladefs.cladefsd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	70, // 21: cladefs.cladefsd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.cladefsd.v1.Forgotten
+	42, // 22: cladefs.cladefsd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.cladefsd.v1.Histogram
+	2,  // 23: cladefs.cladefsd.v1.Cladefsd.CreateCell:input_type -> cladefs.cladefsd.v1.CreateCellRequest
+	4,  // 24: cladefs.cladefsd.v1.Cladefsd.ImportImage:input_type -> cladefs.cladefsd.v1.ImportImageRequest
+	6,  // 25: cladefs.cladefsd.v1.Cladefsd.ForkCell:input_type -> cladefs.cladefsd.v1.ForkCellRequest
+	8,  // 26: cladefs.cladefsd.v1.Cladefsd.DeleteCell:input_type -> cladefs.cladefsd.v1.DeleteCellRequest
+	10, // 27: cladefs.cladefsd.v1.Cladefsd.DropCell:input_type -> cladefs.cladefsd.v1.DropCellRequest
+	12, // 28: cladefs.cladefsd.v1.Cladefsd.ResizeCell:input_type -> cladefs.cladefsd.v1.ResizeCellRequest
+	14, // 29: cladefs.cladefsd.v1.Cladefsd.PlaceCell:input_type -> cladefs.cladefsd.v1.PlaceCellRequest
+	25, // 30: cladefs.cladefsd.v1.Cladefsd.MakePublic:input_type -> cladefs.cladefsd.v1.MakePublicRequest
+	16, // 31: cladefs.cladefsd.v1.Cladefsd.MakeVersion:input_type -> cladefs.cladefsd.v1.MakeVersionRequest
+	18, // 32: cladefs.cladefsd.v1.Cladefsd.ListVersions:input_type -> cladefs.cladefsd.v1.ListVersionsRequest
+	21, // 33: cladefs.cladefsd.v1.Cladefsd.DropVersions:input_type -> cladefs.cladefsd.v1.DropVersionsRequest
+	23, // 34: cladefs.cladefsd.v1.Cladefsd.ShareVersion:input_type -> cladefs.cladefsd.v1.ShareVersionRequest
+	27, // 35: cladefs.cladefsd.v1.Cladefsd.AttachBase:input_type -> cladefs.cladefsd.v1.AttachBaseRequest
+	29, // 36: cladefs.cladefsd.v1.Cladefsd.SyncCell:input_type -> cladefs.cladefsd.v1.SyncCellRequest
+	31, // 37: cladefs.cladefsd.v1.Cladefsd.StatCell:input_type -> cladefs.cladefsd.v1.StatCellRequest
+	33, // 38: cladefs.cladefsd.v1.Cladefsd.ListCells:input_type -> cladefs.cladefsd.v1.ListCellsRequest
+	36, // 39: cladefs.cladefsd.v1.Cladefsd.GetCounters:input_type -> cladefs.cladefsd.v1.GetCountersRequest
+	38, // 40: cladefs.cladefsd.v1.Cladefsd.GetStats:input_type -> cladefs.cladefsd.v1.GetStatsRequest
+	44, // 41: cladefs.cladefsd.v1.Cladefsd.Grant:input_type -> cladefs.cladefsd.v1.GrantRequest
+	46, // 42: cladefs.cladefsd.v1.Cladefsd.Revoke:input_type -> cladefs.cladefsd.v1.RevokeRequest
+	48, // 43: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:input_type -> cladefs.cladefsd.v1.SetMemoryLimitRequest
+	50, // 44: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:input_type -> cladefs.cladefsd.v1.SetMemoryWeightRequest
+	52, // 45: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:input_type -> cladefs.cladefsd.v1.SetTenantInFlightRequest
+	54, // 46: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:input_type -> cladefs.cladefsd.v1.ShrinkMemoryRequest
+	56, // 47: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:input_type -> cladefs.cladefsd.v1.SetDiskLimitRequest
+	58, // 48: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:input_type -> cladefs.cladefsd.v1.SetDiskWeightRequest
+	62, // 49: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:input_type -> cladefs.cladefsd.v1.GetTenantDiskRequest
+	60, // 50: cladefs.cladefsd.v1.Cladefsd.SetPeers:input_type -> cladefs.cladefsd.v1.SetPeersRequest
+	64, // 51: cladefs.cladefsd.v1.Cladefsd.ShredCell:input_type -> cladefs.cladefsd.v1.ShredCellRequest
+	66, // 52: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:input_type -> cladefs.cladefsd.v1.ForgetTenantKeysRequest
+	68, // 53: cladefs.cladefsd.v1.Cladefsd.ShredTenant:input_type -> cladefs.cladefsd.v1.ShredTenantRequest
+	3,  // 54: cladefs.cladefsd.v1.Cladefsd.CreateCell:output_type -> cladefs.cladefsd.v1.CreateCellResponse
+	5,  // 55: cladefs.cladefsd.v1.Cladefsd.ImportImage:output_type -> cladefs.cladefsd.v1.ImportImageResponse
+	7,  // 56: cladefs.cladefsd.v1.Cladefsd.ForkCell:output_type -> cladefs.cladefsd.v1.ForkCellResponse
+	9,  // 57: cladefs.cladefsd.v1.Cladefsd.DeleteCell:output_type -> cladefs.cladefsd.v1.DeleteCellResponse
+	11, // 58: cladefs.cladefsd.v1.Cladefsd.DropCell:output_type -> cladefs.cladefsd.v1.DropCellResponse
+	13, // 59: cladefs.cladefsd.v1.Cladefsd.ResizeCell:output_type -> cladefs.cladefsd.v1.ResizeCellResponse
+	15, // 60: cladefs.cladefsd.v1.Cladefsd.PlaceCell:output_type -> cladefs.cladefsd.v1.PlaceCellResponse
+	26, // 61: cladefs.cladefsd.v1.Cladefsd.MakePublic:output_type -> cladefs.cladefsd.v1.MakePublicResponse
+	17, // 62: cladefs.cladefsd.v1.Cladefsd.MakeVersion:output_type -> cladefs.cladefsd.v1.MakeVersionResponse
+	20, // 63: cladefs.cladefsd.v1.Cladefsd.ListVersions:output_type -> cladefs.cladefsd.v1.ListVersionsResponse
+	22, // 64: cladefs.cladefsd.v1.Cladefsd.DropVersions:output_type -> cladefs.cladefsd.v1.DropVersionsResponse
+	24, // 65: cladefs.cladefsd.v1.Cladefsd.ShareVersion:output_type -> cladefs.cladefsd.v1.ShareVersionResponse
+	28, // 66: cladefs.cladefsd.v1.Cladefsd.AttachBase:output_type -> cladefs.cladefsd.v1.AttachBaseResponse
+	30, // 67: cladefs.cladefsd.v1.Cladefsd.SyncCell:output_type -> cladefs.cladefsd.v1.SyncCellResponse
+	32, // 68: cladefs.cladefsd.v1.Cladefsd.StatCell:output_type -> cladefs.cladefsd.v1.StatCellResponse
+	34, // 69: cladefs.cladefsd.v1.Cladefsd.ListCells:output_type -> cladefs.cladefsd.v1.ListCellsResponse
+	37, // 70: cladefs.cladefsd.v1.Cladefsd.GetCounters:output_type -> cladefs.cladefsd.v1.GetCountersResponse
+	39, // 71: cladefs.cladefsd.v1.Cladefsd.GetStats:output_type -> cladefs.cladefsd.v1.GetStatsResponse
+	45, // 72: cladefs.cladefsd.v1.Cladefsd.Grant:output_type -> cladefs.cladefsd.v1.GrantResponse
+	47, // 73: cladefs.cladefsd.v1.Cladefsd.Revoke:output_type -> cladefs.cladefsd.v1.RevokeResponse
+	49, // 74: cladefs.cladefsd.v1.Cladefsd.SetMemoryLimit:output_type -> cladefs.cladefsd.v1.SetMemoryLimitResponse
+	51, // 75: cladefs.cladefsd.v1.Cladefsd.SetMemoryWeight:output_type -> cladefs.cladefsd.v1.SetMemoryWeightResponse
+	53, // 76: cladefs.cladefsd.v1.Cladefsd.SetTenantInFlight:output_type -> cladefs.cladefsd.v1.SetTenantInFlightResponse
+	55, // 77: cladefs.cladefsd.v1.Cladefsd.ShrinkMemory:output_type -> cladefs.cladefsd.v1.ShrinkMemoryResponse
+	57, // 78: cladefs.cladefsd.v1.Cladefsd.SetDiskLimit:output_type -> cladefs.cladefsd.v1.SetDiskLimitResponse
+	59, // 79: cladefs.cladefsd.v1.Cladefsd.SetDiskWeight:output_type -> cladefs.cladefsd.v1.SetDiskWeightResponse
+	63, // 80: cladefs.cladefsd.v1.Cladefsd.GetTenantDisk:output_type -> cladefs.cladefsd.v1.GetTenantDiskResponse
+	61, // 81: cladefs.cladefsd.v1.Cladefsd.SetPeers:output_type -> cladefs.cladefsd.v1.SetPeersResponse
+	65, // 82: cladefs.cladefsd.v1.Cladefsd.ShredCell:output_type -> cladefs.cladefsd.v1.ShredCellResponse
+	67, // 83: cladefs.cladefsd.v1.Cladefsd.ForgetTenantKeys:output_type -> cladefs.cladefsd.v1.ForgetTenantKeysResponse
+	69, // 84: cladefs.cladefsd.v1.Cladefsd.ShredTenant:output_type -> cladefs.cladefsd.v1.ShredTenantResponse
+	54, // [54:85] is the sub-list for method output_type
+	23, // [23:54] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_cladefs_cladefsd_v1_cladefsd_proto_init() }
@@ -4655,7 +4774,7 @@ func file_cladefs_cladefsd_v1_cladefsd_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc), len(file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   79,
 			NumExtensions: 0,
 			NumServices:   1,
