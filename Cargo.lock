@@ -1439,6 +1439,7 @@ name = "extent_files"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "extent_files",
  "futures",
  "log",
  "rand 0.10.3",

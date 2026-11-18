@@ -6,90 +6,20 @@
 
 mod common;
 
-use futures::executor::block_on;
+use extent_files::testing::CopyingWindow;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Contents, FileSet, FileSetWindow, Options, Registration, Run, register};
-use std::alloc::Layout;
+use sqlite_extents::{FileSet, Options, Registration, register};
 use std::collections::BTreeMap;
-use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use storage_device::DeviceHolder;
 use storage_device::fake_device::{Crashes, FakeDevice, Op};
-use storage_device::{Device, DeviceHolder};
 
 const BLOCK: u32 = 4096;
 
 /// A device of 1 GiB at most, as awkward as a store.
 fn device() -> FakeDevice {
     FakeDevice::new(1 << 18, BLOCK)
-}
-
-/// A window that copies the blocks it maps into memory of its own, as a daemon's maps its cache's
-/// pages: what it unmaps reads as 0xab, which no page SQLite reads holds whole.
-struct CopyingWindow {
-    memory: NonNull<u8>,
-    size: u64,
-}
-
-// SAFETY: written only as the file set maps, under its lock.
-unsafe impl Send for CopyingWindow {}
-// SAFETY: as Send's: shared, its memory is written only under the volume's lock.
-unsafe impl Sync for CopyingWindow {}
-
-impl CopyingWindow {
-    /// Four regions of 16 MiB.
-    const SIZE: u64 = 64 << 20;
-
-    fn new() -> Self {
-        let layout = Layout::from_size_align(Self::SIZE as usize, BLOCK as usize).unwrap();
-        // SAFETY: a layout of some bytes.
-        let memory = NonNull::new(unsafe { std::alloc::alloc(layout) }).unwrap();
-        // SAFETY: the memory allocated.
-        unsafe { memory.as_ptr().write_bytes(0xab, Self::SIZE as usize) };
-        Self { memory, size: Self::SIZE }
-    }
-
-    #[allow(clippy::mut_from_ref)]
-    fn bytes(&self, at: u64, len: u64) -> &mut [u8] {
-        assert!(at + len <= self.size);
-        // SAFETY: within the memory, which the file set changes under its lock alone.
-        unsafe {
-            std::slice::from_raw_parts_mut(self.memory.as_ptr().add(at as usize), len as usize)
-        }
-    }
-}
-
-impl Drop for CopyingWindow {
-    fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.size as usize, BLOCK as usize).unwrap();
-        // SAFETY: allocated so.
-        unsafe { std::alloc::dealloc(self.memory.as_ptr(), layout) };
-    }
-}
-
-impl FileSetWindow for CopyingWindow {
-    fn memory(&self) -> (NonNull<u8>, u64) {
-        (self.memory, self.size)
-    }
-
-    fn map(&self, device: &dyn Device, runs: &[Run]) -> anyhow::Result<()> {
-        for run in runs {
-            match run.contents {
-                Contents::Extent { extent, offset } => {
-                    let mut buffer = block_on(device.allocate_buffer(run.len as usize));
-                    block_on(device.read(extent, offset, buffer.as_mut()))?;
-                    buffer.as_ref().copy_to_slice(self.bytes(run.at, run.len));
-                }
-                Contents::Zeros => self.bytes(run.at, run.len).fill(0),
-            }
-        }
-        Ok(())
-    }
-
-    fn unmap(&self, at: u64, len: u64) -> anyhow::Result<()> {
-        self.bytes(at, len).fill(0xab);
-        Ok(())
-    }
 }
 
 /// How a test's file sets read: from the device, or from a window, SQLite's memory-mapped reads
@@ -121,7 +51,9 @@ impl Mounted {
         let options = Options::default();
         let file_set = match mode {
             Mode::Device => FileSet::open(device, options),
-            Mode::Window => FileSet::open_mapped(device, Box::new(CopyingWindow::new()), options),
+            Mode::Window => {
+                FileSet::open_mapped(device, Box::new(CopyingWindow::new(BLOCK)), options)
+            }
         };
         let file_set = file_set.expect("opening the file set");
         let registration = register(&vfs, file_set.clone()).expect("registering");
@@ -583,7 +515,7 @@ fn a_connection_outlives_its_registration() {
 fn closing_an_uncommitted_file_returns_its_mapping_region() {
     let files = FileSet::open_mapped(
         DeviceHolder::new(device()),
-        Box::new(CopyingWindow::new()),
+        Box::new(CopyingWindow::new(BLOCK)),
         Options { window_regions: 1, ..Options::default() },
     )
     .unwrap();
