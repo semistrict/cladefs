@@ -439,6 +439,9 @@ fn blocking<T>(work: impl FnOnce() -> T) -> T {
 struct Point {
     origin: Origin,
     of: Forked,
+    /// cladefs: a version's: the ring its forks' checkpoints at the version are sealed under, its
+    /// branch's newest DEK, which the forks inherit (TASK-476).
+    sealing: Option<Arc<Ring>>,
 }
 
 /// cladefs: what a commit stalled behind object storage waits for, said as it stalls: the bytes not
@@ -662,7 +665,8 @@ impl<D: Dir> Uploader<D> {
                     // cladefs: a version's, its checkpoint at the version, for a child of another
                     // cell, sealed under the store's keys, its branch's (TASK-476).
                     Forked::Version(id) => {
-                        let keys = keys::Parents::Held(self.store().keys());
+                        let ring = point.sealing.clone().unwrap_or_else(|| self.store().keys().clone());
+                        let keys = keys::Parents::Held(&ring);
                         branch::fork_version_with(bucket, child, id, origin, owner, keys, holding)
                             .await
                     }
@@ -1358,7 +1362,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
         // (TASK-411.28).
         let keys = keys.for_point(branch);
-        let _ = self.point.set(Point { origin, of: Forked::Point(branch) });
+        let _ = self.point.set(Point { origin, of: Forked::Point(branch), sealing: None });
         Ok((recovered, keys))
     }
 
@@ -1382,13 +1386,14 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         };
         let origin = Origin { parent: branch, at: version.at };
         let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
-        let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
+        let keys = keys::ring(&**bucket, &cell_keys, branch, &record, true).await?;
         let recovering =
             extent_bucket::recovery::recover_version(&**bucket, branch, version.at, &keys);
         let recovered = recovering.await?;
-        // cladefs: as a point's (TASK-411.28).
+        // cladefs: as a point's (TASK-411.28); its forks' checkpoints sealed under its branch's.
+        let sealing = Some(keys.clone());
         let keys = keys.for_point(branch);
-        let _ = self.point.set(Point { origin, of: Forked::Version(id) });
+        let _ = self.point.set(Point { origin, of: Forked::Version(id), sealing });
         Ok((recovered, keys))
     }
 
