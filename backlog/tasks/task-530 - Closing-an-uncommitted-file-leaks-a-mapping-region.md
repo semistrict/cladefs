@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 12:25'
-updated_date: '2026-11-18 22:37'
+updated_date: '2026-11-18 22:48'
 labels: []
 dependencies: []
 priority: medium
@@ -39,4 +39,6 @@ Isolated arm64 macOS validation. Give a mapped file set one region. Create, writ
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18: taken up by the Codebase Bug and Performance Audit session, in one batch of file-set fixes with TASK-551, 552, 553, 530, 583 and 584 (branch t3/codebase-bug-perf-review).
+
+Already fixed on main by b1f1e1c7a (close_file's last close of an uncommitted file goes through remove_file, which releases the region). Checked 2026-11-18: sqlite_extents' closing_an_uncommitted_file_returns_its_mapping_region passes, and fails with close_file dropping the record without remove_file.
 <!-- SECTION:NOTES:END -->
