@@ -35,6 +35,18 @@ pub(crate) fn held() -> usize {
 }
 
 impl Bounded {
+    /// Counts `size` held, then allocates it with `allocate`: counted first, as a request past
+    /// the limit aborts before it is asked for; taken back if `allocate` is refused (null), as the
+    /// system then holds nothing of it.
+    fn counted(size: usize, allocate: impl FnOnce() -> *mut u8) -> *mut u8 {
+        Self::check(size);
+        let pointer = allocate();
+        if pointer.is_null() {
+            HELD.fetch_sub(size, Ordering::Relaxed);
+        }
+        pointer
+    }
+
     fn check(size: usize) {
         let held = HELD.fetch_add(size, Ordering::Relaxed) + size;
         PEAK.fetch_max(held, Ordering::Relaxed);
@@ -50,31 +62,38 @@ impl Bounded {
     }
 }
 
-// SAFETY: this only counts what `System` does.
+// SAFETY: each method is `System`'s, with the caller's arguments, the contract `GlobalAlloc` asks
+// of the caller passed on unchanged; what it adds, counting, touches no memory but atomics, and
+// can't unwind: HELD counts what `System` holds, refusals taken back, so it stays below
+// `usize::MAX`, and past the limit it aborts.
 unsafe impl GlobalAlloc for Bounded {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        Self::check(layout.size());
-        // SAFETY: As the caller promises.
-        unsafe { System.alloc(layout) }
+        // SAFETY: the caller's `layout`, of nonzero size, as `GlobalAlloc::alloc` asks of it.
+        Self::counted(layout.size(), || unsafe { System.alloc(layout) })
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        Self::check(layout.size());
-        // SAFETY: As the caller promises.
-        unsafe { System.alloc_zeroed(layout) }
+        // SAFETY: as `alloc`.
+        Self::counted(layout.size(), || unsafe { System.alloc_zeroed(layout) })
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
-        // SAFETY: As the caller promises.
+        // SAFETY: the caller's `pointer`, allocated by this allocator (`System`, as each method
+        // delegates to it) with `layout`, as `GlobalAlloc::dealloc` asks of it.
         unsafe { System.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        Self::check(size);
-        HELD.fetch_sub(layout.size(), Ordering::Relaxed);
-        // SAFETY: As the caller promises.
-        unsafe { System.realloc(pointer, layout, size) }
+        // SAFETY: the caller's `pointer` and `layout`, as `dealloc`, and `size`, nonzero and
+        // not overflowing `isize` once rounded to `layout`'s alignment, as `GlobalAlloc::realloc`
+        // asks of it.
+        let grown = Self::counted(size, || unsafe { System.realloc(pointer, layout, size) });
+        // Refused, the old allocation is still held, as `realloc` leaves it.
+        if !grown.is_null() {
+            HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+        }
+        grown
     }
 }
 
@@ -84,4 +103,29 @@ pub(crate) fn peak_while(work: impl FnOnce()) -> u64 {
     PEAK.store(before, Ordering::Relaxed);
     work();
     PEAK.load(Ordering::Relaxed).saturating_sub(before) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the system refuses to allocate, the heap doesn't hold: counted, it stayed held,
+    /// and each refusal brought the count nearer a limit and to overflow (TASK-444.13).
+    #[test]
+    fn a_refused_allocation_holds_nothing() {
+        let before = held();
+        let mut bytes = Vec::<u8>::new();
+        assert!(bytes.try_reserve_exact(isize::MAX as usize).is_err());
+        assert_eq!(held(), before);
+    }
+
+    /// A growth the system refuses leaves what was held held: it was counted as the new size
+    /// held and the old one freed.
+    #[test]
+    fn a_refused_growth_holds_what_it_held() {
+        let mut bytes = vec![0u8; 4096];
+        let before = held();
+        assert!(bytes.try_reserve_exact(isize::MAX as usize - bytes.len()).is_err());
+        assert_eq!(held(), before);
+    }
 }
