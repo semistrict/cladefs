@@ -598,6 +598,51 @@ fn reads_and_writes_go_through_the_transfer_area() {
     served.join().unwrap();
 }
 
+/// A read dropped while the daemon serves it keeps its transfer slot until the daemon answers it,
+/// as until then the daemon may write the slot: given back as the read was dropped, the next read
+/// or write took it, and the daemon wrote the dropped read's bytes over that one's (TASK-444.15).
+/// So a write's, which the daemon may read until it answers.
+#[test]
+fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
+    use super::client::TRANSFER_SLOTS;
+    use std::sync::{Mutex, mpsc};
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let (store, served) = connect(&path, 1 << 24);
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
+
+    // The daemon holds the read, saying it has it, until let go.
+    let (has, had) = mpsc::channel();
+    let (go, gone) = mpsc::channel::<()>();
+    let gone = Mutex::new(gone);
+    fail::cfg_callback("extentd::read", move || {
+        has.send(()).unwrap();
+        gone.lock().unwrap().recv().unwrap();
+    })
+    .unwrap();
+    let mut data = vec![0; BLOCK];
+    {
+        let mut buffers = [VolatileSliceMut::from(&mut data[..])];
+        let mut reading = std::pin::pin!(store.read_async(extent, 0, &mut buffers));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(reading.as_mut().poll(&mut context).is_pending());
+        had.recv().unwrap();
+    }
+    assert_eq!(store.take_transfer_slots().len(), TRANSFER_SLOTS - 1);
+
+    // Answered, its slot comes back: as the reply comes, on the client's receiving thread.
+    fail::remove("extentd::read");
+    go.send(()).unwrap();
+    while store.take_transfer_slots().len() < TRANSFER_SLOTS {
+        std::thread::yield_now();
+    }
+    assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
+    drop(store);
+    served.join().unwrap();
+}
+
 /// The daemon refuses a transfer area it could fault on, one not sealed against shrinking, and
 /// ranges past the end of the one it has.
 #[test]
