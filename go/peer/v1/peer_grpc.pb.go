@@ -32,7 +32,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Peer_GetPart_FullMethodName = "/cladefs.peer.v1.Peer/GetPart"
+	Peer_GetPart_FullMethodName     = "/cladefs.peer.v1.Peer/GetPart"
+	Peer_Incarnation_FullMethodName = "/cladefs.peer.v1.Peer/Incarnation"
+	Peer_Append_FullMethodName      = "/cladefs.peer.v1.Peer/Append"
+	Peer_Fence_FullMethodName       = "/cladefs.peer.v1.Peer/Fence"
+	Peer_ReadLog_FullMethodName     = "/cladefs.peer.v1.Peer/ReadLog"
+	Peer_DropLogs_FullMethodName    = "/cladefs.peer.v1.Peer/DropLogs"
 )
 
 // PeerClient is the client API for Peer service.
@@ -46,6 +51,22 @@ type PeerClient interface {
 	// reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
 	// fetching it failed.
 	GetPart(ctx context.Context, in *GetPartRequest, opts ...grpc.CallOption) (*GetPartResponse, error)
+	// This host's replica directory's incarnation: what a configuration naming it names.
+	Incarnation(ctx context.Context, in *IncarnationRequest, opts ...grpc.CallOption) (*IncarnationResponse, error)
+	// A writer's appends to its configuration's logs on this member, each answered once synced, in
+	// order. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of a later
+	// epoch fenced the cell (its promise said), OUT_OF_RANGE for an append past a log's end,
+	// RESOURCE_EXHAUSTED past what a member holds for a cell.
+	Append(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendRequest, AppendResponse], error)
+	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
+	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
+	// of the logs it holds of the configuration named, which the take reads.
+	Fence(ctx context.Context, in *FenceRequest, opts ...grpc.CallOption) (*FenceResponse, error)
+	// A log's bytes from an offset to its end, in pieces.
+	ReadLog(ctx context.Context, in *ReadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLogResponse], error)
+	// Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
+	// every configuration before it.
+	DropLogs(ctx context.Context, in *DropLogsRequest, opts ...grpc.CallOption) (*DropLogsResponse, error)
 }
 
 type peerClient struct {
@@ -66,6 +87,68 @@ func (c *peerClient) GetPart(ctx context.Context, in *GetPartRequest, opts ...gr
 	return out, nil
 }
 
+func (c *peerClient) Incarnation(ctx context.Context, in *IncarnationRequest, opts ...grpc.CallOption) (*IncarnationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IncarnationResponse)
+	err := c.cc.Invoke(ctx, Peer_Incarnation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) Append(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AppendRequest, AppendResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Peer_ServiceDesc.Streams[0], Peer_Append_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[AppendRequest, AppendResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Peer_AppendClient = grpc.BidiStreamingClient[AppendRequest, AppendResponse]
+
+func (c *peerClient) Fence(ctx context.Context, in *FenceRequest, opts ...grpc.CallOption) (*FenceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FenceResponse)
+	err := c.cc.Invoke(ctx, Peer_Fence_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *peerClient) ReadLog(ctx context.Context, in *ReadLogRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ReadLogResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Peer_ServiceDesc.Streams[1], Peer_ReadLog_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReadLogRequest, ReadLogResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Peer_ReadLogClient = grpc.ServerStreamingClient[ReadLogResponse]
+
+func (c *peerClient) DropLogs(ctx context.Context, in *DropLogsRequest, opts ...grpc.CallOption) (*DropLogsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DropLogsResponse)
+	err := c.cc.Invoke(ctx, Peer_DropLogs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PeerServer is the server API for Peer service.
 // All implementations must embed UnimplementedPeerServer
 // for forward compatibility.
@@ -77,6 +160,22 @@ type PeerServer interface {
 	// reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
 	// fetching it failed.
 	GetPart(context.Context, *GetPartRequest) (*GetPartResponse, error)
+	// This host's replica directory's incarnation: what a configuration naming it names.
+	Incarnation(context.Context, *IncarnationRequest) (*IncarnationResponse, error)
+	// A writer's appends to its configuration's logs on this member, each answered once synced, in
+	// order. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of a later
+	// epoch fenced the cell (its promise said), OUT_OF_RANGE for an append past a log's end,
+	// RESOURCE_EXHAUSTED past what a member holds for a cell.
+	Append(grpc.BidiStreamingServer[AppendRequest, AppendResponse]) error
+	// A take fences the cell at its epoch, durably, before this answers: appends of older epochs
+	// refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
+	// of the logs it holds of the configuration named, which the take reads.
+	Fence(context.Context, *FenceRequest) (*FenceResponse, error)
+	// A log's bytes from an offset to its end, in pieces.
+	ReadLog(*ReadLogRequest, grpc.ServerStreamingServer[ReadLogResponse]) error
+	// Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
+	// every configuration before it.
+	DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error)
 	mustEmbedUnimplementedPeerServer()
 }
 
@@ -89,6 +188,21 @@ type UnimplementedPeerServer struct{}
 
 func (UnimplementedPeerServer) GetPart(context.Context, *GetPartRequest) (*GetPartResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPart not implemented")
+}
+func (UnimplementedPeerServer) Incarnation(context.Context, *IncarnationRequest) (*IncarnationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Incarnation not implemented")
+}
+func (UnimplementedPeerServer) Append(grpc.BidiStreamingServer[AppendRequest, AppendResponse]) error {
+	return status.Error(codes.Unimplemented, "method Append not implemented")
+}
+func (UnimplementedPeerServer) Fence(context.Context, *FenceRequest) (*FenceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Fence not implemented")
+}
+func (UnimplementedPeerServer) ReadLog(*ReadLogRequest, grpc.ServerStreamingServer[ReadLogResponse]) error {
+	return status.Error(codes.Unimplemented, "method ReadLog not implemented")
+}
+func (UnimplementedPeerServer) DropLogs(context.Context, *DropLogsRequest) (*DropLogsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DropLogs not implemented")
 }
 func (UnimplementedPeerServer) mustEmbedUnimplementedPeerServer() {}
 func (UnimplementedPeerServer) testEmbeddedByValue()              {}
@@ -129,6 +243,78 @@ func _Peer_GetPart_Handler(srv interface{}, ctx context.Context, dec func(interf
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Peer_Incarnation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IncarnationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).Incarnation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_Incarnation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).Incarnation(ctx, req.(*IncarnationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_Append_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(PeerServer).Append(&grpc.GenericServerStream[AppendRequest, AppendResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Peer_AppendServer = grpc.BidiStreamingServer[AppendRequest, AppendResponse]
+
+func _Peer_Fence_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FenceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).Fence(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_Fence_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).Fence(ctx, req.(*FenceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Peer_ReadLog_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadLogRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(PeerServer).ReadLog(m, &grpc.GenericServerStream[ReadLogRequest, ReadLogResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Peer_ReadLogServer = grpc.ServerStreamingServer[ReadLogResponse]
+
+func _Peer_DropLogs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DropLogsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PeerServer).DropLogs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Peer_DropLogs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PeerServer).DropLogs(ctx, req.(*DropLogsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Peer_ServiceDesc is the grpc.ServiceDesc for Peer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -140,7 +326,31 @@ var Peer_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetPart",
 			Handler:    _Peer_GetPart_Handler,
 		},
+		{
+			MethodName: "Incarnation",
+			Handler:    _Peer_Incarnation_Handler,
+		},
+		{
+			MethodName: "Fence",
+			Handler:    _Peer_Fence_Handler,
+		},
+		{
+			MethodName: "DropLogs",
+			Handler:    _Peer_DropLogs_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Append",
+			Handler:       _Peer_Append_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "ReadLog",
+			Handler:       _Peer_ReadLog_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "cladefs/peer/v1/peer.proto",
 }

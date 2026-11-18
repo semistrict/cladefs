@@ -23,7 +23,7 @@ fn serving(bucket: &Arc<ObjectBucket>, dir: &std::path::Path) -> String {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
-    let server = Server { bucket: URL.to_owned(), serving };
+    let server = Server { bucket: URL.to_owned(), serving, replicas: None };
     std::thread::spawn(move || serve(listener, server));
     address
 }
@@ -117,4 +117,160 @@ fn peers_are_named_host_and_port() {
     for address in ["10.0.0.1", "http://10.0.0.1:7070", "10.0.0.1:7070/x", "", ":7070"] {
         assert!(check_address(address).is_err(), "{address:?} taken");
     }
+}
+
+/// cladefs: `work`, failing the test if it takes more than 30 s.
+async fn within(work: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(Duration::from_secs(30), work).await.expect("a member's call hung");
+}
+
+/// cladefs: a daemon's peer server on the loopback, of the bucket [`URL`], with a replica directory
+/// in `dir` (doc-21), or none: its address, and the directory.
+fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<HostDir>>>) {
+    let bucket = crate::bucket::peers::tests::holding(&noise(1)).0;
+    let cache = Arc::new(Cache::open(&dir.join("cache"), u64::MAX, 0).unwrap());
+    let replicas = with.then(|| super::replicas(&dir.join("replicas")).unwrap());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
+    let server = Server { bucket: URL.to_owned(), serving, replicas: replicas.clone() };
+    std::thread::spawn(move || serve(listener, server));
+    (address, replicas)
+}
+
+fn of(incarnation: u64, number: u64, epoch: u64) -> Option<ReplicaOf> {
+    Some(ReplicaOf {
+        bucket: URL.to_owned(),
+        tenant: 3,
+        cell: 9,
+        configuration: Some(proto::Configuration { number, epoch }),
+        incarnation,
+    })
+}
+
+/// cladefs: a writer streams appends to a member, each answered once synced; a take fences the
+/// cell, learns the logs' ends and reads them back; the writer's appends after are refused,
+/// ending its stream; and the logs the bucket holds are dropped (doc-21, TASK-537.3.2).
+#[test]
+fn members_take_appends_and_fences_over_grpc() {
+    let dir = tempfile::tempdir().unwrap();
+    let (address, _) = member(dir.path(), true);
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let mut client = super::member(&runtime, &address).unwrap();
+    // Bounded: a member and a writer waiting on each other fail here, not the run (a member
+    // answering appends only once the first came deadlocked so, TASK-537.3.2).
+    runtime.block_on(within(async move {
+        let incarnation = (client.incarnation(IncarnationRequest { bucket: URL.to_owned() }).await)
+            .unwrap()
+            .into_inner()
+            .incarnation;
+        let append = |log, offset, bytes: &[u8]| AppendRequest {
+            of: of(incarnation, 1, 4),
+            log,
+            offset,
+            bytes: bytes.to_vec(),
+        };
+        let (sending, sent) = tokio::sync::mpsc::channel(8);
+        let mut answers = (client.append(tokio_stream::wrappers::ReceiverStream::new(sent)).await)
+            .unwrap()
+            .into_inner();
+        sending.send(append(1, 0, b"first ")).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 1, end: 6 }));
+        sending.send(append(1, 6, b"second")).await.unwrap();
+        assert_eq!(answers.message().await.unwrap(), Some(AppendResponse { log: 1, end: 12 }));
+
+        // A take of epoch 5 fences the cell, and reads what the old writer's configuration holds.
+        let fence = FenceRequest { of: of(incarnation, 1, 4), epoch: 5 };
+        let fenced = client.fence(fence).await.unwrap().into_inner();
+        assert_eq!(fenced.logs, [LogEnd { log: 1, end: 12 }]);
+        let read = ReadLogRequest { of: of(incarnation, 1, 4), log: 1, offset: 0 };
+        let mut pieces = client.read_log(read).await.unwrap().into_inner();
+        let mut bytes = Vec::new();
+        while let Some(piece) = pieces.message().await.unwrap() {
+            bytes.extend(piece.bytes);
+        }
+        assert_eq!(bytes, b"first second");
+
+        // The old writer's next append is refused, its stream ended.
+        sending.send(append(1, 12, b"late")).await.unwrap();
+        let late = answers.message().await.unwrap_err();
+        assert_eq!(late.code(), Code::FailedPrecondition, "{late:?}");
+        assert!(late.message().contains("fenced at epoch 5"), "{late:?}");
+
+        let drop = DropLogsRequest { of: of(incarnation, 2, 5), through: None };
+        client.drop_logs(drop).await.unwrap();
+        let fence = FenceRequest { of: of(incarnation, 1, 4), epoch: 5 };
+        assert_eq!(client.fence(fence).await.unwrap().into_inner().logs, []);
+    }));
+}
+
+/// cladefs: a member refuses calls naming another incarnation (ABORTED), asked of another bucket,
+/// or of a host with no replica directory (FAILED_PRECONDITION).
+#[test]
+fn members_refuse_other_incarnations_buckets_and_hosts_without_replicas() {
+    let dir = tempfile::tempdir().unwrap();
+    let (address, replicas) = member(dir.path(), true);
+    let theirs = replicas.unwrap().incarnation();
+    let without = tempfile::tempdir().unwrap();
+    let (none, _) = member(without.path(), false);
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    let (mut client, mut other) =
+        (super::member(&runtime, &address).unwrap(), super::member(&runtime, &none).unwrap());
+    // Bounded: a member and a writer waiting on each other fail here, not the run (a member
+    // answering appends only once the first came deadlocked so, TASK-537.3.2).
+    runtime.block_on(within(async move {
+        let fence = |of| FenceRequest { of, epoch: 5 };
+        let wrong = client.fence(fence(of(theirs.wrapping_add(1), 1, 4))).await.unwrap_err();
+        assert_eq!(wrong.code(), Code::Aborted, "{wrong:?}");
+        let mut elsewhere = of(theirs, 1, 4);
+        elsewhere.as_mut().unwrap().bucket = "memory:///other".to_owned();
+        let elsewhere = client.fence(fence(elsewhere)).await.unwrap_err();
+        assert_eq!(elsewhere.code(), Code::FailedPrecondition, "{elsewhere:?}");
+        let asked = IncarnationRequest { bucket: URL.to_owned() };
+        let no = other.incarnation(asked).await.unwrap_err();
+        assert_eq!(no.code(), Code::FailedPrecondition, "{no:?}");
+        assert!(no.message().contains("CLADEFSD_REPLICAS"), "{no:?}");
+    }));
+}
+
+/// cladefs: a sweep drops the logs of configurations a cell's head names no more, and all of a
+/// cell whose head is gone (doc-21, Sweeping stale replica logs).
+#[test]
+fn sweeps_drop_what_heads_name_no_more() {
+    use bucket_cell::layout::{Configuration, Fsync, Member, Replication, Wish};
+    let dir = tempfile::tempdir().unwrap();
+    let replicas = super::replicas(dir.path()).unwrap();
+    let ours = replicas.incarnation();
+    let (cell, gone) = (crate::CellId { tenant: 3, id: 9 }, crate::CellId { tenant: 3, id: 10 });
+    for (of, number) in [(cell, 1), (cell, 2), (gone, 1)] {
+        replicas.append((of, Key { number, epoch: number }, ours), 1, 0, b"x").unwrap();
+    }
+    let bucket = bucket_cell::testing::Direct(bucket_cell::testing::SimBucket::new());
+    let runtime = crate::bucket::bucket_runtime().unwrap();
+    runtime.block_on(async {
+        bucket_cell::lifecycle::create(&bucket, cell, 1).await.unwrap();
+        let taking = bucket_cell::head::Taking {
+            holder: 1,
+            replication: Wish::new(1, Fsync::Replicated),
+            ..Default::default()
+        };
+        let held = bucket_cell::head::take(
+            &bucket,
+            cell,
+            bucket_cell::head::read(&bucket, cell).await,
+            &taking,
+        )
+        .await
+        .unwrap();
+        let mut next = held.head.clone();
+        let members = vec![Member { address: "a:1".into(), incarnation: ours }];
+        next.replication = Some(Replication {
+            wish: Wish::new(1, Fsync::Replicated).unwrap(),
+            configuration: Some(Configuration { number: 2, epoch: 2, f: 1, members }),
+        });
+        bucket_cell::head::swap(&bucket, cell, &held, next).await.unwrap();
+        sweep(&replicas, &bucket).await.unwrap();
+    });
+    assert_eq!(replicas.cells().unwrap(), [(cell, vec![Key { number: 2, epoch: 2 }])]);
 }

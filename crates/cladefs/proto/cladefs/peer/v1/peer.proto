@@ -25,7 +25,137 @@ service Peer {
   // reference); FAILED_PRECONDITION if the asker's bucket is not this host's; UNAVAILABLE if
   // fetching it failed.
   rpc GetPart(GetPartRequest) returns (GetPartResponse);
+
+  // Replicated cells (doc-21, TASK-537): a daemon is a member of other hosts' cells'
+  // configurations, holding their writers' logs, until the bucket does, in its replica directory
+  // (CLADEFSD_REPLICAS). Every call names the asker's bucket (FAILED_PRECONDITION if it is not this
+  // host's) and the member's incarnation it means (ABORTED if this host's replica directory is
+  // another's: its disk lost, its promises with it). A daemon with no replica directory refuses
+  // them all (FAILED_PRECONDITION). The writer's records are ciphertext, MACed, which a member
+  // never opens.
+
+  // This host's replica directory's incarnation: what a configuration naming it names.
+  rpc Incarnation(IncarnationRequest) returns (IncarnationResponse);
+  // A writer's appends to its configuration's logs on this member, each answered once synced, in
+  // order. Refused, the stream ended with the refusal: FAILED_PRECONDITION if a take of a later
+  // epoch fenced the cell (its promise said), OUT_OF_RANGE for an append past a log's end,
+  // RESOURCE_EXHAUSTED past what a member holds for a cell.
+  rpc Append(stream AppendRequest) returns (stream AppendResponse);
+  // A take fences the cell at its epoch, durably, before this answers: appends of older epochs
+  // refused from then on (FAILED_PRECONDITION if a later one fenced it already). Answers the ends
+  // of the logs it holds of the configuration named, which the take reads.
+  rpc Fence(FenceRequest) returns (FenceResponse);
+  // A log's bytes from an offset to its end, in pieces.
+  rpc ReadLog(ReadLogRequest) returns (stream ReadLogResponse);
+  // Drops the logs no take reads: of the configuration named to a log the bucket holds, and of
+  // every configuration before it.
+  rpc DropLogs(DropLogsRequest) returns (DropLogsResponse);
 }
+
+// A configuration of a cell: its number, and the epoch of the writer that made it.
+message Configuration {
+  // Its number, greater than every configuration's before it in the cell.
+  uint64 number = 1;
+  // The epoch of the writer that made it, the only one that appends to it.
+  uint64 epoch = 2;
+}
+
+// What a call to a member is of: the bucket, the cell, the configuration, and the member's
+// incarnation the configuration names.
+message ReplicaOf {
+  // The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
+  string bucket = 1;
+  // The cell's tenant.
+  uint64 tenant = 2;
+  // The cell.
+  uint64 cell = 3;
+  // The configuration of the cell.
+  Configuration configuration = 4;
+  // This host's incarnation, as the configuration names it.
+  uint64 incarnation = 5;
+}
+
+// Asks for this host's replica directory's incarnation.
+message IncarnationRequest {
+  // The URL of the bucket, as the asker names it: this host's.
+  string bucket = 1;
+}
+
+// This host's replica directory's incarnation.
+message IncarnationResponse {
+  // A random number, not 0, made with the directory.
+  uint64 incarnation = 1;
+}
+
+// Bytes appended at an offset of one of the writer's logs. The first of a stream names what it is
+// of; the rest are of the same.
+message AppendRequest {
+  // What it appends to: said by the first of a stream, and read of it alone.
+  ReplicaOf of = 1;
+  // The writer's log, by its number.
+  uint64 log = 2;
+  // Where in it: at its end on this member, or before it, the same bytes again.
+  uint64 offset = 3;
+  // The bytes, as the writer's log holds them.
+  bytes bytes = 4;
+}
+
+// A log's end on this member, synced.
+message AppendResponse {
+  // The log appended to.
+  uint64 log = 1;
+  // Its end on this member, synced.
+  uint64 end = 2;
+}
+
+// Fences a cell at a take's epoch.
+message FenceRequest {
+  // The cell, and the configuration whose logs to answer with.
+  ReplicaOf of = 1;
+  // The take's epoch.
+  uint64 epoch = 2;
+}
+
+// The cell fenced: the logs this member holds of the configuration named.
+message FenceResponse {
+  // Each log and its end, synced.
+  repeated LogEnd logs = 1;
+}
+
+// A log a member holds, and its end.
+message LogEnd {
+  // The writer's log, by its number.
+  uint64 log = 1;
+  // Its end on this member, synced.
+  uint64 end = 2;
+}
+
+// Reads a log a member holds.
+message ReadLogRequest {
+  // The cell and configuration.
+  ReplicaOf of = 1;
+  // The writer's log, by its number.
+  uint64 log = 2;
+  // Where to read from, to its end.
+  uint64 offset = 3;
+}
+
+// A piece of a log, in order.
+message ReadLogResponse {
+  // Its bytes.
+  bytes bytes = 1;
+}
+
+// Drops a cell's logs no take reads.
+message DropLogsRequest {
+  // The cell and configuration: every configuration's before it dropped.
+  ReplicaOf of = 1;
+  // The last log of the configuration named the bucket holds, if any.
+  optional uint64 through = 2;
+}
+
+// The logs dropped.
+message DropLogsResponse {}
 
 // A part asked for.
 message GetPartRequest {
