@@ -3,11 +3,11 @@ id: TASK-433.9
 title: >-
   store-bench burst writes 1.2-1.6x slower through the stores' page cache than
   through the host's (ubu1)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16 15:47'
-updated_date: '2026-11-18 04:41'
+updated_date: '2026-11-18 04:57'
 labels: []
 dependencies: []
 references:
@@ -28,13 +28,14 @@ Left by TASK-433.8, which fixed the burst commit (now at or under the host page 
 <!-- AC:BEGIN -->
 - [x] #1 A profile (perf, lock waits) names where a burst write's time goes beyond the host page cache's
 - [ ] #2 Burst writes on ubu1 within 10% of 0ef6fa1b4's, an A/B under fxjob --bench, each side its own target
+- [x] #3 Burst writes on ubu1, less their encryption (TASK-411, which 0ef6fa1b4 predates), within 10% of 0ef6fa1b4's on the RAM loop device; the rest filed
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -54,4 +55,12 @@ The writer then waits on write-back, 53-107 µs/write: the flusher's 1 MiB direc
 Tried, dropped: begun ranges merged and 4 MiB chunks: RAM 161 -> 210 µs (worse), zvol 216 -> 176 µs (better); mixed, not kept.
 
 Reviews (verifying-reviewer, three rounds) rejected releasing single 4 KiB frames (MADV_DONTNEED zeroes neighbours on 16/64 KiB-page hosts; khugepaged re-collapses) and counting free frames in bytes() (evict_to evicted every clean page without freeing memory; the_governor_lets_parts_held_go_before_tenants_pages failed on ubu1), and mmap'd slabs the test heap budgets did not see. Final: slabs from the global allocator, aligned 2 MiB, MADV_HUGEPAGE; freed whole once idle past 8 spare; accounting as main's. Final A/B (xts vs frames, fxjob --bench, medians rounds 2-6): write 210 -> 165 µs (RAM), 276 -> 208 µs (zvol); copy 83 -> 25, 87 -> 29; durable commit 33.0 -> 25.5 ms, 46.6 -> 38.0 ms. Against p (clear, host page cache): 142 / 85 µs; ours less its encryption 102 / 143 µs. Left: the writer's wait for write-back, 53-85 µs a write. Mac 2659/2659 + Shuttle 37/37; ubu1 workspace 2973/2973 + sim + Shuttle + loom; scripts' one failure TASK-500's flake.
+
+AC #2 not met as written: 0ef6fa1b4's stores are clear, ours encrypted since TASK-411 (63 µs a write after TASK-512). User chose (2026-11-17): close, revised criterion #3, file write-back's throughput (TASK-433.11). Less encryption: 102 µs (RAM) against 142, 143 µs (zvol) against 85.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Profiled a burst write on ubu1 (per-step probe, perf, strace -w, bpftrace off-CPU). Found and fixed: store-bench timed making its data with each write; AES-256-XTS a block at a time, 334 of 460 µs (TASK-512, 4.6x); the copy into the cache's pages 84 µs of fresh-page faults, now 25 with pages in frames of 2 MiB huge-page slabs from the global allocator, the cache's accounting as before (three review rounds); a failed partial-page read uncounting pages (TASK-433.10). A write 460 -> 165 µs (RAM), 468 -> 208 µs (zvol); less encryption 102 µs against the host page cache's 142 (criterion #3; #2's baseline never encrypted). Left, filed: write-back throughput (TASK-433.11). Mac 2662/2662 + Shuttle; ubu1 2973/2973 and every part but TASK-500's flake. docs/measurements/ubu1-burst-writes-2026-11-17.md.
+<!-- SECTION:FINAL_SUMMARY:END -->
