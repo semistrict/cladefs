@@ -1924,6 +1924,79 @@ pub(crate) mod tests {
 
     /// A cell's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
     /// then what it and its fork freed, reclaimed.
+    /// TASK-633.4: a child in one bucket forked from a version of a parent in another, through
+    /// a bucket routing by the registry: the parent's objects, head, reference and checkpoint at
+    /// the version in the parent's bucket alone, the child's head in its own; the child recovers
+    /// what it inherited, and reads it, from the parent's bucket.
+    #[test]
+    fn children_in_one_bucket_read_their_parents_in_another() {
+        use crate::identity::{self, Details};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let (home_url, other_url) = (url("home"), url("other"));
+            let (home, other) = (
+                ObjectBucket::from_url(&home_url).unwrap(),
+                ObjectBucket::from_url(&other_url).unwrap(),
+            );
+            identity::format(&home, &Details::default()).await.unwrap();
+            let details = Details { url: Some(other_url.clone()), ..Details::default() };
+            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            let routed = Arc::new(
+                ObjectBucket::from_url(&home_url)
+                    .unwrap()
+                    .routed(Arc::new(Registered::new(Vec::<(String, String)>::new()))),
+            );
+            let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 2));
+
+            lifecycle::create(&*routed, parent, 0).await.unwrap();
+            let writer = Writer::open(routed.clone(), parent, 10, 1).await.unwrap();
+            let small = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let large = ExtentId::new(parent.id, small.sequence + 1);
+            let commit = Commit {
+                tag: 1,
+                extents: vec![(small, b"small".to_vec())],
+                own: vec![(large.sequence, vec![7; 4096])],
+                ..Commit::default()
+            };
+            let segment = add(&writer, commit);
+            writer.upload(segment).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            let forking = SegmentBuilder::default().close(&mut writer.chain());
+            let fork = writer.add_segment(forking.frame(writer.keys().encrypting())).unwrap();
+            writer.upload(fork).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            let origin = Origin { parent, at: fork };
+            crate::testing::forked_at(&*routed, child, origin).await;
+
+            async fn at(bucket: &ObjectBucket, key: String) -> bool {
+                bucket.store_get(&key).await.is_ok()
+            }
+            let (parents, childs) = (layout::head(parent), layout::head(child));
+            assert_eq!(
+                (at(&other, parents.clone()).await, at(&home, parents).await),
+                (true, false)
+            );
+            assert_eq!((at(&home, childs.clone()).await, at(&other, childs).await), (true, false));
+            let reference = layout::reference(parent, fork, child);
+            assert!(at(&other, reference).await, "the reference is not in the parent's bucket");
+            assert_eq!(home.store_list(&parent.prefix()).await.map(|listed| listed.len()), Ok(0));
+
+            let inherited = recovery::recover(&*routed, child, Some(origin)).await.unwrap().state;
+            assert_eq!(inherited.extents.keys().copied().collect::<Vec<_>>(), [small, large]);
+            let location = &inherited.extents[&small];
+            assert_eq!(crate::testing::read(&routed, small, location).await.unwrap(), b"small");
+            let location = &inherited.extents[&large];
+            assert_eq!(
+                crate::testing::read(&routed, large, location).await.unwrap(),
+                vec![7; 4096]
+            );
+        });
+    }
+
     pub(crate) async fn cell_lifecycle(bucket: Arc<impl Bucket>, root: u64) {
         let child = root + 1;
         lifecycle::create(&*bucket, test_cell(root), 0).await.unwrap();
