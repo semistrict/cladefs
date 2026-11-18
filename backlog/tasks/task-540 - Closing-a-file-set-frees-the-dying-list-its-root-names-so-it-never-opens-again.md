@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 15:23'
+updated_date: '2026-11-18 17:48'
 labels: []
 dependencies: []
 priority: high
@@ -42,3 +43,19 @@ When a commit leaves more than FREE_BATCH (64) extents dying, commit_root mints 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Blind spot: no test of extent_files, sqlite_extents or memory cells called FileSet::close() and then opened the file set again. They reopened crash images or device.snapshot() of a file set still open, which never runs close. a_commit_freeing_many_extents_lists_them does reach the dying list, but only through crash images, and its last commit is a one-row insert, which stops naming the list. extent_files had no randomized test at all; the only model test with a close-and-mount operation (cladefs storage/model_tests.rs) covers Fxfs images, not file sets.
+
+Tests added (red until this is fixed, each failing with "reading the dying extents' list"):
+- crates/extent_files/tests/model.rs: a random model of a file set, on a device and in a window. Operations: write, rewrite, punch, truncate, sync, delete, open and close a file, fetch and give back a page, close and reopen, crash and reopen. 48 seeds of 300 operations. It checks every file against the model and that the device holds exactly what the file set names. It also holds two fixed cases of this bug, plus a_fetched_page_reads_as_it_was_until_given_back.
+- crates/sqlite_extents/tests/sqlite.rs a_database_opens_as_it_was_closed_after_every_kind_of_transaction: 12 rounds, each of 100 to 250 small transactions and then a DELETE, VACUUM or full UPDATE. After each round the file set is closed, reopened, and checked for integrity and rows. A temporary print showed SQLite only fails if the freeing transaction is the last commit before the close.
+
+Checked with the code temporarily changed:
+- With close() not freeing, the model passes in both modes, so it finds nothing else at this layer.
+- With refresh remapping while pages are fetched, the held-page case fails and the random runs do not: random fetches rarely land on a clean, mapped page (holes can't be fetched), so the fixed case carries that check.
+
+Not covered: memory cells (crates/cladefs/src/memory_cell.rs is Linux-only and needs the daemon) have no close-then-reopen test yet. FakeDevice::close only sets a flag, while DaemonDevice and ImageDevice commit on close, so crash images never include what close freed.
+<!-- SECTION:NOTES:END -->

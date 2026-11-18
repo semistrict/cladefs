@@ -7,6 +7,8 @@
 mod common;
 
 use extent_files::testing::CopyingWindow;
+use rand::rngs::StdRng;
+use rand::{RngExt as _, SeedableRng as _};
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_extents::{FileSet, Options, Registration, register};
 use std::collections::BTreeMap;
@@ -73,6 +75,12 @@ impl Mounted {
     /// The device as a crash that loses nothing leaves it.
     fn snapshot(&self) -> DeviceHolder {
         self.file_set.device().snapshot().expect("a snapshot")
+    }
+
+    /// The file set closed, as a cell's is at its end, and its device as closing left it.
+    fn close(self) -> DeviceHolder {
+        self.file_set.close().expect("closing the file set");
+        self.snapshot()
     }
 
     /// The bytes the extents the device holds take.
@@ -485,6 +493,55 @@ fn a_commit_freeing_many_extents_lists_them() {
         }
         // A barrier a transaction, but VACUUM's two: SQLite syncs the database twice in it.
         assert_eq!(marks, vec![0, 1, 1, 2]);
+    });
+}
+
+/// A database closed and opened again after each round of transactions, rounds that free a few
+/// extents or many (DELETE, VACUUM, rewriting every row), opens as its last transaction left it.
+/// No test closed a file set after a commit whose dying extents its root listed in an extent of
+/// their own, which closing freed and opening must read (TASK-540).
+#[test]
+fn a_database_opens_as_it_was_closed_after_every_kind_of_transaction() {
+    both(|mode| {
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut mounted = Mounted::new(DeviceHolder::new(device()), mode);
+        let connection = mounted.connect("main.db");
+        connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v BLOB)").unwrap();
+        drop(connection);
+        for round in 0..12 {
+            let connection = mounted.connect("main.db");
+            // Transactions of a few rows each, an extent or so each, then one that may free them.
+            for _ in 0..rng.random_range(100..250) {
+                let transaction = connection.unchecked_transaction().unwrap();
+                for _ in 0..rng.random_range(1..8) {
+                    let (k, len) = (rng.random_range(0..2000i64), rng.random_range(1..4000usize));
+                    transaction
+                        .execute(
+                            "INSERT OR REPLACE INTO t VALUES (?1, ?2)",
+                            params![k, vec![round as u8; len]],
+                        )
+                        .unwrap();
+                }
+                transaction.commit().unwrap();
+            }
+            match rng.random_range(0..3) {
+                0 => connection.execute_batch("DELETE FROM t").unwrap(),
+                1 => connection.execute_batch("VACUUM").unwrap(),
+                _ => connection
+                    .execute("UPDATE t SET v = randomblob(length(v))", [])
+                    .map(drop)
+                    .unwrap(),
+            }
+            let expected = rows(&connection);
+            drop(connection);
+            mounted.check_extents();
+
+            mounted = Mounted::new(mounted.close(), mode);
+            mounted.check_extents();
+            let connection = mounted.connect("main.db");
+            assert_eq!(integrity(&connection), "ok", "{mode:?}, round {round}");
+            assert_eq!(rows(&connection), expected, "{mode:?}, round {round}");
+        }
     });
 }
 
