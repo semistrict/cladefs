@@ -1195,10 +1195,11 @@ func (x *Version) GetShared() bool {
 	return false
 }
 
-// The versions of the cell, oldest first.
+// The versions of the cell.
 type ListVersionsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Versions      []*Version             `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Oldest first: those its head names, then those made here not yet uploaded.
+	Versions      []*Version `protobuf:"bytes,1,rep,name=versions,proto3" json:"versions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -426,8 +426,9 @@ message Version {
   bool shared = 3;
 }
 
-// The versions of the cell, oldest first.
+// The versions of the cell.
 message ListVersionsResponse {
+  // Oldest first: those its head names, then those made here not yet uploaded.
   repeated Version versions = 1;
 }
 
