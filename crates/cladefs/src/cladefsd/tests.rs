@@ -599,7 +599,7 @@ fn a_dropped_read_keeps_its_transfer_slot_until_answered() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let (store, served) = connect(&path, 1 << 24);
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
 
     // The daemon holds the read, saying it has it, until let go: at its failpoint, named as the
