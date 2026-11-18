@@ -85,8 +85,14 @@ if [[ $what == skip ]]; then
 fi
 
 # To the second, and made afresh: a night measured again (nightly.py plan) never shares its
-# results with the one before.
-results=$repo/docs/measurements/$(hostname -s)-nightly-$(date -u +%Y-%m-%dT%H%M%SZ)-${head:0:8}
+# results with the one before, not even one of the same second and head, counted then (-2, -3):
+# the test's nights, which measure nothing, follow each other within a second on CI's runners.
+name=$repo/docs/measurements/$(hostname -s)-nightly-$(date -u +%Y-%m-%dT%H%M%SZ)-${head:0:8}
+results=$name
+for ((n = 2; ; n++)); do
+    [[ -e $results ]] || break
+    results=$name-$n
+done
 mkdir -p "$(dirname "$results")"
 mkdir "$results"
 say "measuring ${base:0:12} (base) against ${head:0:12} (head, main) into $results"

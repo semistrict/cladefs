@@ -9,6 +9,7 @@ whether a job measured, sudo, setsid, timeout, flock), a backlog CLI of its own 
 bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as ubu1's
 (test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
 
+import datetime
 import json
 import shlex
 import shutil
@@ -381,6 +382,27 @@ class Nights(unittest.TestCase):
         ubu1.night(ubu1.rounds(1.0))
         self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in ubu1.nights()[4:]],
                          [(first, second, "no result"), (first, third, "measured")])
+
+    def test_a_night_of_the_second_and_head_of_another_has_results_of_its_own(self):
+        """TASK-647: nights a second apart of one head, as this test's nights are on CI's runners,
+        named their results alike: the second's mkdir failed, `File exists`. Every name of the
+        next two minutes taken, the night takes the first count after its own."""
+        ubu1 = Ubu1()
+        ubu1.main()
+        head = ubu1.advance("first")
+        host = subprocess.run(["hostname", "-s"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+        measurements = ubu1.clone / "docs" / "measurements"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for second in range(120):
+            at = now + datetime.timedelta(seconds=second)
+            (measurements / f"{host}-nightly-{at:%Y-%m-%dT%H%M%SZ}-{head[:8]}").mkdir(parents=True)
+        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual(status, 0, err)
+        listed = ubu1.git(ubu1.origin, "ls-tree", "-r", "--name-only", "main", "docs/measurements")
+        nights = [path.split("/")[2] for path in listed.splitlines() if path.endswith("/night.json")]
+        self.assertEqual(len(nights), 1, listed)
+        self.assertRegex(nights[0], rf"^{host}-nightly-\d{{4}}-\d\d-\d\dT\d{{6}}Z-{head[:8]}-2$")
 
 
 GIB = 1 << 30

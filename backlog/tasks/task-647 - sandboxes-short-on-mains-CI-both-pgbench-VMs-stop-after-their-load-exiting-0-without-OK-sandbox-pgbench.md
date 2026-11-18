@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-18 22:23'
+updated_date: '2026-11-18 23:09'
 labels:
   - testing
   - ci
@@ -44,4 +44,6 @@ Cause (AC #1), ubu1 2026-11-18, sandboxes.sh short with results kept, sandbox-1-
 A sweep of the rename commits' 362 files (f3cf366ce, 8e9f18a42, ddbe40889; a finder and a skeptic per group) found 35 more words of other systems renamed branch -> cell, all restored: git's in guest cases that ran git (test_fxfs_guest_shared_volumes: init --initial-cell, git cell -D side, twice; test_fxfs_guest_git_fetch: init --initial-cell), which broke those cases; and prose: Firecracker's and this repo's git branches (docs/code.md, docs/testing.md, docs/research/kvm-async-pf..., README.md, OPEN_QUESTIONS.md, build.rs's HEAD), kernel code paths (async branch), upstream Fxfs's merge_into branches (crates/fxfs/src/lsm_tree/merge.rs, an upstream deviation), fuchsia_merkle's branch check.
 
 ubu1 2026-11-18 22:24, tree 65568da06 (the fix and main), prebuilt, fxjob --bench --mem 16G: scripts/sandboxes.sh short exit 0, stores 1.22x what the guests wrote. A run just before failed in a host-wide stall beside others' swapping jobs (fsyncs of 500 s), the writes 1.26x: not this bug. The check that caught this (finish(), each role's OK sandbox line) is what fails a pgbench role that stops early.
+
+Main's CI at a06c690a6 failed both jobs for other reasons: sandboxes built no Firecracker, vendor/firecracker.lock behind 97f0dead8's storage_device libc (regenerated, 2ff7ca286); scripts' test_nightly test_a_night_that_measured_nothing_is_measured_again: nights of one head within a second named their results alike, mkdir File exists (nightly-host.sh now counts the name on, -2, -3; a test takes every name of the next two minutes and fails without it as CI did).
 <!-- SECTION:NOTES:END -->
