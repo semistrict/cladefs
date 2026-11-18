@@ -179,14 +179,11 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     std::fs::write(&faults, "failing=unavailable").unwrap();
     let store = tenant.join("vm");
     let vm = CellClient::connect(&socket, &store, CAPACITY).unwrap();
-    let (mut written, mut cache_at_refusal) = (0, None);
-    let refused = loop {
+    let mut written = 0;
+    let (refused, cache) = loop {
         match write(&vm, 1 + written, 1000 + written) {
             Ok(()) => written += 1,
-            Err(errno) => {
-                cache_at_refusal = Some(metric("cladefsd_part_cache_bytes"));
-                break errno;
-            }
+            Err(errno) => break (errno, metric("cladefsd_part_cache_bytes")),
         }
         if written % 16 == 0 {
             vm.commit_ordered(None).unwrap();
@@ -195,7 +192,6 @@ fn a_full_disk_refuses_guests_alone_and_the_cache_gives_way_first() {
     assert_eq!(refused, Errno::ENOSPC, "after {written} MiB");
     assert!(written > 100, "refused after {written} MiB");
     // The cache gave way first: no more than a band of the headroom left of it.
-    let cache = cache_at_refusal.unwrap();
     assert!(cache <= HEADROOM / 4, "{cache} bytes cached as the first write was refused");
     // Refused, its store commits, not failed: its commit frees what its extents open held, which
     // a few more writes take, then it refuses again, and commits again.
