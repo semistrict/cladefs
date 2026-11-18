@@ -1470,6 +1470,46 @@ mod tests {
         assert_eq!(back.map(|held| held.head), Err(bucket_cell::Error::Stale));
     }
 
+    /// TASK-539.9: a store's disk under pressure urges its uploader, which closes the open segment
+    /// its guest is filling and uploads it at once, rather than wait out its interval, and
+    /// `filling_wait` past it, so that what it held leaves the disk (doc-22).
+    #[test]
+    fn a_disk_under_pressure_has_its_stores_uploaded_at_once() {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let host = Runtime {
+            handle: runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let dir = MemDir::new();
+        let disk = dir.disk().disk().clone();
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell: CELL };
+        LocalCell::make(&dir, description, Some("memory:///urged"), None).unwrap();
+        runtime.block_on(lifecycle::create(&*bucket, CELL, 1)).unwrap();
+        // Its uploader uploads nothing it is not asked to within the hour.
+        let hour = Duration::from_secs(3600);
+        let options = Options { interval: hour, filling_wait: hour, ..Options::default() };
+        let recovering = LocalCell::recover_unmade(dir).unwrap();
+        let (store, uploader) =
+            open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
+                .unwrap();
+        store.made().unwrap();
+        store.write(ExtentId::new(CELL.id, 1), 0, &[1; 4096]).unwrap();
+        store.commit(None).unwrap();
+        let epoch = store.last_commit().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(uploader.last_uploaded() < epoch, "uploaded unasked");
+        disk.urge();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while uploader.last_uploaded() < epoch {
+            assert!(std::time::Instant::now() < deadline, "not uploaded as its disk urged it");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(store.closed(usize::MAX).unwrap().len(), 0, "its segments left unuploaded");
+    }
+
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
     /// with those uploading; the rest it leaves in the store, until those it took are uploaded.
     #[test]
