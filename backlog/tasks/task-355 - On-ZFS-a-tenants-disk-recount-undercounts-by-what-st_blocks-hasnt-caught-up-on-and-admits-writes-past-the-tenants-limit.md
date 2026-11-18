@@ -3,10 +3,10 @@ id: TASK-355
 title: >-
   On ZFS, a tenant's disk recount undercounts by what st_blocks hasn't caught up
   on, and admits writes past the tenant's limit
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-11 13:14'
-updated_date: '2026-11-16 22:53'
+updated_date: '2026-11-18 17:42'
 labels:
   - extentd
   - testing
@@ -24,9 +24,9 @@ Found replaying Hunt run 42949975683's cladefsd hostile seed 53 (TASK-343) on ub
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A test shows a tenant's recount on a filesystem whose st_blocks lags behind its writes (simulated or on ZFS) admitting no write past the limit
-- [ ] #2 Disk::recount, or admission, keeps the admitted bytes of writes whose blocks the walk may not see yet, with the bound stated in disk.rs
-- [ ] #3 Seed 53 of the cladefsd hostile test at CLADEFS_HOSTILE_CASES=1920 passes with TMPDIR on ubu1's ZFS
+- [x] #1 A test shows a tenant's recount on a filesystem whose st_blocks lags behind its writes (simulated or on ZFS) admitting no write past the limit
+- [x] #2 Disk::recount, or admission, keeps the admitted bytes of writes whose blocks the walk may not see yet, with the bound stated in disk.rs
+- [x] #3 Seed 53 of the cladefsd hostile test at CLADEFS_HOSTILE_CASES=1920 passes with TMPDIR on ubu1's ZFS
 <!-- AC:END -->
 
 ## Definition of Done
@@ -35,3 +35,9 @@ Found replaying Hunt run 42949975683's cladefsd hostile seed 53 (TASK-343) on ub
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Gone with TASK-539.5: nothing counts by st_blocks any more; each store counts its files' lengths as it writes them, and admission holds what each write and its store's own work may add until it lands (local_cell::footprint, doc-22). The cladefsd hostile test, seed 53 at CLADEFS_HOSTILE_CASES=1920, passes on ubu1 with TMPDIR on its ZFS home (1120 s), as does tests/disk.rs.
+<!-- SECTION:FINAL_SUMMARY:END -->
