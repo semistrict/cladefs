@@ -21,6 +21,14 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Replicated cells: the wish in the head, members by CLADEFSD_REPLICAS (TASK-537.3.1, .3.2, 2026-11-18)
+
+Decided without you:
+- **A cell's f and fsync level live in its head** (`Head::replication`, bucket format 20), given by a taking (`head::Taking::replication`, from CreateCell's `replicas`/`fsync` through `upload::Options`), not in the store file the task first named: a take on another host must know them, and only the head reaches every host. A taking asking nothing keeps what the head says. *Undo:* nothing reads a store file's copy, so none to drop.
+- **A daemon is a member only with `CLADEFSD_REPLICAS`** (a directory, made if missing; its incarnation made with it). Without it, the member RPCs refuse (FAILED_PRECONDITION) and the writer picks another host: loud, no fallback. *Instead:* a default under the daemon's state directory. *Undo:* default the variable.
+- **The replica directory is flat** (`<tenant>.<cell>.promise`, `<tenant>.<cell>.<number>.<epoch>.<log>`), as `local_cell::Dir` removes no directories, and configurations are keyed by number and epoch, as two racing takers make the same number.
+
+
 ## Replicated commits: the protocol (TASK-537.1, doc-21, 2026-11-18)
 
 Decided without you, after the 2026-11-18 interview:
