@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 16:45'
-updated_date: '2026-11-18 21:39'
+updated_date: '2026-11-18 21:53'
 labels:
   - testing
 dependencies: []
@@ -54,4 +54,6 @@ crates/cladefs/mutants.sh --check, which scripts/test.sh's scripts part runs (CI
 Pushed to main as b454b96f6 (merged origin/main 6b7b54e24; every mutants.sh --check 0 broken after it). Linux workspace on ubu1 (fxjob, scripts/test.sh workspace, --no-fail-fast): 2962/2962 passed; a first run's one failure, cladefsd::tests::hostile::page_ins_in_flight_are_bounded (EBUSY reopening the restored store after its fork's connection dropped), passed 20 of 20 alone and is TASK-648's race. macOS: test.sh clippy + workspace 2641/2641. framed-in-copies' killer, scripts/sandboxes.sh short, can't build inside fxjob --bench since TASK-368 (measurement_refuses): its kill runs as build-then-measure, artifacts built as work (CLADEFS_E2E_BUILD_ONLY, the mutant's through patch_run), then sandboxes.sh under --bench with CLADEFS_E2E_PREBUILT.
 
 framed-in-copies' kill, 2026-11-18 21:3x: artifacts built as work (unmutated, and the mutant's through patch_run); the first prebuilt sandboxes run skipped its case (CLADEFS_GUEST_KERNEL unset, no host kernel cache entry for this tree's key release-f9dd6e4aebc7e837), so its 'killed' meant nothing; the guest kernel is building, then the unmutated baseline and the kill run again.
+
+framed-in-copies: prebuilt, on the ext4 scratch disk with 16G, under fxjob --bench (2026-11-18 21:47): the unmutated tree fails sandboxes.sh short too, both pgbench VMs exiting 0 after 'OK load 1000000' (main's TASK-647), so the kill can't be told from the baseline until TASK-647 is fixed. Kept open for it. (An 8G run's mutant 'killed' on the run's memory check, and one without a guest kernel skipped the case: neither counts.)
 <!-- SECTION:NOTES:END -->

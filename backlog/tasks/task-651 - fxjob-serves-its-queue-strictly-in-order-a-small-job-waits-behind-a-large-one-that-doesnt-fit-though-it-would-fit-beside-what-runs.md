@@ -1,18 +1,19 @@
 ---
-id: TASK-642
+id: TASK-651
 title: >-
   fxjob serves its queue strictly in order: a small job waits behind a large one
   that doesn't fit, though it would fit beside what runs
 status: To Do
 assignee: []
 created_date: '2026-11-18T19:13:00Z'
+updated_date: '2026-11-18 21:53'
 labels:
   - fxjob
   - ubu1
 dependencies: []
 references:
   - scripts/fxjob
-  - TASK-636
+  - TASK-650
 priority: medium
 type: enhancement
 ordinal: 938000
