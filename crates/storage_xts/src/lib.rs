@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use cipher::array::ArraySize;
 use cipher::inout::InOut;
 use cipher::typenum::consts::U16;
 use cipher::{
@@ -75,76 +76,6 @@ fn xts_encrypt_chunk<B: BlockCipherEncBackend<BlockSize = U16>>(
     val ^ tweak.0
 }
 
-fn xts_encrypt_buffer_out_of_place<B: BlockCipherEncBackend<BlockSize = U16>>(
-    backend: &B,
-    src: PtrByteSlice<'_>,
-    mut dst: MutPtrByteSlice<'_>,
-    tweak: &mut Tweak,
-) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert_eq!(src.as_ptr() as usize % 64, 0);
-    debug_assert_eq!(dst.as_ptr() as usize % 64, 0);
-    debug_assert_eq!(src.len() % 64, 0);
-
-    let mut src_chunks = src.iter_as::<u128>();
-    let mut dst_chunks = dst.iter_as_mut::<u128>();
-
-    while let Some(s0) = src_chunks.next() {
-        let d0 = dst_chunks.next().unwrap();
-        // Zero the 64-byte destination cache line on ARM64 ("DC ZVA") to avoid fetching
-        // stale destination cache lines from RAM before writing out-of-place outputs.
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            core::arch::asm!(
-                "dc zva, {0}",
-                in(reg) d0.as_ptr(),
-                options(nostack, preserves_flags),
-            );
-        }
-        let val0 = xts_encrypt_chunk(backend, s0, tweak);
-        d0.write(val0);
-        tweak.update();
-
-        let s1 = src_chunks.next().unwrap();
-        let d1 = dst_chunks.next().unwrap();
-        let val1 = xts_encrypt_chunk(backend, s1, tweak);
-        d1.write(val1);
-        tweak.update();
-
-        let s2 = src_chunks.next().unwrap();
-        let d2 = dst_chunks.next().unwrap();
-        let val2 = xts_encrypt_chunk(backend, s2, tweak);
-        d2.write(val2);
-        tweak.update();
-
-        let s3 = src_chunks.next().unwrap();
-        let d3 = dst_chunks.next().unwrap();
-        let val3 = xts_encrypt_chunk(backend, s3, tweak);
-        d3.write(val3);
-        tweak.update();
-    }
-}
-
-fn xts_encrypt_buffer<B: BlockCipherEncBackend<BlockSize = U16>>(
-    backend: &B,
-    src: PtrByteSlice<'_>,
-    mut dst: MutPtrByteSlice<'_>,
-    tweak: &mut Tweak,
-) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert!(src.as_ptr().cast::<u128>().is_aligned());
-    debug_assert!(dst.as_ptr().cast::<u128>().is_aligned());
-
-    let src_chunks = src.iter_as::<u128>();
-    let dst_chunks = dst.iter_as_mut::<u128>();
-
-    for (src_chunk, dst_chunk) in src_chunks.zip(dst_chunks) {
-        let val = xts_encrypt_chunk(backend, src_chunk, tweak);
-        dst_chunk.write(val);
-        tweak.update();
-    }
-}
-
 fn xts_decrypt_chunk<B: BlockCipherDecBackend<BlockSize = U16>>(
     backend: &B,
     mut val: u128,
@@ -160,74 +91,98 @@ fn xts_decrypt_chunk<B: BlockCipherDecBackend<BlockSize = U16>>(
     val ^ tweak.0
 }
 
-fn xts_decrypt_buffer_out_of_place<B: BlockCipherDecBackend<BlockSize = U16>>(
-    backend: &B,
+/// cladefs: runs `src`'s blocks through a cipher into `dst`'s, XTS: each XORed with its tweak
+/// before and after, `tweak` the first's and left the one after the last's. `N` blocks at a
+/// time go through `par`, the backend's parallel blocks, and those left over one at a time through
+/// `one`. Upstream ran every block through the backend's `encrypt_block`, its AES rounds
+/// latency-bound: 0.78 GB/s on a Ryzen 9 8945HS whose VAES-512 backend takes 64 blocks at once,
+/// 72% of a store's write of 256 KiB (TASK-512). `zero_lines` has an out-of-place `dst`'s 64-byte
+/// lines zeroed ("DC ZVA") before their first block is written, on ARM64, as upstream did, so
+/// that they are not fetched from RAM only to be overwritten. In place, `src` and `dst` alias:
+/// each group of blocks is read whole before any of it is written.
+fn xts_buffer<N: ArraySize>(
     src: PtrByteSlice<'_>,
     mut dst: MutPtrByteSlice<'_>,
     tweak: &mut Tweak,
+    zero_lines: bool,
+    par: impl Fn(&mut Array<Array<u8, U16>, N>),
+    one: impl Fn(u128, &Tweak) -> u128,
 ) {
     debug_assert_eq!(src.len(), dst.len());
-    debug_assert_eq!(src.as_ptr() as usize % 64, 0);
-    debug_assert_eq!(dst.as_ptr() as usize % 64, 0);
-    debug_assert_eq!(src.len() % 64, 0);
+    debug_assert!(src.as_ptr().cast::<u128>().is_aligned());
+    debug_assert!(dst.as_ptr().cast::<u128>().is_aligned());
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = zero_lines;
+    let zero_line = |block: *mut u128| {
+        #[cfg(target_arch = "aarch64")]
+        if zero_lines && (block as usize).is_multiple_of(64) {
+            // SAFETY: the line is dst's, 64-byte aligned, and all of it is written after.
+            unsafe {
+                core::arch::asm!("dc zva, {0}", in(reg) block, options(nostack, preserves_flags));
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        let _ = block;
+    };
 
+    let groups = src.len() / size_of::<u128>() / N::USIZE;
     let mut src_chunks = src.iter_as::<u128>();
     let mut dst_chunks = dst.iter_as_mut::<u128>();
-
-    while let Some(s0) = src_chunks.next() {
-        let d0 = dst_chunks.next().unwrap();
-        // Zero the 64-byte destination cache line on ARM64 ("DC ZVA") to avoid fetching
-        // stale destination cache lines from RAM before writing out-of-place outputs.
-        #[cfg(target_arch = "aarch64")]
-        unsafe {
-            core::arch::asm!(
-                "dc zva, {0}",
-                in(reg) d0.as_ptr(),
-                options(nostack, preserves_flags),
-            );
+    let mut blocks = Array::<Array<u8, U16>, N>::default();
+    let mut tweaks = Array::<u128, N>::default();
+    for _ in 0..groups {
+        for (block, block_tweak) in blocks.iter_mut().zip(tweaks.iter_mut()) {
+            let val = src_chunks.next().expect("a whole group");
+            *block_tweak = tweak.0;
+            *block = Array((val ^ tweak.0).to_le_bytes());
+            tweak.update();
         }
-        let val0 = xts_decrypt_chunk(backend, s0, tweak);
-        d0.write(val0);
-        tweak.update();
-
-        let s1 = src_chunks.next().unwrap();
-        let d1 = dst_chunks.next().unwrap();
-        let val1 = xts_decrypt_chunk(backend, s1, tweak);
-        d1.write(val1);
-        tweak.update();
-
-        let s2 = src_chunks.next().unwrap();
-        let d2 = dst_chunks.next().unwrap();
-        let val2 = xts_decrypt_chunk(backend, s2, tweak);
-        d2.write(val2);
-        tweak.update();
-
-        let s3 = src_chunks.next().unwrap();
-        let d3 = dst_chunks.next().unwrap();
-        let val3 = xts_decrypt_chunk(backend, s3, tweak);
-        d3.write(val3);
+        par(&mut blocks);
+        for (block, block_tweak) in blocks.iter().zip(tweaks.iter()) {
+            let out = dst_chunks.next().expect("as long as src");
+            zero_line(out.as_ptr());
+            out.write(u128::from_le_bytes(block.0) ^ block_tweak);
+        }
+    }
+    for (val, out) in src_chunks.zip(dst_chunks) {
+        zero_line(out.as_ptr());
+        out.write(one(val, tweak));
         tweak.update();
     }
+}
+
+fn xts_encrypt_buffer<B: BlockCipherEncBackend<BlockSize = U16>>(
+    backend: &B,
+    src: PtrByteSlice<'_>,
+    dst: MutPtrByteSlice<'_>,
+    tweak: &mut Tweak,
+    zero_lines: bool,
+) {
+    xts_buffer::<B::ParBlocksSize>(
+        src,
+        dst,
+        tweak,
+        zero_lines,
+        |blocks| backend.encrypt_par_blocks(InOut::from(blocks)),
+        |val, tweak| xts_encrypt_chunk(backend, val, tweak),
+    );
 }
 
 fn xts_decrypt_buffer<B: BlockCipherDecBackend<BlockSize = U16>>(
     backend: &B,
     src: PtrByteSlice<'_>,
-    mut dst: MutPtrByteSlice<'_>,
+    dst: MutPtrByteSlice<'_>,
     tweak: &mut Tweak,
+    zero_lines: bool,
 ) {
-    debug_assert_eq!(src.len(), dst.len());
-    debug_assert!(src.as_ptr().cast::<u128>().is_aligned());
-    debug_assert!(dst.as_ptr().cast::<u128>().is_aligned());
-
-    let src_chunks = src.iter_as::<u128>();
-    let dst_chunks = dst.iter_as_mut::<u128>();
-
-    for (src_chunk, dst_chunk) in src_chunks.zip(dst_chunks) {
-        let val = xts_decrypt_chunk(backend, src_chunk, tweak);
-        dst_chunk.write(val);
-        tweak.update();
-    }
+    xts_buffer::<B::ParBlocksSize>(
+        src,
+        dst,
+        tweak,
+        zero_lines,
+        |blocks| backend.decrypt_par_blocks(InOut::from(blocks)),
+        |val, tweak| xts_decrypt_chunk(backend, val, tweak),
+    );
 }
 
 impl<'a, 'b> XtsProcessor<'a, 'b> {
@@ -251,14 +206,14 @@ impl BlockSizeUser for XtsProcessor<'_, '_> {
 impl BlockCipherEncClosure for XtsProcessor<'_, '_> {
     fn call<B: BlockCipherEncBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_encrypt_buffer_out_of_place(backend, src, dst, &mut tweak);
+        xts_encrypt_buffer(backend, src, dst, &mut tweak, true);
     }
 }
 
 impl BlockCipherDecClosure for XtsProcessor<'_, '_> {
     fn call<B: BlockCipherDecBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_decrypt_buffer_out_of_place(backend, src, dst, &mut tweak);
+        xts_decrypt_buffer(backend, src, dst, &mut tweak, true);
     }
 }
 
@@ -284,14 +239,14 @@ impl BlockSizeUser for XtsInPlaceProcessor<'_> {
 impl BlockCipherEncClosure for XtsInPlaceProcessor<'_> {
     fn call<B: BlockCipherEncBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_encrypt_buffer(backend, src, dst, &mut tweak);
+        xts_encrypt_buffer(backend, src, dst, &mut tweak, false);
     }
 }
 
 impl BlockCipherDecClosure for XtsInPlaceProcessor<'_> {
     fn call<B: BlockCipherDecBackend<BlockSize = Self::BlockSize>>(self, backend: &B) {
         let Self { mut tweak, src, dst } = self;
-        xts_decrypt_buffer(backend, src, dst, &mut tweak);
+        xts_decrypt_buffer(backend, src, dst, &mut tweak, false);
     }
 }
 
@@ -341,7 +296,7 @@ impl BlockCipherEncClosure for XtsCtsProcessor<'_, '_> {
 
         // Fast path for non-CTS (len is an exact multiple of 16):
         if len == base_size {
-            xts_encrypt_buffer(backend, src, dst, &mut tweak);
+            xts_encrypt_buffer(backend, src, dst, &mut tweak, false);
             return;
         }
 
@@ -349,7 +304,7 @@ impl BlockCipherEncClosure for XtsCtsProcessor<'_, '_> {
         if base_size > 16 {
             let src_base = src.subslice(0..(base_size - 16));
             let dst_base = dst.subslice_mut(0..(base_size - 16));
-            xts_encrypt_buffer(backend, src_base, dst_base, &mut tweak);
+            xts_encrypt_buffer(backend, src_base, dst_base, &mut tweak, false);
         }
 
         let last_full_block_range = (base_size - 16)..base_size;
@@ -389,7 +344,7 @@ impl BlockCipherDecClosure for XtsCtsProcessor<'_, '_> {
 
         // Fast path for non-CTS (len is an exact multiple of 16):
         if len == base_size {
-            xts_decrypt_buffer(backend, src, dst, &mut tweak);
+            xts_decrypt_buffer(backend, src, dst, &mut tweak, false);
             return;
         }
 
@@ -397,7 +352,7 @@ impl BlockCipherDecClosure for XtsCtsProcessor<'_, '_> {
         if base_size > 16 {
             let src_base = src.subslice(0..(base_size - 16));
             let dst_base = dst.subslice_mut(0..(base_size - 16));
-            xts_decrypt_buffer(backend, src_base, dst_base, &mut tweak);
+            xts_decrypt_buffer(backend, src_base, dst_base, &mut tweak, false);
         }
 
         let last_full_block_tweak = tweak;
@@ -431,7 +386,7 @@ impl BlockCipherDecClosure for XtsCtsProcessor<'_, '_> {
 mod tests {
     use super::*;
     use cipher::inout::InOut;
-    use cipher::typenum::consts::U1;
+    use cipher::typenum::consts::{U1, U3};
     use cipher::{Block, ParBlocksSizeUser};
     use std::cell::RefCell;
     use test_case::test_case;
@@ -526,6 +481,145 @@ mod tests {
                 std::ptr::write_unaligned(block.get_out().as_mut_ptr() as *mut u128, val);
             }
         }
+    }
+
+    /// cladefs: [`MockNonLinearCipher`]'s scramble, `N` blocks at a time as well, counting the
+    /// times it was asked for them so (TASK-512).
+    struct MockParCipher<N> {
+        key: u128,
+        par_calls: std::cell::Cell<usize>,
+        size: std::marker::PhantomData<N>,
+    }
+
+    impl<N> MockParCipher<N> {
+        fn new(key: u128) -> Self {
+            Self { key, par_calls: Default::default(), size: std::marker::PhantomData }
+        }
+    }
+
+    impl<N> BlockSizeUser for MockParCipher<N> {
+        type BlockSize = U16;
+    }
+
+    impl<N: ArraySize> ParBlocksSizeUser for MockParCipher<N> {
+        type ParBlocksSize = N;
+    }
+
+    impl<N: ArraySize> BlockCipherEncBackend for MockParCipher<N> {
+        fn encrypt_block(&self, block: InOut<'_, '_, Block<Self>>) {
+            MockNonLinearCipher::new(self.key).encrypt_block(block);
+        }
+
+        fn encrypt_par_blocks(&self, mut blocks: InOut<'_, '_, cipher::ParBlocks<Self>>) {
+            self.par_calls.set(self.par_calls.get() + 1);
+            for i in 0..N::USIZE {
+                self.encrypt_block(blocks.get(i));
+            }
+        }
+    }
+
+    impl<N: ArraySize> BlockCipherDecBackend for MockParCipher<N> {
+        fn decrypt_block(&self, block: InOut<'_, '_, Block<Self>>) {
+            MockNonLinearCipher::new(self.key).decrypt_block(block);
+        }
+
+        fn decrypt_par_blocks(&self, mut blocks: InOut<'_, '_, cipher::ParBlocks<Self>>) {
+            self.par_calls.set(self.par_calls.get() + 1);
+            for i in 0..N::USIZE {
+                self.decrypt_block(blocks.get(i));
+            }
+        }
+    }
+
+    /// cladefs: blocks `count` blocks long, 64-byte aligned, each byte its own.
+    fn numbered(count: usize) -> Vec<Aligned64<Blocks<4>>> {
+        let mut blocks: Vec<Aligned64<Blocks<4>>> =
+            (0..count.div_ceil(4)).map(|_| Aligned64(Default::default())).collect();
+        for (at, group) in blocks.iter_mut().enumerate() {
+            for (i, byte) in group.0.as_mut_bytes().iter_mut().enumerate() {
+                *byte = (at * 64 + i).wrapping_mul(7) as u8;
+            }
+        }
+        blocks
+    }
+
+    fn bytes(blocks: &[Aligned64<Blocks<4>>], count: usize) -> &[u8] {
+        // SAFETY: Aligned64<Blocks<4>> is 64 bytes of u128s, no padding.
+        unsafe { std::slice::from_raw_parts(blocks.as_ptr().cast::<u8>(), count * 16) }
+    }
+
+    fn bytes_mut(blocks: &mut [Aligned64<Blocks<4>>], count: usize) -> &mut [u8] {
+        // SAFETY: as `bytes`.
+        unsafe { std::slice::from_raw_parts_mut(blocks.as_mut_ptr().cast::<u8>(), count * 16) }
+    }
+
+    /// cladefs: blocks `count` blocks long encrypted in place, XTS, under `cipher`.
+    fn encrypted_in_place<C>(cipher: &C, tweak: Tweak, count: usize) -> Vec<Aligned64<Blocks<4>>>
+    where
+        C: BlockCipherEncBackend<BlockSize = U16>,
+    {
+        let mut blocks = numbered(count);
+        let processor = XtsInPlaceProcessor::new(tweak, bytes_mut(&mut blocks, count).into());
+        BlockCipherEncClosure::call(processor, cipher);
+        blocks
+    }
+
+    const PAR_TWEAK: u128 = 0x0f1e2d3c4b5a69788796a5b4c3d2e1f0;
+    const PAR_KEY: u128 = 0x00112233445566778899aabbccddeeff;
+
+    /// cladefs: a cipher taking blocks three at a time encrypts and decrypts in place as one
+    /// taking them one at a time does, the blocks left over one at a time, and takes every whole
+    /// three at once (TASK-512: upstream took each alone, AES latency-bound).
+    #[test_case(1; "one_block")]
+    #[test_case(3; "one_group")]
+    #[test_case(4; "a_group_and_one")]
+    #[test_case(8; "two_groups_and_two")]
+    #[test_case(256; "a_sector")]
+    fn test_parallel_blocks_in_place_as_single_ones(count: usize) {
+        let tweak = Tweak::new(PAR_TWEAK);
+        let expected = encrypted_in_place(&MockNonLinearCipher::new(PAR_KEY), tweak, count);
+
+        let par = MockParCipher::<U3>::new(PAR_KEY);
+        let mut blocks = encrypted_in_place(&par, tweak, count);
+        assert_eq!(bytes(&blocks, count), bytes(&expected, count));
+        assert_eq!(par.par_calls.get(), count / 3);
+
+        let processor = XtsInPlaceProcessor::new(tweak, bytes_mut(&mut blocks, count).into());
+        BlockCipherDecClosure::call(processor, &par);
+        assert_eq!(bytes(&blocks, count), bytes(&numbered(count), count));
+        assert_eq!(par.par_calls.get(), 2 * (count / 3));
+    }
+
+    /// cladefs: so out of place, whole 64-byte lines of blocks (TASK-512).
+    #[test_case(4; "a_group_and_one")]
+    #[test_case(12; "four_groups")]
+    #[test_case(256; "a_sector")]
+    fn test_parallel_blocks_out_of_place_as_single_ones(count: usize) {
+        let tweak = Tweak::new(PAR_TWEAK);
+        let expected = encrypted_in_place(&MockNonLinearCipher::new(PAR_KEY), tweak, count);
+        let plain = numbered(count);
+
+        let par = MockParCipher::<U3>::new(PAR_KEY);
+        let mut encrypted = numbered(count);
+        let processor = XtsProcessor::new(
+            tweak,
+            bytes(&plain, count).into(),
+            bytes_mut(&mut encrypted, count).into(),
+        );
+        BlockCipherEncClosure::call(processor, &par);
+        assert_eq!(bytes(&encrypted, count), bytes(&expected, count));
+        assert_eq!(par.par_calls.get(), count / 3);
+
+        let mut decrypted: Vec<Aligned64<Blocks<4>>> =
+            (0..count.div_ceil(4)).map(|_| Aligned64(Blocks::default())).collect();
+        let processor = XtsProcessor::new(
+            tweak,
+            bytes(&encrypted, count).into(),
+            bytes_mut(&mut decrypted, count).into(),
+        );
+        BlockCipherDecClosure::call(processor, &par);
+        assert_eq!(bytes(&decrypted, count), bytes(&plain, count));
+        assert_eq!(par.par_calls.get(), 2 * (count / 3));
     }
 
     #[repr(C)]

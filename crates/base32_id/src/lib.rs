@@ -13,6 +13,9 @@
 //! [`Short`], no leading zeros, as operators read and type IDs (`TENANT/CELL`). [`parse`] reads
 //! either; [`parse_padded`] only the first, for names whose width is part of what they are.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use std::fmt;
 
 /// The digits, by value.

@@ -122,17 +122,21 @@ impl Bounded {
 unsafe impl GlobalAlloc for Bounded {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         Self::check(layout.size());
+        // SAFETY: the caller's layout, as GlobalAlloc::alloc's contract has it, passed on.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: `pointer` System allocated with `layout`, as the caller's contract says.
         unsafe { System.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         Self::check(size);
         HELD.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: `pointer` System allocated with `layout`, and `size` the caller's, as
+        // GlobalAlloc::realloc's contract has them.
         unsafe { System.realloc(pointer, layout, size) }
     }
 }

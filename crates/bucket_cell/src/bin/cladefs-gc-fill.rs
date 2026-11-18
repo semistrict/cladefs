@@ -46,6 +46,9 @@
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use bucket_cell::batch::{Commit, SegmentBuilder};
 use bucket_cell::bucket::Bucket as _;
 use bucket_cell::keys::{self, CachingKms};

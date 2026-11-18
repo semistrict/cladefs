@@ -44,7 +44,7 @@ pub struct CellClient {
     /// cladefs: whether it is a follower's, read-only (backlog doc-8).
     read_only: bool,
     /// Its transfer area, which reads and writes move their data through ([`TRANSFER`]).
-    transfer: Transfer,
+    transfer: Arc<Transfer>,
     /// cladefs: whether its window copies on write (backlog doc-13), once created so.
     copying: std::sync::atomic::AtomicBool,
     /// cladefs: how many mappings the host lets a process make, if it limits them, as the daemon
@@ -127,7 +127,8 @@ impl CellClient {
             Error::new(anyhow::Error::new(errno).context("saying this VM process's build"))
         })?;
         let transfer = Transfer::give(&client)
-            .map_err(|err| err.context("giving the daemon a transfer area"))?;
+            .map_err(|err| err.context("giving the daemon a transfer area"))?
+            .into();
         let copying = std::sync::atomic::AtomicBool::new(false);
         let faults = Mutex::new(None);
         Ok(Self { client, cell, memories, faults, read_only, transfer, copying, max_map_count })
@@ -284,8 +285,9 @@ impl CellClient {
     ) -> Result<()> {
         let len: usize = buffers.iter().map(VolatileSliceMut::len).sum();
         let read = |into| Request::Read { extent, offset, len: len as u64, into };
-        if let Some(slot) = self.transfer.take(len) {
-            self.client.request(&read(ReadInto::Transfer { at: slot.offset() })).await?;
+        if let Some(slot) = Transfer::take(&self.transfer, len) {
+            let into = ReadInto::Transfer { at: slot.offset() };
+            self.client.request_keeping(&read(into), &slot).await?;
             let data = slot.bytes(len);
             let mut at = 0;
             for buffer in buffers {
@@ -337,10 +339,10 @@ impl CellClient {
             }
         };
         let write = |data| Request::Write { extent, offset, data, barriers };
-        if let Some(mut slot) = self.transfer.take(len) {
+        if let Some(mut slot) = Transfer::take(&self.transfer, len) {
             gather(slot.bytes_mut(len));
             let data = Data::Transfer { at: slot.offset(), len: len as u64 };
-            return self.client.request(&write(data)).await.map(drop);
+            return self.client.request_keeping(&write(data), &slot).await.map(drop);
         }
         let mut data = vec![0; len];
         gather(&mut data);
@@ -355,8 +357,8 @@ impl CellClient {
 
     /// The transfer area's slots, taken until dropped, which no read or write then has.
     #[cfg(test)]
-    pub(super) fn take_transfer_slots(&self) -> Vec<impl Drop + '_> {
-        std::iter::from_fn(|| self.transfer.take(1)).collect()
+    pub(super) fn take_transfer_slots(&self) -> Vec<impl Sized> {
+        std::iter::from_fn(|| Transfer::take(&self.transfer, 1)).collect()
     }
 
     /// Sends `header`, `payload` and `fds`, a request, as they are, however malformed, and
@@ -368,7 +370,7 @@ impl CellClient {
         payload: &[u8],
         fds: &[std::os::fd::BorrowedFd<'_>],
     ) -> std::result::Result<Message, Errno> {
-        blocking(self.client.call(header, &[payload], fds))
+        blocking(self.client.call(header, &[payload], fds, None))
     }
 
     /// Frees `extent` (`FREE`).
@@ -906,9 +908,21 @@ impl Client {
 
     /// Sends `request`, encoded ([`Request::encode`]), and returns its reply.
     fn request(&self, request: &Request<'_>) -> BoxFuture<'static, Reply> {
+        self.request_with(request, None)
+    }
+
+    /// [`Client::request`], for a request whose data is in the transfer area's `slot`, which it keeps
+    /// from other requests until the daemon answers, as until then the daemon may access it: the
+    /// slot taken until both it and the request's caller are done with it, though the caller
+    /// drops its request first (TASK-444.15).
+    fn request_keeping(&self, request: &Request<'_>, slot: &Slot) -> BoxFuture<'static, Reply> {
+        self.request_with(request, Some(slot.0.clone()))
+    }
+
+    fn request_with(&self, request: &Request<'_>, kept: Option<Kept>) -> BoxFuture<'static, Reply> {
         let Encoded { header, payload, fd } = request.encode();
         let payload = payload.each_ref().map(|part| &**part);
-        self.call(header, &payload, fd.as_slice())
+        self.call(header, &payload, fd.as_slice(), kept)
     }
 
     fn request_blocking(&self, request: &Request<'_>) -> Reply {
@@ -917,12 +931,14 @@ impl Client {
 
     /// Sends `header`, `payload`'s parts and `fds`, a request, and returns its reply: once the
     /// protocol's bounds of what is in flight leave room for it, waiting for replies to make it,
-    /// but on the thread receiving them (TASK-79.16).
+    /// but on the thread receiving them (TASK-79.16). `kept` it holds until the daemon answers
+    /// ([`Client::request_keeping`]).
     fn call(
         &self,
         mut header: Header,
         payload: &[&[u8]],
         fds: &[std::os::fd::BorrowedFd<'_>],
+        kept: Option<Kept>,
     ) -> BoxFuture<'static, Reply> {
         header.id = self.next.fetch_add(1, Ordering::Relaxed);
         // cladefs: a call for the guest request current says it, first in its payload, which the
@@ -953,7 +969,7 @@ impl Client {
                 }
             }
             match waiting.as_mut() {
-                Some(waiting) => waiting.insert(header.id, reply, bytes),
+                Some(waiting) => waiting.insert(header.id, reply, bytes, kept),
                 None => return Box::pin(std::future::ready(Err(Errno::EIO))),
             }
         }
@@ -1185,7 +1201,9 @@ impl Client {
 /// ([`stream_bytes`]), and those bytes in all.
 #[derive(Default)]
 struct Waiting {
-    replies: HashMap<u64, (oneshot::Sender<Reply>, u64)>,
+    /// Each request's: what its reply goes to, its stream bytes, and what it keeps until answered
+    /// ([`Client::request_keeping`]), let go as it is taken from here.
+    replies: HashMap<u64, (oneshot::Sender<Reply>, u64, Option<Kept>)>,
     stream_bytes: u64,
     /// cladefs: how many requests wait for room ([`Waiting::has_room`]).
     for_room: usize,
@@ -1199,13 +1217,13 @@ impl Waiting {
             || (self.replies.len() < MAX_REQUESTS && self.stream_bytes + bytes <= MAX_STREAM_BYTES)
     }
 
-    fn insert(&mut self, id: u64, reply: oneshot::Sender<Reply>, bytes: u64) {
-        self.replies.insert(id, (reply, bytes));
+    fn insert(&mut self, id: u64, reply: oneshot::Sender<Reply>, bytes: u64, kept: Option<Kept>) {
+        self.replies.insert(id, (reply, bytes, kept));
         self.stream_bytes += bytes;
     }
 
     fn remove(&mut self, id: u64) -> Option<oneshot::Sender<Reply>> {
-        let (reply, bytes) = self.replies.remove(&id)?;
+        let (reply, bytes, _kept) = self.replies.remove(&id)?;
         self.stream_bytes -= bytes;
         Some(reply)
     }
@@ -1288,6 +1306,8 @@ struct Transfer {
 
 // SAFETY: Shared memory mapped for the area's life; each slot is one request's at a time.
 unsafe impl Send for Transfer {}
+// SAFETY: as Send's: threads sharing it take slots through `free`'s lock, and touch only their
+// own slot's memory until they give it back.
 unsafe impl Sync for Transfer {}
 
 impl Transfer {
@@ -1357,14 +1377,14 @@ impl Transfer {
         Ok((transfer, file))
     }
 
-    /// A free slot for `len` bytes, if one is free and holds them.
-    fn take(&self, len: usize) -> Option<Slot<'_>> {
+    /// A free slot of `transfer` for `len` bytes, if one is free and holds them.
+    fn take(transfer: &Arc<Self>, len: usize) -> Option<Slot> {
         if len == 0 || len > Self::SLOT {
             return None;
         }
-        let index = self.free.lock().unwrap().pop()?;
-        self.used.fetch_add(1, Ordering::Relaxed);
-        Some(Slot { transfer: self, index })
+        let index = transfer.free.lock().unwrap().pop()?;
+        transfer.used.fetch_add(1, Ordering::Relaxed);
+        Some(Slot(Arc::new(TakenSlot { transfer: transfer.clone(), index })))
     }
 }
 
@@ -1379,41 +1399,61 @@ impl Drop for Transfer {
 #[cfg(test)]
 pub(super) const TRANSFER_SLOT: usize = Transfer::SLOT;
 
-/// A slot of the transfer area, a request's until dropped.
-struct Slot<'a> {
-    transfer: &'a Transfer,
+/// The slots of a transfer area, for tests.
+#[cfg(test)]
+pub(super) const TRANSFER_SLOTS: usize = Transfer::SLOTS;
+
+/// A slot of the transfer area, a request's: taken from the area's free slots while the request's
+/// caller has it, and while the daemon may access it, until it answers the request
+/// ([`Client::request_keeping`]).
+struct Slot(Kept);
+
+/// A slot taken, given back once neither the request's caller nor its waiting for the daemon's
+/// answer has it.
+type Kept = Arc<TakenSlot>;
+
+/// A slot taken from its transfer area, given back as it is dropped.
+struct TakenSlot {
+    transfer: Arc<Transfer>,
     index: usize,
 }
 
-impl Slot<'_> {
+impl Slot {
     /// Where it is in the area.
     fn offset(&self) -> u64 {
-        (self.index * Transfer::SLOT) as u64
+        (self.0.index * Transfer::SLOT) as u64
     }
 
     /// Its first `len` bytes, which the daemon has left as they are: before the request, or once
     /// it replied.
     fn bytes(&self, len: usize) -> &[u8] {
         assert!(len <= Transfer::SLOT);
-        // SAFETY: The slot's, which no other request has, and the daemon accesses no more.
+        // SAFETY: within the area, mapped while `self.0.transfer` is held, `len` bytes from the
+        // slot's start, at most a slot's; no other request has the slot until it is given back,
+        // when neither this nor the request's waiting holds it (`TakenSlot`'s drop), and the daemon,
+        // which writes it in serving a read, has answered: the caller reads only once it did.
         unsafe {
-            std::slice::from_raw_parts(self.transfer.addr.as_ptr().add(self.offset() as usize), len)
+            std::slice::from_raw_parts(
+                self.0.transfer.addr.as_ptr().add(self.offset() as usize),
+                len,
+            )
         }
     }
 
+    /// Its first `len` bytes, to write, before the request is made.
     fn bytes_mut(&mut self, len: usize) -> &mut [u8] {
         assert!(len <= Transfer::SLOT);
-        // SAFETY: As above.
+        // SAFETY: as `bytes`'s, and before the request is made, the daemon has no access to it.
         unsafe {
             std::slice::from_raw_parts_mut(
-                self.transfer.addr.as_ptr().add(self.offset() as usize),
+                self.0.transfer.addr.as_ptr().add(self.offset() as usize),
                 len,
             )
         }
     }
 }
 
-impl Drop for Slot<'_> {
+impl Drop for TakenSlot {
     fn drop(&mut self) {
         self.transfer.free.lock().unwrap().push(self.index);
     }

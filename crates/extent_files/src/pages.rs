@@ -391,8 +391,10 @@ impl Pages {
         match self.committed_chunk(index) {
             None => out.fill(0),
             Some(at) => match self.mapped(index * self.block_size() as u64, out.len() as u64) {
-                // SAFETY: the window maps the chunk, read-only, until the file's next commit.
                 Some(at) => {
+                    // SAFETY: the window maps the chunk, read-only, until the file's next commit
+                    // marks it stale, which takes `&mut self` (mark_stale), not while this read
+                    // borrows it.
                     out.copy_from_slice(unsafe { std::slice::from_raw_parts(at, out.len()) })
                 }
                 None => read_block(device, at.extent, at.block, out).await?,

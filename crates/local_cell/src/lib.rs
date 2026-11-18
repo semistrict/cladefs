@@ -115,6 +115,9 @@
 //! rules its concurrency relies on ([`Rules`]) can be turned off to see the tests fail
 //! (tests/shuttle/).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 /// cladefs: a step of a protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
 /// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
@@ -155,6 +158,7 @@ mod extents;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
 pub use extents::{OWN_ENTRY_BYTES, Own, own_held};
 mod framed;
+mod frames;
 mod framing;
 mod held;
 pub use held::{HeldCounts, HeldParts};

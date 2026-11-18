@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:33'
+updated_date: '2026-11-16 14:21'
 labels: []
 dependencies: []
 references:
@@ -37,3 +38,11 @@ The host crates hold ~557 unsafe sites (2026-11-15) and Miri runs on none. The f
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Miri probe of the larger crates (ubu1): 301 passed, 827 unsupported, 156 timeout, 71 failed, 45 ub. All 45 ub are fxfs-posix, one site: Stacked Borrows, a Unique retag made by try_join! in fxfs StoreObjectHandle::write_aligned (store_object_handle.rs, compute_checksums) invalidated by a SharedReadOnly retag at multi_write_internal's writes.try_next().await. Reproduced on the Mac (cargo miri --target x86_64-unknown-linux-gnu; macOS Miri lacks kqueue) for tests::a_files_last_bytes_read_back: Stacked Borrows fails in 82 s, Tree Borrows passes (432 s). Not a finding: SB's rule for nested self-referential futures, not UB under TB. fxfs-posix's Miri tests run under -Zmiri-tree-borrows.
+
+Codex labels rerun on gpt-6-astra xhigh (scripts/unsafe-audit.sh's default now), all 8 groups: 383 Correct, 229 Missing, 100 Incorrect of 712 sites. Against gpt-6.1-sol high (418/196/93 of 707): of 571 sites keyed alike, 503 agree; 74 both Incorrect (sqlite_extents vfs.rs 12, virtio_extent buffers.rs 9, cladefs memory.rs 7, extentd tests.rs 6, cache.rs 5, heap.rs 4, ...), 26 Incorrect by Astra alone. Order of reproducers: both-Incorrect first.
+<!-- SECTION:NOTES:END -->

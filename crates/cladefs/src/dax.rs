@@ -845,8 +845,11 @@ impl Window {
                 assert_eq!(addr, at, "map private pages: {}", std::io::Error::last_os_error());
                 for (page, held) in held.into_iter().enumerate() {
                     if let Some(Held::Bytes(bytes)) = held {
-                        // SAFETY: A page just mapped, `ps` bytes, as `bytes` are.
+                        // SAFETY: page `page` of the `held.len()` pages just mapped at `at`.
                         let to = unsafe { at.cast::<u8>().add(page * ps) };
+                        // SAFETY: `to` is `ps` writable bytes the mapping above made, which no
+                        // other thread reaches yet; `bytes` is a heap copy of `ps` bytes (Held::Bytes, above),
+                        // so the two don't overlap.
                         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), to, ps) };
                     }
                 }

@@ -1,0 +1,71 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s8-cap { left: 120px; top: 250px; font-size: 34px; font-weight: 900; color: var(--soft); }
+    #s8-up { left: 1180px; top: 470px; }
+    #s8-bucket-name { left: 1636px; top: 470px; }
+  </style>
+  <div id="root" data-composition-id="s8" data-width="1920" data-height="1080">
+    <div id="s8-l1" class="line"><span class="w">A</span><span class="w">version</span><span class="w">is</span><span class="w">one</span><span class="w">local</span><span class="w">commit</span></div>
+    <div id="s8-l2" class="line"><span class="w">Uploaded</span><span class="w">later,</span><span class="w">in</span><span class="w">the</span><span class="w">background</span></div>
+    <div id="s8-cap" class="note">cell 9 and its log, on its host</div>
+    <svg id="s8-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s8-up" class="note">a copy floats up, soon after</div>
+    <div id="s8-bucket-name" class="label">bucket (S3)</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s8-svg");
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff"];
+      const pail = C.bucket(svg, { x: 1720, y: 370, w: 170, h: 140, id: "s8-pail" });
+      // The log: a string of beads from the cell's side, one per commit.
+      const BX = 470, BY = 690, STEP = 46, N = 28;
+      const thread = C.el("path", { d: `M${BX - 60} ${BY} H${BX + (N - 1) * STEP}`, stroke: "#2e2440", "stroke-width": 5, "stroke-linecap": "round", fill: "none" }, svg);
+      const beads = [];
+      for (let i = 0; i < N; i++) beads.push(C.el("circle", { cx: BX + i * STEP, cy: BY, r: 15, fill: colors[i % colors.length], stroke: "#2e2440", "stroke-width": 5 }, svg));
+      const V = 13; // the version lands after bead 13
+      const vx = BX + V * STEP + STEP / 2;
+      const ring = C.el("rect", { x: BX - 26, y: BY - 30, width: vx - BX + 14, height: 60, rx: 30, fill: "none", stroke: "#e2177e", "stroke-width": 5, "stroke-dasharray": "2 12", "stroke-linecap": "round" }, svg);
+      const flag = C.el("g", {}, svg);
+      gsap.set(flag, { x: vx, y: BY });
+      C.el("path", { d: "M0 0 V-110", stroke: "#2e2440", "stroke-width": 7, "stroke-linecap": "round" }, flag);
+      C.el("path", { d: "M0 -110 L84 -90 L0 -66 Z", fill: "#e2177e", stroke: "#2e2440", "stroke-width": 6, "stroke-linejoin": "round" }, flag);
+      C.el("text", { x: 14, y: -81, "font-family": "Nunito", "font-weight": 900, "font-size": 26, fill: "#ffffff" }, flag).textContent = "v1";
+      // A small copy of the log up to v1.
+      const copy = C.el("g", {}, svg);
+      C.el("rect", { x: -150, y: -24, width: 300, height: 48, rx: 24, fill: "#ffffff", stroke: "#2e2440", "stroke-width": 5 }, copy);
+      for (let i = 0; i < 6; i++) C.el("circle", { cx: -110 + i * 44, cy: 0, r: 12, fill: colors[i % colors.length], stroke: "#2e2440", "stroke-width": 4 }, copy);
+      gsap.set(copy, { x: BX + (vx - BX) / 2 - 20, y: BY });
+      const cell = C.critter(svg, { x: 300, y: 700, r: 110, color: "#ffb088", seed: 909, look: [0.6, 0.2] });
+
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, cell, 0, 6, 88);
+      tl.fromTo(cell.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.2)" }, 0.0);
+      tl.fromTo(thread, { strokeDasharray: "0 1400" }, { strokeDasharray: "1400 0", duration: 0.6, ease: "power2.out" }, 0.1);
+      // Beads up to the version are there; later ones keep coming, one per commit.
+      tl.fromTo(beads.slice(0, V + 1), { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.25, ease: "back.out(3)", stagger: 0.03 }, 0.15);
+      beads.slice(V + 1).forEach((b, i) => tl.fromTo(b, { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.25, ease: "back.out(3)" }, 1.5 + i * 0.28));
+      tl.fromTo("#s8-cap", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.3);
+      C.words(tl, "#s8-l1", 0.2);
+      // v1 stamps in.
+      tl.fromTo(flag, { scaleY: 0, transformOrigin: "50% 100%" }, { scaleY: 1, duration: 0.4, ease: "back.out(3)" }, 1.0);
+      tl.fromTo(cell.body, { y: 0 }, { y: -18, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1 }, 1.1);
+      tl.fromTo(ring, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 1.3);
+      C.wordsOut(tl, "#s8-l1", 2.8);
+      C.words(tl, "#s8-l2", 3.0);
+      // Later: a copy of the log up to v1 floats up into the bucket.
+      tl.fromTo(pail, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.2)" }, 3.0);
+      tl.fromTo("#s8-bucket-name", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 3.2);
+      tl.fromTo(copy, { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(2)" }, 3.5);
+      tl.to(copy, { x: 1720, y: 330, scale: 0.4, duration: 1.0, ease: "power2.inOut" }, 3.8);
+      tl.to(copy, { opacity: 0, duration: 0.15 }, 4.7);
+      tl.fromTo(pail, { rotation: 0 }, { rotation: 6, duration: 0.12, ease: "sine.inOut", yoyo: true, repeat: 3, transformOrigin: "50% 100%" }, 4.8);
+      tl.fromTo("#s8-up", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.8);
+      // Exit.
+      C.wordsOut(tl, "#s8-l2", 5.6);
+      tl.to([svg, "#s8-cap", "#s8-up", "#s8-bucket-name"], { opacity: 0, duration: 0.25, ease: "power2.in" }, 5.65);
+      window.__timelines["s8"] = tl;
+    })();
+  </script>
+</template>

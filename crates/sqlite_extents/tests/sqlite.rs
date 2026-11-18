@@ -33,6 +33,7 @@ struct CopyingWindow {
 
 // SAFETY: written only as the file set maps, under its lock.
 unsafe impl Send for CopyingWindow {}
+// SAFETY: as Send's: shared, its memory is written only under the volume's lock.
 unsafe impl Sync for CopyingWindow {}
 
 impl CopyingWindow {
@@ -553,4 +554,26 @@ fn a_commit_freeing_many_extents_lists_them() {
         // A barrier a transaction, but VACUUM's two: SQLite syncs the database twice in it.
         assert_eq!(marks, vec![0, 1, 1, 2]);
     });
+}
+
+/// A connection SQLite opened on the VFS with none of its files open, an in-memory database's,
+/// outlives the registration: SQLite keeps the VFS and calls it after, for the time among others.
+/// The VFS freed with the registration, which looked only for files open, SQLite called through
+/// freed memory (TASK-444.14; AddressSanitizer shows it, as Miri runs no C).
+#[test]
+fn a_connection_outlives_its_registration() {
+    let file_set = FileSet::open(DeviceHolder::new(device()), Options::default()).unwrap();
+    let registration = register("cladefs-test-outlived", file_set).unwrap();
+    let connection = Connection::open_with_flags_and_vfs(
+        ":memory:",
+        OpenFlags::default(),
+        "cladefs-test-outlived",
+    )
+    .unwrap();
+    drop(registration);
+    let now: f64 = connection.query_row("SELECT julianday('now')", [], |row| row.get(0)).unwrap();
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    // The Julian day of the Unix epoch, and a day's seconds.
+    let expected = 2_440_587.5 + since.as_secs_f64() / 86_400.0;
+    assert!((now - expected).abs() < 10.0 / 86_400.0, "{now} is not {expected}, within 10 s");
 }

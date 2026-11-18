@@ -1278,6 +1278,7 @@ fn abuse(abuse: Abuse, given: &Mutex<Vec<OwnedFd>>) {
 fn identity(fd: BorrowedFd<'_>) -> (u64, u64) {
     // SAFETY: A stat buffer the call fills, of a descriptor the caller holds.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a descriptor the caller holds open, and the buffer above.
     assert_eq!(unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) }, 0);
     (stat.st_dev as u64, stat.st_ino as u64)
 }
@@ -2093,6 +2094,7 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     // Grown, by a tebibyte, as the daemon grows it further, as its extents take more chunks.
     // SAFETY: A stat buffer the call fills, of a descriptor the test holds.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: a descriptor the test holds open, and the buffer above.
     assert_eq!(unsafe { libc::fstat(own, &mut stat) }, 0);
     assert_eq!(truncated(own, stat.st_size + (1 << 40)), Ok(()));
     let extents = 2 * physmem::CHUNK_SIZE / (8 * BLOCK);

@@ -17,6 +17,9 @@
 //! it at random for SECS seconds (default 10), and prints a Markdown table of what each did: MiB/s,
 //! GETs/s, and their latencies' median and 99th percentile. Then it deletes the object.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use bucket_cell::bucket::{Bucket, ByteRange, PutMode};
 use bucket_cell::object_bucket::ObjectBucket;
 use futures::StreamExt as _;

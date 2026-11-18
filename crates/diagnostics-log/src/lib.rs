@@ -5,6 +5,9 @@
 //! The part of `diagnostics_log` the `fuchsia` crate uses on hosts: installing
 //! a `log` backend. Records are written to stderr.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use fidl_fuchsia_diagnostics_types::Severity;
 use std::io::Write as _;
 

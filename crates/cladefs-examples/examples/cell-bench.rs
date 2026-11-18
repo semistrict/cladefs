@@ -249,8 +249,11 @@ fn burst(mib: u64) {
     store.commit(None).unwrap();
     let mut writes = Waits::default();
     for sequence in 1..=mib * 4 {
+        // Made before it is timed: making 256 KiB took as long as the store's write of it (on a
+        // Mac, 200 µs to 140), so that until TASK-433.9 the times said half as much of the store.
+        let bytes = data(sequence, EXTENT);
         let started = Instant::now();
-        store.write(extent(sequence), 0, &data(sequence, EXTENT)).unwrap();
+        store.write(extent(sequence), 0, &bytes).unwrap();
         writes.add(started.elapsed());
     }
     let (started, before) = (Instant::now(), local_cell::written());

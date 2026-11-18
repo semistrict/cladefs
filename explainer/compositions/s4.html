@@ -1,0 +1,150 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .s4-head { position: absolute; top: 230px; font-weight: 900; font-size: 40px; }
+    .s4-vm { position: absolute; top: 290px; width: 600px; height: 290px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); overflow: hidden; }
+    .s4-vm-bar { position: absolute; left: 0; right: 0; top: 0; height: 40px; background: var(--lilac); border-bottom: 4px solid var(--ink); }
+    .s4-vm-name { position: absolute; left: 20px; top: 2px; font-weight: 900; font-size: 28px; }
+    .s4-app { position: absolute; left: 40px; top: 96px; width: 124px; height: 92px; border: 5px solid var(--ink); border-radius: 24px; background: var(--mint); }
+    .s4-app-eye { position: absolute; top: 26px; width: 11px; height: 15px; border-radius: 50%; background: var(--ink); }
+    .s4-app-mouth { position: absolute; left: 49px; top: 48px; width: 20px; height: 10px; border: 4px solid transparent; border-bottom-color: var(--ink); border-top-width: 0; border-radius: 0 0 50% 50% / 0 0 100% 100%; }
+    .s4-app-name { position: absolute; left: 40px; top: 196px; font-weight: 800; font-size: 28px; }
+    .s4-host { position: absolute; top: 630px; width: 780px; height: 300px; border: 4px dashed var(--grey); border-radius: 34px; }
+    .s4-host-name { position: absolute; left: 24px; top: 10px; font-weight: 900; font-size: 28px; color: var(--soft); }
+    .s4-shelf { position: absolute; left: 300px; top: 120px; width: 440px; height: 112px; border: 5px solid var(--ink); border-radius: 24px; background: var(--face); }
+    .s4-shelf-name { position: absolute; left: 18px; top: 6px; font-weight: 900; font-size: 28px; }
+    .s4-tile { position: absolute; top: 44px; width: 54px; height: 48px; border: 4px solid var(--ink); border-radius: 12px; background: var(--face); }
+    .s4-tile.hot { background: var(--accent); }
+    .s4-fs { position: absolute; width: 140px; height: 170px; }
+    .s4-fs-box { position: absolute; inset: 0 0 14px 0; border: 5px solid var(--ink); border-radius: 24px; background: var(--peach); }
+    .s4-fs-drawer { position: absolute; left: 14px; right: 14px; height: 58px; border: 4px solid var(--ink); border-radius: 14px; background: #ffd0b8; }
+    .s4-fs-handle { position: absolute; left: 36px; right: 36px; bottom: 8px; height: 10px; border-radius: 5px; background: var(--ink); }
+    .s4-fs-eye { position: absolute; top: 14px; width: 10px; height: 14px; border-radius: 50%; background: var(--ink); }
+    .s4-fs-foot { position: absolute; bottom: 0; width: 34px; height: 20px; border: 4px solid var(--ink); border-radius: 50%; background: #e08a62; }
+    .s4-fs-name { position: absolute; font-weight: 800; font-size: 28px; }
+    .s4-pill { position: absolute; left: 0; top: 0; padding: 4px 14px; border: 4px solid var(--ink); border-radius: 22px; background: var(--face); font-family: var(--font-mono); font-weight: 500; font-size: 28px; white-space: nowrap; opacity: 0; }
+    .s4-pill.ok { background: var(--mint); }
+    .s4-trips { position: absolute; top: 880px; font-weight: 900; font-size: 30px; }
+    #s4-note { left: 120px; top: 952px; font-size: 28px; }
+    #s4-data { left: 1110px; top: 588px; font-size: 28px; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-l1" class="line"><span class="w">virtio-fs</span><span class="w">shares</span><span class="w">host</span><span class="w">pages</span><span class="w">too</span></div>
+    <div id="s4-l2" class="line"><span class="w">But</span><span class="w">its</span><span class="w">filesystem</span><span class="w">lives</span><span class="w">on</span><span class="w">the</span><span class="w">host</span></div>
+    <div id="s4-l3" class="line"><span class="w">Every</span><span class="w">stat</span><span class="w">leaves</span><span class="w">the</span><span class="w">sandbox</span></div>
+    <div id="s4-l4" class="line"><span class="w">cladefs</span><span class="w">keeps</span><span class="w">the</span><span class="w">filesystem</span><span class="w">inside</span></div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+
+    <div id="s4-left">
+      <div class="s4-head" style="left:120px">virtio-fs</div>
+      <div class="s4-vm" style="left:120px"><div class="s4-vm-bar"><div class="s4-vm-name">sandbox</div></div>
+        <div class="s4-app"><div class="s4-app-eye" style="left:40px"></div><div class="s4-app-eye" style="left:68px"></div><div class="s4-app-mouth"></div></div>
+        <div class="s4-app-name">a program</div>
+      </div>
+      <div class="s4-host" style="left:120px"><div class="s4-host-name">host</div>
+        <div class="s4-shelf"><div class="s4-shelf-name">memory</div><div class="s4-tile" style="left:150px"></div><div class="s4-tile hot" style="left:216px"></div><div class="s4-tile" style="left:282px"></div><div class="s4-tile" style="left:348px"></div></div>
+      </div>
+      <div class="s4-fs" id="s4-fs-l" style="left:180px; top:720px">
+        <div class="s4-fs-foot" style="left:22px"></div><div class="s4-fs-foot" style="left:84px"></div>
+        <div class="s4-fs-box"><div class="s4-fs-drawer" style="top:14px"><div class="s4-fs-eye" style="left:34px"></div><div class="s4-fs-eye" style="left:62px"></div><div class="s4-fs-handle"></div></div><div class="s4-fs-drawer" style="top:82px"><div class="s4-fs-handle"></div></div></div>
+      </div>
+      <div class="s4-fs-name" id="s4-fs-l-name" style="left:156px; top:890px">filesystem</div>
+      <div class="s4-trips" id="s4-trips-l-wrap" style="left:430px">trips out: <span id="s4-trips-l">0</span></div>
+      <div id="s4-note" class="note">stat, create, readdir, unlink: 8 to 55× ext4's time (measured)</div>
+    </div>
+
+    <div id="s4-right">
+      <div class="s4-head" style="left:1020px">cladefs</div>
+      <div class="s4-vm" style="left:1020px"><div class="s4-vm-bar"><div class="s4-vm-name">sandbox</div></div>
+        <div class="s4-app"><div class="s4-app-eye" style="left:40px"></div><div class="s4-app-eye" style="left:68px"></div><div class="s4-app-mouth"></div></div>
+        <div class="s4-app-name">a program</div>
+      </div>
+      <div class="s4-host" style="left:1020px"><div class="s4-host-name">host</div>
+        <div class="s4-shelf"><div class="s4-shelf-name">memory</div><div class="s4-tile" style="left:150px"></div><div class="s4-tile hot" style="left:216px"></div><div class="s4-tile" style="left:282px"></div><div class="s4-tile" style="left:348px"></div></div>
+      </div>
+      <div class="s4-trips" id="s4-trips-r-wrap" style="left:1330px">trips out: 0</div>
+      <div id="s4-data" class="note">file data, shared</div>
+    </div>
+    <div class="s4-fs" id="s4-fs-r" style="left:1420px; top:350px">
+      <div class="s4-fs-foot" style="left:22px"></div><div class="s4-fs-foot" style="left:84px"></div>
+      <div class="s4-fs-box"><div class="s4-fs-drawer" style="top:14px"><div class="s4-fs-eye" style="left:34px"></div><div class="s4-fs-eye" style="left:62px"></div><div class="s4-fs-handle"></div></div><div class="s4-fs-drawer" style="top:82px"><div class="s4-fs-handle"></div></div></div>
+    </div>
+    <div class="s4-fs-name" id="s4-fs-r-name" style="left:1424px; top:522px">filesystem</div>
+    <div id="s4-pills" data-layout-ignore></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s4-svg");
+      const pills = document.getElementById("s4-pills");
+      // Shared page (tile 2 of each shelf) mapped up into its VM.
+      const tileX = (x0) => x0 + 4 + 300 + 5 + 216 + 27;
+      const mapL = C.el("path", { d: `M${tileX(120)} 794 C${tileX(120)} 700 ${tileX(120) - 120} 660 ${tileX(120) - 120} 584`, fill: "none", stroke: "#e2177e", "stroke-width": 5, "stroke-linecap": "round", pathLength: 100 }, svg);
+      const mapR = C.el("path", { d: `M${tileX(1020)} 794 C${tileX(1020)} 700 ${tileX(1020) - 120} 660 ${tileX(1020) - 120} 584`, fill: "none", stroke: "#e2177e", "stroke-width": 5, "stroke-linecap": "round", pathLength: 100 }, svg);
+
+      const tl = gsap.timeline({ paused: true });
+      const draw = (p, at) => tl.fromTo(p, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.5, ease: "power2.out" }, at);
+      const pop = (sel, at, stagger) => tl.fromTo(sel, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.2)", stagger: stagger || 0.1 }, at);
+
+      // virtio-fs: the VM, its host, the filesystem on the host.
+      C.words(tl, "#s4-l1", 0.05);
+      tl.fromTo("#s4-left .s4-head", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.1);
+      pop("#s4-left .s4-vm", 0.2);
+      tl.fromTo("#s4-left .s4-host", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 0.8);
+      draw(mapL, 1.3);
+      pop("#s4-fs-l", 1.6);
+      tl.fromTo(["#s4-fs-l-name", "#s4-trips-l-wrap"], { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.1 }, 1.8);
+      C.wordsOut(tl, "#s4-l1", 2.9);
+      C.words(tl, "#s4-l2", 3.1);
+      tl.fromTo("#s4-fs-l", { rotation: 0 }, { rotation: 5, duration: 0.12, ease: "sine.inOut", yoyo: true, repeat: 5, transformOrigin: "50% 100%" }, 3.6);
+
+      // Trips: every metadata call leaves the VM and comes back.
+      const ops = ["stat", "create", "readdir", "stat", "unlink", "open", "stat", "readdir", "create", "stat", "rename", "stat"];
+      const fromX = 120 + 5 + 40 + 20, fromY = 420, toX = 180 + 10, toY = 660;
+      const tripsNode = document.getElementById("s4-trips-l");
+      ops.forEach((op, k) => {
+        const at = 2.2 + k * 0.85;
+        const q = C.div("s4-pill", pills); q.textContent = op + "?";
+        const a = C.div("s4-pill ok", pills); a.textContent = "ok";
+        tl.fromTo(q, { opacity: 0, x: fromX, y: fromY, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.12, ease: "back.out(2)" }, at);
+        tl.to(q, { x: toX, y: toY, duration: 0.32, ease: "power1.inOut" }, at + 0.05);
+        tl.to(q, { opacity: 0, scale: 0.5, duration: 0.1 }, at + 0.37);
+        tl.fromTo("#s4-fs-l", { y: 0 }, { y: -14, duration: 0.1, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, at + 0.38);
+        tl.fromTo(a, { opacity: 0, x: toX + 20, y: toY, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.1, ease: "back.out(2)" }, at + 0.42);
+        tl.to(a, { x: fromX + 20, y: fromY, duration: 0.3, ease: "power1.inOut" }, at + 0.46);
+        tl.to(a, { opacity: 0, scale: 0.5, duration: 0.08 }, at + 0.76);
+        tl.set(tripsNode, { textContent: String(k + 1) }, at + 0.8);
+      });
+      C.wordsOut(tl, "#s4-l2", 5.9);
+      C.words(tl, "#s4-l3", 6.1);
+      tl.fromTo("#s4-note", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 6.8);
+      tl.fromTo("#s4-left .s4-app-mouth", { rotation: 0, y: 0 }, { rotation: 180, y: 6, duration: 0.3, ease: "back.out(2)" }, 7.2);
+
+      // cladefs: the filesystem lives in the VM; only file data comes from the host.
+      tl.fromTo("#s4-right .s4-head", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 7.0);
+      pop("#s4-right .s4-vm", 7.1);
+      tl.fromTo("#s4-right .s4-host", { opacity: 0 }, { opacity: 1, duration: 0.35 }, 7.4);
+      pop("#s4-fs-r", 7.7);
+      tl.fromTo(["#s4-fs-r-name", "#s4-trips-r-wrap"], { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.1 }, 7.9);
+      draw(mapR, 8.2);
+      const rOps = ["stat", "create", "readdir", "stat", "unlink", "open", "stat", "readdir", "stat", "create", "stat", "rename", "stat", "stat"];
+      rOps.forEach((op, k) => {
+        const at = 8.4 + k * 0.3;
+        const p = C.div("s4-pill ok", pills); p.textContent = op + " ok";
+        const x = 1020 + 5 + 190 + (k % 2) * 30, y = 470 - (k % 3) * 8;
+        tl.fromTo(p, { opacity: 0, x, y, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.12, ease: "back.out(2.5)" }, at);
+        tl.to(p, { y: y - 110, opacity: 0, duration: 0.45, ease: "power1.in" }, at + 0.14);
+      });
+      C.wordsOut(tl, "#s4-l3", 9.0);
+      C.words(tl, "#s4-l4", 9.2);
+      tl.fromTo("#s4-data", { opacity: 0, y: 12 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 10.2);
+      tl.fromTo("#s4-right .s4-app-mouth", { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)" }, 10.0);
+
+      // Hand-off: the cladefs filesystem steps forward.
+      C.wordsOut(tl, "#s4-l4", 12.2);
+      tl.to(["#s4-left", "#s4-right", svg, "#s4-fs-r-name"], { opacity: 0, duration: 0.3, ease: "power2.in" }, 12.3);
+      tl.to("#s4-fs-r", { x: 960 - 70 - 1420, y: 520 - 85 - 350, scale: 1.8, duration: 0.6, ease: "power3.inOut" }, 12.35);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

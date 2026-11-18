@@ -23,6 +23,9 @@
 //! TASK-277). The crate's other binary, `git-remote-fxfs` ([`git`]), moves a repo's fetches to the
 //! newest generation of it (TASK-136.7).
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod git;
 pub mod reconnect;
 pub mod upcall;

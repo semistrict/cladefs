@@ -53,6 +53,7 @@ pub struct DaemonWindow {
 // SAFETY: the memory is the daemon's to change, through the store, whose requests may come from
 // any thread; this process only reads it.
 unsafe impl Send for DaemonWindow {}
+// SAFETY: as Send's: shared, this process only reads the memory, which the daemon changes.
 unsafe impl Sync for DaemonWindow {}
 
 impl DaemonWindow {

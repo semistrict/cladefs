@@ -109,6 +109,9 @@
 //! them, finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it
 //! rewraps nothing.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use base32_id::Short;
 use bucket_cell::bucket::Meta;
 use bucket_cell::collector::{Collector, DryRun, Marking, Options, Report};

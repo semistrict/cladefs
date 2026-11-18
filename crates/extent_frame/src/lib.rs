@@ -58,6 +58,9 @@
 //! sectors; one that compresses is framed in a copy, encrypted with AES-GCM as above: no object mixes
 //! the two.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod segment;
 pub mod spent;
 pub mod table;

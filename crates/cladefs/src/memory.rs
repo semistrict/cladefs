@@ -32,7 +32,9 @@ pub struct VolatileSliceMut<'a> {
 // copied into only through `&mut`, as it may be memory Rust owns (`From<&mut [u8]>`), so it is not
 // `Sync`: shared, it could be written from two threads at once.
 unsafe impl Send for VolatileSlice<'_> {}
+// SAFETY: as Send's, above: a VolatileSlice only reads, volatile, memory that may be shared.
 unsafe impl Sync for VolatileSlice<'_> {}
+// SAFETY: as VolatileSlice's Send, above: it may go to another thread; written only through `&mut`.
 unsafe impl Send for VolatileSliceMut<'_> {}
 
 impl<'a> VolatileSlice<'a> {

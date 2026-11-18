@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+    <script src="assets/cuddly.js"></script>
+    <style>
+      :root {
+        --ground: #efeaf8;
+        --ink: #2e2440;
+        --accent: #e2177e;
+        --grey: #9a93ad;
+        --soft: #5e5672;
+        --face: #ffffff;
+        --peach: #ffb088;
+        --rose: #ff9ec0;
+        --lilac: #b9a4ff;
+        --mint: #8fddc2;
+        --butter: #ffd86e;
+        --sky: #8cc8ff;
+        --font-display: "Nunito", sans-serif;
+        --font-mono: "JetBrains Mono", monospace;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--ground);
+      }
+      #root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        font-family: var(--font-display);
+        color: var(--ink);
+      }
+      #ground {
+        position: absolute;
+        inset: 0;
+        background: var(--ground);
+      }
+      #felt {
+        position: absolute;
+        inset: 0;
+        opacity: 0.03;
+        pointer-events: none;
+        z-index: 50;
+      }
+      /* Shared by every scene. */
+      .line { position: absolute; left: 120px; top: 84px; font-weight: 900; font-size: 80px; letter-spacing: -0.01em; line-height: 1.05; white-space: nowrap; }
+      .line .w { display: inline-block; margin-right: 0.24em; }
+      .label { position: absolute; font-weight: 800; font-size: 30px; white-space: nowrap; }
+      .note { position: absolute; font-weight: 700; font-size: 30px; color: var(--soft); white-space: nowrap; }
+      .mono { font-family: var(--font-mono); font-weight: 500; }
+      .vm { position: absolute; background: var(--face); border-style: solid; border-color: var(--ink); overflow: hidden; }
+      .vm-bar { position: absolute; left: 0; right: 0; top: 0; background: var(--lilac); }
+      .vm-face { position: absolute; left: 0; right: 0; bottom: 0; }
+      .vm-eye { position: absolute; background: var(--ink); border-radius: 50%; }
+      .vm-mouth { position: absolute; border-style: solid; border-color: transparent transparent var(--ink) transparent; border-top-width: 0 !important; border-radius: 0 0 50% 50% / 0 0 100% 100%; }
+      .scene-svg { position: absolute; left: 0; top: 0; overflow: visible; }
+    </style>
+  </head>
+  <body>
+    <div id="root" data-composition-id="main" data-start="0" data-duration="132" data-width="1920" data-height="1080">
+      <div id="ground"></div>
+
+      <div id="s1" data-composition-id="s1" data-composition-src="compositions/s1.html" data-start="0" data-duration="9" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s2" data-composition-id="s2" data-composition-src="compositions/s2.html" data-start="9" data-duration="8" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s3" data-composition-id="s3" data-composition-src="compositions/s3.html" data-start="17" data-duration="15" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s4" data-composition-id="s4" data-composition-src="compositions/s4.html" data-start="32" data-duration="13" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s5" data-composition-id="s5" data-composition-src="compositions/s5.html" data-start="45" data-duration="7" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s6" data-composition-id="s6" data-composition-src="compositions/s6.html" data-start="52" data-duration="7" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s7" data-composition-id="s7" data-composition-src="compositions/s7.html" data-start="59" data-duration="13" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s8" data-composition-id="s8" data-composition-src="compositions/s8.html" data-start="72" data-duration="6" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s9" data-composition-id="s9" data-composition-src="compositions/s9.html" data-start="78" data-duration="12" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s11" data-composition-id="s11" data-composition-src="compositions/s11.html" data-start="90" data-duration="11" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s12" data-composition-id="s12" data-composition-src="compositions/s12.html" data-start="101" data-duration="9.5" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s13" data-composition-id="s13" data-composition-src="compositions/s13.html" data-start="110.5" data-duration="9.5" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div id="s10" data-composition-id="s10" data-composition-src="compositions/s10.html" data-start="120" data-duration="12" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+
+      <svg id="felt" width="1920" height="1080" data-layout-ignore>
+        <filter id="felt-noise"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="11" /></filter>
+        <rect width="1920" height="1080" filter="url(#felt-noise)" />
+      </svg>
+
+      <!-- Music: a ukulele phrase of 40 beats (20 s at 120 BPM), six times, then a last pass that ends on its own chord. -->
+      <audio id="uke-1" class="clip" src="assets/audio/uke-loud.wav" data-start="0" data-duration="20" data-track-index="10" data-volume="0.75" data-fade-in="0.3"></audio>
+      <audio id="uke-2" class="clip" src="assets/audio/uke-loud.wav" data-start="20" data-duration="20" data-track-index="10" data-volume="0.75"></audio>
+      <audio id="uke-3" class="clip" src="assets/audio/uke-loud.wav" data-start="40" data-duration="20" data-track-index="10" data-volume="0.75"></audio>
+      <audio id="uke-4" class="clip" src="assets/audio/uke-loud.wav" data-start="60" data-duration="20" data-track-index="10" data-volume="0.75"></audio>
+      <audio id="uke-5" class="clip" src="assets/audio/uke-loud.wav" data-start="80" data-duration="20" data-track-index="10" data-volume="0.75"></audio>
+      <audio id="uke-6" class="clip" src="assets/audio/uke-loud.wav" data-start="100" data-duration="20" data-track-index="10" data-volume="0.75"></audio>
+      <!-- The last pass starts on a bar, 10 s in, so its own last chord lands at 130 s. -->
+      <audio id="uke-7" class="clip" src="assets/audio/uke-loud.wav" data-start="120" data-duration="12" data-media-start="10" data-track-index="10" data-volume="0.75"></audio>
+      <!-- Effects: each placed so its peak lands with its picture. -->
+      <audio id="fx-01" class="clip" src="assets/audio/sfx_003.mp3" data-start="0.30" data-duration="0.57" data-track-index="11" data-volume="0.8"></audio> <!-- VM bounces in -->
+      <audio id="fx-02" class="clip" src="assets/audio/sfx_004.mp3" data-start="3.35" data-duration="0.21" data-track-index="11" data-volume="0.7"></audio> <!-- memory -->
+      <audio id="fx-03" class="clip" src="assets/audio/sfx_004.mp3" data-start="3.70" data-duration="0.21" data-track-index="11" data-volume="0.7"></audio> <!-- disk -->
+      <audio id="fx-04" class="clip" src="assets/audio/sfx_003.mp3" data-start="5.27" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- file into memory -->
+      <audio id="fx-05" class="clip" src="assets/audio/sfx_010.mp3" data-start="8.27" data-duration="1.4" data-track-index="11" data-volume="0.6"></audio> <!-- VM shrinks -->
+      <audio id="fx-06" class="clip" src="assets/audio/sfx_004.mp3" data-start="9.10" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- popcorn -->
+      <audio id="fx-07" class="clip" src="assets/audio/sfx_003.mp3" data-start="9.50" data-duration="0.57" data-track-index="12" data-volume="0.5"></audio> <!-- popcorn -->
+      <audio id="fx-08" class="clip" src="assets/audio/sfx_004.mp3" data-start="9.90" data-duration="0.21" data-track-index="11" data-volume="0.5"></audio> <!-- popcorn -->
+      <audio id="fx-09" class="clip" src="assets/audio/sfx_003.mp3" data-start="10.30" data-duration="0.57" data-track-index="11" data-volume="0.5"></audio> <!-- popcorn -->
+      <audio id="fx-10" class="clip" src="assets/audio/sfx_008.mp3" data-start="14.56" data-duration="1.6" data-track-index="11" data-volume="0.5"></audio> <!-- memory strains -->
+      <audio id="fx-11" class="clip" src="assets/audio/sfx_003.mp3" data-start="19.10" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- one page -->
+      <audio id="fx-12" class="clip" src="assets/audio/sfx_012.mp3" data-start="21.92" data-duration="3.3" data-track-index="11" data-volume="0.6"></audio> <!-- one brick -->
+      <audio id="fx-13" class="clip" src="assets/audio/sfx_008.mp3" data-start="26.56" data-duration="1.6" data-track-index="11" data-volume="0.45"></audio> <!-- bucket wiggles -->
+      <audio id="fx-14" class="clip" src="assets/audio/sfx_004.mp3" data-start="34.58" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 1 -->
+      <audio id="fx-15" class="clip" src="assets/audio/sfx_004.mp3" data-start="35.43" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 2 -->
+      <audio id="fx-16" class="clip" src="assets/audio/sfx_004.mp3" data-start="36.28" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 3 -->
+      <audio id="fx-17" class="clip" src="assets/audio/sfx_004.mp3" data-start="37.13" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 4 -->
+      <audio id="fx-18" class="clip" src="assets/audio/sfx_004.mp3" data-start="37.98" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 5 -->
+      <audio id="fx-19" class="clip" src="assets/audio/sfx_004.mp3" data-start="38.83" data-duration="0.21" data-track-index="11" data-volume="0.35"></audio> <!-- trip 6 -->
+      <audio id="fx-20" class="clip" src="assets/audio/sfx_012.mp3" data-start="39.75" data-duration="3.3" data-track-index="11" data-volume="0.55"></audio> <!-- stats inside -->
+      <audio id="fx-21" class="clip" src="assets/audio/sfx_010.mp3" data-start="44.17" data-duration="1.4" data-track-index="11" data-volume="0.55"></audio> <!-- filesystem steps forward -->
+      <audio id="fx-22" class="clip" src="assets/audio/sfx_003.mp3" data-start="46.00" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- Fxfs tag -->
+      <audio id="fx-23" class="clip" src="assets/audio/sfx_004.mp3" data-start="47.20" data-duration="0.21" data-track-index="11" data-volume="0.6"></audio> <!-- Fuchsia -->
+      <audio id="fx-24" class="clip" src="assets/audio/sfx_008.mp3" data-start="50.23" data-duration="1.6" data-track-index="11" data-volume="0.6"></audio> <!-- lands in the VM -->
+      <audio id="fx-25" class="clip" src="assets/audio/sfx_003.mp3" data-start="52.70" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- extent -->
+      <audio id="fx-26" class="clip" src="assets/audio/sfx_012.mp3" data-start="54.62" data-duration="3.3" data-track-index="11" data-volume="0.5"></audio> <!-- shine -->
+      <audio id="fx-27" class="clip" src="assets/audio/sfx_004.mp3" data-start="56.15" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- plop -->
+      <audio id="fx-28" class="clip" src="assets/audio/sfx_004.mp3" data-start="56.30" data-duration="0.21" data-track-index="13" data-volume="0.5"></audio> <!-- plop -->
+      <audio id="fx-29" class="clip" src="assets/audio/sfx_004.mp3" data-start="56.45" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- plop -->
+      <audio id="fx-30" class="clip" src="assets/audio/sfx_003.mp3" data-start="57.50" data-duration="0.57" data-track-index="12" data-volume="0.6"></audio> <!-- into the bucket -->
+      <audio id="fx-31" class="clip" src="assets/audio/sfx_004.mp3" data-start="59.20" data-duration="0.21" data-track-index="11" data-volume="0.45"></audio> <!-- cells -->
+      <audio id="fx-32" class="clip" src="assets/audio/sfx_003.mp3" data-start="59.50" data-duration="0.57" data-track-index="11" data-volume="0.45"></audio> <!-- cells -->
+      <audio id="fx-33" class="clip" src="assets/audio/sfx_004.mp3" data-start="59.80" data-duration="0.21" data-track-index="12" data-volume="0.45"></audio> <!-- cells -->
+      <audio id="fx-34" class="clip" src="assets/audio/sfx_003.mp3" data-start="60.10" data-duration="0.57" data-track-index="11" data-volume="0.45"></audio> <!-- cells -->
+      <audio id="fx-35" class="clip" src="assets/audio/sfx_004.mp3" data-start="60.40" data-duration="0.21" data-track-index="12" data-volume="0.45"></audio> <!-- cells -->
+      <audio id="fx-36" class="clip" src="assets/audio/sfx_009.mp3" data-start="60.78" data-duration="2.4" data-track-index="11" data-volume="0.45"></audio> <!-- cell 9 up close -->
+      <audio id="fx-37" class="clip" src="assets/audio/sfx_008.mp3" data-start="70.26" data-duration="1.6" data-track-index="11" data-volume="0.6"></audio> <!-- hop to host B -->
+      <audio id="fx-38" class="clip" src="assets/audio/sfx_003.mp3" data-start="73.20" data-duration="0.57" data-track-index="11" data-volume="0.8"></audio> <!-- v1 stamps -->
+      <audio id="fx-39" class="clip" src="assets/audio/sfx_004.mp3" data-start="76.80" data-duration="0.21" data-track-index="11" data-volume="0.6"></audio> <!-- into the bucket -->
+      <audio id="fx-40" class="clip" src="assets/audio/sfx_003.mp3" data-start="79.50" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- first fork -->
+      <audio id="fx-41" class="clip" src="assets/audio/sfx_004.mp3" data-start="81.70" data-duration="0.21" data-track-index="11" data-volume="0.6"></audio> <!-- forks -->
+      <audio id="fx-42" class="clip" src="assets/audio/sfx_003.mp3" data-start="82.00" data-duration="0.57" data-track-index="11" data-volume="0.6"></audio> <!-- forks -->
+      <audio id="fx-43" class="clip" src="assets/audio/sfx_004.mp3" data-start="83.10" data-duration="0.21" data-track-index="11" data-volume="0.45"></audio> <!-- multiply -->
+      <audio id="fx-44" class="clip" src="assets/audio/sfx_003.mp3" data-start="83.35" data-duration="0.57" data-track-index="11" data-volume="0.45"></audio> <!-- multiply -->
+      <audio id="fx-45" class="clip" src="assets/audio/sfx_004.mp3" data-start="83.60" data-duration="0.21" data-track-index="12" data-volume="0.45"></audio> <!-- multiply -->
+      <audio id="fx-46" class="clip" src="assets/audio/sfx_003.mp3" data-start="83.85" data-duration="0.57" data-track-index="12" data-volume="0.45"></audio> <!-- multiply -->
+      <audio id="fx-47" class="clip" src="assets/audio/sfx_004.mp3" data-start="84.10" data-duration="0.21" data-track-index="11" data-volume="0.45"></audio> <!-- multiply -->
+      <audio id="fx-48" class="clip" src="assets/audio/sfx_012.mp3" data-start="85.12" data-duration="3.3" data-track-index="11" data-volume="0.5"></audio> <!-- writers -->
+      <audio id="fx-n01" class="clip" src="assets/audio/sfx_003.mp3" data-start="90.45" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- checkout -->
+      <audio id="fx-n02" class="clip" src="assets/audio/sfx_004.mp3" data-start="91.65" data-duration="0.21" data-track-index="11" data-volume="0.6"></audio> <!-- keeper -->
+      <audio id="fx-n03" class="clip" src="assets/audio/sfx_004.mp3" data-start="93.05" data-duration="0.21" data-track-index="11" data-volume="0.7"></audio> <!-- git fetch -->
+      <audio id="fx-n04" class="clip" src="assets/audio/sfx_012.mp3" data-start="93.37" data-duration="3.3" data-track-index="11" data-volume="0.5"></audio> <!-- gen 2 -->
+      <audio id="fx-n05" class="clip" src="assets/audio/sfx_004.mp3" data-start="95.40" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- attach -->
+      <audio id="fx-n06" class="clip" src="assets/audio/sfx_003.mp3" data-start="95.70" data-duration="0.57" data-track-index="12" data-volume="0.5"></audio> <!-- attach -->
+      <audio id="fx-n07" class="clip" src="assets/audio/sfx_004.mp3" data-start="96.00" data-duration="0.21" data-track-index="13" data-volume="0.5"></audio> <!-- attach -->
+      <audio id="fx-n08" class="clip" src="assets/audio/sfx_003.mp3" data-start="101.50" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- cell 9 on host A -->
+      <audio id="fx-n09" class="clip" src="assets/audio/sfx_003.mp3" data-start="104.25" data-duration="0.57" data-track-index="11" data-volume="0.6"></audio> <!-- out of the bucket -->
+      <audio id="fx-n10" class="clip" src="assets/audio/sfx_008.mp3" data-start="105.36" data-duration="1.6" data-track-index="11" data-volume="0.6"></audio> <!-- lands on host B -->
+      <audio id="fx-n11" class="clip" src="assets/audio/sfx_004.mp3" data-start="107.05" data-duration="0.21" data-track-index="11" data-volume="0.6"></audio> <!-- fence -->
+      <audio id="fx-n12" class="clip" src="assets/audio/sfx_008.mp3" data-start="107.81" data-duration="1.6" data-track-index="11" data-volume="0.55"></audio> <!-- write bounces -->
+      <audio id="fx-n13" class="clip" src="assets/audio/sfx_004.mp3" data-start="110.90" data-duration="0.21" data-track-index="11" data-volume="0.5"></audio> <!-- cells -->
+      <audio id="fx-n14" class="clip" src="assets/audio/sfx_003.mp3" data-start="111.20" data-duration="0.57" data-track-index="11" data-volume="0.5"></audio> <!-- cells -->
+      <audio id="fx-n15" class="clip" src="assets/audio/sfx_004.mp3" data-start="111.50" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- cells -->
+      <audio id="fx-n16" class="clip" src="assets/audio/sfx_003.mp3" data-start="113.55" data-duration="0.57" data-track-index="11" data-volume="0.7"></audio> <!-- KMS -->
+      <audio id="fx-n17" class="clip" src="assets/audio/sfx_004.mp3" data-start="113.85" data-duration="0.21" data-track-index="12" data-volume="0.6"></audio> <!-- tenant key -->
+      <audio id="fx-n18" class="clip" src="assets/audio/sfx_003.mp3" data-start="116.10" data-duration="0.57" data-track-index="11" data-volume="0.8"></audio> <!-- key breaks -->
+      <audio id="fx-n19" class="clip" src="assets/audio/sfx_004.mp3" data-start="116.55" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- poof -->
+      <audio id="fx-n20" class="clip" src="assets/audio/sfx_003.mp3" data-start="116.80" data-duration="0.57" data-track-index="11" data-volume="0.5"></audio> <!-- poof -->
+      <audio id="fx-n21" class="clip" src="assets/audio/sfx_004.mp3" data-start="117.05" data-duration="0.21" data-track-index="12" data-volume="0.5"></audio> <!-- poof -->
+      <audio id="fx-e1" class="clip" src="assets/audio/sfx_004.mp3" data-start="120.10" data-duration="0.21" data-track-index="11" data-volume="0.5"></audio> <!-- sandboxes -->
+      <audio id="fx-e2" class="clip" src="assets/audio/sfx_003.mp3" data-start="120.40" data-duration="0.57" data-track-index="11" data-volume="0.5"></audio> <!-- sandboxes -->
+      <audio id="fx-e3" class="clip" src="assets/audio/sfx_006.mp3" data-start="122.84" data-duration="1.9" data-track-index="11" data-volume="0.8"></audio> <!-- copies squeeze together -->
+      <audio id="fx-e4" class="clip" src="assets/audio/sfx_012.mp3" data-start="123.92" data-duration="3.3" data-track-index="12" data-volume="0.5"></audio> <!-- one copy -->
+      <audio id="fx-e5" class="clip" src="assets/audio/sfx_004.mp3" data-start="125.05" data-duration="0.21" data-track-index="11" data-volume="0.5"></audio> <!-- smiles -->
+      <audio id="fx-e6" class="clip" src="assets/audio/sfx_008.mp3" data-start="129.96" data-duration="1.6" data-track-index="11" data-volume="0.6"></audio> <!-- cell 9 lands on the last chord -->
+    </div>
+    <script>
+      window.__timelines = window.__timelines || {};
+      window.__timelines["main"] = gsap.timeline({ paused: true });
+    </script>
+  </body>
+</html>

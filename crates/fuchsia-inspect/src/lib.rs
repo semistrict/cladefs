@@ -8,6 +8,9 @@
 //! the tree is never published, so nodes and properties record nothing, but
 //! they keep the real library's names and signatures so Fxfs is unchanged.
 
+// Every unsafe block says why it is sound, other threads included (TASK-444.4).
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 use futures::future::BoxFuture;
 
 /// Accepted wherever Inspect takes a node or property name.
