@@ -4670,16 +4670,14 @@ fn stores_whose_vm_went_open_again_while_their_uploads_wait() {
 }
 
 /// An object store in memory whose reads wait while they are held ([`GatedReads::hold`]): what
-/// makes a page-in's fetch from object storage wait as long as a test needs. And whose writes
-/// under a prefix wait while it is held ([`GatedReads::hold_writes`]).
+/// makes a page-in's fetch from object storage wait as long as a test needs. And whose next write
+/// under a prefix waits until let go ([`GatedReads::hold_next_write`]).
 #[derive(Debug)]
 struct GatedReads {
     store: object_store::memory::InMemory,
     held: tokio::sync::watch::Sender<bool>,
     /// The reads waiting.
     waiting: std::sync::atomic::AtomicUsize,
-    /// The prefix of the keys whose writes wait, if any.
-    held_writes: tokio::sync::watch::Sender<Option<String>>,
     /// The writes waiting.
     writes_waiting: std::sync::atomic::AtomicUsize,
     /// The prefix of the keys whose next write alone waits, until let go, if any
@@ -4700,7 +4698,6 @@ impl GatedReads {
             store: object_store::memory::InMemory::new(),
             held: tokio::sync::watch::channel(false).0,
             waiting: Default::default(),
-            held_writes: tokio::sync::watch::channel(None).0,
             writes_waiting: Default::default(),
             next_write: Default::default(),
             next_write_going: tokio::sync::watch::channel(false).0,
@@ -4717,11 +4714,6 @@ impl GatedReads {
 
     fn let_held_write_go(&self) {
         self.next_write_going.send_replace(true);
-    }
-
-    /// Holds the writes of keys beginning with `prefix` from now on, if any, or lets them go.
-    fn hold_writes(&self, prefix: Option<String>) {
-        self.held_writes.send_replace(prefix);
     }
 
     fn writes_waiting(&self) -> usize {
@@ -4759,12 +4751,6 @@ impl object_store::ObjectStore for GatedReads {
             let mut going = self.next_write_going.subscribe();
             self.writes_waiting.fetch_add(1, Ordering::Relaxed);
             let _ = going.wait_for(|going| *going).await;
-            self.writes_waiting.fetch_sub(1, Ordering::Relaxed);
-        }
-        if holds(&self.held_writes.borrow()) {
-            let mut held = self.held_writes.subscribe();
-            self.writes_waiting.fetch_add(1, Ordering::Relaxed);
-            let _ = held.wait_for(|prefix| !holds(prefix)).await;
             self.writes_waiting.fetch_sub(1, Ordering::Relaxed);
         }
         self.store.put_opts(location, payload, opts).await
