@@ -1,0 +1,253 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! cladefs: a store's directory whose every change is counted in its footprint as it is made
+//! ([`crate::footprint`], backlog doc-22, TASK-539.4): what every directory a store opens is
+//! outermost, over its page cache ([`crate::CachedDir`]), the host's ([`crate::HostDir`]) and one in
+//! memory ([`crate::MemDir`]) alike, so that no store, a test's no more than a host's, runs around
+//! it. A write is counted as the page cache takes it; what changes a directory, as it is changed,
+//! once the directory under it has changed it.
+
+use crate::cached::{CachedDir, CachedFile};
+use crate::dir::{Dir, DirFile, File};
+use crate::footprint::{FileLen, Footprint};
+use crate::pages::PageCache;
+use bucket_cell::host_disk::HostDisk;
+use std::io;
+use std::ops::Range;
+use std::os::fd::{AsRawFd, RawFd};
+use std::path::Path;
+use std::sync::Arc;
+
+/// A directory, `D`, its changes counted. See the module docs.
+pub struct Metered<D: Dir> {
+    shared: Arc<Shared<D>>,
+}
+
+struct Shared<D: Dir> {
+    dir: D,
+    footprint: Arc<Footprint>,
+}
+
+/// Its clones are the same opening of its store.
+impl<D: Dir> Clone for Metered<D> {
+    fn clone(&self) -> Self {
+        Self { shared: self.shared.clone() }
+    }
+}
+
+impl<D: Dir> Drop for Shared<D> {
+    fn drop(&mut self) {
+        self.footprint.detach();
+    }
+}
+
+impl<D: Dir> Metered<D> {
+    /// `dir`, its changes counted in `footprint`, its store's: listed, if no other opening of it
+    /// is alive, and counted as listed ([`Footprint::attach`]).
+    pub fn over(dir: D, footprint: Arc<Footprint>) -> io::Result<Self> {
+        footprint.attach(&dir)?;
+        Ok(Self { shared: Arc::new(Shared { dir, footprint }) })
+    }
+
+    /// The directory under it.
+    pub fn under(&self) -> &D {
+        &self.shared.dir
+    }
+
+    /// Its store's footprint.
+    pub fn footprint(&self) -> &Arc<Footprint> {
+        &self.shared.footprint
+    }
+
+    fn file(&self, file: D::File, len: Arc<FileLen>) -> MeteredFile<D::File> {
+        MeteredFile { file, len, footprint: self.shared.footprint.clone() }
+    }
+}
+
+impl<D: Dir> Metered<CachedDir<D>> {
+    /// The page cache its files' pages are in.
+    pub fn cache(&self) -> &Arc<PageCache> {
+        self.under().cache()
+    }
+}
+
+impl<D: Dir> Dir for Metered<D> {
+    type File = MeteredFile<D::File>;
+
+    fn create(&self, path: &str, data: bool) -> io::Result<Self::File> {
+        let file = self.shared.dir.create(path, data)?;
+        Ok(self.file(file, self.shared.footprint.made(path)))
+    }
+
+    fn open(&self, path: &str, data: bool) -> io::Result<Self::File> {
+        let file = self.shared.dir.open(path, data)?;
+        let len = self.shared.footprint.opened(path, || file.size())?;
+        Ok(self.file(file, len))
+    }
+
+    fn remove(&self, path: &str) -> io::Result<()> {
+        self.shared.dir.remove(path)?;
+        self.shared.footprint.removed(path);
+        Ok(())
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.shared.dir.rename(from, to)?;
+        self.shared.footprint.renamed(from, to);
+        Ok(())
+    }
+
+    fn link(&self, from: &str, to: &str) -> io::Result<()> {
+        self.shared.dir.link(from, to)?;
+        self.shared.footprint.linked(from, to);
+        Ok(())
+    }
+
+    fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        self.shared.dir.replace(path, bytes)?;
+        self.shared.footprint.replaced(path, bytes.len() as u64);
+        Ok(())
+    }
+
+    fn create_dir(&self, path: &str) -> io::Result<()> {
+        self.shared.dir.create_dir(path)?;
+        self.shared.footprint.made_dir(path);
+        Ok(())
+    }
+
+    fn list(&self, path: &str) -> io::Result<Vec<String>> {
+        self.shared.dir.list(path)
+    }
+
+    fn entries(&self) -> io::Result<Vec<DirFile>> {
+        self.shared.dir.entries()
+    }
+
+    fn sync_dir(&self, path: &str) -> io::Result<()> {
+        self.shared.dir.sync_dir(path)
+    }
+
+    fn barrier(&self) -> io::Result<()> {
+        self.shared.dir.barrier()
+    }
+
+    fn take(&self) -> io::Result<()> {
+        self.shared.dir.take()
+    }
+
+    fn let_go(&self) {
+        self.shared.dir.let_go()
+    }
+
+    fn claim(&self) -> io::Result<()> {
+        self.shared.dir.claim()
+    }
+
+    fn unclaim(&self) {
+        self.shared.dir.unclaim()
+    }
+
+    /// Taken, it goes from the store, as a removal takes it.
+    fn give(&self, path: &str, to: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<bool> {
+        let given = self.shared.dir.give(path, to)?;
+        if given {
+            self.shared.footprint.removed(path);
+        }
+        Ok(given)
+    }
+
+    fn concurrent(&self) -> bool {
+        self.shared.dir.concurrent()
+    }
+
+    fn disk(&self) -> Option<&Arc<HostDisk>> {
+        self.shared.dir.disk()
+    }
+
+    fn footprint(&self) -> Option<&Arc<Footprint>> {
+        Some(&self.shared.footprint)
+    }
+}
+
+/// A file of a [`Metered`] directory: its writes counted as far as they go.
+pub struct MeteredFile<F: File> {
+    file: F,
+    len: Arc<FileLen>,
+    footprint: Arc<Footprint>,
+}
+
+impl<F: File> MeteredFile<F> {
+    /// The file under it.
+    pub fn under(&self) -> &F {
+        &self.file
+    }
+}
+
+impl<F: File> MeteredFile<CachedFile<F>> {
+    /// As [`CachedFile::settle`].
+    pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
+        self.file.settle(range)
+    }
+
+    /// As [`CachedFile::settle_for_write`], counting the file as far as `range` goes: what the
+    /// caller writes there, on the file under it, by its descriptor ([`AsRawFd`]), as an image's
+    /// device does.
+    pub fn settle_for_write(&self, range: Range<u64>) -> io::Result<()> {
+        self.file.settle_for_write(range.clone())?;
+        self.len.grow(&self.footprint, range.end);
+        Ok(())
+    }
+}
+
+impl<F: File + AsRawFd> AsRawFd for MeteredFile<F> {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
+impl<F: File> File for MeteredFile<F> {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_at(buf, offset)
+    }
+
+    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_cached(buf, offset)
+    }
+
+    /// Counted as far as it went: one failing may have grown the file part way, as a partial
+    /// write does, which its size says.
+    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        let written = self.file.write_at(buf, offset);
+        match &written {
+            Ok(()) => self.len.grow(&self.footprint, offset + buf.len() as u64),
+            Err(_) => {
+                if let Ok(size) = self.file.size() {
+                    self.len.grow(&self.footprint, size);
+                }
+            }
+        }
+        written
+    }
+
+    fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
+        self.file.write_back(offset, len)
+    }
+
+    fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
+        self.file.write_behind(offset, len)
+    }
+
+    fn size(&self) -> io::Result<u64> {
+        self.file.size()
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        self.file.sync()
+    }
+
+    fn sync_cached(&self) -> io::Result<()> {
+        self.file.sync_cached()
+    }
+}

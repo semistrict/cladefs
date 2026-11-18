@@ -71,7 +71,10 @@ pub fn unmade_host(path: &Path) -> bool {
 pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     let mut file = store_file(path)?;
     file.token = Some(token);
-    let written = HostDir::new(path).and_then(|dir| dir.replace(DESCRIPTION, file.text().as_bytes()));
+    let written = HostDir::new(path).and_then(|dir| {
+        dir.replace(DESCRIPTION, file.text().as_bytes())?;
+        dir.sync_dir("")
+    });
     written.with_context(|| format!("placing {}", path.display()))
 }
 
@@ -122,6 +125,11 @@ fn deleted_description() -> String {
 /// it held a store or what a making left of one, so that what its files took of the host's disk
 /// goes with them (TASK-539.3); the store opened nowhere.
 pub fn remove_store_dir(store: &Path) -> Result<(), Error> {
+    crate::footprint::removing(store, || remove_store(store))
+}
+
+/// Removes the directory of the store at `store`, as [`remove_store_dir`] says.
+fn remove_store(store: &Path) -> Result<(), Error> {
     let name = deleted_description();
     let deleted = store.join(&name);
     let removing = || -> std::io::Result<()> {

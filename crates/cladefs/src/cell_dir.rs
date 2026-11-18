@@ -33,7 +33,9 @@ const PUBLIC: &str = "public-";
 /// and synced beside it, renamed over it, the directory synced after.
 /// cladefs: through the store's directory, as every change to it is (`Dir::replace`, TASK-539.3).
 pub(crate) fn write(dir: &Path, name: &str, text: &str) -> io::Result<()> {
-    local_cell::HostDir::new(dir)?.replace(name, text.as_bytes())
+    let dir = local_cell::HostDir::new(dir)?;
+    dir.replace(name, text.as_bytes())?;
+    dir.sync_dir("")
 }
 
 /// Makes the empty records `names` in `dir`, durably: each synced, then the directory; one there

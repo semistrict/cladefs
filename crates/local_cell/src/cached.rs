@@ -14,7 +14,7 @@
 //! as they are. A file removed, or replaced by a rename, is unlinked, unless it is at another name
 //! still: its openings go on with its pages, and the last drops them, the dirty ones unwritten.
 
-use crate::dir::{Dir, File};
+use crate::dir::{Dir, DirFile, File};
 use crate::pages::{Cached, PageCache, WeakCached};
 use crate::sync::Mutex;
 use std::collections::HashMap;
@@ -156,6 +156,17 @@ impl<D: Dir> Dir for CachedDir<D> {
 
     fn list(&self, path: &str) -> io::Result<Vec<String>> {
         self.shared.dir.list(path)
+    }
+
+    /// Each data file open as long as its pages go, written back or not.
+    fn entries(&self) -> io::Result<Vec<DirFile>> {
+        let mut found = self.shared.dir.entries()?;
+        for file in found.iter_mut().filter(|file| !file.dir) {
+            if let Some(cached) = self.cached(&file.path) {
+                file.len = file.len.max(cached.size()?);
+            }
+        }
+        Ok(found)
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
@@ -320,7 +331,8 @@ mod tests {
     /// A directory of the host's over a page cache of its own, with no flusher: what it holds
     /// dirty stays so until written back.
     fn host_dir(path: &std::path::Path) -> HostDir {
-        HostDir::over(crate::dir::DiskDir::new(path).unwrap(), PageCache::without_flusher(Options::default()))
+        let cache = PageCache::without_flusher(Options::default());
+        HostDir::on(crate::dir::DiskDir::new(path).unwrap(), cache).unwrap()
     }
 
     /// TASK-539.2: a data file given is written back before the taker reads it, and, taken, its

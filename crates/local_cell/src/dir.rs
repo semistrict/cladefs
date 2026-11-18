@@ -67,6 +67,19 @@ pub trait File: Send + Sync + 'static {
     fn sync_cached(&self) -> io::Result<()>;
 }
 
+/// cladefs: a file or directory a directory holds, as [`Dir::entries`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirFile {
+    /// Its path in the directory.
+    pub path: String,
+    /// Its length, in bytes: nothing, for a directory.
+    pub len: u64,
+    /// Its inode, which its every name shares: nothing, for a directory.
+    pub inode: u64,
+    /// Whether it is a directory.
+    pub dir: bool,
+}
+
 /// The directory a store lives in, with what the store needs of its file system. Paths are
 /// relative to it: a file's name, or a subdirectory's and a file's, joined by `/`. `""` is the
 /// directory itself.
@@ -103,10 +116,11 @@ pub trait Dir: Send + Sync + 'static {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    /// cladefs: writes `bytes` as the file at `path`, whole or not at all, and durably: a file
-    /// written and synced beside it, renamed over any there, its directory synced after, so that a
-    /// crash leaves the one there before or this, never neither (TASK-539.3). What the records
-    /// beside a store's files are written by: its description, and cladefs's own.
+    /// cladefs: writes `bytes` as the file at `path`, whole or not at all: a file written and synced
+    /// beside it, renamed over any there, at once, as [`Dir::rename`] renames, so that a crash leaves
+    /// the one there before or this, never neither, and this once its directory is synced
+    /// (TASK-539.3). Failing, it changed nothing at `path`. What the records beside a store's files
+    /// are written by: its description, and cladefs's own, each synced so.
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()>;
 
     /// Creates the directory at `path`.
@@ -114,6 +128,13 @@ pub trait Dir: Send + Sync + 'static {
 
     /// The names of the files in the directory at `path`.
     fn list(&self, path: &str) -> io::Result<Vec<String>>;
+
+    /// cladefs: every file and directory it holds, at any depth, but itself: what a store's
+    /// footprint counts as its first opening begins ([`crate::footprint`], TASK-539.4). By
+    /// default, unsupported.
+    fn entries(&self) -> io::Result<Vec<DirFile>> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 
     /// Makes the directory's entries durable: the files created and removed in it.
     fn sync_dir(&self, path: &str) -> io::Result<()>;
@@ -167,6 +188,11 @@ pub trait Dir: Send + Sync + 'static {
     fn disk(&self) -> Option<&Arc<bucket_cell::host_disk::HostDisk>> {
         None
     }
+
+    /// cladefs: the footprint its store's files are counted in, if they are ([`crate::Metered`]).
+    fn footprint(&self) -> Option<&Arc<crate::footprint::Footprint>> {
+        None
+    }
 }
 
 /// The whole of `file`, read as it is: a store's file that holds no extents' data, whose reads
@@ -214,24 +240,36 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `fsync` would leave the order to the drive as well, so that a power loss could keep a commit's
 /// record, synced after its data, without the data. macOS is a development host: stores run on
 /// Linux.
-pub type HostDir = crate::CachedDir<DiskDir>;
+///
+/// cladefs: its changes counted, as it makes them, in its store's footprint ([`crate::Metered`],
+/// TASK-539.4).
+pub type HostDir = crate::Metered<crate::CachedDir<DiskDir>>;
 
 /// cladefs: a file of a [`HostDir`]: one of its extents' files, through the process's page cache,
-/// or any other, read and written as it is ([`DiskFile`]).
-pub type HostFile = crate::CachedFile<DiskFile>;
+/// or any other, read and written as it is ([`DiskFile`]); its writes counted.
+pub type HostFile = crate::MeteredFile<crate::CachedFile<DiskFile>>;
 
 impl HostDir {
     /// The directory at `path`, which exists, its extents' files through the process's page cache
     /// ([`crate::pages::shared`]). Its files are opened bypassing the host's page cache, or not
     /// at all: a file system that refuses to fails their openings (`InvalidInput`), never falling
     /// back to the host's cache, a second memory (TASK-433, TASK-433.6).
+    /// cladefs: its changes counted in its store's footprint, the one this process counts it in
+    /// already if it opened it before ([`crate::footprint`]): the first opening while no other
+    /// is alive lists it.
     pub fn new(path: &Path) -> io::Result<Self> {
-        Ok(Self::over(DiskDir::new(path)?, crate::pages::shared().clone()))
+        Self::on(DiskDir::new(path)?, crate::pages::shared().clone())
+    }
+
+    /// `dir`, its extents' files through `cache`, its changes counted in its store's footprint.
+    pub fn on(dir: DiskDir, cache: Arc<crate::pages::PageCache>) -> io::Result<Self> {
+        let footprint = crate::footprint::of_host(&dir.path, &dir.disk)?;
+        Self::over(crate::CachedDir::over(dir, cache), footprint)
     }
 
     /// The directory's path.
     pub fn path(&self) -> &Path {
-        &self.under().path
+        &self.under().under().path
     }
 }
 
@@ -296,6 +334,30 @@ impl Dir for DiskDir {
         std::fs::hard_link(self.path.join(from), self.path.join(to))
     }
 
+    fn entries(&self) -> io::Result<Vec<DirFile>> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut found = Vec::new();
+        let mut dirs = vec![String::new()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(self.path.join(&dir))? {
+                let entry = entry?;
+                let name = entry.file_name().into_string().map_err(|name| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("{name:?} isn't UTF-8"))
+                })?;
+                let path = if dir.is_empty() { name } else { format!("{dir}/{name}") };
+                let metadata = entry.metadata()?;
+                if metadata.is_dir() {
+                    dirs.push(path.clone());
+                    found.push(DirFile { path, len: 0, inode: 0, dir: true });
+                } else {
+                    let (len, inode) = (metadata.len(), metadata.ino());
+                    found.push(DirFile { path, len, inode, dir: false });
+                }
+            }
+        }
+        Ok(found)
+    }
+
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let new = format!("{path}.new");
         // One a write that stopped left.
@@ -306,8 +368,7 @@ impl Dir for DiskDir {
         let file = self.create(&new, false)?;
         file.write_at(bytes, 0)?;
         file.sync()?;
-        std::fs::rename(self.path.join(&new), self.path.join(path))?;
-        self.sync_dir(path.rsplit_once('/').map_or("", |(dir, _)| dir))
+        std::fs::rename(self.path.join(&new), self.path.join(path))
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {

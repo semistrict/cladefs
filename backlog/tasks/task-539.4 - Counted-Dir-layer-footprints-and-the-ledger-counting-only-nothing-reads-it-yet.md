@@ -3,9 +3,11 @@ id: TASK-539.4
 title: >-
   Counted Dir layer, footprints and the ledger (counting only, nothing reads it
   yet)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 14:16'
+updated_date: '2026-11-18 15:12'
 labels:
   - extentd
   - disk
@@ -43,3 +45,13 @@ Requirement (4): count each store's files where the store writes them, above the
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Dir::entries lists a directory's files (path, len, inode) and directories; DiskDir walks, MemDisk from its tables, CachedDir takes open data files' cached sizes.
+2. local_cell::footprint: Footprint (bytes, unframed, charging its HostDisk), FileLen per file shared by names/openings (len counted in granules, names, open-* names), attach/detach (first opening lists and counts in place of what was; last keeps totals), ledger of host stores by (dev, ino), removing() forgets on remove_store_dir.
+3. local_cell::Metered<D>: outermost layer, counts create/open/remove/rename (POSIX same-file rename a no-op)/link/replace/create_dir/give, MeteredFile counts writes (a failing one as far as size says) and settle_for_write's range.
+4. HostDir = Metered<CachedDir<DiskDir>>, MemDir = Metered<CachedDir<MemDisk>>; MemDisk owns its footprint; Dir::footprint().
+5. Oracle tests: random changes over MemDir (failing fs, crashes) and HostDir, footprint == listing after write-back after every step; ledger tests.
+<!-- SECTION:PLAN:END -->

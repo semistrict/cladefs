@@ -16,7 +16,7 @@
 //! the first that failed was a thread's of the store's ([`MemDir::failed_elsewhere`], TASK-79.79).
 
 use crate::cached::{CachedDir, CachedFile};
-use crate::dir::{Dir, File};
+use crate::dir::{Dir, DirFile, File};
 use crate::pages::{Options, PageCache};
 use crate::sync::{Mutex, thread};
 use bucket_cell::host_disk::{self, HostDisk, Sample};
@@ -36,6 +36,8 @@ pub struct MemDisk {
     fs: Arc<Mutex<Fs>>,
     /// cladefs: its disk, of its capacity ([`MemDisk::with_capacity`], doc-22).
     disk: Arc<HostDisk>,
+    /// cladefs: the footprint its store's files are counted in ([`crate::footprint`]).
+    footprint: Arc<crate::footprint::Footprint>,
     /// cladefs: whether the store does all of its I/O in it on its callers' threads
     /// ([`MemDir::serial`]): as it never changes, asking takes no lock ([`Dir::concurrent`]), which
     /// under Shuttle would be a scheduling point of its own.
@@ -224,7 +226,8 @@ impl MemDisk {
             let (size, used) = (fs.capacity.unwrap_or(u64::MAX), fs.used());
             Sample { size, free: size.saturating_sub(used), used }
         });
-        Self { fs, disk, serial }
+        let footprint = crate::footprint::Footprint::new(None, Some(disk.clone()));
+        Self { fs, disk, footprint, serial }
     }
 
     /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads,
@@ -356,10 +359,13 @@ impl MemDisk {
 /// small, so that the store's tests write back often, and with no flusher, so that what is written
 /// when is a function of the store's calls alone ([`PageCache::without_flusher`]). What its pages
 /// hold dirty a crash loses, as a host's crash loses a process's memory.
-pub type MemDir = CachedDir<MemDisk>;
+///
+/// cladefs: its changes counted, as it makes them, in its footprint ([`crate::Metered`], TASK-539.4),
+/// as a host's are.
+pub type MemDir = crate::Metered<CachedDir<MemDisk>>;
 
 /// A file of a [`MemDir`].
-pub type MemFile = CachedFile<MemDiskFile>;
+pub type MemFile = crate::MeteredFile<CachedFile<MemDiskFile>>;
 
 /// The page cache of a [`MemDir`].
 fn page_cache() -> std::sync::Arc<PageCache> {
@@ -374,44 +380,55 @@ fn page_cache() -> std::sync::Arc<PageCache> {
 impl MemDir {
     /// An empty directory ([`MemDisk::new`]).
     pub fn new() -> Self {
-        Self::over(MemDisk::new(), page_cache())
+        Self::on(MemDisk::new(), page_cache())
     }
 
     /// An empty directory whose page cache goes by `options`, with no flusher: what a test of how
     /// the store paces its own write-back holds dirty under a cache as large as a host's.
     pub fn with_cache(options: Options) -> Self {
-        Self::over(MemDisk::new(), PageCache::without_flusher(options))
+        Self::on(MemDisk::new(), PageCache::without_flusher(options))
     }
 
     /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads
     /// ([`MemDisk::serial`]).
     pub fn serial() -> Self {
-        Self::over(MemDisk::serial(), page_cache())
+        Self::on(MemDisk::serial(), page_cache())
     }
 
     /// cladefs: an empty directory on a disk of `capacity` bytes ([`MemDisk::with_capacity`]).
     pub fn with_capacity(capacity: u64) -> Self {
-        Self::over(MemDisk::with_capacity(capacity), page_cache())
+        Self::on(MemDisk::with_capacity(capacity), page_cache())
+    }
+
+    /// cladefs: `disk`, its extents' files through `cache`, its changes counted in its footprint.
+    pub fn on(disk: MemDisk, cache: std::sync::Arc<PageCache>) -> Self {
+        let footprint = disk.footprint.clone();
+        Self::over(CachedDir::over(disk, cache), footprint).expect("a directory in memory lists")
+    }
+
+    /// The directory in memory under its page cache.
+    pub fn disk(&self) -> &MemDisk {
+        self.under().under()
     }
 
     /// As [`MemDisk::fail_after`].
     pub fn fail_after(&self, operations: Option<u64>) {
-        self.under().fail_after(operations)
+        self.disk().fail_after(operations)
     }
 
     /// As [`MemDisk::io`]: what reached the directory under the page cache.
     pub fn io(&self) -> Io {
-        self.under().io()
+        self.disk().io()
     }
 
     /// As [`MemDisk::has_failed`].
     pub fn has_failed(&self) -> bool {
-        self.under().has_failed()
+        self.disk().has_failed()
     }
 
     /// As [`MemDisk::failed_elsewhere`].
     pub fn failed_elsewhere(&self) -> bool {
-        self.under().failed_elsewhere()
+        self.disk().failed_elsewhere()
     }
 
     /// cladefs: every file in it, by its path, with what it holds now ([`MemDisk::files`]), what
@@ -421,13 +438,13 @@ impl MemDir {
         if let Err(err) = self.cache().write_back_all() {
             log::warn!("extent store: writing back a directory in memory: {err}");
         }
-        self.under().files()
+        self.disk().files()
     }
 
     /// The directory as a crash would leave it ([`MemDisk::crash`]): what its page cache held
-    /// dirty lost, as a process's memory is.
+    /// dirty lost, as a process's memory is; its footprint counted anew, as listed.
     pub fn crash(&self, seed: u64) -> MemDir {
-        Self::over(self.under().crash(seed), page_cache())
+        Self::on(self.disk().crash(seed), page_cache())
     }
 }
 
@@ -489,22 +506,21 @@ impl Dir for MemDisk {
         fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))
     }
 
-    /// cladefs: its file written and synced, then put at `path`, which a crash keeps or not, then
-    /// its directory synced: two operations, either of which may fail, as a crash would stop it.
+    /// cladefs: its file written and synced, then put at `path`, which a crash keeps or not until
+    /// its directory is synced.
     fn replace(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
         let mut fs = self.fs.lock().unwrap();
         fs.fits(host_disk::counted(bytes.len() as u64))?;
         fs.spend()?;
         let inode = fs.next_inode;
-        let (dir, name) = split(path);
+        let (_, name) = split(path);
         fs.change_dir(path, DirChange::Replace(name.to_owned(), inode))?;
         fs.next_inode += 1;
         let data = bytes.to_vec();
         fs.inodes.insert(inode, Inode { durable: data.clone(), data, ..Inode::default() });
         fs.io.written += bytes.len() as u64;
         fs.io.synced_files += 1;
-        drop(fs);
-        self.sync_dir(dir)
+        Ok(())
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
@@ -532,6 +548,22 @@ impl Dir for MemDisk {
         );
         names.sort();
         Ok(names)
+    }
+
+    fn entries(&self) -> io::Result<Vec<DirFile>> {
+        let fs = self.fs.lock().unwrap();
+        let mut found = Vec::new();
+        for (dir, entries) in &fs.dirs {
+            if !dir.is_empty() {
+                found.push(DirFile { path: dir.clone(), len: 0, inode: 0, dir: true });
+            }
+            for (name, inode) in entries {
+                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+                let len = fs.inodes[inode].data.len() as u64;
+                found.push(DirFile { path, len, inode: *inode, dir: false });
+            }
+        }
+        Ok(found)
     }
 
     fn sync_dir(&self, path: &str) -> io::Result<()> {
@@ -692,7 +724,8 @@ mod tests {
     #[test]
     fn a_capacity_refuses_what_would_pass_it() {
         const G: u64 = host_disk::GRANULE;
-        let full = |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::ENOSPC);
+        let full =
+            |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::ENOSPC);
         let dir = MemDisk::with_capacity(4 * G);
         let sample = || dir.disk().sample().unwrap();
         assert_eq!(sample(), Sample { size: 4 * G, free: 4 * G, used: 0 });
@@ -727,12 +760,15 @@ mod tests {
         let dir = MemDisk::new();
         dir.replace("r", b"old").unwrap();
         dir.replace("r", b"new").unwrap();
+        dir.sync_dir("").unwrap();
         for seed in 0..16 {
             assert_eq!(read(&dir.crash(seed).open("r", false).unwrap()), b"new", "seed {seed}");
         }
-        // Its directory's sync stopped: the rename is not durable.
-        dir.fail_after(Some(1));
-        assert!(dir.replace("r", b"newer").is_err());
+        // Its directory not synced after: either.
+        dir.replace("r", b"newer").unwrap();
+        dir.fail_after(Some(0));
+        assert!(dir.replace("r", b"newest").is_err(), "failing, it changes nothing");
+        assert_eq!(read(&dir.open("r", false).unwrap()), b"newer");
         let mut seen = std::collections::BTreeSet::new();
         for seed in 0..64 {
             seen.insert(read(&dir.crash(seed).open("r", false).unwrap()));
