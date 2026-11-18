@@ -517,6 +517,10 @@ pub const fn test_cell(id: u64) -> CellId {
     CellId { tenant: TEST_CELL.tenant, id }
 }
 
+/// cladefs: the default tenant (TASK-364), of the cells made for no tenant: public bases, images,
+/// tests'. Its versions fork into any tenant's cells, shared or not ([`Version::shared`]).
+pub const DEFAULT_TENANT: u64 = 0;
+
 /// Where a cell was forked from: ordered by its parent, then its segment, so that the forks made
 /// at one segment sort together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

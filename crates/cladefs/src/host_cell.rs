@@ -40,7 +40,7 @@ pub(crate) const BLOCK_SIZE: u32 = 4096;
 /// The default tenant (TASK-364), of the stores made for no tenant of the host's: the cladefs
 /// CLI's images, an ungranted caller's stores, public bases, tests'. Its stores with writers alone
 /// fork into other tenants' cells ([`may_fork_into`], TASK-395.9).
-pub(crate) const DEFAULT_TENANT: u64 = 0;
+pub(crate) const DEFAULT_TENANT: u64 = bucket_cell::layout::DEFAULT_TENANT;
 
 /// cladefs: whether a fork of `parent` by `uploader`, its uploader, may make a new cell of `tenant`'s
 /// (TASK-395.9): `EACCES` if `parent` has a writer and `cell` is another tenant's than its own,
@@ -473,12 +473,7 @@ pub(crate) fn fork_through(
     child: Child,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> Result<(), Error> {
-    let cell = store.description().cell;
-    // A fork into another tenant's cell, which `may_fork_into` let through, is of a shared version.
-    if child.cell.tenant != cell.tenant {
-        uploader.share_version(version, true)?;
-    }
-    let at = version_dir(cell, version);
+    let at = version_dir(store.description().cell, version);
     let (kind, url) = (store.kind().ok_or(Errno::EINVAL)?, store.bucket().ok_or(Errno::EINVAL)?);
     let made =
         at.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::create_dir(&at));

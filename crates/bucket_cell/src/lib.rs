@@ -164,8 +164,9 @@ pub enum Error {
     /// ([`head::Given`]): another's taking gave them first. Its keys are made anew.
     #[error("another taking gave the cell its keys first")]
     Raced,
-    /// cladefs: a fork of a version to a cell of another tenant's cell than the version's
-    /// cell's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
+    /// cladefs: a fork of a version to a cell of another tenant's than the version's cell's, which
+    /// its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7), nor is the default
+    /// tenant's ([`layout::DEFAULT_TENANT`]).
     #[error("cell {0}'s version is another tenant's, not shared")]
     NotShared(layout::CellId),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease

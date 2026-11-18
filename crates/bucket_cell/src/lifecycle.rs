@@ -327,14 +327,16 @@ async fn finish_fork(
     start: Start,
 ) -> Result<Option<Object>, Error> {
     let cell = origin.parent;
-    if rules().forks_check_versions || cell.tenant != child.tenant {
+    // Into another tenant's cell, a version of the default tenant's, or one shared.
+    let crosses = cell.tenant != child.tenant && cell.tenant != layout::DEFAULT_TENANT;
+    if rules().forks_check_versions || crosses {
         let head = head::get(bucket, cell).await?;
         let named = head.as_ref().and_then(|head| head.version(version));
         let named = named.filter(|named| named.at == origin.at);
         if rules().forks_check_versions && named.is_none() {
             return Err(Error::Deleted);
         }
-        if cell.tenant != child.tenant && !named.is_some_and(|named| named.shared) {
+        if crosses && !named.is_some_and(|named| named.shared) {
             return Err(Error::NotShared(cell));
         }
     }

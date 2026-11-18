@@ -512,7 +512,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
         |listed: &[String]| -> String { listed.iter().map(|line| line.clone() + "\n").collect() };
     let mut with_c = listed.clone();
     for line in &mut with_c {
-        if line.starts_with(&format!("{one} {c} ")) {
+        if *line == format!("{one} {c}") {
             line.push_str(" detaching");
         }
     }
@@ -521,7 +521,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
     drop(open);
     assert!(detach.0.wait().unwrap().success());
     let without_c: Vec<String> =
-        listed.iter().filter(|line| !line.starts_with(&format!("{one} {c} "))).cloned().collect();
+        listed.iter().filter(|line| **line != format!("{one} {c}")).cloned().collect();
     assert_eq!(cladefsctl_mount(socket, &["list"]), detaching(&without_c));
 
     terminate(child, &m);
