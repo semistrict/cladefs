@@ -110,7 +110,7 @@ impl KeptImage {
     /// cell of its tenant's (TASK-364), whose handle is a new directory at `path`, in its bucket
     /// too ([`host_store::fork`]): `held` is let go of once the fork's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
-        let tenant = self.store.description().branch.cell.tenant;
+        let tenant = self.store.description().branch.tenant;
         let branch = host_store::new_branch(self.uploader.bucket(), tenant).map_err(Error::from)?;
         let child = Child { branch, owner: rand::random() };
         host_store::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
@@ -171,7 +171,7 @@ mod tests {
 
     /// The extents `branch`'s state in `bucket` holds, by their lengths, those it inherited too,
     /// and its root.
-    fn kept(bucket: &ObjectBucket, branch: crate::Branch) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
+    fn kept(bucket: &ObjectBucket, branch: crate::CellId) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = extent_store::upload::block_on(async {
             let record = extent_bucket::branch::record(bucket, branch).await?;
             extent_bucket::recover(bucket, branch, record.and_then(|record| record.origin())).await

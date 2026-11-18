@@ -61,7 +61,7 @@ use crate::layout::{
 use crate::raw::{RawEncryption, SECTOR};
 use crate::segments::{fold, footer_last, segment_footer};
 use anyhow::{Context as _, Error, ensure};
-use extent_frame::segment::{Branch, Chain, Contents, Footer, epoch_of, writer_of};
+use extent_frame::segment::{CellId, Chain, Contents, Footer, epoch_of, writer_of};
 use extent_frame::{KeyId, Salt};
 use extent_keys::{MAC_LEN, SALT_LEN};
 use serde::{Deserialize, Serialize};
@@ -461,7 +461,7 @@ impl Recovered {
     pub fn close<D: Dir>(
         &mut self,
         dir: &D,
-        branch: Branch,
+        branch: CellId,
         keys: &extent_bucket::keys::Ring,
     ) -> Result<(), Error> {
         if self.closing.is_empty() {
@@ -509,7 +509,7 @@ impl Recovered {
 
     /// cladefs: drops what it holds of the segments closed again, not yet framed: their raw files
     /// and logs, durably, so that no recovery closes them again (`Recovering::drop_wal`).
-    pub fn drop_closing<D: Dir>(&mut self, dir: &D, branch: Branch) -> Result<(), Error> {
+    pub fn drop_closing<D: Dir>(&mut self, dir: &D, branch: CellId) -> Result<(), Error> {
         if self.closing.is_empty() {
             return Ok(());
         }
@@ -529,7 +529,7 @@ impl Recovered {
 /// is whole, in order, and each whose framed file is not that its log closes again, holding
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed
 /// files torn, closed again or holding nothing durable, go.
-pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Error> {
+pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Error> {
     let (start_file, start) = StartFile::read(dir)?;
     let listed = |kind| -> Result<BTreeSet<u64>, Error> {
         Ok(list_numbers(dir, &branch_dir(kind, branch.id))?.into_iter().collect())
@@ -927,7 +927,7 @@ fn log_records<D: Dir>(
 /// as `branch`'s, after `last`, the footer before it, if any. cladefs: framed with it once the store's
 /// keys are known ([`Recovered::close`], TASK-411.9).
 fn closed_again(
-    branch: Branch,
+    branch: CellId,
     last: Option<&Footer>,
     records: &[Contents],
 ) -> Result<Footer, Error> {
@@ -1060,7 +1060,7 @@ mod tests {
     use extent_frame::segment::{Continued, tag};
     use storage_device::ExtentId;
 
-    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }

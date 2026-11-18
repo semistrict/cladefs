@@ -27,7 +27,7 @@
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Version};
 use crate::collector::{Collector, Heard, Holding, Marking, Options, Report};
-use crate::layout::Cell;
+use crate::layout::CellId;
 use crate::object_bucket::Request;
 use crate::{Error, Left};
 use futures::{FutureExt as _, StreamExt as _};
@@ -111,7 +111,7 @@ pub enum Outcome {
 /// A pass over a cell, as a sweep ran it, once it ended.
 #[derive(Clone, Debug)]
 pub struct Ran {
-    pub cell: Cell,
+    pub cell: CellId,
     pub outcome: Outcome,
     /// The requests it made.
     pub requests: Requests,
@@ -141,7 +141,7 @@ pub struct Swept {
     /// The requests its passes made, and those listing the cells.
     pub requests: Requests,
     /// Its slowest passes, of those it ran, slowest first: [`Sweep::slowest`] of them at most.
-    pub slowest: Vec<(Cell, Duration)>,
+    pub slowest: Vec<(CellId, Duration)>,
     /// How long it took.
     pub took: Duration,
 }
@@ -204,7 +204,7 @@ impl Sweep {
     pub async fn run_cell<B: Bucket>(
         &self,
         bucket: &Arc<B>,
-        cell: Cell,
+        cell: CellId,
         observe: impl FnMut(&Ran),
     ) -> Swept {
         self.over(bucket, futures::stream::iter([cell]), observe).await
@@ -214,7 +214,7 @@ impl Sweep {
     async fn over<B: Bucket>(
         &self,
         bucket: &Arc<B>,
-        cells: impl futures::Stream<Item = Cell>,
+        cells: impl futures::Stream<Item = CellId>,
         mut observe: impl FnMut(&Ran),
     ) -> Swept {
         assert!(self.at_once >= 1, "a sweep of no passes at once");
@@ -258,7 +258,7 @@ impl Sweep {
     async fn pass<B: Bucket>(
         &self,
         bucket: &Arc<B>,
-        cell: Cell,
+        cell: CellId,
         since: u64,
         heard: Arc<Heard>,
     ) -> Ran {
@@ -402,7 +402,7 @@ impl<B: Bucket> Bucket for Counted<B> {
 mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
-    use crate::layout::{self, Branch};
+    use crate::layout::{self, CellId};
     use crate::object_bucket::ObjectBucket;
     use crate::passed::Passed;
     use crate::testing::{Direct, Fault, SimBucket};
@@ -421,8 +421,8 @@ mod tests {
     const LEASE: u64 = 60_000;
 
     /// The `n` cells of the tests' buckets, across three tenants.
-    fn cells(n: u64) -> Vec<Cell> {
-        let mut cells: Vec<Cell> = (0..n).map(|id| Cell { tenant: 1 + id % 3, id }).collect();
+    fn cells(n: u64) -> Vec<CellId> {
+        let mut cells: Vec<CellId> = (0..n).map(|id| CellId { tenant: 1 + id % 3, id }).collect();
         cells.sort();
         cells
     }
@@ -431,9 +431,9 @@ mod tests {
     /// two segments, one holding what the other freed, beside the fence it keeps; and, if
     /// `compacted`, a segment holding a small extent live and a large one freed, which a pass
     /// compacting what is less than half live compacts.
-    async fn fill<B: Bucket>(bucket: &Arc<B>, cells: &[Cell], compacted: bool) {
+    async fn fill<B: Bucket>(bucket: &Arc<B>, cells: &[CellId], compacted: bool) {
         for &cell in cells {
-            let branch = Branch { cell, id: 1 };
+            let branch = CellId { tenant: cell.tenant, id: 1 };
             branch::create(&**bucket, branch, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
             let first = writer.chain().next_sequence();
@@ -469,7 +469,7 @@ mod tests {
 
     /// The cell each request waiting at `bucket` is of, if it is any's: a pass's, as a pass asks
     /// nothing outside its cell here.
-    fn waiting_cells(bucket: &SimBucket) -> BTreeSet<Cell> {
+    fn waiting_cells(bucket: &SimBucket) -> BTreeSet<CellId> {
         (0..bucket.waiting())
             .filter_map(|index| {
                 let asked = bucket.describe(index);
@@ -548,7 +548,8 @@ mod tests {
             let collected: Vec<&(usize, Ran)> = (passes.iter())
                 .filter(|(_, passed)| matches!(passed.outcome, Outcome::Collected(_)))
                 .collect();
-            let mut by_cell: Vec<Cell> = collected.iter().map(|(_, passed)| passed.cell).collect();
+            let mut by_cell: Vec<CellId> =
+                collected.iter().map(|(_, passed)| passed.cell).collect();
             by_cell.sort();
             assert_eq!(by_cell, cells, "seed {seed}: each cell passed over once");
             let ran = |which| collected.iter().filter(|(by, _)| *by == which).count();
@@ -648,7 +649,7 @@ mod tests {
     /// A bucket that notes, for each request of a cell's, the Tokio task that made it.
     struct Tasks {
         bucket: Arc<ObjectBucket>,
-        tasks: std::sync::Mutex<BTreeSet<(Cell, Option<tokio::task::Id>)>>,
+        tasks: std::sync::Mutex<BTreeSet<(CellId, Option<tokio::task::Id>)>>,
     }
 
     impl Tasks {
@@ -748,7 +749,7 @@ mod tests {
         };
         let (visited, deleted, tasks) = swept(true);
         assert_eq!((visited, deleted), (10, 20));
-        let by_cell: BTreeSet<Cell> = tasks.iter().map(|&(cell, _)| cell).collect();
+        let by_cell: BTreeSet<CellId> = tasks.iter().map(|&(cell, _)| cell).collect();
         let by_task: BTreeSet<Option<tokio::task::Id>> = tasks.iter().map(|&(_, id)| id).collect();
         assert_eq!((by_cell.len(), by_task.len(), tasks.len()), (10, 10, 10), "{tasks:?}");
         assert!(by_task.iter().all(Option::is_some));
@@ -851,7 +852,7 @@ mod tests {
             summed += report;
         }
         assert_eq!(summed, expected);
-        let mut slowest: Vec<(Cell, Duration)> =
+        let mut slowest: Vec<(CellId, Duration)> =
             passes.iter().map(|passed| (passed.cell, passed.took)).collect();
         slowest.sort_by_key(|&(_, took)| std::cmp::Reverse(took));
         assert_eq!(swept.slowest.len(), 3);
@@ -946,8 +947,8 @@ mod tests {
             let ids = crate::objectid::Allocator::new();
             block_on(async {
                 for id in 1..=n {
-                    let cell = Cell { tenant: 1, id };
-                    let branch = Branch { cell, id: ids.next(&*bucket).await };
+                    let cell = CellId { tenant: 1, id };
+                    let branch = CellId { tenant: cell.tenant, id: ids.next(&*bucket).await };
                     branch::create(&*bucket, branch, 0).await.unwrap();
                     let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
                     let extent = ExtentId::new(branch.id, writer.chain().next_sequence());
@@ -1026,7 +1027,7 @@ mod tests {
         assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
         // A record written in the cell: the next pass, either's, goes over it in full.
-        block_on(branch::create(&*bucket, Branch { cell, id: 2 }, 0)).unwrap();
+        block_on(branch::create(&*bucket, CellId { tenant: cell.tenant, id: 2 }, 0)).unwrap();
         assert_eq!(run(&first).report, Report::default());
         let rewritten = recorded().unwrap();
         assert_ne!(rewritten.listing, settled.listing);

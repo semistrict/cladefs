@@ -24,7 +24,7 @@ use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
 use extent_bucket::known::Learned;
-use extent_bucket::layout::{Branch, Cell, Child};
+use extent_bucket::layout::{CellId, Child};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::{branch, cell};
 use extent_store::upload::{self, Failure, Uploader};
@@ -49,11 +49,11 @@ pub(crate) const DEFAULT_TENANT: u64 = 0;
 /// fork of a version is checked at the read of the head naming the version its child's making makes instead
 /// (`branch::finish_point_fork`, TASK-395.7).
 pub(crate) fn may_fork_into(
-    parent: Branch,
+    parent: CellId,
     uploader: &Uploader<HostDir>,
     tenant: u64,
 ) -> Result<(), Error> {
-    let own = parent.cell.tenant;
+    let own = parent.tenant;
     if uploader.is_at_version() || own == DEFAULT_TENANT || own == tenant {
         return Ok(());
     }
@@ -68,41 +68,40 @@ pub(crate) fn may_fork_into(
 /// other cell of the bucket has, nor will (`extent_bucket::objectid`), so that stores made apart,
 /// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
 /// extents keys them by (TASK-364). A cell's ID is its branch's: no caller names a new one.
-pub(crate) fn new_branch(bucket: &ObjectBucket, tenant: u64) -> Result<Branch, Failure> {
+pub(crate) fn new_branch(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
     let id = upload::block_on(bucket.new_objectid())?;
-    Ok(Branch { cell: Cell { tenant, id }, id })
+    Ok(CellId { tenant: tenant, id: id })
 }
 
 /// A new cell of `tenant`'s, of the bucket at `url`, its ID given as [`new_branch`] gives it: for a
 /// cell made before its branch, which takes its ID ([`BranchOf::Cell`]), as the FUSE mount's are. It
 /// blocks.
 #[cfg(target_os = "linux")]
-pub(crate) fn new_cell(url: &str, tenant: u64) -> Result<Cell, Failure> {
+pub(crate) fn new_cell(url: &str, tenant: u64) -> Result<CellId, Failure> {
     let id = upload::block_on(bucket(url)?.new_objectid())?;
-    Ok(Cell { tenant, id })
+    Ok(CellId { tenant, id })
 }
 
 /// A branch of a new cell of the default tenant's, of a random ID no allocator gave: for tests
 /// that write a branch's objects themselves, as no store does, or name a fork's child
 /// (`ExtentStore::fork_to`).
 #[cfg(test)]
-pub(crate) fn new_alone() -> Branch {
+pub(crate) fn new_alone() -> CellId {
     named(DEFAULT_TENANT)
 }
 
-/// The branch of a new cell of `tenant`'s, of a random ID no allocator gave, the cell's too.
+/// A new cell of `tenant`'s, of a random ID no allocator gave.
 #[cfg(test)]
-pub(crate) fn named(tenant: u64) -> Branch {
-    let id = rand::random::<u64>().max(1);
-    Branch { cell: Cell { tenant, id }, id }
+pub(crate) fn named(tenant: u64) -> CellId {
+    CellId { tenant, id: rand::random::<u64>().max(1) }
 }
 
 /// A child of a fork of `parent`, of a random ID no allocator gave, for tests that name it
 /// (`ExtentStore::fork_to`): of a new cell of its tenant's. Random, not next to its parent's: an
 /// allocator gives the IDs of its block in order, the next to another store.
 #[cfg(test)]
-pub(crate) fn fork_child(parent: Branch) -> Branch {
-    named(parent.cell.tenant)
+pub(crate) fn fork_child(parent: CellId) -> CellId {
+    named(parent.tenant)
 }
 
 /// The branch a store is made of (TASK-364).
@@ -111,15 +110,15 @@ pub enum BranchOf {
     /// The branch of a new cell of the tenant's, its ID the store's bucket's to give
     /// ([`new_branch`]).
     New(u64),
-    /// The branch of `Cell`, made with its ID the bucket gave ([`new_cell`]), the branch's too.
-    Cell(Cell),
+    /// The branch of `CellId`, made with its ID the bucket gave ([`new_cell`]), the branch's too.
+    Cell(CellId),
     /// A branch the store's bucket has (`ENOENT` otherwise), which the store takes as it opens, or
     /// reads, if a version.
-    Taken(Branch),
+    Taken(CellId),
     /// A new branch of an ID a test chose, no allocator's: for tests that write extents of a
     /// branch they name.
     #[cfg(test)]
-    Named(Branch),
+    Named(CellId),
 }
 
 /// What the name of the directory beside a store's that is its own file bucket ends with, where no
@@ -283,7 +282,7 @@ pub(crate) fn create_unmade(
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let branch = match of {
             BranchOf::New(tenant) => new_branch(&*self::bucket(&url)?, tenant)?,
-            BranchOf::Cell(cell) => Branch { cell, id: cell.id },
+            BranchOf::Cell(cell) => CellId { tenant: cell.tenant, id: cell.id },
             // Its record, read to see the bucket has it, is what the store's opening, next, would
             // read first: learned for it, a read less (`extent_bucket::known`, TASK-449).
             BranchOf::Taken(branch) => {
@@ -413,7 +412,7 @@ pub(crate) fn fork<H>(
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
-    may_fork_into(store.description().branch, uploader, child.branch.cell.tenant)?;
+    may_fork_into(store.description().branch, uploader, child.branch.tenant)?;
     let inheriting = uploader.inheriting(child)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
@@ -491,7 +490,7 @@ fn fork_in<H>(
 }
 
 /// The error of a fork to `branch`, whose ID another branch has in the bucket.
-fn taken(branch: Branch) -> anyhow::Error {
+fn taken(branch: CellId) -> anyhow::Error {
     let refused = format!("forking to branch {branch}: another branch has its ID");
     anyhow::Error::new(Errno::EEXIST).context(refused)
 }
@@ -504,7 +503,7 @@ fn taken(branch: Branch) -> anyhow::Error {
 fn make_child(
     parent: &Store<HostDir>,
     path: &Path,
-    branch: Branch,
+    branch: CellId,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     prepare(path)?;
@@ -556,7 +555,7 @@ pub(crate) fn delete(
 /// no store, goes, `elsewhere` called for nothing.
 pub(crate) fn delete_with(
     path: &Path,
-    elsewhere: impl Fn(&Path, Branch) -> Result<(), Failure>,
+    elsewhere: impl Fn(&Path, CellId) -> Result<(), Failure>,
 ) -> Result<(), Error> {
     if !path.exists() {
         return Err(Errno::ENOENT.into());
@@ -623,14 +622,13 @@ mod tests {
         let first = made(&one, new());
         let second = made(&two, new());
         assert_eq!(second.id, first.id + 1);
-        assert_eq!((first.cell.id, second.cell.id), (first.id, second.id));
+        assert_eq!((first.id, second.id), (first.id, second.id));
         let block = first.id / extent_bucket::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = extent_bucket::layout::objectid_block(block);
         assert!(upload::block_on(extent_bucket::bucket::get(&*bucket, &taken)).unwrap().is_some());
 
-        let absent =
-            Branch { cell: Cell { tenant: DEFAULT_TENANT, id: second.id + 1 }, id: second.id + 1 };
+        let absent = CellId { tenant: DEFAULT_TENANT, id: second.id + 1 };
         let path = dir.path().join("absent");
         let refused = create_unmade(
             &path,
@@ -664,7 +662,7 @@ mod tests {
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
         let Opened { store, bucket, uploader } =
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
-        let forked = new_branch(&bucket, store.description().branch.cell.tenant).unwrap();
+        let forked = new_branch(&bucket, store.description().branch.tenant).unwrap();
         let child = Child { branch: forked, owner: 1 };
         super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
@@ -676,7 +674,7 @@ mod tests {
         // The bucket is this process's one of its URL, whose objects are in its directory.
         assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
         // cladefs: under its cell's prefix (TASK-364).
-        let cell = own.join(store.description().branch.cell.prefix());
+        let cell = own.join(store.description().branch.prefix());
         assert!(cell.join("branches").exists(), "{:?}", std::fs::read_dir(&own).unwrap());
         // The store deleted, its fork's branch lives on in it.
         drop(uploader);

@@ -26,7 +26,7 @@
 //! window's, a connection's, or `extent_store`'s store's, which its followers share with its writer,
 //! is an `extent_store::shared::SharedLock`: a panic holding one stops the daemon (TASK-149.24).
 
-use crate::Branch;
+use crate::CellId;
 use crate::error::{Errno, Result};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -46,11 +46,11 @@ struct HaltState {
 
 /// cladefs: the halts of the stores open in the process, each with its store's branch, held weakly,
 /// so that a host told to forget a tenant's or a cell's keys halts theirs (TASK-411.7).
-static HALTS: Mutex<Vec<(Branch, Weak<HaltState>)>> = Mutex::new(Vec::new());
+static HALTS: Mutex<Vec<(CellId, Weak<HaltState>)>> = Mutex::new(Vec::new());
 
 impl Halt {
     /// The halt of the store at `store`, of `branch`, not halted: listed among the process's.
-    pub(crate) fn new(store: &Path, branch: Branch) -> Self {
+    pub(crate) fn new(store: &Path, branch: CellId) -> Self {
         let state = Arc::new(HaltState { store: store.to_owned(), why: OnceLock::new() });
         let mut halts = HALTS.lock().unwrap();
         halts.retain(|(_, halt)| halt.strong_count() > 0);
@@ -116,7 +116,7 @@ impl HaltState {
 /// failing with `errno` from then on, as `why` says: what a host told a tenant's KEK is revoked or
 /// destroyed, or a cell shredded, does to their stores (TASK-411.7), which it can't open again
 /// either. Returns how many it halted, those halted already left out.
-pub(crate) fn halt_stores(scope: impl Fn(Branch) -> bool, errno: Errno, why: &str) -> usize {
+pub(crate) fn halt_stores(scope: impl Fn(CellId) -> bool, errno: Errno, why: &str) -> usize {
     let halts: Vec<Arc<HaltState>> = (HALTS.lock().unwrap().iter())
         .filter(|(branch, _)| scope(*branch))
         .filter_map(|(_, halt)| halt.upgrade())

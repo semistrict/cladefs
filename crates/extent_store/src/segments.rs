@@ -2078,7 +2078,7 @@ mod tests {
     use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = SECTOR;
-    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }

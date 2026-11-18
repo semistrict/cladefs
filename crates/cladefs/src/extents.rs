@@ -37,7 +37,7 @@ use crate::profile::{self, Recorder};
 use crate::stats::{self, Counter};
 use crate::store_dir;
 use extent_bucket::cell::Kind;
-use extent_bucket::layout::Branch;
+use extent_bucket::layout::CellId;
 use extent_bucket::trace;
 use extent_store::{
     HostDir, NoSpace, NotHeld, NotQuiescent, SpentExtent, Store, TooLong, TooSmall, Unaligned,
@@ -550,7 +550,7 @@ impl ExtentStore {
     pub fn create_for_branch(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: Branch,
+        branch: CellId,
     ) -> Result<Self, Error> {
         Self::create_with(path, capacity, BranchOf::Taken(branch), Opening::here()?)
     }
@@ -605,7 +605,7 @@ impl ExtentStore {
     pub(crate) fn create_kept_with(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: Branch,
+        branch: CellId,
         url: &str,
         keeping: extent_store::upload::Options,
     ) -> Result<Self, Error> {
@@ -986,7 +986,7 @@ impl ExtentStore {
     /// fails with `ENOENT` once the version is deleted (`Uploader::forked`).
     ///
     /// cladefs: in a span of its own, `store.fork` (`extent_bucket::trace`, TASK-258).
-    pub fn fork(&self, path: impl AsRef<Path>, tenant: u64) -> Result<Branch, Error> {
+    pub fn fork(&self, path: impl AsRef<Path>, tenant: u64) -> Result<CellId, Error> {
         let branch = self.new_child(tenant)?;
         self.fork_to(path, branch)?;
         Ok(branch)
@@ -997,7 +997,7 @@ impl ExtentStore {
     /// is its writer's, which forks nothing of it (`EROFS`). A store with a writer forks to no cell
     /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_store::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
-    fn new_child(&self, tenant: u64) -> Result<Branch, Error> {
+    fn new_child(&self, tenant: u64) -> Result<CellId, Error> {
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
         host_store::may_fork_into(self.branch(), uploader, tenant)?;
         Ok(host_store::new_branch(uploader.bucket(), tenant).map_err(upload_errno)?)
@@ -1006,7 +1006,7 @@ impl ExtentStore {
     /// cladefs: forks the store as [`ExtentStore::fork`] does, to `branch`, whatever its ID: so the
     /// tests make a fork whose child's ID another branch took, which IDs given out by the bucket
     /// never are, to show a fork refuses it (`EEXIST`) and harms no other branch (TASK-79.82).
-    pub(crate) fn fork_to(&self, path: impl AsRef<Path>, branch: Branch) -> Result<(), Error> {
+    pub(crate) fn fork_to(&self, path: impl AsRef<Path>, branch: CellId) -> Result<(), Error> {
         self.fork_span(branch).run(|| {
             self.access().may_manage()?;
             self.make_uploaded()?;
@@ -1018,7 +1018,7 @@ impl ExtentStore {
     }
 
     /// cladefs: the span of a fork of it to `branch`.
-    fn fork_span(&self, branch: Branch) -> trace::Span {
+    fn fork_span(&self, branch: CellId) -> trace::Span {
         let span = trace::Span::start("store.fork");
         span.set_branch(self.branch());
         span.set_with(trace::CHILD, || branch.to_string());
@@ -1031,7 +1031,7 @@ impl ExtentStore {
     fn fork_uploaded(
         &self,
         path: &Path,
-        branch: Branch,
+        branch: CellId,
         opening: Option<StoreGuard<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
     ) -> Result<(), Error> {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
@@ -1057,7 +1057,7 @@ impl ExtentStore {
     pub fn take(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: Branch,
+        branch: CellId,
         token: Option<u64>,
     ) -> Result<(), Error> {
         drop(Self::take_with(path, (capacity, branch, token), Opening::here()?)?);
@@ -1068,7 +1068,7 @@ impl ExtentStore {
     /// bytes, placed at `token`'s placement if given, and returns it, opened as `opening` says.
     pub fn take_with(
         path: impl AsRef<Path>,
-        (capacity, branch, token): (u64, Branch, Option<u64>),
+        (capacity, branch, token): (u64, CellId, Option<u64>),
         opening: Opening,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
@@ -1103,7 +1103,7 @@ impl ExtentStore {
         (capacity, of, token): (u64, BranchOf, Option<u64>),
         kind: Kind,
         keeping: extent_store::upload::Options,
-    ) -> Result<Branch, Error> {
+    ) -> Result<CellId, Error> {
         let opened = Self::made_placed(path.as_ref(), (capacity, of, token), kind, keeping)?;
         Ok(opened.store.description().branch)
     }
@@ -1197,7 +1197,7 @@ impl ExtentStore {
     }
 
     /// The branch whose extents the guest mints, by its ID, in its cell.
-    pub fn branch(&self) -> Branch {
+    pub fn branch(&self) -> CellId {
         self.store.description().branch
     }
 
@@ -1883,7 +1883,7 @@ impl ExtentStore {
     /// ([`ExtentStore::is_quiescent`]), and no write comes between that and the fork, which would
     /// seal it under its writer: `EBUSY` otherwise. So a running VM's store forks,
     /// its guest's filesystem frozen (TASK-39.3), as a snapshot of the VM does (TASK-39.1).
-    pub fn fork_quiescent(&self, path: impl AsRef<Path>, tenant: u64) -> Result<Branch, Error> {
+    pub fn fork_quiescent(&self, path: impl AsRef<Path>, tenant: u64) -> Result<CellId, Error> {
         let branch = self.new_child(tenant)?;
         self.fork_at_rest(path.as_ref(), branch)?;
         Ok(branch)
@@ -1895,7 +1895,7 @@ impl ExtentStore {
     pub(crate) fn fork_quiescent_to(
         &self,
         path: impl AsRef<Path>,
-        branch: Branch,
+        branch: CellId,
     ) -> Result<(), Error> {
         self.fork_at_rest(path.as_ref(), branch)
     }
@@ -2029,12 +2029,12 @@ impl ExtentStore {
     /// rebinds them first; one it couldn't, as a writeback that found no memory leaves (TASK-207)
     /// or a rebind refused, it says it left. Checked before the fork's lock, which no write of the
     /// window's private pages takes: with its VM paused, as a snapshot has it, none comes after.
-    fn fork_at_rest(&self, path: &Path, branch: Branch) -> Result<(), Error> {
+    fn fork_at_rest(&self, path: &Path, branch: CellId) -> Result<(), Error> {
         self.fork_span(branch).run(|| self.fork_at_rest_now(path, branch))
     }
 
     /// cladefs: forks the store, as [`ExtentStore::fork_at_rest`] says, in its span.
-    fn fork_at_rest_now(&self, path: &Path, branch: Branch) -> Result<(), Error> {
+    fn fork_at_rest_now(&self, path: &Path, branch: CellId) -> Result<(), Error> {
         self.at_rest(|| {
             self.make_uploaded()?;
             failpoint!("fork::uploaded");
@@ -2749,7 +2749,7 @@ mod tests {
 
         let branch = store.branch();
         let bucket = store.bucket().clone();
-        let cell = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, branch.cell));
+        let cell = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, branch));
         let cell = cell.unwrap().unwrap().unwrap();
         let [kek] = &cell.keks[..] else { panic!("{:?}", cell.keks) };
         assert!(kek.wrapped.0.starts_with(b"fxkr\x01\x07gcp-kms"), "{:?}", kek.wrapped);
@@ -3687,7 +3687,7 @@ mod tests {
                             store
                                 .fork_to(
                                     path,
-                                    crate::Branch {
+                                    crate::CellId {
                                         id: store.branch().id + fork,
                                         ..store.branch()
                                     },

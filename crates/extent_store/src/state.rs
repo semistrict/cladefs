@@ -32,7 +32,7 @@ use crate::sync::{Condvar, MutexGuard, rules};
 use crate::views::{Keeping, NotHeld, Sealed};
 use crate::wal::Queue;
 use anyhow::{Error, bail};
-use extent_frame::segment::Branch;
+use extent_frame::segment::CellId;
 use extent_frame::segment::Location;
 use extent_frame::spent::Spent;
 #[cfg(any(test, feature = "audit"))]
@@ -470,14 +470,14 @@ impl Standing {
 /// waits (TASK-160.19).
 pub(crate) trait Holds {
     /// Fails unless `state`, of branch `branch`, holds to it.
-    fn check<F: File>(state: &State<F>, branch: Branch) -> Result<(), Error>;
+    fn check<F: File>(state: &State<F>, branch: CellId) -> Result<(), Error>;
 }
 
 /// cladefs: a store not failed: what reading takes ([`Readable`]).
 pub(crate) struct Whole;
 
 impl Holds for Whole {
-    fn check<F: File>(state: &State<F>, _branch: Branch) -> Result<(), Error> {
+    fn check<F: File>(state: &State<F>, _branch: CellId) -> Result<(), Error> {
         state.standing.whole()
     }
 }
@@ -487,7 +487,7 @@ impl Holds for Whole {
 pub(crate) struct Changeable;
 
 impl Holds for Changeable {
-    fn check<F: File>(state: &State<F>, branch: Branch) -> Result<(), Error> {
+    fn check<F: File>(state: &State<F>, branch: CellId) -> Result<(), Error> {
         state.standing.whole()?;
         anyhow::ensure!(!state.standing.is_closed(), "branch {branch} is closed");
         anyhow::ensure!(!state.version, "branch {branch} is a version, which nothing writes");
@@ -502,7 +502,7 @@ impl Holds for Changeable {
 /// nothing.
 pub(crate) struct Guarded<'a, F: File, H> {
     state: Locked<'a, F>,
-    branch: Branch,
+    branch: CellId,
     holds: std::marker::PhantomData<H>,
 }
 
@@ -514,7 +514,7 @@ pub(crate) type Writable<'a, F> = Guarded<'a, F, Changeable>;
 
 impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
     /// `state`, of branch `branch`, if it holds to `H`.
-    pub fn check(state: Locked<'a, F>, branch: Branch) -> Result<Self, Error> {
+    pub fn check(state: Locked<'a, F>, branch: CellId) -> Result<Self, Error> {
         H::check(&state, branch)?;
         Ok(Self { state, branch, holds: std::marker::PhantomData })
     }
@@ -551,7 +551,7 @@ impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
         self.checked_again(branch)
     }
 
-    fn checked_again(self, branch: Branch) -> Result<Self, Error> {
+    fn checked_again(self, branch: CellId) -> Result<Self, Error> {
         if !rules().recheck_after_waiting {
             return Ok(self);
         }

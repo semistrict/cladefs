@@ -25,7 +25,7 @@ use crate::extents::Opening;
 use crate::pages::Arena;
 use crate::store_requests::{self, Capacity, Close};
 use crate::store_table::{self, StoreTable, Writer as _};
-use crate::{Branch, BranchOf, Errno, ExtentInfo, ExtentStore};
+use crate::{BranchOf, CellId, Errno, ExtentInfo, ExtentStore};
 use extent_bucket::cache::Cache;
 use extent_bucket::cell::Kind;
 use extent_bucket::object_bucket::Stats;
@@ -651,9 +651,9 @@ pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: crate::Error) -> Errn
 pub(super) async fn create(
     path: PathBuf,
     capacity: u64,
-    branch: Branch,
+    branch: CellId,
     (token, kind): (Option<u64>, Kind),
-) -> Result<Branch, Errno> {
+) -> Result<CellId, Errno> {
     let held = hold(&path).await?;
     blocking(move || {
         // Let go of once the work is done, though the call may give up on it before.
@@ -665,8 +665,8 @@ pub(super) async fn create(
         }
         // cladefs: a cell of 0 is a new one, its ID, its branch's too, the bucket's to give: no
         // caller names a new cell; a branch named, one the bucket has, of a cell named (TASK-364).
-        let of = match (branch.cell.id, branch.id) {
-            (0, 0) => BranchOf::New(branch.cell.tenant),
+        let of = match (branch.id, branch.id) {
+            (0, 0) => BranchOf::New(branch.tenant),
             (_, 0) | (0, _) => return Err(Errno::EINVAL),
             (_, _) => BranchOf::Taken(branch),
         };
@@ -686,7 +686,7 @@ pub(super) async fn import(
     image: PathBuf,
     reference: Option<String>,
     tenant: u64,
-) -> Result<Branch, Errno> {
+) -> Result<CellId, Errno> {
     let held = hold(&path).await?;
     blocking(move || {
         let _held = held;
@@ -711,7 +711,7 @@ pub(super) async fn import(
 /// the daemon's bucket: what the branch holds there.
 /// cladefs: a store of `branch` there whose write-ahead log another writer's commits moved its branch
 /// past is opened as the branch is, the log dropped (`ExtentStore::take_with`, TASK-165.9).
-fn take_store(path: &Path, branch: Option<Branch>, capacity: u64) -> Result<ExtentStore, Errno> {
+fn take_store(path: &Path, branch: Option<CellId>, capacity: u64) -> Result<ExtentStore, Errno> {
     let branch = match branch {
         Some(branch) => branch,
         None if !path.exists() => return Err(Errno::ENOENT),
@@ -739,19 +739,19 @@ pub(super) fn removed_if_unmade(path: &Path) -> Result<(), Errno> {
 /// cladefs: where the daemon keeps the version `version` of `cell`'s branch open for the forks of it
 /// made here: a directory of its own, in the process's temporary directory, made from the bucket
 /// the first time the version is forked here ([`opened_version`]), gone with the process.
-fn version_dir(cell: Branch, version: u64) -> PathBuf {
+fn version_dir(cell: CellId, version: u64) -> PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let root = ROOT.get_or_init(|| {
         std::env::temp_dir().join(format!("cladefsd-versions-{}", std::process::id()))
     });
-    root.join(format!("{:x}.{:x}.{:x}", cell.cell.tenant, cell.id, version))
+    root.join(format!("{:x}.{:x}.{:x}", cell.tenant, cell.id, version))
 }
 
 /// cladefs: the directory the version `version` of `cell` is kept open in for forks here
 /// ([`version_dir`]), made if it isn't, of `capacity` bytes: from the bucket, once the cell's commits
 /// here, if its writer is here, are uploaded, the version's among them, as a version is local as it
 /// is made and uploaded behind. `ENOENT` if the bucket has no such cell.
-async fn opened_version(cell: Branch, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
+async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<PathBuf, Errno> {
     let dir = version_dir(cell, version);
     let held = hold(&dir).await?;
     if dir.exists() && !crate::host_store::unmade(&dir) {
@@ -769,7 +769,7 @@ async fn opened_version(cell: Branch, version: u64, capacity: u64) -> Result<Pat
             std::fs::create_dir_all(root).map_err(|_| Errno::EIO)?;
         }
         let bucket = daemon_bucket()?;
-        let found = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, cell.cell));
+        let found = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, cell));
         let object = found.map_err(|_| Errno::EIO)?.map_err(|_| Errno::EIO)?;
         let object = object.ok_or(Errno::ENOENT)?;
         let kind = object.kind.ok_or(Errno::ENOENT)?;
@@ -794,7 +794,7 @@ async fn opened_version(cell: Branch, version: u64, capacity: u64) -> Result<Pat
 /// given, the granted tenant's whose VM process restores, or else of `cell`'s tenant's (TASK-364):
 /// one of another tenant's than `cell`'s only if the version is shared (`EACCES` otherwise).
 pub(super) async fn fork_version(
-    (cell, version): (Branch, u64),
+    (cell, version): (CellId, u64),
     capacity: u64,
     (path, tenant): (&Path, Option<u64>),
 ) -> Result<(), Errno> {
@@ -813,11 +813,11 @@ pub(super) async fn fork_version(
 /// if given, else of `cell`'s tenant's, as [`fork_version`] does, the store at `to` held throughout
 /// (`ForkStore`'s `version`): returns its branch.
 pub(super) async fn fork_of_version(
-    cell: Branch,
+    cell: CellId,
     version: u64,
     to: PathBuf,
     tenant: Option<u64>,
-) -> Result<Branch, Errno> {
+) -> Result<CellId, Errno> {
     let _child = hold_to_fork(&to).await?;
     fork_version((cell, version), ExtentStore::BLOCK_SIZE as u64, (&to, tenant)).await?;
     extent_store::host_branch(&to).map_err(|_| Errno::EIO)
@@ -829,7 +829,7 @@ pub(super) async fn fork_of_version(
 /// (TASK-194). `EEXIST` otherwise, logged: its guest, of the snapshot's memory, would read extents
 /// freed since and commit over what was written since. Nothing of the store is changed.
 pub(super) async fn at_version(
-    (cell, version): (Branch, u64),
+    (cell, version): (CellId, u64),
     capacity: u64,
     path: &Path,
     store: &ExtentStore,
@@ -859,7 +859,7 @@ async fn fork_kept(
         Err(errno) => return (Err(errno), Opened::Now),
     };
     // A new cell of `tenant`'s, or of the kept store's tenant's (TASK-364).
-    let tenant = tenant.unwrap_or(kept.store.branch().cell.tenant);
+    let tenant = tenant.unwrap_or(kept.store.branch().tenant);
     let forked = kept.store.fork(path, tenant);
     let forked = forked.map(drop).map_err(|err| {
         errno_of(format_args!("forking {} to {}", from.display(), path.display()), err)
@@ -922,17 +922,17 @@ async fn kept_or_open(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Ope
 /// A version not shared forks to no cell of another tenant's (`EACCES`, TASK-395.7); nor does a
 /// store with a writer, unless it is the default tenant's, as the daemon's own stores and public
 /// bases are (`EACCES`, TASK-395.9), refused before anything is made.
-pub(super) async fn fork(from: PathBuf, to: PathBuf, tenant: Option<u64>) -> Result<Branch, Errno> {
+pub(super) async fn fork(from: PathBuf, to: PathBuf, tenant: Option<u64>) -> Result<CellId, Errno> {
     fork_from_store(&from, &to, tenant).await
 }
 
 /// cladefs: forks the store at `from` to `to` as [`fork`] does.
-async fn fork_from_store(from: &Path, to: &Path, tenant: Option<u64>) -> Result<Branch, Errno> {
+async fn fork_from_store(from: &Path, to: &Path, tenant: Option<u64>) -> Result<CellId, Errno> {
     let _child = hold_to_fork(to).await?;
     let key = store_key(from);
     // A new cell of `tenant`'s, or of the store's tenant's (TASK-364).
     let from_branch = extent_store::host_branch(from).map_err(|_| Errno::ENOENT)?;
-    let tenant = tenant.unwrap_or(from_branch.cell.tenant);
+    let tenant = tenant.unwrap_or(from_branch.tenant);
     let was_kept = kept(&key).is_some();
     match fork_held(from, to, tenant, &key).await {
         Err(errno) if was_kept && store_at_fault(errno) => fork_held(from, to, tenant, &key).await,
@@ -942,7 +942,7 @@ async fn fork_from_store(from: &Path, to: &Path, tenant: Option<u64>) -> Result<
 
 /// cladefs: forks the store at `from`, whose key is `key`, to `to`, which the caller holds, as
 /// [`fork`] does, once, to a new cell of `tenant`'s, and returns its branch. A kept store whose fork fails is let go of ([`let_go_failed`]).
-async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<Branch, Errno> {
+async fn fork_held(from: &Path, to: &Path, tenant: u64, key: &Path) -> Result<CellId, Errno> {
     let live = |connection: &Connection| {
         Some(Forked { store: Here::of(connection.store()?.clone(), None), live: true })
     };
@@ -1166,7 +1166,7 @@ pub(super) async fn make_public(path: PathBuf, attach_only: bool) -> Result<(), 
 /// What the store at `path` is, and holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StoreState {
-    pub branch: Branch,
+    pub branch: CellId,
     pub info: ExtentInfo,
     /// What its branch holds, bytes and extents, and whose (TASK-49, TASK-454).
     pub holding: crate::StoreHolding,
@@ -1237,7 +1237,7 @@ fn open_instances() -> Vec<Arc<ExtentStore>> {
 
 /// The branches of the stores open for connections whose commits upload now, and what their
 /// uploaders have left to do (`metrics`, TASK-91.3).
-pub(super) fn upload_statuses() -> Vec<(Branch, extent_store::upload::UploadStatus)> {
+pub(super) fn upload_statuses() -> Vec<(CellId, extent_store::upload::UploadStatus)> {
     (open_instances().iter())
         .filter_map(|store| Some((store.branch(), store.upload_status().ok()??)))
         .collect()

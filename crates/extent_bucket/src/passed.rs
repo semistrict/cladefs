@@ -32,7 +32,7 @@
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::collector::{Holding, Options};
-use crate::layout::{self, Branch, Cell, FORMAT};
+use crate::layout::{self, CellId, FORMAT};
 use crate::{Error, Left, branch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -62,10 +62,10 @@ pub struct CollectorLease {
 
 impl CollectorLease {
     /// The lease of `cell` `bytes` encode: [`Error::Format`] if it is of another format.
-    pub fn decode(cell: Cell, bytes: &[u8]) -> Result<Self, Error> {
+    pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
-            return Err(Error::Format { branch: Branch { cell, id: 0 }, format });
+            return Err(Error::Format { branch: CellId { tenant: cell.tenant, id: 0 }, format });
         }
         layout::decode(bytes)
     }
@@ -234,7 +234,7 @@ pub(crate) struct Listed {
 }
 
 /// Lists `cell`, once.
-pub(crate) async fn list(bucket: &impl Bucket, cell: Cell) -> Listed {
+pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Listed {
     let measured = bucket.now();
     let mut listed = bucket::list(bucket, &cell.prefix()).await;
     listed.sort_by(|a, b| a.key.cmp(&b.key));
@@ -261,7 +261,7 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: Cell) -> Listed {
 
 /// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
 /// of every object but the collector's own (`<C>gc/`).
-pub(crate) fn digest<'a>(cell: Cell, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
+pub(crate) fn digest<'a>(cell: CellId, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
     let own = layout::collectors(cell);
     let mut digest = Sha256::new();
     for meta in listed.into_iter().filter(|meta| !meta.key.starts_with(&own)) {
@@ -300,7 +300,7 @@ pub(crate) struct LeaseTaking {
 
 /// The collector lease of `cell` as a read finds it, if there is one, for a taking of it after
 /// ([`take`]).
-pub(crate) async fn found(bucket: &impl Bucket, cell: Cell) -> Option<bucket::Object> {
+pub(crate) async fn found(bucket: &impl Bucket, cell: CellId) -> Option<bucket::Object> {
     bucket::get(bucket, &layout::collector_lease(cell)).await
 }
 
@@ -311,7 +311,7 @@ pub(crate) async fn found(bucket: &impl Bucket, cell: Cell) -> Option<bucket::Ob
 /// cell to that pass, writing nothing ([`Error::Left`]).
 pub(crate) async fn take(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     found: Option<bucket::Object>,
     holder: u64,
     holding: Holding,
@@ -346,7 +346,7 @@ pub(crate) async fn take(
 /// was. Its usage counts the lease as it is written.
 pub(crate) async fn change(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     taken: &LeaseTaking,
     change: impl Fn(CollectorLease) -> CollectorLease,
 ) -> Result<bool, Error> {
@@ -362,12 +362,12 @@ pub(crate) async fn change(
 }
 
 /// The collector lease of `cell`, if there is one: [`Error::Format`] if of another format.
-pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<CollectorLease>, Error> {
+pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Option<CollectorLease>, Error> {
     found(bucket, cell).await.map(|object| CollectorLease::decode(cell, &object.bytes)).transpose()
 }
 
 /// The epoch of the last taking of the collector lease of `cell`: 0 if none took it.
-pub(crate) async fn epoch(bucket: &impl Bucket, cell: Cell) -> Result<u64, Error> {
+pub(crate) async fn epoch(bucket: &impl Bucket, cell: CellId) -> Result<u64, Error> {
     Ok(read(bucket, cell).await?.map_or(0, |lease| lease.epoch))
 }
 
@@ -392,7 +392,7 @@ mod tests {
     /// was written, its version; and not with where one key ends and the next begins.
     #[test]
     fn digests_change_with_every_part_of_a_listing() {
-        let record = layout::record(Branch { cell: TEST_CELL, id: 1 });
+        let record = layout::record(CellId { tenant: TEST_CELL.tenant, id: 1 });
         let base = [meta(&record, 10, 5, "1")];
         let changed = [
             vec![meta(&record, 11, 5, "1")],
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn leases_count_themselves() {
         let mut usage = Usage { measured: 3, ..Usage::default() };
-        usage.add(&layout::record(Branch { cell: TEST_CELL, id: 1 }), 40);
+        usage.add(&layout::record(CellId { tenant: TEST_CELL.tenant, id: 1 }), 40);
         let deferred = vec![Deferred { key: "k".into(), due: 9 }];
         let passed = Passed {
             listing: Some([7; 32]),
@@ -442,7 +442,8 @@ mod tests {
         for format in [FORMAT + 1, 8] {
             let lease =
                 CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
-            let refused = Error::Format { branch: Branch { cell: TEST_CELL, id: 0 }, format };
+            let refused =
+                Error::Format { branch: CellId { tenant: TEST_CELL.tenant, id: 0 }, format };
             assert_eq!(CollectorLease::decode(TEST_CELL, &layout::encode(&lease)), Err(refused));
         }
     }

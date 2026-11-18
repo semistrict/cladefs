@@ -458,7 +458,7 @@ mod host {
                 });
                 if self.memory == Memory::Cell {
                     load["mem_backend"] = serde_json::json!({
-                        "backend_type": "Cell",
+                        "backend_type": "CellId",
                         "backend_path": dir.join(format!("memory-{name}")),
                     });
                     let version = memory_version.context("the memory cell made no version")?;

@@ -12,7 +12,7 @@ use crate::layout::{DESCRIPTION, Description, StoreFile};
 use crate::store::{Store, UNMADE};
 use anyhow::{Context as _, Error};
 use extent_bucket::cell::Kind;
-use extent_frame::segment::Branch;
+use extent_frame::segment::CellId;
 use std::path::Path;
 
 /// Makes a new store at `path`, which must be a directory holding no store, as `description`
@@ -98,7 +98,7 @@ pub fn host_token(path: &Path) -> Result<Option<u64>, Error> {
 /// called for nothing. It fails while another process has the store open, or this one.
 pub fn delete_host(
     path: &Path,
-    before: impl FnOnce(Branch) -> Result<(), Error>,
+    before: impl FnOnce(CellId) -> Result<(), Error>,
 ) -> Result<(), Error> {
     if !path.join(DESCRIPTION).exists() {
         return remove_store(path);
@@ -235,7 +235,7 @@ fn remove(removed: std::io::Result<()>) -> std::io::Result<()> {
 }
 
 /// The branch of the store at `path`, as its description names it.
-pub fn host_branch(path: &Path) -> Result<Branch, Error> {
+pub fn host_branch(path: &Path) -> Result<CellId, Error> {
     Ok(store_file(path)?.branch)
 }
 

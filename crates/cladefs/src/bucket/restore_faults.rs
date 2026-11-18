@@ -63,7 +63,7 @@ struct Hosts {
     /// What the version holds, and its root.
     held: Vec<(ExtentId, Vec<u8>)>,
     /// The forks made, by their branches, with their stores' paths.
-    children: Arc<Mutex<Vec<(crate::Branch, PathBuf)>>>,
+    children: Arc<Mutex<Vec<(crate::CellId, PathBuf)>>>,
     /// Whether a host died.
     dead: Arc<AtomicBool>,
     /// Whether the version was dropped.
@@ -76,7 +76,7 @@ fn copy_at(disk: &Path) -> PathBuf {
 }
 
 /// The keys of the segments of `branch` in `bucket`.
-fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::Branch) -> Vec<String> {
+fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::CellId) -> Vec<String> {
     let keys = block_on(extent_bucket::Bucket::list(&**bucket, "")).unwrap();
     let segments = keys.into_iter().map(|meta| meta.key);
     segments
@@ -89,7 +89,7 @@ fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::Branch) -> Vec<String> {
 /// (TASK-411.4).
 fn in_bucket(
     bucket: &Arc<ObjectBucket>,
-    child: crate::Branch,
+    child: crate::CellId,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
         let record = branch::record(&**bucket, child).await.map_err(|err| err.to_string())?;
@@ -118,7 +118,7 @@ fn in_bucket(
 /// the deletion records of a branch's forks to other cells is authenticated (TASK-411.4).
 async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
-    branch: crate::Branch,
+    branch: crate::CellId,
     holder: u64,
 ) -> Result<(), extent_bucket::Error> {
     let kms = crate::bucket::kms().unwrap();
@@ -210,7 +210,7 @@ impl Hosts {
 
     /// Asserts the fork `child` holds what the version held, in the bucket, and, its store at
     /// `path`, opened, reads it and goes on.
-    fn check_fork(&self, child: crate::Branch, path: &Path, case: &str) {
+    fn check_fork(&self, child: crate::CellId, path: &Path, case: &str) {
         let mut read = in_bucket(&self.bucket, child).unwrap_or_else(|err| panic!("{case}: {err}"));
         read.sort();
         let mut held = self.held.clone();
@@ -361,7 +361,7 @@ impl Hosts {
     fn settle(
         mut self,
         host: usize,
-        child: crate::Branch,
+        child: crate::CellId,
         forked: Result<(), Option<Errno>>,
         leftover: Leftover,
         case: &str,

@@ -18,7 +18,7 @@ const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
 /// branches in a bucket in its memory, as of placement 1; its log on standard error.
 /// The branch of the store at `path`, in its cell, as its description names it (TASK-364): what a
 /// VM process's store, which names its branch's ID alone, is in the bucket.
-fn branch_at(path: &std::path::Path) -> crate::Branch {
+fn branch_at(path: &std::path::Path) -> crate::CellId {
     extent_store::host_branch(path).unwrap()
 }
 
@@ -409,7 +409,7 @@ fn resize(path: &Path, capacity: u64) -> Result<(), Errno> {
 
 /// Forks the store at `from` to a new branch at `to`, as the control API does (`ForkStore`), and
 /// returns the branch.
-fn fork_store(from: &Path, to: &Path) -> Result<crate::Branch, crate::Error> {
+fn fork_store(from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
     let forked = control(super::stores::fork(from.to_owned(), to.to_owned(), None));
     forked.map_err(crate::Error::from)
 }
@@ -2459,7 +2459,7 @@ fn stores_made_are_cells_of_their_kinds() {
     let memory_branch = branch_at(&memory);
     assert_eq!((fxfs.branch(), sqlite.branch()), (disk_branch.id, db_branch.id));
     assert_eq!(memory_store.branch(), memory_branch.id);
-    assert_ne!(disk_branch.cell, db_branch.cell, "each made alone, in a cell of its own");
+    assert_ne!(disk_branch, db_branch, "each made alone, in a cell of its own");
     let bucket = super::stores::daemon_bucket().unwrap();
     futures::executor::block_on(async {
         for (branch, name, kind) in [
@@ -2467,7 +2467,7 @@ fn stores_made_are_cells_of_their_kinds() {
             (db_branch, "db.sqlite", Kind::Sqlite),
             (memory_branch, "memory", Kind::Memory),
         ] {
-            let cell = extent_bucket::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
+            let cell = extent_bucket::cell::read(&*bucket, branch).await.unwrap().unwrap();
             let made = (cell.branch, cell.kind, cell.deleted);
             assert_eq!(made, (Some(branch.id), Some(kind), false), "{name}");
             let head = extent_bucket::head::get(&*bucket, branch).await.unwrap().unwrap();
@@ -2706,7 +2706,7 @@ fn control_takes_branches_at_the_placements_given() {
     std::thread::spawn(move || serve(listener));
     let path = |name: &str| dir.path().join(name);
     // Host 1's copy, of a new branch the bucket names, placed at 5, its commit synced.
-    let new = crate::Branch { cell: crate::Cell { tenant: 0, id: 0 }, id: 0 };
+    let new = crate::CellId { tenant: 0, id: 0 };
     let made = super::stores::create(path("first"), 1 << 24, new, (Some(5), Kind::Fxfs));
     let branch = control(made).unwrap();
     let extent = ExtentId { branch: branch.id, sequence: 1 };
@@ -6477,9 +6477,6 @@ fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
 }
 
 /// The branch of the cell `version` is of: its ID the cell's (doc-20).
-fn version_branch(version: crate::CellVersion) -> crate::Branch {
-    crate::Branch {
-        cell: crate::Cell { tenant: version.tenant, id: version.cell },
-        id: version.cell,
-    }
+fn version_branch(version: crate::CellVersion) -> crate::CellId {
+    crate::CellId { tenant: version.tenant, id: version.cell }
 }

@@ -60,7 +60,7 @@ mod stalling;
 use stalling::{Op, Stalling};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 /// Small segments, so that commits and the closer close several, and an extent of four blocks in
 /// a file of its own.
 const OPTIONS: Options = Options {
@@ -111,7 +111,7 @@ enum Step {
 }
 
 /// The branch the writer forks.
-const CHILD: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(BRANCH.id + 1);
+const CHILD: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(BRANCH.id + 1);
 
 const STEPS: &[Step] = &[
     Step::Write(1, 1),

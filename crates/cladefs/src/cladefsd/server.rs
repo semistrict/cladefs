@@ -339,7 +339,7 @@ impl Tenant {
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
         match extent_store::host_branch(path) {
-            Ok(branch) if branch.cell.tenant != id => Err(Errno::EACCES),
+            Ok(branch) if branch.tenant != id => Err(Errno::EACCES),
             // No store yet, which it makes of its own cell; or one its opening fails, saying why.
             _ => Ok(()),
         }
@@ -1386,8 +1386,7 @@ impl Connection {
                     stores::errno_of(format_args!("making a version"), err)
                 })?;
                 let branch = store.branch();
-                reply.args =
-                    Forked { branch: branch.id, version, tenant: branch.cell.tenant }.args();
+                reply.args = Forked { branch: branch.id, version, tenant: branch.tenant }.args();
                 Ok(())
             }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
@@ -1395,7 +1394,7 @@ impl Connection {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
                 // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
-                let forked = store.fork(path, store.branch().cell.tenant);
+                let forked = store.fork(path, store.branch().tenant);
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
@@ -2771,6 +2770,6 @@ mod in_dir_tests {
 
 /// cladefs: the branch of the cell `id` of `tenant`'s, which a version a restore forks is of: a
 /// cell's ID is its branch's (doc-20).
-fn version_cell(tenant: u64, id: u64) -> crate::Branch {
-    crate::Branch { cell: crate::Cell { tenant, id }, id }
+fn version_cell(tenant: u64, id: u64) -> crate::CellId {
+    crate::CellId { tenant, id }
 }

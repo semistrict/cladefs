@@ -11,7 +11,7 @@
 //! ring holding it ([`encrypting`], [`ring`]): nothing is framed in the clear (TASK-411.28).
 
 use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
-use crate::layout::{self, Branch, Kind};
+use crate::layout::{self, CellId, Kind};
 pub use crate::moves::{Moved, MovesMaps};
 use futures::channel::oneshot;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,7 +60,7 @@ struct Inner {
     queue: Vec<Request>,
     /// The writers whose creates of segments are held ([`SimBucket::hold`]): of each branch, those
     /// of this epoch and before.
-    held: BTreeMap<Branch, u64>,
+    held: BTreeMap<CellId, u64>,
     /// The creates held, out of the queue, each until an object at its key is deleted.
     parked: Vec<Request>,
     /// Each request completed, in order, and what it gave ([`SimBucket::journal`]).
@@ -108,7 +108,7 @@ impl SimBucket {
     /// when it waits again: a writer taken over, whose creates are in flight while the next one's
     /// segments take their places, which the collector compacts and deletes, landing then
     /// (TASK-79.18).
-    pub fn hold(&self, branch: Branch, epoch: u64) {
+    pub fn hold(&self, branch: CellId, epoch: u64) {
         let inner = &mut *self.inner.lock().unwrap();
         let held = inner.held.entry(branch).or_default();
         *held = (*held).max(epoch);
@@ -507,7 +507,7 @@ pub const VERSION: u64 = 0xa;
 /// The writer, and the version's origin.
 pub async fn versioned<B: Bucket + 'static>(
     bucket: &Arc<B>,
-    branch: Branch,
+    branch: CellId,
     extents: Vec<(storage_device::ExtentId, Vec<u8>)>,
 ) -> (crate::writer::Writer<B>, layout::Origin) {
     crate::branch::create(&**bucket, branch, 0).await.unwrap();
@@ -537,7 +537,7 @@ pub async fn versioned_by<B: Bucket + 'static>(
 /// KMS ([`crate::branch::fork_version`]).
 pub async fn fork_version(
     bucket: &impl Bucket,
-    child: Branch,
+    child: CellId,
     id: u64,
     origin: layout::Origin,
     owner: u64,
@@ -551,7 +551,7 @@ pub async fn fork_version(
 /// (TASK-395.4).
 pub async fn live(
     bucket: &impl Bucket,
-) -> Result<BTreeMap<Branch, crate::record::Record>, crate::Error> {
+) -> Result<BTreeMap<CellId, crate::record::Record>, crate::Error> {
     use futures::StreamExt as _;
     let mut live = BTreeMap::new();
     let mut cells = std::pin::pin!(crate::cell::listed(bucket));
@@ -620,7 +620,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     use storage_device::ExtentId;
     let keys: BTreeSet<String> =
         crate::bucket::list(bucket, "").await.into_iter().map(|meta| meta.key).collect();
-    let mut records: BTreeMap<Branch, Record> = BTreeMap::new();
+    let mut records: BTreeMap<CellId, Record> = BTreeMap::new();
     let mut references = Vec::new();
     for key in &keys {
         match layout::kind(key) {
@@ -634,9 +634,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         }
     }
     // A cell no live branch and no reference keeps, whose pass retires its children's references.
-    let dead = |cell: layout::Cell| {
-        records.iter().filter(|(branch, _)| branch.cell == cell).all(|(_, record)| record.deleted)
-            && !references.iter().any(|(_, parent, _, _)| parent.cell == cell)
+    let dead = |cell: layout::CellId| {
+        records.iter().filter(|(branch, _)| **branch == cell).all(|(_, record)| record.deleted)
+            && !references.iter().any(|(_, parent, _, _)| *parent == cell)
     };
     // cladefs: the branches of deleted roots and clones whose IDs an allocator gave (TASK-455).
     let mut given = BTreeSet::new();
@@ -660,29 +660,29 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             fences.insert(key.clone());
         }
     }
-    let fenced = |cell: layout::Cell| {
+    let fenced = |cell: layout::CellId| {
         fences
             .iter()
-            .any(|key| matches!(layout::kind(key), Kind::Head { branch } if branch.cell == cell))
+            .any(|key| matches!(layout::kind(key), Kind::Head { branch } if branch == cell))
     };
     // Whether a cell goes whole: dead, no mark under it, no fence, each of its records, one at
     // least, one it may go with.
-    let marked_under = |cell: layout::Cell| {
+    let marked_under = |cell: layout::CellId| {
         keys.iter().any(|key| match layout::kind(key) {
-            Kind::Retired { parent, .. } => parent.cell == cell,
+            Kind::Retired { parent, .. } => parent == cell,
             Kind::Marks { cell: of, .. } => of == cell,
             _ => false,
         })
     };
-    let removed = |cell: layout::Cell| {
-        let mut held = records.iter().filter(|(branch, _)| branch.cell == cell).peekable();
+    let removed = |cell: layout::CellId| {
+        let mut held = records.iter().filter(|(branch, _)| **branch == cell).peekable();
         held.peek().is_some()
             && dead(cell)
             && !marked_under(cell)
             && !fenced(cell)
             && held.all(|(branch, record)| record.removable(given.contains(branch)))
     };
-    let recorded = |cell: layout::Cell| records.keys().any(|branch| branch.cell == cell);
+    let recorded = |cell: layout::CellId| records.keys().any(|branch| *branch == cell);
     // The moves of a location's object listed, every pass's (TASK-407.1): none of no cell's, which
     // nothing compacts.
     let moves_of = |key: &str| -> Vec<String> {
@@ -705,7 +705,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         // final, which fences its writers (TASK-407): but those of a cell that goes whole
         // (TASK-455).
         if record.deleted {
-            if !removed(branch.cell) {
+            if !removed(branch) {
                 needed.insert(layout::head(branch));
                 needed.insert(key);
             }
@@ -720,7 +720,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let (epoch, end, checkpoint) = (recovered.epoch(), recovered.end(), recovered.checkpoint());
         // Its forks to other cells, whose children may have no references yet.
         for fork in &recovered.state.forks {
-            if fork.child.cell != branch.cell {
+            if fork.child != branch {
                 versions.insert(Origin { parent: branch, at: fork.at });
                 pending.insert((branch, fork.at, fork.child));
             }
@@ -779,8 +779,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for &(key, parent, at, child) in &references {
         let origin = Origin { parent, at };
         let named = records.get(&child).is_some_and(|record| record.origin() == Some(origin));
-        let retired =
-            named && records[&child].deleted && child.cell != parent.cell && dead(child.cell);
+        let retired = named && records[&child].deleted && child != parent && dead(child);
         // Marked, retired or taken back before: a stale writer's, written after, garbage
         // (TASK-395.13, TASK-395.14).
         let marked = keys.contains(&layout::retired(parent, at, child));
@@ -826,7 +825,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         // volumes' heads; blocks of object IDs taken, for good (TASK-364); and the collector's
         // leases and marks, and references not yet retirable (TASK-395); tenants' KEK objects,
         // for good (TASK-411.27).
-        let alone = |cell: layout::Cell| {
+        let alone = |cell: layout::CellId| {
             let prefix = cell.prefix();
             keys.iter().filter(|other| other.starts_with(&prefix)).count() == 1
         };
@@ -877,16 +876,16 @@ pub fn dek() -> &'static extent_frame::Secret {
 
 /// cladefs: how a test frames an object of `branch` outside a writer: under [`dek`], as the branch's
 /// DEK of the first generation.
-pub fn encrypting(branch: Branch) -> layout::EncryptionKey<'static> {
+pub fn encrypting(branch: CellId) -> layout::EncryptionKey<'static> {
     (dek(), extent_frame::KeyId { branch: branch.id, generation: crate::keys::FIRST })
 }
 
 /// cladefs: a ring holding [`dek`] as the DEK of each of `branches`, which a test's reader reads
 /// what [`encrypting`] encrypted under, encrypting as the first's writer.
-pub fn ring(branches: impl IntoIterator<Item = Branch>) -> Arc<crate::keys::Ring> {
+pub fn ring(branches: impl IntoIterator<Item = CellId>) -> Arc<crate::keys::Ring> {
     let mut branches = branches.into_iter();
     let first = branches.next().expect("a branch, at least");
-    let key = |branch: Branch| encrypting(branch).1;
+    let key = |branch: CellId| encrypting(branch).1;
     let others =
         branches.map(|branch| (key(branch), extent_frame::Secret::from_bytes(dek().expose())));
     let dek = extent_frame::Secret::from_bytes(dek().expose());
@@ -894,7 +893,7 @@ pub fn ring(branches: impl IntoIterator<Item = Branch>) -> Arc<crate::keys::Ring
 }
 
 /// cladefs: the branch whose object is at `key`, by its key: of a moves', the object's they are of.
-fn branch_of_key(key: &str) -> Option<Branch> {
+fn branch_of_key(key: &str) -> Option<CellId> {
     match layout::kind(key) {
         Kind::Segment { branch, .. }
         | Kind::Extent { branch, .. }
@@ -909,13 +908,13 @@ fn branch_of_key(key: &str) -> Option<Branch> {
 /// writer encrypts under (TASK-411.28).
 pub async fn ring_of(
     bucket: &impl Bucket,
-    branch: Branch,
+    branch: CellId,
 ) -> Result<Arc<crate::keys::Ring>, crate::Error> {
     let record = crate::branch::record(bucket, branch).await?.ok_or(crate::Error::NoBranch)?;
     let kms = crate::keys::testing::host_kms();
-    let keys = match crate::cell::read(bucket, branch.cell).await? {
-        Some(object) => crate::keys::CellKeys::of(branch.cell, &object, kms),
-        None => crate::keys::CellKeys::objectless(branch.cell, kms),
+    let keys = match crate::cell::read(bucket, branch).await? {
+        Some(object) => crate::keys::CellKeys::of(branch, &object, kms),
+        None => crate::keys::CellKeys::objectless(branch, kms),
     };
     crate::keys::ring(bucket, &keys, branch, &record, false).await
 }

@@ -50,7 +50,7 @@ use extent_bucket::cache::Cache;
 use extent_bucket::fetch::Budget;
 use extent_bucket::keys::{self, CellKeys, Ring, RingHold};
 use extent_bucket::known::Learned;
-use extent_bucket::layout::{Branch, Chain, Child, Origin, epoch_of};
+use extent_bucket::layout::{CellId, Chain, Child, Origin, epoch_of};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::record::{Kind, Record};
 use extent_bucket::wal::TakenBranch;
@@ -189,13 +189,13 @@ impl<T> Retried<T> {
 /// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
     bucket: &ObjectBucket,
-    branch: Branch,
+    branch: CellId,
     token: u64,
     kms: &Arc<keys::CachingKms>,
 ) -> Result<(), Failure> {
     Ok(block_on(async {
         branch::delete(bucket, branch, rand::random(), token, kms).await?;
-        cell::forget(bucket, branch.cell, branch.id).await
+        cell::forget(bucket, branch, branch.id).await
     })??)
 }
 
@@ -382,7 +382,7 @@ pub(crate) struct Shared<D: Dir, B: extent_bucket::Bucket = ObjectBucket> {
     at_version: std::sync::OnceLock<AtVersion>,
     /// The origins of the forks of the segments the uploader took, by their children: what a fork
     /// that fails deletes its child by (TASK-165.7).
-    forks: Mutex<std::collections::BTreeMap<Branch, Origin>>,
+    forks: Mutex<std::collections::BTreeMap<CellId, Origin>>,
     progress: Mutex<Progress>,
     /// Notified as the progress changes: what waits for uploads listens to it, blocking or not
     /// (TASK-43.6).
@@ -744,7 +744,7 @@ impl<D: Dir> Uploader<D> {
     /// whose record its parent's writers, finding it another's, would fail on for ever. One GET of
     /// the child's record. cladefs: a fork of a store at a version needs none: its child's record's
     /// create finds any there, and refuses it alike (`branch::fork_version`, TASK-449).
-    pub fn child_free(&self, child: Branch) -> Result<bool, Failure> {
+    pub fn child_free(&self, child: CellId) -> Result<bool, Failure> {
         let found = block_on(branch::record(&*self.bucket, child))??;
         failing!("upload::child_free");
         Ok(found.is_none())
@@ -880,7 +880,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     async fn cell_keys(
         &self,
         bucket: &B,
-        cell: extent_bucket::layout::Cell,
+        cell: extent_bucket::layout::CellId,
         placement: Option<u64>,
     ) -> Result<CellKeys, Failure> {
         let kms = self.keys.kms.clone();
@@ -925,7 +925,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
 
     /// Where the fork to `child` is in the branch, once the uploader took the segment its commit
     /// ends.
-    pub(crate) fn fork_origin(&self, child: Branch) -> Option<Origin> {
+    pub(crate) fn fork_origin(&self, child: CellId) -> Option<Origin> {
         self.forks.lock().unwrap().get(&child).copied()
     }
 
@@ -1177,7 +1177,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
                 let before = match record.deks.is_empty() {
                     true => Ring::keyless(),
                     false => {
-                        let keys = self.cell_keys(bucket, branch.cell, Some(placement)).await?;
+                        let keys = self.cell_keys(bucket, branch, Some(placement)).await?;
                         keys::ring(&**bucket, &keys, branch, &record, true).await?
                     }
                 };
@@ -1219,25 +1219,25 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         let kms = &self.keys.kms;
         let kek = match &found {
             Some((record, ..)) if !record.deks.is_empty() => None,
-            _ => Some(keys::new_cell_kek(kms, branch.cell.tenant).await?),
+            _ => Some(keys::new_cell_kek(kms, branch.tenant).await?),
         };
         let making = kek.as_ref().map(|(_, kek)| kek);
         let holding = (placement, placement);
         let remembered = matches!(cell, CellFrom::Remembered(_));
-        let holding = cell::hold_from(&**bucket, branch.cell, cell.start(), holding, making, given);
+        let holding = cell::hold_from(&**bucket, branch, cell.start(), holding, making, given);
         let (held, object) = match holding.await.map(|(held, object, _)| (held, object)) {
             Ok(held) => held,
             Err(err) => {
                 if let Some((secret, kek)) = kek {
-                    kms.give_back(branch.cell.tenant, (secret, kek.wrapped));
+                    kms.give_back(branch.tenant, (secret, kek.wrapped));
                 }
                 return Err(err.into());
             }
         };
-        let cell_keys = keys::held(kms, branch.cell, object, kek);
+        let cell_keys = keys::held(kms, branch, object, kek);
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
         // its stores into new cells take, filled off this path (TASK-411.4).
-        kms.refill(branch.cell.tenant);
+        kms.refill(branch.tenant);
         let token = held.epoch;
         let taker = Taker { holder, token, remembered: remembered.then_some(held) };
         // Its state, once it holds the head, recovered on from what was found before. cladefs:
@@ -1282,7 +1282,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         &self,
         bucket: &Arc<B>,
         cell_keys: &CellKeys,
-        branch: extent_bucket::layout::Branch,
+        branch: extent_bucket::layout::CellId,
         record: Option<Record>,
     ) -> Result<Arc<Ring>, Failure> {
         let record = match record {
@@ -1327,7 +1327,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     async fn version(
         &self,
         bucket: &Arc<B>,
-        branch: Branch,
+        branch: CellId,
         record: Record,
         head: Option<extent_bucket::layout::Head>,
         id: u64,
@@ -1337,7 +1337,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
             return Err(Failure::VersionDropped);
         };
         let origin = Origin { parent: branch, at: version.at };
-        let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
+        let cell_keys = self.cell_keys(bucket, branch, None).await?;
         let keys = keys::ring(&**bucket, &cell_keys, branch, &record, true).await?;
         let recovering =
             extent_bucket::recovery::recover_version(&**bucket, branch, version.at, &keys);
@@ -1391,7 +1391,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
         let mut segments = Vec::with_capacity(closed.len());
         for closed in closed {
             let (number, tag) = (closed.number, closed.tag());
-            let forks: Vec<Branch> =
+            let forks: Vec<CellId> =
                 closed.footer.contents.forks.iter().map(|forked| forked.branch).collect();
             let own = closed.own.iter().map(|(key, file)| Ok((key.clone(), stored(file)?)));
             let own = own.collect::<Result<_, Failure>>()?;
@@ -1475,12 +1475,12 @@ fn learned<B: extent_bucket::Bucket, D: Dir>(
 /// ([`CellFrom::Remembered`]; `Writer::take`).
 async fn first_reads<B: extent_bucket::Bucket>(
     bucket: &B,
-    branch: Branch,
+    branch: CellId,
     learned: Option<Learned>,
     kms: &Arc<keys::CachingKms>,
 ) -> Result<(Option<Record>, extent_bucket::head::Read, CellFrom), Failure> {
     use extent_bucket::head::{self, Read};
-    let key = extent_bucket::layout::cell(branch.cell);
+    let key = extent_bucket::layout::cell(branch);
     let cell_read = || extent_bucket::bucket::get(bucket, &key);
     let Some(Learned { record, cell, headless }) = learned else {
         let (found, read, cell) = futures::join!(
@@ -1513,7 +1513,7 @@ async fn first_reads<B: extent_bucket::Bucket>(
 /// not made.
 async fn resumed<B: extent_bucket::Bucket>(
     bucket: &B,
-    branch: Branch,
+    branch: CellId,
     found: Option<Record>,
     kms: &Arc<keys::CachingKms>,
 ) -> Result<Option<Record>, Failure> {
@@ -1647,7 +1647,7 @@ mod tests {
     use extent_bucket::fetch::Limits;
     use storage_device::ExtentId;
 
-    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 
     /// TASK-449's review: a failed making of the bucket runtime, a thread not spawned as under a
     /// limit of the process's threads, fails the call it was made for, not every call after for
@@ -1721,7 +1721,7 @@ mod tests {
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .unwrap();
         store.made().unwrap();
-        let object = runtime.block_on(cell::read(&*bucket, BRANCH.cell)).unwrap().unwrap();
+        let object = runtime.block_on(cell::read(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
         assert_eq!((object.branch, object.kind), (Some(BRANCH.id), Some(cell::Kind::Fxfs)));
         let head = runtime.block_on(extent_bucket::head::get(&*bucket, BRANCH)).unwrap().unwrap();
@@ -1733,7 +1733,7 @@ mod tests {
         // Another placement takes the cell, and its writer the branch with the cell's epoch,
         // fencing it (TASK-371).
         let taken = runtime.block_on(async {
-            let (held, _) = cell::hold(&*bucket, BRANCH.cell, (6, 6), None, None).await.unwrap();
+            let (held, _) = cell::hold(&*bucket, BRANCH, (6, 6), None, None).await.unwrap();
             drop(
                 extent_bucket::Writer::open(bucket.clone(), BRANCH, 0x66, held.epoch)
                     .await
@@ -1746,7 +1746,7 @@ mod tests {
         store.commit(None).unwrap();
         let fenced = uploader.wait_uploaded(store.last_commit().unwrap());
         assert!(matches!(fenced, Err(Failure::Bucket(extent_bucket::Error::Fenced))), "{fenced:?}");
-        let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), None, None));
+        let back = runtime.block_on(cell::hold(&*bucket, BRANCH, (5, 5), None, None));
         assert_eq!(back.map(|(held, _)| held), Err(extent_bucket::Error::Stale));
     }
 
@@ -1821,9 +1821,9 @@ mod shuttle_tests {
     use storage_device::ExtentId;
 
     const BLOCK: usize = 4096;
-    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
     /// The branch the writer forks.
-    const CHILD: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(BRANCH.id + 1);
+    const CHILD: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(BRANCH.id + 1);
 
     /// Small segments, so that commits close several, and extents of two blocks or more in
     /// objects of their own, which upload before the segments naming them (TASK-79.3); flushes of
@@ -1974,7 +1974,7 @@ mod shuttle_tests {
     /// What the branch `branch`, recovered from `bucket`, holds, if not `holds`, extent by extent.
     fn differs(
         bucket: &Arc<Turns>,
-        branch: Branch,
+        branch: CellId,
         holds: &BTreeMap<ExtentId, Vec<u8>>,
     ) -> Result<(), String> {
         let failed = |err: extent_bucket::Error| format!("branch {branch}: {err}");
@@ -2009,7 +2009,7 @@ mod shuttle_tests {
         uploader: Arc<Shared<MemDir, Turns>>,
         running: shuttle::thread::JoinHandle<()>,
         store: Arc<Store<MemDir>>,
-        branch: Branch,
+        branch: CellId,
         /// What the store's extents hold, by their IDs.
         holds: BTreeMap<ExtentId, Vec<u8>>,
         /// The first sequence number of its own extents'.
@@ -2017,7 +2017,7 @@ mod shuttle_tests {
     }
 
     impl Session {
-        fn open(bucket: &Arc<Turns>, branch: Branch, holder: u64) -> Self {
+        fn open(bucket: &Arc<Turns>, branch: CellId, holder: u64) -> Self {
             let dir = MemDir::new();
             let description = Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
             Store::make(&dir, description, None, None).unwrap();

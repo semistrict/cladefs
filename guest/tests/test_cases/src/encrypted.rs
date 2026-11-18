@@ -23,7 +23,7 @@
 
 use anyhow::Context as _;
 use extent_bucket::Bucket as _;
-use extent_bucket::layout::{self, Cell};
+use extent_bucket::layout::{self, CellId};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -133,7 +133,7 @@ pub fn run(buckets: &[String], dirs: &[PathBuf]) -> anyhow::Result<Report> {
 #[derive(Default)]
 struct Scope {
     whole: BTreeSet<String>,
-    cells: BTreeMap<String, BTreeSet<Cell>>,
+    cells: BTreeMap<String, BTreeSet<CellId>>,
 }
 
 /// Walks `dir`: every regular file searched for known plaintext; each store's directory checked
@@ -184,7 +184,7 @@ fn store(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<(
     }
     match on_disk.bucket {
         Some(url) if url.starts_with("memory:") => _ = report.unread.insert(url),
-        Some(url) => _ = scope.cells.entry(url).or_default().insert(on_disk.branch.cell),
+        Some(url) => _ = scope.cells.entry(url).or_default().insert(on_disk.branch),
         None => {}
     }
     Ok(())

@@ -26,7 +26,7 @@
 //!   taken by the opening it was learned for as that begins, and goes with the process.
 
 use crate::bucket::Object;
-use crate::layout::Branch;
+use crate::layout::CellId;
 use crate::record::Record;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -46,8 +46,8 @@ pub struct Learned {
 /// What a host knows of its bucket ([`crate::Bucket::known`]; see the module's docs).
 #[derive(Default)]
 pub struct Known {
-    epochs: Mutex<Bounded<(Branch, u64), u64>>,
-    learned: Mutex<Bounded<Branch, Learned>>,
+    epochs: Mutex<Bounded<(CellId, u64), u64>>,
+    learned: Mutex<Bounded<CellId, Learned>>,
 }
 
 impl Known {
@@ -60,23 +60,23 @@ impl Known {
     const LEARNED: usize = 1 << 12;
 
     /// The epoch of the writer of segment `segment` of `branch`, if a head was seen naming it.
-    pub fn epoch(&self, branch: Branch, segment: u64) -> Option<u64> {
+    pub fn epoch(&self, branch: CellId, segment: u64) -> Option<u64> {
         self.epochs.lock().unwrap().get(&(branch, segment)).copied()
     }
 
     /// Notes that a head of `branch` names its segment `segment` as of the writer of `epoch`: so it
     /// does for good.
-    pub fn named(&self, branch: Branch, segment: u64, epoch: u64) {
+    pub fn named(&self, branch: CellId, segment: u64, epoch: u64) {
         self.epochs.lock().unwrap().insert((branch, segment), epoch, Self::EPOCHS);
     }
 
     /// Notes what this host learned of `branch`, which it is about to open.
-    pub fn learn(&self, branch: Branch, learned: Learned) {
+    pub fn learn(&self, branch: CellId, learned: Learned) {
         self.learned.lock().unwrap().insert(branch, learned, Self::LEARNED);
     }
 
     /// What this host learned of `branch`, if anything, which its opening takes: once.
-    pub fn take(&self, branch: Branch) -> Option<Learned> {
+    pub fn take(&self, branch: CellId) -> Option<Learned> {
         self.learned.lock().unwrap().remove(&branch)
     }
 }

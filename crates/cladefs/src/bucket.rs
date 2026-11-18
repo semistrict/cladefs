@@ -285,9 +285,8 @@ pub struct Forgotten {
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
-    let stores =
-        crate::halt::halt_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &halted);
-    let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
+    let stores = crate::halt::halt_stores(|branch| scope.covers(branch), Errno::EACCES, &halted);
+    let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch));
     let kept = MEMORY.forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
     if let Some(kms) = POOLED.get() {
@@ -306,7 +305,7 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
 /// forgot. Only as strong as `bucket` keeps no older version of the cell's object (doc-16).
 pub async fn shred_cell(
     bucket: &ObjectBucket,
-    cell: crate::Cell,
+    cell: crate::CellId,
 ) -> Result<(usize, Forgotten), extent_bucket::Error> {
     let removed = extent_bucket::cell::shred(bucket, cell).await?;
     let why = extent_bucket::cell::shredded(cell).to_string();
@@ -571,7 +570,7 @@ mod tests {
     /// in `bucket`, its uploader uploading as `keeping` says.
     pub(super) fn kept_in(
         path: impl AsRef<std::path::Path>,
-        (capacity, branch): (u64, Option<crate::Branch>),
+        (capacity, branch): (u64, Option<crate::CellId>),
         bucket: &Arc<ObjectBucket>,
         keeping: extent_store::upload::Options,
     ) -> Result<ExtentStore, crate::Error> {
@@ -630,7 +629,7 @@ mod tests {
     pub(super) type Uploaded = (Vec<(u64, Vec<u8>)>, Option<Vec<u8>>);
 
     /// The branch's extents and root, read back from `bucket`.
-    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, branch: crate::Branch) -> Uploaded {
+    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, branch: crate::CellId) -> Uploaded {
         futures::executor::block_on(async {
             let state = recover(&**bucket, branch, None).await.unwrap().state;
             let mut extents = Vec::new();
@@ -893,7 +892,7 @@ mod tests {
         parent.commit(None).unwrap();
         let child = dir.path().join("child");
         let forked = crate::host_store::fork_child(branch);
-        assert_ne!(forked.cell, branch.cell, "a fork in a cell of its own");
+        assert_ne!(forked, branch, "a fork in a cell of its own");
         parent.fork_to(&child, forked).unwrap();
         drop(parent);
         crate::host_store::delete(&path, Some(&bucket), crate::host_store::token).unwrap();
@@ -918,7 +917,7 @@ mod tests {
                         extent_bucket::layout::kind(key),
                         extent_bucket::layout::Kind::Moves { .. }
                             | extent_bucket::layout::Kind::Segment { .. }
-                    ) && key.starts_with(&branch.cell.prefix())
+                    ) && key.starts_with(&branch.prefix())
                 })
                 .collect();
         let sealed = extent_bucket::layout::segments(branch);
@@ -1006,7 +1005,7 @@ mod tests {
     }
 
     /// The footers of `branch`'s segments in `bucket`, in order.
-    fn footers(bucket: &ObjectBucket, branch: crate::Branch) -> Vec<extent_bucket::layout::Footer> {
+    fn footers(bucket: &ObjectBucket, branch: crate::CellId) -> Vec<extent_bucket::layout::Footer> {
         use extent_bucket::layout;
         futures::executor::block_on(async {
             let listed = extent_bucket::Bucket::list(bucket, &layout::segments(branch)).await;
@@ -1897,7 +1896,7 @@ mod tests {
         let head = head.unwrap().unwrap();
         // cladefs: its cell taken with the host's token, its branch's head with the cell's epoch
         // (TASK-364).
-        let cell = extent_bucket::cell::read(&*bucket, store.branch().cell);
+        let cell = extent_bucket::cell::read(&*bucket, store.branch());
         let cell = futures::executor::block_on(cell).unwrap().unwrap();
         assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
     }
@@ -2754,7 +2753,7 @@ mod tests {
             })
             .sum();
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
-        let cell = sizes[&layout::cell(branch.cell)];
+        let cell = sizes[&layout::cell(branch)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
         // holder's as it was and naming the branch (TASK-364), and read before for the KEK its
         // recovery unwraps the branch's DEK under, every branch encrypted (TASK-411.28, TASK-460);
@@ -2925,7 +2924,7 @@ mod tests {
     fn open_racing(
         path: std::path::PathBuf,
         gated: &Arc<Gated>,
-        branch: crate::Branch,
+        branch: crate::CellId,
         meanwhile: impl FnOnce(),
     ) -> Result<ExtentStore, crate::Error> {
         gated.hold.send_replace(Hold::First(extent_bucket::layout::head(branch)));
@@ -2938,7 +2937,7 @@ mod tests {
 
     /// The directory of a store of `branch` at `path`, its branch kept in `bucket`, made whole, and
     /// not opened: what opening takes the branch into, as the bucket holds it.
-    fn made_for(path: &std::path::Path, branch: crate::Branch, bucket: &Arc<ObjectBucket>) {
+    fn made_for(path: &std::path::Path, branch: crate::CellId, bucket: &Arc<ObjectBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
@@ -3228,8 +3227,7 @@ mod tests {
             let refused = kept_in(dir.path().join(name), (1 << 30, Some(branch)), &bucket, idle());
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
-            let cell =
-                futures::executor::block_on(extent_bucket::cell::read(&*bucket, branch.cell));
+            let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, branch));
             assert_eq!(cell, Ok(None), "{name}");
         }
     }
@@ -3281,7 +3279,7 @@ mod tests {
             reopened(dir.path().join(names[at]), idle()).map(drop).map_err(|err| err.errno())
         };
 
-        let cell = stores[0].0.branch().cell;
+        let cell = stores[0].0.branch();
         let shredded = futures::executor::block_on(crate::bucket::shred_cell(&bucket, cell));
         let (removed, forgotten) = shredded.unwrap();
         assert_eq!(removed, 1);
@@ -3362,10 +3360,8 @@ mod tests {
         for (store, _, _) in &stores {
             let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
-            let cell = futures::executor::block_on(extent_bucket::cell::read(
-                &*bucket,
-                store.branch().cell,
-            ));
+            let cell =
+                futures::executor::block_on(extent_bucket::cell::read(&*bucket, store.branch()));
             assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
         }
         let kek = |tenant| {
@@ -3395,7 +3391,7 @@ mod tests {
         let new = of(1);
         let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
-        let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, new.cell));
+        let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, new));
         assert_eq!(cell, Ok(None));
         let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
         assert_eq!(again.0, Destroyed::Already);
@@ -3458,13 +3454,13 @@ mod tests {
         }
         assert_eq!(listed(), before, "a refused fork wrote to the bucket");
         let ours = dir.path().join("ours");
-        assert_eq!(acme.fork(&ours, 1).unwrap().cell.tenant, 1);
+        assert_eq!(acme.fork(&ours, 1).unwrap().tenant, 1);
         assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
 
         let base = store("base", crate::host_store::DEFAULT_TENANT);
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
-            assert_eq!(base.fork(&to, tenant).unwrap().cell.tenant, tenant);
+            assert_eq!(base.fork(&to, tenant).unwrap().tenant, tenant);
             let fork = reopened(&to, idle()).unwrap();
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
@@ -3738,7 +3734,7 @@ mod tests {
         parent: &ExtentStore,
         bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
-        child: crate::Branch,
+        child: crate::CellId,
     ) -> extent_bucket::record::Record {
         write(parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
@@ -3828,7 +3824,7 @@ mod tests {
     }
 
     /// Why a fork to `child` fails, its writer finding its branch taken.
-    fn taken_over(child: crate::Branch) -> Result<(), String> {
+    fn taken_over(child: crate::CellId) -> Result<(), String> {
         Err(format!("forking to branch {child}: another writer took the branch"))
     }
 
@@ -3880,8 +3876,8 @@ mod tests {
     struct FailedFork {
         memory: Arc<dyn object_store::ObjectStore>,
         gated: Arc<Gated>,
-        branch: crate::Branch,
-        child: crate::Branch,
+        branch: crate::CellId,
+        child: crate::CellId,
     }
 
     impl FailedFork {
@@ -4021,7 +4017,7 @@ mod tests {
     fn others(
         path: &std::path::Path,
         bucket: &Arc<ObjectBucket>,
-        branch: crate::Branch,
+        branch: crate::CellId,
     ) -> ExtentStore {
         let others = kept_in(path, (1 << 30, Some(branch)), &bucket.clone(), idle()).unwrap();
         write(&others, 1, &pattern(3, BLOCK));
@@ -4081,7 +4077,7 @@ mod tests {
         dir: &std::path::Path,
         gated: &Arc<Gated>,
         path: &std::path::Path,
-    ) -> (crate::Branch, crate::Branch, Forking) {
+    ) -> (crate::CellId, crate::CellId, Forking) {
         let parent = Arc::new(
             kept_in(
                 dir.join("parent"),
@@ -4106,7 +4102,7 @@ mod tests {
 
     /// Why a fork to `child` fails whose parent's writer, giving the child its record, found it
     /// another branch's.
-    fn anothers(child: crate::Branch) -> Result<(), String> {
+    fn anothers(child: crate::CellId) -> Result<(), String> {
         Err(format!("forking to branch {child}: another branch has its ID"))
     }
 

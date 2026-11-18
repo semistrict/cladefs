@@ -4,7 +4,7 @@
 
 //! cladefs: cells (TASK-364, doc-20). A tenant's cell has one kind, and is its unit of placement:
 //! a host at a time holds it, and with it its branch, kept under the cell's prefix
-//! ([`Cell::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
+//! ([`CellId::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
 //! which placement's fencing token, and its branch and kind.
 //!
 //! Taking a cell is one compare-and-swap of its object, to the next epoch, refused to a placement
@@ -29,7 +29,7 @@
 use crate::branch::{Start, Step, transition, transition_leaving};
 use crate::bucket::Bucket;
 use crate::keys::Kek;
-use crate::layout::{self, Branch, Cell, FORMAT};
+use crate::layout::{self, CellId, FORMAT};
 use crate::{Error, bucket, rules};
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
@@ -104,25 +104,25 @@ impl Object {
         }
     }
 
-    fn decode(cell: Cell, bytes: &[u8]) -> Result<Self, Error> {
+    fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
-            let branch = Branch { cell, id: 0 };
+            let branch = CellId { tenant: cell.tenant, id: 0 };
             return Err(Error::Format { branch, format });
         }
         layout::decode(bytes)
     }
 
     /// Its branch, if it has one.
-    pub fn branch(&self, cell: Cell) -> Option<Branch> {
-        self.branch.map(|id| Branch { cell, id })
+    pub fn branch(&self, cell: CellId) -> Option<CellId> {
+        self.branch.map(|id| CellId { tenant: cell.tenant, id: id })
     }
 }
 
 /// A taking of a cell: what changing it, and taking its branch's head, goes by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
-    pub cell: Cell,
+    pub cell: CellId,
     /// The epoch of the taking: the token its branch's head is taken with.
     pub epoch: u64,
     pub holder: u64,
@@ -131,7 +131,7 @@ pub struct Held {
 /// Changes `cell`'s object as `step` says ([`transition`]).
 async fn change<R>(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     start: Start,
     step: impl FnMut(Option<Object>) -> Result<Step<Object, R>, Error>,
 ) -> Result<R, Error> {
@@ -143,7 +143,7 @@ async fn change<R>(
 /// create of another's finds its object there. cladefs: its KEK `kek` (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     (holder, token): (u64, u64),
     kek: Kek,
 ) -> Result<Held, Error> {
@@ -163,7 +163,7 @@ pub async fn create(
 /// object, and whether this made it: one there already, another's, is left as it is.
 pub async fn make(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     holder: u64,
     kek: &Kek,
 ) -> Result<(Object, bool), Error> {
@@ -185,7 +185,7 @@ pub async fn make(
 /// ([`shredded`]).
 pub async fn take(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     holder: u64,
     token: u64,
 ) -> Result<Held, Error> {
@@ -205,7 +205,7 @@ pub async fn take(
 }
 
 /// `cell`'s object, if it has one.
-pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<Object>, Error> {
+pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Option<Object>, Error> {
     match bucket::get(bucket, &layout::cell(cell)).await {
         Some(object) => Ok(Some(Object::decode(cell, &object.bytes)?)),
         None => Ok(None),
@@ -255,7 +255,7 @@ async fn change_held<R>(
 /// object as it left it.
 pub async fn hold(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     holding: (u64, u64),
     making: Option<&Kek>,
     given: Option<(u64, Kind)>,
@@ -271,7 +271,7 @@ pub async fn hold(
 /// from: a fork's host holds its child's cell so, and the child's store, opening, from that.
 pub async fn hold_from(
     bucket: &impl Bucket,
-    cell: Cell,
+    cell: CellId,
     start: Start,
     (holder, token): (u64, u64),
     making: Option<&Kek>,
@@ -341,7 +341,7 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
 /// Only as strong as the bucket keeps no older version of the cell's object: with versioning on,
 /// a lifecycle rule must expire non-current versions, or theirs unwrap while the tenant's KEK
 /// lives.
-pub async fn shred(bucket: &impl Bucket, cell: Cell) -> Result<usize, Error> {
+pub async fn shred(bucket: &impl Bucket, cell: CellId) -> Result<usize, Error> {
     change(bucket, cell, Start::Read, |found| match found {
         None => Err(Error::NoCell),
         Some(found) if found.shredded => Ok(Step::Stop(0)),
@@ -355,14 +355,14 @@ pub async fn shred(bucket: &impl Bucket, cell: Cell) -> Result<usize, Error> {
 
 /// cladefs: the refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its
 /// stores opening no more (`EACCES`), and the collector leaving its encrypted objects uncompacted.
-pub fn shredded(cell: Cell) -> Error {
+pub fn shredded(cell: CellId) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
 
 /// Takes `branch`, deleted, out of `cell`, if it is the cell's branch: what any placement
 /// deleting the branch does, whoever holds the cell, which changes nothing of who holds it, nor
 /// its epoch.
-pub async fn forget(bucket: &impl Bucket, cell: Cell, branch: u64) -> Result<(), Error> {
+pub async fn forget(bucket: &impl Bucket, cell: CellId, branch: u64) -> Result<(), Error> {
     change(bucket, cell, Start::Read, |found| match found {
         Some(found) if found.branch == Some(branch) => {
             Ok(Step::Write(Object { branch: None, kind: None, ..found }, ()))
@@ -396,7 +396,7 @@ pub async fn holds(bucket: &impl Bucket, held: Held) -> Result<bool, Error> {
 /// holds no more than a page of each, a tenant of millions of cells as one of a few. A request for
 /// every [`LIST_PAGE`](bucket::LIST_PAGE) tenants, and one for every
 /// [`LIST_PAGE`](bucket::LIST_PAGE) cells of each.
-pub fn listed<B: Bucket>(bucket: &B) -> impl Stream<Item = Cell> + Send + '_ {
+pub fn listed<B: Bucket>(bucket: &B) -> impl Stream<Item = CellId> + Send + '_ {
     tenants(bucket).flat_map(move |tenant| of_tenant(bucket, tenant))
 }
 
@@ -410,7 +410,7 @@ pub fn tenants<B: Bucket>(bucket: &B) -> impl Stream<Item = u64> + Send + '_ {
 /// cladefs: every cell of `tenant` with an object under its prefix, in order: by a delimiter listing
 /// of the tenant's `cells/`, a page at a time, listing none of their objects (`cladefs-gc --usage`,
 /// TASK-395.8).
-pub fn of_tenant<B: Bucket>(bucket: &B, tenant: u64) -> impl Stream<Item = Cell> + Send + '_ {
+pub fn of_tenant<B: Bucket>(bucket: &B, tenant: u64) -> impl Stream<Item = CellId> + Send + '_ {
     let cells = bucket::prefixes(bucket, layout::cells_of(tenant));
     cells.filter_map(|prefix| std::future::ready(layout::cell_of_prefix(&prefix)))
 }
@@ -460,7 +460,7 @@ mod tests {
             shredded: false,
         };
         assert_eq!(object, expected);
-        let never = Cell { tenant: 1, id: 2 };
+        let never = CellId { tenant: 1, id: 2 };
         assert_eq!(block_on(read(&bucket, never)), Ok(None));
         assert_eq!(block_on(take(&bucket, never, 0x13, 5)), Err(Error::NoCell));
     }
@@ -472,9 +472,12 @@ mod tests {
     fn cells_are_listed_by_their_prefixes() {
         use crate::bucket::PutMode;
         let bucket = Direct(SimBucket::new());
-        let cells =
-            [Cell { tenant: 1, id: 2 }, Cell { tenant: 1, id: 0x10 }, Cell { tenant: 3, id: 1 }];
-        let branch = |cell, id| Branch { cell, id };
+        let cells = [
+            CellId { tenant: 1, id: 2 },
+            CellId { tenant: 1, id: 0x10 },
+            CellId { tenant: 3, id: 1 },
+        ];
+        let branch = |cell: CellId, id| CellId { tenant: cell.tenant, id };
         let keys = [
             layout::cell(cells[2]),
             layout::record(branch(cells[0], 4)),
@@ -499,10 +502,10 @@ mod tests {
         let sim = SimBucket::new();
         let bucket = Direct(sim.clone());
         let many = LIST_PAGE as u64 * 2 + 5;
-        let mut cells: Vec<Cell> = (0..many).map(|id| Cell { tenant: 2, id }).collect();
-        cells.extend([Cell { tenant: 1, id: 7 }, Cell { tenant: 3, id: 1 }]);
+        let mut cells: Vec<CellId> = (0..many).map(|id| CellId { tenant: 2, id }).collect();
+        cells.extend([CellId { tenant: 1, id: 7 }, CellId { tenant: 3, id: 1 }]);
         for &cell in &cells {
-            let key = layout::record(Branch { cell, id: 1 });
+            let key = layout::record(CellId { tenant: cell.tenant, id: 1 });
             block_on(bucket.put(&key, vec![1].into(), PutMode::Create)).unwrap();
         }
         cells.sort();
@@ -576,7 +579,7 @@ mod tests {
         let (held, object) =
             block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(FXFS))).unwrap();
         assert_eq!((held.epoch, branch_and_kind(&object)), (1, Some(FXFS)));
-        assert_eq!(object.branch(TEST_CELL), Some(Branch { cell: TEST_CELL, id: 7 }));
+        assert_eq!(object.branch(TEST_CELL), Some(CellId { tenant: TEST_CELL.tenant, id: 7 }));
         let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), None, Some(FXFS))).unwrap();
         assert_eq!(again, held);
         let refused = block_on(hold(&bucket, TEST_CELL, (6, 6), None, Some(SQLITE)));
@@ -589,7 +592,7 @@ mod tests {
         assert_eq!(block_on(delete(&bucket, held)), Ok(Some(7)));
         assert_eq!(block_on(holds(&bucket, held)), Ok(false));
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 9)), Err(Error::Deleted));
-        let other = Cell { tenant: 1, id: 9 };
+        let other = CellId { tenant: 1, id: 9 };
         block_on(hold(&bucket, other, (5, 5), Some(&kek()), Some(SQLITE))).unwrap();
         block_on(forget(&bucket, other, 8)).unwrap();
         let object = block_on(read(&bucket, other)).unwrap().unwrap();
@@ -646,7 +649,8 @@ mod tests {
                 shredded: false,
             };
             block_on(bucket::create(&bucket, &layout::cell(TEST_CELL), layout::encode(&object)));
-            let refused = Error::Format { branch: Branch { cell: TEST_CELL, id: 0 }, format };
+            let refused =
+                Error::Format { branch: CellId { tenant: TEST_CELL.tenant, id: 0 }, format };
             assert_eq!(block_on(read(&bucket, TEST_CELL)), Err(refused.clone()));
             assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 5)), Err(refused));
         }

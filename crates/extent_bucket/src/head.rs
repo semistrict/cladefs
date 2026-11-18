@@ -14,7 +14,7 @@
 //! that one that landed though its answer was lost is recognised by reading it back.
 
 use crate::bucket::{self, Bucket, Object, PutMode, Version};
-use crate::layout::{self, Branch, Head};
+use crate::layout::{self, CellId, Head};
 use crate::{Error, rules};
 use bytes::Bytes;
 
@@ -45,12 +45,12 @@ impl Read {
 
 /// Reads `branch`'s head for a taking of it after ([`take_from`]), as with other reads a taking
 /// needs, at once (TASK-165.11).
-pub async fn read(bucket: &impl Bucket, branch: Branch) -> Read {
+pub async fn read(bucket: &impl Bucket, branch: CellId) -> Read {
     Read(bucket::get(bucket, &layout::head(branch)).await)
 }
 
 /// `branch`'s head, if it has one.
-pub async fn get(bucket: &impl Bucket, branch: Branch) -> Result<Option<Head>, Error> {
+pub async fn get(bucket: &impl Bucket, branch: CellId) -> Result<Option<Head>, Error> {
     match bucket::get(bucket, &layout::head(branch)).await {
         Some(object) => Ok(Some(Head::decode(&object.bytes)?)),
         None => Ok(None),
@@ -58,7 +58,7 @@ pub async fn get(bucket: &impl Bucket, branch: Branch) -> Result<Option<Head>, E
 }
 
 /// The epoch of `branch`'s head: 0 if it has none.
-pub async fn epoch(bucket: &impl Bucket, branch: Branch) -> Result<u64, Error> {
+pub async fn epoch(bucket: &impl Bucket, branch: CellId) -> Result<u64, Error> {
     Ok(get(bucket, branch).await?.map_or(0, |head| head.epoch))
 }
 
@@ -69,7 +69,7 @@ pub async fn epoch(bucket: &impl Bucket, branch: Branch) -> Result<u64, Error> {
 /// back from the one after it (TASK-39.7).
 pub async fn take(
     bucket: &impl Bucket,
-    branch: Branch,
+    branch: CellId,
     holder: u64,
     token: u64,
 ) -> Result<Held, Error> {
@@ -82,7 +82,7 @@ pub async fn take(
 /// A round trip less, on a real bucket, for every opening of a store (TASK-165.11).
 pub async fn take_from(
     bucket: &impl Bucket,
-    branch: Branch,
+    branch: CellId,
     read: Read,
     holder: u64,
     token: u64,
@@ -118,7 +118,7 @@ pub async fn take_from(
 /// otherwise ([`Error::Fenced`]): another taking, or the branch's deletion, swapped it since.
 pub async fn swap(
     bucket: &impl Bucket,
-    branch: Branch,
+    branch: CellId,
     held: &Held,
     next: Head,
 ) -> Result<Held, Error> {
@@ -140,7 +140,7 @@ pub async fn swap(
 /// what a read of it found ([`read`]). Returns it.
 pub(crate) async fn end(
     bucket: &impl Bucket,
-    branch: Branch,
+    branch: CellId,
     found: Read,
     holder: u64,
     token: u64,

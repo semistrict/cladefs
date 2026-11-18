@@ -256,8 +256,8 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
     };
     StatStoreResponse {
         branch: state.branch.id,
-        tenant: state.branch.cell.tenant,
-        cell: state.branch.cell.id,
+        tenant: state.branch.tenant,
+        cell: state.branch.id,
         capacity: state.info.capacity,
         used: state.info.used,
         available: state.info.available,
@@ -278,9 +278,9 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
     }
 }
 
-/// The branch a response names by its tenant, cell and ID (TASK-364).
-fn branched(tenant: u64, cell: u64, id: u64) -> crate::Branch {
-    crate::Branch { cell: crate::Cell { tenant, id: cell }, id }
+/// The cell a response names by its tenant and ID (TASK-364).
+fn branched(tenant: u64, cell: u64) -> crate::CellId {
+    crate::CellId { tenant, id: cell }
 }
 
 fn reply<T>(done: Result<T, Errno>) -> Result<Response<T>, Status> {
@@ -336,12 +336,12 @@ impl Cladefsd for Control {
             0 => self.new_cell_at(&store, tenant)?,
             _ => tenant,
         };
-        let branch = crate::Branch { cell: crate::Cell { tenant, id: cell }, id: branch };
+        let branch = crate::CellId { tenant: tenant, id: branch };
         let made = stores::create(store, capacity, branch, (token, kind)).await;
         reply(made.map(|made| CreateStoreResponse {
             branch: made.id,
-            tenant: made.cell.tenant,
-            cell: made.cell.id,
+            tenant: made.tenant,
+            cell: made.id,
         }))
     }
 
@@ -357,8 +357,8 @@ impl Cladefsd for Control {
         let made = stores::import(store, capacity, image, reference, tenant).await;
         reply(made.map(|made| ImportImageResponse {
             branch: made.id,
-            tenant: made.cell.tenant,
-            cell: made.cell.id,
+            tenant: made.tenant,
+            cell: made.id,
         }))
     }
 
@@ -372,12 +372,12 @@ impl Cladefsd for Control {
         let forked = match version {
             0 => stores::fork(path(from)?, to, tenant).await,
             _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ => stores::fork_of_version(branched(of, cell, cell), version, to, tenant).await,
+            _ => stores::fork_of_version(branched(of, cell), version, to, tenant).await,
         };
         reply(forked.map(|forked| ForkStoreResponse {
             branch: forked.id,
-            tenant: forked.cell.tenant,
-            cell: forked.cell.id,
+            tenant: forked.tenant,
+            cell: forked.id,
         }))
     }
 
@@ -700,7 +700,7 @@ impl Cladefsd for Control {
         request: Request<ShredCellRequest>,
     ) -> Result<Response<ShredCellResponse>, Status> {
         let ShredCellRequest { tenant, cell } = request.into_inner();
-        let cell = crate::Cell { tenant, id: cell };
+        let cell = crate::CellId { tenant, id: cell };
         let bucket = stores::daemon_bucket().map_err(status)?;
         let shredded = crate::bucket::shred_cell(&bucket, cell).await.map_err(|err| {
             let failure = extent_store::upload::Failure::Bucket(err);
@@ -792,23 +792,23 @@ impl Client {
         &self,
         path: &Path,
         capacity: u64,
-        branch: crate::Branch,
+        branch: crate::CellId,
         token: Option<u64>,
-    ) -> Result<crate::Branch, crate::Error> {
+    ) -> Result<crate::CellId, crate::Error> {
         let request = CreateStoreRequest {
             path: name(path)?,
             capacity,
             branch: branch.id,
             token,
-            tenant: branch.cell.tenant,
-            cell: branch.cell.id,
+            tenant: branch.tenant,
+            cell: branch.id,
             kind: CellKind::Fxfs.into(),
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
                 c.create_store(request).await
             })?;
-        Ok(branched(response.tenant, response.cell, response.branch))
+        Ok(branched(response.tenant, response.cell))
     }
 
     /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
@@ -820,7 +820,7 @@ impl Client {
         capacity: u64,
         image: &Path,
         reference: Option<&str>,
-    ) -> Result<crate::Branch, crate::Error> {
+    ) -> Result<crate::CellId, crate::Error> {
         let request = ImportImageRequest {
             path: name(path)?,
             capacity,
@@ -831,15 +831,15 @@ impl Client {
         let response = self.call(format!("importing {}", image.display()), |mut c| async move {
             c.import_image(request).await
         })?;
-        Ok(branched(response.tenant, response.cell, response.branch))
+        Ok(branched(response.tenant, response.cell))
     }
 
     /// Forks the store at `from` to a new cell at `to`, and returns its branch (`ForkStore`).
-    pub fn fork_store(&self, from: &Path, to: &Path) -> Result<crate::Branch, crate::Error> {
+    pub fn fork_store(&self, from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
         let request = ForkStoreRequest { from: name(from)?, to: name(to)?, ..Default::default() };
         let what = format!("forking the store at {} to {}", from.display(), to.display());
         let response = self.call(what, |mut c| async move { c.fork_store(request).await })?;
-        Ok(branched(response.tenant, response.cell, response.branch))
+        Ok(branched(response.tenant, response.cell))
     }
 
     /// Forks the version `from` to a new cell at `to`, on any host, and returns its branch
@@ -848,13 +848,13 @@ impl Client {
         &self,
         from: crate::CellVersion,
         to: &Path,
-    ) -> Result<crate::Branch, crate::Error> {
+    ) -> Result<crate::CellId, crate::Error> {
         let crate::CellVersion { tenant, cell, version } = from;
         let request =
             ForkStoreRequest { to: name(to)?, version, tenant, cell, ..Default::default() };
         let what = format!("forking version {version} of cell {cell} to {}", to.display());
         let response = self.call(what, |mut c| async move { c.fork_store(request).await })?;
-        Ok(branched(response.tenant, response.cell, response.branch))
+        Ok(branched(response.tenant, response.cell))
     }
 
     /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
@@ -958,9 +958,9 @@ impl Client {
 
     /// The branch of the store at `path`, in its cell (`StatStore`'s `tenant`, `cell` and
     /// `branch`, TASK-364).
-    pub fn branch(&self, path: &Path) -> Result<crate::Branch, crate::Error> {
+    pub fn branch(&self, path: &Path) -> Result<crate::CellId, crate::Error> {
         let stat = self.stat_store(path)?;
-        Ok(branched(stat.tenant, stat.cell, stat.branch))
+        Ok(branched(stat.tenant, stat.cell))
     }
 
     /// The commit number of the latest commit of the store at `path` (`StatStore`'s `committed`).
@@ -1065,7 +1065,7 @@ impl Client {
     /// cladefs: shreds the cell `cell` in the daemon's bucket, its wrapped KEKs taken out of its
     /// object, and has the daemon forget its keys (`ShredCell`, TASK-411.7): how many generations
     /// of its KEK it took out, 0 if it was shredded already, and what the daemon forgot.
-    pub fn shred_cell(&self, cell: crate::Cell) -> Result<(u32, Forgotten), crate::Error> {
+    pub fn shred_cell(&self, cell: crate::CellId) -> Result<(u32, Forgotten), crate::Error> {
         let request = ShredCellRequest { tenant: cell.tenant, cell: cell.id };
         let what = format!("shredding cell {cell}");
         let response = self.call(what, |mut c| async move { c.shred_cell(request).await })?;

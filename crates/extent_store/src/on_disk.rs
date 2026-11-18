@@ -17,7 +17,7 @@
 use crate::dir::{Dir, File as _, not_found, read_file};
 use crate::layout::{DESCRIPTION, EXTENTS, LOGS, SEGMENTS, SPARE, StoreFile, parse_number};
 use crate::wal::LOG_MAGIC;
-use extent_frame::segment::Branch;
+use extent_frame::segment::CellId;
 use extent_frame::{Frame, TRAILER};
 use std::io;
 
@@ -29,7 +29,7 @@ pub const CLEAR_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OnDisk {
     /// Its branch, as its description names it.
-    pub branch: Branch,
+    pub branch: CellId,
     /// The bucket its branch is kept in, as its description names it, if it does.
     pub bucket: Option<String>,
     /// How many of its framed files and logs it read, each by its trailer or header.

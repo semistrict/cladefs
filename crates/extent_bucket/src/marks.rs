@@ -34,7 +34,7 @@
 //! lists every marked key by design.
 
 use crate::bucket::{Meta, Version};
-use crate::layout::{self, Cell, Marks};
+use crate::layout::{self, CellId, Marks};
 use crate::object_bucket::Request;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -60,7 +60,7 @@ pub(crate) struct Watch {
     marking: AtomicBool,
     /// When, in milliseconds after `started`, whether it does is next read: at once, at first.
     marking_due: AtomicU64,
-    cells: RwLock<HashMap<Cell, Held>>,
+    cells: RwLock<HashMap<CellId, Held>>,
     /// What the times kept count from.
     started: Instant,
 }
@@ -127,7 +127,7 @@ impl Watch {
     /// Whether `cell`'s marks are due to be read again, which this call then takes on: one caller
     /// a [`REFRESH`]; at once, for a cell not read before. Never while no mark-only pass marks the
     /// bucket ([`Watch::marking`]), which costs the read the one load.
-    pub(crate) fn take_refresh(&self, cell: Cell) -> bool {
+    pub(crate) fn take_refresh(&self, cell: CellId) -> bool {
         if !self.marking() {
             return false;
         }
@@ -160,7 +160,7 @@ impl Watch {
 
     /// Whether the marks held of `cell` are of `newest`, the newest marks object listed of it: at
     /// its key, of its version.
-    pub(crate) fn holds(&self, cell: Cell, newest: &Meta) -> bool {
+    pub(crate) fn holds(&self, cell: CellId, newest: &Meta) -> bool {
         let cells = self.cells.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         cells
             .get(&cell)
@@ -169,7 +169,7 @@ impl Watch {
     }
 
     /// Holds `marks` of `cell`, of the object `of` lists; or none, no marks object being there.
-    pub(crate) fn hold(&self, cell: Cell, marks: Option<(&Meta, Marks)>) {
+    pub(crate) fn hold(&self, cell: CellId, marks: Option<(&Meta, Marks)>) {
         let mut cells = self.cells.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         let held = cells.entry(cell).or_default();
         let had = !held.keys.is_empty();
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn refreshes_are_taken_once_an_interval_a_cell_while_marking() {
         let watch = Watch::new();
-        let other = Cell { tenant: 1, id: 2 };
+        let other = CellId { tenant: 1, id: 2 };
         assert_eq!([watch.take_marking_refresh(), watch.take_marking_refresh()], [true, false]);
         assert!(!watch.take_refresh(TEST_CELL), "not marking");
         assert!(watch.cells.read().unwrap().is_empty());
@@ -361,8 +361,8 @@ mod tests {
         };
         assert!(held(&segment));
         assert!(!held(&layout::segment(test_branch(1), 3, 1)));
-        let other = Cell { tenant: 1, id: 2 };
-        let elsewhere = layout::segment(layout::Branch { cell: other, id: 1 }, 2, 1);
+        let other = CellId { tenant: 1, id: 2 };
+        let elsewhere = layout::segment(layout::CellId { tenant: other.tenant, id: 1 }, 2, 1);
         assert!(!held(&elsewhere));
         assert_eq!(
             [

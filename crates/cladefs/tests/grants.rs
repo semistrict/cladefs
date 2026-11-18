@@ -80,10 +80,10 @@ fn tenants_stores_are_their_own_cells() {
 
     let vm = DaemonExtentStore::connect(&ours, acme.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(1), b"acme");
-    assert_eq!(daemon.branch(&acme.join("vm")).unwrap().cell.tenant, 0xa);
-    let new = |tenant| cladefs::Branch { cell: cladefs::Cell { tenant, id: 0 }, id: 0 };
-    assert_eq!(daemon.create(&acme.join("made"), new(0), None).unwrap().cell.tenant, 0xa);
-    assert_eq!(daemon.create(&acme.join("named"), new(0xa), None).unwrap().cell.tenant, 0xa);
+    assert_eq!(daemon.branch(&acme.join("vm")).unwrap().tenant, 0xa);
+    let new = |tenant| cladefs::CellId { tenant: tenant, id: 0 };
+    assert_eq!(daemon.create(&acme.join("made"), new(0), None).unwrap().tenant, 0xa);
+    assert_eq!(daemon.create(&acme.join("named"), new(0xa), None).unwrap().tenant, 0xa);
     let theirs = daemon.create(&acme.join("theirs"), new(0xb), None);
     assert_eq!(failure(theirs), (Code::PermissionDenied, Errno::EPERM));
     assert!(!acme.join("theirs").exists(), "a store of another tenant's cell was made");
@@ -91,8 +91,8 @@ fn tenants_stores_are_their_own_cells() {
     // elsewhere, of the store's tenant.
     let base = dir.path().join("base");
     daemon.create(&base, new(0), None).unwrap();
-    assert_eq!(daemon.fork(&base, &acme.join("fork")).unwrap().cell.tenant, 0xa);
-    assert_eq!(daemon.fork(&base, &dir.path().join("loose")).unwrap().cell.tenant, 0);
+    assert_eq!(daemon.fork(&base, &acme.join("fork")).unwrap().tenant, 0xa);
+    assert_eq!(daemon.fork(&base, &dir.path().join("loose")).unwrap().tenant, 0);
 
     assert_eq!(daemon.grant(0xa, &acme, None).unwrap(), ours);
     let initech = dir.path().join("initech");
@@ -122,7 +122,7 @@ fn tenants_reach_no_store_of_another_tenants_cell() {
     std::fs::rename(&moved, globex.join("vm")).unwrap();
     let their_vm = DaemonExtentStore::connect(&theirs, globex.join("vm"), CAPACITY).unwrap();
     assert_eq!(their_vm.root().unwrap(), b"globex");
-    assert_eq!(daemon.branch(&globex.join("vm")).unwrap().cell.tenant, 0xb);
+    assert_eq!(daemon.branch(&globex.join("vm")).unwrap().tenant, 0xb);
 }
 
 /// TASK-456.2: a tenant's memory cell, a VM's memory in a cell of the tenant's, opens through
@@ -143,7 +143,7 @@ fn tenants_reach_no_memory_cell_of_another_tenants_cell() {
     their_memory.write(0, &[7; 4096]).unwrap();
     their_memory.commit().unwrap();
     their_memory.close().unwrap();
-    assert_eq!(daemon.branch(&globex.join("memory")).unwrap().cell.tenant, 0xb);
+    assert_eq!(daemon.branch(&globex.join("memory")).unwrap().tenant, 0xb);
 
     let moved = acme.join("moved");
     std::fs::rename(globex.join("memory"), &moved).unwrap();
@@ -181,7 +181,7 @@ fn tenants_restore_shared_versions_of_others_into_cells_of_their_own() {
     let restored = restore(&there.socket, &there.acme.join("restored"), version).unwrap();
     assert_eq!(restored.root().unwrap(), b"globex");
     let made = there.daemon.branch(&there.acme.join("restored")).unwrap();
-    assert_eq!((made.cell.tenant, made.id), (1, restored.branch()));
+    assert_eq!((made.tenant, made.id), (1, restored.branch()));
     here.daemon.share(&globex.join("vm"), version.version, false).unwrap();
     assert_eq!(restore(&there.socket, &refused, version).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
@@ -214,7 +214,7 @@ fn shared_versions_of_bases_fork_into_other_tenants() {
     assert!(!refused.exists(), "a refused fork made a store");
     fork(&mut here.daemon, &here.acme.join("ours")).unwrap();
     here.daemon.share(&base, version.version, true).unwrap();
-    assert_eq!(here.daemon.fork_version(version, &globex.join("theirs")).unwrap().cell.tenant, 2);
+    assert_eq!(here.daemon.fork_version(version, &globex.join("theirs")).unwrap().tenant, 2);
     let vm = DaemonExtentStore::connect(&theirs, globex.join("theirs"), CAPACITY).unwrap();
     assert_eq!(vm.root().unwrap(), b"base");
     drop(vm);
@@ -242,13 +242,13 @@ fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
     let forked = here.daemon.fork(&vm, &refused);
     assert_eq!(failure(forked), (Code::PermissionDenied, Errno::EACCES));
     assert!(!refused.exists(), "a refused fork made a store");
-    assert_eq!(here.daemon.fork(&vm, &here.acme.join("ours")).unwrap().cell.tenant, 1);
+    assert_eq!(here.daemon.fork(&vm, &here.acme.join("ours")).unwrap().tenant, 1);
 
     let base = dir.path().join("here/base");
-    let new = cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
-    assert_eq!(here.daemon.create(&base, new, None).unwrap().cell.tenant, 0);
+    let new = cladefs::CellId { tenant: 0, id: 0 };
+    assert_eq!(here.daemon.create(&base, new, None).unwrap().tenant, 0);
     for (to, tenant) in [(here.acme.join("base"), 1), (globex.join("base"), 2)] {
-        assert_eq!(here.daemon.fork(&base, &to).unwrap().cell.tenant, tenant);
+        assert_eq!(here.daemon.fork(&base, &to).unwrap().tenant, tenant);
     }
 }
 
@@ -594,7 +594,7 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
     let version = hosts[0].daemon.version(&base).unwrap();
     hosts[0].daemon.sync(&base).unwrap();
 
-    let forks: Vec<(usize, PathBuf, cladefs::Branch)> = std::thread::scope(|scope| {
+    let forks: Vec<(usize, PathBuf, cladefs::CellId)> = std::thread::scope(|scope| {
         let forking: Vec<_> = (hosts.iter_mut().enumerate())
             .map(|(at, host)| {
                 scope.spawn(move || {

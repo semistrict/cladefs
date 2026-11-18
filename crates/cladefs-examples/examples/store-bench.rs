@@ -77,8 +77,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 /// The benchmark's branch: of a cell of the default tenant's (TASK-364).
-const BRANCH: extent_store::Branch =
-    extent_store::Branch { cell: extent_store::Cell { tenant: 0, id: 1 }, id: 1 };
+const BRANCH: extent_store::CellId = extent_store::CellId { tenant: 0, id: 1 };
 
 fn extent(sequence: u64) -> ExtentId {
     ExtentId::new(BRANCH.id, sequence)
@@ -429,7 +428,7 @@ impl Host {
         held: Arc<HeldParts>,
     ) -> (Arc<Store<HostDir>>, extent_store::upload::Uploader<HostDir>) {
         let tenant = Self::ENCRYPTED;
-        let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
+        let branch = extent_store::CellId { tenant: tenant, id: id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
         let kind = extent_bucket::cell::Kind::Fxfs;
         let kind = kind;

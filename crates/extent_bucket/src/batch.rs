@@ -11,7 +11,7 @@
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
 //! as they upload ([`objects`]).
 
-use crate::layout::{self, Branch, Chain, Child, Contents, Footer, NewVersion, Segment};
+use crate::layout::{self, CellId, Chain, Child, Contents, Footer, NewVersion, Segment};
 use crate::writer::{Body, Objects};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -123,7 +123,7 @@ impl Plan {
 
     /// Its footer's contents, as `branch`'s: what its commits sealed that none of them freed, and
     /// what they freed that a commit before held.
-    fn contents(self, branch: Branch) -> Contents {
+    fn contents(self, branch: CellId) -> Contents {
         let Self { mut contents, extents, own, frees, .. } = self;
         let in_data = extents.iter().map(|&((extent, ..), by)| (extent, by));
         let on_own =

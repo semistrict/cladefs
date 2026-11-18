@@ -14,7 +14,7 @@ use crate::{BucketData, Description, MemDir};
 use extent_bucket::Bucket as _;
 use extent_bucket::bucket::PutMode;
 use extent_bucket::fetch::{Fetcher, Limits, Memory, Priority};
-use extent_bucket::layout::{self, Branch, Cell, Location, TEST_CELL, test_branch};
+use extent_bucket::layout::{self, CellId, Location, TEST_CELL, test_branch};
 use extent_frame::{KeyId, Secret};
 use extent_keys::kms::{Kms, LocalKms};
 use extent_keys::testing::Counted;
@@ -29,9 +29,9 @@ const TENANT: u64 = TEST_CELL.tenant;
 /// Another tenant, whose KEK tests that fork across tenants have the KMS keep (TASK-411.4).
 const OTHER: u64 = 2;
 
-/// A child of a fork, `id`, the one branch of cell `cell` of `tenant`'s.
-fn child_in(tenant: u64, cell: u64, id: u64) -> Child {
-    Child { branch: Branch { cell: Cell { tenant, id: cell }, id }, owner: 0x100 + id }
+/// A child of a fork, the cell `id` of `tenant`'s.
+fn child_in(tenant: u64, id: u64) -> Child {
+    Child { branch: CellId { tenant, id }, owner: 0x100 + id }
 }
 
 /// What the tests' hosts share: a bucket, its objects as object storage holds them, and a KMS,
@@ -130,7 +130,7 @@ impl<K: Kms> World<K> {
     }
 
     /// `branch`'s record.
-    fn record(&self, branch: Branch) -> extent_bucket::record::Record {
+    fn record(&self, branch: CellId) -> extent_bucket::record::Record {
         self.runtime.block_on(branch::record(&*self.bucket, branch)).unwrap().unwrap()
     }
 
@@ -140,12 +140,12 @@ impl<K: Kms> World<K> {
     }
 
     /// `cell`'s object, if it has one.
-    fn cell_of(&self, cell: Cell) -> Option<cell::Object> {
+    fn cell_of(&self, cell: CellId) -> Option<cell::Object> {
         self.runtime.block_on(cell::read(&*self.bucket, cell)).unwrap()
     }
 
     /// Whether `branch` has a record.
-    fn has_record(&self, branch: Branch) -> bool {
+    fn has_record(&self, branch: CellId) -> bool {
         self.runtime.block_on(branch::record(&*self.bucket, branch)).unwrap().is_some()
     }
 
@@ -157,7 +157,7 @@ impl<K: Kms> World<K> {
 
 /// A store's directory, made, of `branch`, of a cell several of these tests' branches share: none
 /// is the cell's branch, which a branch of a cell of its own is (doc-20), so that each opens.
-fn made(branch: Branch) -> MemDir {
+fn made(branch: CellId) -> MemDir {
     let dir = MemDir::new();
     let description = Description { block_size: 4096, capacity: 1 << 30, branch };
     Store::make(&dir, description, Some("memory:///encrypted"), None).unwrap();
@@ -165,7 +165,7 @@ fn made(branch: Branch) -> MemDir {
 }
 
 /// A store's directory, made, a store at the version `id` of `branch` ([`Store::make_copy`]).
-fn made_at_version(branch: Branch, id: u64) -> MemDir {
+fn made_at_version(branch: CellId, id: u64) -> MemDir {
     let dir = MemDir::new();
     let description = Description { block_size: 4096, capacity: 1 << 30, branch };
     Store::make_copy(&dir, description, Some("memory:///encrypted"), None, Some(id)).unwrap();
@@ -371,14 +371,14 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
 fn stores_of_tenants_with_no_kek_open_not() {
     let world = World::new();
     let host = world.host(5);
-    let branch = Branch { cell: Cell { tenant: 2, id: 1 }, id: 7 };
+    let branch = CellId { tenant: 2, id: 7 };
     let refused = Failure::Bucket(extent_bucket::Error::Kms("tenant 2: no KEK in the KMS".into()));
     for calls in 1..=2 {
         let opened = open_on(&world, &host, &made(branch)).map(drop);
         assert_eq!(opened, Err(refused.clone()));
         assert_eq!(world.calls(), (calls, 0));
     }
-    assert_eq!(world.cell_of(branch.cell), None);
+    assert_eq!(world.cell_of(branch), None);
     assert!(!world.has_record(branch));
     assert_eq!(world.objects(), Vec::<(String, Vec<u8>)>::new());
 }
@@ -638,7 +638,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(kms.in_pool(OTHER), 4);
     world.kms.reset();
 
-    let child = child_in(OTHER, 5, 8);
+    let child = child_in(OTHER, 8);
     forked(&store, &uploader, child).unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(kms.in_pool(OTHER), 3);
@@ -651,7 +651,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(inherited(&record), [(parent, 1, 1)]);
     // Its cell, made at the fork with a KEK of the pool, held by no placement: the parent's DEK
     // unwraps under it, for the child alone.
-    let made_cell = world.cell_of(child.branch.cell).unwrap();
+    let made_cell = world.cell_of(child.branch).unwrap();
     assert_eq!((made_cell.epoch, made_cell.token, made_cell.branch), (1, 0, None));
     let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
     let dek = keys::unwrap_inherited(&kek, child.branch, &record.inherited[0]).unwrap();
@@ -663,14 +663,14 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     let child_dir = made(child.branch);
     let (child_store, child_uploader) = open_on(&world, &host, &child_dir).unwrap();
     assert_eq!(world.calls(), (0, 0));
-    assert_eq!(world.cell_of(child.branch.cell).unwrap().epoch, 2);
+    assert_eq!(world.cell_of(child.branch).unwrap().epoch, 2);
     assert_eq!(read(&world, &host, &child_store, a, 4096), Ok(noise(1, 4096)));
     let b = ExtentId::new(8, child_uploader.next_sequence().max(1));
     written(&child_store, &child_uploader, b, &noise(2, 4096));
 
     // Its fork into a third cell keeps both its parents' DEKs: the child's, and the parent's the
     // child kept.
-    let grandchild = child_in(OTHER, 6, 9);
+    let grandchild = child_in(OTHER, 9);
     forked(&child_store, &child_uploader, grandchild).unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(inherited(&world.record(grandchild.branch)), [(parent, 1, 1), (child.branch, 1, 1)]);
@@ -682,7 +682,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     }
     // A take leaving the pool low refills it: a batch of wraps, once the fork took its KEK.
     assert_eq!(kms.in_pool(OTHER), 2);
-    forked(&child_store, &child_uploader, child_in(OTHER, 7, 10)).unwrap();
+    forked(&child_store, &child_uploader, child_in(OTHER, 10)).unwrap();
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((4, 0), 5));
     drop((store, uploader, child_store, child_uploader, grandchild_store, _grandchild_uploader));
@@ -742,11 +742,11 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
-    let clone = child_in(OTHER, 4, 10);
+    let clone = child_in(OTHER, 10);
     let refused = forked(&copy, &version_uploader, clone).unwrap_err();
     let revoked = extent_bucket::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
-    assert!(!world.has_record(clone.branch) && world.cell_of(clone.branch.cell).is_none());
+    assert!(!world.has_record(clone.branch) && world.cell_of(clone.branch).is_none());
     assert_eq!(kms.in_pool(OTHER), 4);
     drop((copy, version_uploader));
 
@@ -800,12 +800,12 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     kms.revoked(OTHER, "tenant 2: its KEK is revoked");
     assert_eq!(kms.in_pool(OTHER), 0);
     world.kms.reset();
-    let child = child_in(OTHER, 5, 8);
+    let child = child_in(OTHER, 8);
     let refused = forked(&store, &uploader, child).unwrap_err();
     let revoked = extent_bucket::Error::Kms("tenant 2: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert_eq!(world.calls(), (1, 0));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
+    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
 
     world.kms.inner().unrevoke(OTHER).unwrap();
     forked(&store, &uploader, child).unwrap();
@@ -813,18 +813,18 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert_eq!((world.calls(), kms.in_pool(OTHER)), ((1 + 1 + 4, 0), 4));
 
     world.kms.inner().destroy(OTHER).unwrap();
-    for (cell, id) in [(6, 9), (7, 10), (8, 11)] {
-        forked(&store, &uploader, child_in(OTHER, cell, id)).unwrap();
+    for id in [9, 10, 11] {
+        forked(&store, &uploader, child_in(OTHER, id)).unwrap();
     }
     // The last take left 1: its refill, refused, dropped the pool.
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!(kms.in_pool(OTHER), 0);
-    let last = child_in(OTHER, 9, 12);
+    let last = child_in(OTHER, 12);
     let refused = forked(&store, &uploader, last).unwrap_err();
     let destroyed = extent_bucket::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
     assert_eq!(kms.refuses(OTHER), Some(destroyed));
-    assert!(!world.has_record(last.branch) && world.cell_of(last.branch.cell).is_none());
+    assert!(!world.has_record(last.branch) && world.cell_of(last.branch).is_none());
 }
 
 /// TASK-411.4, as TASK-411.28 left it: an encrypted store forks into no cell of a tenant the KMS has no
@@ -836,11 +836,11 @@ fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
     let host = world.host(5);
     let (store, uploader) = open_on(&world, &host, &made(test_branch(7))).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
-    let child = child_in(3, 9, 8);
+    let child = child_in(3, 8);
     let refused = forked(&store, &uploader, child).unwrap_err();
     let none = extent_bucket::Error::Kms("tenant 3: no KEK in the KMS".into());
     assert_eq!(refused, Failure::Bucket(none));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
+    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
 }
 
 /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS forgot (a real KMS's key
@@ -862,18 +862,18 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     let none = "tenant 1: no KEK in the KMS";
     let refused = Failure::Bucket(extent_bucket::Error::Kms(none.into()));
     let second = world.host(6);
-    let elsewhere = Branch { cell: Cell { tenant: TENANT, id: 2 }, id: 9 };
+    let elsewhere = CellId { tenant: TENANT, id: 9 };
     for branch in [elsewhere, test_branch(8)] {
         let opened = open_on(&world, &second, &made(branch)).map(drop);
         assert_eq!(opened, Err(refused.clone()), "{branch}");
     }
-    assert_eq!(world.cell_of(elsewhere.cell), None);
+    assert_eq!(world.cell_of(elsewhere), None);
     assert_eq!(world.cell().branch, None);
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
-    let child = child_in(TENANT, 3, 10);
+    let child = child_in(TENANT, 10);
     assert_eq!(forked(&store, &remote, child), Err(refused));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
+    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
     drop((store, remote));
     let objects: Vec<String> = world.objects().into_iter().map(|(key, _)| key).collect();
     assert!(objects.iter().all(|key| !key.ends_with("/encrypted")), "{objects:?}");
@@ -1460,12 +1460,12 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     let at = location(&store, uploaded);
 
     // Another tenant's store, and a fork of the shredded tenant's into a cell of the other's.
-    let theirs = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
+    let theirs = CellId { tenant: OTHER, id: 9 };
     let (their_store, their_uploader) = open_on(&world, &writer, &made(theirs)).unwrap();
     let (their_extent, their_data) = (ExtentId::new(9, 1), noise(3, 4096));
     written(&their_store, &their_uploader, their_extent, &their_data);
     let their_at = location(&their_store, their_extent);
-    let child = child_in(OTHER, 2, 8);
+    let child = child_in(OTHER, 8);
     forked(&store, &uploader, child).unwrap();
     let child_dir = made(child.branch);
     let (child_store, _child_uploader) = open_on(&world, &writer, &child_dir).unwrap();
@@ -1527,7 +1527,7 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     let world = World::new();
     let (writer, reader) = (world.host(5), world.host(6));
     let ours = test_branch(7);
-    let sibling = Branch { cell: Cell { tenant: TENANT, id: 2 }, id: 8 };
+    let sibling = CellId { tenant: TENANT, id: 8 };
     let dirs = [made(ours), made(sibling)];
     let cache_dir = tempfile::tempdir().unwrap();
     let fetcher = caching_fetcher(&world, &reader.memory, cache_dir.path());
@@ -1823,8 +1823,8 @@ fn sealed_stores_open_through_openbao() {
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data));
 
     // A tenant with no key in OpenBao: its store opens not, refused (TASK-411.28).
-    let keyless = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
+    let keyless = CellId { tenant: OTHER, id: 9 };
     let refused = open_on(&world, &host, &made(keyless)).map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 2: no KEK in the KMS");
-    assert_eq!(world.cell_of(keyless.cell), None);
+    assert_eq!(world.cell_of(keyless), None);
 }

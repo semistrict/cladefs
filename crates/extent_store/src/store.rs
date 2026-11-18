@@ -44,7 +44,7 @@ use extent_bucket::recovery::{Places, Seal};
 use extent_bucket::trace;
 use extent_bucket::wal::{Rebased, Wal};
 use extent_frame::segment::{
-    Branch, Chain, Child, Contents, Footer, Location, NewVersion, epoch_of,
+    CellId, Chain, Child, Contents, Footer, Location, NewVersion, epoch_of,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -65,14 +65,14 @@ pub struct NoSpace;
 #[error("the fork to branch {child} failed once its commit was made")]
 pub struct ForkCommitted {
     /// The fork's child.
-    pub child: Branch,
+    pub child: CellId,
 }
 
 /// cladefs: the error of a fork whose child's ID is the branch's, or that of a branch whose extents
 /// the branch holds: its child's extents' IDs would be theirs (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the fork's child {0} has the ID of its parent's or of a branch it inherits from")]
-pub struct InheritedId(pub Branch);
+pub struct InheritedId(pub CellId);
 
 /// cladefs: the error of a version cut of a store that is not quiescent: extents written since its
 /// last commit, which a version holds not, as its guest committed them not (TASK-476).
@@ -228,7 +228,7 @@ pub struct Store<D: Dir> {
     /// Its directory, which its framings share.
     dir: Arc<D>,
     block_size: u32,
-    branch: Branch,
+    branch: CellId,
     /// cladefs: the IDs of the branches whose extents it held as it opened, its own among them: no
     /// fork's child takes one, as an extent's ID names its branch by its ID alone, and branches
     /// are unique by theirs only within their cells (TASK-364).
@@ -786,7 +786,7 @@ impl Opening {
     /// [`UNKEPT_DEK`]: every store is encrypted (TASK-411.28), and one kept nowhere has no record to
     /// keep a DEK of its own; tests', benches' and simulations'.
     #[cfg(any(test, feature = "unkept"))]
-    pub fn new(branch: Branch) -> Self {
+    pub fn new(branch: CellId) -> Self {
         let chain = Chain::new(branch, 0, 0, 0);
         let state = extent_bucket::State::new(branch);
         let taken = extent_bucket::TakenBranch::of(Default::default(), &state, chain);
@@ -808,7 +808,7 @@ pub struct Recovering<D: Dir> {
 
 impl<D: Dir> Recovering<D> {
     /// The branch.
-    pub fn branch(&self) -> Branch {
+    pub fn branch(&self) -> CellId {
         self.file.branch
     }
 

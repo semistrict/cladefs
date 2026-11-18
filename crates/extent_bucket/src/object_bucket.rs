@@ -578,7 +578,7 @@ impl ObjectBucket {
     /// each cell it reads, alongside a read of it; its requests go uncounted
     /// ([`ObjectBucket::stats`]), being no reader's. A request failed, it keeps what it held, until
     /// the next; marks it can't decode, it warns of, holding none.
-    pub async fn refresh_marks(&self, cell: layout::Cell) {
+    pub async fn refresh_marks(&self, cell: layout::CellId) {
         let prefix = self.path(layout::marks_of(cell).trim_end_matches('/'));
         let listed = match self.store.list(Some(&prefix)).try_collect::<Vec<_>>().await {
             Ok(listed) => listed,
@@ -1282,13 +1282,13 @@ pub(crate) mod tests {
     /// a cell's marks, under its prefix, of each cell it reads, read at its first read of the cell.
     #[test]
     fn stores_warn_of_reading_what_the_newest_marks_name() {
-        use crate::layout::{Branch, Cell, Marked, Marks, TEST_CELL};
+        use crate::layout::{CellId, Marked, Marks, TEST_CELL};
         let log = crate::marks::captured();
         let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (old, marked) =
             (layout::checkpoint(test_branch(1), 3, 1), layout::checkpoint(test_branch(1), 4, 1));
-        let other = Cell { tenant: 1, id: 2 };
-        let theirs = layout::checkpoint(Branch { cell: other, id: 2 }, 1, 1);
+        let other = CellId { tenant: 1, id: 2 };
+        let theirs = layout::checkpoint(CellId { tenant: other.tenant, id: 2 }, 1, 1);
         let warned = || -> Vec<String> { log.lock().unwrap().clone() };
         futures::executor::block_on(async {
             let writer = ObjectBucket::new(objects.clone(), "p");
@@ -1351,10 +1351,11 @@ pub(crate) mod tests {
                  request={request} marks={epoch}"
             )
         };
-        let ours = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, segment: 4, epoch: 1 }";
+        let ours = "Checkpoint { branch: CellId { tenant: 1, id: 1 }, segment: 4, epoch: 1 }";
         let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
-        let other = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, segment: 1, epoch: 1 }";
-        let theirs = reached("get", &theirs, layout::marks(Cell { tenant: 1, id: 2 }, 3), other, 3);
+        let other = "Checkpoint { branch: CellId { tenant: 1, id: 2 }, segment: 1, epoch: 1 }";
+        let theirs =
+            reached("get", &theirs, layout::marks(CellId { tenant: 1, id: 2 }, 3), other, 3);
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
 

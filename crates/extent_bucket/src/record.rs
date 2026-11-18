@@ -13,7 +13,7 @@
 //! [`crate::branch`]'s one transition.
 
 use crate::keys::{Dek, InheritedDek};
-use crate::layout::{Branch, FORMAT, Origin, decode};
+use crate::layout::{CellId, FORMAT, Origin, decode};
 use crate::{Error, rules};
 use serde::{Deserialize, Serialize};
 
@@ -119,7 +119,7 @@ impl Record {
     /// The record of `branch` that `bytes` encode, unless it is of another format than this one,
     /// newer or older, which its first bytes say ([`Error::Format`]), or its flags say no [`Kind`]
     /// ([`Error::Corrupt`]).
-    pub fn decode(branch: Branch, bytes: &[u8]) -> Result<Self, Error> {
+    pub fn decode(branch: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
             return Err(Error::Format { branch, format });

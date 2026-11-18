@@ -88,7 +88,7 @@ fn forks_and_takes_branches_in(url: &str) {
 
     let child =
         branch(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
-    let child_branch: cladefs::Branch = child.trim().parse().unwrap();
+    let child_branch: cladefs::CellId = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let record = runtime.block_on(extent_bucket::branch::record(&*bucket, child_branch));
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_branch));
@@ -151,7 +151,7 @@ fn places_and_syncs_stores_in(url: &str) {
     let made = branch(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
     let store = ExtentStore::open(path("first")).unwrap();
     let branch_id = store.branch();
-    assert_eq!(made.parse::<cladefs::Branch>(), Ok(branch_id));
+    assert_eq!(made.parse::<cladefs::CellId>(), Ok(branch_id));
     let extent = ExtentId { branch: branch_id.id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).unwrap();
     store.commit(Some(b"synced")).unwrap();

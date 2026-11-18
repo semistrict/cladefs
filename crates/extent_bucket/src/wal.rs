@@ -19,7 +19,7 @@
 //! before, at the keys of none of what landed. A head names a writer's segments only between its
 //! commits, so that the log keeps a commit whole until the branch has it whole.
 
-use crate::layout::{Branch, Chain, Footer, Head};
+use crate::layout::{CellId, Chain, Footer, Head};
 use crate::{Error, rules};
 use std::collections::{BTreeSet, VecDeque};
 
@@ -33,7 +33,7 @@ use std::collections::{BTreeSet, VecDeque};
 pub struct TakenBranch {
     pub head: Head,
     pub last_commit: Option<u64>,
-    pub forks: BTreeSet<(Branch, u64)>,
+    pub forks: BTreeSet<(CellId, u64)>,
     pub chain: Chain,
 }
 

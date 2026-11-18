@@ -20,31 +20,31 @@ pub struct Location {
     pub len: u64,
 }
 
-/// cladefs: a tenant's cell, its unit of placement: one host at a time writes all the branches in it,
-/// under its one taking, and keeps them under its prefix in the bucket (TASK-364). Tenants and
-/// cells are IDs alone; what they stand for, their callers keep.
+/// cladefs: a tenant's cell: its tenant, and its ID, unique in its bucket, which the bucket's
+/// allocator gives (doc-20): what its keys are under, and what an extent's ID names as the cell
+/// that wrote it. Tenants are IDs alone; what they stand for, their callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Cell {
+pub struct CellId {
     pub tenant: u64,
     pub id: u64,
 }
 
-impl Cell {
+impl CellId {
     /// The prefix of the keys of the cell's objects: `tenants/<tenant>/cells/<id>/`.
     pub fn prefix(self) -> String {
         format!("tenants/{}/cells/{}/", Padded(self.tenant), Padded(self.id))
     }
 }
 
-/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in base 32, as a branch's
-/// first two parts (`cladefs-gc --cell`, TASK-395.4).
-impl std::fmt::Display for Cell {
+/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in base 32
+/// (`cladefs-gc --cell`, TASK-395.4).
+impl std::fmt::Display for CellId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", Short(self.tenant), Short(self.id))
     }
 }
 
-impl std::str::FromStr for Cell {
+impl std::str::FromStr for CellId {
     type Err = String;
 
     /// The cell `TENANT/CELL` names, each in base 32, as it is displayed.
@@ -58,53 +58,11 @@ impl std::str::FromStr for Cell {
     }
 }
 
-/// cladefs: where a branch is: its cell, and its ID, which no other branch its extents are inherited
-/// from or by has: an extent's ID names its branch by the ID alone (TASK-364).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Branch {
-    pub cell: Cell,
-    pub id: u64,
-}
-
-impl Branch {
-    /// The branch `id` of cell `cell` of this one's tenant: where a fork of this one goes, a cell
-    /// of its own (TASK-364).
-    pub fn in_cell(self, cell: u64, id: u64) -> Self {
-        Self { cell: Cell { tenant: self.cell.tenant, id: cell }, id }
-    }
-}
-
-/// A branch as operators read and write it: `TENANT/CELL/ID`, each in base 32.
-impl std::fmt::Display for Branch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.cell, Short(self.id))
-    }
-}
-
-impl std::str::FromStr for Branch {
-    type Err = String;
-
-    /// The branch `TENANT/CELL/ID` names, each in base 32, as it is displayed.
-    fn from_str(text: &str) -> Result<Self, String> {
-        let id = base32_id::parse;
-        let parsed = match text.split('/').collect::<Vec<_>>()[..] {
-            [tenant, cell, branch] => (id(tenant), id(cell), id(branch)),
-            _ => (None, None, None),
-        };
-        match parsed {
-            (Some(tenant), Some(cell), Some(id)) => {
-                Ok(Self { cell: Cell { tenant, id: cell }, id })
-            }
-            _ => Err(format!("no branch, TENANT/CELL/ID in base 32: {text}")),
-        }
-    }
-}
-
 /// cladefs: a fork made at a segment's end: its child's branch, the child's owner, which every
 /// record of the child names, whoever writes it (TASK-79.82, TASK-153.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Child {
-    pub branch: Branch,
+    pub branch: CellId,
     pub owner: u64,
 }
 
@@ -113,7 +71,7 @@ pub struct Child {
 /// set the root, or forks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footer {
-    pub branch: Branch,
+    pub branch: CellId,
     pub segment: u64,
     /// The epoch of its writer's taking, which its key names too: a segment is the branch's only
     /// once the branch's head names it, by its number and epoch (doc-7, The head; TASK-407).
@@ -229,16 +187,13 @@ impl Contents {
     /// writer of epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
     pub fn own_at(
         &self,
-        branch: Branch,
+        branch: CellId,
         epoch: u64,
         segment: u64,
     ) -> impl Iterator<Item = (ExtentId, Location)> + '_ {
         self.own.iter().map(move |&(sequence, len)| {
             let extent = ExtentId { branch: branch.id, sequence };
-            (
-                extent,
-                Location { key: extent_key(branch.cell, epoch, segment, extent), offset: 0, len },
-            )
+            (extent, Location { key: extent_key(branch, epoch, segment, extent), offset: 0, len })
         })
     }
 }
@@ -251,7 +206,7 @@ impl Contents {
 /// only if its chain would have stamped it so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chain {
-    branch: Branch,
+    branch: CellId,
     epoch: u64,
     /// The number of the next segment.
     next_segment: u64,
@@ -263,11 +218,11 @@ impl Chain {
     /// The chain of the writer of epoch `epoch` of `branch`, whose next segment is numbered
     /// `next_segment`; the footers it stamps name `next_sequence`, the writer's floor, as the
     /// branch's next sequence number at least.
-    pub const fn new(branch: Branch, epoch: u64, next_segment: u64, next_sequence: u64) -> Self {
+    pub const fn new(branch: CellId, epoch: u64, next_segment: u64, next_sequence: u64) -> Self {
         Self { branch, epoch, next_segment, next_sequence }
     }
 
-    pub fn branch(&self) -> Branch {
+    pub fn branch(&self) -> CellId {
         self.branch
     }
 
@@ -353,11 +308,10 @@ pub fn writer_of(tag: u64) -> u64 {
 /// which no state naming it frees it: what the branch's next sequence number can't tell, as its
 /// extents are committed in no order of their sequence numbers (TASK-79.3). Under the prefix of
 /// `cell`, its branch's (TASK-364).
-pub fn extent_key(cell: Cell, epoch: u64, segment: u64, extent: ExtentId) -> String {
+pub fn extent_key(cell: CellId, epoch: u64, segment: u64, extent: ExtentId) -> String {
     format!(
-        "{}extents/{}/{}.{}.{}",
+        "{}extents/{}.{}.{}",
         cell.prefix(),
-        Padded(extent.branch),
         Padded(epoch),
         Padded(segment),
         Padded(extent.sequence)
@@ -369,11 +323,11 @@ mod tests {
     use super::*;
 
     /// The cell of the tests' branches.
-    const CELL: Cell = Cell { tenant: 1, id: 2 };
+    const CELL: CellId = CellId { tenant: 1, id: 2 };
 
-    /// Branch `id` of `CELL`.
-    const fn branch(id: u64) -> Branch {
-        Branch { cell: CELL, id }
+    /// The cell `id` of `CELL`'s tenant.
+    const fn branch(id: u64) -> CellId {
+        CellId { tenant: CELL.tenant, id }
     }
 
     /// A footer decodes as it was encoded: a store's segments and the bucket's objects hold them.
@@ -392,10 +346,7 @@ mod tests {
                 next_sequence: 13,
                 forks: vec![
                     Child { branch: branch(3), owner: 0x33 },
-                    Child {
-                        branch: Branch { cell: Cell { tenant: 5, id: 6 }, id: 4 },
-                        owner: 0x44,
-                    },
+                    Child { branch: CellId { tenant: 5, id: 4 }, owner: 0x44 },
                 ],
                 capacity: Some(1 << 30),
                 continued: Some(Continued {
@@ -440,13 +391,13 @@ mod tests {
     /// branch.
     #[test]
     fn branches_parse_as_they_display() {
-        let branch = Branch { cell: Cell { tenant: 10, id: 32 * 11 + 22 }, id: 33 };
+        let branch = CellId { tenant: 10, id: 33 };
         assert_eq!(branch.to_string(), "a/bp/11");
         assert_eq!("a/bp/11".parse(), Ok(branch));
         assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(branch));
         for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
             let refused = format!("no branch, TENANT/CELL/ID in base 32: {wrong}");
-            assert_eq!(wrong.parse::<Branch>(), Err(refused));
+            assert_eq!(wrong.parse::<CellId>(), Err(refused));
         }
     }
 
@@ -512,16 +463,13 @@ mod tests {
         let misplaced =
             |place: &str| format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4));
         for (wrong, refused) in [
-            (Footer { branch: branch(3), ..footer.clone() }, misplaced("1/2/3, number 9, epoch 4")),
+            (Footer { branch: branch(3), ..footer.clone() }, misplaced("1/3, number 9, epoch 4")),
             (
-                Footer {
-                    branch: Branch { cell: Cell { tenant: 1, id: 3 }, ..branch(2) },
-                    ..footer.clone()
-                },
-                misplaced("1/3/2, number 9, epoch 4"),
+                Footer { branch: CellId { tenant: 5, ..branch(2) }, ..footer.clone() },
+                misplaced("5/2, number 9, epoch 4"),
             ),
-            (Footer { segment: 10, ..footer.clone() }, misplaced("1/2/2, number 10, epoch 4")),
-            (Footer { epoch: 5, ..footer }, misplaced("1/2/2, number 9, epoch 5")),
+            (Footer { segment: 10, ..footer.clone() }, misplaced("1/2, number 10, epoch 4")),
+            (Footer { epoch: 5, ..footer }, misplaced("1/2, number 9, epoch 5")),
         ] {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
         }
@@ -550,10 +498,10 @@ mod tests {
     /// base 32, so that a listing is in that order.
     #[test]
     fn extent_keys_order_by_cell_branch_epoch_segment_and_sequence() {
-        let cell = Cell { tenant: 10, id: 12 };
+        let cell = CellId { tenant: 10, id: 12 };
         let key = extent_key(cell, 7, 42, ExtentId { branch: 2, sequence: 31 });
         let expected = "tenants/000000000000a/cells/000000000000c/extents/\
-                        0000000000002/0000000000007.000000000001a.000000000000z";
+                        0000000000007.000000000001a.000000000000z";
         assert_eq!(key, expected);
     }
 }

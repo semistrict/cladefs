@@ -22,7 +22,7 @@ fn provider(exporter: &InMemorySpanExporter) -> SdkTracerProvider {
 
 /// Writes 2 blocks, reads them back and commits them, uploaded,, in a store a daemon serves, as a VM
 /// process would: returns the store's branch.
-fn write_read_commit() -> crate::Branch {
+fn write_read_commit() -> crate::CellId {
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 20);
     let branch = super::branch_at(&dir.path().join("store"));

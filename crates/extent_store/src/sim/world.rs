@@ -159,9 +159,8 @@ impl Default for Profile {
 
 /// cladefs: the simulation's branch `id`: a cell of its own, as a store made
 /// alone, or a fork, is (TASK-364).
-fn sim_branch(id: u64) -> extent_bucket::layout::Branch {
-    let cell = extent_bucket::layout::Cell { tenant: 1, id };
-    extent_bucket::layout::Branch { cell, id }
+fn sim_branch(id: u64) -> extent_bucket::layout::CellId {
+    extent_bucket::layout::CellId { tenant: 1, id }
 }
 
 /// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
@@ -237,7 +236,7 @@ impl Intervals {
     }
 }
 
-struct Branch {
+struct CellId {
     origin: Option<Origin>,
     /// The parent's commit the fork made, which the child's first follows.
     base: Option<u64>,
@@ -250,7 +249,7 @@ struct Branch {
     owner: u64,
 }
 
-impl Branch {
+impl CellId {
     /// A branch forked from `origin`, its parent's fork commit `base`, of `owner`.
     fn forked(origin: Option<Origin>, base: Option<u64>, owner: u64) -> Self {
         Self { origin, base, acked: BTreeSet::new(), deleting: false, taken: 0, owner }
@@ -404,7 +403,7 @@ struct Unfork {
     running: Option<AbortHandle>,
     /// The fork whose child's ID its restore took ([`Restore::taken`]): the child's, if the fork's
     /// record came first.
-    taken: Option<Branch>,
+    taken: Option<CellId>,
 }
 
 /// A fork of a version, until it is done: of which, naming what, on which host, and the task,
@@ -421,7 +420,7 @@ struct Restore {
     running: Option<AbortHandle>,
     /// The fork whose child's ID it took, a guest having named it, that fork's segment not yet
     /// acknowledged: the child's, if that fork's record comes first (TASK-173).
-    taken: Option<Branch>,
+    taken: Option<CellId>,
 }
 
 /// cladefs: a version a guest cut (TASK-476): of which branch, as of which of its commits, whether
@@ -444,7 +443,7 @@ pub struct World {
     spawner: LocalSpawner,
     events: Rc<RefCell<Vec<Event>>>,
     hosts: Vec<Host>,
-    branches: BTreeMap<u64, Branch>,
+    branches: BTreeMap<u64, CellId>,
     commits: HashMap<u64, Truth>,
     /// The commit, or write, that minted each extent.
     minted: HashMap<ExtentId, u64>,
@@ -467,7 +466,7 @@ pub struct World {
     versions: BTreeMap<u64, Cut>,
     /// The forks whose children's IDs a root is taking ([`World::usurp`]), until it is done: the
     /// child's, if the fork's record comes first.
-    usurped: BTreeMap<u64, Branch>,
+    usurped: BTreeMap<u64, CellId>,
     /// What the footer of each segment the history check read says, by its branch, number and
     /// epoch, one writer stamping one footer at a place.
     footers: RefCell<HashMap<(u64, u64, u64), Applied>>,
@@ -532,7 +531,7 @@ impl World {
         };
         let (root, owner) = (world.id(), world.id());
         block_on(branch::create(&Direct(world.bucket.clone()), sim_branch(root), owner)).unwrap();
-        world.branches.insert(root, Branch::forked(None, None, owner));
+        world.branches.insert(root, CellId::forked(None, None, owner));
         world
     }
 
@@ -709,7 +708,7 @@ impl World {
                 (Ok(true), Err(Error::Corrupt(_))) => {}
                 // The other branch did: it lives on.
                 (Ok(false), Ok(_)) => {
-                    self.branches.insert(child, Branch::forked(None, None, owner));
+                    self.branches.insert(child, CellId::forked(None, None, owner));
                 }
                 (deleted, taken) => self.violation(format!(
                     "deleting the failed fork to {child} gave {deleted:?}, another branch taking \
@@ -728,7 +727,7 @@ impl World {
                 | [(lost, Err(Error::IdTaken(_))), (owner, Ok(()))] => {
                     // Its fork's VM manager told: a branch from now on. The other's host deletes
                     // what it thinks its fork made.
-                    self.branches.insert(child, Branch::forked(None, None, owner));
+                    self.branches.insert(child, CellId::forked(None, None, owner));
                     self.untwin(child, lost);
                 }
                 taken => self.violation(format!(
@@ -776,7 +775,7 @@ impl World {
                 match result {
                     // Told to its VM's manager: a branch from now on, whatever comes of the version.
                     Ok(()) => {
-                        let found = Branch::forked(origin, base, owner);
+                        let found = CellId::forked(origin, base, owner);
                         drop(self.branches.insert(child, found))
                     }
                     // The fork whose child's ID it took recorded it first: the fork's child, as it
@@ -793,7 +792,7 @@ impl World {
                 // The root took the ID, and is gone.
                 (Ok(()), Some(Ok(()))) => {
                     self.usurped.remove(&child);
-                    let mut found = Branch::forked(None, None, owner);
+                    let mut found = CellId::forked(None, None, owner);
                     found.deleting = true;
                     drop(self.branches.insert(child, found))
                 }
@@ -1453,7 +1452,7 @@ impl World {
         let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
         let made = Truth { branch, parent, extents, frees: Vec::new(), root: None, capacity: None };
         self.made(host, branch, tag, epoch, made);
-        self.branches.insert(child, Branch::forked(None, Some(tag), owner));
+        self.branches.insert(child, CellId::forked(None, Some(tag), owner));
         self.forking.insert(child, (branch, forked));
         let _ = uploader.ask(epoch, false);
     }
@@ -1555,7 +1554,7 @@ impl World {
 
     /// The fork's child `child` as its making's guest knows it, wherever it is: a branch, or set
     /// aside while a restore or a root takes its ID; none once one of those took it.
-    fn fork_child(&mut self, child: &Child) -> Option<&mut Branch> {
+    fn fork_child(&mut self, child: &Child) -> Option<&mut CellId> {
         let id = child.branch.id;
         let restore = self.restores.get_mut(&id).and_then(|restore| restore.taken.as_mut());
         let unfork = self.unforks.get_mut(&id).and_then(|unfork| unfork.taken.as_mut());
@@ -1569,7 +1568,7 @@ impl World {
     /// it, or an operator does what no host held: which nothing relies on.
     fn fail_restore(&mut self, child: u64, restore: Restore, base: Option<u64>) {
         let Restore { version, origin, owner, taken, .. } = restore;
-        let mut found = Branch::forked(Some(origin), base, owner);
+        let mut found = CellId::forked(Some(origin), base, owner);
         found.deleting = true;
         self.branches.insert(child, found);
         let forked = Kind::Forking { origin, version };
@@ -1912,7 +1911,7 @@ impl World {
 
     /// Deletes a branch, if `bases`, one a fork of which lives.
     fn delete(&mut self, bases: bool) {
-        let live = |found: &Branch| !found.deleting;
+        let live = |found: &CellId| !found.deleting;
         // Keep a branch or two.
         if self.branches.values().filter(|found| live(found)).count() < 3 {
             return;
@@ -1993,7 +1992,7 @@ impl World {
         let branches: Vec<u64> = self.branches.keys().copied().collect();
         let one_cell = self.profile.one_cell;
         let cell = (!branches.is_empty() && one_cell > 0.0 && self.rng.random_bool(one_cell))
-            .then(|| sim_branch(branches[self.rng.random_range(0..branches.len())]).cell);
+            .then(|| sim_branch(branches[self.rng.random_range(0..branches.len())]));
         let handle = self.spawn(async move {
             let result = match cell {
                 Some(cell) => collector::collect_cell(&*bucket, cell, id, &options).await,
@@ -2167,7 +2166,7 @@ impl World {
             // all of them at once (TASK-455).
             removed: (gone())
                 .filter_map(|key| match layout::kind(key) {
-                    layout::Kind::Record { branch } => Some(branch.cell),
+                    layout::Kind::Record { branch } => Some(branch),
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
@@ -2400,7 +2399,7 @@ impl World {
             // No placement took it back from a later one. cladefs: a placement takes the branch's cell,
             // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
-            let cell = block_on(extent_bucket::cell::read(&*direct, sim_branch(id).cell));
+            let cell = block_on(extent_bucket::cell::read(&*direct, sim_branch(id)));
             let head = block_on(extent_bucket::head::get(&*direct, sim_branch(id)));
             match (cell, head) {
                 (Ok(Some(cell)), Ok(Some(head))) => {

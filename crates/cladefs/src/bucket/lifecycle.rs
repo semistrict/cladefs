@@ -22,7 +22,7 @@
 use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::extents::Opening;
 use crate::host_store::{self, DEFAULT_TENANT};
-use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
+use crate::{CellId, ExtentId, ExtentStore, VolatileSlice};
 use base32_id::Padded;
 use extent_bucket::faults::{Fault, Faults, Faulty};
 use extent_bucket::object_bucket::ObjectBucket;
@@ -318,9 +318,9 @@ fn chain(events: &[Event]) -> usize {
 struct Names(BTreeMap<String, String>);
 
 impl Names {
-    fn name(&mut self, branch: Branch, name: &str) {
+    fn name(&mut self, branch: CellId, name: &str) {
         self.0.insert(Padded(branch.id).to_string(), name.to_owned());
-        self.0.insert(Padded(branch.cell.id).to_string(), format!("{name}'s"));
+        self.0.insert(Padded(branch.id).to_string(), format!("{name}'s"));
     }
 
     /// `key`, each of its segments that is a named ID as its name.
@@ -420,7 +420,7 @@ fn open(path: &Path) -> ExtentStore {
 struct Made {
     dir: tempfile::TempDir,
     /// The base's cell, and the version.
-    version: (Branch, u64),
+    version: (CellId, u64),
     capacity: u64,
 }
 
@@ -462,7 +462,7 @@ fn based(
     made: &Path,
     (capacity, bucket): (u64, &Arc<ObjectBucket>),
     run: &mut Run,
-) -> (Branch, u64) {
+) -> (CellId, u64) {
     let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).unwrap();
     run.names.name(base.branch(), "base");
     // Extents of one to four blocks, so that their lengths and places in their segments vary, as
@@ -697,7 +697,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_store::keeping().unwrap().token + 1;
-    let holding = extent_bucket::cell::hold(&elsewhere, clone.cell, (later, later), None, None);
+    let holding = extent_bucket::cell::hold(&elsewhere, clone, (later, later), None, None);
     extent_store::upload::block_on(holding).unwrap().unwrap();
     let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
     assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));

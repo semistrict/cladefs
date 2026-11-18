@@ -111,7 +111,7 @@ impl Holders {
 
     /// cladefs: lets go of those whose branches `scope` says are of it, and of those closed: no
     /// page-in reads through them again (TASK-411.7). Returns whether it let go of one of `scope`.
-    fn forget(&self, scope: &dyn Fn(crate::Branch) -> bool) -> bool {
+    fn forget(&self, scope: &dyn Fn(crate::CellId) -> bool) -> bool {
         let mut forgot = false;
         self.0.with(Mutex::lock).retain(|holder| match holder.store.upgrade() {
             None => false,
@@ -264,7 +264,7 @@ pub(crate) fn evict_arena(arena: ArenaId) {
 /// holds stays, its pages theirs to read (another tenant's fork of a shared version, a public
 /// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
 /// extents.
-pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {
+pub(crate) fn forget(scope: impl Fn(crate::CellId) -> bool) -> (u64, u64) {
     let Some(cache) = EXTENT_CACHE.get() else { return (0, 0) };
     let gone: Vec<Cached> = {
         let mut extents = cache.extents.with(Mutex::lock);

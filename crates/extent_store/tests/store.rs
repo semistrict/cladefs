@@ -18,7 +18,7 @@ use std::sync::Arc;
 use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 /// The most bytes an extent holds: doc-4's `max_extent`, the store's default.
 const MAX_EXTENT: u64 = 64 << 20;
 
@@ -351,7 +351,7 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     let blocks: Vec<_> = (1..=16).map(|sequence| (extent(sequence), BLOCK as u64)).collect();
     assert_eq!(written, blocks);
     let own = Location {
-        key: extent_key(BRANCH.cell, WRITER.epoch(), writing.footer.segment, extent(17)),
+        key: extent_key(BRANCH, WRITER.epoch(), writing.footer.segment, extent(17)),
         offset: 0,
         len: 32 << 10,
     };
@@ -1003,7 +1003,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     store.flush().unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [first] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    let own = Location { key: extent_key(BRANCH.cell, 3, 5, extent(2)), offset: 0, len: 32 << 10 };
+    let own = Location { key: extent_key(BRANCH, 3, 5, extent(2)), offset: 0, len: 32 << 10 };
     assert_eq!(
         first.footer,
         Footer {
@@ -3337,14 +3337,14 @@ fn forks_take_no_id_of_their_lineage() {
     let store = create(MemDir::new(), 1 << 20);
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
-    let elsewhere = extent_bucket::layout::Cell { tenant: 9, id: 9 };
-    let child = extent_bucket::layout::Branch { cell: elsewhere, id: BRANCH.id };
+    let elsewhere = extent_bucket::layout::CellId { tenant: 9, id: 9 };
+    let child = extent_bucket::layout::CellId { tenant: elsewhere.tenant, id: BRANCH.id };
     let forked = Child { branch: child, owner: 0 };
     let refused = store.commit_fork(forked).unwrap_err();
     assert_eq!(refused.downcast_ref(), Some(&extent_store::InheritedId(child)));
     assert_eq!(store.last_commit().unwrap(), 1);
     let other =
-        Child { branch: extent_bucket::layout::Branch { id: BRANCH.id + 1, ..child }, ..forked };
+        Child { branch: extent_bucket::layout::CellId { id: BRANCH.id + 1, ..child }, ..forked };
     assert_eq!(store.commit_fork(other).unwrap(), 2);
 }
 

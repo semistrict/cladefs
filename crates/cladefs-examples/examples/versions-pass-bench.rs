@@ -18,7 +18,7 @@
 
 use extent_bucket::collector::{Collector, Options};
 use extent_bucket::keys::CachingKms;
-use extent_bucket::layout::{Branch, Cell, NewVersion};
+use extent_bucket::layout::{CellId, NewVersion};
 use extent_bucket::object_bucket::{ObjectBucket, Request, Stats};
 use extent_bucket::{Commit, SegmentBuilder, Writer, branch};
 use futures::executor::block_on;
@@ -32,7 +32,7 @@ const CHANGED: u64 = 16;
 const EXTENT: usize = 64;
 const CHECKPOINT_EVERY: u64 = 64;
 const PASSES: usize = 5;
-const CELL: Cell = Cell { tenant: 1, id: 1 };
+const CELL: CellId = CellId { tenant: 1, id: 1 };
 
 fn main() {
     let args: Vec<usize> = std::env::args().skip(1).map(|arg| arg.parse().unwrap()).collect();
@@ -86,7 +86,7 @@ fn bench(versions: usize) {
 /// Writes the branch, branch 1 of `CELL`: its extents, then `versions` versions, each after a commit
 /// rewriting `CHANGED` of them. Returns how many segments it wrote.
 async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
-    let branch = Branch { cell: CELL, id: 1 };
+    let branch = CellId { tenant: CELL.tenant, id: 1 };
     branch::create(&**bucket, branch, 0).await.unwrap();
     // The tests' KMS: every branch is encrypted, and so read by the pass.
     let kms = CachingKms::new(Arc::new(extent_keys::testing::MemoryKms::new()));

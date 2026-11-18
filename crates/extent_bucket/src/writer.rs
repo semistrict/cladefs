@@ -31,7 +31,7 @@ use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
 use crate::head::{self, Held};
 use crate::keys::Ring;
-use crate::layout::{self, Branch, Chain, Child, Footer, Location, Origin};
+use crate::layout::{self, CellId, Chain, Child, Footer, Location, Origin};
 use crate::moves::MovesMaps;
 use crate::record::Record;
 use crate::recovery::{self, Recovered, State};
@@ -100,7 +100,7 @@ pub type Mover = Box<dyn Fn(&[(ExtentId, Location, Location)]) + Send + Sync>;
 
 pub struct Writer<B: Bucket> {
     bucket: Arc<B>,
-    branch: Branch,
+    branch: CellId,
     epoch: u64,
     /// What its uploads may hold at once, with those of the writers it shares it with.
     budget: Arc<Budget>,
@@ -129,12 +129,12 @@ struct Inner {
     /// The newest checkpoint, its own or the one the head named as it took it.
     checkpoint: Option<u64>,
     /// The forks whose children have their records.
-    recorded: BTreeSet<Branch>,
+    recorded: BTreeSet<CellId>,
     /// The children of those forks whose IDs another branch has: their forks made no branch.
-    refused: BTreeSet<Branch>,
+    refused: BTreeSet<CellId>,
     /// The child of a fork whose record a checkpoint read last, looking for those deleted, which
     /// the next goes on after (TASK-92.4).
-    looked: Option<Branch>,
+    looked: Option<CellId>,
     /// Why it stopped, if it did.
     stopped: Option<Error>,
     /// cladefs: the versions dropped, which no acknowledgement names, local ones among them, cut
@@ -178,7 +178,7 @@ impl<B: Bucket> Writer<B> {
     /// ([`crate::keys::taking`], TASK-411.28). What takes a branch outside a store: tools, tests.
     pub async fn open_under(
         bucket: Arc<B>,
-        branch: Branch,
+        branch: CellId,
         (holder, token): (u64, u64),
         kms: &Arc<crate::keys::CachingKms>,
     ) -> Result<Self, Error> {
@@ -191,7 +191,7 @@ impl<B: Bucket> Writer<B> {
     #[cfg(any(test, feature = "testing"))]
     pub async fn open(
         bucket: Arc<B>,
-        branch: Branch,
+        branch: CellId,
         holder: u64,
         token: u64,
     ) -> Result<Self, Error> {
@@ -203,7 +203,7 @@ impl<B: Bucket> Writer<B> {
     /// (TASK-411.3), a writer's, which encrypts.
     pub async fn open_keyed(
         bucket: Arc<B>,
-        branch: Branch,
+        branch: CellId,
         taker: impl Into<Taker>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
@@ -246,7 +246,7 @@ impl<B: Bucket> Writer<B> {
     /// the head taken from `read`, a read of it before, if given; as `taker` says.
     async fn take(
         bucket: Arc<B>,
-        branch: Branch,
+        branch: CellId,
         record: Record,
         (before, read): (Option<Recovered>, Option<head::Read>),
         Taker { holder, token, remembered }: Taker,
@@ -344,7 +344,7 @@ impl<B: Bucket> Writer<B> {
         self.inner.lock().unwrap()
     }
 
-    pub fn branch(&self) -> Branch {
+    pub fn branch(&self) -> CellId {
         self.branch
     }
 
@@ -618,7 +618,7 @@ impl<B: Bucket> Writer<B> {
 
     /// Whether another branch has the ID of `child`, a fork's child, acknowledged: the fork made no
     /// branch.
-    pub fn refused(&self, child: Branch) -> bool {
+    pub fn refused(&self, child: CellId) -> bool {
         self.inner().refused.contains(&child)
     }
 
@@ -693,11 +693,11 @@ impl<B: Bucket> Writer<B> {
         // each checkpoint, made a storm of forks, a checkpoint each, read their records N^2 / 2
         // times (TASK-92.4). A child deleted has its fork go within as many checkpoints as there
         // are forks to read RECORDS_AT_ONCE at a time.
-        let mut children: Vec<Branch> = state.forks.iter().map(|fork| fork.child).collect();
+        let mut children: Vec<CellId> = state.forks.iter().map(|fork| fork.child).collect();
         children.sort_unstable();
         children.dedup();
         let after = children.partition_point(|&child| Some(child) <= self.inner().looked);
-        let children: Vec<Branch> = children[after..]
+        let children: Vec<CellId> = children[after..]
             .iter()
             .chain(&children[..after])
             .take(RECORDS_AT_ONCE)
@@ -711,7 +711,7 @@ impl<B: Bucket> Writer<B> {
             })
             .buffer_unordered(RECORDS_AT_ONCE)
             .try_filter_map(|gone| async move { Ok(gone) })
-            .try_collect::<Vec<Branch>>();
+            .try_collect::<Vec<CellId>>();
         // The moves of the objects its extents are in, followed, alongside those records' reads:
         // neither waits for the other, a round trip less for each checkpoint, and so each fork,
         // on a real bucket (TASK-165.11).

@@ -22,9 +22,9 @@ fn host_kms<B: extent_bucket::Bucket>(bucket: &Arc<B>) -> Arc<extent_bucket::key
     extent_bucket::keys::CachingKms::new(Arc::new(kms))
 }
 
-/// Branch `id` of tenant 1's cell 1, the tests'.
-fn test_branch(id: u64) -> extent_bucket::layout::Branch {
-    extent_bucket::layout::Branch { cell: extent_bucket::layout::Cell { tenant: 1, id: 1 }, id }
+/// The tests' cell `id`, of tenant 1.
+fn test_branch(id: u64) -> extent_bucket::layout::CellId {
+    extent_bucket::layout::CellId { tenant: 1, id }
 }
 
 fn gc(args: &[&str]) -> std::process::Output {
@@ -370,7 +370,7 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use extent_bucket::Bucket as _;
     use extent_bucket::batch::{Commit, SegmentBuilder};
-    use extent_bucket::layout::{self, Branch, Cell};
+    use extent_bucket::layout::{self, CellId};
     use extent_bucket::object_bucket::ObjectBucket;
     use extent_bucket::{Writer, branch};
     use serde_json::{Value, json};
@@ -380,16 +380,21 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-    let cells =
-        [Cell { tenant: 1, id: 1 }, Cell { tenant: 1, id: 0x2f }, Cell { tenant: 0xb, id: 1 }];
-    let unpassed = Cell { tenant: 1, id: 0x30 };
+    let cells = [
+        CellId { tenant: 1, id: 1 },
+        CellId { tenant: 1, id: 0x2f },
+        CellId { tenant: 0xb, id: 1 },
+    ];
+    let unpassed = CellId { tenant: 1, id: 0x30 };
     futures::executor::block_on(async {
         for (id, cell) in cells.into_iter().enumerate() {
-            branch::create(&*bucket, Branch { cell, id: id as u64 + 1 }, 0).await.unwrap();
+            branch::create(&*bucket, CellId { tenant: cell.tenant, id: id as u64 + 1 }, 0)
+                .await
+                .unwrap();
         }
         // In the first cell, a segment written and one freeing it: what the pass deletes.
         let kms = host_kms(&bucket);
-        let branch = Branch { cell: cells[0], id: 1 };
+        let branch = CellId { tenant: (cells[0]).tenant, id: 1 };
         let writer = Writer::open_under(bucket.clone(), branch, (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
@@ -421,12 +426,16 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert!(slowest.starts_with("cladefs-gc: took T s; slowest: "), "{slowest}");
     let after = now().as_millis() as u64;
     // A cell made after the pass, which no pass went over.
-    futures::executor::block_on(branch::create(&*bucket, Branch { cell: unpassed, id: 4 }, 0))
-        .unwrap();
+    futures::executor::block_on(branch::create(
+        &*bucket,
+        CellId { tenant: unpassed.tenant, id: 4 },
+        0,
+    ))
+    .unwrap();
     let listed = futures::executor::block_on(bucket.list("")).unwrap();
 
     // Each cell's objects and bytes by kind, as the bucket lists them now.
-    let sums = |cell: Cell| {
+    let sums = |cell: CellId| {
         let mut kinds: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         for meta in listed.iter().filter(|meta| meta.key.starts_with(&cell.prefix())) {
             let sum = kinds.entry(layout::kind(&meta.key).name()).or_default();
@@ -454,7 +463,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         let when = when.as_u64().unwrap();
         assert!(before <= when && when <= after, "{before} {when} {after}");
     }
-    let cell_line = |cell: Cell, when: &Value| {
+    let cell_line = |cell: CellId, when: &Value| {
         let kinds = sums(cell);
         let (objects, bytes) = total(&kinds);
         json!({
@@ -467,7 +476,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
             "kinds": kinds_json(&kinds),
         })
     };
-    let tenant_line = |tenant: u64, of: &[Cell], when: &[&Value], unmeasured: u64| {
+    let tenant_line = |tenant: u64, of: &[CellId], when: &[&Value], unmeasured: u64| {
         let mut kinds: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         for cell in of {
             for (name, sum) in sums(*cell) {
@@ -527,7 +536,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 #[test]
 fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
     use extent_bucket::batch::{Commit, SegmentBuilder};
-    use extent_bucket::layout::{self, Branch, Cell, Child, Origin};
+    use extent_bucket::layout::{self, CellId, Child, Origin};
     use extent_bucket::object_bucket::ObjectBucket;
     use extent_bucket::{Bucket as _, Writer, branch, cell, keys};
     use extent_frame::{Encryption, Frame, KeyId};
@@ -544,15 +553,15 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
     let local = Arc::new(LocalKms::open(&kms_dir).unwrap());
     local.create(1).unwrap();
     let parent = test_branch(1);
-    let child = Branch { cell: Cell { tenant: 1, id: 2 }, id: 9 };
+    let child = CellId { tenant: 1, id: 9 };
     let at = block_on(async {
         let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
         let shared: extent_keys::kms::Shared = local.clone();
         let host = keys::CachingKms::new(shared);
         let kek = keys::new_cell_kek(&host, 1).await.unwrap();
         let making = Some(&kek.1);
-        let (_, object) = cell::hold(&*bucket, parent.cell, (5, 5), making, None).await.unwrap();
-        let cell_keys = keys::held(&host, parent.cell, object, Some(kek));
+        let (_, object) = cell::hold(&*bucket, parent, (5, 5), making, None).await.unwrap();
+        let cell_keys = keys::held(&host, parent, object, Some(kek));
         branch::create(&*bucket, parent, 0).await.unwrap();
         let record = branch::record(&*bucket, parent).await.unwrap().unwrap();
         let record = keys::with_dek(&*bucket, &cell_keys, parent, record).await.unwrap();
@@ -582,7 +591,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
     let bucket = ObjectBucket::from_url(&url).unwrap();
     let record = |branch| block_on(branch::record(&bucket, branch)).unwrap();
     let checkpoints = || {
-        let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.cell.prefix())));
+        let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.prefix())));
         listed.unwrap().into_iter().map(|meta| meta.key).collect::<Vec<_>>()
     };
     assert_eq!(record(child), None);

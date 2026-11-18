@@ -186,7 +186,7 @@ pub use cached::{CachedDir, CachedFile};
 pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
 pub use extent_bucket::cell::Kind;
 /// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
-pub use extent_frame::segment::{Branch, Cell};
+pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
 pub use host::{
     create_host, create_host_at_version, delete_host, host_branch, host_bucket, host_token,

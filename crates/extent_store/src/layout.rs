@@ -8,7 +8,7 @@ use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, ensure};
 use base32_id::Padded;
 use extent_bucket::cell::Kind;
-use extent_frame::segment::Branch;
+use extent_frame::segment::CellId;
 #[cfg(test)]
 use extent_frame::segment::Contents;
 use extent_frame::segment::Location;
@@ -48,7 +48,7 @@ pub struct Format {
 pub struct Description {
     pub block_size: u32,
     pub capacity: u64,
-    pub branch: Branch,
+    pub branch: CellId,
 }
 
 /// The store's description, its `store` file: its format, block size, and branch; and cladefs: the
@@ -60,7 +60,7 @@ pub struct Description {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoreFile {
     pub block_size: u32,
-    pub branch: Branch,
+    pub branch: CellId,
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
@@ -537,10 +537,7 @@ mod tests {
     fn descriptions() {
         let file = StoreFile {
             block_size: 4096,
-            branch: Branch {
-                cell: extent_frame::segment::Cell { tenant: 0xa, id: u64::MAX },
-                id: u64::MAX,
-            },
+            branch: CellId { tenant: 0xa, id: u64::MAX },
             bucket: None,
             capacity: 1,
             token: None,

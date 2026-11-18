@@ -12,7 +12,7 @@ use std::time::Duration;
 use storage_device::{ExtentId, NoExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 
 /// Small segments and large extents, so that tests make several of each.
 const OPTIONS: Options = Options {

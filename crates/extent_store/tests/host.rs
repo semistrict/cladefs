@@ -13,7 +13,7 @@ use std::path::Path;
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::CellId = extent_bucket::layout::test_branch(7);
 const OPTIONS: Options = Options {
     max_extent: 64 << 20,
     segment_size: 64 << 10,

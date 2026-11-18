@@ -47,28 +47,28 @@ impl Daemon {
     pub fn create(
         &mut self,
         path: &Path,
-        branch: cladefs::Branch,
+        branch: cladefs::CellId,
         token: Option<u64>,
-    ) -> Result<cladefs::Branch, tonic::Status> {
+    ) -> Result<cladefs::CellId, tonic::Status> {
         let request = CreateStoreRequest {
             path: name(path),
             capacity: CAPACITY,
             branch: branch.id,
             token,
-            tenant: branch.cell.tenant,
-            cell: branch.cell.id,
+            tenant: branch.tenant,
+            cell: branch.id,
             kind: 0,
         };
         let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
-        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::Branch { cell, id: response.branch })
+        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
 
     /// The branch of the store at `path`, in its cell, as StatStore says it (TASK-364).
-    pub fn branch(&mut self, path: &Path) -> Result<cladefs::Branch, tonic::Status> {
+    pub fn branch(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let stat = self.stat(path)?;
-        let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
-        Ok(cladefs::Branch { cell, id: stat.branch })
+        let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
+        Ok(cladefs::CellId { tenant: cell.tenant, id: stat.branch })
     }
 
     pub fn stat(&mut self, path: &Path) -> Result<StatStoreResponse, tonic::Status> {
@@ -77,11 +77,11 @@ impl Daemon {
     }
 
     /// Forks the store at `from` to `to` (ForkStore).
-    pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
+    pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let request = ForkStoreRequest { from: name(from), to: name(to), ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
-        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::Branch { cell, id: response.branch })
+        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
 
     /// Makes a version of the cell of the store at `from` (MakeVersion), and returns it.
@@ -89,11 +89,7 @@ impl Daemon {
         let request = MakeVersionRequest { path: name(from), keep_last: 0 };
         let version = self.runtime.block_on(self.client.make_version(request))?.into_inner();
         let cell = self.branch(from)?;
-        Ok(cladefs::CellVersion {
-            tenant: cell.cell.tenant,
-            cell: cell.id,
-            version: version.version,
-        })
+        Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version: version.version })
     }
 
     /// Forks the version `from` to `to`, on this host, whichever made it (ForkStore's `version`).
@@ -101,13 +97,13 @@ impl Daemon {
         &mut self,
         from: cladefs::CellVersion,
         to: &Path,
-    ) -> Result<cladefs::Branch, tonic::Status> {
+    ) -> Result<cladefs::CellId, tonic::Status> {
         let cladefs::CellVersion { tenant, cell, version } = from;
         let request =
             ForkStoreRequest { to: name(to), version, tenant, cell, ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
-        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::Branch { cell, id: response.branch })
+        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
 
     /// Drops the versions `versions` of the cell of the store at `path` (DropVersions).
@@ -153,7 +149,7 @@ impl Daemon {
         self.runtime.block_on(self.client.drop_store(request)).map(drop)
     }
 
-    pub fn import(&mut self, path: &Path, image: &Path) -> Result<cladefs::Branch, tonic::Status> {
+    pub fn import(&mut self, path: &Path, image: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let request = ImportImageRequest {
             path: name(path),
             capacity: CAPACITY,
@@ -162,8 +158,8 @@ impl Daemon {
             tenant: 0,
         };
         let response = self.runtime.block_on(self.client.import_image(request))?.into_inner();
-        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::Branch { cell, id: response.branch })
+        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
     }
 
     /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
@@ -241,8 +237,7 @@ impl Daemon {
 }
 
 /// A branch to make anew: of a new cell of the default tenant's, a new ID there (TASK-364).
-pub const NEW: cladefs::Branch =
-    cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
+pub const NEW: cladefs::CellId = cladefs::CellId { tenant: 0, id: 0 };
 
 pub const CAPACITY: u64 = 1 << 26;
 

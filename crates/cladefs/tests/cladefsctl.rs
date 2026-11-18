@@ -109,7 +109,7 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     store.commit(None).unwrap();
     drop(store);
     let printed = cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
-    let branch: cladefs::Branch = printed.trim().parse().unwrap();
+    let branch: cladefs::CellId = printed.trim().parse().unwrap();
 
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists(), "the store's directory stayed");
@@ -319,7 +319,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
     };
     run(&[&"import", &base, &"67108864", &image]).unwrap();
     let printed = run(&[&"fork", &base, &fork]).unwrap();
-    let branch: cladefs::Branch = printed.trim().parse().unwrap();
+    let branch: cladefs::CellId = printed.trim().parse().unwrap();
     assert_eq!(ExtentStore::open(&fork).unwrap().branch(), branch);
     // The file `hello` of the store at `path`, as its filesystem has it.
     let hello = |path: &Path| {

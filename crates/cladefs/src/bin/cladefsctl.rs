@@ -213,7 +213,7 @@ enum Command {
     Take {
         dir: PathBuf,
         capacity: u64,
-        branch: cladefs::Branch,
+        branch: cladefs::CellId,
         token: Option<u64>,
     },
     Place {
@@ -302,7 +302,7 @@ enum Command {
     /// cladefs: a cell shredded (TASK-411.7).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     ShredCell {
-        cell: cladefs::Cell,
+        cell: cladefs::CellId,
     },
     /// cladefs: a tenant's keys forgotten, its KEK revoked or destroyed (TASK-411.7).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -325,9 +325,9 @@ enum Command {
 enum Mount {
     /// A cell attached, at `token`'s placement if given; or, `capacity` given, a new one of its
     /// tenant's, a new Fxfs cell of `capacity` bytes.
-    Attach { cell: cladefs::Cell, capacity: u64, token: Option<u64> },
+    Attach { cell: cladefs::CellId, capacity: u64, token: Option<u64> },
     /// A cell detached, at once if `force`.
-    Detach { cell: cladefs::Cell, force: bool },
+    Detach { cell: cladefs::CellId, force: bool },
     /// The cells attached.
     List,
 }
@@ -335,8 +335,8 @@ enum Mount {
 impl Mount {
     /// The `mount` command `args` say, the words after `mount`.
     fn parse(args: &[&str]) -> anyhow::Result<Self> {
-        let cell = |tenant: &str, cell: &str| -> anyhow::Result<cladefs::Cell> {
-            Ok(cladefs::Cell { tenant: id("TENANT", tenant)?, id: id("CELL", cell)? })
+        let cell = |tenant: &str, cell: &str| -> anyhow::Result<cladefs::CellId> {
+            Ok(cladefs::CellId { tenant: id("TENANT", tenant)?, id: id("CELL", cell)? })
         };
         let token = |rest: &[&str]| -> anyhow::Result<Option<u64>> {
             let parsed = rest.first().map(|token| token.parse()).transpose();
@@ -428,7 +428,7 @@ impl Command {
                 Self::Share { dir: dir.into(), version: version(id)?, shared: false }
             }
             ["fork-version", cell, id, dst] => {
-                let cell: cladefs::Cell = cell.parse().map_err(anyhow::Error::msg)?;
+                let cell: cladefs::CellId = cell.parse().map_err(anyhow::Error::msg)?;
                 let from = cladefs::CellVersion {
                     tenant: cell.tenant,
                     cell: cell.id,
@@ -454,7 +454,7 @@ impl Command {
             ["revoke", given] => Self::Revoke { tenant: tenant(given)? },
             ["shred-cell", cell] => {
                 let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
-                let cell = cladefs::Cell {
+                let cell = cladefs::CellId {
                     tenant: self::id("TENANT", tenant)?,
                     id: self::id("CELL", id)?,
                 };
@@ -476,7 +476,7 @@ impl Command {
         let daemon = cladefs::cladefsd::control::Client::connect(socket)?;
         match self {
             Self::Create { dir, capacity } => {
-                let new = cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
+                let new = cladefs::CellId { tenant: 0, id: 0 };
                 println!("{}", daemon.create_store(&dir, capacity, new, None)?);
             }
             Self::Take { dir, capacity, branch, token } => {
@@ -501,12 +501,12 @@ impl Command {
             Self::Attach { dir, base } => daemon.attach_base(&dir, &base)?,
             Self::Stat { dir } => {
                 let stat = daemon.stat_store(&dir)?;
-                let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
+                let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
                 let whose = |own, inherited| cladefs::Whose { own, inherited };
                 print!(
                     "{}",
                     Stat {
-                        branch: cladefs::Branch { cell, id: stat.branch },
+                        branch: cladefs::CellId { tenant: cell.tenant, id: stat.branch },
                         capacity: stat.capacity,
                         used: stat.used,
                         available: stat.available,
@@ -606,7 +606,7 @@ impl Command {
             Self::Fork { src, dst } => {
                 let store = ExtentStore::open(&src)?;
                 // A new cell of the store's tenant's (TASK-364).
-                let tenant = store.branch().cell.tenant;
+                let tenant = store.branch().tenant;
                 println!("{}", store.fork(&dst, tenant)?);
             }
             Self::Version { dir } => println!("{:x}", ExtentStore::open(&dir)?.make_version(None)?),
@@ -676,7 +676,7 @@ impl Command {
 
 /// What `stat` says of a store, which it prints one `name value` a line.
 struct Stat {
-    branch: cladefs::Branch,
+    branch: cladefs::CellId,
     capacity: u64,
     used: u64,
     available: u64,

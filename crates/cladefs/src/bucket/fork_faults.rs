@@ -82,9 +82,9 @@ struct World {
     bucket: Arc<ObjectBucket>,
     gated: Arc<Gated>,
     parent: Option<ExtentStore>,
-    branch: crate::Branch,
+    branch: crate::CellId,
     /// The child of the fork.
-    child: crate::Branch,
+    child: crate::CellId,
     /// The parent's extents, with their data.
     held: Vec<(ExtentId, Vec<u8>)>,
     other: ExtentStore,
@@ -287,12 +287,12 @@ impl World {
     }
 
     /// The child's record, if it has one.
-    fn record(&self, child: crate::Branch) -> Option<extent_bucket::record::Record> {
+    fn record(&self, child: crate::CellId) -> Option<extent_bucket::record::Record> {
         block_on(branch::record(&*self.bucket, child)).unwrap()
     }
 
     /// The branches live in the bucket.
-    fn live(&self) -> Vec<crate::Branch> {
+    fn live(&self) -> Vec<crate::CellId> {
         block_on(extent_bucket::testing::live(&*self.bucket)).unwrap().into_keys().collect()
     }
 
@@ -300,7 +300,7 @@ impl World {
     /// host died, or whose cleanup failed, leaves standing, which an operator finds so, and
     /// deletes, whichever placement took it last, as `cladefs-gc --branches` and `--delete-branch`
     /// do. Only the fork's child may be one, and only if the fork failed.
-    fn delete_orphans(&self, named: &[crate::Branch], failed: bool, case: &str) {
+    fn delete_orphans(&self, named: &[crate::CellId], failed: bool, case: &str) {
         let orphans: Vec<_> =
             self.live().into_iter().filter(|live| !named.contains(live)).collect();
         if orphans.is_empty() {

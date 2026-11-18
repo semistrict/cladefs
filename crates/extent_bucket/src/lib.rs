@@ -118,7 +118,7 @@ pub enum Error {
     /// guest gave it, which that branch took while the fork was made (TASK-79.82). The fork failed;
     /// its parent's branch is as sound as before.
     #[error("branch {0} has another origin")]
-    IdTaken(layout::Branch),
+    IdTaken(layout::CellId),
     /// Something a branch needs is gone.
     #[error("lost: {0}")]
     Lost(String),
@@ -140,14 +140,14 @@ pub enum Error {
         "branch {branch} inherits from branch {from}, of another cell, whose objects are \
          encrypted, and its record holds not their keys"
     )]
-    Inherited { branch: layout::Branch, from: layout::Branch },
+    Inherited { branch: layout::CellId, from: layout::CellId },
     /// The branch's record says its objects are of another format than this one's, newer or
     /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
     #[error(
         "branch {branch} is of format {format}, which this reader, of format {ours}, doesn't read",
         ours = layout::FORMAT
     )]
-    Format { branch: layout::Branch, format: u32 },
+    Format { branch: layout::CellId, format: u32 },
     /// What a writer was to upload, it could not read where it is kept: a store's file.
     #[error("reading {0}")]
     Read(String),
@@ -166,7 +166,7 @@ pub enum Error {
     /// cladefs: a fork of a version to a branch of another tenant's cell than the version's
     /// branch's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
     #[error("branch {0}'s version is another tenant's, not shared")]
-    NotShared(layout::Branch),
+    NotShared(layout::CellId),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]

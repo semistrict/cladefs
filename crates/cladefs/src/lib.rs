@@ -191,7 +191,7 @@ pub use dax::uffd::{
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
-pub use extent_bucket::layout::{Branch, Cell};
+pub use extent_bucket::layout::CellId;
 pub use extents::{
     CellVersion, Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
     StoreHolding, StoreRole, VersionInfo, Whose, WindowMapping, WriteBarriers,

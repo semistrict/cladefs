@@ -14,7 +14,7 @@ use extent_bucket::object_bucket::ObjectBucket;
 use std::time::{Duration, Instant};
 
 /// The newest checkpoint of `branch` that `bucket` lists, by its sequence number.
-pub(crate) fn newest(bucket: &ObjectBucket, branch: crate::Branch) -> Option<u64> {
+pub(crate) fn newest(bucket: &ObjectBucket, branch: crate::CellId) -> Option<u64> {
     let prefix = extent_bucket::layout::checkpoints(branch);
     let listed = futures::executor::block_on(extent_bucket::Bucket::list(bucket, &prefix));
     (listed.unwrap().iter())

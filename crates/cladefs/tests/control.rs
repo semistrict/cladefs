@@ -45,8 +45,8 @@ fn stores_through_the_control_api() {
         stat,
         StatStoreResponse {
             branch: branch.id,
-            tenant: branch.cell.tenant,
-            cell: branch.cell.id,
+            tenant: branch.tenant,
+            cell: branch.id,
             capacity: CAPACITY,
             used: 64 << 10,
             available: CAPACITY - (64 << 10),
@@ -421,10 +421,10 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (ours, sibling) = (dir.path().join("ours"), dir.path().join("sibling"));
-    let of_tenant = cladefs::Branch { cell: cladefs::Cell { tenant: 1, id: 0 }, id: 0 };
+    let of_tenant = cladefs::CellId { tenant: 1, id: 0 };
     let branch = daemon.create(&ours, of_tenant, None).unwrap();
     let other = daemon.create(&sibling, of_tenant, None).unwrap();
-    assert_ne!(branch.cell, other.cell);
+    assert_ne!(branch, other);
     let vms = [daemon.open(&ours, CAPACITY), daemon.open(&sibling, CAPACITY)];
     for (seed, vm) in (1..).zip(&vms) {
         write(vm, &pattern(seed), b"encrypted");
@@ -445,7 +445,7 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     }
 
     let shred = |daemon: &mut Daemon| {
-        let request = ShredCellRequest { tenant: 1, cell: branch.cell.id };
+        let request = ShredCellRequest { tenant: 1, cell: branch.id };
         let shredded = daemon.runtime.block_on(daemon.client.shred_cell(request)).unwrap();
         let ShredCellResponse { keks_removed, forgotten } = shredded.into_inner();
         (keks_removed, forgotten.unwrap().stores)
@@ -484,7 +484,7 @@ fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api()
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
-    let of = |tenant| cladefs::Branch { cell: cladefs::Cell { tenant, id: 0 }, id: 0 };
+    let of = |tenant| cladefs::CellId { tenant: tenant, id: 0 };
     daemon.create(&ours, of(1), None).unwrap();
     daemon.create(&theirs, of(2), None).unwrap();
     let vms = [daemon.open(&ours, CAPACITY), daemon.open(&theirs, CAPACITY)];

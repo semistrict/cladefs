@@ -110,7 +110,7 @@ mod host {
         /// The placement's fencing token, which each lost host's successor's exceeds.
         token: u64,
         /// The base's branch, once made.
-        base: Option<cladefs::Branch>,
+        base: Option<cladefs::CellId>,
         slots: Vec<SlotState>,
         measures: Vec<Measure>,
     }
@@ -120,7 +120,7 @@ mod host {
     struct SlotState {
         /// How many times it was forked again.
         generation: u32,
-        branch: Option<cladefs::Branch>,
+        branch: Option<cladefs::CellId>,
         /// Its writers' runs, by name.
         runs: BTreeMap<String, RunState>,
         /// The fsx script whose files and models it holds, synced, if any.
@@ -435,7 +435,7 @@ mod host {
         }
 
         /// The live branches the collector finds in the bucket.
-        fn live_branches(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
+        fn live_branches(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
             let output = std::process::Command::new(&self.paths.gc)
                 .args([&self.paths.bucket, "--branches"])
                 .output()?;
@@ -868,7 +868,7 @@ mod host {
         /// The branches whose uploads the repeat's daemons failed, as their logs say: those stores'
         /// uploaders stopped, and their commits fail until they are attached again
         /// (`extent_store::upload`).
-        fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
+        fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
                 let log = self.setup.tmp_dir.join(format!("cladefsd-{daemon}.log"));
@@ -1004,7 +1004,7 @@ mod host {
 
     /// The branches a daemon's log, `log`, says it failed an upload of (FAILPOINTS'
     /// `writer::upload`).
-    fn upload_failures(log: &str) -> BTreeSet<cladefs::Branch> {
+    fn upload_failures(log: &str) -> BTreeSet<cladefs::CellId> {
         (log.lines())
             .filter(|line| line.contains("failpoint writer::upload"))
             .filter_map(|line| line.split("uploading branch ").nth(1)?.split(':').next())
@@ -1170,8 +1170,8 @@ RUN apk add --no-cache postgresql postgresql-contrib
                        0/3t/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
                        cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
                        writer::upload\n";
-            let cell = cladefs::Cell { tenant: 0, id: 0x7a };
-            let branch = cladefs::Branch { cell, id: 0xfb23_2d47_39d5_69c0 };
+            let cell = cladefs::CellId { tenant: 0, id: 0x7a };
+            let branch = cladefs::CellId { tenant: cell.tenant, id: 0xfb23_2d47_39d5_69c0 };
             assert_eq!(upload_failures(log), BTreeSet::from([branch]));
             let failed = "base ok\nfsx script 7\nscript failed: operation 989: errno 5: fsync: \
                           I/O error (os error 5)\n";

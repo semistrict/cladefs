@@ -49,7 +49,7 @@
 use extent_bucket::batch::{Commit, SegmentBuilder};
 use extent_bucket::bucket::Bucket as _;
 use extent_bucket::keys::{self, CachingKms};
-use extent_bucket::layout::{Branch, Cell, NewVersion, Origin};
+use extent_bucket::layout::{CellId, NewVersion, Origin};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::objectid::Allocator;
 use extent_bucket::{Bytes, Writer, branch, cell};
@@ -227,14 +227,14 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
         return Err(format!("{}: not empty", dir.display()));
     }
     let files = LocalFileSystem::new_with_prefix(dir).map_err(|err| err.to_string())?;
-    let first = Cell { tenant: 1, id: 1 };
+    let first = CellId { tenant: 1, id: 1 };
     let mut filled =
         Filled { cells: 0, total: Sum::default(), largest: Sum::default(), bases: Vec::new() };
     // The bases first, each with its version, which their tenants' sandboxes are clones of.
     if let Kind::Clones { extents } = kind {
         let base = Shape::Vm { segments: largest, extents, versions: 1 };
         for tenant in 1..=tenants {
-            let cell = Cell { tenant, id: 1 };
+            let cell = CellId { tenant, id: 1 };
             let (sum, version) = futures::executor::block_on(fill_base(&files, kms, cell, base))
                 .map_err(|err| format!("cell {cell}: {err}"))?;
             filled.cells += 1;
@@ -246,14 +246,14 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
         }
     }
     let bases = &filled.bases;
-    let shapes: Vec<(Cell, Shape, Option<&Version>)> = (1..=tenants)
+    let shapes: Vec<(CellId, Shape, Option<&Version>)> = (1..=tenants)
         .flat_map(|tenant| (1..=cells).map(move |id| (tenant, id)))
         .map(|(tenant, id)| {
-            let cell = Cell { tenant, id };
+            let cell = CellId { tenant, id };
             match kind {
                 Kind::Clones { .. } => {
                     let sandbox = Shape::Garbage { segments, deleted: true };
-                    (Cell { tenant, id: id + 1 }, sandbox, Some(&bases[tenant as usize - 1]))
+                    (CellId { tenant, id: id + 1 }, sandbox, Some(&bases[tenant as usize - 1]))
                 }
                 Kind::Vm { extents, versions } if cell == first => {
                     (cell, Shape::Vm { segments: largest, extents, versions }, None)
@@ -270,7 +270,7 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     let ids = Allocator::new();
     let threads = std::thread::available_parallelism().map_or(4, |threads| threads.get());
     let next = AtomicUsize::new(0);
-    let sums: Vec<Result<Vec<(Cell, Sum)>, String>> = std::thread::scope(|scope| {
+    let sums: Vec<Result<Vec<(CellId, Sum)>, String>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
@@ -316,7 +316,7 @@ struct Written {
 async fn fill(
     files: &LocalFileSystem,
     kms: &Arc<CachingKms>,
-    cell: Cell,
+    cell: CellId,
     shape: Shape,
     of: Option<&Version>,
     ids: &Allocator,
@@ -331,7 +331,7 @@ async fn fill(
 async fn fill_base(
     files: &LocalFileSystem,
     kms: &Arc<CachingKms>,
-    cell: Cell,
+    cell: CellId,
     shape: Shape,
 ) -> Result<(Sum, Version), String> {
     let written = write(kms, cell, shape, None, &Allocator::new()).await?;
@@ -349,7 +349,7 @@ async fn fill_base(
 /// Its branch's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
     kms: &Arc<CachingKms>,
-    cell: Cell,
+    cell: CellId,
     shape: Shape,
     of: Option<&Version>,
     ids: &Allocator,
@@ -366,8 +366,8 @@ async fn write(
     let failed = |err: extent_bucket::Error| err.to_string();
     make_cell(&bucket, kms, cell).await.map_err(failed)?;
     let id = match shape {
-        Shape::Vm { .. } => Branch { cell, id: 1 },
-        Shape::Garbage { .. } => Branch { cell, id: ids.next(&*bucket).await },
+        Shape::Vm { .. } => CellId { tenant: cell.tenant, id: 1 },
+        Shape::Garbage { .. } => CellId { tenant: cell.tenant, id: ids.next(&*bucket).await },
     };
     match of {
         None => branch::create(&*bucket, id, 0).await.map_err(failed)?,
@@ -438,7 +438,7 @@ async fn write(
 async fn make_cell(
     bucket: &ObjectBucket,
     kms: &Arc<CachingKms>,
-    cell: Cell,
+    cell: CellId,
 ) -> Result<(), extent_bucket::Error> {
     let (_, kek) = keys::new_cell_kek(kms, cell.tenant).await?;
     cell::create(bucket, cell, WRITER, kek).await.map(drop)
@@ -612,10 +612,10 @@ mod tests {
         // A look at the base's cell: its lease read, its listing.
         assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
         for id in 2..=4 {
-            let cell = Cell { tenant: 1, id };
+            let cell = CellId { tenant: 1, id };
             assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
         }
-        let base = Cell { tenant: 1, id: 1 };
+        let base = CellId { tenant: 1, id: 1 };
         let of_base = |bucket: &ObjectBucket| {
             let keys = keys(bucket, &base.prefix());
             let count = |kind: fn(&Key<'_>) -> bool| {
@@ -633,7 +633,7 @@ mod tests {
         // for its retirement; the sandbox's removes it.
         let files = LocalFileSystem::new_with_prefix(&clones.dir).unwrap();
         let sandbox = Shape::Garbage { segments: 2, deleted: true };
-        let cell = Cell { tenant: 1, id: 5 };
+        let cell = CellId { tenant: 1, id: 5 };
         let ids = Allocator::new();
         let sum = futures::executor::block_on(fill(
             &files,

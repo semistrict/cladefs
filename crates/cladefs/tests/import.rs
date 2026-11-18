@@ -754,7 +754,7 @@ fn stores_made_of_images_fork_where_no_daemon_is() {
     let manifest = store_manifest(&base);
     let fork = dir.path().join("fork");
     let base_store = cladefs::ExtentStore::open(&base).unwrap();
-    base_store.fork(&fork, base_store.branch().cell.tenant).unwrap();
+    base_store.fork(&fork, base_store.branch().tenant).unwrap();
     drop(base_store);
     assert_eq!(store_manifest(&fork), manifest);
     assert_eq!(store_manifest(&base), manifest);

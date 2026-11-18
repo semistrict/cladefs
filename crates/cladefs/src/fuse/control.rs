@@ -14,7 +14,7 @@
 use super::server::Server;
 use crate::cladefsd::control::{channel, errno, saying};
 use crate::error::{Errno, Error};
-use crate::{Branch, BranchOf, Cell, Filesystem, SetAttr, Storage};
+use crate::{BranchOf, CellId, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use extent_bucket::cell::{self, Kind};
 use extent_bucket::keys;
@@ -55,12 +55,12 @@ pub(crate) fn service(
 /// The path `cell`'s filesystem has in the mount, and in its directory of stores: `TENANT/CELL`,
 /// the tenant and the cell in base 32, padded, as the bucket's keys have them
 /// (`base32_id::Padded`).
-pub fn cell_path(cell: Cell) -> String {
+pub fn cell_path(cell: CellId) -> String {
     format!("{}/{}", Padded(cell.tenant), Padded(cell.id))
 }
 
 /// The cells attached, or being attached or detached, and the fencing token each was taken at.
-type Cells = Arc<Mutex<BTreeMap<Cell, Attaching>>>;
+type Cells = Arc<Mutex<BTreeMap<CellId, Attaching>>>;
 
 /// A cell of the mount's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +110,7 @@ fn held_open(
 /// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
 fn reserve(
     cells: &Cells,
-    (cell, marked): (Cell, Attaching),
+    (cell, marked): (CellId, Attaching),
     reserving: impl FnOnce(Option<Attaching>) -> Result<(), Errno>,
 ) -> Result<(), Errno> {
     let mut cells = cells.lock().unwrap();
@@ -165,7 +165,7 @@ impl Control {
     /// an Fxfs one. Returns its branch, or 0 if it shows none.
     async fn attach_cell(
         &self,
-        cell: Cell,
+        cell: CellId,
         object: &cell::Object,
         (new, capacity): (bool, u64),
         token: Option<u64>,
@@ -176,7 +176,7 @@ impl Control {
         let of = match (new, object.branch, object.kind) {
             (true, ..) => (BranchOf::Cell(cell), capacity),
             (false, Some(branch), Some(Kind::Fxfs)) => {
-                (BranchOf::Taken(Branch { cell, id: branch }), TAKEN_CAPACITY)
+                (BranchOf::Taken(CellId { tenant: cell.tenant, id: branch }), TAKEN_CAPACITY)
             }
             (false, ..) => return Ok(0),
         };
@@ -221,7 +221,7 @@ impl proto::mount_server::Mount for Control {
                 });
                 made.await.map_err(|err| failed(Error::new(err)))?.map_err(failed)?
             }
-            id => Cell { tenant, id },
+            id => CellId { tenant, id },
         };
         reserve(&self.cells, (cell, Attaching::Busy), |found| match found {
             None => Ok(()),
@@ -293,7 +293,7 @@ impl proto::mount_server::Mount for Control {
         request: Request<DetachRequest>,
     ) -> Result<Response<DetachResponse>, Status> {
         let DetachRequest { tenant, cell, force } = request.into_inner();
-        let cell = Cell { tenant, id: cell };
+        let cell = CellId { tenant, id: cell };
         reserve(&self.cells, (cell, Attaching::Detaching), |found| match found {
             Some(Attaching::Attached(_)) => Ok(()),
             Some(Attaching::Busy | Attaching::Detaching) => Err(Errno::EBUSY),
@@ -330,7 +330,7 @@ impl proto::mount_server::Mount for Control {
     }
 
     async fn list(&self, _: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
-        let attached: Vec<Cell> = (self.cells.lock().unwrap().iter())
+        let attached: Vec<CellId> = (self.cells.lock().unwrap().iter())
             .filter(|(_, attaching)| !matches!(attaching, Attaching::Busy))
             .map(|(cell, _)| *cell)
             .collect();
@@ -418,19 +418,19 @@ impl Client {
     /// branch of its filesystem shown, 0 if none (`Attach`).
     pub fn attach(
         &self,
-        cell: Cell,
+        cell: CellId,
         capacity: u64,
         token: Option<u64>,
-    ) -> Result<(Cell, u64), Error> {
+    ) -> Result<(CellId, u64), Error> {
         let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
         let response = self.call(format!("attaching cell {cell}"), |mut client| async move {
             client.attach(request).await
         })?;
-        Ok((Cell { id: response.cell, ..cell }, response.branch))
+        Ok((CellId { id: response.cell, ..cell }, response.branch))
     }
 
     /// Detaches `cell`, at once if `force` (`Detach`).
-    pub fn detach(&self, cell: Cell, force: bool) -> Result<(), Error> {
+    pub fn detach(&self, cell: CellId, force: bool) -> Result<(), Error> {
         let request = DetachRequest { tenant: cell.tenant, cell: cell.id, force };
         self.call(format!("detaching cell {cell}"), |mut client| async move {
             client.detach(request).await

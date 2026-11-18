@@ -113,7 +113,7 @@ use base32_id::Short;
 use extent_bucket::bucket::Meta;
 use extent_bucket::collector::{Collector, DryRun, Marking, Options, Report};
 use extent_bucket::layout;
-use extent_bucket::layout::Cell;
+use extent_bucket::layout::CellId;
 use extent_bucket::object_bucket::{ObjectBucket, Request, probe};
 use extent_bucket::passed::{self, Sum, Usage};
 use extent_bucket::record::Record;
@@ -149,11 +149,17 @@ struct Args {
 #[derive(Debug, PartialEq)]
 enum Command {
     /// Collects, every so long if more than once, every cell or one.
-    Collect { every: Option<Duration>, options: Options, mode: Mode, cell: Option<Cell>, run: Run },
+    Collect {
+        every: Option<Duration>,
+        options: Options,
+        mode: Mode,
+        cell: Option<CellId>,
+        run: Run,
+    },
     /// Lists the live branches, of every cell or one, but those a file names.
-    Branches { held: Option<PathBuf>, cell: Option<Cell> },
+    Branches { held: Option<PathBuf>, cell: Option<CellId> },
     /// Deletes a branch.
-    DeleteBranch(layout::Branch),
+    DeleteBranch(layout::CellId),
     /// Says what each cell takes, and each tenant, every tenant's or one's, as recorded (TASK-394,
     /// TASK-395.8).
     Usage { tenant: Option<u64> },
@@ -274,13 +280,13 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
 }
 
 /// The branches `text` names, in base 32, separated by white space.
-fn held_branches(text: &str) -> Result<BTreeSet<layout::Branch>, String> {
+fn held_branches(text: &str) -> Result<BTreeSet<layout::CellId>, String> {
     let branch = |word: &str| word.parse();
     text.split_whitespace().map(branch).collect()
 }
 
 /// What `--branches` prints of `live`, but those `held`.
-fn listed(live: &BTreeMap<layout::Branch, Record>, held: &BTreeSet<layout::Branch>) -> String {
+fn listed(live: &BTreeMap<layout::CellId, Record>, held: &BTreeSet<layout::CellId>) -> String {
     let listed = live.iter().filter(|(branch, _)| !held.contains(branch));
     listed
         .map(|(branch, record)| match record.origin() {
@@ -300,7 +306,7 @@ fn kinds_json(kinds: &BTreeMap<String, Sum>) -> Value {
 }
 
 /// What `--usage` says of `cell`, of `usage`, as its last pass to end recorded it, if one did.
-fn cell_line(cell: Cell, usage: Option<&Usage>) -> String {
+fn cell_line(cell: CellId, usage: Option<&Usage>) -> String {
     let total = usage.map(Usage::total);
     json!({
         "scope": "cell",
@@ -389,7 +395,7 @@ async fn say_usage(
 
 /// The cells a command goes over: the one named, or every cell of `bucket`, found by delimiter
 /// listings a page at a time, listing none of their objects (TASK-395.4, TASK-395.5).
-fn cells(bucket: &ObjectBucket, named: Option<Cell>) -> impl Stream<Item = Cell> + '_ {
+fn cells(bucket: &ObjectBucket, named: Option<CellId>) -> impl Stream<Item = CellId> + '_ {
     match named {
         Some(cell) => futures::stream::iter([cell]).left_stream(),
         None => cell::listed(bucket).right_stream(),
@@ -403,7 +409,7 @@ async fn collect(
     every: Option<Duration>,
     options: Options,
     mode: Mode,
-    named: Option<Cell>,
+    named: Option<CellId>,
     run: Run,
 ) -> Result<(), String> {
     let kms = match mode {
@@ -502,7 +508,7 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
 /// lease ended: running it again once the KMS answers finishes it.
 async fn delete_branch(
     bucket: &ObjectBucket,
-    branch: layout::Branch,
+    branch: layout::CellId,
     kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
     let keys = extent_bucket::keys::CachingKms::new(kms);
@@ -516,7 +522,7 @@ async fn delete_branch(
 async fn dry_run_cells(
     bucket: &ObjectBucket,
     options: Options,
-    named: Option<Cell>,
+    named: Option<CellId>,
 ) -> Result<(), String> {
     let collector = Collector::new(options);
     let mut dry = DryRun::default();
@@ -839,7 +845,7 @@ fn write_atomically(file: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 /// What a mark-only pass over `cell` says of `marking`.
-fn marked_line(cell: Cell, marking: &Marking) -> String {
+fn marked_line(cell: CellId, marking: &Marking) -> String {
     let locked = locked(&marking.report);
     let Some(marks) = &marking.marks else {
         let compacted = marking.report.compacted;
@@ -1057,7 +1063,7 @@ mod tests {
             meta(layout::checkpoint(branch(3), 1, 1), 20),
         ];
         let compactable = vec![meta(layout::segment(branch(1), 4, 1), 7)];
-        let parent = layout::Branch { cell: layout::Cell { tenant: 1, id: 9 }, id: 4 };
+        let parent = layout::CellId { tenant: 1, id: 4 };
         let retired = vec![layout::reference(parent, 5, branch(6))];
         let (listed, summary) = dry_run(&DryRun { doomed, compactable, retired, fenced: false });
         let at = "tenants/0000000000001/cells/0000000000002/";
@@ -1101,7 +1107,7 @@ mod tests {
             marks: Some(marks),
             resurrected: vec!["c".into()],
         };
-        let cell = branch(1).cell;
+        let cell = branch(1);
         assert_eq!(
             marked_line(cell, &marking),
             "cladefs-gc: cell 1/2: marked 2 (11 bytes) in \
@@ -1116,9 +1122,9 @@ mod tests {
         );
     }
 
-    /// Branch `id` of tenant 1's cell 2.
-    fn branch(id: u64) -> layout::Branch {
-        layout::Branch { cell: layout::Cell { tenant: 1, id: 2 }, id }
+    /// The cell `id` of tenant 1.
+    fn branch(id: u64) -> layout::CellId {
+        layout::CellId { tenant: 1, id }
     }
 
     /// TASK-79.85: an operator lists what no host holds, and deletes a branch, by IDs as
@@ -1167,13 +1173,13 @@ mod tests {
         use extent_bucket::bucket::{LIST_PAGE, PutMode};
         let bucket = ObjectBucket::from_url("memory:///").unwrap();
         let many = LIST_PAGE as u64 * 2 + 5;
-        let mut cells: Vec<Cell> = (0..many).map(|id| Cell { tenant: 2, id }).collect();
-        cells.extend([Cell { tenant: 1, id: 7 }, Cell { tenant: 3, id: 1 }]);
+        let mut cells: Vec<CellId> = (0..many).map(|id| CellId { tenant: 2, id }).collect();
+        cells.extend([CellId { tenant: 1, id: 7 }, CellId { tenant: 3, id: 1 }]);
         cells.sort();
         let tokio = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         tokio.block_on(async {
             for &cell in &cells {
-                let key = layout::record(layout::Branch { cell, id: 1 });
+                let key = layout::record(layout::CellId { tenant: cell.tenant, id: 1 });
                 bucket.put(&key, vec![1].into(), PutMode::Create).await.unwrap();
             }
         });
@@ -1235,7 +1241,7 @@ mod tests {
     /// newest measurement.
     #[test]
     fn usage_says_each_cell_and_tenant_as_measured() {
-        let cell = layout::Cell { tenant: 10, id: 47 };
+        let cell = layout::CellId { tenant: 10, id: 47 };
         let mut usage = Usage { measured: 1_700_000_000_000, ..Usage::default() };
         let usage = {
             usage.kinds.insert("segment".into(), Sum { objects: 2, bytes: 300 });
@@ -1271,7 +1277,7 @@ mod tests {
     #[test]
     fn passes_and_lists_go_over_a_cell_or_all() {
         let url = "u".to_owned();
-        let cell = Some(layout::Cell { tenant: 10, id: 47 });
+        let cell = Some(layout::CellId { tenant: 10, id: 47 });
         let options = Options { compact_below: 0.5, grace: 60_000 };
         let command = Command::Collect {
             every: None,
@@ -1323,7 +1329,7 @@ mod tests {
         requests.0[Request::Get as usize] = 40;
         requests.0[Request::ListDelimited as usize] = 9;
         requests.0[Request::DeleteBatch as usize] = 2;
-        let cell = |id| Cell { tenant: 0xa, id };
+        let cell = |id| CellId { tenant: 0xa, id };
         let swept = Swept {
             visited: 7,
             held: 2,
@@ -1371,7 +1377,7 @@ mod tests {
         let mut requests = Requests::default();
         requests.0[Request::List as usize] = 2;
         let passed = |outcome| Ran {
-            cell: Cell { tenant: 1, id: 2 },
+            cell: CellId { tenant: 1, id: 2 },
             outcome,
             requests,
             took: Duration::from_millis(12),
@@ -1436,7 +1442,7 @@ mod tests {
                 ..Report::default()
             },
             requests,
-            slowest: vec![(Cell { tenant: 1, id: 2 }, Duration::from_millis(250))],
+            slowest: vec![(CellId { tenant: 1, id: 2 }, Duration::from_millis(250))],
             took: Duration::from_millis(1500),
             ..Swept::default()
         };
@@ -1447,7 +1453,7 @@ mod tests {
             (20_000, Outcome::Failed(extent_bucket::Error::Corrupt("x".into()))),
             (1, Outcome::Left(extent_bucket::Left::Held)),
         ] {
-            let cell = Cell { tenant: 1, id: 2 };
+            let cell = CellId { tenant: 1, id: 2 };
             let took = Duration::from_millis(millis);
             passes.observe(&Ran { cell, outcome, requests: Requests::default(), took });
         }
