@@ -1,11 +1,11 @@
 ---
 id: TASK-530
 title: Closing an uncommitted file leaks a mapping region
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 12:25'
-updated_date: '2026-11-18 22:48'
+updated_date: '2026-11-18 22:58'
 labels: []
 dependencies: []
 priority: medium
@@ -25,7 +25,7 @@ Isolated arm64 macOS validation. Give a mapped file set one region. Create, writ
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 In a one-region file set, closing an empty uncommitted file leaves the next committed file eligible for a mapped fetch.
+- [x] #1 In a one-region file set, closing an empty uncommitted file leaves the next committed file eligible for a mapped fetch.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -42,3 +42,9 @@ Isolated arm64 macOS validation. Give a mapped file set one region. Create, writ
 
 Already fixed on main by b1f1e1c7a (close_file's last close of an uncommitted file goes through remove_file, which releases the region). Checked 2026-11-18: sqlite_extents' closing_an_uncommitted_file_returns_its_mapping_region passes, and fails with close_file dropping the record without remove_file.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Fixed on main by b1f1e1c7a; sqlite_extents' closing_an_uncommitted_file_returns_its_mapping_region covers it and fails with the fix undone.
+<!-- SECTION:FINAL_SUMMARY:END -->
