@@ -99,6 +99,44 @@ pub struct Budget {
     queues: Mutex<Queues>,
 }
 
+/// cladefs: the budgets a fetcher's GETs go under (TASK-633.4): one for all, or one for each bucket
+/// its keys' cells are of ([`crate::objectid::bucket_of`]), each of the same limits, so that a bucket
+/// slow or failing, another cloud region's, holds up no GET of another bucket's.
+/// Cloned, it is the same budgets, as a host's fetchers share them.
+#[derive(Clone)]
+pub enum Budgets {
+    One(Arc<Budget>),
+    PerBucket(Arc<(Limits, Mutex<std::collections::BTreeMap<u16, Arc<Budget>>>)>),
+}
+
+impl Budgets {
+    /// One budget of `limits` for each bucket.
+    pub fn per_bucket(limits: Limits) -> Self {
+        Self::PerBucket(Arc::new((limits, Mutex::default())))
+    }
+
+    /// The budget a GET of the object at `key` goes under: its cell's bucket's, the cells tests
+    /// name and keys of no cell's under number 0's.
+    pub fn of(&self, key: &str) -> Arc<Budget> {
+        match self {
+            Self::One(budget) => budget.clone(),
+            Self::PerBucket(per) => {
+                let (limits, each) = &**per;
+                let number = crate::layout::cell_of(key)
+                    .map_or(0, |cell| crate::objectid::bucket_of(cell.id));
+                let mut each = each.lock().unwrap();
+                each.entry(number).or_insert_with(|| Budget::new(*limits)).clone()
+            }
+        }
+    }
+}
+
+impl From<Arc<Budget>> for Budgets {
+    fn from(budget: Arc<Budget>) -> Self {
+        Self::One(budget)
+    }
+}
+
 #[derive(Default)]
 struct Queues {
     requests: usize,
@@ -628,7 +666,7 @@ const STREAMS: usize = 1024;
 /// What a part's GET needs.
 struct Fetching<B: Bucket> {
     bucket: Arc<B>,
-    budget: Arc<Budget>,
+    budgets: Budgets,
     /// Objects' tails, or the reads of them, and, if it keeps the parts it fetches, those it
     /// fetched last, as fetched.
     memory: Arc<Memory>,
@@ -640,15 +678,17 @@ struct Fetching<B: Bucket> {
 }
 
 impl<B: Bucket> Fetcher<B> {
-    /// Reads `bucket` under `budget`, keeping objects' tails in `memory`; and, with a `cache`, the
-    /// parts it fetches there, those it fetched last in `memory` too.
+    /// Reads `bucket` under `budgets` (a budget for all, or one for each bucket: [`Budgets`]),
+    /// keeping objects' tails in `memory`; and, with a `cache`, the parts it fetches there, those it
+    /// fetched last in `memory` too.
     pub fn new(
         bucket: Arc<B>,
-        budget: Arc<Budget>,
+        budgets: impl Into<Budgets>,
         memory: Arc<Memory>,
         cache: Option<Arc<Cache>>,
     ) -> Self {
-        let shared = Arc::new(Fetching { bucket, budget, memory, cache, peers: None });
+        let budgets = budgets.into();
+        let shared = Arc::new(Fetching { bucket, budgets, memory, cache, peers: None });
         Self { shared, streams: Arc::default(), spawn: None }
     }
 
@@ -871,7 +911,7 @@ impl<B: Bucket> Fetcher<B> {
         let flight = {
             let mut parts = parts.lock().unwrap();
             let waited = parts.flights.entry(id.clone()).or_insert_with(|| {
-                let budget = self.shared.budget.clone();
+                let budget = self.shared.budgets.of(key);
                 let (ticket, given) = budget.enter(priority, PART);
                 let (shared, tail, key) = (self.shared.clone(), tail.clone(), key.to_owned());
                 let flight = async move { shared.part(&key, part, &tail, given, owner).await };
@@ -1057,7 +1097,7 @@ impl<B: Bucket> Fetching<B> {
         let tail = match self.kept_tail(key)? {
             Some(tail) => tail,
             None => {
-                let slot = self.budget.enter(Priority::Demand, TAIL).1.await;
+                let slot = self.budgets.of(key).enter(Priority::Demand, TAIL).1.await;
                 let read = object::tail(&*self.bucket, key).await;
                 drop(slot);
                 let Some(tail) = read? else { return Ok(None) };
@@ -1291,6 +1331,26 @@ mod tests {
             Some(slot) => Ok(slot),
             None => Err(given),
         }
+    }
+
+    /// TASK-633.4: under budgets per bucket, a bucket's GETs filling its budget hold up none of
+    /// another bucket's, which one budget for all would; keys of one bucket's cells, and of no
+    /// cell's, share theirs.
+    #[test]
+    fn budgets_per_bucket_hold_up_no_other_buckets_gets() {
+        use crate::layout::{CellId, head};
+        let limits = Limits { requests: 1, bytes: 10 };
+        let (one, two) =
+            (CellId { tenant: 1, id: 1 << 48 | 3 }, CellId { tenant: 1, id: 2 << 48 | 3 });
+        let per = Budgets::per_bucket(limits);
+        let _full = enter(&per.of(&head(two)), 1).ok().unwrap();
+        assert!(enter(&per.of(&head(one)), 1).is_ok(), "bucket 1's GET waited for bucket 2's");
+        assert!(enter(&per.of(&head(two)), 1).is_err(), "bucket 2's budget let two GETs go");
+        assert!(Arc::ptr_eq(&per.of(&head(two)), &per.of(&crate::layout::segments(two))));
+        assert!(Arc::ptr_eq(&per.of("identity"), &per.of(&head(CellId { tenant: 1, id: 7 }))));
+        let shared = Budgets::from(Budget::new(limits));
+        let _full = enter(&shared.of(&head(two)), 1).ok().unwrap();
+        assert!(enter(&shared.of(&head(one)), 1).is_err(), "one budget for all let two GETs go");
     }
 
     /// The GETs and bytes `budget` counts in flight.

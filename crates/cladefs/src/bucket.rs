@@ -444,9 +444,12 @@ pub(crate) fn uploaders() -> tokio::sync::watch::Receiver<usize> {
 }
 
 /// The GETs of extents' data a host has in flight: one connection to object storage gives roughly
-/// 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB.
-static BUDGET: std::sync::LazyLock<Arc<Budget>> =
-    std::sync::LazyLock::new(|| Budget::new(Limits { requests: 64, bytes: 64 << 20 }));
+/// 80-100 MB/s, so a host needs tens (doc-7, Reading); each holds a part, of 1 MiB. cladefs: so many
+/// for each bucket its stores read (TASK-633.4), so that one slow or failing, another cloud
+/// region's, holds up none of another's.
+static BUDGET: std::sync::LazyLock<fetch::Budgets> = std::sync::LazyLock::new(|| {
+    fetch::Budgets::per_bucket(Limits { requests: 64, bytes: 64 << 20 })
+});
 
 /// What a host's stores' reads keep in memory, objects' tails and the parts fetched last: once for
 /// the host, however many of its stores read them, as the forks of one base read its parts, within
