@@ -470,7 +470,7 @@ impl Real {
         let extents = self.fs.dax_extents(ino, 0..i64::MAX as u64).await.expect("extents");
         let mut blocks = BTreeMap::new();
         for extent in extents {
-            let id = ExtentId::new(extent.branch, extent.sequence);
+            let id = ExtentId::new(extent.cell, extent.sequence);
             for page in 0..extent.len / PAGE {
                 let block = extent.extent_offset / PAGE + page;
                 let open = extent.access == ExtentAccess::Open;

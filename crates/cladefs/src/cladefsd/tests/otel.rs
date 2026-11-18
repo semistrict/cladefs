@@ -21,12 +21,12 @@ fn provider(exporter: &InMemorySpanExporter) -> SdkTracerProvider {
 }
 
 /// Writes 2 blocks, reads them back and commits them, uploaded,, in a store a daemon serves, as a VM
-/// process would: returns the store's branch.
+/// process would: returns the store's cell.
 fn write_read_commit() -> crate::CellId {
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 20);
-    let branch = super::branch_at(&dir.path().join("store"));
-    let extent = ExtentId { branch: branch.id, sequence: 1 };
+    let cell = super::cell_at(&dir.path().join("store"));
+    let extent = ExtentId { cell: cell.id, sequence: 1 };
     // TASK-260: the write for the guest's request 42.
     let guest =
         std::num::NonZeroU64::new(42).map(|guest| crate::request::RequestId { guest, store: None });
@@ -35,7 +35,7 @@ fn write_read_commit() -> crate::CellId {
     store.commit(Some(b"root")).unwrap();
     drop(store);
     served.join().unwrap();
-    branch
+    cell
 }
 
 /// The span of `spans` named `name`, the one there is.
@@ -65,7 +65,7 @@ fn attribute(span: &SpanData, key: &str) -> Option<Value> {
     span.attributes.iter().find(|kv| kv.key.as_str() == key).map(|kv| kv.value.clone())
 }
 
-/// A request served is a trace's root, named by its kind, which says the store's branch and what
+/// A request served is a trace's root, named by its kind, which says the store's cell and what
 /// it asked for; a durable commit's span has its phases as children, sealing, writing, the flush
 /// and the wait for object storage; and the upload of its segment is a span whose children are
 /// the bucket's requests.
@@ -75,21 +75,21 @@ fn spans_trace_requests_commits_and_uploads() {
     let exporter = InMemorySpanExporter::default();
     let provider = provider(&exporter);
     super::super::otel::install(provider.clone());
-    let branch = write_read_commit();
+    let cell = write_read_commit();
     provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     // cladefs: as `TENANT/CELL/ID`, in base 32 (TASK-364, TASK-504).
-    let named = Value::from(branch.to_string());
+    let named = Value::from(cell.to_string());
 
     let opened = the(&spans, "cladefsd.open");
     assert_eq!(children(&spans, opened), BTreeSet::from(["store.create".to_owned()]));
     let created = the(&spans, "store.create");
-    assert_eq!(attribute(created, "cladefs.branch"), Some(named.clone()));
+    assert_eq!(attribute(created, "cladefs.cell"), Some(named.clone()));
 
     let written = the(&spans, "cladefsd.write");
     assert_eq!(written.parent_span_id, opentelemetry::trace::SpanId::INVALID);
     assert_eq!(attribute(written, "cladefs.request.kind"), Some(Value::from("write")));
-    assert_eq!(attribute(written, "cladefs.branch"), Some(named.clone()));
+    assert_eq!(attribute(written, "cladefs.cell"), Some(named.clone()));
     assert_eq!(attribute(written, "cladefs.bytes"), Some(Value::I64(2 * BLOCK as i64)));
     assert_eq!(written.status, opentelemetry::trace::Status::Unset);
     assert_eq!(attribute(written, "cladefs.request_id"), Some(Value::from("42")));
@@ -101,7 +101,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(committed, "cladefs.level"), Some(Value::from("uploaded")));
     assert_eq!(children(&spans, committed), BTreeSet::from(["store.commit".to_owned()]));
     let commit = the(&spans, "store.commit");
-    assert_eq!(attribute(commit, "cladefs.branch"), Some(named.clone()));
+    assert_eq!(attribute(commit, "cladefs.cell"), Some(named.clone()));
     assert_eq!(
         children(&spans, commit),
         ["commit.seal", "commit.upload_wait", "commit.write", "store.flush"]
@@ -111,15 +111,15 @@ fn spans_trace_requests_commits_and_uploads() {
     let sealed = the(&spans, "commit.seal");
     assert_eq!(attribute(sealed, "cladefs.extents"), Some(Value::I64(1)));
 
-    // The commit's segment, created, the commit's small extents in it; then the branch's
-    // checkpoint, which follows its forks' moves, created, then named by a swap of the branch's
+    // The commit's segment, created, the commit's small extents in it; then the cell's
+    // checkpoint, which follows its forks' moves, created, then named by a swap of the cell's
     // head (TASK-407).
     let upload = the(&spans, "upload.segment");
-    assert_eq!(attribute(upload, "cladefs.branch"), Some(named.clone()));
+    assert_eq!(attribute(upload, "cladefs.cell"), Some(named.clone()));
     assert_eq!(attribute(upload, "cladefs.extents"), Some(Value::I64(0)));
     assert_eq!(children(&spans, upload), BTreeSet::from(["bucket.create".to_owned()]));
     let checkpoint = the(&spans, "upload.checkpoint");
-    assert_eq!(attribute(checkpoint, "cladefs.branch"), Some(named));
+    assert_eq!(attribute(checkpoint, "cladefs.cell"), Some(named));
     assert_eq!(
         children(&spans, checkpoint),
         ["bucket.create", "bucket.list", "bucket.update"].map(str::to_owned).into()

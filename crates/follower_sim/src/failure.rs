@@ -7,7 +7,7 @@
 //! the commit it was as of, which its readers may be reading from, and no later batch advances its
 //! view, or applies anything.
 
-use crate::BRANCH;
+use crate::CELL;
 use crate::device::ViewDevice;
 use crate::model::{NAMES, Op, Writer};
 use fuchsia_async as fasync;
@@ -30,7 +30,7 @@ struct Following {
 }
 
 async fn following() -> Following {
-    let description = Description { block_size: 4096, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: 4096, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
     let store = Arc::new(store);
     let writer = Writer::new(store.clone()).await;

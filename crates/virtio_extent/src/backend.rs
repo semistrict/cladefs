@@ -15,8 +15,8 @@ use cladefs::{
 /// method one of the device's requests, as cladefs's `CellClient` serves it, which its
 /// documentation describes. Errors are the request's status.
 pub trait Backend: Send + Sync {
-    /// The branch the guest mints extents of.
-    fn branch(&self) -> u64;
+    /// The cell the guest mints extents of.
+    fn cell(&self) -> u64;
     /// Whether the store's window copies on write: a writer's (backlog doc-13).
     fn copies_on_write(&self) -> bool;
     /// `READ`: the bytes at `offset` in `extent` into `buffers`, in order.
@@ -93,8 +93,8 @@ pub trait Backend: Send + Sync {
 
 #[cfg(target_os = "linux")]
 impl Backend for cladefs::CellClient {
-    fn branch(&self) -> u64 {
-        cladefs::CellClient::branch(self)
+    fn cell(&self) -> u64 {
+        cladefs::CellClient::cell(self)
     }
 
     fn copies_on_write(&self) -> bool {

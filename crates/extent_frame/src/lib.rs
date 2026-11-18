@@ -9,13 +9,13 @@
 //! tag; then a [`TRAILER`] of the lengths of the data, the parts stored and the footer, the CRC of
 //! the footer, the object's [`Encryption`], the MACs of its footer and of its table, and the CRC of
 //! its table. A store's closed segments and sealed extents are framed so, as are the objects a
-//! branch keeps in object storage: a reader reads and decompresses only the parts it needs, each
+//! cell keeps in object storage: a reader reads and decompresses only the parts it needs, each
 //! checked against its CRC before it is decompressed.
 //!
 //! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). Every object is encrypted, or, metadata,
-//! authenticated, under its branch's DEK, as its trailer says: none is in the clear (TASK-411.28),
+//! authenticated, under its cell's DEK, as its trailer says: none is in the clear (TASK-411.28),
 //! a trailer saying so corrupt. Encrypted, each of its parts is compressed first, then encrypted
-//! with AES-256-GCM under a subkey of the object's own: its branch's DEK's, of the generation its
+//! with AES-256-GCM under a subkey of the object's own: its cell's DEK's, of the generation its
 //! trailer names, derived with a salt drawn at random for the object and kept in its trailer
 //! ([`Secret::derive`]); the nonce is the part's index, and the associated data its index,
 //! encoding and lengths. The table's entry holds the part's tag; the CRC stays, over the bytes
@@ -31,20 +31,20 @@
 //! own its footer names go to keys naming that number and epoch too. A part moved to another
 //! object is opened under that object's salt, another subkey, and fails; one moved to another
 //! index fails by its nonce and associated data. A whole object copied to another key is authentic
-//! there: what it is, a reader tells by its footer, as it does now (a segment's names its branch,
+//! there: what it is, a reader tells by its footer, as it does now (a segment's names its cell,
 //! number and epoch, `segment::Footer`).
 //!
-//! A branch's checkpoints, locally and in object storage, are such objects: tables of where its
-//! extents are ([`table`]). cladefs: authenticated, not encrypted, under their branch's DEK
+//! A cell's checkpoints, locally and in object storage, are such objects: tables of where its
+//! extents are ([`table`]). cladefs: authenticated, not encrypted, under their cell's DEK
 //! (TASK-411.3, [`Encryption::Authenticated`]): metadata, which the collector reads holding no key
 //! (doc-16, What is encrypted), each part's tag a GMAC of its stored bytes, which a reader holding
 //! the key checks.
 //!
 //! cladefs: no object is in the clear (TASK-411.28): a trailer whose encryption is of kind 0, as one whose
 //! encryption, MACs and tags are zeroed, is corrupt to every reader, holding keys or none. (Before, a
-//! cell with no KEK wrote in the clear, and a reader of an encrypted branch refused its objects in the
+//! cell with no KEK wrote in the clear, and a reader of an encrypted cell refused its objects in the
 //! clear, TASK-411.3: the trailer's encryption is not authenticated, and one who can write the bucket
-//! could otherwise zero an object's encryption, MACs and tags, and have it read as its branch's.)
+//! could otherwise zero an object's encryption, MACs and tags, and have it read as its cell's.)
 //!
 //! cladefs: an object framed in place from an encrypted store's raw file ([`Encryption::Sectors`],
 //! TASK-411.23): every part stored raw, as its raw file holds it, AES-256-XTS a sector at a time
@@ -91,7 +91,7 @@ pub const ENTRY: u64 = 8 + 4 + 4 + 1 + TAG_LEN as u64;
 type Tag = [u8; TAG_LEN];
 
 /// The bytes of a trailer's [`Encryption`]: its kind, a byte, 1 encrypted, 2 authenticated, 3 a raw file's
-/// sectors (0, in the clear, is refused: TASK-411.28); the branch and generation of the DEK its
+/// sectors (0, in the clear, is refused: TASK-411.28); the cell and generation of the DEK its
 /// subkeys came from; and its salt.
 const ENCRYPTION_LEN: usize = 1 + 8 + 4 + SALT_LEN;
 
@@ -177,8 +177,8 @@ pub enum Error {
     #[error(transparent)]
     Corrupt(#[from] Corrupt),
     #[error(
-        "an object encrypted under branch {}'s key of generation {}, which its reader doesn't hold",
-        base32_id::Short(.0.branch),
+        "an object encrypted under cell {}'s key of generation {}, which its reader doesn't hold",
+        base32_id::Short(.0.cell),
         .0.generation
     )]
     NoKey(KeyId),
@@ -198,8 +198,8 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 pub trait Keys {
     fn dek(&self, id: KeyId) -> Option<&Secret>;
 
-    /// cladefs: whether its reader holds the objects it reads under their branch's DEK, as every
-    /// reader holding keys does, every branch being encrypted (TASK-411.3, TASK-411.28): one
+    /// cladefs: whether its reader holds the objects it reads under their cell's DEK, as every
+    /// reader holding keys does, every cell being encrypted (TASK-411.3, TASK-411.28): one
     /// authenticated under a key it doesn't hold is unread ([`Error::NoKey`]), not read as stored.
     /// None by default: a reader of metadata alone, as the collector's marking is, which checks
     /// CRCs.
@@ -234,7 +234,7 @@ pub enum Encryption {
     Encrypted { key: KeyId, salt: Salt },
     /// cladefs: its parts in the clear, as stored, each tagged with AES-256-GCM's GMAC of them, its
     /// footer and table authenticated as an encrypted object's are (TASK-411.3): metadata, a
-    /// branch's checkpoints, which a reader holding no key reads, checked against their CRCs, as
+    /// cell's checkpoints, which a reader holding no key reads, checked against their CRCs, as
     /// the collector does, and one holding the key checks against their tags and MACs.
     Authenticated { key: KeyId, salt: Salt },
     /// cladefs: framed in place from an encrypted store's raw file (TASK-411.23): its parts stored raw,
@@ -255,7 +255,7 @@ impl Encryption {
     }
 }
 
-/// cladefs: how a writer frames an object under its branch's DEK, the key it names (TASK-411.3):
+/// cladefs: how a writer frames an object under its cell's DEK, the key it names (TASK-411.3):
 /// its parts encrypted, as data is, or authenticated alone, as metadata the collector reads is; or
 /// left where a raw file holds them, its XTS sectors, tagged (TASK-411.23).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -904,13 +904,13 @@ pub struct Packer {
 }
 
 impl Packer {
-    /// A packer of an object encrypted, given its branch's DEK and which it is, `encrypt`, under subkeys
+    /// A packer of an object encrypted, given its cell's DEK and which it is, `encrypt`, under subkeys
     /// of the DEK from a salt drawn for it alone (TASK-411.2).
     pub fn new((dek, id): (&Secret, KeyId)) -> Self {
         Self::keyed((dek, id, Keyed::Encrypted))
     }
 
-    /// cladefs: a packer of an object, given its branch's DEK, which it is, and how, `keyed` under
+    /// cladefs: a packer of an object, given its cell's DEK, which it is, and how, `keyed` under
     /// subkeys of the DEK from a salt drawn for it alone: encrypted, or authenticated alone
     /// (TASK-411.3).
     pub fn keyed((dek, id, keyed): (&Secret, KeyId, Keyed)) -> Self {
@@ -1087,7 +1087,7 @@ fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKe
         Keyed::Authenticated => 2,
         Keyed::Sectors => 3,
     };
-    encryption[1..9].copy_from_slice(&key.id.branch.to_le_bytes());
+    encryption[1..9].copy_from_slice(&key.id.cell.to_le_bytes());
     encryption[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
     encryption[13..].copy_from_slice(&key.salt.0);
     bytes.extend_from_slice(&encryption);
@@ -1197,8 +1197,7 @@ impl Frame {
             // cladefs: no object is in the clear (TASK-411.28).
             0 => Err(corrupt("trailer: an encryption in the clear, which no object has")),
             kind @ 1..=3 => {
-                let key =
-                    KeyId { branch: u64_at(encryption, 1), generation: u32_at(encryption, 9) };
+                let key = KeyId { cell: u64_at(encryption, 1), generation: u32_at(encryption, 9) };
                 let salt = Salt(encryption[13..].try_into().unwrap());
                 Ok(match kind {
                     1 => Encryption::Encrypted { key, salt },
@@ -1466,7 +1465,7 @@ mod tests {
     use std::cell::RefCell;
 
     /// The DEK of the tests' encrypted objects, and which it is.
-    const ID: KeyId = KeyId { branch: 0x7b, generation: 2 };
+    const ID: KeyId = KeyId { cell: 0x7b, generation: 2 };
 
     fn dek() -> Secret {
         Secret::from_bytes(&[0x5a; extent_keys::KEY_LEN])
@@ -1753,7 +1752,7 @@ mod tests {
         let no_key = Error::NoKey(ID);
         assert_eq!(
             no_key.to_string(),
-            "an object encrypted under branch 3v's key of generation 2, which its reader doesn't hold"
+            "an object encrypted under cell 3v's key of generation 2, which its reader doesn't hold"
         );
         assert_eq!(super::data(&bytes, &NoKeys), Err(no_key.clone()));
         let other_generation = HashMap::from([(KeyId { generation: 3, ..ID }, dek())]);
@@ -1795,7 +1794,7 @@ mod tests {
         assert_eq!(corrupt_of(frame.check_footer(footer_bytes, &wrong)), by_footer_mac);
     }
 
-    /// A reader holding `keys`, which holds the objects it reads encrypted: a reader of a branch
+    /// A reader holding `keys`, which holds the objects it reads encrypted: a reader of a cell
     /// whose record has a DEK (TASK-411.3).
     struct Encrypting(HashMap<KeyId, Secret>);
 

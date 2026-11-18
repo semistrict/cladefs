@@ -2,19 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! An image's store kept in its bucket (backlog doc-14, TASK-165.6): as every store's branch is,
+//! An image's store kept in its bucket (backlog doc-14, TASK-165.6): as every store's cell is,
 //! in the bucket its description names, an image's own file bucket where it was made on no host
-//! of cladefs's system (`host_cell::create`). An uploader takes the branch's head and uploads the
+//! of cladefs's system (`host_cell::create`). An uploader takes the cell's head and uploads the
 //! image's commits behind them, as the extent daemon's stores' are (`crate::bucket`); the image's
 //! commits are durable once in its store, as before, and closing it waits for them to be uploaded.
-//! An image's fork forks its branch in the bucket, as the daemon's forks do (`host_cell::fork`).
+//! An image's fork forks its cell in the bucket, as the daemon's forks do (`host_cell::fork`).
 //! An image's own bucket's collector runs in the process, after commits ([`super::collect`]); a
 //! host's bucket's is the host's.
 
 use super::collect::{self, Collecting};
 use crate::bucket;
 use crate::error::{Error, anyhow_of};
-use crate::host_cell::{self, BranchOf, Opened};
+use crate::host_cell::{self, CellOf, Opened};
 use bucket_cell::cache::Cache;
 use bucket_cell::cell::Kind;
 use bucket_cell::layout::Child;
@@ -23,10 +23,10 @@ use local_cell::{HostDir, LocalCell};
 use std::path::Path;
 use std::sync::Arc;
 
-/// An image's store, its branch kept in its bucket. See the module docs.
+/// An image's store, its cell kept in its bucket. See the module docs.
 pub(crate) struct KeptImage {
     store: Arc<LocalCell<HostDir>>,
-    /// The branch's uploader, which opened the store: dropped, it closes the store's open segment,
+    /// The cell's uploader, which opened the store: dropped, it closes the store's open segment,
     /// uploads what the store made durable, then stops (TASK-192).
     uploader: Uploader<HostDir>,
     /// What reads the store's extents whose data is in the bucket.
@@ -38,14 +38,14 @@ pub(crate) struct KeptImage {
 
 impl KeptImage {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of the
-    /// branch `of` says ([`host_cell::create`]): whole if `whole`, or else unmade until its maker says it
+    /// cell `of` says ([`host_cell::create`]): whole if `whole`, or else unmade until its maker says it
     /// is ([`host_cell::create_unmade`], TASK-196), as an import's, once filled. Its uploader
-    /// keeps its branch as `keeping` says: in a host's daemon, with the host's cache of the
+    /// keeps its cell as `keeping` says: in a host's daemon, with the host's cache of the
     /// bucket's objects, which what the bucket acknowledged goes into, and its extents are read
     /// from (TASK-237); elsewhere, with none ([`host_cell::keeping`]).
     pub fn create(
         dir: &Path,
-        (capacity, of, whole): (u64, BranchOf, bool),
+        (capacity, of, whole): (u64, CellOf, bool),
         keeping: upload::Options,
     ) -> anyhow::Result<Self> {
         let cache = keeping.cache.clone();
@@ -57,15 +57,15 @@ impl KeptImage {
         Self::opened(opened, cache)
     }
 
-    /// The image at `dir`, or the fork at `dir`, a store of its own holding its branch alone
-    /// (TASK-165.7): its uploader takes its branch's head as a copy never placed takes it where
+    /// The image at `dir`, or the fork at `dir`, a store of its own holding its cell alone
+    /// (TASK-165.7): its uploader takes its cell's head as a copy never placed takes it where
     /// this process is no host's daemon ([`host_cell::keeping`]).
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         let keeping = host_cell::keeping().map_err(anyhow_of)?;
         Self::opened(host_cell::open(dir, keeping).map_err(anyhow_of)?, None)
     }
 
-    /// `opened`, its branch taken in its bucket, its extents there read through `cache`, if given.
+    /// `opened`, its cell taken in its bucket, its extents there read through `cache`, if given.
     fn opened(opened: Opened, cache: Option<Arc<Cache>>) -> anyhow::Result<Self> {
         let Opened { store, bucket, uploader } = opened;
         let url = store.bucket().unwrap_or_default().to_owned();
@@ -85,13 +85,13 @@ impl KeptImage {
         self.fetcher.clone()
     }
 
-    /// What follows a commit of the store's: it fails once the uploader has, the branch another
+    /// What follows a commit of the store's: it fails once the uploader has, the cell another
     /// writer's or deleted, or its bucket out of reach for good, rather than the image go on as
-    /// a branch no bucket has; it waits while more of its commits wait to be uploaded than the
+    /// a cell no bucket has; it waits while more of its commits wait to be uploaded than the
     /// lag's bound; and the bucket's collector runs, if it is due.
     pub fn committed(&self) -> anyhow::Result<()> {
         if let Some(failed) = self.uploader.failed() {
-            return Err(anyhow::Error::new(failed).context("the image's branch is not uploaded"));
+            return Err(anyhow::Error::new(failed).context("the image's cell is not uploaded"));
         }
         self.uploader.wait_lag(self.store.last_commit()?)?;
         if let Some(collecting) = &self.collecting {
@@ -100,19 +100,19 @@ impl KeptImage {
         Ok(())
     }
 
-    /// Waits until the store's commits are uploaded: so a closed image's branch is whole in its
+    /// Waits until the store's commits are uploaded: so a closed image's cell is whole in its
     /// bucket.
     pub fn wait_uploaded(&self) -> anyhow::Result<()> {
         Ok(self.uploader.wait_uploaded(self.store.last_commit()?)?)
     }
 
-    /// Forks the store's branch, as of its last commit, to a new branch, the one cell of a new
+    /// Forks the store's cell, as of its last commit, to a new cell, the one cell of a new
     /// cell of its tenant's (TASK-364), whose handle is a new directory at `path`, in its bucket
     /// too ([`host_cell::fork`]): `held` is let go of once the fork's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
-        let tenant = self.store.description().branch.tenant;
-        let branch = host_cell::new_branch(self.uploader.bucket(), tenant).map_err(Error::from)?;
-        let child = Child { branch, owner: rand::random() };
+        let tenant = self.store.description().cell.tenant;
+        let cell = host_cell::new_cell(self.uploader.bucket(), tenant).map_err(Error::from)?;
+        let child = Child { cell, owner: rand::random() };
         host_cell::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
     }
 
@@ -124,7 +124,7 @@ impl KeptImage {
 }
 
 /// Deletes the image at `path`, or the fork at `path`, which nothing in this process has open
-/// ([`host_cell::delete`]): its branch, in the bucket its description names, first, as
+/// ([`host_cell::delete`]): its cell, in the bucket its description names, first, as
 /// a copy never placed deletes it where this process is no host's daemon ([`host_cell::token`]).
 pub(crate) fn delete(path: &Path) -> Result<(), Error> {
     let bucket = host_cell::bucket_at(path).map_err(Error::new)?;
@@ -169,12 +169,12 @@ mod tests {
         host_cell::bucket_at(path).unwrap().expect("a bucket")
     }
 
-    /// The extents `branch`'s state in `bucket` holds, by their lengths, those it inherited too,
+    /// The extents `cell`'s state in `bucket` holds, by their lengths, those it inherited too,
     /// and its root.
-    fn kept(bucket: &ObjectBucket, branch: crate::CellId) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
+    fn kept(bucket: &ObjectBucket, cell: crate::CellId) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = local_cell::upload::block_on(async {
-            let record = bucket_cell::branch::record(bucket, branch).await?;
-            bucket_cell::recover(bucket, branch, record.and_then(|record| record.origin())).await
+            let record = bucket_cell::lifecycle::record(bucket, cell).await?;
+            bucket_cell::recover(bucket, cell, record.and_then(|record| record.origin())).await
         });
         let state = recovered.unwrap().unwrap().state;
         let extents = state.extents.iter().map(|(extent, at)| (*extent, at.len)).collect();
@@ -198,10 +198,10 @@ mod tests {
             .sum()
     }
 
-    /// TASK-165.6: an image keeps its branch in a file bucket of its own, beside its directory
-    /// (TASK-165.7), which its description names: closed, the branch holds what its store does.
+    /// TASK-165.6: an image keeps its cell in a file bucket of its own, beside its directory
+    /// (TASK-165.7), which its description names: closed, the cell holds what its store does.
     #[test]
-    fn images_keep_their_branches_in_a_file_bucket_of_their_own() {
+    fn images_keep_their_cells_in_a_file_bucket_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let storage = block_on(image_with(&path, b"file", b"contents"));
@@ -209,27 +209,27 @@ mod tests {
         let url = format!("file://{}/", own.display());
         assert_eq!(local_cell::host_bucket(&path).unwrap(), Some(url));
         let image = image(&storage);
-        let branch = image.store().description().branch;
-        let (extents, root) = kept(&bucket_of(&path), branch);
+        let cell = image.store().description().cell;
+        let (extents, root) = kept(&bucket_of(&path), cell);
         assert!(!extents.is_empty() && !root.is_empty());
         assert_eq!((extents, root), held(image));
     }
 
-    /// TASK-165.6: an image's fork forks the image's branch in the image's bucket, where it keeps
-    /// its own: a branch of its own there, whose record names the image's as its parent, and which
+    /// TASK-165.6: an image's fork forks the image's cell in the image's bucket, where it keeps
+    /// its own: a cell of its own there, whose record names the image's as its parent, and which
     /// holds what the fork's store does, closed.
     #[test]
-    fn forks_branch_in_their_images_bucket() {
+    fn forks_cell_in_their_images_bucket() {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
             let storage = image_with(&path, b"file", b"original").await;
-            let parent = image(&storage).store().description().branch;
+            let parent = image(&storage).store().description().cell;
             let fork = storage.fork_to(&fork_path).await.unwrap();
-            let child = image(&fork).store().description().branch;
+            let child = image(&fork).store().description().cell;
             let bucket = bucket_of(&fork_path);
             assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
-            let record = bucket_cell::branch::record(&*bucket, child).await.unwrap().unwrap();
+            let record = bucket_cell::lifecycle::record(&*bucket, child).await.unwrap().unwrap();
             let Record::Fork(origin) = record.kind else { panic!("{record:?}") };
             assert_eq!(origin.parent, parent);
 
@@ -242,19 +242,19 @@ mod tests {
         })
     }
 
-    /// TASK-165.6: deleting an image, or a fork, deletes its branch in its bucket too, which the
+    /// TASK-165.6: deleting an image, or a fork, deletes its cell in its bucket too, which the
     /// collector then reclaims what only it held of.
     #[test]
-    fn deleting_images_deletes_their_branches() {
+    fn deleting_images_deletes_their_cells() {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
             let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
             let storage = image_with(&path, b"file", b"original").await;
             let fork = storage.fork_to(&fork_path).await.unwrap();
-            let child = image(&fork).store().description().branch;
+            let child = image(&fork).store().description().cell;
             drop((fork, storage));
             let bucket = bucket_of(&path);
-            let record = |branch| bucket_cell::branch::record(&*bucket, branch);
+            let record = |cell| bucket_cell::lifecycle::record(&*bucket, cell);
             assert!(!record(child).await.unwrap().unwrap().deleted);
             Storage::delete(&fork_path).unwrap();
             assert!(record(child).await.unwrap().unwrap().deleted);
@@ -295,10 +295,10 @@ mod tests {
         fail::cfg("upload::stopped", "sleep(500)").unwrap();
         drop(Storage::create(&path, SIZE).unwrap());
         let reopened = host_cell::open(&path, host_cell::keeping().unwrap())
-            .map(|opened| opened.store.description().branch);
+            .map(|opened| opened.store.description().cell);
         scenario.teardown();
-        let branch = reopened.map_err(|err| format!("{err:#}"));
-        assert_eq!(branch.map(|_| ()), Ok(()));
+        let cell = reopened.map_err(|err| format!("{err:#}"));
+        assert_eq!(cell.map(|_| ()), Ok(()));
     }
 
     /// TASK-165.6: an image kept in a host's bucket, as a store the extent daemon made is, which
@@ -311,7 +311,7 @@ mod tests {
         let made = host_cell::create_unmade(
             &path,
             SIZE,
-            BranchOf::Named(bucket_cell::layout::test_branch(7)),
+            CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some("memory:///host"),
             keeping,
@@ -324,20 +324,20 @@ mod tests {
         image.committed().unwrap();
         image.wait_uploaded().unwrap();
         assert_eq!(
-            kept(&bucket_of(&path), bucket_cell::layout::test_branch(7)).0,
+            kept(&bucket_of(&path), bucket_cell::layout::test_cell(7)).0,
             BTreeMap::from([(ExtentId::new(7, 1), 4096)])
         );
     }
 
     /// TASK-165.6: what an image freed, uploaded, and checkpointed as its uploader stops, a pass of
-    /// its bucket's collector reclaims; what it holds, the branch still holds.
+    /// its bucket's collector reclaims; what it holds, the cell still holds.
     #[test]
     fn the_collector_reclaims_what_images_freed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let image = KeptImage::create(
             &path,
-            (SIZE, BranchOf::Named(bucket_cell::layout::test_branch(7)), true),
+            (SIZE, CellOf::Named(bucket_cell::layout::test_cell(7)), true),
             host_cell::keeping().unwrap(),
         )
         .unwrap();
@@ -368,7 +368,7 @@ mod tests {
         assert!(report.deleted >= 3, "{report:?}");
         let after = bucket_bytes(&own);
         assert!(after < 6 * MIB as u64, "{after} bytes");
-        let (extents, root) = kept(&bucket_of(&path), bucket_cell::layout::test_branch(7));
+        let (extents, root) = kept(&bucket_of(&path), bucket_cell::layout::test_cell(7));
         assert_eq!(
             (extents, root),
             (BTreeMap::from([(extent(3), 5 * MIB as u64)]), b"root".into())

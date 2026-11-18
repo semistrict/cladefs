@@ -397,7 +397,7 @@ echo "encryption: $(cat "$results/encryption.txt")" >&2
 # A host keeps stores in a bucket, CLADEFSD_BUCKET's or a file bucket in memory, on tmpfs,
 # as of placement 1 unless one is named; what it did with it scripts/bench-report.py reports. Not
 # one in the daemon's memory: the cases open the stores it made in processes of their own (cladefs's
-# Storage), which keep a store's branch in the bucket its description names (TASK-165.6). Its
+# Storage), which keep a store's cell in the bucket its description names (TASK-165.6). Its
 # memory is CLADEFSD_MEMORY bytes, if set; otherwise, as production's, a page cache of what
 # of the host's memory, and the run's cgroup's, is free (TASK-358).
 # cladefs: what its stores read from the bucket it keeps in a part cache of its own on disk, as

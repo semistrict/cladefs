@@ -7,7 +7,7 @@
 //! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_ENCRYPTED`), and this checks, holding no key, what
 //! their stores left:
 //!
-//! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a branch
+//! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a cell
 //!   that wrote anything, but versions' and deleted ones', has a DEK; every framed object (segments,
 //!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
@@ -137,7 +137,7 @@ struct Scope {
 }
 
 /// Walks `dir`: every regular file searched for known plaintext; each store's directory checked
-/// (`local_cell::on_disk`), the cell of its branch in the bucket it names put in `scope`; each
+/// (`local_cell::on_disk`), its cell in the bucket it names put in `scope`; each
 /// file bucket, a directory holding the local bucket's locks, put in `scope` whole.
 fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
     let mut dirs = vec![dir.to_owned()];
@@ -184,7 +184,7 @@ fn store(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<(
     }
     match on_disk.bucket {
         Some(url) if url.starts_with("memory:") => _ = report.unread.insert(url),
-        Some(url) => _ = scope.cells.entry(url).or_default().insert(on_disk.branch),
+        Some(url) => _ = scope.cells.entry(url).or_default().insert(on_disk.cell),
         None => {}
     }
     Ok(())
@@ -226,10 +226,10 @@ async fn bucket(
         let key = meta.key.as_str();
         let at = || format!("{url} {key}");
         let framed = match layout::kind(key) {
-            layout::Kind::Segment { branch, .. }
-            | layout::Kind::Extent { branch, .. }
-            | layout::Kind::Checkpoint { branch, .. } => {
-                written.insert(branch);
+            layout::Kind::Segment { cell, .. }
+            | layout::Kind::Extent { cell, .. }
+            | layout::Kind::Checkpoint { cell, .. } => {
+                written.insert(cell);
                 true
             }
             layout::Kind::Moves { .. } => true,
@@ -243,8 +243,8 @@ async fn bucket(
                 }
                 false
             }
-            layout::Kind::Record { branch } => {
-                records.push(branch);
+            layout::Kind::Record { cell } => {
+                records.push(cell);
                 false
             }
             _ => false,
@@ -265,13 +265,13 @@ async fn bucket(
             report.clear.push(format!("{}: holds known plaintext at {offset}", at()));
         }
     }
-    for branch in records {
+    for cell in records {
         report.records += 1;
-        let Some(record) = bucket_cell::branch::record(&store, branch).await? else { continue };
-        if record.deks.is_empty() && !record.deleted && written.contains(&branch) {
+        let Some(record) = bucket_cell::lifecycle::record(&store, cell).await? else { continue };
+        if record.deks.is_empty() && !record.deleted && written.contains(&cell) {
             report.clear.push(format!(
-                "{url} {}: branch {branch} wrote objects, its record has no DEK",
-                layout::record(branch)
+                "{url} {}: cell {cell} wrote objects, its record has no DEK",
+                layout::record(cell)
             ));
         }
     }

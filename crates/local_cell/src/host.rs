@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Stores in directories of the host's, as cladefs's images and cladefsd's stores are: a directory
-//! holds one store, of one branch (TASK-165.7). Forks, versions and deletions are the bucket's,
+//! holds one store, of one cell (TASK-165.7). Forks, versions and deletions are the bucket's,
 //! which the store's description names: the store makes nothing of them but the commit that names
 //! a fork ([`LocalCell::commit_fork`]).
 
@@ -16,11 +16,11 @@ use extent_frame::segment::CellId;
 use std::path::Path;
 
 /// Makes a new store at `path`, which must be a directory holding no store, as `description`
-/// describes. cladefs: its description names `bucket`, the URL of the bucket its branch is kept in,
+/// describes. cladefs: its description names `bucket`, the URL of the bucket its cell is kept in,
 /// as every host's store's does (TASK-165.6); it is unmade until its maker says it is whole
 /// ([`LocalCell::made`], TASK-196). Its description is made last: until it is durable, the directory
-/// is no store, whatever else is in it. Opening it takes its branch in the bucket
-/// ([`LocalCell::recover`], `crate::upload`), and its branch's cell, of `kind`, whose branch it is
+/// is no store, whatever else is in it. Opening it takes its cell in the bucket
+/// ([`LocalCell::recover`], `crate::upload`), and its cell, of `kind`, whose cell it is
 /// (TASK-364, doc-20).
 pub fn create_host(
     path: &Path,
@@ -32,7 +32,7 @@ pub fn create_host(
 }
 
 /// cladefs: makes a new store at `path` as [`create_host`] does, a store at the version `version` of
-/// its branch: the branch's state at the version, which nothing writes, and which forks fork
+/// its cell: the cell's state at the version, which nothing writes, and which forks fork
 /// (doc-18, doc-20). Opening it reads the version from the bucket, once the cell's head names it.
 pub fn create_host_at_version(
     path: &Path,
@@ -66,9 +66,9 @@ pub fn unmade_host(path: &Path) -> bool {
 
 /// cladefs: places the store at `path` (TASK-39.7): records, durably, in its description, the
 /// fencing token its host takes its cell with from then on, the boot ID of the placement it
-/// is, which a later placement's exceeds; its writer takes its branch's head with the epoch of
+/// is, which a later placement's exceeds; its writer takes its cell's head with the epoch of
 /// that taking of the cell. A placement takes the cell only with a token as high as the last
-/// one's: a placement cut off takes no branch back from the one after it.
+/// one's: a placement cut off takes no cell back from the one after it.
 /// A store never placed takes it with its host's (TASK-165.9: the token is the description's).
 pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     let mut file = store_file(path)?;
@@ -91,7 +91,7 @@ pub fn host_token(path: &Path) -> Result<Option<u64>, Error> {
 }
 
 /// Deletes the store at `path`, which no store has open: `before` goes once that is found so, with
-/// the store's branch, before its directory goes, to delete what keeps the branch elsewhere, as a
+/// the store's cell, before its directory goes, to delete what keeps the cell elsewhere, as a
 /// bucket does; then the directory, whole. A deletion that stopped partway is finished by deleting
 /// again, which calls `before` again unless the directory's removal had begun. A directory with no
 /// description is no store, but what a store's making left, or its removal: it goes, `before`
@@ -103,12 +103,12 @@ pub fn delete_host(
     if !path.join(DESCRIPTION).exists() {
         return remove_store(path);
     }
-    let branch = host_branch(path)?;
+    let cell = host_cell(path)?;
     let dir = HostDir::new(path)?;
     dir.take().context("taking the store's directory")?;
     let removed = dir.claim().context("taking the store's directory").and_then(|()| {
-        let removed = before(branch).and_then(|()| {
-            failpoint!("delete::branch");
+        let removed = before(cell).and_then(|()| {
+            failpoint!("delete::cell");
             remove_store(path)
         });
         dir.unclaim();
@@ -234,18 +234,18 @@ fn remove(removed: std::io::Result<()>) -> std::io::Result<()> {
     }
 }
 
-/// The branch of the store at `path`, as its description names it.
-pub fn host_branch(path: &Path) -> Result<CellId, Error> {
-    Ok(store_file(path)?.branch)
+/// The cell of the store at `path`, as its description names it.
+pub fn host_cell(path: &Path) -> Result<CellId, Error> {
+    Ok(store_file(path)?.cell)
 }
 
-/// cladefs: the URL of the bucket the store at `path` keeps its branch in, as its description names
+/// cladefs: the URL of the bucket the store at `path` keeps its cell in, as its description names
 /// it: none for a store of memory's, which names none (TASK-165.6).
 pub fn host_bucket(path: &Path) -> Result<Option<String>, Error> {
     Ok(store_file(path)?.bucket)
 }
 
-/// cladefs: the version of its branch the store at `path` is at, if it is one.
+/// cladefs: the version of its cell the store at `path` is at, if it is one.
 pub fn host_version(path: &Path) -> Result<Option<u64>, Error> {
     Ok(store_file(path)?.version)
 }
@@ -308,7 +308,7 @@ mod tests {
         STEPS.with_borrow_mut(|steps| std::mem::take(&mut steps.taken))
     }
 
-    /// The store at `path`, opened where the bucket holds nothing of its branch.
+    /// The store at `path`, opened where the bucket holds nothing of its cell.
     fn open(path: &Path) -> Result<LocalCell<HostDir>, Error> {
         LocalCell::open(HostDir::new(path)?, Options::default())
     }
@@ -320,12 +320,12 @@ mod tests {
         let description = Description {
             block_size: BLOCK as u32,
             capacity: 1 << 20,
-            branch: bucket_cell::layout::test_branch(3),
+            cell: bucket_cell::layout::test_cell(3),
         };
         create_host(&path, description, BUCKET, bucket_cell::cell::Kind::Fxfs).unwrap();
         let store = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
         let store = store
-            .open(Options::default(), crate::Opening::new(bucket_cell::layout::test_branch(3)))
+            .open(Options::default(), crate::Opening::new(bucket_cell::layout::test_cell(3)))
             .unwrap();
         store.made().unwrap();
         store.write(ExtentId::new(3, 0), 0, &[7; BLOCK]).unwrap();
@@ -334,7 +334,7 @@ mod tests {
     }
 
     /// A deletion that stopped partway, its description renamed and part of the rest gone, is
-    /// finished by deleting again, which calls nothing to delete the branch elsewhere; and so is
+    /// finished by deleting again, which calls nothing to delete the cell elsewhere; and so is
     /// a directory a store's making left before its description, holding files of no store's.
     #[test]
     fn stopped_deletions_finish() {
@@ -352,30 +352,27 @@ mod tests {
         assert!(!unmade.exists());
     }
 
-    /// A deletion calls `before` with the store's branch, while the store is open nowhere, before
+    /// A deletion calls `before` with the store's cell, while the store is open nowhere, before
     /// its directory goes: one `before` stopped leaves the store, which deleting again finishes.
     /// One of a store open in this process fails, calling nothing.
     #[test]
-    fn deletions_delete_their_branch_elsewhere_first() {
+    fn deletions_delete_their_cell_elsewhere_first() {
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
         let opened = open(&path).unwrap();
         let refused = delete_host(&path, |_| Err(anyhow!("called")));
         assert!(refused.is_err() && path.join(DESCRIPTION).exists(), "{refused:?}");
         drop(opened);
-        let stopped = delete_host(&path, |branch| Err(anyhow!("stopped at {branch}")));
+        let stopped = delete_host(&path, |cell| Err(anyhow!("stopped at {cell}")));
         assert_eq!(stopped.map_err(|err| err.to_string()), Err("stopped at 1/1/3".to_owned()));
         assert!(open(&path).is_ok(), "a store stopped opens no more");
         let called = std::cell::Cell::new(None);
-        delete_host(&path, |branch| Ok(called.set(Some(branch)))).unwrap();
-        assert_eq!(
-            (called.get(), path.exists()),
-            (Some(bucket_cell::layout::test_branch(3)), false)
-        );
+        delete_host(&path, |cell| Ok(called.set(Some(cell)))).unwrap();
+        assert_eq!((called.get(), path.exists()), (Some(bucket_cell::layout::test_cell(3)), false));
     }
 
     /// TASK-79.77: a deletion stopped at any step is finished by deleting again, which leaves
-    /// nothing of the store: one stopped before the branch went elsewhere, and one stopped before
+    /// nothing of the store: one stopped before the cell went elsewhere, and one stopped before
     /// each step of the removals that follow ([`removals`]), as a crash would stop them.
     #[test]
     fn deletions_stopped_at_any_step_finish() {
@@ -389,7 +386,7 @@ mod tests {
             let left: Vec<_> = std::fs::read_dir(temp).unwrap().collect();
             assert_eq!(left.len(), 0, "stopped {at}: {left:?} left");
         };
-        let at = "before the branch went";
+        let at = "before the cell went";
         let temp = tempfile::tempdir().unwrap();
         let path = stored(temp.path());
         stopped(delete_host(&path, |_| Err(anyhow!("stopped"))), at);

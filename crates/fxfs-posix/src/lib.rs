@@ -176,7 +176,7 @@ pub struct DaxExtent {
     pub offset: u64,
     pub len: u64,
     /// The extent, and where in it.
-    pub branch: u64,
+    pub cell: u64,
     pub sequence: u64,
     pub extent_offset: u64,
     /// Whether the piece's extent is sealed, which the window maps only then (backlog doc-13).
@@ -193,7 +193,7 @@ impl DaxExtent {
         Self {
             offset: extent.logical_offset(),
             len: extent.length(),
-            branch: device_range.extent.branch,
+            cell: device_range.extent.cell,
             sequence: device_range.extent.sequence,
             extent_offset: device_range.range.start,
             access,

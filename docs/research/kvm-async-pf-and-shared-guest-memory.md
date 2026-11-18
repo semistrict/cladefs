@@ -185,7 +185,7 @@ Ubuntu's `7.0.0-43-generic` may carry Ubuntu patches; everything below is upstre
   The fourth argument is `prefetch`
   ([`arch/x86/kvm/mmu/mmu_internal.h`: `kvm_mmu_do_page_fault`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/x86/kvm/mmu/mmu_internal.h?h=v7.0)),
   and `.write = err & PFERR_WRITE_MASK` comes from the saved error code.
-- With `prefetch` set, `__kvm_mmu_faultin_pfn` skips the async branch: after the `FOLL_NOWAIT`
+- With `prefetch` set, `__kvm_mmu_faultin_pfn` skips the async cell: after the `FOLL_NOWAIT`
   attempt it faults synchronously with the vCPU's own access, on the vCPU thread (**derived** from
   1.2). A userfaultfd message from this retry therefore carries the vCPU thread's tid
   (`UFFD_FEATURE_THREAD_ID`) and `UFFD_PAGEFAULT_FLAG_WRITE` only for a real store
@@ -272,7 +272,7 @@ Ubuntu's `7.0.0-43-generic` may carry Ubuntu patches; everything below is upstre
   and content **unverified** (lore blocked, patchew 404). Its cover letter of 2026-07 says the
   RISC-V port waits "once the generic userfault series lands".
 - API (from the v3 cover letter and the documentation patch as carried in Firecracker's
-  [`feature/secret-hiding` branch, `15-kvm-mem-userfault/0059`](https://github.com/firecracker-microvm/firecracker/tree/aa10ee7828b357cbb0cbf7ee38a5f19ca5093e24/resources/hiding_ci/kernels/6.18-secret-hiding/linux_patches/15-kvm-mem-userfault)):
+  [`feature/secret-hiding` cell, `15-kvm-mem-userfault/0059`](https://github.com/firecracker-microvm/firecracker/tree/aa10ee7828b357cbb0cbf7ee38a5f19ca5093e24/resources/hiding_ci/kernels/6.18-secret-hiding/linux_patches/15-kvm-mem-userfault)):
   - memslot flag `KVM_MEM_USERFAULT`; `userfault_bitmap` (a `__u64` taken from `pad2` of
     `struct kvm_userspace_memory_region2`): "each bit in the array linearly corresponds to a single
     gfn ... If the bit for a page is set, any vCPU access to that page will exit to userspace with
@@ -298,7 +298,7 @@ Ubuntu's `7.0.0-43-generic` may carry Ubuntu patches; everything below is upstre
   so a fault on a marked page exits on the vCPU thread and never starts a worker.
 - Related, Amazon (Jack Thomson): "userfaultfd async page faults" on top of KVM userfault
   (`KVM_ASYNC_PF` vCPU ioctl with ACCEPT/READY ops, `KVM_MEMORY_EXIT_FLAG_APF`), patches dated
-  2026-01 to 2026-04 in the same branch, [`60-async-pf/`](https://github.com/firecracker-microvm/firecracker/tree/aa10ee7828b357cbb0cbf7ee38a5f19ca5093e24/resources/hiding_ci/kernels/6.18-secret-hiding/linux_patches/60-async-pf).
+  2026-01 to 2026-04 in the same cell, [`60-async-pf/`](https://github.com/firecracker-microvm/firecracker/tree/aa10ee7828b357cbb0cbf7ee38a5f19ca5093e24/resources/hiding_ci/kernels/6.18-secret-hiding/linux_patches/60-async-pf).
   Upstream posting status **unverified**. Firecracker's README there: "The patches are not yet
   merged upstream."
 
@@ -416,7 +416,7 @@ All v7.0; same logic in v6.1 (`hva_to_pfn_slow(addr, async, ...)` with `FOLL_NOW
 - Upstream UFFD backend: the handler "issues `UFFDIO_COPY` to load the previously mmaped file
   contents" ([docs/snapshotting/handling-page-faults-on-snapshot-resume.md @v1.18.0](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/snapshotting/handling-page-faults-on-snapshot-resume.md)):
   a private copy per VM.
-- Secret hiding (guest_memfd, KVM userfault) is on branch `feature/secret-hiding` with patched
+- Secret hiding (guest_memfd, KVM userfault) is on cell `feature/secret-hiding` with patched
   6.18 kernels; snapshot-support.md: diff snapshots are in developer preview "while we are diving
   deep into how the feature can be combined with guest_memfd support".
 - [docs/prod-host-setup.md](https://github.com/firecracker-microvm/firecracker/blob/cc88013eadcf432da1b37d47d445b7e8bcc3046e/docs/prod-host-setup.md):
@@ -599,7 +599,7 @@ in place of `MAP_SHARED` + `UFFDIO_WRITEPROTECT`.
 ## Measurements on ubu1 (2026-11-16)
 
 Every fault on a restored VM's memory window logged (thread, access, write-protect flag, whether the
-page was installed), branch t456-measure, fxfs-guest-snapshot-memory-volume-dax: a 512 MiB VM
+page was installed), cell t456-measure, fxfs-guest-snapshot-memory-volume-dax: a 512 MiB VM
 snapshotted, its memory file imported into a memory volume, two VMs restored from its version one after
 the other, each running the case's guest workload (thaw, reads, writes of a few MiB, remount).
 

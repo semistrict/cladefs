@@ -39,7 +39,7 @@ fn read(store: &CellClient, extent: ExtentId) -> Result<Vec<u8>, Errno> {
 fn publish(daemon: &mut Daemon, dir: &Path, seed: u64, generation: &str) -> (ExtentId, PathBuf) {
     let (publisher, fork) = (dir.join(format!("publisher-{generation}")), dir.join(generation));
     let vm = daemon.open(&publisher, CAPACITY);
-    let extent = ExtentId { branch: vm.branch(), sequence: 1 };
+    let extent = ExtentId { cell: vm.cell(), sequence: 1 };
     write(&vm, &pattern(seed), b"published");
     daemon.fork(&publisher, &fork).unwrap();
     (extent, fork)
@@ -111,7 +111,7 @@ fn tenants_reach_their_own_bases_and_public_ones() {
 
     // A private generation of acme's.
     let vm = open(&acme_socket, acme.join("publisher"));
-    let private = ExtentId { branch: vm.branch(), sequence: 1 };
+    let private = ExtentId { cell: vm.cell(), sequence: 1 };
     write(&vm, &pattern(5), b"private");
     let generation = acme.join("generation");
     daemon.fork(&acme.join("publisher"), &generation).unwrap();
@@ -134,7 +134,7 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     }
     let publisher = dir.path().join("publisher-public");
     let writer = daemon.open(&publisher, CAPACITY);
-    let next = ExtentId { branch: writer.branch(), sequence: 2 };
+    let next = ExtentId { cell: writer.cell(), sequence: 2 };
     writer.write(next, 0, &[cladefs::VolatileSlice::from(&pattern(7)[..])]).unwrap();
     writer.commit(None).unwrap();
     assert_eq!(copies(cladefs::pages::physical_memory(), &pattern(6)), 1, "of one copy");

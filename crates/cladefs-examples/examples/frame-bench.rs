@@ -74,7 +74,7 @@ fn rate(bytes: usize, took: Duration) -> f64 {
 
 fn main() {
     let mib: usize = std::env::args().nth(1).map_or(256, |n| n.parse().expect("N, in MiB"));
-    let id = KeyId { branch: 1, generation: 1 };
+    let id = KeyId { cell: 1, generation: 1 };
     let mut keys = HashMap::new();
     keys.insert(id, Secret::random());
     for kind in ["text", "noise"] {

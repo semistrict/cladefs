@@ -855,7 +855,7 @@ impl FxFilesystem {
 
     /// cladefs: gives the journal new extents past where it continues, if it can't write those it
     /// has there, and returns whether it did: after replay, and as the filesystem thaws in a VM
-    /// restored from a snapshot, whose device's branch is new
+    /// restored from a snapshot, whose device's cell is new
     /// ([`Journal::renew_tail`](crate::object_store::journal::Journal::renew_tail)). Nothing may
     /// commit, nor compact, meanwhile. A super-block must record them next
     /// ([`FxFilesystem::record_journal_tail`]), which nothing compacting may come before.
@@ -1900,13 +1900,13 @@ mod tests {
         }
     }
 
-    /// cladefs: the extents of the device's branch that it holds and Fxfs doesn't know.
+    /// cladefs: the extents of the device's cell that it holds and Fxfs doesn't know.
     async fn leaked_extents(fs: &FxFilesystem) -> Vec<ExtentId> {
         let device = fs.device();
         let known = fs.allocator().extents();
-        let branch = device.branch();
+        let cell = device.cell();
         let held = device.extents().into_iter();
-        held.filter(|extent| extent.branch == branch && !known.contains_key(extent)).collect()
+        held.filter(|extent| extent.cell == cell && !known.contains_key(extent)).collect()
     }
 
     /// cladefs: Fxfs writes, overwrites, renames and deletes files while its store crashes at
@@ -2221,7 +2221,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// cladefs: a fork of the store (backlog doc-4) has a branch of its own, and holds the
+    /// cladefs: a fork of the store (backlog doc-4) has a cell of its own, and holds the
     /// filesystem as its parent did, which it mounts, changes and checks apart from its parent.
     #[fuchsia::test]
     async fn test_fork() {
@@ -2269,9 +2269,9 @@ mod tests {
         fs.close().await.expect("close failed");
         let device = fs.take_device().await;
         device.reopen(false);
-        let fork = device.fork(device.branch() + 1).expect("fork failed");
+        let fork = device.fork(device.cell() + 1).expect("fork failed");
 
-        // The fork writes its own extents: the journal's tail, which its parent's branch
+        // The fork writes its own extents: the journal's tail, which its parent's cell
         // preallocated, and new files.
         let fs = FxFilesystem::open(fork).await.expect("open failed");
         fsck(fs.clone()).await.expect("fsck failed");
@@ -2669,9 +2669,9 @@ mod tests {
     async fn test_image_builder_mode() {
         const BLOCK_SIZE: u32 = 4096;
         const EXISTING_FILE_RANGE: Range<u64> = 4096 * 1024..4096 * 1025;
-        // cladefs: the data is an extent of the device's branch, which Fxfs mints past.
+        // cladefs: the data is an extent of the device's cell, which Fxfs mints past.
         let device =
-            DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE).with_branch(TEST_EXTENT.branch));
+            DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE).with_cell(TEST_EXTENT.cell));
 
         // Write some fake file data at an offset in the image and confirm it as an fxfs file below.
         {

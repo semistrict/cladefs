@@ -6,7 +6,7 @@
 //! check of a guest's crash opens it: whole, as of its last commit, durable or only ordered, as a
 //! guest's fsyncs are (TASK-26.6.2). The daemon closes the
 //! store as the VM process goes, flushing it, and the other process's opening waits for that,
-//! as opening a branch another process has open does (`local_cell::Dir::take`), rather than
+//! as opening a cell another process has open does (`local_cell::Dir::take`), rather than
 //! recover the store from under it.
 
 #![cfg(target_os = "linux")]
@@ -25,7 +25,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// A daemon serving in `dir`, and its socket: its stores' branches in a file bucket there, which
+/// A daemon serving in `dir`, and its socket: its stores' cells in a file bucket there, which
 /// another process reads what they hold in once it has left their directories, uploaded
 /// (TASK-165.8).
 fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
@@ -57,7 +57,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
         let mut root = Vec::new();
         for commit in 0..20 {
             for _ in 0..4 {
-                let extent = ExtentId { branch: store.branch(), sequence };
+                let extent = ExtentId { cell: store.cell(), sequence };
                 sequence += 1;
                 let data = vec![(round * 20 + commit) as u8; 3 * 4096];
                 store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
@@ -86,7 +86,7 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
         let store = CellClient::connect(&socket, &path, 1 << 28).unwrap();
         let mut last = Vec::new();
         for commit in 0..20u64 {
-            let extent = ExtentId { branch: store.branch(), sequence };
+            let extent = ExtentId { cell: store.cell(), sequence };
             sequence += 1;
             let data = vec![(round * 20 + commit) as u8; 4096];
             store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
@@ -119,7 +119,7 @@ fn stores_are_told_when_their_daemon_goes() {
     let store = CellClient::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
     store.on_daemon_lost(move || told.send("store").unwrap());
     let write = |sequence| {
-        let extent = ExtentId { branch: store.branch(), sequence };
+        let extent = ExtentId { cell: store.cell(), sequence };
         store.write(extent, 0, &[VolatileSlice::from(&[7; 4096][..])])
     };
     write(1).unwrap();

@@ -9,7 +9,7 @@
 // than at device offsets (backlog doc-4): the types that hold locations are V60. AllocatorInfoV60
 // adds snapshots' owners, the sequence number the allocator mints extents from, and the extents
 // dying when the allocator's tree was compacted, which a mount frees again. Version 61 adds
-// StoreInfoV61: layers of a base, and the branches of its extents (backlog doc-10). Version 62's
+// StoreInfoV61: layers of a base, and the cells of its extents (backlog doc-10). Version 62's
 // MutationV62, and JournalRecordV62 that holds it, record what replay needs to find the metadata
 // space borrowed as the filesystem had it (`Mutation::UpdateBorrowed`, TASK-218). Version 63's
 // ObjectDescriptorV63 says which special file a file is, in the entries of its directories

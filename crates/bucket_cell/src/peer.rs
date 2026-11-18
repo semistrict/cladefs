@@ -36,7 +36,7 @@ pub trait Peer: Send + Sync {
 }
 
 /// Whether the object at `key` is one whose parts peers give each other: one of extents' data, or
-/// of their places, framed and checked by its tail, which a fetcher reads by parts. Never a branch's
+/// of their places, framed and checked by its tail, which a fetcher reads by parts. Never a cell's
 /// record, a head, a cell's object or a reference, which are no frames, and the first two change in
 /// place.
 pub fn served(key: &str) -> bool {

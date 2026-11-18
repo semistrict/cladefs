@@ -85,8 +85,8 @@ impl Device for Timing {
     ) -> Result<(), Error> {
         timed(1, self.0.write_with_opts(extent, offset, buffer, opts)).await
     }
-    fn branch(&self) -> u64 {
-        self.0.branch()
+    fn cell(&self) -> u64 {
+        self.0.cell()
     }
     async fn next_sequence(&self) -> Result<u64, Error> {
         self.0.next_sequence().await
@@ -265,7 +265,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
-    // A host of the multi-node system, the daemon's and the image's branches kept in a file bucket
+    // A host of the multi-node system, the daemon's and the image's cells kept in a file bucket
     // here, placement 1.
     // SAFETY: before this process starts any other thread.
     unsafe {

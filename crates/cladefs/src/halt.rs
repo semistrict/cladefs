@@ -18,7 +18,7 @@
 //! cladefs: a store is halted too as its host is told its tenant's KEK is revoked or destroyed, or
 //! its cell shredded ([`halt_stores`], doc-16, Shredding; TASK-411.7): each request failing with
 //! `EACCES` then, as a store of such a tenant or cell refuses to open. So a host finds the stores to
-//! halt by their branches: every halt of the process is listed, weakly, with its store's.
+//! halt by their cells: every halt of the process is listed, weakly, with its store's.
 //!
 //! A halted store is not fenced: fencing is a later taking's cutting a writer off (`Error::Fenced`).
 //!
@@ -44,17 +44,17 @@ struct HaltState {
     why: OnceLock<(Errno, String)>,
 }
 
-/// cladefs: the halts of the stores open in the process, each with its store's branch, held weakly,
+/// cladefs: the halts of the stores open in the process, each with its store's cell, held weakly,
 /// so that a host told to forget a tenant's or a cell's keys halts theirs (TASK-411.7).
 static HALTS: Mutex<Vec<(CellId, Weak<HaltState>)>> = Mutex::new(Vec::new());
 
 impl Halt {
-    /// The halt of the store at `store`, of `branch`, not halted: listed among the process's.
-    pub(crate) fn new(store: &Path, branch: CellId) -> Self {
+    /// The halt of the store at `store`, of `cell`, not halted: listed among the process's.
+    pub(crate) fn new(store: &Path, cell: CellId) -> Self {
         let state = Arc::new(HaltState { store: store.to_owned(), why: OnceLock::new() });
         let mut halts = HALTS.lock().unwrap();
         halts.retain(|(_, halt)| halt.strong_count() > 0);
-        halts.push((branch, Arc::downgrade(&state)));
+        halts.push((cell, Arc::downgrade(&state)));
         Self(state)
     }
 
@@ -112,13 +112,13 @@ impl HaltState {
     }
 }
 
-/// cladefs: halts every store open in the process whose branch `scope` says is of it, its requests
+/// cladefs: halts every store open in the process whose cell `scope` says is of it, its requests
 /// failing with `errno` from then on, as `why` says: what a host told a tenant's KEK is revoked or
 /// destroyed, or a cell shredded, does to their stores (TASK-411.7), which it can't open again
 /// either. Returns how many it halted, those halted already left out.
 pub(crate) fn halt_stores(scope: impl Fn(CellId) -> bool, errno: Errno, why: &str) -> usize {
     let halts: Vec<Arc<HaltState>> = (HALTS.lock().unwrap().iter())
-        .filter(|(branch, _)| scope(*branch))
+        .filter(|(cell, _)| scope(*cell))
         .filter_map(|(_, halt)| halt.upgrade())
         .collect();
     halts.iter().filter(|halt| halt.halt(errno, || why.to_owned())).count()
@@ -229,9 +229,9 @@ pub(crate) mod tests {
     /// store be read past it; another store's are untouched.
     #[test]
     fn a_panic_holding_a_lock_halts_its_store() {
-        let branch = crate::host_cell::new_alone();
+        let cell = crate::host_cell::new_alone();
         let (halt, other) =
-            (Halt::new(Path::new("store"), branch), Halt::new(Path::new("other"), branch));
+            (Halt::new(Path::new("store"), cell), Halt::new(Path::new("other"), cell));
         let (lock, rw) = (CellMutex::new("first", 1), StoreRwLock::new("second", 2));
         let panicked = std::panic::catch_unwind(|| {
             let mut guard = lock.lock(&halt).unwrap();

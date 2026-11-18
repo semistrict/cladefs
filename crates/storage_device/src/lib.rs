@@ -7,8 +7,8 @@
 // for host tools and tests: it blocks its callers' threads, and trims by overwriting. Images are
 // cladefs's own device (crates/cladefs/src/storage/image.rs). A device is an extent store (backlog
 // doc-4): data lives in extents the filesystem names, which it frees whole (`Device::free`), in
-// place of trimming ranges of a block device; extent IDs are the device's branch and a sequence
-// number (`Device::branch`, `Device::next_sequence`). The root, the device's one mutable record,
+// place of trimming ranges of a block device; extent IDs are the device's cell and a sequence
+// number (`Device::cell`, `Device::next_sequence`). The root, the device's one mutable record,
 // names where the filesystem starts (`Device::root`, `Device::commit_root`). A follower's device
 // reads a store another writes, as of a commit it advances (`Device::advance`), and pins extents
 // its filesystem keeps (`Device::pin`, backlog doc-8).
@@ -38,7 +38,7 @@ pub mod buffer;
 pub mod buffer_allocator;
 mod extent;
 
-pub use extent::{ExtentId, ExtentRange, NoExtent, OpenExtents, OtherBranch, SealedExtent};
+pub use extent::{ExtentId, ExtentRange, NoExtent, OpenExtents, OtherCell, SealedExtent};
 pub mod splittable_buffer;
 
 pub use splittable_buffer::{SplittableBuffer, SubHandle};
@@ -110,15 +110,15 @@ pub trait Device: Send + Sync {
         write_opts: WriteOptions<'_>,
     ) -> Result<(), Error>;
 
-    /// The branch whose extents the filesystem on the device mints: the first half of their IDs.
-    fn branch(&self) -> u64;
+    /// The cell whose extents the filesystem on the device mints: the first half of their IDs.
+    fn cell(&self) -> u64;
 
-    /// One more than the highest sequence number of any extent of the device's branch that the
+    /// One more than the highest sequence number of any extent of the device's cell that the
     /// device holds or has held, freed or not: where minting resumes after a crash, which may
     /// leave extents written whose references the filesystem lost.
     async fn next_sequence(&self) -> Result<u64, Error>;
 
-    /// cladefs: the lowest sequence number the filesystem may mint from: the device's branch may hold
+    /// cladefs: the lowest sequence number the filesystem may mint from: the device's cell may hold
     /// extents another writer minted below it that the device doesn't hold (backlog doc-7,
     /// The head). Minting starts past it, and past `next_sequence`, which alone bounds the extents
     /// the device holds.
@@ -190,9 +190,9 @@ pub trait Device: Send + Sync {
         bail!("Not supported");
     }
 
-    /// Returns a snapshot of the device as a fork of it whose branch is `branch`, which holds the
+    /// Returns a snapshot of the device as a fork of it whose cell is `cell`, which holds the
     /// device's extents and writes its own (backlog doc-4).
-    fn fork(&self, _branch: u64) -> Result<DeviceHolder, Error> {
+    fn fork(&self, _cell: u64) -> Result<DeviceHolder, Error> {
         bail!("Not supported");
     }
 

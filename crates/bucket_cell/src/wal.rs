@@ -2,59 +2,59 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: a host's write-ahead log of a branch (doc-14): its closed segments not yet
+//! cladefs's own: a host's write-ahead log of a cell (doc-14): its closed segments not yet
 //! acknowledged, each stamped by its writer's chain, the very object it is to be in the bucket. A
 //! segment is in the log before its upload starts, so that every segment that may land in the
 //! writer's name is the log's; one leaves it once acknowledged.
 //!
-//! A writer taking the branch over, here after a crash or elsewhere, puts the log after the
-//! branch's end ([`Wal::rebase`]), as the head it took names it (doc-7, The head; TASK-407), by
-//! commits: the log keeps its start, the branch's last commit before its first segment, and the
-//! branch's last commit says how far the log landed. If it is one of the log's, the log's segments
-//! to it are the branch's; if it is that one, or the start, the rest are stamped again on the new
-//! writer's chain, after the head's end; otherwise another writer's commits moved the branch on,
+//! A writer taking the cell over, here after a crash or elsewhere, puts the log after the
+//! cell's end ([`Wal::rebase`]), as the head it took names it (doc-7, The head; TASK-407), by
+//! commits: the log keeps its start, the cell's last commit before its first segment, and the
+//! cell's last commit says how far the log landed. If it is one of the log's, the log's segments
+//! to it are the cell's; if it is that one, or the start, the rest are stamped again on the new
+//! writer's chain, after the head's end; otherwise another writer's commits moved the cell on,
 //! and the log diverged ([`Error::Diverged`]): its commits, never acknowledged, are lost once
 //! `cladefsctl take` drops it. By commits, not by the keys the head names: a log stamped again on a
 //! writer's chain is kept so in memory alone (TASK-165.9), a crash after finding it stamped as
 //! before, at the keys of none of what landed. A head names a writer's segments only between its
-//! commits, so that the log keeps a commit whole until the branch has it whole.
+//! commits, so that the log keeps a commit whole until the cell has it whole.
 
 use crate::layout::{CellId, Chain, Footer, Head};
 use crate::{Error, rules};
 use std::collections::{BTreeSet, VecDeque};
 
-/// What a writer taking a branch over found ([`Writer::taken`]): the head as it took it, what it
-/// names, the branch's segments; the branch's last commit, and the forks it holds, by their
+/// What a writer taking a cell over found ([`Writer::taken`]): the head as it took it, what it
+/// names, the cell's segments; the cell's last commit, and the forks it holds, by their
 /// children and owners; and the writer's chain then, where its first segment goes, at the head's
 /// end. What a host's log is put after ([`Wal::rebase`]).
 ///
 /// [`Writer::taken`]: crate::Writer::taken
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TakenBranch {
+pub struct TakenCell {
     pub head: Head,
     pub last_commit: Option<u64>,
     pub forks: BTreeSet<(CellId, u64)>,
     pub chain: Chain,
 }
 
-impl TakenBranch {
-    /// What a writer whose chain is `chain` found taking a branch whose head is `head`, `state` the
-    /// branch's state as it names it.
+impl TakenCell {
+    /// What a writer whose chain is `chain` found taking a cell whose head is `head`, `state` the
+    /// cell's state as it names it.
     pub fn of(head: Head, state: &crate::State, chain: Chain) -> Self {
         let forks = state.forks.iter().map(|fork| (fork.child, fork.owner)).collect();
         Self { head, last_commit: state.last_commit, forks, chain }
     }
 }
 
-/// What putting a host's log after the end of a branch took out of it ([`Wal::rebase`]).
+/// What putting a host's log after the end of a cell took out of it ([`Wal::rebase`]).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Rebased<T> {
-    /// The segments the branch holds, landed and named by its head, by their footers, with what
+    /// The segments the cell holds, landed and named by its head, by their footers, with what
     /// the host keeps of each.
     pub landed: Vec<(Footer, T)>,
 }
 
-/// A host's write-ahead log of a branch: its start, the branch's last commit before its first
+/// A host's write-ahead log of a cell: its start, the cell's last commit before its first
 /// segment, which the guest's history goes on from; then its segments, in order, by their footers,
 /// with what the host keeps of each, `T`: its data, or the files holding it.
 #[derive(Clone, Debug)]
@@ -70,13 +70,13 @@ impl<T> Wal<T> {
     }
 
     /// cladefs: the log a host's disk held, after `start`, of `segments`, in order, stamped as they
-    /// were, which needn't follow each other: what follows the branch is the log's commits, and
+    /// were, which needn't follow each other: what follows the cell is the log's commits, and
     /// [`Wal::rebase`] stamps it anew (TASK-165.9).
     pub fn of(start: Option<u64>, segments: impl IntoIterator<Item = (Footer, T)>) -> Self {
         Self { start, segments: segments.into_iter().collect() }
     }
 
-    /// The branch's last commit before its first segment.
+    /// The cell's last commit before its first segment.
     pub fn start(&self) -> Option<u64> {
         self.start
     }
@@ -135,30 +135,30 @@ impl<T> Wal<T> {
         heads
     }
 
-    /// Puts the log after the end of the branch a writer took over, as `taken` says it found it,
-    /// by commits: takes out and returns the segments the branch holds, those to the one ending
+    /// Puts the log after the end of the cell a writer took over, as `taken` says it found it,
+    /// by commits: takes out and returns the segments the cell holds, those to the one ending
     /// its last commit, if it is one of the log's, and after it those making no commit, a fork's
-    /// alone, whose forks the branch holds (a head names a writer's segments between commits, so
-    /// that a fork's alone, after them, is the branch's as its fork is); and stamps the rest again
+    /// alone, whose forks the cell holds (a head names a writer's segments between commits, so
+    /// that a fork's alone, after them, is the cell's as its fork is); and stamps the rest again
     /// on the writer's chain, after the head's end, their data as it was and their extents of their
     /// own at the writer's keys; the writer then takes them as it takes any segment it closed. The
-    /// log's start is then the branch's last commit, which what it stamped again follows.
+    /// log's start is then the cell's last commit, which what it stamped again follows.
     ///
     /// Fails with [`Error::Diverged`], the log unchanged, if another writer's commits moved the
-    /// branch on (`wal_follows`): its last commit is neither one of the log's nor its start. An
-    /// empty log never diverges: taking a branch with one is how a host takes it, wherever it was.
-    pub fn rebase(&mut self, taken: &TakenBranch) -> Result<Rebased<T>, Error> {
+    /// cell on (`wal_follows`): its last commit is neither one of the log's nor its start. An
+    /// empty log never diverges: taking a cell with one is how a host takes it, wherever it was.
+    pub fn rebase(&mut self, taken: &TakenCell) -> Result<Rebased<T>, Error> {
         let last = taken.last_commit;
         let heads = self.heads();
         let landed = match heads.iter().position(|&head| head == last) {
             Some(landed) => {
-                // And the segments of forks alone after it, those the branch holds.
+                // And the segments of forks alone after it, those the cell holds.
                 let held = |footer: &Footer| {
                     footer.contents.commits.is_empty()
                         && footer.contents.continued.is_none()
                         && !footer.contents.forks.is_empty()
                         && (footer.contents.forks.iter())
-                            .all(|fork| taken.forks.contains(&(fork.branch, fork.owner)))
+                            .all(|fork| taken.forks.contains(&(fork.cell, fork.owner)))
                 };
                 let after = self.segments.iter().skip(landed);
                 landed + after.take_while(|(footer, _)| held(footer)).count()
@@ -180,10 +180,10 @@ impl<T> Wal<T> {
 mod tests {
     use super::*;
     use crate::batch::{Commit, Data, SegmentBuilder, Unframed};
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::layout::{self, Contents, Continued, child};
     use crate::object_bucket::ObjectBucket;
-    use crate::{Writer, branch, head};
+    use crate::{Writer, head, lifecycle};
     use object_store::memory::InMemory;
     use std::sync::Arc;
     use storage_device::ExtentId;
@@ -192,19 +192,19 @@ mod tests {
         Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
     }
 
-    /// A bucket holding branch 1, a root.
+    /// A bucket holding cell 1, a root.
     async fn bucket() -> Arc<ObjectBucket> {
         let bucket = memory();
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         bucket
     }
 
-    /// A writer of branch 1, a host's, taking it over as `holder`.
+    /// A writer of cell 1, a host's, taking it over as `holder`.
     async fn open(bucket: &Arc<ObjectBucket>, holder: u64) -> Writer<ObjectBucket> {
-        Writer::open(bucket.clone(), test_branch(1), holder, 0).await.unwrap()
+        Writer::open(bucket.clone(), test_cell(1), holder, 0).await.unwrap()
     }
 
-    /// An empty log of the branch `writer` just took.
+    /// An empty log of the cell `writer` just took.
     fn log(writer: &Writer<ObjectBucket>) -> Wal<Data> {
         Wal::new(writer.taken().last_commit)
     }
@@ -233,8 +233,8 @@ mod tests {
         writer.acknowledge().await.unwrap();
     }
 
-    /// Puts `wal` after the end of the branch `writer` just took, as opening a store does, and
-    /// lands what it stamped again: the commits of the segments it found the branch held.
+    /// Puts `wal` after the end of the cell `writer` just took, as opening a store does, and
+    /// lands what it stamped again: the commits of the segments it found the cell held.
     async fn rebase(writer: &Writer<ObjectBucket>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
@@ -246,13 +246,13 @@ mod tests {
         Ok(landed.iter().flat_map(|(footer, _)| footer.contents.commits.clone()).collect())
     }
 
-    /// The commits the segments branch 1's head names make, in order: each once, if its history
+    /// The commits the segments cell 1's head names make, in order: each once, if its history
     /// is whole.
     async fn history(bucket: &Arc<ObjectBucket>) -> Vec<u64> {
-        let named = head::get(&**bucket, test_branch(1)).await.unwrap().unwrap_or_default();
+        let named = head::get(&**bucket, test_cell(1)).await.unwrap().unwrap_or_default();
         let mut commits = Vec::new();
         for (segment, epoch) in named.segments(0) {
-            let key = layout::segment(test_branch(1), segment, epoch);
+            let key = layout::segment(test_cell(1), segment, epoch);
             let object = crate::bucket::get(&**bucket, &key).await.unwrap();
             commits.extend(layout::Segment::footer(&object.bytes).unwrap().contents.commits);
         }
@@ -260,7 +260,7 @@ mod tests {
     }
 
     /// A log whose segments all landed, though never acknowledged, its host crashing first, is not
-    /// the branch's: no head names them (TASK-407). Stamped again whole after the head's end, they
+    /// the cell's: no head names them (TASK-407). Stamped again whole after the head's end, they
     /// land again, at the new writer's keys, each commit once.
     #[test]
     fn logs_landed_unacknowledged_are_stamped_again() {
@@ -282,10 +282,10 @@ mod tests {
 
     /// TASK-165.2's case, which a rebase by the footers recovery read declared diverged: a log
     /// whose segment the head names, which another host's writer then checkpointed past, is the
-    /// branch's, though recovery, starting from the checkpoint, reads none of its footers: the head
+    /// cell's, though recovery, starting from the checkpoint, reads none of its footers: the head
     /// names it by its number and epoch.
     #[test]
-    fn logs_acknowledged_under_a_later_checkpoint_are_the_branchs() {
+    fn logs_acknowledged_under_a_later_checkpoint_are_the_cells() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -301,13 +301,13 @@ mod tests {
         });
     }
 
-    /// A log stamped again by a writer taking the branch, in memory alone, as a store keeps it
+    /// A log stamped again by a writer taking the cell, in memory alone, as a store keeps it
     /// (TASK-165.9), which then landed it, under its own epoch, and acknowledged it, the host
     /// crashing before its log let go of it: the next writer finds it stamped as before, at keys
-    /// none of what landed is at, and finds it the branch's by its commits (found by local_cell's
-    /// crash rounds once the log was put after the branch by the keys the head names).
+    /// none of what landed is at, and finds it the cell's by its commits (found by local_cell's
+    /// crash rounds once the log was put after the cell by the keys the head names).
     #[test]
-    fn logs_stamped_again_in_memory_are_the_branchs_by_their_commits() {
+    fn logs_stamped_again_in_memory_are_the_cells_by_their_commits() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -326,7 +326,7 @@ mod tests {
         });
     }
 
-    /// A log whose first segment the head names, the second not: the first is the branch's, the
+    /// A log whose first segment the head names, the second not: the first is the cell's, the
     /// second is stamped again after the head's end, and lands, each commit once.
     #[test]
     fn logs_partly_acknowledged_go_on_after_the_heads_end() {
@@ -395,8 +395,8 @@ mod tests {
     /// cladefs: a log whose segment ending commit 1 goes on with commit 2, landed alone, the
     /// segment ending commit 2 not: no head names it, as its writer acknowledges whole commits
     /// alone, so both are stamped again after the head's end, and land, each commit once, both
-    /// runs sealed (TASK-345's case, which diverged when the log was put after the branch by
-    /// commits, though no other writer moved the branch on).
+    /// runs sealed (TASK-345's case, which diverged when the log was put after the cell by
+    /// commits, though no other writer moved the cell on).
     #[test]
     fn logs_whose_segment_ending_a_commit_and_going_on_landed_alone_go_on() {
         futures::executor::block_on(async {
@@ -525,10 +525,10 @@ mod tests {
         });
     }
 
-    /// An empty log never diverges, wherever the branch went: its start is the branch's last
+    /// An empty log never diverges, wherever the cell went: its start is the cell's last
     /// commit.
     #[test]
-    fn empty_logs_go_on_from_the_branchs_end() {
+    fn empty_logs_go_on_from_the_cells_end() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -543,8 +543,8 @@ mod tests {
     }
 
     /// The segments the head names are the log's landed, exactly, by their numbers and epochs: a
-    /// segment making no commit, a fork's alone, after the branch's last commit, is not taken as
-    /// landed, as it was when the log was put after the branch by commits; stamped again, it lands
+    /// segment making no commit, a fork's alone, after the cell's last commit, is not taken as
+    /// landed, as it was when the log was put after the cell by commits; stamped again, it lands
     /// once.
     #[test]
     fn segments_the_head_names_are_landed_exactly() {
@@ -554,7 +554,7 @@ mod tests {
             let mut wal = log(&first);
             let segment = close(&first, &mut wal, commit(1));
             let Unframed { footer, data } =
-                SegmentBuilder::default().fork(child(test_branch(2)), &mut first.chain());
+                SegmentBuilder::default().fork(child(test_cell(2)), &mut first.chain());
             first.add_segment(data.frame(&footer, first.keys().encrypting())).unwrap();
             wal.push(footer, data);
             close(&first, &mut wal, commit(3));
@@ -564,7 +564,7 @@ mod tests {
             let commits: Vec<_> = landed.iter().map(|(f, _)| f.contents.commits.clone()).collect();
             assert_eq!(commits, [vec![1]]);
             let forks: Vec<_> = wal.segments().map(|(f, _)| f.contents.forks.clone()).collect();
-            assert_eq!(forks, [vec![child(test_branch(2))], vec![]]);
+            assert_eq!(forks, [vec![child(test_cell(2))], vec![]]);
         });
     }
 
@@ -572,7 +572,7 @@ mod tests {
     /// commit they make, or, those making none, the start before.
     #[test]
     fn acknowledged_segments_leave_the_log() {
-        let mut chain = Chain::new(test_branch(1), 2, 5, 0);
+        let mut chain = Chain::new(test_cell(1), 2, 5, 0);
         let mut wal = Wal::new(Some(7));
         let mut push = |commits: Vec<u64>| {
             wal.push(chain.close(Contents { commits, ..Contents::default() }), ());

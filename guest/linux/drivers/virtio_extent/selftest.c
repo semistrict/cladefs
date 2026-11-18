@@ -146,7 +146,7 @@ static void run(struct vext_selftest *st)
 		*req = (struct vext_request) { __VA_ARGS__ };           \
 		virtio_extent_call(vext, req);                          \
 	})
-#define EXTENT(i) ((struct vext_id) { config->branch, next + (i) })
+#define EXTENT(i) ((struct vext_id) { config->cell, next + (i) })
 
 	err = CALL(.type = VIRTIO_EXTENT_T_INFO, .data = info, .data_len = sizeof(*info));
 	if (err)

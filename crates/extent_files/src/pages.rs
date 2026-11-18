@@ -1087,7 +1087,7 @@ mod tests {
             let next = &mut self.next;
             let mint = || {
                 *next += 1;
-                ExtentId::new(storage_device::fake_device::DEFAULT_BRANCH, *next)
+                ExtentId::new(storage_device::fake_device::DEFAULT_CELL, *next)
             };
             let plan = block_on(self.pages.plan(&self.device, mint, self.max_blocks)).unwrap();
             block_on(plan.write(&self.device, None)).unwrap();

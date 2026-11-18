@@ -1552,7 +1552,7 @@ pub(crate) mod tests {
             let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
             Arc::new(Self {
                 kind,
-                extent: ExtentId { branch: 0, sequence },
+                extent: ExtentId { cell: 0, sequence },
                 pages: Mutex::new(pages),
                 requests: Mutex::new(Vec::new()),
                 asked: Condvar::new(),

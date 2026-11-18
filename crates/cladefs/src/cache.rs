@@ -11,7 +11,7 @@
 //! time, on the pager's threads, and evicted, its extents asked for longest ago first, as memory
 //! runs out (`physmem::relieve_with`) or the daemon is asked to give memory back. Windows map its
 //! pages read-only: one copy of each page, whichever store or fork maps it, as an extent never
-//! changes once sealed, its ID its branch's to write once, which the store keeps to (TASK-79.6).
+//! changes once sealed, its ID its cell's to write once, which the store keeps to (TASK-79.6).
 //! A page evicted is unmapped from each window that maps it first; freed, it waits in quarantine
 //! for the VM processes that may reach it still (`physmem::quarantine_with`, TASK-79.9).
 //!
@@ -61,7 +61,7 @@ pub(crate) struct Cached {
 /// of a base share it, held weakly, so that the cache keeps none open, nor its files and disk
 /// space, once it closes. A page-in reads through the first open still that holds the extent, or
 /// keeps it for a follower's view: a store that frees an extent its siblings map, or closes,
-/// leaves them reading it through theirs. Each holds the same data by its ID, which its branch
+/// leaves them reading it through theirs. Each holds the same data by its ID, which its cell
 /// writes once (TASK-79.6).
 struct Holders(SharedLock<Mutex<Vec<Holder>>>);
 
@@ -113,13 +113,13 @@ impl Holders {
             .collect()
     }
 
-    /// cladefs: lets go of those whose branches `scope` says are of it, and of those closed: no
+    /// cladefs: lets go of those whose cells `scope` says are of it, and of those closed: no
     /// page-in reads through them again (TASK-411.7). Returns whether it let go of one of `scope`.
     fn forget(&self, scope: &dyn Fn(crate::CellId) -> bool) -> bool {
         let mut forgot = false;
         self.0.with(Mutex::lock).retain(|holder| match holder.store.upgrade() {
             None => false,
-            Some(store) if scope(store.description().branch) => {
+            Some(store) if scope(store.description().cell) => {
                 forgot = true;
                 false
             }
@@ -259,7 +259,7 @@ pub(crate) fn evict_arena(arena: ArenaId) {
     drop(evicted);
 }
 
-/// cladefs: forgets the stores whose branches `scope` says are of it, as their host does as it is
+/// cladefs: forgets the stores whose cells `scope` says are of it, as their host does as it is
 /// told their tenant's KEK is revoked or destroyed, or their cell shredded (doc-16, Shredding;
 /// TASK-411.7): no cached extent's page is read in through them again, and an extent no other open
 /// store holds goes from the cache, its pages evicted, unmapped from every window that maps them
@@ -862,7 +862,7 @@ impl CachedExtent {
     /// TASK-258): its reads, from the store or the bucket, its children.
     fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
         let span = trace::Span::start("cache.page_in");
-        span.set_with(trace::BRANCH, || base32_id::Short(self.extent.branch).to_string());
+        span.set_with(trace::CELL, || base32_id::Short(self.extent.cell).to_string());
         span.set_count(trace::EXTENT, self.extent.sequence);
         span.set_count(trace::ARENA, u64::from(self.arena.0));
         span.set_count(trace::BYTES, (pages.end - pages.start) * page_size());

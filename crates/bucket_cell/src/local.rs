@@ -4,7 +4,7 @@
 
 //! cladefs's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14), for
 //! development, tests and images: objects are files under a directory, as `object_store`'s
-//! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates branches rely
+//! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates cells rely
 //! on (doc-7, The head), which `LocalFileSystem` refuses.
 //!
 //! What replaces or removes an object, an update, an overwrite, a delete, a copy or a rename, holds
@@ -30,7 +30,7 @@
 //! locks taken at once (TASK-395.5): a collector's batch of deletes takes a lock a directory, not
 //! one an object. A delete removes the directories it leaves empty (`LocalFileSystem`'s automatic
 //! cleanup), which a listing by delimiter would list as prefixes of nothing, as no other store does,
-//! and which piled up before, a directory a branch, for good. A create racing it is unharmed:
+//! and which piled up before, a directory a cell, for good. A create racing it is unharmed:
 //! `LocalFileSystem` makes its directory again where it finds none, and a directory holding its
 //! staged file is not empty.
 
@@ -192,7 +192,7 @@ impl ObjectStore for Local {
         }
     }
 
-    /// Completes as an overwrite, as on S3, outside the lock: branches upload nothing by parts,
+    /// Completes as an overwrite, as on S3, outside the lock: cells upload nothing by parts,
     /// and nothing completed so is updated.
     async fn put_multipart_opts(
         &self,

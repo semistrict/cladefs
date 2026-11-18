@@ -33,7 +33,7 @@ fn contents(sequence: u64) -> Vec<u8> {
 /// all, read-only, twice over: [`EXTENTS`] MiB of pages cached in the daemon's memory, as it
 /// holds them. Returns the window.
 fn read_through(store: &CellClient) -> std::ptr::NonNull<u8> {
-    let extent = |sequence| ExtentId { branch: store.branch(), sequence };
+    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
     for sequence in 1..=EXTENTS {
         store.write(extent(sequence), 0, &[VolatileSlice::from(&contents(sequence)[..])]).unwrap();
     }

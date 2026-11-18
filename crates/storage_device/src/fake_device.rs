@@ -4,7 +4,7 @@
 
 // cladefs: Fuchsia's fake device is a range of memory. This one is an extent store in memory
 // (backlog doc-4): it holds extents by ID, each as long as its furthest write, written once (until
-// the next barrier seals them) and only by their branch, frees them, and simulates a crash by undoing any of what happened
+// the next barrier seals them) and only by their cell, frees them, and simulates a crash by undoing any of what happened
 // since the last barrier (writes and frees). It can record such crashes at random barriers
 // (`Crashes`), and count the round trips its reads would take to a store answering from afar
 // (`RoundTrips`). Unless told to be calm (`FakeDevice::calm`), it is as awkward as a store
@@ -13,7 +13,7 @@
 
 use crate::buffer::{BufferFuture, BufferRef, MutableBufferRef};
 use crate::buffer_allocator::{BufferAllocator, BufferSource};
-use crate::{Device, DeviceHolder, ExtentId, NoExtent, OpenExtents, OtherBranch, SealedExtent};
+use crate::{Device, DeviceHolder, ExtentId, NoExtent, OpenExtents, OtherCell, SealedExtent};
 use anyhow::{Error, ensure};
 use async_trait::async_trait;
 use block_protocol::{ReadOptions, WriteFlags, WriteOptions};
@@ -39,8 +39,8 @@ pub trait Observer: Send + Sync {
     fn barrier(&self) {}
 }
 
-/// The branch of a fake device's extents, unless it is given another.
-pub const DEFAULT_BRANCH: u64 = 1;
+/// The cell of a fake device's extents, unless it is given another.
+pub const DEFAULT_CELL: u64 = 1;
 
 #[derive(Debug, Default, Clone)]
 struct Inner {
@@ -48,7 +48,7 @@ struct Inner {
     extents: HashMap<ExtentId, Vec<u8>>,
     /// The bytes the extents hold.
     stored: u64,
-    /// One more than the highest sequence number written in the device's branch.
+    /// One more than the highest sequence number written in the device's cell.
     next_sequence: u64,
     /// The extents written since the last barrier, which are open: the others are sealed.
     open: HashSet<ExtentId>,
@@ -196,7 +196,7 @@ struct Crash {
     lost: Vec<usize>,
     capacity: u64,
     block_size: u32,
-    branch: u64,
+    cell: u64,
     /// cladefs: the seed of the device that recovers, if it is awkward, and the floor before.
     awkward: Option<(u64, u64)>,
 }
@@ -208,7 +208,7 @@ impl Crash {
         inner.undo_lost(&self.lost, self.block_size as usize);
         inner.barrier();
         let device =
-            FakeDevice::with_inner(inner, self.capacity, self.block_size).with_branch(self.branch);
+            FakeDevice::with_inner(inner, self.capacity, self.block_size).with_cell(self.cell);
         let device = match self.awkward {
             Some((seed, floor)) => device.recovered_awkward(seed, floor),
             None => device,
@@ -343,7 +343,7 @@ impl CrashesInner {
             lost,
             capacity: device.capacity,
             block_size: device.block_size(),
-            branch: device.branch,
+            cell: device.cell,
             awkward,
         });
     }
@@ -370,8 +370,8 @@ const MOST_TURNS: u32 = 16;
 /// sequence number 0, is not: a search from 0 was tiny on it, and took a guest's allocator 2 GiB.
 /// All of it follows a seed.
 ///
-/// - A branch's numbers start large: what the branch wrote before this device, as a fork has, up to
-///   its `next_sequence`, and half of branches, kept in a bucket, have a floor past that, which
+/// - A cell's numbers start large: what the cell wrote before this device, as a fork has, up to
+///   its `next_sequence`, and half of cells, kept in a bucket, have a floor past that, which
 ///   jumps as another writer takes them over: at a crash, or a remount, of those a lease moved.
 /// - Reads, writes, frees and barriers take turns of the executor to answer, at random, so that
 ///   those in flight together finish in any order. As a guest's driver holds them (`Seal` in
@@ -398,7 +398,7 @@ impl Awkward {
         }
     }
 
-    /// Where `inner`'s branch, which has written nothing here, starts, and its `floor`.
+    /// Where `inner`'s cell, which has written nothing here, starts, and its `floor`.
     fn start(&self, inner: &mut Inner, floor: &AtomicU64) {
         let mut rng = self.rng.lock();
         inner.next_sequence = rng.random_range(1 << 20..1 << 40);
@@ -407,7 +407,7 @@ impl Awkward {
     }
 
     /// Moves a floor on, if a lease moved: a new writer's range starts past every number of the
-    /// last's. A branch that has none, kept on the host alone, has no writer but the host's.
+    /// last's. A cell that has none, kept on the host alone, has no writer but the host's.
     fn take_over(&self, floor: &AtomicU64) {
         let mut rng = self.rng.lock();
         if floor.load(Ordering::Relaxed) != 0 && rng.random() {
@@ -550,7 +550,7 @@ pub struct FakeDevice {
     inner: Mutex<Inner>,
     /// The most bytes the extents may hold.
     capacity: u64,
-    branch: u64,
+    cell: u64,
     closed: AtomicBool,
     operation_closure: Box<dyn Fn(Op) -> Result<(), Error> + Send + Sync>,
     /// cladefs: what each write waits for first, if anything (`FakeDevice::set_write_hook`).
@@ -595,7 +595,7 @@ impl FakeDevice {
             allocator,
             inner: Mutex::new(inner),
             capacity,
-            branch: DEFAULT_BRANCH,
+            cell: DEFAULT_CELL,
             closed: AtomicBool::new(false),
             operation_closure: Box::new(|_: Op| Ok(())),
             write_hook: None,
@@ -639,9 +639,9 @@ impl FakeDevice {
         self
     }
 
-    /// Makes `branch` the branch of the device's extents.
-    pub fn with_branch(mut self, branch: u64) -> Self {
-        self.branch = branch;
+    /// Makes `cell` the cell of the device's extents.
+    pub fn with_cell(mut self, cell: u64) -> Self {
+        self.cell = cell;
         self
     }
 
@@ -704,7 +704,7 @@ impl FakeDevice {
     }
 
     /// Creates a fake device from an image (which can be anything that implements
-    /// std::io::Read), which becomes the contents of extent 0 of branch 0. The device holds as
+    /// std::io::Read), which becomes the contents of extent 0 of cell 0. The device holds as
     /// much as is read.
     pub fn from_image(
         mut reader: impl std::io::Read,
@@ -715,7 +715,7 @@ impl FakeDevice {
         Ok(Self::from_vec(data, block_size))
     }
 
-    /// Creates a fake device from a `Vec`, which becomes the contents of extent 0 of branch 0. The
+    /// Creates a fake device from a `Vec`, which becomes the contents of extent 0 of cell 0. The
     /// device holds as much as the `Vec`.
     pub fn from_vec(data: Vec<u8>, block_size: u32) -> Self {
         let capacity = data.len() as u64;
@@ -727,22 +727,22 @@ impl FakeDevice {
         Self::with_inner(inner, capacity, block_size)
     }
 
-    /// cladefs: a calm device of `branch` holding what this one does, sealed.
-    fn copy_of_branch(&self, branch: u64) -> Self {
+    /// cladefs: a calm device of `cell` holding what this one does, sealed.
+    fn copy_of_cell(&self, cell: u64) -> Self {
         let mut inner = self.inner.lock().clone();
         inner.open.clear();
         inner.sealing.clear();
-        if branch != self.branch {
-            // The fork's branch has written nothing.
+        if cell != self.cell {
+            // The fork's cell has written nothing.
             inner.next_sequence = 0;
         }
-        Self::with_inner(inner, self.capacity, self.block_size()).with_branch(branch)
+        Self::with_inner(inner, self.capacity, self.block_size()).with_cell(cell)
     }
 
     /// cladefs: a copy of the device, as if it crashed losing nothing and recovered, awkward as
     /// `seed` says, if it is: one image, many times, as `corrupt` leaves each.
     pub fn recovered(&self, seed: u64) -> Self {
-        let copy = self.copy_of_branch(self.branch);
+        let copy = self.copy_of_cell(self.cell);
         copy.inner.lock().barrier();
         match self.awkward {
             Some(_) => copy.recovered_awkward(seed, self.sequence_floor.load(Ordering::Relaxed)),
@@ -900,10 +900,10 @@ impl Device for FakeDevice {
         }
 
         (self.operation_closure)(Op::Write)?;
-        // As doc-4 has it, only the device's branch writes, and an extent sealed by a barrier can't
+        // As doc-4 has it, only the device's cell writes, and an extent sealed by a barrier can't
         // be written.
-        if extent.branch != self.branch {
-            return Err(OtherBranch(extent).into());
+        if extent.cell != self.cell {
+            return Err(OtherCell(extent).into());
         }
         if inner.extents.contains_key(&extent)
             && !inner.open.contains(&extent)
@@ -946,8 +946,8 @@ impl Device for FakeDevice {
         Ok(())
     }
 
-    fn branch(&self) -> u64 {
-        self.branch
+    fn cell(&self) -> u64 {
+        self.cell
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
@@ -1058,17 +1058,17 @@ impl Device for FakeDevice {
     }
 
     fn snapshot(&self) -> Result<DeviceHolder, Error> {
-        self.fork(self.branch)
+        self.fork(self.cell)
     }
 
     /// The snapshot is of a device that crashed, and recovered with what it held sealed.
-    fn fork(&self, branch: u64) -> Result<DeviceHolder, Error> {
-        let mut fork = self.copy_of_branch(branch);
+    fn fork(&self, cell: u64) -> Result<DeviceHolder, Error> {
+        let mut fork = self.copy_of_cell(cell);
         fork.attached = self.attached.clone();
         let fork = match &self.awkward {
             Some(awkward) => {
                 let seed = awkward.rng.lock().random();
-                if branch == self.branch {
+                if cell == self.cell {
                     fork.recovered_awkward(seed, self.sequence_floor.load(Ordering::Relaxed))
                 } else {
                     fork.awkward(seed)
@@ -1109,7 +1109,7 @@ impl Drop for FakeDevice {
 mod tests {
     use super::{Crashes, EPOCH_SHIFT, FakeDevice, RoundTrips};
     use crate::Device;
-    use crate::{ExtentId, OtherBranch, SealedExtent};
+    use crate::{ExtentId, OtherCell, SealedExtent};
     use block_protocol::{WriteFlags, WriteOptions};
     use fuchsia_sync::Mutex;
     use std::sync::Arc;
@@ -1132,8 +1132,8 @@ mod tests {
     #[fuchsia::test]
     async fn test_extents() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
-        let device = FakeDevice::new(8, BS as u32).calm().with_branch(7);
-        assert_eq!(device.branch(), 7);
+        let device = FakeDevice::new(8, BS as u32).calm().with_cell(7);
+        assert_eq!(device.cell(), 7);
         assert_eq!(device.next_sequence().await.unwrap(), 0);
         let (a, b) = (ExtentId::new(7, 1), ExtentId::new(7, 4));
         write(&device, a, BS as u64, 1, BS).await;
@@ -1164,10 +1164,10 @@ mod tests {
         assert_eq!(device.extents(), vec![b, ExtentId::new(7, 9)]);
         // Freeing doesn't make sequence numbers available again.
         assert_eq!(device.next_sequence().await.unwrap(), 10);
-        // Only the device's branch writes.
+        // Only the device's cell writes.
         let other = ExtentId::new(8, 20);
         let error = device.write(other, 0, buffer.as_ref()).await.expect_err("wrote");
-        assert_eq!(error.downcast_ref::<OtherBranch>(), Some(&OtherBranch(other)));
+        assert_eq!(error.downcast_ref::<OtherCell>(), Some(&OtherCell(other)));
     }
 
     #[fuchsia::test]

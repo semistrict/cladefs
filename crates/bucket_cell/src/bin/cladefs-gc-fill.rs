@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: fills a bucket of files with cells of branches holding garbage, for measuring the
+//! cladefs: fills a bucket of files with cells of cells holding garbage, for measuring the
 //! collector's sweeps over many cells (TASK-395.5; `scripts/gc-sweep.sh`).
 //!
 //! ```sh
@@ -10,31 +10,31 @@
 //! ```
 //!
 //! DIR, a directory, made if missing and empty, becomes a bucket of files (`file:///DIR/`) of
-//! TENANTS tenants of CELLS cells each, each cell's object and one branch, its record, its head,
+//! TENANTS tenants of CELLS cells each, each cell's object, its record, its head,
 //! SEGMENTS segments and a checkpoint covering them all: SEGMENTS + 5 objects a cell, but the first
-//! cell of tenant 1, the largest, whose branch has LARGEST segments (SEGMENTS by default). Each
+//! cell of tenant 1, the largest, whose cell has LARGEST segments (SEGMENTS by default). Each
 //! segment holds four extents of 1 KiB, and the next frees three of them, every other one all
-//! four: so a pass deletes about half of each branch's segments, those freed whole, and compacts
+//! four: so a pass deletes about half of each cell's segments, those freed whole, and compacts
 //! the rest, a quarter live, once it compacts what is less than half live.
 //!
 //! With `--vm`, the largest cell is a running VM's, snapshotted many times (TASK-395.12): each of
 //! its segments seals EXTENTS extents of 16 to 112 bytes and frees none, a disk filling, its checkpoints
-//! naming every extent sealed before them, and its branch has VERSIONS versions, at segments evenly
+//! naming every extent sealed before them, and its cell has VERSIONS versions, at segments evenly
 //! apart, the last at its last: what a pass in full over the VM's cell recovers, a state a version.
 //!
-//! With `--deleted`, every cell's branch is deleted once written, as its host deletes it
+//! With `--deleted`, every cell is deleted once written, as its host deletes it
 //! (TASK-443.4): cells nothing lives in, which a pass removes whole (TASK-455).
 //!
 //! With `--clones`, the cells are sandboxes made and deleted (TASK-443.4). Each tenant's first cell
-//! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, with a version at
+//! is a base, its cell of LARGEST segments of EXTENTS extents each, as a VM's, with a version at
 //! its last, and the checkpoint there that its first restore into another cell writes; and CELLS
-//! sandboxes after it (`T/2` on), each a cell whose branch is a clone of the version, as a host makes
-//! one (`branch::fork_version`: its record, then its reference under the base's cell), which wrote
+//! sandboxes after it (`T/2` on), each a cell whose cell is a clone of the version, as a host makes
+//! one (`lifecycle::fork_version`: its record, then its reference under the base's cell), which wrote
 //! SEGMENTS segments of garbage and a
 //! checkpoint and was deleted. The pass over each retires its reference, unmarked, and removes its
 //! cell (TASK-455): what a pass over a popular base's cell lists is its live clones' alone.
 //!
-//! Every cell's branch but a VM's or a base's, of ID 1, is of an ID an
+//! Every cell but a VM's or a base's, of ID 1, is of an ID an
 //! allocator gave, as hosts give them (`bucket_cell::objectid`).
 //!
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
@@ -52,7 +52,7 @@ use bucket_cell::keys::{self, CachingKms};
 use bucket_cell::layout::{CellId, NewVersion, Origin};
 use bucket_cell::object_bucket::ObjectBucket;
 use bucket_cell::objectid::Allocator;
-use bucket_cell::{Bytes, Writer, branch, cell};
+use bucket_cell::{Bytes, Writer, cell, lifecycle};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -67,7 +67,7 @@ use storage_device::ExtentId;
 const EXTENTS: u64 = 4;
 const EXTENT_BYTES: usize = 1024;
 
-/// Who writes the cells, and the token of its placement; and who deletes their branches.
+/// Who writes the cells, and the token of its placement; and who deletes their cells.
 const WRITER: (u64, u64) = (10, 1);
 const DELETER: u64 = 11;
 
@@ -85,10 +85,10 @@ fn usage() -> String {
         .into()
 }
 
-/// What the cells are, beside branches of garbage.
+/// What the cells are, beside cells of garbage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
-    /// Branches of garbage alone.
+    /// Cells of garbage alone.
     Garbage,
     /// The same, each deleted once written (TASK-443.4).
     Deleted,
@@ -143,7 +143,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(Args { dir: dir.into(), tenants, cells, segments, largest, kind })
 }
 
-/// What a cell's branch is.
+/// What a cell is.
 #[derive(Clone, Copy, Debug)]
 enum Shape {
     /// `segments` segments of garbage, and then deleted, if `deleted`.
@@ -265,7 +265,7 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
             }
         })
         .collect();
-    // What gives the IDs of the cells' branches, as a host's does: one for the filling, its blocks
+    // What gives the IDs of the cells, as a host's does: one for the filling, its blocks
     // taken in the bucket of the cell that first needs one, copied with it.
     let ids = Allocator::new();
     let threads = std::thread::available_parallelism().map_or(4, |threads| threads.get());
@@ -304,14 +304,14 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     Ok(filled)
 }
 
-/// A cell written into memory ([`write`]): its bucket, and its branch's last version, if any, by
+/// A cell written into memory ([`write`]): its bucket, and its cell's last version, if any, by
 /// its ID and origin.
 struct Written {
     bucket: Arc<ObjectBucket>,
     version: Option<(u64, Origin)>,
 }
 
-/// Writes `cell`, its branch as `shape` says, a clone of `of` if given, into memory, then into
+/// Writes `cell`, its cell as `shape` says, a clone of `of` if given, into memory, then into
 /// `files`: what it took, `of`'s own objects apart.
 async fn fill(
     files: &LocalFileSystem,
@@ -325,7 +325,7 @@ async fn fill(
     Ok(copy(&written.bucket, files, of).await?.0)
 }
 
-/// Writes the base `cell`, its branch as `shape` says, with a version, into memory, and the
+/// Writes the base `cell`, its cell as `shape` says, with a version, into memory, and the
 /// checkpoint at the version that its first restore into another cell writes, then into `files`:
 /// what it took, and its version, for its clones.
 async fn fill_base(
@@ -344,9 +344,9 @@ async fn fill_base(
     Ok((sum, Version { id, origin, objects }))
 }
 
-/// Writes `cell`, its branch as `shape` says, into a bucket in memory: one starting from `of`'s
-/// objects, the branch a clone of that version, if given.
-/// Its branch's ID, but a VM's or a base's, 1, given by `ids`.
+/// Writes `cell`, its cell as `shape` says, into a bucket in memory: one starting from `of`'s
+/// objects, the cell a clone of that version, if given.
+/// Its cell's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
     kms: &Arc<CachingKms>,
     cell: CellId,
@@ -370,10 +370,10 @@ async fn write(
         Shape::Garbage { .. } => CellId { tenant: cell.tenant, id: ids.next(&*bucket).await },
     };
     match of {
-        None => branch::create(&*bucket, id, 0).await.map_err(failed)?,
+        None => lifecycle::create(&*bucket, id, 0).await.map_err(failed)?,
         Some(version) => {
             let keys = keys::Parents::Kms(kms, None);
-            branch::fork_version(&*bucket, id, version.id, version.origin, WRITER.0, keys)
+            lifecycle::fork_version(&*bucket, id, version.id, version.origin, WRITER.0, keys)
                 .await
                 .map_err(failed)?
         }
@@ -426,14 +426,14 @@ async fn write(
     writer.checkpoint().await.map_err(failed)?;
     drop(writer);
     if let Shape::Garbage { deleted: true, .. } = shape {
-        // As a host deletes a branch (`local_cell::upload::delete_branch`).
-        branch::delete(&*bucket, id, DELETER, WRITER.1, kms).await.map_err(failed)?;
+        // As a host deletes a cell (`local_cell::upload::delete_cell`).
+        lifecycle::delete(&*bucket, id, DELETER, WRITER.1, kms).await.map_err(failed)?;
         cell::forget(&*bucket, cell).await.map_err(failed)?;
     }
     Ok(Written { bucket, version: versioned })
 }
 
-/// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its branch's record is given its DEK
+/// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its cell's record is given its DEK
 /// by its writer.
 async fn make_cell(
     bucket: &ObjectBucket,
@@ -471,7 +471,7 @@ async fn copy(
     Ok((sum, objects))
 }
 
-/// The ID of the version a VM's branch, as `shape` says, has at the end of its segment `n`,
+/// The ID of the version a VM's cell, as `shape` says, has at the end of its segment `n`,
 /// counting from 0, if any: the `versions` of its `segments` evenly apart, the last at the last,
 /// numbered from 1.
 fn version_at(shape: Shape, n: u64) -> Option<u64> {
@@ -574,7 +574,7 @@ mod tests {
     }
 
     /// TASK-443.4, TASK-455: what `--deleted` and `--clones` fill, as sweeps find it. A dead cell,
-    /// its branch a root or a clone of an ID an allocator gave, is removed whole by its first pass,
+    /// its cell a root or a clone of an ID an allocator gave, is removed whole by its first pass,
     /// and costs the sweeps after it nothing: they list no cell of it. A sandbox's reference is
     /// retired unmarked, leaving its base's cell nothing of it: that cell's pass lists no
     /// reference, and skips once a sweep went by without a sandbox made or retired, a look

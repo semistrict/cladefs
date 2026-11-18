@@ -11,12 +11,12 @@
 //! holds it, unexpired, or ended since the taker's sweep began, when the taker leaves the cell to
 //! it ([`Error::Left`], [`Holding`]). A pass holding its cell for a time renews the lease between
 //! its steps and lets it go as it ends ([`change`]); a pass of a process gone holds it until it
-//! expires. A taking fences every pass before it, as a branch's taking of its head does: a pass
+//! expires. A taking fences every pass before it, as a cell's taking of its head does: a pass
 //! fenced deletes nothing, and writes nothing to the lease.
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
 //! records, as it lets the lease go, the digest of its listing of the cell, but the collector's own
-//! objects (`<C>gc/`); the options it decided by; what it found no live branch needs but for the
+//! objects (`<C>gc/`); the options it decided by; what it found no live cell needs but for the
 //! time since an object was written, each with when it may go ([`Deferred`]); the cell's objects
 //! and bytes, by kind, as of its listing ([`Usage`]); and how many objects encrypted it left
 //! uncompacted, its cell's KEK not to be had ([`Passed::uncompacted`]).
@@ -33,13 +33,13 @@
 use crate::bucket::{self, Bucket, Meta};
 use crate::collector::{Holding, Options};
 use crate::layout::{self, CellId, FORMAT};
-use crate::{Error, Left, branch};
+use crate::{Error, Left, lifecycle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
 /// A cell's collector lease ([`layout::collector_lease`]): the format of the bucket's objects,
-/// first, as a cell's object says it; the epoch of its last taking, and who took it, as a branch's
+/// first, as a cell's object says it; the epoch of its last taking, and who took it, as a cell's
 /// head does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go
 /// through ended; and what the last pass over the cell that ran to its end recorded, carried from
 /// each taking to the next ([`Passed`]). Time is the store's clock as each pass read it
@@ -65,7 +65,7 @@ impl CollectorLease {
     pub fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
-            return Err(Error::Format { branch: CellId { tenant: cell.tenant, id: 0 }, format });
+            return Err(Error::Format { cell, format });
         }
         layout::decode(bytes)
     }
@@ -107,12 +107,12 @@ pub struct Passed {
     /// it ([`Listed::digest`]): what a pass listing the same decides as it did. None if it decided
     /// by more than the cell holds, which may change with no object of the cell's changing: a version
     /// of another cell's record, read for a clone of it being made; an origin found lost; a
-    /// branch's recovery that found what it needs lost, and then nothing lost. Or if it deleted
+    /// cell's recovery that found what it needs lost, and then nothing lost. Or if it deleted
     /// only what a pass before deferred, without deciding anew what goes once that is gone.
     pub listing: Option<[u8; 32]>,
     /// The options it decided by.
     pub decided: Decided,
-    /// What it found no live branch needs, but that it was written too recently, each with when it
+    /// What it found no live cell needs, but that it was written too recently, each with when it
     /// may go, by the store's clock: in the order of their keys.
     pub deferred: Vec<Deferred>,
     /// The cell's objects and bytes, as of its listing, less what it deleted, and with what it
@@ -147,7 +147,7 @@ impl Decided {
     }
 }
 
-/// An object a pass found no live branch needs once a grace period went by since an object was
+/// An object a pass found no live cell needs once a grace period went by since an object was
 /// written: one compacted, its moves too recent; moves of an object gone, or compacted in turn
 /// ([`crate::collector`]). Its key, and when it may go, by the store's clock.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,9 +163,9 @@ pub struct Usage {
     /// When the listing it is of began, by the store's clock: milliseconds since the Unix epoch on
     /// a real store.
     pub measured: u64,
-    /// Objects, and their bytes as stored, by kind ([`layout::Kind::name`]): the cell's branches'
+    /// Objects, and their bytes as stored, by kind ([`layout::Kind::name`]): the cell's
     /// objects, what the collector compacted of them, its lease and marks, and the references of
-    /// forks of its branches; the garbage among them the collector has yet to reclaim too.
+    /// forks of its cells; the garbage among them the collector has yet to reclaim too.
     pub kinds: BTreeMap<String, Sum>,
 }
 
@@ -212,7 +212,7 @@ impl std::ops::AddAssign for Sum {
 
 /// What a pass's listing of a cell found.
 pub(crate) struct Listed {
-    /// Every object of the cell, by its key, but the references of forks of its branches, which are
+    /// Every object of the cell, by its key, but the references of forks of its cells, which are
     /// never candidates, nor named by any state.
     pub objects: BTreeMap<String, Meta>,
     /// SHA-256 over every object listed but the collector's own (`<C>gc/`), in the order of their
@@ -223,12 +223,12 @@ pub(crate) struct Listed {
     /// Every object listed but the cell's collector lease, which recording counts as it writes it
     /// ([`record`]).
     pub usage: Usage,
-    /// cladefs: the references of forks of the cell's branches listed beside their marks
+    /// cladefs: the references of forks of the cell listed beside their marks
     /// ([`layout::retired`]): retired, or taken back, and written again since by a writer whose
     /// read of the child's record came before, garbage the pass deletes (TASK-395.13,
     /// TASK-395.14). Their writes changed the listing, so that no pass skips them.
     pub stale: Vec<String>,
-    /// cladefs: how many references of forks of the cell's branches it listed, the stale among
+    /// cladefs: how many references of forks of the cell it listed, the stale among
     /// them: none but those, a pass deleting them leaves none (TASK-455).
     pub references: usize,
 }
@@ -316,9 +316,9 @@ pub(crate) async fn take(
     holder: u64,
     holding: Holding,
 ) -> Result<LeaseTaking, Error> {
-    let start = branch::Start::Found(found);
+    let start = lifecycle::Start::Found(found);
     let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
-    branch::transition(bucket, &layout::collector_lease(cell), start, decode, |found| {
+    lifecycle::transition(bucket, &layout::collector_lease(cell), start, decode, |found| {
         // The time as it decides, after its read: a lease's expiry is never taken for later than
         // the read found it.
         let now = bucket.now();
@@ -337,7 +337,7 @@ pub(crate) async fn take(
         };
         let lease =
             CollectorLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
-        Ok(branch::Step::Write(lease, LeaseTaking { epoch, holder, passed }))
+        Ok(lifecycle::Step::Write(lease, LeaseTaking { epoch, holder, passed }))
     })
     .await
 }
@@ -352,11 +352,11 @@ pub(crate) async fn change(
 ) -> Result<bool, Error> {
     let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
     let key = layout::collector_lease(cell);
-    branch::transition(bucket, &key, branch::Start::Read, decode, |found| match found {
+    lifecycle::transition(bucket, &key, lifecycle::Start::Read, decode, |found| match found {
         Some(lease) if (lease.epoch, lease.holder) == (taken.epoch, taken.holder) => {
-            Ok(branch::Step::Write(change(lease).counting_itself(), true))
+            Ok(lifecycle::Step::Write(change(lease).counting_itself(), true))
         }
-        _ => Ok(branch::Step::Stop(false)),
+        _ => Ok(lifecycle::Step::Stop(false)),
     })
     .await
 }
@@ -442,8 +442,7 @@ mod tests {
         for format in [FORMAT + 1, 8] {
             let lease =
                 CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
-            let refused =
-                Error::Format { branch: CellId { tenant: TEST_CELL.tenant, id: 0 }, format };
+            let refused = Error::Format { cell: TEST_CELL, format };
             assert_eq!(CollectorLease::decode(TEST_CELL, &layout::encode(&lease)), Err(refused));
         }
     }

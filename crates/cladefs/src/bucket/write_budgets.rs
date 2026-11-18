@@ -93,14 +93,14 @@ fn a_hosts_store_writes_what_its_design_says() {
     // raw files of their own held two each till its commit, past 1,024 (TASK-332).
     let dir = tempfile::tempdir().unwrap();
     let bucket =
-        Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "branches"));
+        Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "cells"));
     let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).unwrap();
     let options = crate::host_cell::options();
-    let branch = store.branch();
+    let cell = store.cell();
     let mut sequence = 0;
     let mut next = || {
         sequence += 1;
-        ExtentId { branch: branch.id, sequence }
+        ExtentId { cell: cell.id, sequence }
     };
     #[cfg(target_os = "linux")]
     let (start, io_before) = (local_cell::written(), io_written());

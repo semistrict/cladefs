@@ -2226,7 +2226,7 @@ impl<const KEEPS: bool> World<KEEPS> {
         let (device, allocator) = (self.filesystem.device(), self.filesystem.allocator());
         allocator.freed().await.map_err(|e| format!("freeing: {e:#}"))?;
         let longer: Vec<_> = (device.extents().into_iter())
-            .filter(|extent| extent.branch == device.branch())
+            .filter(|extent| extent.cell == device.cell())
             .filter_map(|extent| {
                 let held = device.extent_len(extent)?;
                 let counted = allocator.extent_counted(extent);
@@ -2309,8 +2309,8 @@ impl<const KEEPS: bool> World<KEEPS> {
         let allocator = self.filesystem.allocator();
         let device = self.filesystem.device();
         let known = self.filesystem.allocator().extents();
-        let (branch, held) = (device.branch(), device.extents());
-        let held = held.iter().filter(|extent| extent.branch == branch);
+        let (cell, held) = (device.cell(), device.extents());
+        let held = held.iter().filter(|extent| extent.cell == cell);
         let orphans: Vec<_> = held.filter(|extent| !known.contains_key(extent)).collect();
         match orphans.len() {
             0 => Ok(()),
@@ -2332,9 +2332,9 @@ impl<const KEEPS: bool> World<KEEPS> {
         let device = self.filesystem.device();
         let known = self.filesystem.allocator().extents();
         let sought = self.filesystem.allocator().orphans_sought();
-        let (branch, held) = (device.branch(), device.extents());
+        let (cell, held) = (device.cell(), device.extents());
         let orphans: Vec<_> =
-            held.iter().filter(|e| e.branch == branch && !known.contains_key(e)).collect();
+            held.iter().filter(|e| e.cell == cell && !known.contains_key(e)).collect();
         let in_sought =
             |e: &&storage_device::ExtentId| sought.iter().any(|w| w.contains(&e.sequence));
         match orphans.iter().any(in_sought) {

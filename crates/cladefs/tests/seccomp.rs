@@ -363,7 +363,7 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
     })
     .unwrap();
     assert!(store.copies_on_write());
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     let bytes = common::pattern(1);
     on_vmm("fc_extent_q0", || {
         store.write(extent, 0, &[VolatileSlice::from(&bytes[..ps])]).unwrap();

@@ -288,7 +288,7 @@ void host_store_write(u64 offset, const void *buf, size_t len)
 struct cladefs_device *cladefs_device_find(const char *tag, size_t len, struct cladefs_device_info *info)
 {
 	*info = (struct cladefs_device_info) {
-		.block_size = PAGE_SIZE, .max_io = 1 << 20, .max_root = 4096, .branch = 1,
+		.block_size = PAGE_SIZE, .max_io = 1 << 20, .max_root = 4096, .cell = 1,
 		.max_extent = 64 << 20,
 	};
 	return &device;

@@ -24,10 +24,10 @@
 //!   takes the segments of durable ones.
 //!
 //! Commits are made durable by a flusher, too, while an uploader begins, as of the latest commit,
-//! and while the branch closes: the uploader takes only the segments of commits a flush made
-//! durable, and the branch, closed, holds its last commit durably. A free races a write in flight,
+//! and while the cell closes: the uploader takes only the segments of commits a flush made
+//! durable, and the cell, closed, holds its last commit durably. A free races a write in flight,
 //! too, which is dropped, whenever it finishes; and writes fill segments between commits, which
-//! go to the next as each is full. And the store fails, and the branch closes, while a commit
+//! go to the next as each is full. And the store fails, and the cell closes, while a commit
 //! waits for a write in progress, which fails then. And the guest's requests are served while a commit's flush writes its checkpoint, stalling (TASK-92.56).
 //!
 //! So are the crash tests' rounds, the store framing segments and syncing flushes on threads of its own while
@@ -60,7 +60,7 @@ mod stalling;
 use stalling::{Op, Stalling};
 
 const BLOCK: usize = 4096;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 /// Small segments, so that commits and the closer close several, and an extent of four blocks in
 /// a file of its own.
 const OPTIONS: Options = Options {
@@ -74,8 +74,8 @@ const OPTIONS: Options = Options {
     // cladefs: flushes of either kind, holding their runs or checking them (TASK-301).
     held_most: 8 << 10,
 };
-/// The chain of a writer of the branch in object storage, whose segments the store closes.
-const WRITER: Chain = Chain::new(BRANCH, 0, 0, 0);
+/// The chain of a writer of the cell in object storage, whose segments the store closes.
+const WRITER: Chain = Chain::new(CELL, 0, 0, 0);
 
 /// The schedules each test runs, randomly and by PCT: some seconds; `SHUTTLE_SOAK` multiplies them.
 fn runs() -> usize {
@@ -89,7 +89,7 @@ fn check(holds: bool, failure: impl FnOnce() -> String) -> Result<(), String> {
 }
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
 /// Bytes each their offset modulo 251, plus `seed`.
@@ -110,8 +110,8 @@ enum Step {
     Fork,
 }
 
-/// The branch the writer forks.
-const CHILD: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(BRANCH.id + 1);
+/// The cell the writer forks.
+const CHILD: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(CELL.id + 1);
 
 const STEPS: &[Step] = &[
     Step::Write(1, 1),
@@ -167,7 +167,7 @@ fn reopening() {
 
 fn run_with(Run { steps, follow }: Run) {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     // What the store holds as of each commit, by epoch, the writer's record.
     let history = Arc::new(Mutex::new(vec![Holds::new()]));
@@ -194,7 +194,7 @@ fn run_with(Run { steps, follow }: Run) {
                     Step::Commit { .. } | Step::Fork => {
                         match *step {
                             Step::Fork => {
-                                let child = Child { branch: CHILD, owner: 0 };
+                                let child = Child { cell: CHILD, owner: 0 };
                                 *forked.lock().unwrap() = Some(store.commit_fork(child).unwrap());
                             }
                             Step::Commit { durable: true } => store.commit(None).unwrap(),
@@ -276,7 +276,7 @@ fn run_with(Run { steps, follow }: Run) {
                     let holds = held(last);
                     let data = extent_frame::data(
                         &closed.bytes().unwrap(),
-                        &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+                        &bucket_cell::testing::ring([CELL]).of(CELL.id),
                     )
                     .unwrap();
                     let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
@@ -287,7 +287,7 @@ fn run_with(Run { steps, follow }: Run) {
                             key.clone(),
                             extent_frame::data(
                                 bytes,
-                                &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+                                &bucket_cell::testing::ring([CELL]).of(CELL.id),
                             )
                             .unwrap()
                             .to_vec(),
@@ -300,7 +300,7 @@ fn run_with(Run { steps, follow }: Run) {
                     let on_their_own = closed.footer.own().map(|(extent, location)| {
                         let data = extent_frame::data(
                             &own[&location.key],
-                            &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+                            &bucket_cell::testing::ring([CELL]).of(CELL.id),
                         )
                         .unwrap();
                         (extent, location.len, data)
@@ -469,7 +469,7 @@ fn run_with(Run { steps, follow }: Run) {
 
 /// cladefs: what the uploader uploaded, as far as the store's reads need it once their data is in
 /// the bucket: each object's data, unframed, by its key (TASK-165.8); and the footers the uploader
-/// acknowledged, in order, the branch's history there, which a crash's store opens as of
+/// acknowledged, in order, the cell's history there, which a crash's store opens as of
 /// (TASK-165.9).
 #[derive(Clone, Default)]
 struct Bucket(Arc<Mutex<BTreeMap<String, Vec<u8>>>>, Arc<Mutex<Vec<Footer>>>);
@@ -479,23 +479,23 @@ impl Bucket {
         self.0.lock().unwrap().insert(key, data);
     }
 
-    /// The segment whose footer is `footer` is acknowledged: the branch's from now on.
+    /// The segment whose footer is `footer` is acknowledged: the cell's from now on.
     fn acknowledge(&self, footer: Footer) {
         self.1.lock().unwrap().push(footer);
     }
 
-    /// The store in `dir`, opened as the bucket holds its branch: its acknowledged footers
+    /// The store in `dir`, opened as the bucket holds its cell: its acknowledged footers
     /// replayed, its writer's chain after them.
     fn reopen(&self, dir: MemDir) -> LocalCell<MemDir> {
-        let (mut state, mut chain) = (bucket_cell::State::new(BRANCH), WRITER);
+        let (mut state, mut chain) = (bucket_cell::State::new(CELL), WRITER);
         for footer in self.1.lock().unwrap().iter() {
             state.apply(footer);
             chain = chain.admit(footer).expect("the footers acknowledged follow each other");
         }
         let head =
             bucket_cell::layout::Head::default().holding(chain.epoch(), chain.next_segment());
-        let taken = bucket_cell::TakenBranch::of(head, &state, chain);
-        let keys = bucket_cell::testing::ring([BRANCH]);
+        let taken = bucket_cell::TakenCell::of(head, &state, chain);
+        let keys = bucket_cell::testing::ring([CELL]);
         let opening =
             Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
         LocalCell::recover(dir).unwrap().open(OPTIONS, opening).unwrap()
@@ -527,7 +527,7 @@ impl Bucket {
 
 /// cladefs: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
 fn bucket_key<F>(closed: &local_cell::Closed<F>) -> String {
-    bucket_cell::layout::segment(closed.footer.branch, closed.footer.segment, closed.footer.epoch)
+    bucket_cell::layout::segment(closed.footer.cell, closed.footer.segment, closed.footer.epoch)
 }
 
 /// One run of writes racing commits, as a VM's requests may: a writer writes extents, in segments
@@ -535,7 +535,7 @@ fn bucket_key<F>(closed: &local_cell::Closed<F>) -> String {
 /// between commits. Each extent a commit sealed holds what was written to it, and the segments
 /// closed after hold what their commits sealed, in them.
 fn racing() {
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(MemDir::new(), description, OPTIONS).unwrap());
     // Extents of one block, in segments, and of four, in a file of its own.
     const WRITES: [(u64, usize); 3] = [(1, 1), (2, 4), (3, 1)];
@@ -599,7 +599,7 @@ const ROLLING: Options = Options { max_extent: 4 * BLOCK as u64, ..OPTIONS };
 /// again holding what its last commit did.
 fn rolling_over() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, ROLLING).unwrap());
     const EXTENTS: u64 = 6;
     let writer = {
@@ -653,7 +653,7 @@ fn rolling_over() {
 /// store commits, and opens again holding that.
 fn freeing_during_a_write() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     let begun = Arc::new(AtomicBool::new(false));
     let writer = {
@@ -707,7 +707,7 @@ fn freeing_during_a_write() {
 /// flush made durable, not those of commits a flush took and has yet to sync.
 fn uploading_during_flushes() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     let writer = {
         let store = store.clone();
@@ -753,7 +753,7 @@ fn uploading_during_flushes() {
 /// the store's state may differ from its files.
 fn failing_during_a_commit() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit_ordered(None).unwrap();
@@ -806,13 +806,13 @@ fn failing_during_a_commit() {
     );
 }
 
-/// One run of the branch closing while a commit waits for a write in progress (TASK-83): a writer
-/// begins a write, which it finishes once the branch closed; a committer commits, which waits for
-/// it; and the branch closes meanwhile, after which another store may open it. The commit fails
-/// then, changing nothing, as all changes of a closed branch do.
+/// One run of the cell closing while a commit waits for a write in progress (TASK-83): a writer
+/// begins a write, which it finishes once the cell closed; a committer commits, which waits for
+/// it; and the cell closes meanwhile, after which another store may open it. The commit fails
+/// then, changing nothing, as all changes of a closed cell do.
 fn closing_during_a_commit() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     let (begun, closed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
     let writer = {
@@ -850,16 +850,16 @@ fn closing_during_a_commit() {
     closer.join().unwrap();
     let committed = committer.join().unwrap().map_err(|error| error.to_string());
     assert!(
-        committed == Err(format!("branch {BRANCH} is closed")),
-        "a commit went on over a branch closed: {committed:?}"
+        committed == Err(format!("cell {CELL} is closed")),
+        "a commit went on over a cell closed: {committed:?}"
     );
 }
 
-/// One run of the branch closing while a flush makes its commits durable: once closed, it holds
+/// One run of the cell closing while a flush makes its commits durable: once closed, it holds
 /// its last commit durably, as another store opening it, or a crash, finds.
 fn closing_during_a_flush() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     for sequence in 1..=2 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, BLOCK)).unwrap();
@@ -874,7 +874,7 @@ fn closing_during_a_flush() {
         thread::spawn(move || {
             store.close().unwrap();
             let epoch = LocalCell::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap();
-            assert!(epoch == 2, "a crash after the branch closed recovered commit {epoch} of 2");
+            assert!(epoch == 2, "a crash after the cell closed recovered commit {epoch} of 2");
         })
     };
     for thread in [flusher, closer] {
@@ -882,16 +882,16 @@ fn closing_during_a_flush() {
     }
 }
 
-/// A store of the branch whose open segment, its first, holds a commit's extent, in a directory
+/// A store of the cell whose open segment, its first, holds a commit's extent, in a directory
 /// that stalls the creation of the segment's framed file, as the segment closes: so that a closing
 /// between commits stalls framing it, as on a slow disk (TASK-41.1).
 fn framing_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
     let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
-    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(CELL.id), Padded(0)));
     (dir, store)
 }
 
@@ -901,7 +901,7 @@ fn spawn_closing(store: &Arc<LocalCell<Stalling>>) -> thread::JoinHandle<()> {
     let store = store.clone();
     thread::spawn(move || {
         let closed = store.close_now();
-        let closed = closed.expect("a closing between commits raced the branch's closing");
+        let closed = closed.expect("a closing between commits raced the cell's closing");
         assert!(closed, "a closing between commits closed nothing");
     })
 }
@@ -930,8 +930,8 @@ fn serving_during_a_framing() {
     check_framed(&store, "a read once a closing between commits framed");
 }
 
-/// One run of the branch closing while a closing between commits frames the segment, which stalls
-/// (TASK-41.1): the branch's closing waits for it, so that another store opening the branch then
+/// One run of the cell closing while a closing between commits frames the segment, which stalls
+/// (TASK-41.1): the cell's closing waits for it, so that another store opening the cell then
 /// finds the segment framed, rather than framing it again meanwhile from its raw file.
 fn closing_during_a_framing() {
     let (dir, store) = framing_stalls();
@@ -942,8 +942,8 @@ fn closing_during_a_framing() {
         thread::spawn(move || {
             store.close().unwrap();
             let reopened = LocalCell::open(dir, OPTIONS);
-            let reopened = reopened.expect("a closing between commits raced the branch's closing");
-            check_framed(&reopened, "a closing between commits raced the branch's closing");
+            let reopened = reopened.expect("a closing between commits raced the cell's closing");
+            check_framed(&reopened, "a closing between commits raced the cell's closing");
         })
     };
     dir.let_go(Ok(()));
@@ -952,8 +952,8 @@ fn closing_during_a_framing() {
 }
 
 /// One run of the framing of the segment a commit closed, which stalls, failing, while those of
-/// the segments later commits closed wait behind it (TASK-79.99): the branch's closing waits for
-/// each, so that another store, opening the branch, frames their segments again from their raw
+/// the segments later commits closed wait behind it (TASK-79.99): the cell's closing waits for
+/// each, so that another store, opening the cell, frames their segments again from their raw
 /// files only once nothing else frames them. Framings are one queue (TASK-165.9): those after the
 /// failed one fail with it, framing nothing. A flush waits for no framing: the commits it made
 /// durable while the first stalled, their records in the logs of the segments they were made in,
@@ -974,7 +974,7 @@ fn closing_after_a_failed_framing() {
     let error = store.closed(usize::MAX).map(|_| ()).expect_err("a framing failed");
     drop(error);
     store.close().expect_err("a store whose framing failed closed with its commits durable");
-    let failure = "a framing raced the branch's closing after a failed framing";
+    let failure = "a framing raced the cell's closing after a failed framing";
     let reopened = LocalCell::open(dir.clone(), OPTIONS);
     let reopened = reopened.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
     // What was durable: the commits the flush took, extents 1 to 3's.
@@ -994,13 +994,13 @@ fn closing_after_a_failed_framing() {
     }
 }
 
-/// A store of the branch, segments laid out as [`ROLLING`] says, whose open segment, its first,
+/// A store of the cell, segments laid out as [`ROLLING`] says, whose open segment, its first,
 /// holds a commit's extent, and those of three written since, and is full, in a directory that
 /// stalls the creation of the segment's framed file: so that the next commit, which seals what it
 /// holds where it is, closes it, and its framing stalls, as on a slow disk (TASK-79.2, TASK-92.41).
 fn framing_at_a_commit_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
     let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, ROLLING).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -1008,7 +1008,7 @@ fn framing_at_a_commit_stalls() -> (Stalling, Arc<LocalCell<Stalling>>) {
     for sequence in 2..5 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 2 * BLOCK)).unwrap();
     }
-    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(BRANCH.id), Padded(0)));
+    dir.arm(Op::Create, &format!("segments/{}/framing-{}", Padded(CELL.id), Padded(0)));
     (dir, store)
 }
 
@@ -1039,12 +1039,12 @@ fn serving_during_a_framing_at_a_commit() {
     store.flush().unwrap();
     check_rolled(&store, 5, "a read once a commit's closing of a segment filled framed");
     drop(store);
-    check_rolled(&LocalCell::open(dir, OPTIONS).unwrap(), 5, "the branch opened again");
+    check_rolled(&LocalCell::open(dir, OPTIONS).unwrap(), 5, "the cell opened again");
 }
 
-/// One run of the branch closing while the framing of a segment filled between commits, which the
-/// commit after closed, stalls (TASK-79.2, TASK-92.41): the branch's closing waits for it; another
-/// store, opening the branch, finds it framed, and holds what the commit made.
+/// One run of the cell closing while the framing of a segment filled between commits, which the
+/// commit after closed, stalls (TASK-79.2, TASK-92.41): the cell's closing waits for it; another
+/// store, opening the cell, finds it framed, and holds what the commit made.
 fn closing_during_a_framing_at_a_commit() {
     let (dir, store) = framing_at_a_commit_stalls();
     store.write(extent(5), 0, &pattern(5, 2 * BLOCK)).unwrap();
@@ -1068,7 +1068,7 @@ fn closing_during_a_framing_at_a_commit() {
 /// asking once more after, with no commit to come, has the commit's segment.
 fn uploading_what_a_segment_filled_holds() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -1105,7 +1105,7 @@ fn gather(store: &LocalCell<MemDir>, taken: &mut Vec<u64>) {
 /// leave the uploader without them (TASK-150.2, TASK-153.8).
 fn uploading_what_a_spanning_commit_closed() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir, description, ROLLING).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -1132,7 +1132,7 @@ fn uploading_what_a_spanning_commit_closed() {
 /// reports, finds so. Both commits are durable after, in their order.
 fn serving_during_a_flush() {
     let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     dir.arm(Op::Barrier, "");
@@ -1150,7 +1150,7 @@ fn serving_during_a_flush() {
     drop(store);
     let reopened = LocalCell::open(dir, OPTIONS).unwrap();
     assert_eq!(reopened.last_commit().unwrap(), 2, "the commits made durable were not");
-    check_flushed(&reopened, "the branch opened again");
+    check_flushed(&reopened, "the cell opened again");
 }
 
 /// One run of a flush, an uploader's, of a commit only ordered, stalled at its barrier, as a
@@ -1160,7 +1160,7 @@ fn serving_during_a_flush() {
 /// lost it (GCE r717's crash-dax-daemon-killed, TASK-165.9).
 fn pending_during_a_flush() {
     let dir = Stalling::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(dir.clone(), description, OPTIONS).unwrap());
     store.write(extent(1), 0, &pattern(1, BLOCK)).unwrap();
     store.commit_ordered(None).unwrap();
@@ -1493,12 +1493,12 @@ fn needs_rechecks_after_waiting_for_failures() {
     fails_without(rules, &["a commit went on over a store that failed"], failing_during_a_commit);
 }
 
-/// Commits that waited for the writes in progress going on over a branch closed meanwhile, which
+/// Commits that waited for the writes in progress going on over a cell closed meanwhile, which
 /// another store may have opened since.
 #[test]
 fn needs_rechecks_after_waiting_for_closings() {
     let rules = Rules { recheck_after_waiting: false, ..Rules::ALL };
-    fails_without(rules, &["a commit went on over a branch closed"], closing_during_a_commit);
+    fails_without(rules, &["a commit went on over a cell closed"], closing_during_a_commit);
 }
 
 /// Writes to extents freed since they began recorded as they finish: the extent holds the
@@ -1516,21 +1516,21 @@ fn needs_writes_to_freed_extents_dropped() {
     fails_without(rules, &expected, freeing_during_a_write);
 }
 
-/// The branch closing while a flush is in flight, as if nothing were left to flush: a crash then
+/// The cell closing while a flush is in flight, as if nothing were left to flush: a crash then
 /// loses commits made before it closed.
 #[test]
 fn needs_closes_to_wait_for_flushes() {
     let rules = Rules { close_waits_for_flushes: false, ..Rules::ALL };
-    fails_without(rules, &["a crash after the branch closed"], closing_during_a_flush);
+    fails_without(rules, &["a crash after the cell closed"], closing_during_a_flush);
 }
 
-/// The branch closing while a closing between commits frames a segment: another store, opening
-/// the branch, frames it again meanwhile, from its raw file, which the first removes, or the first
+/// The cell closing while a closing between commits frames a segment: another store, opening
+/// the cell, frames it again meanwhile, from its raw file, which the first removes, or the first
 /// finds the framed file made.
 #[test]
 fn needs_closes_to_wait_for_framings() {
     let rules = Rules { close_waits_for_framings: false, ..Rules::ALL };
-    fails_without(rules, &["raced the branch's closing"], closing_during_a_framing);
+    fails_without(rules, &["raced the cell's closing"], closing_during_a_framing);
 }
 
 /// The segments a commit closes past the one it ends in, those filled since the commit before,

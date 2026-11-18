@@ -201,7 +201,7 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
 }
 
 /// TASK-364: a SQLite cell is fenced as any cell is. Another host, of a later
-/// placement, takes the cell, and the cell's branch with it: the first host's commit, durable on
+/// placement, takes the cell, and the cell with it: the first host's commit, durable on
 /// its disk alone, is not in the bucket, its wait for it failing; its commits after it fail.
 #[test]
 fn a_database_is_fenced_with_its_cell() {
@@ -227,18 +227,18 @@ fn a_database_is_fenced_with_its_cell() {
     connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)").unwrap();
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
     control.sync_cell(&store).unwrap();
-    let ours = control.branch(&store).unwrap();
+    let ours = control.cell(&store).unwrap();
     let objects = bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours)).unwrap().unwrap();
-    assert_eq!((held.branch, held.kind), (Some(ours.id), Some(cell::Kind::Sqlite)));
+    assert_eq!(held.kind, Some(cell::Kind::Sqlite));
     assert_eq!((held.epoch, held.token), (1, 1));
 
     // Another host's, placed later.
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
         let (held, _) = cell::hold(&*objects, ours, (2, 2), None, None).await.unwrap();
-        // Its writer fences the branch (TASK-371), unwrapping the cell's KEK through the host's
+        // Its writer fences the cell (TASK-371), unwrapping the cell's KEK through the host's
         // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
         let kms = cladefs::bucket::kms().unwrap();
         let writer =

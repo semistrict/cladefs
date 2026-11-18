@@ -7,17 +7,17 @@
 //! extent-store device of a VM's host.
 //!
 //! Extents are written once: from their first write until the next commit, which seals them. They
-//! are freed whole. A store holds one branch, a filesystem, which mints its extents' IDs under its
-//! branch; it may hold extents of other branches' too, whose data is in the bucket, as a fork's
+//! are freed whole. A store holds one cell, a filesystem, which mints its extents' IDs under its
+//! cell; it may hold extents of other cells' too, whose data is in the bucket, as a fork's
 //! inherited ones are (doc-7). cladefs: forks, versions and deletion are the bucket's (doc-14,
 //! TASK-165.7): the store makes nothing of them but the commit that names a fork
 //! ([`LocalCell::commit_fork`]). A store's directory holds:
 //!
-//! - `store`, its description: its format, block size, branch, and the bucket its branch is kept
+//! - `store`, its description: its format, block size, cell, and the bucket its cell is kept
 //!   in;
-//! - `segments/<branch>/<n>`: the branch's extents' data, in segments (doc-7, Segments): open
+//! - `segments/<cell>/<n>`: the cell's extents' data, in segments (doc-7, Segments): open
 //!   extents' pieces, as they were written, and sealed extents in one 4 KiB-aligned run each. A
-//!   segment is written raw while it is open, in `open-segments/<branch>/<n>`. It closes at a
+//!   segment is written raw while it is open, in `open-segments/<cell>/<n>`. It closes at a
 //!   commit once no write is in progress in it, when it holds about `Options::segment_size`, when
 //!   it is `Options::segment_age` old, when asked to ([`LocalCell::close_segment`]), and at a fork; then
 //!   it is framed as objects in object storage are (`extent_frame`), its data in parts compressed
@@ -36,19 +36,19 @@
 //!   past its room. Before, a segment filled was closed, or set aside, holding no commit, and the
 //!   commit copied every extent written since out of it, into files of their own past the open
 //!   segment's room;
-//! - `extents/<branch>/<sequence>`: the branch's extents sealed at `Options::large_extent` or more,
-//!   in files of their own, framed so; written raw in `open-extents/<branch>/<sequence>` until
+//! - `extents/<cell>/<sequence>`: the cell's extents sealed at `Options::large_extent` or more,
+//!   in files of their own, framed so; written raw in `open-extents/<cell>/<sequence>` until
 //!   sealed, if large from their first write. cladefs: one none of whose parts compresses is framed
 //!   in place, its raw file renamed its framed file, its tail appended: its data written once
 //!   (TASK-310);
-//! - `logs/<branch>/<n>`: each segment's log of the commits made in it, a record each, appended as
+//! - `logs/<cell>/<n>`: each segment's log of the commits made in it, a record each, appended as
 //!   they are made local, until it is framed and they are; and `wal`, its write-ahead log's
-//!   start, the branch's commit its first segment goes on from (TASK-165.9: the `wal` module has
+//!   start, the cell's commit its first segment goes on from (TASK-165.9: the `wal` module has
 //!   the write-ahead log).
 //!
 //! A store is opened by one process at a time ([`Dir::take`]), and once in it. Stores in
 //! directories of the host's are made, opened and deleted with [`create_host`], [`open_host`] and
-//! [`delete_host`], which removes the directory whole, once what else keeps the branch, as a
+//! [`delete_host`], which removes the directory whole, once what else keeps the cell, as a
 //! bucket does, deleted it.
 //!
 //! **Commits.** A commit is a barrier: it seals the extents written before it, copying each whose
@@ -63,39 +63,39 @@
 //! **Recovery.** Opening a store recovers its write-ahead log from its directory (the `wal`
 //! module): the segments framed whole, and those a crash left open or torn closed again from their
 //! raw data and the records of their logs that are whole, which are the commits made local, at
-//! least. Its branch is the bucket's, recovered by its uploader, after whose end the log is put
+//! least. Its cell is the bucket's, recovered by its uploader, after whose end the log is put
 //! by its commits ([`Recovering::open`], `bucket_cell::Wal::rebase`); the store's state is the
-//! branch's and its log's segments' after it. cladefs: a closed segment's raw file goes only once
+//! cell's and its log's segments' after it. cladefs: a closed segment's raw file goes only once
 //! the commits its footer names are local, so that one closed by a commit not local has it
 //! still, holding what the local commits wrote, whatever its framed file holds (TASK-79.33). So
-//! a crash at any point leaves each branch as of a prefix of its commits, one at least as late as
+//! a crash at any point leaves each cell as of a prefix of its commits, one at least as late as
 //! the last made local.
 //!
 //! **Footers.** A closed segment's footer is the one segments in object storage have
-//! (`extent_frame::segment`), so that a closed segment is the object its branch keeps there, byte
+//! (`extent_frame::segment`), so that a closed segment is the object its cell keeps there, byte
 //! for byte (doc-7, decision 1). Given a writer's chain by an uploader ([`Recovering::open`]), the
 //! store's footers are the writer's (`extent_frame::segment::Chain`): numbered on from where the
 //! chain is, each following the one before, their commits tagged with the writer's epoch,
 //! their extents of their own at the writer's keys; and it keeps each closed segment for the
 //! uploader until it is acknowledged in the bucket ([`LocalCell::closed`], [`LocalCell::acknowledged`]). The uploader may have
 //! it close its open segment between commits ([`LocalCell::close_now`]): cladefs: framed holding none of
-//! the store's locks, as a commit's closing is, which the branch's closing and forks wait for.
+//! the store's locks, as a commit's closing is, which the cell's closing and forks wait for.
 //!
 //! **The bucket.** cladefs: once its writer acknowledges a segment in the bucket
 //! ([`LocalCell::acknowledged`], TASK-165.8), the extents sealed in it, and those stored on their own
 //! its footer names, held or kept, are the bucket's: read there ([`BucketData`]), and their files
 //! leave the store, into the host's cache of the bucket's objects if the uploader gave one, the
 //! segment's once no write is in progress in it. Locally: the write-ahead log's start records it,
-//! after the commits local so far. So the branch's files are what is not acknowledged yet, and
+//! after the commits local so far. So the cell's files are what is not acknowledged yet, and
 //! the open segment: what the upload lag bound bounds, with the segment's room, and the cache's
-//! capacity. Nothing cleans the branch's segments here: what no extent is in leaves with them, the
+//! capacity. Nothing cleans the cell's segments here: what no extent is in leaves with them, the
 //! bucket's collector's to take back. What writes since the last commit wasted, writing over what
 //! they wrote, or writing extents freed before the commit, counts as used once it is past the
 //! capacity's worth, which the commit takes back: a writer's that never commits. What the commits
-//! leave freed takes none of the branch's room, however much, which the writer could neither make
+//! leave freed takes none of the cell's room, however much, which the writer could neither make
 //! room for nor know of.
 //!
-//! **Views.** [`LocalCell::view`] gives a [`View`] of the branch as of its latest commit, which a
+//! **Views.** [`LocalCell::view`] gives a [`View`] of the cell as of its latest commit, which a
 //! follower reads through ([`LocalCell::read_view`]) while the writer goes on (doc-8, TASK-42.2): the
 //! extents it frees after a view's commit are kept while the view lives, and those a view pins,
 //! and count as used. Views never wait for a commit. One that lags too long, or keeps too much,
@@ -191,11 +191,11 @@ pub use cell::{
     Opening, Options, Recovering, SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
-/// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
+/// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
 pub use host::{
-    create_host, create_host_at_version, delete_host, host_branch, host_bucket, host_token,
+    create_host, create_host_at_version, delete_host, host_bucket, host_cell, host_token,
     host_version, made_host, place_host, unmade_host,
 };
 pub use layout::{Description, Format, Place};

@@ -55,7 +55,7 @@ fn stamp_commit() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The files of `root`'s checkout, if it is one, that change as it moves to another commit: its
-/// HEAD, the branch it names, and its index, which a commit writes.
+/// HEAD, the cell it names, and its index, which a commit writes.
 fn git_paths(root: &Path) -> Vec<PathBuf> {
     let git = |args: &[&str]| -> Option<String> {
         let output = Command::new("git").arg("-C").arg(root).args(args).output().ok()?;

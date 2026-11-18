@@ -109,9 +109,9 @@ impl MemoryCell {
         self.files.device().block_size() as u64
     }
 
-    /// The branch of the cell's store.
-    pub fn branch(&self) -> u64 {
-        self.store.branch()
+    /// The store's cell.
+    pub fn cell(&self) -> u64 {
+        self.store.cell()
     }
 
     /// Writes `pages` at `offset`, whole pages, to be committed by [`MemoryCell::commit`].
@@ -182,7 +182,7 @@ impl MemoryCell {
     }
 
     /// Forks the cell, as of its last commit, to a new store at `path`, a memory cell of a
-    /// new cell, which reads its pages until it writes its own: its branch.
+    /// new cell, which reads its pages until it writes its own: its cell.
     pub fn fork(&self, path: &Path) -> Result<u64, Error> {
         self.store.fork(path).map_err(Error::new)
     }
@@ -385,10 +385,7 @@ impl Mapper {
             .filter_map(|(range, contents)| {
                 let contents = match contents? {
                     Contents::Extent { extent, offset } => MappingContents::Extent {
-                        extent: crate::ExtentId {
-                            branch: extent.branch,
-                            sequence: extent.sequence,
-                        },
+                        extent: crate::ExtentId { cell: extent.cell, sequence: extent.sequence },
                         offset,
                     },
                     Contents::Zeros => MappingContents::Zeros,

@@ -71,7 +71,7 @@ pub async fn store(
     make_store(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
 }
 
-/// cladefs: makes a store at `path` as [`store`] does, its branch kept as `keeping` says: as the
+/// cladefs: makes a store at `path` as [`store`] does, its cell kept as `keeping` says: as the
 /// extent daemon's stores keep theirs, with the host's cache of the bucket's objects, which what
 /// the bucket acknowledged of the image goes into, and the import's check reads (TASK-237).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -900,7 +900,7 @@ mod tests {
     use futures::future::{Either, select};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    /// How a store an import here makes keeps its branch: where no host's daemon serves it.
+    /// How a store an import here makes keeps its cell: where no host's daemon serves it.
     fn keeping() -> local_cell::upload::Options {
         crate::host_cell::keeping().unwrap()
     }

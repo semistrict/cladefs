@@ -17,7 +17,7 @@ struct cladefs_device;
 
 /* A WRITE may carry VIRTIO_EXTENT_WRITE_COMMIT. */
 #define CLADEFS_DEVICE_WRITE_COMMIT (1 << 0)
-/* The device takes FREEZE, and INFO says the branch (VIRTIO_EXTENT_F_FREEZE). */
+/* The device takes FREEZE, and INFO says the cell (VIRTIO_EXTENT_F_FREEZE). */
 #define CLADEFS_DEVICE_FREEZE (1 << 1)
 /*
  * cladefs: the device follows a store another VM writes, read-only (VIRTIO_EXTENT_F_READ_ONLY):
@@ -36,8 +36,8 @@ struct cladefs_device_info {
 	u32 max_root;
 	/* CLADEFS_DEVICE_*. */
 	u32 flags;
-	/* The branch whose extents the device's filesystem writes. */
-	u64 branch;
+	/* The cell whose extents the device's filesystem writes. */
+	u64 cell;
 	/* The most bytes one extent holds. */
 	u64 max_extent;
 };
@@ -61,7 +61,7 @@ void cladefs_device_put(struct cladefs_device *dev);
 struct cladefs_device_op {
 	u32 type;
 	u32 flags;
-	u64 branch;
+	u64 cell;
 	u64 sequence;
 	u64 offset;
 	void *data;
@@ -131,12 +131,12 @@ struct dax_device *cladefs_device_dax(struct cladefs_device *dev, u64 *window_le
 u64 cladefs_device_private_max(struct cladefs_device *dev);
 bool cladefs_device_read_only(struct cladefs_device *dev);
 /*
- * Maps `len` bytes at `offset` in the extent {branch, sequence} at `window_offset` in the window,
+ * Maps `len` bytes at `offset` in the extent {cell, sequence} at `window_offset` in the window,
  * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. cladefs:
  * `prefault` if the guest accesses the pages next, as a read does, which the device then maps for
  * it ahead of its accesses, if it can (MAP_PREFAULT, TASK-112.1).
  */
-int cladefs_device_map(struct cladefs_device *dev, u64 branch, u64 sequence, u64 offset, u64 len,
+int cladefs_device_map(struct cladefs_device *dev, u64 cell, u64 sequence, u64 offset, u64 len,
 		    u64 window_offset, bool prefault);
 
 /*
@@ -144,7 +144,7 @@ int cladefs_device_map(struct cladefs_device *dev, u64 branch, u64 sequence, u64
  * `zeros`, cladefs_device_map_zeros's, its extent ignored.
  */
 struct cladefs_device_map {
-	u64 branch;
+	u64 cell;
 	u64 sequence;
 	u64 offset;
 	u64 len;

@@ -92,7 +92,7 @@ fn stats_response(stats: super::stats::HostStats) -> GetStatsResponse {
     };
     let vms = stats.vms.into_iter().map(|vm| VmStats {
         connection: vm.connection,
-        branch: vm.branch,
+        cell: vm.cell,
         path: vm.path.to_string_lossy().into_owned(),
         follower: vm.follower,
         build: vm.build.clone().unwrap_or_default(),
@@ -255,9 +255,8 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         since.elapsed().map_or(0, |waited| waited.as_millis() as u64)
     };
     StatCellResponse {
-        branch: state.branch.id,
-        tenant: state.branch.tenant,
-        cell: state.branch.id,
+        tenant: state.cell.tenant,
+        cell: state.cell.id,
         capacity: state.info.capacity,
         used: state.info.used,
         available: state.info.available,
@@ -276,11 +275,6 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),
     }
-}
-
-/// The cell a response names by its tenant and ID (TASK-364).
-fn branched(tenant: u64, cell: u64) -> crate::CellId {
-    crate::CellId { tenant, id: cell }
 }
 
 fn reply<T>(done: Result<T, Errno>) -> Result<Response<T>, Status> {
@@ -323,7 +317,7 @@ impl Cladefsd for Control {
         &self,
         request: Request<CreateCellRequest>,
     ) -> Result<Response<CreateCellResponse>, Status> {
-        let CreateCellRequest { path: store, capacity, branch, token, tenant, cell, kind } =
+        let CreateCellRequest { path: store, capacity, token, tenant, cell, kind } =
             request.into_inner();
         let store = path(store)?;
         let kind = match CellKind::try_from(kind) {
@@ -336,13 +330,9 @@ impl Cladefsd for Control {
             0 => self.new_cell_at(&store, tenant)?,
             _ => tenant,
         };
-        let branch = crate::CellId { tenant: tenant, id: branch };
-        let made = cells::create(store, capacity, branch, (token, kind)).await;
-        reply(made.map(|made| CreateCellResponse {
-            branch: made.id,
-            tenant: made.tenant,
-            cell: made.id,
-        }))
+        let cell = crate::CellId { tenant, id: cell };
+        let made = cells::create(store, capacity, cell, (token, kind)).await;
+        reply(made.map(|made| CreateCellResponse { tenant: made.tenant, cell: made.id }))
     }
 
     async fn import_image(
@@ -355,11 +345,7 @@ impl Cladefsd for Control {
         let reference = Some(reference).filter(|reference| !reference.is_empty());
         let tenant = self.new_cell_at(&store, tenant)?;
         let made = cells::import(store, capacity, image, reference, tenant).await;
-        reply(made.map(|made| ImportImageResponse {
-            branch: made.id,
-            tenant: made.tenant,
-            cell: made.id,
-        }))
+        reply(made.map(|made| ImportImageResponse { tenant: made.tenant, cell: made.id }))
     }
 
     async fn fork_cell(
@@ -372,13 +358,12 @@ impl Cladefsd for Control {
         let forked = match version {
             0 => cells::fork(path(from)?, to, tenant).await,
             _ if !from.is_empty() || cell == 0 => Err(Errno::EINVAL),
-            _ => cells::fork_of_version(branched(of, cell), version, to, tenant).await,
+            _ => {
+                cells::fork_of_version(crate::CellId { tenant: of, id: cell }, version, to, tenant)
+                    .await
+            }
         };
-        reply(forked.map(|forked| ForkCellResponse {
-            branch: forked.id,
-            tenant: forked.tenant,
-            cell: forked.id,
-        }))
+        reply(forked.map(|forked| ForkCellResponse { tenant: forked.tenant, cell: forked.id }))
     }
 
     async fn delete_cell(
@@ -785,35 +770,34 @@ impl Client {
         Ok(Self { runtime, client })
     }
 
-    /// Makes an empty store at `path` of `capacity` bytes, of `branch`, an Fxfs cell:
-    /// of a new cell if its cell's ID is 0, and a new branch there if its ID is; placed at `token`
-    /// if given; and returns its branch (`CreateCell`, TASK-364).
+    /// Makes an empty store at `path` of `capacity` bytes, of `cell`, an Fxfs cell:
+    /// of a new cell if its cell's ID is 0, and a new cell there if its ID is; placed at `token`
+    /// if given; and returns its cell (`CreateCell`, TASK-364).
     pub fn create_cell(
         &self,
         path: &Path,
         capacity: u64,
-        branch: crate::CellId,
+        cell: crate::CellId,
         token: Option<u64>,
     ) -> Result<crate::CellId, crate::Error> {
         let request = CreateCellRequest {
             path: name(path)?,
             capacity,
-            branch: branch.id,
             token,
-            tenant: branch.tenant,
-            cell: branch.id,
+            tenant: cell.tenant,
+            cell: cell.id,
             kind: CellKind::Fxfs.into(),
         };
         let response = self
             .call(format!("making the store at {}", path.display()), |mut c| async move {
                 c.create_cell(request).await
             })?;
-        Ok(branched(response.tenant, response.cell))
+        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
     /// Makes a store at `path` of `capacity` bytes holding the container image at `image`, the one
     /// `reference` names in it if given, a new cell of the default tenant's, and
-    /// returns its branch (`ImportImage`).
+    /// returns its cell (`ImportImage`).
     pub fn import_image(
         &self,
         path: &Path,
@@ -831,18 +815,18 @@ impl Client {
         let response = self.call(format!("importing {}", image.display()), |mut c| async move {
             c.import_image(request).await
         })?;
-        Ok(branched(response.tenant, response.cell))
+        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Forks the store at `from` to a new cell at `to`, and returns its branch (`ForkCell`).
+    /// Forks the store at `from` to a new cell at `to`, and returns its cell (`ForkCell`).
     pub fn fork_cell(&self, from: &Path, to: &Path) -> Result<crate::CellId, crate::Error> {
         let request = ForkCellRequest { from: name(from)?, to: name(to)?, ..Default::default() };
         let what = format!("forking the store at {} to {}", from.display(), to.display());
         let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
-        Ok(branched(response.tenant, response.cell))
+        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// Forks the version `from` to a new cell at `to`, on any host, and returns its branch
+    /// Forks the version `from` to a new cell at `to`, on any host, and returns its cell
     /// (`ForkCell`'s `version`).
     pub fn fork_version(
         &self,
@@ -854,7 +838,7 @@ impl Client {
             ForkCellRequest { to: name(to)?, version, tenant, cell, ..Default::default() };
         let what = format!("forking version {version} of cell {cell} to {}", to.display());
         let response = self.call(what, |mut c| async move { c.fork_cell(request).await })?;
-        Ok(branched(response.tenant, response.cell))
+        Ok(crate::CellId { tenant: response.tenant, id: response.cell })
     }
 
     /// Makes a version of the cell of the store at `path`, keeping its newest `keep_last` if given,
@@ -897,7 +881,7 @@ impl Client {
         self.call(what, |mut c| async move { c.delete_cell(request).await }).map(drop)
     }
 
-    /// Deletes this host's copy of the store at `path`, its branch staying in the daemon's bucket
+    /// Deletes this host's copy of the store at `path`, its cell staying in the daemon's bucket
     /// (`DropCell`).
     pub fn drop_cell(&self, path: &Path) -> Result<(), crate::Error> {
         let request = DropCellRequest { path: name(path)? };
@@ -926,7 +910,7 @@ impl Client {
         self.call(what, |mut c| async move { c.make_public(request).await }).map(drop)
     }
 
-    /// Makes the fork at `path` public, its branch alone, to attach to stores, not to fork
+    /// Makes the fork at `path` public, its cell alone, to attach to stores, not to fork
     /// (`MakePublic` with `attach_only`).
     pub fn make_public_attach_only(&self, path: &Path) -> Result<(), crate::Error> {
         let request = MakePublicRequest { path: name(path)?, attach_only: true };
@@ -956,11 +940,11 @@ impl Client {
         Ok(listed.stores)
     }
 
-    /// The branch of the store at `path`, in its cell (`StatCell`'s `tenant`, `cell` and
-    /// `branch`, TASK-364).
-    pub fn branch(&self, path: &Path) -> Result<crate::CellId, crate::Error> {
+    /// The cell of the store at `path`, in its cell (`StatCell`'s `tenant`, `cell` and
+    /// `cell`, TASK-364).
+    pub fn cell(&self, path: &Path) -> Result<crate::CellId, crate::Error> {
         let stat = self.stat_cell(path)?;
-        Ok(branched(stat.tenant, stat.cell))
+        Ok(crate::CellId { tenant: stat.tenant, id: stat.cell })
     }
 
     /// The commit number of the latest commit of the store at `path` (`StatCell`'s `committed`).

@@ -998,7 +998,7 @@ mod tests {
             let bytes = extent_frame::framed(
                 data,
                 b"footer",
-                crate::testing::encrypting(crate::layout::test_branch(1)),
+                crate::testing::encrypting(crate::layout::test_cell(1)),
             );
             let start = Frame::of(&bytes).unwrap().tail().start as usize;
             let tail = object::Tail::of(key, bytes[start..].to_vec()).unwrap();

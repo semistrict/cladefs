@@ -134,7 +134,7 @@ mod tests {
         let short = layout::with_footer(
             &[1; 5000],
             &"footer",
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         assert!((short.len() as u64) < TAIL);
         let (read_back, asked) = read(&short);
@@ -148,7 +148,7 @@ mod tests {
         let empty = read_tail(&layout::with_footer(
             &[1; 5000],
             &Vec::<u8>::new(),
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         ))
         .bytes
         .len();
@@ -157,7 +157,7 @@ mod tests {
                 layout::with_footer(
                     &[1; 5000],
                     &vec![2u8; len],
-                    crate::testing::encrypting(layout::test_branch(1)),
+                    crate::testing::encrypting(layout::test_cell(1)),
                 )
             })
             .find(|bytes| read_tail(bytes).bytes.len() as u64 == TAIL)
@@ -171,7 +171,7 @@ mod tests {
         let long = layout::with_footer(
             &[1; 5000],
             &footer,
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         let range = Frame::of(&long).unwrap().tail();
         let (read_back, asked) = read(&long);
@@ -184,10 +184,10 @@ mod tests {
     /// cladefs: an encrypted object's tail is read and checked by a reader holding no key, as the cache
     /// keeps it; opened under its key, its parts open, and its footer and table are checked
     /// against their MACs; under another key of its name, refused (TASK-411.2). One encrypted under a
-    /// key of another branch, which the keys hold not, stays unopened.
+    /// key of another cell, which the keys hold not, stays unopened.
     #[test]
     fn encrypted_tails_are_read_keyless_and_opened_under_their_key() {
-        let id = extent_frame::KeyId { branch: 1, generation: 0 };
+        let id = extent_frame::KeyId { cell: 1, generation: 0 };
         let dek = extent_frame::Secret::from_bytes(&[7; 32]);
         let footer = layout::encode(&"footer");
         let keys = std::collections::HashMap::from([(id, dek)]);
@@ -206,7 +206,7 @@ mod tests {
         let others = layout::with_footer(
             &[1; 5000],
             &"footer",
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         let bucket = holding(others.clone());
         let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
@@ -221,7 +221,7 @@ mod tests {
         bytes.extend_from_slice(&layout::with_footer(
             &[1; 100],
             &"footer",
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         ));
         let bucket = holding(bytes.clone());
         let corrupt = Error::Corrupt(format!("{KEY}, by its trailer"));
@@ -236,7 +236,7 @@ mod tests {
         let bytes = layout::with_footer(
             &[1; 5000],
             &"footer",
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         let bucket = holding(bytes.clone());
         let (read, asked) = bucket.served(footer::<String>(&*bucket, KEY));

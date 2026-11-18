@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a branch's head (doc-7, The head; TASK-407): its writer's taking and its commit, one
-//! object ([`Head`]). Every object of a branch's is written once, at a key naming its writer's
-//! epoch, and is the branch's only once the head names it: a writer acknowledges its segments by
+//! cladefs: a cell's head (doc-7, The head; TASK-407): its writer's taking and its commit, one
+//! object ([`Head`]). Every object of a cell's is written once, at a key naming its writer's
+//! epoch, and is the cell's only once the head names it: a writer acknowledges its segments by
 //! swapping the head to name them, with the condition that it is still the version it last wrote,
 //! its own taking's. A takeover swaps it to the next epoch, so that the writer before fails at its
 //! next swap: the head is the fence. A deletion swaps it to [`Head::FINAL`], which no writer takes,
@@ -26,11 +26,11 @@ pub struct Held {
     version: Version,
 }
 
-/// `branch`'s head as a read finds it, for a taking of it after ([`take_from`]).
+/// `cell`'s head as a read finds it, for a taking of it after ([`take_from`]).
 pub struct Read(Option<Object>);
 
 impl Read {
-    /// cladefs: what a read of the head of a branch known to have none finds, without the read
+    /// cladefs: what a read of the head of a cell known to have none finds, without the read
     /// (`crate::known`, TASK-449): a clone its host just made, which no writer took yet. Wrong, a
     /// taking from it finds the head there and goes on from it, its create being conditional.
     pub fn absent() -> Self {
@@ -43,51 +43,51 @@ impl Read {
     }
 }
 
-/// Reads `branch`'s head for a taking of it after ([`take_from`]), as with other reads a taking
+/// Reads `cell`'s head for a taking of it after ([`take_from`]), as with other reads a taking
 /// needs, at once (TASK-165.11).
-pub async fn read(bucket: &impl Bucket, branch: CellId) -> Read {
-    Read(bucket::get(bucket, &layout::head(branch)).await)
+pub async fn read(bucket: &impl Bucket, cell: CellId) -> Read {
+    Read(bucket::get(bucket, &layout::head(cell)).await)
 }
 
-/// `branch`'s head, if it has one.
-pub async fn get(bucket: &impl Bucket, branch: CellId) -> Result<Option<Head>, Error> {
-    match bucket::get(bucket, &layout::head(branch)).await {
+/// `cell`'s head, if it has one.
+pub async fn get(bucket: &impl Bucket, cell: CellId) -> Result<Option<Head>, Error> {
+    match bucket::get(bucket, &layout::head(cell)).await {
         Some(object) => Ok(Some(Head::decode(&object.bytes)?)),
         None => Ok(None),
     }
 }
 
-/// The epoch of `branch`'s head: 0 if it has none.
-pub async fn epoch(bucket: &impl Bucket, branch: CellId) -> Result<u64, Error> {
-    Ok(get(bucket, branch).await?.map_or(0, |head| head.epoch))
+/// The epoch of `cell`'s head: 0 if it has none.
+pub async fn epoch(bucket: &impl Bucket, cell: CellId) -> Result<u64, Error> {
+    Ok(get(bucket, cell).await?.map_or(0, |head| head.epoch))
 }
 
-/// Takes `branch`'s head, of the epoch after its last, as `holder`, which must differ from every
+/// Takes `cell`'s head, of the epoch after its last, as `holder`, which must differ from every
 /// other taking's, of the placement whose fencing token is `token`: what it names, the segments the
-/// branch holds and its newest checkpoint, kept. Fails for a deleted branch's, and for one a later
-/// placement took, whose token is higher ([`Error::Stale`]): a placement cut off takes no branch
+/// cell holds and its newest checkpoint, kept. Fails for a deleted cell's, and for one a later
+/// placement took, whose token is higher ([`Error::Stale`]): a placement cut off takes no cell
 /// back from the one after it (TASK-39.7).
 pub async fn take(
     bucket: &impl Bucket,
-    branch: CellId,
+    cell: CellId,
     holder: u64,
     token: u64,
 ) -> Result<Held, Error> {
-    take_from(bucket, branch, read(bucket, branch).await, holder, token).await
+    take_from(bucket, cell, read(bucket, cell).await, holder, token).await
 }
 
-/// Takes `branch`'s head as [`take`] does, starting from `read`, what a read of it before found
+/// Takes `cell`'s head as [`take`] does, starting from `read`, what a read of it before found
 /// ([`read`]), rather than reading it again: its write is conditional on what `read` found, so that
 /// another's taking since, which changed it, is read and gone on from, as after a read of its own.
 /// A round trip less, on a real bucket, for every opening of a store (TASK-165.11).
 pub async fn take_from(
     bucket: &impl Bucket,
-    branch: CellId,
+    cell: CellId,
     read: Read,
     holder: u64,
     token: u64,
 ) -> Result<Held, Error> {
-    let key = layout::head(branch);
+    let key = layout::head(cell);
     let mut found = read.0;
     loop {
         let head = match &found {
@@ -113,16 +113,16 @@ pub async fn take_from(
     }
 }
 
-/// Swaps `branch`'s head from `held`, as its holder last wrote it, to `next`: with the condition
+/// Swaps `cell`'s head from `held`, as its holder last wrote it, to `next`: with the condition
 /// that it is still that version (rule `head_swap`), and so that taking still, which it fails
-/// otherwise ([`Error::Fenced`]): another taking, or the branch's deletion, swapped it since.
+/// otherwise ([`Error::Fenced`]): another taking, or the cell's deletion, swapped it since.
 pub async fn swap(
     bucket: &impl Bucket,
-    branch: CellId,
+    cell: CellId,
     held: &Held,
     next: Head,
 ) -> Result<Held, Error> {
-    let key = layout::head(branch);
+    let key = layout::head(cell);
     if !rules().head_swap {
         // Written whatever is there: a test's, which shows the condition needed.
         let bytes = Bytes::from(layout::encode(&next));
@@ -132,20 +132,20 @@ pub async fn swap(
     write(bucket, &key, &next, Some(held.version.clone())).await.map_err(|_| Error::Fenced)
 }
 
-/// Ends `branch`'s head, as a deletion does first: swapped to its final epoch, which no writer
+/// Ends `cell`'s head, as a deletion does first: swapped to its final epoch, which no writer
 /// takes, as `holder` of the placement whose fencing token is `token`, unless a later placement
-/// took it ([`Error::Stale`]). What it names, it keeps: the head the deletion recovers the branch
-/// from, which nothing swaps after, so that every deletion of the branch finds the same forks
-/// (TASK-183); but its versions, which go with the branch (doc-18, TASK-476). Starts from `found`,
+/// took it ([`Error::Stale`]). What it names, it keeps: the head the deletion recovers the cell
+/// from, which nothing swaps after, so that every deletion of the cell finds the same forks
+/// (TASK-183); but its versions, which go with the cell (doc-18, TASK-476). Starts from `found`,
 /// what a read of it found ([`read`]). Returns it.
 pub(crate) async fn end(
     bucket: &impl Bucket,
-    branch: CellId,
+    cell: CellId,
     found: Read,
     holder: u64,
     token: u64,
 ) -> Result<Head, Error> {
-    let key = layout::head(branch);
+    let key = layout::head(cell);
     let mut found = found.0;
     loop {
         let head = match &found {

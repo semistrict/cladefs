@@ -4,7 +4,7 @@
 
 //! What a file set keeps on its device: the root, and the nodes of each file's tree.
 //!
-//! **Refs.** A block of an extent is named by a ref of 24 bytes: the extent's branch and sequence
+//! **Refs.** A block of an extent is named by a ref of 24 bytes: the extent's cell and sequence
 //! number, the block's index in it, and how many blocks the extent holds, which no ref to an
 //! extent says otherwise; none, a ref of zeros, is a hole.
 //!
@@ -153,7 +153,7 @@ pub(crate) fn decode_node(
 /// Writes `at` into `slot`, a ref's bytes: zeros if none.
 fn encode_ref(slot: &mut [u8; REF_BYTES], at: Option<Ref>) {
     let at = at.unwrap_or(Ref { extent: ExtentId::new(0, 0), block: 0, blocks: 0 });
-    slot[0..8].copy_from_slice(&at.extent.branch.to_le_bytes());
+    slot[0..8].copy_from_slice(&at.extent.cell.to_le_bytes());
     slot[8..16].copy_from_slice(&at.extent.sequence.to_le_bytes());
     slot[16..20].copy_from_slice(&at.block.to_le_bytes());
     slot[20..24].copy_from_slice(&at.blocks.to_le_bytes());
@@ -204,7 +204,7 @@ pub(crate) fn list_len(count: u64, block_size: usize) -> usize {
 /// The bytes of an extent listing `extents`, in blocks of `block_size`.
 pub(crate) fn encode_list(extents: &[ExtentId], block_size: usize) -> Vec<u8> {
     let mut out: Vec<u8> = (extents.iter())
-        .flat_map(|extent| [extent.branch.to_le_bytes(), extent.sequence.to_le_bytes()])
+        .flat_map(|extent| [extent.cell.to_le_bytes(), extent.sequence.to_le_bytes()])
         .flatten()
         .collect();
     out.resize(list_len(extents.len() as u64, block_size), 0);
@@ -225,11 +225,11 @@ impl Root {
         out.extend_from_slice(&self.minted.to_le_bytes());
         out.extend_from_slice(&(self.dying.len() as u64).to_le_bytes());
         for extent in &self.dying {
-            out.extend_from_slice(&extent.branch.to_le_bytes());
+            out.extend_from_slice(&extent.cell.to_le_bytes());
             out.extend_from_slice(&extent.sequence.to_le_bytes());
         }
         let (list, count) = self.dying_list.unwrap_or((ExtentId::new(0, 0), 0));
-        for word in [list.branch, list.sequence, count] {
+        for word in [list.cell, list.sequence, count] {
             out.extend_from_slice(&word.to_le_bytes());
         }
         out.extend_from_slice(&(self.files.len() as u64).to_le_bytes());
@@ -244,7 +244,7 @@ impl Root {
             assert!(file.sparse.len() <= SPARSE_KEPT, "{} extents to compact", file.sparse.len());
             out.extend_from_slice(&(file.sparse.len() as u64).to_le_bytes());
             for (extent, blocks) in &file.sparse {
-                out.extend_from_slice(&extent.branch.to_le_bytes());
+                out.extend_from_slice(&extent.cell.to_le_bytes());
                 out.extend_from_slice(&extent.sequence.to_le_bytes());
                 out.extend_from_slice(&blocks.to_le_bytes());
             }

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: object IDs, unique in their bucket (TASK-364): a branch's ID is one. An extent's ID names
-//! its branch by the branch's ID alone, as forks share their parents' extents by it, and a host's
-//! cache of extents keys them by it; so no two branches of a bucket may have one ID, whatever their
-//! cells. Records were once keyed by IDs alone, a second branch of an ID refused by its record's
+//! cladefs: object IDs, unique in their bucket (TASK-364): a cell's ID is one. An extent's ID names
+//! its cell by the cell's ID alone, as forks share their parents' extents by it, and a host's
+//! cache of extents keys them by it; so no two cells of a bucket may have one ID, whatever their
+//! cells. Records were once keyed by IDs alone, a second cell of an ID refused by its record's
 //! create; under cells, they are not, and this is what keeps IDs apart.
 //!
 //! An [`Allocator`] gives IDs out of a block of [`ID_BLOCK`] of them it took: a block is taken by
@@ -29,7 +29,7 @@ use std::sync::Mutex;
 /// block.
 pub const ID_BLOCK: u64 = 1 << 24;
 
-/// How many blocks there are: none holds `u64::MAX`, which names no branch. Block 0, the IDs tests
+/// How many blocks there are: none holds `u64::MAX`, which names no cell. Block 0, the IDs tests
 /// name, no allocator takes.
 const ID_BLOCKS: u64 = u64::MAX / ID_BLOCK;
 
@@ -169,7 +169,7 @@ mod tests {
         });
     }
 
-    /// No ID of block 0 is given, 0 among them, which names no branch: no allocator takes the
+    /// No ID of block 0 is given, 0 among them, which names no cell: no allocator takes the
     /// block, whose IDs tests name, and none of them is given though its object were there
     /// (TASK-455). An allocator's ID is given; one of a block no allocator took is not.
     #[test]

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! An open branch's state, as its store holds it ([`State`]), which its lock guards: its extents,
+//! An open cell's state, as its store holds it ([`State`]), which its lock guards: its extents,
 //! epoch and root, and an owner of each part of the rest, which keeps that part's invariants: the
 //! room its extents take ([`Space`]), what it changed since its last commit ([`Uncommitted`]), the
 //! gate writes pass ([`Gate`]), its segments ([`Segments`]), its extents' own files
@@ -21,7 +21,7 @@ use crate::extents::{Entry, Extents};
 use crate::framed::{Files, Framed};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
-    Change, Data, EXTENTS, Extent, FileKey, Piece, SegmentId, branch_dir, extent_path,
+    Change, Data, EXTENTS, Extent, FileKey, Piece, SegmentId, cell_dir, extent_path,
 };
 use crate::raw::RawFile;
 #[cfg(any(test, feature = "audit"))]
@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage_device::{ExtentId, NoExtent};
 
-/// An open branch's state. See the module's docs.
+/// An open cell's state. See the module's docs.
 pub(crate) struct State<F> {
     /// Its extents.
     pub extents: Extents,
@@ -84,19 +84,19 @@ pub(crate) struct State<F> {
     /// cladefs: the framings to run, one at a time, in the order their segments closed
     /// (TASK-165.9).
     pub framing: Framing<F>,
-    /// cladefs: the branch as the replay of its footers has it, from its opening on, in the builds
+    /// cladefs: the cell as the replay of its footers has it, from its opening on, in the builds
     /// of the tests ([`Replay`], TASK-165.9).
     #[cfg(any(test, feature = "audit"))]
     pub replay: Replay,
 }
 
-/// cladefs: a branch as the one replay of its segments' footers has it, the bucket's and its
+/// cladefs: a cell as the one replay of its segments' footers has it, the bucket's and its
 /// write-ahead log's from its store's opening on, its extents by their lengths: which the state,
 /// as of each commit that closes a segment, must hold, the audit asserts (TASK-165.9's AC #5).
 #[cfg(any(test, feature = "audit"))]
 pub(crate) type Replay = bucket_cell::State<Lengths>;
 
-/// cladefs: the lengths of a branch's extents, as a replay of its footers places them ([`Replay`]).
+/// cladefs: the lengths of a cell's extents, as a replay of its footers places them ([`Replay`]).
 #[cfg(any(test, feature = "audit"))]
 #[derive(Default)]
 pub(crate) struct Lengths(pub BTreeMap<ExtentId, u64>);
@@ -186,7 +186,7 @@ pub(crate) enum Life<'a> {
     Held(Entry<'a>),
     /// Freed by a commit, and kept: for the bucket, views or pins ([`Kept`]).
     Kept(&'a Kept),
-    /// Sealed once, and freed, and not kept: its number the branch writes no more (TASK-79.6).
+    /// Sealed once, and freed, and not kept: its number the cell writes no more (TASK-79.6).
     Spent,
     /// Neither opened nor sealed here.
     Unknown,
@@ -468,28 +468,28 @@ impl Standing {
 /// cladefs: what a [`Guarded`] state holds to, checked as it is taken and again after each of its
 /// waits (TASK-160.19).
 pub(crate) trait Holds {
-    /// Fails unless `state`, of branch `branch`, holds to it.
-    fn check<F: File>(state: &State<F>, branch: CellId) -> Result<(), Error>;
+    /// Fails unless `state`, of cell `cell`, holds to it.
+    fn check<F: File>(state: &State<F>, cell: CellId) -> Result<(), Error>;
 }
 
 /// cladefs: a store not failed: what reading takes ([`Readable`]).
 pub(crate) struct Whole;
 
 impl Holds for Whole {
-    fn check<F: File>(state: &State<F>, _branch: CellId) -> Result<(), Error> {
+    fn check<F: File>(state: &State<F>, _cell: CellId) -> Result<(), Error> {
         state.standing.whole()
     }
 }
 
-/// cladefs: a store not failed, nor closed, its branch no version: what changing it takes
+/// cladefs: a store not failed, nor closed, its cell no version: what changing it takes
 /// ([`Writable`]).
 pub(crate) struct Changeable;
 
 impl Holds for Changeable {
-    fn check<F: File>(state: &State<F>, branch: CellId) -> Result<(), Error> {
+    fn check<F: File>(state: &State<F>, cell: CellId) -> Result<(), Error> {
         state.standing.whole()?;
-        anyhow::ensure!(!state.standing.is_closed(), "branch {branch} is closed");
-        anyhow::ensure!(!state.version, "branch {branch} is a version, which nothing writes");
+        anyhow::ensure!(!state.standing.is_closed(), "cell {cell} is closed");
+        anyhow::ensure!(!state.version, "cell {cell} is a version, which nothing writes");
         Ok(())
     }
 }
@@ -501,7 +501,7 @@ impl Holds for Changeable {
 /// nothing.
 pub(crate) struct Guarded<'a, F: File, H> {
     state: Locked<'a, F>,
-    branch: CellId,
+    cell: CellId,
     holds: std::marker::PhantomData<H>,
 }
 
@@ -512,10 +512,10 @@ pub(crate) type Readable<'a, F> = Guarded<'a, F, Whole>;
 pub(crate) type Writable<'a, F> = Guarded<'a, F, Changeable>;
 
 impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
-    /// `state`, of branch `branch`, if it holds to `H`.
-    pub fn check(state: Locked<'a, F>, branch: CellId) -> Result<Self, Error> {
-        H::check(&state, branch)?;
-        Ok(Self { state, branch, holds: std::marker::PhantomData })
+    /// `state`, of cell `cell`, if it holds to `H`.
+    pub fn check(state: Locked<'a, F>, cell: CellId) -> Result<Self, Error> {
+        H::check(&state, cell)?;
+        Ok(Self { state, cell, holds: std::marker::PhantomData })
     }
 
     /// Waits for `condvar` while `busy` says so of the state, letting it go meanwhile, and returns
@@ -525,11 +525,11 @@ impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
         condvar: &Condvar,
         busy: impl Fn(&State<F>) -> bool,
     ) -> Result<Self, Error> {
-        let branch = self.branch;
+        let cell = self.cell;
         while busy(&self.state) {
             self.state = self.state.wait(condvar);
         }
-        self.checked_again(branch)
+        self.checked_again(cell)
     }
 
     /// Holds new writes back ([`Gate`]) while `busy` says so of the state, waiting for `condvar`
@@ -540,21 +540,21 @@ impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
         condvar: &Condvar,
         busy: impl Fn(&State<F>) -> bool,
     ) -> Result<Self, Error> {
-        let branch = self.branch;
+        let cell = self.cell;
         self.state.gate.hold();
         while busy(&self.state) {
             self.state = self.state.wait(condvar);
         }
         self.state.gate.release();
         condvar.notify_all();
-        self.checked_again(branch)
+        self.checked_again(cell)
     }
 
-    fn checked_again(self, branch: CellId) -> Result<Self, Error> {
+    fn checked_again(self, cell: CellId) -> Result<Self, Error> {
         if !rules().recheck_after_waiting {
             return Ok(self);
         }
-        Self::check(self.state, branch)
+        Self::check(self.state, cell)
     }
 }
 
@@ -619,16 +619,16 @@ impl<F: File> Drop for Locked<'_, F> {
     }
 }
 
-/// cladefs: the most extents a branch may hold for the audit to recount its state ([`Locked`]): it
+/// cladefs: the most extents a cell may hold for the audit to recount its state ([`Locked`]): it
 /// goes through them all each time the state is let go, which took a test of cladefs's, writing a
 /// base of 32,768 extents one at a time and forking it a hundred times, past an hour; the stores
 /// of the store's own tests hold hundreds at most (TASK-160.16).
 #[cfg(any(test, feature = "audit"))]
 const AUDITED_EXTENTS: usize = 4096;
 
-/// cladefs: `guard`'s state, audited, in the builds of the tests ([`Locked`]), if its branch holds
+/// cladefs: `guard`'s state, audited, in the builds of the tests ([`Locked`]), if its cell holds
 /// [`AUDITED_EXTENTS`] at most. An audit that fails panics once it has let the state go,
-/// unpoisoned, saying what it found after [`AUDIT_FAILED`]: the store's drop, closing its branch,
+/// unpoisoned, saying what it found after [`AUDIT_FAILED`]: the store's drop, closing its cell,
 /// locks it again, which a lock poisoned would panic in, aborting as the audit's panic unwinds.
 #[cfg(any(test, feature = "audit"))]
 fn audited<F: File>(guard: StateGuard<'_, F>) -> StateGuard<'_, F> {
@@ -693,12 +693,12 @@ impl<F: File> State<F> {
     /// progress take, and what writes since the last commit let go of, which nothing it holds
     /// says, it checks only as far as what it holds bounds them.
     pub fn audit(&self) {
-        let branch = self.segments.open_segment().branch;
-        self.space.audit(branch, self.extents.lens(), self.gate.is_writing());
+        let cell = self.segments.open_segment().cell;
+        self.space.audit(cell, self.extents.lens(), self.gate.is_writing());
         self.uncommitted.audit(&self.extents);
         self.kept.audit();
         let own =
-            |extent: &ExtentId, entry: &Extent| extent.branch == branch && entry.data == Data::Own;
+            |extent: &ExtentId, entry: &Extent| extent.cell == cell && entry.data == Data::Own;
         let mut recount = Recount::default();
         let mut own_files = HashSet::new();
         for (extent, entry) in self.extents.iter() {
@@ -720,7 +720,7 @@ impl<F: File> State<F> {
     }
 }
 
-/// The room a branch's extents take: the most they may hold, as its record says
+/// The room a cell's extents take: the most they may hold, as its record says
 /// ([`LocalCell::set_capacity`](crate::LocalCell::set_capacity)), the bytes they hold, and those writes
 /// in progress may add. A write takes room only if what they hold and may add, with what views
 /// keep of the frees, which counts as used, fits. cladefs: and with what writes since the last
@@ -732,7 +732,7 @@ impl<F: File> State<F> {
 /// refused too (doc-4's `WRITE_COMMIT`'s, and those of the extents a DAX guest maps writably,
 /// which its commits write first), so that a writer past it may be unable to commit: a guest's
 /// filesystem comes nowhere near it, Fxfs freeing an extent only once a flush has committed it,
-/// and writing over little between commits. What the commits leave in the branch's segments
+/// and writing over little between commits. What the commits leave in the cell's segments
 /// that no extent is in, freed, takes none of the room, however much: the segments leave the
 /// store once acknowledged in the bucket, whose collector takes it back (TASK-165.8). Counted as
 /// used past the capacity's worth, it found a guest's store full with a tenth of it used
@@ -745,9 +745,9 @@ pub(crate) struct Space {
     reserved: u64,
 }
 
-/// cladefs: how many extents a branch holds, and the bytes they hold, as [`Space`] keeps them on
-/// as they change: of all of them, and of those the branch wrote (TASK-49), the rest inherited
-/// from the branches it was forked from. Kept on so that reading them walks nothing: a fork's map
+/// cladefs: how many extents a cell holds, and the bytes they hold, as [`Space`] keeps them on
+/// as they change: of all of them, and of those the cell wrote (TASK-49), the rest inherited
+/// from the cells it was forked from. Kept on so that reading them walks nothing: a fork's map
 /// holds its base's extents too, hundreds of thousands of them (TASK-92.17, TASK-454).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Holding {
@@ -763,23 +763,23 @@ struct Held {
 }
 
 impl Holding {
-    /// What `extents`, those of `branch` and those it inherited, by their lengths, hold: what an
+    /// What `extents`, those of `cell` and those it inherited, by their lengths, hold: what an
     /// opening counts, and the audit recounts.
-    pub fn of(branch: u64, extents: impl IntoIterator<Item = (ExtentId, u64)>) -> Self {
+    pub fn of(cell: u64, extents: impl IntoIterator<Item = (ExtentId, u64)>) -> Self {
         let mut holding = Self::default();
         for (extent, len) in extents {
-            holding.entered(extent.branch == branch);
-            holding.grew(len, extent.branch == branch);
+            holding.entered(extent.cell == cell);
+            holding.grew(len, extent.cell == cell);
         }
         holding
     }
 
-    /// The counts of all of them, and of the branch's own if `own`.
+    /// The counts of all of them, and of the cell's own if `own`.
     fn counts(&mut self, own: bool) -> impl Iterator<Item = &mut Held> {
         std::iter::once(&mut self.all).chain(own.then_some(&mut self.own))
     }
 
-    /// An extent is held, holding nothing yet: the branch's own if `own`.
+    /// An extent is held, holding nothing yet: the cell's own if `own`.
     fn entered(&mut self, own: bool) {
         self.counts(own).for_each(|held| held.extents += 1);
     }
@@ -799,7 +799,7 @@ impl Holding {
 }
 
 impl Space {
-    /// The room of a branch of `capacity` bytes whose extents hold what `holding` says.
+    /// The room of a cell of `capacity` bytes whose extents hold what `holding` says.
     pub fn new(capacity: u64, holding: Holding) -> Self {
         Self { capacity, holding, reserved: 0 }
     }
@@ -838,17 +838,17 @@ impl Space {
         self.reserved -= grows;
     }
 
-    /// cladefs: an extent is held, holding nothing yet, the branch's own if `own` (TASK-454).
+    /// cladefs: an extent is held, holding nothing yet, the cell's own if `own` (TASK-454).
     pub fn entered(&mut self, own: bool) {
         self.holding.entered(own);
     }
 
-    /// An extent held holds `len` bytes more, of the branch's own if `own`.
+    /// An extent held holds `len` bytes more, of the cell's own if `own`.
     pub fn grew(&mut self, len: u64, own: bool) {
         self.holding.grew(len, own);
     }
 
-    /// An extent of `len` bytes, of the branch's own if `own`, is held no more.
+    /// An extent of `len` bytes, of the cell's own if `own`, is held no more.
     pub fn removed(&mut self, len: u64, own: bool) {
         self.holding.removed(len, own);
     }
@@ -887,11 +887,11 @@ impl Space {
         }
     }
 
-    /// cladefs: panics unless it counts `held`, the extents of `branch`, and what they hold, of them
+    /// cladefs: panics unless it counts `held`, the extents of `cell`, and what they hold, of them
     /// its own (TASK-454); and, unless `writing`, writes in progress reserving none (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
-    fn audit(&self, branch: u64, held: impl Iterator<Item = (ExtentId, u64)>, writing: bool) {
-        let recounted = Holding::of(branch, held);
+    fn audit(&self, cell: u64, held: impl Iterator<Item = (ExtentId, u64)>, writing: bool) {
+        let recounted = Holding::of(cell, held);
         assert_eq!(self.holding, recounted, "the bytes the extents hold, own, and their counts");
         assert!(writing || self.reserved == 0, "{} bytes reserved, no write in progress", {
             self.reserved
@@ -914,7 +914,7 @@ impl<F> Clone for Packing<F> {
     }
 }
 
-/// What a branch changed since its last commit, which the next records: its changes, and the
+/// What a cell changed since its last commit, which the next records: its changes, and the
 /// extents written since, which are open, with where their data goes, until it seals them.
 pub(crate) struct Uncommitted<F> {
     open: HashMap<ExtentId, Open<F>>,
@@ -928,7 +928,7 @@ pub(crate) struct Uncommitted<F> {
     /// no commit held: of the extents freed while open, in segments, what they wrote over too, or
     /// in raw files of their own; and of the writes dropped, in segments (TASK-79.2).
     let_go: u64,
-    /// cladefs: the capacity set since the last commit, which the next sets in the branch's state
+    /// cladefs: the capacity set since the last commit, which the next sets in the cell's state
     /// as object storage keeps it, its segment's footer saying so (TASK-165.3).
     capacity: Option<u64>,
 }
@@ -1022,7 +1022,7 @@ impl<F> Uncommitted<F> {
     }
 
     /// The extents open, which the next commit seals, in the order they were opened. cladefs: an
-    /// order the branch's writes decide, not the map's, which differs from one run to the next,
+    /// order the cell's writes decide, not the map's, which differs from one run to the next,
     /// so that where a commit seals each, and what its record says, do not (TASK-79.79).
     pub fn open_extents(&self) -> Vec<ExtentId> {
         let mut open: Vec<_> =
@@ -1035,7 +1035,7 @@ impl<F> Uncommitted<F> {
         self.changes.push(change);
     }
 
-    /// cladefs: the branch's capacity is `capacity`, as of the next commit.
+    /// cladefs: the cell's capacity is `capacity`, as of the next commit.
     pub fn resize(&mut self, capacity: u64) {
         self.capacity = Some(capacity);
     }
@@ -1123,7 +1123,7 @@ impl Gate {
     }
 }
 
-/// The files of a branch's extents stored on their own, sealed: those open, at most
+/// The files of a cell's extents stored on their own, sealed: those open, at most
 /// `Options::open_files` but for those reads use, the least lately read closing as more open; the
 /// bytes each takes; those written since the last commit, which its flush syncs, with their
 /// directory.
@@ -1133,7 +1133,7 @@ pub(crate) struct OwnFiles<F> {
     /// cladefs: in order, which their flush syncs them in, rather than the order of a map that
     /// differs from one run to the next (TASK-79.79).
     unsynced: BTreeMap<ExtentId, Arc<F>>,
-    /// Their directory, the branch's, and whether its entries changed since the last commit.
+    /// Their directory, the cell's, and whether its entries changed since the last commit.
     dir: String,
     written: bool,
     /// cladefs: the store's keys, which its files are read under (TASK-411.3).
@@ -1141,14 +1141,13 @@ pub(crate) struct OwnFiles<F> {
 }
 
 impl<F: File> OwnFiles<F> {
-    /// `branch`'s, whose files take `sizes`, of which `limit` stay open, read under `keys`.
+    /// `cell`'s, whose files take `sizes`, of which `limit` stay open, read under `keys`.
     pub fn new(
-        branch: u64,
+        cell: u64,
         sizes: HashMap<ExtentId, u64>,
         (limit, keys): (usize, Arc<bucket_cell::keys::Ring>),
     ) -> Self {
-        let (dir, open, unsynced) =
-            (branch_dir(EXTENTS, branch), Files::new(limit), BTreeMap::new());
+        let (dir, open, unsynced) = (cell_dir(EXTENTS, cell), Files::new(limit), BTreeMap::new());
         Self { open, sizes, unsynced, dir, written: false, keys }
     }
 
@@ -1162,7 +1161,7 @@ impl<F: File> OwnFiles<F> {
             return Ok(file);
         }
         let path = extent_path(extent);
-        let keys = self.keys.of(extent.branch);
+        let keys = self.keys.of(extent.cell);
         let file = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
         Ok(self.open.insert(extent, file))
     }
@@ -1198,7 +1197,7 @@ impl<F: File> OwnFiles<F> {
         self.sizes.values().sum()
     }
 
-    /// cladefs: panics unless they are the files of `sealed`, the branch's own extents sealed in
+    /// cladefs: panics unless they are the files of `sealed`, the cell's own extents sealed in
     /// files of their own, held or kept (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
     pub fn audit(&self, sealed: &HashSet<ExtentId>) {
@@ -1207,12 +1206,12 @@ impl<F: File> OwnFiles<F> {
     }
 }
 
-/// What a branch's next commit makes unreferenced: files of the branch's, which it removes once it
+/// What a cell's next commit makes unreferenced: files of the cell's, which it removes once it
 /// is durable.
 #[derive(Default)]
 pub(crate) struct Unreferenced {
     /// Raw files whose extents were sealed from them, or freed, and files of extents' data no
-    /// extent is in any more: they wait for the branch's commits, in its queue of them, and are
+    /// extent is in any more: they wait for the cell's commits, in its queue of them, and are
     /// forgotten with a failed store's, as its next opening removes what nothing refers to.
     pub doomed: Vec<String>,
 }

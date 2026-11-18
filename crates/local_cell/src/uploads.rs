@@ -35,7 +35,7 @@ impl<F: File> Closed<F> {
         if !self.restamped {
             return Ok(object);
         }
-        let keys = &self.keys.of(self.footer.branch.id);
+        let keys = &self.keys.of(self.footer.cell.id);
         extent_frame::restamp(&object, &self.footer.encode(), keys).map_err(io::Error::other)
     }
 

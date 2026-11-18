@@ -546,7 +546,7 @@ mod tests {
     async fn test_reads_ahead() {
         use crate::object_store::journal::JournalHandle as _;
         use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
-        use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice, RoundTrips};
+        use storage_device::fake_device::{DEFAULT_CELL, FakeDevice, RoundTrips};
         use storage_device::{ExtentId, ExtentRange};
 
         // The journal's 100 blocks are written, and 28 more known.
@@ -555,7 +555,7 @@ mod tests {
         let bs = BLOCK_SIZE.get();
         let trips = Arc::new(RoundTrips::default());
         let device = Arc::new(FakeDevice::new(KNOWN, bs as u32).with_round_trips(trips.clone()));
-        let extent = |block| ExtentId::new(DEFAULT_BRANCH, block);
+        let extent = |block| ExtentId::new(DEFAULT_CELL, block);
         let (data, records) = journal(&*device, WRITTEN).await;
         for (block, data) in data.chunks(bs as usize).enumerate() {
             write_to(&*device, extent(block as u64), data).await;
@@ -583,12 +583,12 @@ mod tests {
     async fn test_forgets_what_it_read_ahead_through_extents_replaced() {
         use crate::object_store::journal::JournalHandle as _;
         use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
-        use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice};
+        use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
         use storage_device::{ExtentId, ExtentRange};
 
         let bs = BLOCK_SIZE.get();
         let device = Arc::new(FakeDevice::new(16, bs as u32));
-        let extent = |sequence| ExtentId::new(DEFAULT_BRANCH, sequence);
+        let extent = |sequence| ExtentId::new(DEFAULT_CELL, sequence);
         let block = |sequence| ExtentRange::new(extent(sequence), 0..bs);
         // The journal's 4 blocks: the first two in extents 0 and 1, the others in 12 and 13, which
         // replace 2 and 3. Extent 20 holds the first two, at once, and 21 all four. Extents 2, 3,
@@ -773,10 +773,10 @@ mod tests {
     #[fuchsia::test]
     async fn test_extents_past_any_offset() {
         use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
-        use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice};
+        use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
         use storage_device::{ExtentId, ExtentRange};
 
-        let extent = ExtentId::new(DEFAULT_BRANCH, 0);
+        let extent = ExtentId::new(DEFAULT_CELL, 0);
         let device = Arc::new(FakeDevice::new(16, 4096));
         let handle = BootstrapObjectHandle::new_with_start_offset(1, device.clone(), 0);
         let mut reader = JournalReader::new(handle, &JournalCheckpoint::default());

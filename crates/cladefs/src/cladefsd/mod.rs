@@ -79,15 +79,15 @@
 //! before, TASK-39.2), as nothing below a tenant is separated. Its physical memory goes to a
 //! connection only once it opens a store.
 //!
-//! That directory is all a tenant's VM processes reach of the bucket: the branch they name is
-//! ignored, and a branch comes into a tenant's directory only by the VM manager's making a store of
+//! That directory is all a tenant's VM processes reach of the bucket: the cell they name is
+//! ignored, and a cell comes into a tenant's directory only by the VM manager's making a store of
 //! it there, as it restores the tenant's snapshot on another host, and goes by its dropping that
 //! store (TASK-154; `proto/cladefs/cladefsd/v1/cladefsd.proto` says what the VM manager does). The
-//! default tenant's VM processes name any branch: its socket is the daemon's user's alone
+//! default tenant's VM processes name any cell: its socket is the daemon's user's alone
 //! ([`bind_owner_only`], TASK-155), whatever is mounted where, so that a jailed VM process, of
 //! another user, reaches its tenant's socket alone, which the VM manager gives it (`Grant`).
 //! What differs between tenants is a tenant's policy (`server::Policy`, TASK-160.10): where its VM
-//! processes name stores, whether the branch one names counts, and whether they follow public
+//! processes name stores, whether the cell one names counts, and whether they follow public
 //! bases. What may be done to a store is the store's, fixed as it opens ([`crate::CellAccess`]).
 
 pub(crate) mod cells;

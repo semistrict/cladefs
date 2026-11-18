@@ -72,7 +72,7 @@ impl RootVolume {
             .context(FxfsError::InvalidArgs)?;
         info.check_manifest()?;
         info.set_new_guid();
-        filesystem.allocator().check_base_branches(&info.base_branches)?;
+        filesystem.allocator().check_base_cells(&info.base_cells)?;
 
         let root_store = filesystem.root_store();
         let directory_key =
@@ -135,7 +135,7 @@ mod tests {
     use storage_device::fake_device::FakeDevice;
     use test_case::test_case;
 
-    // cladefs: volumes over a base (backlog doc-10). The branches of the devices these tests use:
+    // cladefs: volumes over a base (backlog doc-10). The cells of the devices these tests use:
     // those of the base, the fork of it that keeps a generation, and of what reads through to it.
     const BASE: u64 = 10;
     const GENERATION: u64 = 11;
@@ -143,10 +143,10 @@ mod tests {
 
     const ORIGINAL: [(&str, u8); 3] = [("a", 0xaa), ("b", 0xbb), ("c", 0xcc)];
 
-    /// A filesystem on a device of branch `BASE` holding the volume "repo", published, with the
+    /// A filesystem on a device of cell `BASE` holding the volume "repo", published, with the
     /// files `ORIGINAL` and `more` others, and the volume's manifest. The filesystem stays open.
     async fn published(more: usize) -> (crate::filesystem::OpenFxFilesystem, Vec<u8>) {
-        let device = DeviceHolder::new(FakeDevice::new(65536, 512).with_branch(BASE));
+        let device = DeviceHolder::new(FakeDevice::new(65536, 512).with_cell(BASE));
         let filesystem = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let store =
@@ -162,12 +162,12 @@ mod tests {
         (filesystem, manifest)
     }
 
-    /// A new filesystem on a device of branch `SANDBOX` reading through to a fork of `base`, and
+    /// A new filesystem on a device of cell `SANDBOX` reading through to a fork of `base`, and
     /// what counts the reads that reach the fork.
     async fn over(
         base: &FxFilesystem,
     ) -> (crate::filesystem::OpenFxFilesystem, Arc<std::sync::atomic::AtomicU64>) {
-        let mut device = FakeDevice::new(16384, 512).with_branch(SANDBOX);
+        let mut device = FakeDevice::new(16384, 512).with_cell(SANDBOX);
         let reads = device.attach(base.device().fork(GENERATION).expect("fork failed"));
         let filesystem = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new");
         (filesystem, reads)
@@ -251,7 +251,7 @@ mod tests {
             filesystem.allocator().data_owner(store.store_object_id()),
             store.store_object_id()
         );
-        assert!(filesystem.allocator().branches_of(&[store.store_object_id()]).is_empty());
+        assert!(filesystem.allocator().cells_of(&[store.store_object_id()]).is_empty());
         std::mem::drop((store, root, base_store, base_root));
         do_fsck(&filesystem, Some("repo"), None).await;
         filesystem.close().await.expect("Close failed");
@@ -442,13 +442,13 @@ mod tests {
         let upper = root.publish_volume("repo").await.expect("publish_volume failed");
         middle.sync(SyncOptions { flush_device: true, ..Default::default() }).await.unwrap();
 
-        let mut device = FakeDevice::new(16384, 512).with_branch(30);
+        let mut device = FakeDevice::new(16384, 512).with_cell(30);
         device.attach(middle.device().fork(SANDBOX + 1).expect("fork failed"));
         let filesystem = FxFilesystem::new_empty(DeviceHolder::new(device)).await.expect("new");
         let root = root_volume(filesystem.clone()).await.expect("root_volume failed");
         let top = root.new_volume_over_base("repo", &upper).await.expect("over_base failed");
         assert_eq!(top.store_info().unwrap().base_layers.len(), 2);
-        assert_eq!(top.store_info().unwrap().base_branches, [BASE, SANDBOX]);
+        assert_eq!(top.store_info().unwrap().base_cells, [BASE, SANDBOX]);
         assert_eq!(read_file(&top, "new").await, [0x11; 4096]);
         assert!(!exists(&top, "a").await);
         assert_eq!(read_file(&top, "b").await, [0xbb; 8192]);
@@ -567,8 +567,8 @@ mod tests {
             result.err().expect("over_base succeeded").downcast::<FxfsError>().expect("not fxfs")
         };
 
-        // Of the device's own branch.
-        let device = DeviceHolder::new(FakeDevice::new(16384, 512).with_branch(BASE));
+        // Of the device's own cell.
+        let device = DeviceHolder::new(FakeDevice::new(16384, 512).with_cell(BASE));
         let own = FxFilesystem::new_empty(device).await.expect("new_empty failed");
         let root = root_volume(own.clone()).await.expect("root_volume failed");
         assert_eq!(
@@ -578,7 +578,7 @@ mod tests {
         std::mem::drop(root);
         own.close().await.expect("Close failed");
 
-        // Of a branch the allocator holds extents of: a fork of the base has them already.
+        // Of a cell the allocator holds extents of: a fork of the base has them already.
         let fork = base.device().fork(SANDBOX).expect("fork failed");
         let forked = FxFilesystem::open(fork).await.expect("open failed");
         let root = root_volume(forked.clone()).await.expect("root_volume failed");

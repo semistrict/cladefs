@@ -42,33 +42,30 @@ impl Daemon {
         CellClient::connect(&self.vms, path, capacity).unwrap()
     }
 
-    /// Makes a store at `path` of `branch`, an Fxfs cell: a new cell if its cell's
-    /// ID is 0, a new branch there if its ID is (TASK-364).
+    /// Makes a store at `path` of `cell`, an Fxfs cell: a new cell if its cell's
+    /// ID is 0, a new cell there if its ID is (TASK-364).
     pub fn create(
         &mut self,
         path: &Path,
-        branch: cladefs::CellId,
+        cell: cladefs::CellId,
         token: Option<u64>,
     ) -> Result<cladefs::CellId, tonic::Status> {
         let request = CreateCellRequest {
             path: name(path),
             capacity: CAPACITY,
-            branch: branch.id,
             token,
-            tenant: branch.tenant,
-            cell: branch.id,
+            tenant: cell.tenant,
+            cell: cell.id,
             kind: 0,
         };
         let response = self.runtime.block_on(self.client.create_cell(request))?.into_inner();
-        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
+        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
-    /// The branch of the store at `path`, in its cell, as StatCell says it (TASK-364).
-    pub fn branch(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
+    /// The cell of the store at `path`, in its cell, as StatCell says it (TASK-364).
+    pub fn cell(&mut self, path: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let stat = self.stat(path)?;
-        let cell = cladefs::CellId { tenant: stat.tenant, id: stat.cell };
-        Ok(cladefs::CellId { tenant: cell.tenant, id: stat.branch })
+        Ok(cladefs::CellId { tenant: stat.tenant, id: stat.cell })
     }
 
     pub fn stat(&mut self, path: &Path) -> Result<StatCellResponse, tonic::Status> {
@@ -80,15 +77,14 @@ impl Daemon {
     pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::CellId, tonic::Status> {
         let request = ForkCellRequest { from: name(from), to: name(to), ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
-        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
+        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
     /// Makes a version of the cell of the store at `from` (MakeVersion), and returns it.
     pub fn version(&mut self, from: &Path) -> Result<cladefs::CellVersion, tonic::Status> {
         let request = MakeVersionRequest { path: name(from), keep_last: 0 };
         let version = self.runtime.block_on(self.client.make_version(request))?.into_inner();
-        let cell = self.branch(from)?;
+        let cell = self.cell(from)?;
         Ok(cladefs::CellVersion { tenant: cell.tenant, cell: cell.id, version: version.version })
     }
 
@@ -101,8 +97,7 @@ impl Daemon {
         let cladefs::CellVersion { tenant, cell, version } = from;
         let request = ForkCellRequest { to: name(to), version, tenant, cell, ..Default::default() };
         let response = self.runtime.block_on(self.client.fork_cell(request))?.into_inner();
-        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
+        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
     /// Drops the versions `versions` of the cell of the store at `path` (DropVersions).
@@ -157,8 +152,7 @@ impl Daemon {
             tenant: 0,
         };
         let response = self.runtime.block_on(self.client.import_image(request))?.into_inner();
-        let cell = cladefs::CellId { tenant: response.tenant, id: response.cell };
-        Ok(cladefs::CellId { tenant: cell.tenant, id: response.branch })
+        Ok(cladefs::CellId { tenant: response.tenant, id: response.cell })
     }
 
     /// Grants the tenant of the ID `tenant` in the bucket (TASK-364), whose stores are in `dir`,
@@ -235,7 +229,7 @@ impl Daemon {
     }
 }
 
-/// A branch to make anew: of a new cell of the default tenant's, a new ID there (TASK-364).
+/// A cell to make anew: of a new cell of the default tenant's, a new ID there (TASK-364).
 pub const NEW: cladefs::CellId = cladefs::CellId { tenant: 0, id: 0 };
 
 pub const CAPACITY: u64 = 1 << 26;
@@ -252,7 +246,7 @@ pub fn failure<T: std::fmt::Debug>(result: Result<T, tonic::Status>) -> (Code, E
 
 /// Writes `bytes` as the first extent of `store` and commits, setting its root to `root`.
 pub fn write(store: &CellClient, bytes: &[u8], root: &[u8]) {
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(Some(root)).unwrap();
 }

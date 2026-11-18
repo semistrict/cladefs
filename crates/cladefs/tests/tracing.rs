@@ -72,13 +72,13 @@ fn collector() -> (String, mpsc::Receiver<(String, Vec<u8>)>) {
     (endpoint, exports)
 }
 
-/// A daemon serving at `socket`, its stores' branches in a bucket in its memory, as `traces` says
+/// A daemon serving at `socket`, its stores' cells in a bucket in its memory, as `traces` says
 /// of its spans, OpenTelemetry's variables naming `endpoint` the collector, every trace kept.
 fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(socket)
-        .env("CLADEFSD_BUCKET", "memory:///branches")
+        .env("CLADEFSD_BUCKET", "memory:///cells")
         .env("CLADEFSD_TOKEN", "1")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_TRACES_SAMPLER", "always_on")
@@ -103,7 +103,7 @@ fn serve_and_drain(dir: &Path, traces: Option<&str>) -> Vec<(String, Vec<u8>)> {
     let socket = dir.join("cladefsd.sock");
     let mut daemon = daemon(&socket, traces, &endpoint);
     let store = CellClient::connect(&socket, dir.join("store"), 1 << 28).unwrap();
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     store.commit(Some(b"traced")).unwrap();
     drop(store);
@@ -139,7 +139,7 @@ fn the_daemon_exports_its_spans_over_otlp() {
         "upload.segment",
         "bucket.create",
         "cladefs.request.kind",
-        "cladefs.branch",
+        "cladefs.cell",
         "cladefs.bytes",
     ]
     .into_iter()

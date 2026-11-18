@@ -20,7 +20,7 @@ use bucket_cell::collector::{Collector, Options};
 use bucket_cell::keys::CachingKms;
 use bucket_cell::layout::{CellId, NewVersion};
 use bucket_cell::object_bucket::{ObjectBucket, Request, Stats};
-use bucket_cell::{Commit, SegmentBuilder, Writer, branch};
+use bucket_cell::{Commit, SegmentBuilder, Writer, lifecycle};
 use futures::executor::block_on;
 use object_store::memory::InMemory;
 use std::sync::Arc;
@@ -83,18 +83,17 @@ fn bench(versions: usize) {
     );
 }
 
-/// Writes the branch, branch 1 of `CELL`: its extents, then `versions` versions, each after a commit
+/// Writes the cell `CELL`: its extents, then `versions` versions, each after a commit
 /// rewriting `CHANGED` of them. Returns how many segments it wrote.
 async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
-    let branch = CellId { tenant: CELL.tenant, id: 1 };
-    branch::create(&**bucket, branch, 0).await.unwrap();
-    // The tests' KMS: every branch is encrypted, and so read by the pass.
+    let cell = CellId { tenant: CELL.tenant, id: 1 };
+    lifecycle::create(&**bucket, cell, 0).await.unwrap();
+    // The tests' KMS: every cell is encrypted, and so read by the pass.
     let kms = CachingKms::new(Arc::new(extent_keys::testing::MemoryKms::new()));
-    let writer = Writer::open_under(bucket.clone(), branch, (10, 0), &kms).await.unwrap();
+    let writer = Writer::open_under(bucket.clone(), cell, (10, 0), &kms).await.unwrap();
     let data = vec![0x5a; EXTENT];
     let first = writer.chain().next_sequence();
-    let mut live: Vec<ExtentId> =
-        (0..EXTENTS).map(|n| ExtentId::new(branch.id, first + n)).collect();
+    let mut live: Vec<ExtentId> = (0..EXTENTS).map(|n| ExtentId::new(cell.id, first + n)).collect();
     let extents = live.iter().map(|&extent| (extent, data.clone())).collect();
     let mut segments = 0;
     let mut add = async |segment: SegmentBuilder, cut: Option<NewVersion>| {
@@ -117,7 +116,7 @@ async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
         // A rolling change: the oldest CHANGED extents rewritten as new ones.
         let frees: Vec<ExtentId> = live.drain(..CHANGED as usize).collect();
         let written: Vec<ExtentId> =
-            (0..CHANGED).map(|n| ExtentId::new(branch.id, next + n)).collect();
+            (0..CHANGED).map(|n| ExtentId::new(cell.id, next + n)).collect();
         next += CHANGED;
         live.extend(&written);
         let extents = written.iter().map(|&extent| (extent, data.clone())).collect();

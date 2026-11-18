@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: views of a branch as of a commit (TASK-42.2): what they read while the writer goes on,
+//! cladefs: views of a cell as of a commit (TASK-42.2): what they read while the writer goes on,
 //! what they keep of its frees, and for how long, their pins, and their cutting off. Their
 //! concurrency with the writer is tests/shuttle/main.rs's.
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 use storage_device::{ExtentId, NoExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 
 /// Small segments and large extents, so that tests make several of each.
 const OPTIONS: Options = Options {
@@ -27,7 +27,7 @@ const OPTIONS: Options = Options {
 };
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
 /// `blocks` blocks of bytes each their offset modulo 251, plus `seed`.
@@ -36,7 +36,7 @@ fn pattern(seed: u8, blocks: usize) -> Vec<u8> {
 }
 
 fn create(options: Options) -> LocalCell<MemDir> {
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     LocalCell::create(MemDir::new(), description, options).unwrap()
 }
 
@@ -97,7 +97,7 @@ fn views_read_frees_acknowledged_in_the_bucket() {
     let keys: Vec<String> = (closed.iter())
         .map(|closed| {
             bucket_cell::layout::segment(
-                closed.footer.branch,
+                closed.footer.cell,
                 closed.footer.segment,
                 closed.footer.epoch,
             )

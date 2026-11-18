@@ -11,23 +11,23 @@
 //! - **Suspend:** once, into the store the VM had, which nothing changed meanwhile but its size:
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
-//!   restore names a version and a store it doesn't have here, so it takes the version's branch from
+//!   restore names a version and a store it doesn't have here, so it takes the version's cell from
 //!   the bucket, and forks the store from it. The bucket is CLADEFSD_BUCKET's, if set, or one
 //!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
-//!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
+//!   scripts/migrate-host.sh): `source` snapshots the VM, its store's cell in the bucket, and
 //!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
 //!   `target`, on another host, which has nothing of the store, restores it from there, at the
 //!   same paths, the root filesystem's too, which the restored VM goes on reading.
 //! - **TenantMigrate:** as Migrate, for a tenant's VM (TASK-154): the tenant's VM process names no
-//!   branch, so that the host's VM manager makes the version in the tenant's directory first, of the
-//!   branch the daemon says it is, and Firecracker restores through the tenant's socket. Several
+//!   cell, so that the host's VM manager makes the version in the tenant's directory first, of the
+//!   cell the daemon says it is, and Firecracker restores through the tenant's socket. Several
 //!   times at once (TASK-158), each from a copy of the version of its own, as on hosts of their own,
 //!   for tenants of their own, and once from the snapshot's own copy, all at the same moment: each
 //!   copy a read-only ancestor, which no restore takes from the others.
 //!
 //! Each restored guest thaws, reads what was written before the snapshot (with a DAX window,
 //! through a mapping made before it, which the restored window maps again), writes its own file,
-//! which mints extents of its store's branch, and remounts.
+//! which mints extents of its store's cell, and remounts.
 //!
 //! cladefs TASK-92.14: before the snapshot, the guest maps a file of `PIECES` pages, each an extent
 //! of its own, read in from a mount before, so that the window maps each page apart (with a DAX
@@ -255,7 +255,7 @@ mod host {
     }
 
     /// What a VM manager does for a tenant's VM to restore the snapshot at `snapshot` where its
-    /// version isn't (TASK-154): the tenant granted `dir`, and the version's branch, as the daemon says
+    /// version isn't (TASK-154): the tenant granted `dir`, and the version's cell, as the daemon says
     /// it, not as the snapshot does, made a store at `version` in it. Returns the tenant's socket,
     /// given to the jail's user, if Firecracker runs in one. The tenant is its ID in the bucket
     /// (TASK-364); the version stays the snapshot's tenant's, and the restores are the tenant's.
@@ -393,7 +393,7 @@ mod host {
                 crate::common::control(&cladefsd)?.shrink_memory(None, 0)?;
             }
             if phase == Some(Phase::Source) {
-                // For another host to restore: the version's branch is in the bucket.
+                // For another host to restore: the version's cell is in the bucket.
                 let bundle = bundle()?;
                 std::fs::create_dir_all(&bundle)?;
                 for name in BUNDLED {
@@ -964,7 +964,7 @@ mod guest {
             assert_eq!(unsafe { libc::munmap(mapped_pieces.as_ptr() as *mut _, len) }, 0);
             fs::write(format!("{MNT}/who"), &name).unwrap();
             eprintln!("{name}: wrote");
-            // New extents, of the restored store's branch.
+            // New extents, of the restored store's cell.
             let after: Vec<u8> = (0..4 << 20).map(|i: usize| (i % 241) as u8).collect();
             let mut file = fs::File::create(format!("{MNT}/after")).unwrap();
             file.write_all(&after).unwrap();

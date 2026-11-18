@@ -11,11 +11,11 @@
 pub mod daemon;
 
 /// Makes this process a host of the multi-node system, as an extent daemon's must be: its stores'
-/// branches in a bucket in its memory, as of placement 1, unless the test named others.
+/// cells in a bucket in its memory, as of placement 1, unless the test named others.
 pub fn host() {
     // The daemon's log, and the VM processes', on standard error, which a test that fails shows.
     let _ = cladefs::cladefsd::logging::to_stderr();
-    for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
+    for (name, value) in [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.
@@ -97,7 +97,7 @@ pub fn read_window(at: *const u8, len: usize) -> Vec<u8> {
 /// Writes `bytes` as an extent of `store`, commits, and reads it through a window, which caches
 /// its pages in the daemon's memory.
 pub fn cache(store: &CellClient, bytes: &[u8]) {
-    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(None).unwrap();
     let window = memory(bytes.len() / cladefs::pages::page_size() as usize);

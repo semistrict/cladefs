@@ -22,7 +22,7 @@
 //! TASK-42.5, TASK-42.10), which readers read through: holding its fill barrier, which a batch
 //! holds exclusively as it applies.
 
-use crate::BRANCH;
+use crate::CELL;
 use crate::device::ViewDevice;
 use crate::history::{HeldRead, History, Read};
 use crate::model::{Model, NAMES, Op, Writer, lookup, observe, read};
@@ -355,7 +355,7 @@ pub async fn simulate(profile: Profile) {
         Mutation::Breaks(rules) => rules,
         _ => fxfs::follower::Rules::ALL,
     });
-    let description = Description { block_size: 4096, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: 4096, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
     let store = Arc::new(store);
     let writer = Writer::new(store.clone()).await;

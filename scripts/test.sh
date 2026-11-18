@@ -157,7 +157,7 @@ fi
 # IDs' (TASK-267), on Linux alone, which the VMM builds for, with no KVM. With its cladefs feature, as
 # cladefs builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
 # device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its store from a daemon in its process, a host's:
-# its stores' branches in a bucket in memory, as of placement 1, which without
+# its stores' cells in a bucket in memory, as of placement 1, which without
 # CLADEFSD_BUCKET and CLADEFSD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
 # bindgen needs libclang to build it.
 if part firecracker; then

@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// What a sweep's passes do with what no live branch needs.
+/// What a sweep's passes do with what no live cell needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// Delete it ([`Collector::collect_cell`]).
@@ -406,7 +406,7 @@ mod tests {
     use crate::object_bucket::ObjectBucket;
     use crate::passed::Passed;
     use crate::testing::{Direct, Fault, SimBucket};
-    use crate::{Writer, branch};
+    use crate::{Writer, lifecycle};
     use futures::executor::block_on;
     use rand::{RngExt as _, SeedableRng as _};
     use std::cell::RefCell;
@@ -427,15 +427,14 @@ mod tests {
         cells
     }
 
-    /// Fills each of `cells` of `bucket` with a branch whose checkpoint covers what a pass deletes:
+    /// Fills each of `cells` of `bucket` with a cell whose checkpoint covers what a pass deletes:
     /// two segments, one holding what the other freed, beside the fence it keeps; and, if
     /// `compacted`, a segment holding a small extent live and a large one freed, which a pass
     /// compacting what is less than half live compacts.
     async fn fill<B: Bucket>(bucket: &Arc<B>, cells: &[CellId], compacted: bool) {
         for &cell in cells {
-            let branch = CellId { tenant: cell.tenant, id: 1 };
-            branch::create(&**bucket, branch, 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
+            lifecycle::create(&**bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 1).await.unwrap();
             let first = writer.chain().next_sequence();
             let (dead, small, large) =
                 (ExtentId::new(1, first), ExtentId::new(1, first + 1), ExtentId::new(1, first + 2));
@@ -937,7 +936,7 @@ mod tests {
         assert_eq!([0, 1, 1000, 1001, 2000].map(crate::bucket::list_pages), [1, 1, 1, 2, 2]);
     }
 
-    /// TASK-455: cells whose branches, roots of IDs an allocator gave, were deleted go whole in the
+    /// TASK-455: cells whose cells, roots of IDs an allocator gave, were deleted go whole in the
     /// sweep that first passes over them, and cost the sweeps after it the listing of the bucket's
     /// tenants alone, a request, however many there were: none of their objects is left.
     #[test]
@@ -948,10 +947,10 @@ mod tests {
             block_on(async {
                 for id in 1..=n {
                     let cell = CellId { tenant: 1, id };
-                    let branch = CellId { tenant: cell.tenant, id: ids.next(&*bucket).await };
-                    branch::create(&*bucket, branch, 0).await.unwrap();
-                    let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
-                    let extent = ExtentId::new(branch.id, writer.chain().next_sequence());
+                    let cell = CellId { tenant: cell.tenant, id: ids.next(&*bucket).await };
+                    lifecycle::create(&*bucket, cell, 0).await.unwrap();
+                    let writer = Writer::open(bucket.clone(), cell, 10, 1).await.unwrap();
+                    let extent = ExtentId::new(cell.id, writer.chain().next_sequence());
                     let commit = Commit {
                         tag: 1,
                         extents: vec![(extent, vec![7; 64])],
@@ -965,7 +964,7 @@ mod tests {
                     writer.acknowledge().await.unwrap();
                     writer.checkpoint().await.unwrap();
                     drop(writer);
-                    branch::delete(&*bucket, branch, 11, 1, &crate::keys::testing::host_kms())
+                    lifecycle::delete(&*bucket, cell, 11, 1, &crate::keys::testing::host_kms())
                         .await
                         .unwrap();
                     crate::cell::forget(&*bucket, cell).await.unwrap();
@@ -1027,7 +1026,7 @@ mod tests {
         assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
         // A record written in the cell: the next pass, either's, goes over it in full.
-        block_on(branch::create(&*bucket, CellId { tenant: cell.tenant, id: 2 }, 0)).unwrap();
+        block_on(lifecycle::create(&*bucket, CellId { tenant: cell.tenant, id: 2 }, 0)).unwrap();
         assert_eq!(run(&first).report, Report::default());
         let rewritten = recorded().unwrap();
         assert_ne!(rewritten.listing, settled.listing);

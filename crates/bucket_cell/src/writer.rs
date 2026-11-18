@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A branch's writer: its commits, in segments, uploaded in parallel and acknowledged in order.
+//! A cell's writer: its commits, in segments, uploaded in parallel and acknowledged in order.
 //!
-//! A writer takes the branch's head ([`head`], doc-7, The head; TASK-407), swapping it to the
+//! A writer takes the cell's head ([`head`], doc-7, The head; TASK-407), swapping it to the
 //! epoch after its last, and recovers the state it names, anew or on from what it found before
 //! ([`Writer::open_recovered`]). Its segments are uploaded at keys naming its epoch, numbered on
 //! from the head's end, each written once; it acknowledges them, once they and every one before
 //! them are uploaded, by swapping the head to name them, with the condition that the head is still
 //! the one it last wrote: its taking's. A writer taken over fails at that swap, and stops for good
 //! ([`Writer::stopped`], [`Error::Fenced`]): what it uploaded since, no head names, nor ever will.
-//! Only a writer taking the branch anew goes on with it.
+//! Only a writer taking the cell anew goes on with it.
 //!
 //! Its segments' footers are stamped by its chain ([`Writer::chain`]): those a local store closed,
 //! framed, which it uploads as they are (a store's closed segment is the object, doc-7, decision
@@ -24,8 +24,8 @@
 //! while they go: what a host's writers hold at once is bounded, however far behind they are.
 //!
 //! cladefs: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
-//! branch reading under it, and encrypts its fences and authenticates its checkpoints under its
-//! branch's newest DEK; the segments it is given come encrypted by their store.
+//! cell reading under it, and encrypts its fences and authenticates its checkpoints under its
+//! cell's newest DEK; the segments it is given come encrypted by their store.
 
 use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
@@ -35,8 +35,8 @@ use crate::layout::{self, CellId, Chain, Child, Footer, Location, Origin};
 use crate::moves::MovesMaps;
 use crate::record::Record;
 use crate::recovery::{self, Recovered, State};
-use crate::wal::TakenBranch;
-use crate::{EPOCH_SHIFT, Error, branch, rules, trace};
+use crate::wal::TakenCell;
+use crate::{EPOCH_SHIFT, Error, lifecycle, rules, trace};
 use futures::{StreamExt as _, TryStreamExt as _};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -100,12 +100,12 @@ pub type Mover = Box<dyn Fn(&[(ExtentId, Location, Location)]) + Send + Sync>;
 
 pub struct Writer<B: Bucket> {
     bucket: Arc<B>,
-    branch: CellId,
+    cell: CellId,
     epoch: u64,
     /// What its uploads may hold at once, with those of the writers it shares it with.
     budget: Arc<Budget>,
-    /// What it found taking the branch over: the head as it took it.
-    taken: TakenBranch,
+    /// What it found taking the cell over: the head as it took it.
+    taken: TakenCell,
     /// The head as it last swapped it, which its next swap is conditional on: one at a time.
     held: futures::lock::Mutex<Held>,
     inner: Mutex<Inner>,
@@ -122,7 +122,7 @@ struct Inner {
     /// As of the last segment acknowledged.
     state: State,
     /// Where its next segment goes: its number, the segment it follows, the last it took, and the
-    /// branch's next sequence number as of that.
+    /// cell's next sequence number as of that.
     chain: Chain,
     /// The segments taken and not yet acknowledged.
     pending: BTreeMap<u64, Pending>,
@@ -130,7 +130,7 @@ struct Inner {
     checkpoint: Option<u64>,
     /// The forks whose children have their records.
     recorded: BTreeSet<CellId>,
-    /// The children of those forks whose IDs another branch has: their forks made no branch.
+    /// The children of those forks whose IDs another cell has: their forks made no cell.
     refused: BTreeSet<CellId>,
     /// The child of a fork whose record a checkpoint read last, looking for those deleted, which
     /// the next goes on after (TASK-92.4).
@@ -142,15 +142,15 @@ struct Inner {
     dropped: BTreeSet<u64>,
 }
 
-/// cladefs: how a writer takes its branch ([`Writer::open_keyed`],
+/// cladefs: how a writer takes its cell ([`Writer::open_keyed`],
 /// [`Writer::open_recovered_from`]): as `holder`, which must differ from every other taking's, with
 /// the fencing token `token`.
 #[derive(Clone, Copy, Debug)]
 pub struct Taker {
     pub holder: u64,
     pub token: u64,
-    /// The holding of the branch's cell whose epoch `token` is, if its host remembers it rather
-    /// than read it before the head's taking: what its fork of the branch left (TASK-449's review).
+    /// The holding of the cell whose epoch `token` is, if its host remembers it rather
+    /// than read it before the head's taking: what its fork of the cell left (TASK-449's review).
     /// A holding found from memory, unchanged, writes nothing, which no condition checks; so the
     /// taking reads the cell once the head is taken, at once with the record: held still, it held
     /// it as the head was taken; another's since, the taking is refused ([`Error::Stale`]).
@@ -171,19 +171,19 @@ struct Pending {
 }
 
 impl<B: Bucket> Writer<B> {
-    /// Takes `branch` over: its head, as `holder`, which must differ from every other taking's, of
+    /// Takes `cell` over: its head, as `holder`, which must differ from every other taking's, of
     /// the placement whose fencing token is `token` ([`head::take`]); then its state, recovered from
     /// it once it holds it. cladefs: under its keys, its cell's KEK unwrapped by `kms`, the host's:
     /// its cell made, encrypted, if it has no object, its record given its first DEK if it has none
-    /// ([`crate::keys::taking`], TASK-411.28). What takes a branch outside a store: tools, tests.
+    /// ([`crate::keys::taking`], TASK-411.28). What takes a cell outside a store: tools, tests.
     pub async fn open_under(
         bucket: Arc<B>,
-        branch: CellId,
+        cell: CellId,
         (holder, token): (u64, u64),
         kms: &Arc<crate::keys::CachingKms>,
     ) -> Result<Self, Error> {
-        let keys = crate::keys::taking(&*bucket, kms, branch, holder).await?;
-        Self::open_keyed(bucket, branch, (holder, token), keys).await
+        let keys = crate::keys::taking(&*bucket, kms, cell, holder).await?;
+        Self::open_keyed(bucket, cell, (holder, token), keys).await
     }
 
     /// [`Writer::open_under`] the tests' KMS (`keys::testing`): every test's writer encrypts
@@ -191,27 +191,27 @@ impl<B: Bucket> Writer<B> {
     #[cfg(any(test, feature = "testing"))]
     pub async fn open(
         bucket: Arc<B>,
-        branch: CellId,
+        cell: CellId,
         holder: u64,
         token: u64,
     ) -> Result<Self, Error> {
         let kms = crate::keys::testing::host_kms();
-        Self::open_under(bucket, branch, (holder, token), &kms).await
+        Self::open_under(bucket, cell, (holder, token), &kms).await
     }
 
-    /// cladefs: takes `branch` over as [`Writer::open_under`] does, holding `keys`, its store's ring
+    /// cladefs: takes `cell` over as [`Writer::open_under`] does, holding `keys`, its store's ring
     /// (TASK-411.3), a writer's, which encrypts.
     pub async fn open_keyed(
         bucket: Arc<B>,
-        branch: CellId,
+        cell: CellId,
         taker: impl Into<Taker>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
-        let record = branch::record(&*bucket, branch).await?.ok_or(Error::NoBranch)?;
-        Self::take(bucket, branch, record, (None, None), taker.into(), keys).await
+        let record = lifecycle::record(&*bucket, cell).await?.ok_or(Error::NoCell)?;
+        Self::take(bucket, cell, record, (None, None), taker.into(), keys).await
     }
 
-    /// Takes over the branch `before` recovered, whose record is `record`, as [`Writer::open`]
+    /// Takes over the cell `before` recovered, whose record is `record`, as [`Writer::open`]
     /// does, having found both before it takes the head: its state, once it holds it, is
     /// `before`'s recovered on ([`recovery::recover_on`]), which reads only what came since.
     /// cladefs: holding `keys` (TASK-411.3).
@@ -222,11 +222,11 @@ impl<B: Bucket> Writer<B> {
         (holder, token): (u64, u64),
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
-        let branch = before.state.branch;
-        Self::take(bucket, branch, record, (Some(before), None), (holder, token).into(), keys).await
+        let cell = before.state.cell;
+        Self::take(bucket, cell, record, (Some(before), None), (holder, token).into(), keys).await
     }
 
-    /// Takes over the branch `before` recovered as [`Writer::open_recovered`] does, its head taken
+    /// Takes over the cell `before` recovered as [`Writer::open_recovered`] does, its head taken
     /// from `read`, what a read of it found as its record was read ([`head::take_from`]): a round
     /// trip less on a real bucket (TASK-165.11).
     pub async fn open_recovered_from(
@@ -236,17 +236,17 @@ impl<B: Bucket> Writer<B> {
         taker: impl Into<Taker>,
         keys: Arc<Ring>,
     ) -> Result<Self, Error> {
-        let branch = before.state.branch;
+        let cell = before.state.cell;
         let found = (Some(before), Some(read));
-        Self::take(bucket, branch, record, found, taker.into(), keys).await
+        Self::take(bucket, cell, record, found, taker.into(), keys).await
     }
 
-    /// Takes `branch`, whose record is `record`, over, as [`Writer::open`] says: its state
+    /// Takes `cell`, whose record is `record`, over, as [`Writer::open`] says: its state
     /// recovered from the head it took, anew, or on from `before`, a recovery of it made before;
     /// the head taken from `read`, a read of it before, if given; as `taker` says.
     async fn take(
         bucket: Arc<B>,
-        branch: CellId,
+        cell: CellId,
         record: Record,
         (before, read): (Option<Recovered>, Option<head::Read>),
         Taker { holder, token, remembered }: Taker,
@@ -255,22 +255,20 @@ impl<B: Bucket> Writer<B> {
         // Before the head: a version has none, and nothing writes it, whoever asks.
         record.writable()?;
         let held = match read {
-            Some(read) => head::take_from(&*bucket, branch, read, holder, token).await?,
-            None => head::take(&*bucket, branch, holder, token).await?,
+            Some(read) => head::take_from(&*bucket, cell, read, holder, token).await?,
+            None => head::take(&*bucket, cell, holder, token).await?,
         };
         let epoch = held.head.epoch;
         let named = Some(held.head.clone());
         // Once the head is taken, two reads, neither of which waits for the other, at once: each a
         // round trip or more on a real bucket, which every opening of a store pays (TASK-165.11).
-        // The record: deleted meanwhile, the branch is gone, whatever its recovery found. And the
-        // branch, recovered from the head it took, which nothing changes but a later taking.
+        // The record: deleted meanwhile, the cell is gone, whatever its recovery found. And the
+        // cell, recovered from the head it took, which nothing changes but a later taking.
         // cladefs: and the cell whose holding gave the token, if remembered, not read: held still,
         // or another's taking since refuses this one (TASK-449's review).
         let recovering = async {
             match before {
-                None => {
-                    recovery::recover_from(&*bucket, branch, record.origin(), named, &keys).await
-                }
+                None => recovery::recover_from(&*bucket, cell, record.origin(), named, &keys).await,
                 Some(before) => {
                     recovery::recover_on(&*bucket, record.origin(), before, named, &keys).await
                 }
@@ -283,7 +281,7 @@ impl<B: Bucket> Writer<B> {
             }
         };
         let (found, recovered, confirmed) =
-            futures::join!(branch::record(&*bucket, branch), recovering, confirming);
+            futures::join!(lifecycle::record(&*bucket, cell), recovering, confirming);
         if found?.is_none_or(|record| record.deleted) {
             return Err(Error::Deleted);
         }
@@ -292,12 +290,12 @@ impl<B: Bucket> Writer<B> {
         // Its sequences minted from its epoch's range, past every earlier writer's: what it
         // recovered is what the head it took names, no later writer's segment among it.
         let floor = if rules().epoch_sequences { epoch << EPOCH_SHIFT } else { 0 };
-        let chain = Chain::new(branch, epoch, held.head.end, state.next_sequence.max(floor));
-        let taken = TakenBranch::of(held.head.clone(), &state, chain);
+        let chain = Chain::new(cell, epoch, held.head.end, state.next_sequence.max(floor));
+        let taken = TakenCell::of(held.head.clone(), &state, chain);
         let checkpoint = held.head.checkpoint.map(|(segment, _)| segment);
         let writer = Self {
             bucket,
-            branch,
+            cell,
             epoch,
             budget: Budget::new(Limits::UNBOUNDED),
             taken,
@@ -344,8 +342,8 @@ impl<B: Bucket> Writer<B> {
         self.inner.lock().unwrap()
     }
 
-    pub fn branch(&self) -> CellId {
-        self.branch
+    pub fn cell(&self) -> CellId {
+        self.cell
     }
 
     /// cladefs: the keys it reads and encrypts under (TASK-411.3).
@@ -357,9 +355,9 @@ impl<B: Bucket> Writer<B> {
         self.epoch
     }
 
-    /// What it found taking the branch over, the head as it took it: what a host's write-ahead
+    /// What it found taking the cell over, the head as it took it: what a host's write-ahead
     /// log is put after ([`Wal::rebase`](crate::Wal::rebase)), before the writer takes a segment.
-    pub fn taken(&self) -> &TakenBranch {
+    pub fn taken(&self) -> &TakenCell {
         &self.taken
     }
 
@@ -369,24 +367,24 @@ impl<B: Bucket> Writer<B> {
         self.layer.clone()
     }
 
-    /// The branch's state as of the last segment acknowledged.
+    /// The cell's state as of the last segment acknowledged.
     pub fn state(&self) -> State {
         self.inner().state.clone()
     }
 
-    /// The tag of the branch's last commit, as of the last segment acknowledged.
+    /// The tag of the cell's last commit, as of the last segment acknowledged.
     pub fn last_commit(&self) -> Option<u64> {
         self.inner().state.last_commit
     }
 
-    /// Where `extent` is, as of the last segment acknowledged, if the branch holds it.
+    /// Where `extent` is, as of the last segment acknowledged, if the cell holds it.
     pub fn location(&self, extent: ExtentId) -> Option<Location> {
         self.inner().state.extents.get(&extent).cloned()
     }
 
     /// Where the writer's next segment goes: its chain, as of the last segment it took, which
     /// stamps the footer of the next, a store's or a batch's ([`Writer::add_segment`]). The
-    /// branch's next sequence number it names is what the guest mints from.
+    /// cell's next sequence number it names is what the guest mints from.
     pub fn chain(&self) -> Chain {
         self.inner().chain
     }
@@ -430,7 +428,7 @@ impl<B: Bucket> Writer<B> {
     /// requests children of it (`crate::trace`, TASK-258).
     pub async fn upload(&self, segment: u64) -> Result<(), Error> {
         let span = trace::Span::start("upload.segment");
-        span.set_branch(self.branch);
+        span.set_cell(self.cell);
         span.set_count(trace::SEGMENT, segment);
         let uploaded = span.around(self.upload_segment(segment, &span)).await;
         span.result(&uploaded);
@@ -460,8 +458,8 @@ impl<B: Bucket> Writer<B> {
         if let Err(error) = creates.buffer_unordered(OWN_AT_ONCE).try_collect::<()>().await {
             return Err(self.stop(error));
         }
-        let key = layout::segment(self.branch, segment, self.epoch);
-        let keys = self.keys.of(self.branch.id);
+        let key = layout::segment(self.cell, segment, self.epoch);
+        let keys = self.keys.of(self.cell.id);
         let read = |bytes: &[u8]| layout::footer_under::<Footer>(bytes, &keys);
         let taken = |bytes: &[u8]| match read(bytes)? == footer {
             true => Ok(()),
@@ -500,9 +498,9 @@ impl<B: Bucket> Writer<B> {
         Ok(bucket::create(&*self.bucket, key, bytes).await)
     }
 
-    /// Acknowledges the segments uploaded with every one before them, by swapping the branch's
+    /// Acknowledges the segments uploaded with every one before them, by swapping the cell's
     /// head to name them, with the condition that it is the one this writer last wrote ([`head`],
-    /// doc-7, The head; TASK-407): a writer taken over, or a deleted branch's, fails, and stops.
+    /// doc-7, The head; TASK-407): a writer taken over, or a deleted cell's, fails, and stops.
     /// Returns the last segment acknowledged. cladefs: to the last that goes on with no commit, a
     /// commit spanning segments acknowledged with the segment it ends in, not part of it
     /// (`extent_frame::segment::Continued`, TASK-92.41): what a store lets go of, once
@@ -545,7 +543,7 @@ impl<B: Bucket> Writer<B> {
             if held.head.end <= through {
                 let named = cuts.iter().map(|(seq, cut)| (*seq, cut));
                 let next = held.head.clone().holding(self.epoch, through + 1).naming(named);
-                match head::swap(&*self.bucket, self.branch, &held, next).await {
+                match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
                 }
@@ -566,18 +564,18 @@ impl<B: Bucket> Writer<B> {
         Ok(self.inner().state.through)
     }
 
-    /// cladefs: the branch's versions, as its head names them, as this writer last swapped it
+    /// cladefs: the cell's versions, as its head names them, as this writer last swapped it
     /// (doc-18, TASK-476): those its acknowledgements named, and those named before it took the
-    /// branch, but those dropped.
+    /// cell, but those dropped.
     pub async fn versions(&self) -> Vec<layout::Version> {
         self.held.lock().await.head.versions.clone()
     }
 
-    /// cladefs: drops the versions `ids` names, those the branch's head names of them, and those of
+    /// cladefs: drops the versions `ids` names, those the cell's head names of them, and those of
     /// segments it is yet to acknowledge, which its acknowledgements name not: the head
     /// swapped to name them no more, with the condition every swap has (rule `head_swap`), a writer
     /// taken over failing and stopping ([`Error::Fenced`]). The collector's next pass over the
-    /// branch's cell keeps their states no more (doc-18, TASK-476). Failing so, they may be dropped
+    /// cell keeps their states no more (doc-18, TASK-476). Failing so, they may be dropped
     /// all the same: a swap that took effect, its answer lost, and the head taken over before its
     /// retry found it its own, fails as one that didn't (TASK-499); the head says which.
     pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
@@ -585,17 +583,17 @@ impl<B: Bucket> Writer<B> {
         self.change_versions(|head| head.without(ids)).await
     }
 
-    /// cladefs: shares the version `id`, if `shared`, or no longer, if the branch's head names it:
+    /// cladefs: shares the version `id`, if `shared`, or no longer, if the cell's head names it:
     /// forks of it may be of other tenants' cells while it is (doc-7, Shared versions). Fails with
-    /// [`Error::NoBranch`] if the head names no such version.
+    /// [`Error::NoCell`] if the head names no such version.
     pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
         if self.held.lock().await.head.version(id).is_none() {
-            return Err(Error::NoBranch);
+            return Err(Error::NoCell);
         }
         self.change_versions(|head| head.sharing(id, shared)).await
     }
 
-    /// cladefs: the branch's head swapped to what `change` makes of it, its versions alone changed,
+    /// cladefs: the cell's head swapped to what `change` makes of it, its versions alone changed,
     /// unless it makes it the same.
     async fn change_versions(
         &self,
@@ -609,22 +607,22 @@ impl<B: Bucket> Writer<B> {
         if next == held.head {
             return Ok(());
         }
-        match head::swap(&*self.bucket, self.branch, &held, next).await {
+        match head::swap(&*self.bucket, self.cell, &held, next).await {
             Ok(swapped) => *held = swapped,
             Err(error) => return Err(self.stop(error)),
         }
         Ok(())
     }
 
-    /// Whether another branch has the ID of `child`, a fork's child, acknowledged: the fork made no
-    /// branch.
+    /// Whether another cell has the ID of `child`, a fork's child, acknowledged: the fork made no
+    /// cell.
     pub fn refused(&self, child: CellId) -> bool {
         self.inner().refused.contains(&child)
     }
 
-    /// Gives the children of acknowledged forks their records: but one whose ID another branch took
-    /// while its fork was made, which is that branch's, and this one's segments go on sound; its
-    /// writers would fail on it for ever otherwise, taking the branch or not (TASK-79.82).
+    /// Gives the children of acknowledged forks their records: but one whose ID another cell took
+    /// while its fork was made, which is that cell's, and this one's segments go on sound; its
+    /// writers would fail on it for ever otherwise, taking the cell or not (TASK-79.82).
     async fn record_forks(&self) -> Result<(), Error> {
         let forks: Vec<_> = {
             let inner = self.inner();
@@ -638,10 +636,10 @@ impl<B: Bucket> Writer<B> {
         };
         futures::stream::iter(forks)
             .map(|fork| async move {
-                let origin = Origin { parent: self.branch, at: fork.at };
-                let child = Child { branch: fork.child, owner: fork.owner };
+                let origin = Origin { parent: self.cell, at: fork.at };
+                let child = Child { cell: fork.child, owner: fork.owner };
                 let keys = crate::keys::Parents::Held(&self.keys);
-                match branch::record_fork(&*self.bucket, child, origin, keys).await {
+                match lifecycle::record_fork(&*self.bucket, child, origin, keys).await {
                     Ok(()) => {}
                     Err(Error::IdTaken(child)) => drop(self.inner().refused.insert(child)),
                     Err(error) => return Err(error),
@@ -649,7 +647,7 @@ impl<B: Bucket> Writer<B> {
                 // cladefs: without the rule that the reference comes first, as a test shows it
                 // needed, after (TASK-395.3).
                 if !crate::rules().references_first {
-                    branch::refer_fork(&*self.bucket, child, origin).await;
+                    lifecycle::refer_fork(&*self.bucket, child, origin).await;
                 }
                 self.inner().recorded.insert(fork.child);
                 Ok::<_, Error>(())
@@ -663,12 +661,12 @@ impl<B: Bucket> Writer<B> {
     /// moved where they went: where the writer names them from then on, before the checkpoint
     /// lands, so that it never names one before where a checkpoint of its own does, which the
     /// collector, its head naming it, keeps the moves from, not from before (TASK-175). Then swaps
-    /// the head to name it, the branch's newest (TASK-407).
+    /// the head to name it, the cell's newest (TASK-407).
     /// cladefs: in a span of its own, `upload.checkpoint`, its bucket's requests children of it
     /// (`crate::trace`, TASK-258).
     pub async fn checkpoint(&self) -> Result<Option<u64>, Error> {
         let span = trace::Span::start("upload.checkpoint");
-        span.set_branch(self.branch);
+        span.set_cell(self.cell);
         let checkpointed = span.around(self.write_checkpoint(&span)).await;
         span.result(&checkpointed);
         checkpointed
@@ -706,7 +704,7 @@ impl<B: Bucket> Writer<B> {
         let looked = children.last().copied();
         let looking = futures::stream::iter(children)
             .map(|child| async move {
-                let record = branch::record(&*self.bucket, child).await?;
+                let record = lifecycle::record(&*self.bucket, child).await?;
                 Ok::<_, Error>(record.is_some_and(|record| record.deleted).then_some(child))
             })
             .buffer_unordered(RECORDS_AT_ONCE)
@@ -738,7 +736,7 @@ impl<B: Bucket> Writer<B> {
         }
         state.forks.retain(|fork| !gone.contains(&fork.child));
         failpoint!("writer::checkpoint");
-        let key = layout::checkpoint(self.branch, segment, self.epoch);
+        let key = layout::checkpoint(self.cell, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
         let checkpoint = crate::checkpoint::encode(&state, self.keys.encrypting());
@@ -748,7 +746,7 @@ impl<B: Bucket> Writer<B> {
             if held.head.checkpoint.is_none_or(|(at, _)| at < segment) {
                 let next =
                     layout::Head { checkpoint: Some((segment, self.epoch)), ..held.head.clone() };
-                match head::swap(&*self.bucket, self.branch, &held, next).await {
+                match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
                 }
@@ -792,7 +790,7 @@ mod tests {
     use super::*;
     use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::layout::{Contents, NewVersion, Segment, child};
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
@@ -810,15 +808,15 @@ mod tests {
         )
     }
 
-    /// A writer another took the branch from uploads its segment, at its own key, but its swap of
+    /// A writer another took the cell from uploads its segment, at its own key, but its swap of
     /// the head fails: it stops, and says why; it takes no segment more (TASK-407).
     #[test]
     fn writers_taken_over_stop() {
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let first = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
-            let _second = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let first = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
+            let _second = Writer::open(bucket.clone(), test_cell(1), 11, 0).await.unwrap();
             let segment = add(&first, Commit { tag: 1, ..Commit::default() }).unwrap();
             assert_eq!(first.upload(segment).await, Ok(()));
             assert_eq!(first.acknowledge().await, Err(Error::Fenced));
@@ -848,7 +846,7 @@ mod tests {
         versions.iter().map(|version| (version.id, version.at)).collect()
     }
 
-    /// TASK-476: a branch's head names a version once the acknowledgement naming the segment
+    /// TASK-476: a cell's head names a version once the acknowledgement naming the segment
     /// cutting it does, in the same swap; a window drops the oldest as a version asking for one is
     /// named; its writer drops a version by a swap; a takeover names what the head named; a
     /// deletion's final head names none.
@@ -856,45 +854,45 @@ mod tests {
     fn heads_name_versions_as_their_segments_are_acknowledged() {
         futures::executor::block_on(async {
             let bucket = memory();
-            let branch = test_branch(1);
-            branch::create(&*bucket, branch, 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
             let a = cut(&writer, 1, version(0xa, None)).unwrap();
             let b = cut(&writer, 2, version(0xb, None)).unwrap();
             writer.upload(a).await.unwrap();
             writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xa, a)]);
+            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xa, a)]);
             writer.upload(b).await.unwrap();
             writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xa, a), (0xb, b)]);
+            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xa, a), (0xb, b)]);
             let c = cut(&writer, 3, version(0xc, Some(2))).unwrap();
             writer.upload(c).await.unwrap();
             writer.acknowledge().await.unwrap();
-            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xb, b), (0xc, c)]);
+            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xb, b), (0xc, c)]);
             writer.drop_versions(&BTreeSet::from([0xb, 0xd])).await.unwrap();
-            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xc, c)]);
+            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xc, c)]);
             let versions: Vec<_> = writer.versions().await.iter().map(|v| (v.id, v.at)).collect();
             assert_eq!(versions, [(0xc, c)]);
             writer.share_version(0xc, true).await.unwrap();
-            assert_eq!(writer.share_version(0xb, true).await, Err(Error::NoBranch));
-            let shared = head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert_eq!(writer.share_version(0xb, true).await, Err(Error::NoCell));
+            let shared = head::get(&*bucket, cell).await.unwrap().unwrap();
             assert!(shared.version(0xc).unwrap().shared);
 
-            let next = Writer::open(bucket.clone(), branch, 11, 0).await.unwrap();
-            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xc, c)]);
+            let next = Writer::open(bucket.clone(), cell, 11, 0).await.unwrap();
+            assert_eq!(named(head::get(&*bucket, cell).await.unwrap()), [(0xc, c)]);
             assert_eq!(writer.drop_versions(&BTreeSet::from([0xc])).await, Err(Error::Fenced));
             drop(next);
-            branch::delete(&*bucket, branch, 12, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, cell, 12, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
-            let ended = head::get(&*bucket, branch).await.unwrap().unwrap();
+            let ended = head::get(&*bucket, cell).await.unwrap().unwrap();
             assert_eq!((ended.epoch, named(Some(ended))), (layout::Head::FINAL, vec![]));
         });
     }
 
     /// TASK-476, rule `versions_acked`: an acknowledgement names the versions of the segments it
     /// names alone. Without the rule, it names a version whose segment it does not, at a segment
-    /// past the head's end, which no reader of the branch holds.
+    /// past the head's end, which no reader of the cell holds.
     #[test]
     fn heads_name_versions_with_their_segments_alone() {
         let (acked, unacked) = (Rules::ALL, Rules { versions_acked: false, ..Rules::ALL });
@@ -902,14 +900,14 @@ mod tests {
             crate::set_rules(rules);
             let named = futures::executor::block_on(async {
                 let bucket = memory();
-                let branch = test_branch(1);
-                branch::create(&*bucket, branch, 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+                let cell = test_cell(1);
+                lifecycle::create(&*bucket, cell, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
                 let a = cut(&writer, 1, version(0xa, None)).unwrap();
                 cut(&writer, 2, version(0xb, None)).unwrap();
                 writer.upload(a).await.unwrap();
                 writer.acknowledge().await.unwrap();
-                let head = head::get(&*bucket, branch).await.unwrap().unwrap();
+                let head = head::get(&*bucket, cell).await.unwrap().unwrap();
                 (head.end, named(Some(head)))
             });
             crate::set_rules(Rules::ALL);
@@ -927,14 +925,14 @@ mod tests {
             crate::set_rules(rules);
             let named = futures::executor::block_on(async {
                 let bucket = memory();
-                let branch = test_branch(1);
-                branch::create(&*bucket, branch, 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+                let cell = test_cell(1);
+                lifecycle::create(&*bucket, cell, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
                 let a = cut(&writer, 1, version(0xa, None)).unwrap();
                 writer.upload(a).await.unwrap();
                 writer.acknowledge().await.unwrap();
-                let _next = Writer::open(bucket.clone(), branch, 11, 0).await.unwrap();
-                named(head::get(&*bucket, branch).await.unwrap())
+                let _next = Writer::open(bucket.clone(), cell, 11, 0).await.unwrap();
+                named(head::get(&*bucket, cell).await.unwrap())
             });
             crate::set_rules(Rules::ALL);
             named
@@ -949,8 +947,8 @@ mod tests {
     fn extents_of_their_own_found_uploaded_are_the_writers() {
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (again, other) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let again_key = layout::extent(
@@ -984,7 +982,7 @@ mod tests {
                 layout::with_footer(
                     b"another",
                     &(),
-                    crate::testing::encrypting(layout::test_branch(1)),
+                    crate::testing::encrypting(layout::test_cell(1)),
                 ),
             )
             .await;
@@ -997,14 +995,14 @@ mod tests {
     }
 
     /// A checkpoint reads the moves of its segments that have them, which a listing finds: read
-    /// one at a time, each segment's, at 25 ms of latency, a branch of a few minutes' pgbench held
+    /// one at a time, each segment's, at 25 ms of latency, a cell of a few minutes' pgbench held
     /// the uploader up for tens of seconds (TASK-91.2).
     #[test]
     fn checkpoints_read_only_the_moves_there_are() {
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             for n in 0..64 {
                 let extents = vec![(ExtentId::new(1, first + n), b"segment".to_vec())];
@@ -1033,8 +1031,8 @@ mod tests {
         use std::task::{Context, Poll};
         let bucket = SimBucket::new();
         let (writer, _) = bucket.served(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         let first = writer.chain().next_sequence();
         let own = (0..2 * OWN_AT_ONCE as u64 + 1).map(|n| (first + n, vec![n as u8; 10])).collect();
@@ -1065,11 +1063,11 @@ mod tests {
         use std::task::{Context, Poll};
         let bucket = SimBucket::new();
         let (writer, _) = bucket.served(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         let children =
-            (2..2 + 2 * RECORDS_AT_ONCE as u64 + 1).map(|id| child(test_branch(id))).collect();
+            (2..2 + 2 * RECORDS_AT_ONCE as u64 + 1).map(|id| child(test_cell(id))).collect();
         let footer = writer.chain().close(Contents { forks: children, ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() };
         let segment = writer.add_segment(Objects {
@@ -1109,14 +1107,14 @@ mod tests {
         const FORKS: u64 = 4 * RECORDS_AT_ONCE as u64;
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let mut most = 0;
             let mut first = None;
             for n in 0..FORKS {
                 let batch = SegmentBuilder::from(Commit { tag: n + 1, ..Commit::default() });
                 let forked = batch
-                    .fork(child(test_branch(2 + n)), &mut writer.chain())
+                    .fork(child(test_cell(2 + n)), &mut writer.chain())
                     .frame(writer.keys().encrypting());
                 let segment = writer.add_segment(forked).unwrap();
                 first.get_or_insert(segment);
@@ -1128,13 +1126,13 @@ mod tests {
             }
             assert_eq!(most, RECORDS_AT_ONCE as u64, "the most records a checkpoint read");
             // The first child deleted: its fork goes within FORKS / RECORDS_AT_ONCE checkpoints.
-            let origin = Origin { parent: test_branch(1), at: first.unwrap() };
+            let origin = Origin { parent: test_cell(1), at: first.unwrap() };
             let forked = crate::record::Kind::Fork(origin);
-            branch::delete_fork(
+            lifecycle::delete_fork(
                 &*bucket,
-                test_branch(2),
+                test_cell(2),
                 forked,
-                child(test_branch(2)).owner,
+                child(test_cell(2)).owner,
                 (9, 0),
                 &crate::keys::testing::host_kms(),
             )
@@ -1161,8 +1159,8 @@ mod tests {
         use std::task::{Context, Poll};
         let bucket = SimBucket::new();
         let (writer, _) = bucket.served(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         let writer = writer.uploading_within(Budget::new(Limits { requests: 1, bytes: u64::MAX }));
         // Two segments, a commit's each, whose reads are noted.
@@ -1203,8 +1201,8 @@ mod tests {
     fn segments_ending_with_another_footer_than_taken_stop_their_writers() {
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let close = |tag| {
                 let commit = Commit { tag, ..Commit::default() };
                 SegmentBuilder::from(commit)
@@ -1214,7 +1212,7 @@ mod tests {
             let Objects { footer, own, .. } = close(1);
             let objects = Objects { footer, segment: close(2).segment, own };
             let segment = writer.add_segment(objects).unwrap();
-            let key = layout::segment(test_branch(1), segment, 1);
+            let key = layout::segment(test_cell(1), segment, 1);
             let corrupt = Error::Corrupt(format!("{key} ends with another footer than taken"));
             assert_eq!(writer.upload(segment).await, Err(corrupt.clone()));
             assert_eq!(writer.stopped(), Some(corrupt));
@@ -1222,7 +1220,7 @@ mod tests {
         });
     }
 
-    /// TASK-92.6: a writer taking over a branch recovered before it took the head recovers it on
+    /// TASK-92.6: a writer taking over a cell recovered before it took the head recovers it on
     /// from there: it reads the head, takes it, then reads the record and the segments the head
     /// names that came in between at once (TASK-165.11, TASK-407). Each round a round trip on a
     /// real bucket.
@@ -1231,8 +1229,8 @@ mod tests {
         use crate::testing::SimBucket;
         let bucket = SimBucket::new();
         let (first, _) = bucket.served(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         let commit = |tag| {
             let objects = SegmentBuilder::from(Commit { tag, ..Commit::default() })
@@ -1243,8 +1241,8 @@ mod tests {
             bucket.served(first.acknowledge()).0.unwrap();
         };
         commit(1);
-        let record = bucket.served(branch::record(&*bucket, test_branch(1))).0.unwrap().unwrap();
-        let before = bucket.served(recovery::recover(&*bucket, test_branch(1), None)).0.unwrap();
+        let record = bucket.served(lifecycle::record(&*bucket, test_cell(1))).0.unwrap().unwrap();
+        let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
         assert_eq!(before.end(), 1);
         // Committed in between.
         commit(2);
@@ -1256,12 +1254,12 @@ mod tests {
         let tail = |segment| {
             format!(
                 "get {} last {}",
-                layout::segment(test_branch(1), segment, 1),
+                layout::segment(test_cell(1), segment, 1),
                 crate::object::TAIL
             )
         };
-        let head = layout::head(test_branch(1));
-        let record_key = layout::record(test_branch(1));
+        let head = layout::head(test_cell(1));
+        let record_key = layout::record(test_cell(1));
         assert_eq!(
             rounds,
             [
@@ -1270,11 +1268,11 @@ mod tests {
                 vec![format!("get {record_key}"), tail(1)],
             ]
         );
-        let anew = bucket.served(recovery::recover(&*bucket, test_branch(1), None)).0.unwrap();
+        let anew = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
         assert_eq!(second.state(), anew.state);
     }
 
-    /// TASK-165.11: a writer taking over a branch from a read of its head made before, as its
+    /// TASK-165.11: a writer taking over a cell from a read of its head made before, as its
     /// record was read, takes the head from that read: its first round the head's update, a round
     /// trip less; and from a read gone stale, another writer having taken the head since, by
     /// reading it again once its update finds it changed, at the epoch after that writer's.
@@ -1283,17 +1281,16 @@ mod tests {
         use crate::testing::SimBucket;
         let bucket = SimBucket::new();
         let (first, _) = bucket.served(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         assert_eq!(first.epoch(), 1);
-        let head = layout::head(test_branch(1));
+        let head = layout::head(test_cell(1));
         let found = || {
             let record =
-                bucket.served(branch::record(&*bucket, test_branch(1))).0.unwrap().unwrap();
-            let before =
-                bucket.served(recovery::recover(&*bucket, test_branch(1), None)).0.unwrap();
-            let read = bucket.served(head::read(&*bucket, test_branch(1))).0;
+                bucket.served(lifecycle::record(&*bucket, test_cell(1))).0.unwrap().unwrap();
+            let before = bucket.served(recovery::recover(&*bucket, test_cell(1), None)).0.unwrap();
+            let read = bucket.served(head::read(&*bucket, test_cell(1))).0;
             (record, before, read)
         };
         let (record, before, read) = found();
@@ -1310,7 +1307,7 @@ mod tests {
         assert_eq!(rounds[0], [format!("put {head}")]);
         // A read of the head, then another writer's taking of it, then the opening.
         let (record, before, read) = found();
-        let (third, _) = bucket.served(Writer::open(bucket.clone(), test_branch(1), 12, 0));
+        let (third, _) = bucket.served(Writer::open(bucket.clone(), test_cell(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);
         let opening = Writer::open_recovered_from(
             bucket.clone(),
@@ -1332,8 +1329,8 @@ mod tests {
     fn checkpoints_are_written_once() {
         futures::executor::block_on(async {
             let bucket = memory();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let segment = writer.checkpoint().await.unwrap();
             let requests = bucket.stats().requests;
             assert_eq!(writer.checkpoint().await, Ok(segment));
@@ -1348,14 +1345,14 @@ mod tests {
     fn writers_upload_segments_stores_closed() {
         futures::executor::block_on(async {
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let chain = writer.chain();
             let segment = chain.next_segment();
             let (small, large) = (ExtentId::new(1, 2), ExtentId::new(1, 3));
             let own_key = layout::extent(layout::TEST_CELL, writer.epoch(), segment, large);
             let footer = Footer {
-                branch: test_branch(1),
+                cell: test_cell(1),
                 segment,
                 epoch: writer.epoch(),
                 contents: Contents {
@@ -1385,9 +1382,9 @@ mod tests {
             let elsewhere = layout::extent(layout::TEST_CELL, writer.epoch() + 1, segment, large);
             // Its chain's next place: segment 0 of epoch 1, the head's end.
             assert_eq!((writer.epoch(), segment), (1, 0));
-            let wanted = format!("{:?}", (test_branch(1), 0, 1));
+            let wanted = format!("{:?}", (test_cell(1), 0, 1));
             let misplaced = |place: &str| {
-                Error::Corrupt(format!("a segment of branch 1/1/1, {place}, not {wanted}"))
+                Error::Corrupt(format!("a segment of cell 1/1/1, {place}, not {wanted}"))
             };
             for (wrong, refused) in [
                 (Footer { segment: segment + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),
@@ -1414,7 +1411,7 @@ mod tests {
             writer.upload(segment).await.unwrap();
             assert_eq!(writer.acknowledge().await, Ok(Some(segment)));
             let object =
-                bucket::get(&*bucket, &layout::segment(test_branch(1), segment, 1)).await.unwrap();
+                bucket::get(&*bucket, &layout::segment(test_cell(1), segment, 1)).await.unwrap();
             assert_eq!(object.bytes, ours);
             let object = bucket::get(&*bucket, &own_key).await.unwrap();
             assert_eq!(object.bytes, own);

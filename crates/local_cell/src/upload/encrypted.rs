@@ -14,7 +14,7 @@ use crate::{BucketData, Description, MemDir};
 use bucket_cell::Bucket as _;
 use bucket_cell::bucket::PutMode;
 use bucket_cell::fetch::{Fetcher, Limits, Memory, Priority};
-use bucket_cell::layout::{self, CellId, Location, TEST_CELL, test_branch};
+use bucket_cell::layout::{self, CellId, Location, TEST_CELL, test_cell};
 use extent_frame::{KeyId, Secret};
 use extent_keys::kms::{Kms, LocalKms};
 use extent_keys::testing::Counted;
@@ -31,7 +31,7 @@ const OTHER: u64 = 2;
 
 /// A child of a fork, the cell `id` of `tenant`'s.
 fn child_in(tenant: u64, id: u64) -> Child {
-    Child { branch: CellId { tenant, id }, owner: 0x100 + id }
+    Child { cell: CellId { tenant, id }, owner: 0x100 + id }
 }
 
 /// What the tests' hosts share: a bucket, its objects as object storage holds them, and a KMS,
@@ -129,9 +129,9 @@ impl<K: Kms> World<K> {
         self.runtime.block_on(put).unwrap();
     }
 
-    /// `branch`'s record.
-    fn record(&self, branch: CellId) -> bucket_cell::record::Record {
-        self.runtime.block_on(branch::record(&*self.bucket, branch)).unwrap().unwrap()
+    /// `cell`'s record.
+    fn record(&self, cell: CellId) -> bucket_cell::record::Record {
+        self.runtime.block_on(lifecycle::record(&*self.bucket, cell)).unwrap().unwrap()
     }
 
     /// The cell's object.
@@ -144,9 +144,9 @@ impl<K: Kms> World<K> {
         self.runtime.block_on(cell::read(&*self.bucket, cell)).unwrap()
     }
 
-    /// Whether `branch` has a record.
-    fn has_record(&self, branch: CellId) -> bool {
-        self.runtime.block_on(branch::record(&*self.bucket, branch)).unwrap().is_some()
+    /// Whether `cell` has a record.
+    fn has_record(&self, cell: CellId) -> bool {
+        self.runtime.block_on(lifecycle::record(&*self.bucket, cell)).unwrap().is_some()
     }
 
     /// `wrapped`, unwrapped by `tenant`'s KEK, asked of the KMS uncounted.
@@ -155,19 +155,19 @@ impl<K: Kms> World<K> {
     }
 }
 
-/// A store's directory, made, of `branch`, of a cell several of these tests' branches share: none
-/// is the cell's branch, which a branch of a cell of its own is (doc-20), so that each opens.
-fn made(branch: CellId) -> MemDir {
+/// A store's directory, made, of `cell`, of a cell several of these tests' cells share: none
+/// is the cell (doc-20), so that each opens.
+fn made(cell: CellId) -> MemDir {
     let dir = MemDir::new();
-    let description = Description { block_size: 4096, capacity: 1 << 30, branch };
+    let description = Description { block_size: 4096, capacity: 1 << 30, cell };
     LocalCell::make(&dir, description, Some("memory:///encrypted"), None).unwrap();
     dir
 }
 
-/// A store's directory, made, a store at the version `id` of `branch` ([`LocalCell::make_copy`]).
-fn made_at_version(branch: CellId, id: u64) -> MemDir {
+/// A store's directory, made, a store at the version `id` of `cell` ([`LocalCell::make_copy`]).
+fn made_at_version(cell: CellId, id: u64) -> MemDir {
     let dir = MemDir::new();
-    let description = Description { block_size: 4096, capacity: 1 << 30, branch };
+    let description = Description { block_size: 4096, capacity: 1 << 30, cell };
     LocalCell::make_copy(&dir, description, Some("memory:///encrypted"), None, Some(id)).unwrap();
     dir
 }
@@ -279,25 +279,25 @@ fn segment_key(key: &str, bytes: &[u8]) -> KeyId {
 }
 
 /// AC #1, #2: three volumes of a cell opened by a host, the first making it: the cell's KEK
-/// wrapped by its tenant's in the KMS, its branches' DEKs by it, each kept only so, no plaintext
-/// of either nor of their data in any object; their segments encrypted under their own branch's DEK,
+/// wrapped by its tenant's in the KMS, its cells' DEKs by it, each kept only so, no plaintext
+/// of either nor of their data in any object; their segments encrypted under their own cell's DEK,
 /// their checkpoints authenticated. A host making the cell unwraps nothing; one taking it after
 /// unwraps its KEK once for the three, and reads what the first wrote.
 #[test]
 fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let world = World::new();
     let first = world.host(5);
-    let cells = [(test_branch(7), "a"), (test_branch(8), "b"), (test_branch(9), "c")];
-    let dirs: Vec<MemDir> = cells.iter().map(|&(branch, _)| made(branch)).collect();
+    let cells = [(test_cell(7), "a"), (test_cell(8), "b"), (test_cell(9), "c")];
+    let dirs: Vec<MemDir> = cells.iter().map(|&(cell, _)| made(cell)).collect();
     let mut deks = Vec::new();
     let mut data = Vec::new();
     for (at, dir) in dirs.iter().enumerate() {
         let (store, uploader) = open_on(&world, &first, dir).unwrap();
-        let branch = cells[at].0;
+        let cell = cells[at].0;
         let written_data = noise(at as u64 + 1, 4 * 4096);
-        written(&store, &uploader, ExtentId::new(branch.id, 1), &written_data);
+        written(&store, &uploader, ExtentId::new(cell.id, 1), &written_data);
         let (dek, id) = store.keys().encrypting();
-        assert_eq!(id, KeyId { branch: branch.id, generation: 1 });
+        assert_eq!(id, KeyId { cell: cell.id, generation: 1 });
         deks.push(Secret::from_bytes(dek.expose()));
         data.push(written_data);
     }
@@ -311,36 +311,36 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     let unwrapped = futures::executor::block_on(world.kms.inner().unwrap(TENANT, &kek.wrapped));
     let kek_bytes = *unwrapped.unwrap().expose();
     let objects = world.objects();
-    for ((branch, _), dek) in cells.iter().zip(&deks) {
-        let record = world.record(*branch);
+    for ((cell, _), dek) in cells.iter().zip(&deks) {
+        let record = world.record(*cell);
         let [wrapped] = &record.deks[..] else { panic!("{:?}", record.deks) };
         assert_eq!((wrapped.generation, wrapped.kek), (1, 1));
-        let unwrapped = keys::unwrap_dek(&Secret::from_bytes(&kek_bytes), *branch, wrapped);
+        let unwrapped = keys::unwrap_dek(&Secret::from_bytes(&kek_bytes), *cell, wrapped);
         assert_eq!(unwrapped.unwrap().expose(), dek.expose());
         for (key, bytes) in &objects {
-            assert!(!holds(bytes, dek.expose()), "{key} holds {branch}'s DEK");
+            assert!(!holds(bytes, dek.expose()), "{key} holds {cell}'s DEK");
         }
     }
-    for ((key, bytes), (at, (branch, _))) in
+    for ((key, bytes), (at, (cell, _))) in
         objects.iter().flat_map(|object| cells.iter().enumerate().map(move |v| (object, v)))
     {
         assert!(!holds(bytes, &kek_bytes), "{key} holds the cell's KEK");
-        assert!(!holds(bytes, &data[at][..64]), "{key} holds {branch}'s data");
+        assert!(!holds(bytes, &data[at][..64]), "{key} holds {cell}'s data");
     }
     let mut kinds = std::collections::BTreeMap::new();
     for (key, bytes) in &objects {
         let encryption = || extent_frame::Frame::of(bytes).unwrap().encryption;
         let kind = layout::kind(key);
         match kind {
-            layout::Kind::Segment { branch, .. } => {
-                assert_eq!(segment_key(key, bytes).branch, branch.id, "{key}");
+            layout::Kind::Segment { cell, .. } => {
+                assert_eq!(segment_key(key, bytes).cell, cell.id, "{key}");
             }
-            layout::Kind::Checkpoint { branch, .. } => {
+            layout::Kind::Checkpoint { cell, .. } => {
                 let encrypted = encryption();
                 let extent_frame::Encryption::Authenticated { key: id, .. } = encrypted else {
                     panic!("{key}: {encrypted:?}")
                 };
-                assert_eq!(id.branch, branch.id, "{key}");
+                assert_eq!(id.cell, cell.id, "{key}");
             }
             _ => {}
         }
@@ -371,15 +371,15 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
 fn stores_of_tenants_with_no_kek_open_not() {
     let world = World::new();
     let host = world.host(5);
-    let branch = CellId { tenant: 2, id: 7 };
+    let cell = CellId { tenant: 2, id: 7 };
     let refused = Failure::Bucket(bucket_cell::Error::Kms("tenant 2: no KEK in the KMS".into()));
     for calls in 1..=2 {
-        let opened = open_on(&world, &host, &made(branch)).map(drop);
+        let opened = open_on(&world, &host, &made(cell)).map(drop);
         assert_eq!(opened, Err(refused.clone()));
         assert_eq!(world.calls(), (calls, 0));
     }
-    assert_eq!(world.cell_of(branch), None);
-    assert!(!world.has_record(branch));
+    assert_eq!(world.cell_of(cell), None);
+    assert!(!world.has_record(cell));
     assert_eq!(world.objects(), Vec::<(String, Vec<u8>)>::new());
 }
 
@@ -388,7 +388,7 @@ fn stores_of_tenants_with_no_kek_open_not() {
 #[test]
 fn stores_of_revoked_tenants_open_not() {
     let world = World::new();
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, uploader) = open_on(&world, &world.host(5), &dir).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     drop((store, uploader));
@@ -402,7 +402,7 @@ fn stores_of_revoked_tenants_open_not() {
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
 }
 
-/// AC #4: a generation of a branch's DEK added, the store's next opening encrypts its new objects
+/// AC #4: a generation of a cell's DEK added, the store's next opening encrypts its new objects
 /// under it, what was encrypted under the one before read as before. The cell's KEK rotated, its
 /// records' DEKs are rewrapped under the new one, the same DEKs, by one conditional update each,
 /// and its stores open and read as before.
@@ -410,27 +410,26 @@ fn stores_of_revoked_tenants_open_not() {
 fn generations_encrypt_new_objects_and_rotations_rewrap() {
     let world = World::new();
     let host = world.host(5);
-    let branches = [test_branch(7), test_branch(8)];
-    let dirs = [made(branches[0]), made(branches[1])];
+    let cells = [test_cell(7), test_cell(8)];
+    let dirs = [made(cells[0]), made(cells[1])];
     let (store, uploader) = open_on(&world, &host, &dirs[0]).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     drop(open_on(&world, &host, &dirs[1]).unwrap());
     let kms = host.runtime.keys.kms.clone();
     let cell_keys = CellKeys::of(TEST_CELL, &world.cell(), kms.clone());
-    let added =
-        world.runtime.block_on(keys::add_generation(&*world.bucket, &cell_keys, branches[0]));
+    let added = world.runtime.block_on(keys::add_generation(&*world.bucket, &cell_keys, cells[0]));
     assert_eq!(added, Ok(2));
     assert_eq!(store.keys().generations(7), [1]);
     drop((store, uploader));
     let (store, uploader) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
     assert_eq!(store.keys().generations(7), [1, 2]);
-    assert_eq!(store.keys().encrypting().1, KeyId { branch: 7, generation: 2 });
+    assert_eq!(store.keys().encrypting().1, KeyId { cell: 7, generation: 2 });
     written(&store, &uploader, ExtentId::new(7, 2), &noise(2, 4096));
     let first = location(&store, ExtentId::new(7, 2)).key;
-    assert_eq!(segment_key(&first, &world.object(&first)), KeyId { branch: 7, generation: 2 });
+    assert_eq!(segment_key(&first, &world.object(&first)), KeyId { cell: 7, generation: 2 });
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
-    let deks_before: Vec<_> = branches.iter().map(|&branch| world.record(branch).deks).collect();
+    let deks_before: Vec<_> = cells.iter().map(|&cell| world.record(cell).deks).collect();
     drop((store, uploader));
 
     // The cell's KEK rotated by its holder.
@@ -448,15 +447,15 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
         .unwrap(),
         new.unwrap(),
     );
-    for (branch, before) in branches.iter().zip(deks_before) {
-        let after = world.record(*branch).deks;
-        assert_eq!(after.len(), before.len(), "{branch}");
+    for (cell, before) in cells.iter().zip(deks_before) {
+        let after = world.record(*cell).deks;
+        assert_eq!(after.len(), before.len(), "{cell}");
         for (before, after) in before.iter().zip(&after) {
-            assert_eq!((after.generation, after.kek), (before.generation, 2), "{branch}");
-            assert_ne!(after.wrapped, before.wrapped, "{branch}");
-            let was = keys::unwrap_dek(&old, *branch, before).unwrap();
-            let is = keys::unwrap_dek(&new, *branch, after).unwrap();
-            assert_eq!(was.expose(), is.expose(), "{branch}");
+            assert_eq!((after.generation, after.kek), (before.generation, 2), "{cell}");
+            assert_ne!(after.wrapped, before.wrapped, "{cell}");
+            let was = keys::unwrap_dek(&old, *cell, before).unwrap();
+            let is = keys::unwrap_dek(&new, *cell, after).unwrap();
+            assert_eq!(was.expose(), is.expose(), "{cell}");
         }
     }
     // Another placement takes the cell after the rotation, unwrapping the new KEK: both
@@ -467,15 +466,15 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
     assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
 }
 
-/// AC #5, as TASK-411.28 left it: an object of a branch put at its key in the clear, its encryption's
-/// kind made 0 as one who can write the bucket would (a downgrade): refused by the branch's readers
+/// AC #5, as TASK-411.28 left it: an object of a cell put at its key in the clear, its encryption's
+/// kind made 0 as one who can write the bucket would (a downgrade): refused by the cell's readers
 /// and by a reader holding no key, as the collector reads, as corrupt, whether its tail was kept
 /// before or not. Its newest checkpoint so: its store's recovery refuses it.
 #[test]
-fn objects_of_encrypted_branches_unencrypted_are_refused() {
+fn objects_of_encrypted_cells_unencrypted_are_refused() {
     let world = World::new();
     let host = world.host(5);
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     let extent = ExtentId::new(7, 1);
     written(&store, &uploader, extent, &noise(1, 4096));
@@ -499,7 +498,7 @@ fn objects_of_encrypted_branches_unencrypted_are_refused() {
     drop((store, uploader));
     let objects = world.objects();
     let mut checkpoints = objects.iter().filter(|(key, _)| {
-        matches!(layout::kind(key), layout::Kind::Checkpoint { branch, .. } if branch.id == 7)
+        matches!(layout::kind(key), layout::Kind::Checkpoint { cell, .. } if cell.id == 7)
     });
     let (key, bytes) = checkpoints.next_back().unwrap();
     world.put(key, downgraded(bytes.clone()));
@@ -508,13 +507,13 @@ fn objects_of_encrypted_branches_unencrypted_are_refused() {
 }
 
 /// AC #6: the object of an extent stored on its own, copied whole to another extent's key of the
-/// same branch, is refused there: its footer, which its MAC covers, names the extent it is of. The
+/// same cell, is refused there: its footer, which its MAC covers, names the extent it is of. The
 /// moves of an object, copied to another's moves, likewise.
 #[test]
 fn own_extents_copied_to_another_key_are_refused() {
     let world = World::new();
     let host = world.host(5);
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     let large = crate::Options::default().large_extent as usize;
     let (one, other) = (ExtentId::new(7, 1), ExtentId::new(7, 2));
@@ -540,7 +539,7 @@ fn own_extents_copied_to_another_key_are_refused() {
 fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let world = World::new();
     let host = world.host(5);
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     let extent = ExtentId::new(7, 1);
     written(&store, &uploader, extent, &noise(1, 4096));
@@ -552,7 +551,7 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     let budget = Budget::new(Limits::UNBOUNDED);
     let fetcher = Fetcher::new(world.bucket.clone(), budget, memory.clone(), Some(cache));
     let reading = || world.runtime.block_on(fetcher.read(extent, &at, 0, 4096, Priority::Demand));
-    let key = KeyId { branch: 7, generation: 1 };
+    let key = KeyId { cell: 7, generation: 1 };
     assert_eq!(reading(), Err(bucket_cell::Error::NoKey(key)));
     // Served to a peer as stored, encrypted.
     let tail = world.runtime.block_on(bucket_cell::object::tail(&*world.bucket, &at.key));
@@ -569,7 +568,7 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     drop(held);
 }
 
-/// Forks a store's branch, as of its last commit, to `child`, as a host does: what the child
+/// Forks a store's cell, as of its last commit, to `child`, as a host does: what the child
 /// inherits asked for first, then the fork's commit made, then the fork in the bucket, its child's
 /// record and checkpoint, and its keys.
 fn forked(
@@ -593,26 +592,26 @@ fn forked(
 fn forks_and_versions_within_an_encrypted_cell_read_what_they_inherit() {
     let world = World::new();
     let host = world.host(5);
-    let parent = test_branch(7);
+    let parent = test_cell(7);
     let dir = made(parent);
     let (store, uploader) = open_on(&world, &host, &dir).unwrap();
     let inherited = ExtentId::new(7, 1);
     written(&store, &uploader, inherited, &noise(1, 4096));
 
     // A fork's child, of the parent's cell.
-    let child = Child { branch: test_branch(8), owner: 0x81 };
+    let child = Child { cell: test_cell(8), owner: 0x81 };
     forked(&store, &uploader, child).unwrap();
-    assert_eq!(world.record(child.branch).deks, Vec::new());
-    let (forked_store, forked_uploader) = open_on(&world, &host, &made(child.branch)).unwrap();
-    assert_eq!(world.record(child.branch).deks.len(), 1);
+    assert_eq!(world.record(child.cell).deks, Vec::new());
+    let (forked_store, forked_uploader) = open_on(&world, &host, &made(child.cell)).unwrap();
+    assert_eq!(world.record(child.cell).deks.len(), 1);
     let keys = forked_store.keys();
     assert_eq!((keys.generations(7), keys.generations(8)), (vec![1], vec![1]));
-    assert_eq!(keys.encrypting().1, KeyId { branch: 8, generation: 1 });
+    assert_eq!(keys.encrypting().1, KeyId { cell: 8, generation: 1 });
     assert_eq!(read(&world, &host, &forked_store, inherited, 4096), Ok(noise(1, 4096)));
     let own = ExtentId::new(8, forked_uploader.next_sequence().max(1));
     written(&forked_store, &forked_uploader, own, &noise(2, 4096));
     let at = location(&forked_store, own).key;
-    assert_eq!(segment_key(&at, &world.object(&at)), KeyId { branch: 8, generation: 1 });
+    assert_eq!(segment_key(&at, &world.object(&at)), KeyId { cell: 8, generation: 1 });
     assert_eq!(read(&world, &host, &forked_store, own, 4096), Ok(noise(2, 4096)));
 }
 
@@ -630,7 +629,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
     let kms = host.runtime.keys.kms.clone();
-    let parent = test_branch(7);
+    let parent = test_cell(7);
     let parent_dir = made(parent);
     let (store, uploader) = open_on(&world, &host, &parent_dir).unwrap();
     let a = ExtentId::new(7, 1);
@@ -646,28 +645,28 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     forked(&store, &uploader, child).unwrap();
     assert_eq!(world.calls(), (0, 0));
     assert_eq!(kms.in_pool(OTHER), 3);
-    let record = world.record(child.branch);
+    let record = world.record(child.cell);
     assert_eq!(record.deks.len(), 1);
     let inherited = |record: &bucket_cell::record::Record| {
         let had = record.inherited.iter();
-        had.map(|had| (had.branch, had.dek.generation, had.dek.kek)).collect::<Vec<_>>()
+        had.map(|had| (had.cell, had.dek.generation, had.dek.kek)).collect::<Vec<_>>()
     };
     assert_eq!(inherited(&record), [(parent, 1, 1)]);
     // Its cell, made at the fork with a KEK of the pool, held by no placement: the parent's DEK
     // unwraps under it, for the child alone.
-    let made_cell = world.cell_of(child.branch).unwrap();
+    let made_cell = world.cell_of(child.cell).unwrap();
     assert_eq!((made_cell.epoch, made_cell.token, made_cell.kind), (1, 0, None));
     let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
-    let dek = keys::unwrap_inherited(&kek, child.branch, &record.inherited[0]).unwrap();
+    let dek = keys::unwrap_inherited(&kek, child.cell, &record.inherited[0]).unwrap();
     assert_eq!(dek.expose(), store.keys().encrypting().0.expose());
-    assert!(keys::unwrap_inherited(&kek, test_branch(8), &record.inherited[0]).is_err());
+    assert!(keys::unwrap_inherited(&kek, test_cell(8), &record.inherited[0]).is_err());
     world.kms.reset();
 
     // Opened here: no call either, the cell's KEK kept from its making for its first taking.
-    let child_dir = made(child.branch);
+    let child_dir = made(child.cell);
     let (child_store, child_uploader) = open_on(&world, &host, &child_dir).unwrap();
     assert_eq!(world.calls(), (0, 0));
-    assert_eq!(world.cell_of(child.branch).unwrap().epoch, 2);
+    assert_eq!(world.cell_of(child.cell).unwrap().epoch, 2);
     assert_eq!(read(&world, &host, &child_store, a, 4096), Ok(noise(1, 4096)));
     let b = ExtentId::new(8, child_uploader.next_sequence().max(1));
     written(&child_store, &child_uploader, b, &noise(2, 4096));
@@ -677,8 +676,8 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     let grandchild = child_in(OTHER, 9);
     forked(&child_store, &child_uploader, grandchild).unwrap();
     assert_eq!(world.calls(), (0, 0));
-    assert_eq!(inherited(&world.record(grandchild.branch)), [(parent, 1, 1), (child.branch, 1, 1)]);
-    let grandchild_dir = made(grandchild.branch);
+    assert_eq!(inherited(&world.record(grandchild.cell)), [(parent, 1, 1), (child.cell, 1, 1)]);
+    let grandchild_dir = made(grandchild.cell);
     let (grandchild_store, _grandchild_uploader) = open_on(&world, &host, &grandchild_dir).unwrap();
     assert_eq!(world.calls(), (0, 0));
     for (extent, data) in [(a, noise(1, 4096)), (b, noise(2, 4096))] {
@@ -709,7 +708,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!(world.calls(), (0, 3));
 }
 
-/// TASK-411.4 AC #1, #2: a store at a version reads what it names under its branch's cell's KEK.
+/// TASK-411.4 AC #1, #2: a store at a version reads what it names under its cell's KEK.
 /// Shared, the version forks into a cell of another tenant's, the clone keeping the keys it
 /// inherits rewrapped under its own cell's KEK, with no KMS call. A host whose KMS refuses the
 /// version's tenant opens no copy of it, so forks none; a host holding a copy open, told the
@@ -721,7 +720,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
-    let parent_dir = made(test_branch(7));
+    let parent_dir = made(test_cell(7));
     let (store, uploader) = open_on(&world, &host, &parent_dir).unwrap();
     let a = ExtentId::new(7, 1);
     written(&store, &uploader, a, &noise(1, 4096));
@@ -730,7 +729,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     uploader.wait_uploaded(epoch.unwrap()).unwrap();
     uploader.share_version(id, true).unwrap();
     drop((store, uploader));
-    let point_dir = made_at_version(test_branch(7), id);
+    let point_dir = made_at_version(test_cell(7), id);
 
     // A host whose KMS refuses the version's tenant: no copy, no fork.
     world.kms.inner().revoke(TENANT).unwrap();
@@ -750,7 +749,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let refused = forked(&copy, &version_uploader, clone).unwrap_err();
     let revoked = bucket_cell::Error::Kms("tenant 1: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
-    assert!(!world.has_record(clone.branch) && world.cell_of(clone.branch).is_none());
+    assert!(!world.has_record(clone.cell) && world.cell_of(clone.cell).is_none());
     assert_eq!(kms.in_pool(OTHER), 4);
     drop((copy, version_uploader));
 
@@ -766,11 +765,11 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     world.kms.reset();
     forked(&copy, &version_uploader, clone).unwrap();
     assert_eq!(world.calls(), (0, 0));
-    let record = world.record(clone.branch);
-    let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
-    assert_eq!(inherited, [test_branch(7)]);
-    assert_eq!(record.origin(), Some(layout::Origin { parent: test_branch(7), at: 1 }));
-    let clone_dir = made(clone.branch);
+    let record = world.record(clone.cell);
+    let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
+    assert_eq!(inherited, [test_cell(7)]);
+    assert_eq!(record.origin(), Some(layout::Origin { parent: test_cell(7), at: 1 }));
+    let clone_dir = made(clone.cell);
     let (clone_store, _clone_uploader) = open_on(&world, &forker, &clone_dir).unwrap();
     assert_eq!(read(&world, &forker, &clone_store, a, 4096), Ok(noise(1, 4096)));
     drop((copy, version_uploader, clone_store, _clone_uploader));
@@ -794,7 +793,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
     let kms = host.runtime.keys.kms.clone();
-    let (store, uploader) = open_on(&world, &host, &made(test_branch(7))).unwrap();
+    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
@@ -809,7 +808,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let revoked = bucket_cell::Error::Kms("tenant 2: its KEK is revoked".into());
     assert_eq!(refused, Failure::Bucket(revoked));
     assert_eq!(world.calls(), (1, 0));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
+    assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
 
     world.kms.inner().unrevoke(OTHER).unwrap();
     forked(&store, &uploader, child).unwrap();
@@ -828,7 +827,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let destroyed = bucket_cell::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
     assert_eq!(kms.refuses(OTHER), Some(destroyed));
-    assert!(!world.has_record(last.branch) && world.cell_of(last.branch).is_none());
+    assert!(!world.has_record(last.cell) && world.cell_of(last.cell).is_none());
 }
 
 /// TASK-411.4, as TASK-411.28 left it: an encrypted store forks into no cell of a tenant the KMS has no
@@ -838,13 +837,13 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
 fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
     let world = World::new();
     let host = world.host(5);
-    let (store, uploader) = open_on(&world, &host, &made(test_branch(7))).unwrap();
+    let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
     let child = child_in(3, 8);
     let refused = forked(&store, &uploader, child).unwrap_err();
     let none = bucket_cell::Error::Kms("tenant 3: no KEK in the KMS".into());
     assert_eq!(refused, Failure::Bucket(none));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
+    assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
 }
 
 /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS forgot (a real KMS's key
@@ -859,7 +858,7 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     local.create(TENANT).unwrap();
     let world = World::with_kms(extent_keys::testing::Forgetting::new(local));
     let first = world.host(5);
-    let (store, remote) = open_on(&world, &first, &made(test_branch(7))).unwrap();
+    let (store, remote) = open_on(&world, &first, &made(test_cell(7))).unwrap();
     written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
 
     world.kms.inner().inner().destroy(TENANT).unwrap();
@@ -867,9 +866,9 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     let refused = Failure::Bucket(bucket_cell::Error::Kms(none.into()));
     let second = world.host(6);
     let elsewhere = CellId { tenant: TENANT, id: 9 };
-    for branch in [elsewhere, test_branch(8)] {
-        let opened = open_on(&world, &second, &made(branch)).map(drop);
-        assert_eq!(opened, Err(refused.clone()), "{branch}");
+    for cell in [elsewhere, test_cell(8)] {
+        let opened = open_on(&world, &second, &made(cell)).map(drop);
+        assert_eq!(opened, Err(refused.clone()), "{cell}");
     }
     assert_eq!(world.cell_of(elsewhere), None);
     assert_eq!(world.cell().kind, None);
@@ -877,7 +876,7 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     // of the fork is made.
     let child = child_in(TENANT, 10);
     assert_eq!(forked(&store, &remote, child), Err(refused));
-    assert!(!world.has_record(child.branch) && world.cell_of(child.branch).is_none());
+    assert!(!world.has_record(child.cell) && world.cell_of(child.cell).is_none());
     drop((store, remote));
     let objects: Vec<String> = world.objects().into_iter().map(|(key, _)| key).collect();
     assert!(objects.iter().all(|key| !key.ends_with("/encrypted")), "{objects:?}");
@@ -911,11 +910,11 @@ fn in_the_clear(files: Vec<(String, Vec<u8>)>, data: &[u8]) -> Vec<String> {
 fn segments_closed_again_are_never_in_the_clear() {
     let world = World::new();
     let host = world.host(5);
-    let branch = test_branch(7);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let dir = made(cell);
     // No closing between commits: the open segment holds the commit as the crash leaves it.
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-    let extent = ExtentId::new(branch.id, 1);
+    let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, 8 * 4096);
     let crashed = {
         let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
@@ -973,12 +972,12 @@ fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
 fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
     let world = World::new();
     let host = world.host(5);
-    let branch = test_branch(7);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let dir = made(cell);
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
     let (store, uploader) = open_with(&world, &host, &dir, quiet).unwrap();
     assert!(store.keys().encrypts());
-    let (small, large) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
+    let (small, large) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
     let small_data = noise(1, 8 * 4096);
     let large_data = noise(2, crate::Options::default().large_extent as usize);
     store.write(small, 0, &small_data).unwrap();
@@ -1008,7 +1007,7 @@ fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
     // TASK-411.15: and so a reader holding no key tells, by their trailers and headers.
     let on_disk = crate::on_disk(&dir).unwrap().unwrap();
     assert_eq!(on_disk.bucket.as_deref(), Some("memory:///encrypted"));
-    assert_eq!(on_disk.branch, branch);
+    assert_eq!(on_disk.cell, cell);
     assert_eq!(on_disk.clear, Vec::new(), "{on_disk:?}");
     assert!(on_disk.read >= 3, "{on_disk:?}");
     // Copies headed and encrypted as stores in the clear wrote them: found so.
@@ -1051,9 +1050,9 @@ fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
     {
         let world = World::new();
         let host = world.host(5);
-        let branch = test_branch(7);
+        let cell = test_cell(7);
         let dir = MemDir::serial();
-        let description = Description { block_size: 4096, capacity: 1 << 30, branch };
+        let description = Description { block_size: 4096, capacity: 1 << 30, cell };
         let kind = cell::Kind::Fxfs;
         LocalCell::make(&dir, description, Some("memory:///encrypted"), Some(kind)).unwrap();
         let held = crate::HeldParts::new();
@@ -1062,7 +1061,7 @@ fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
         let (store, uploader) = open_with(&world, &host, &dir, options).unwrap();
         assert!(store.keys().encrypts());
         for sequence in 1..=7 {
-            store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
+            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).unwrap();
         }
         store.commit(None).unwrap();
         let holding = held.counts();
@@ -1075,7 +1074,7 @@ fn encrypted_stores_hold_parts_packed_ahead_and_encrypt_them_framing() {
         assert_eq!(read_back, 4096, "the last part alone read back");
         assert_eq!(held.counts().bytes, 0, "taken");
         for sequence in 1..=7 {
-            let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
+            let (extent, data) = (ExtentId::new(cell.id, sequence), data(sequence));
             let mut buf = vec![0; data.len()];
             store.read(extent, 0, &mut buf).unwrap();
             assert!(buf == data, "{extent:?} read back");
@@ -1118,14 +1117,14 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
     {
         let world = World::new();
         let host = world.host(5);
-        let branch = test_branch(7);
-        let dir = made(branch);
+        let cell = test_cell(7);
+        let dir = made(cell);
         let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let (store, uploader) = open_with(&world, &host, &dir, quiet).unwrap();
         assert!(store.keys().encrypts());
         let before = (crate::written(), crate::segments_framed_in_place());
         for sequence in 1..=10 {
-            store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
+            store.write(ExtentId::new(cell.id, sequence), 0, &data(sequence)).unwrap();
         }
         store.commit(None).unwrap();
         store.close_segment().unwrap();
@@ -1157,12 +1156,12 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
         let own: Vec<_> =
             own.into_iter().map(|(path, encryption)| (path, in_place(&encryption))).collect();
         let extent_of =
-            |sequence: u64| crate::layout::extent_path(ExtentId::new(branch.id, sequence));
+            |sequence: u64| crate::layout::extent_path(ExtentId::new(cell.id, sequence));
         let expected = vec![(extent_of(8), true), (extent_of(9), false), (extent_of(10), false)];
         assert_eq!(own, expected, "8 in place, 9 and 10 in copies");
         let all: Vec<u8> = (1..=10).flat_map(data).collect();
         for sequence in 1..=10 {
-            let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
+            let (extent, data) = (ExtentId::new(cell.id, sequence), data(sequence));
             let mut buf = vec![0; data.len()];
             store.read(extent, 0, &mut buf).unwrap();
             assert!(buf == data, "{extent:?} read back");
@@ -1172,7 +1171,7 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
             assert_eq!(clear_files(&dir, &all), Vec::<String>::new());
             assert_eq!(in_the_clear(world.objects(), &all), Vec::<String>::new());
             for sequence in [1, 8] {
-                let extent = ExtentId::new(branch.id, sequence);
+                let extent = ExtentId::new(cell.id, sequence);
                 let at = location(&store, extent);
                 let encryption =
                     extent_frame::Frame::of(&world.object(&at.key)).unwrap().encryption;
@@ -1203,10 +1202,10 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
     use std::sync::mpsc::channel;
     let world = World::new();
     let host = world.host(5);
-    let branch = test_branch(7);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let dir = made(cell);
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-    let extent = ExtentId::new(branch.id, 1);
+    let extent = ExtentId::new(cell.id, 1);
     let data = noise(1, (2 << 20) + 8 * 4096);
     let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
     store.write(extent, 0, &data).unwrap();
@@ -1289,13 +1288,13 @@ fn segments_framed_in_place_encrypted_recover_from_crashes() {
 fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors() {
     let world = World::new();
     let host = world.host(5);
-    let branch = test_branch(7);
+    let cell = test_cell(7);
     let dir = MemDir::new();
-    let description = Description { block_size: 512, capacity: 1 << 30, branch };
+    let description = Description { block_size: 512, capacity: 1 << 30, cell };
     let kind = cell::Kind::Fxfs;
     LocalCell::make(&dir, description, Some("memory:///encrypted"), Some(kind)).unwrap();
     let (store, remote) = open_on(&world, &host, &dir).unwrap();
-    let extent = ExtentId::new(branch.id, 1);
+    let extent = ExtentId::new(cell.id, 1);
     let data = noise(3, 4 * 4096);
     let write = store.begin_write(extent, 0, data.len() as u64).unwrap();
     let mut bytes = crate::Aligned::new(data.len());
@@ -1309,7 +1308,7 @@ fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors()
     assert!(buf == data, "read back");
     assert_eq!(clear_files(&dir, &data), Vec::<String>::new());
     let large = crate::Options::default().large_extent;
-    let written = store.write(ExtentId::new(branch.id, 2), large, &data[..512]);
+    let written = store.write(ExtentId::new(cell.id, 2), large, &data[..512]);
     assert_eq!(
         written.unwrap_err().downcast::<crate::Unsectored>().unwrap(),
         crate::Unsectored { offset: large, len: 512 }
@@ -1325,10 +1324,10 @@ fn writes_stored_by_callers_are_encrypted_and_large_extents_take_whole_sectors()
 fn encrypted_logs_changed_are_refused() {
     let world = World::new();
     let host = world.host(5);
-    let branch = test_branch(7);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let dir = made(cell);
     let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-    let extent = ExtentId::new(branch.id, 1);
+    let extent = ExtentId::new(cell.id, 1);
     let crashed = {
         let (store, uploader) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
         store.write(extent, 0, &noise(1, 4096)).unwrap();
@@ -1337,7 +1336,7 @@ fn encrypted_logs_changed_are_refused() {
         uploader.cut_short()();
         crashed
     };
-    let segment = SegmentId { branch: branch.id, number: 0 };
+    let segment = SegmentId { cell: cell.id, number: 0 };
     let path = crate::layout::log_path(segment);
     let log = read_file(&crashed.open(&path, false).unwrap()).unwrap();
     let header = crate::wal::LogHeader::of(&log, segment).unwrap();
@@ -1365,13 +1364,13 @@ fn encrypted_logs_changed_are_refused() {
         (changed_header(salt), "its header is not authentic"),
         (
             changed_header(generation),
-            "is encrypted under KeyId { branch: 7, generation: 0 }, which the store holds not",
+            "is encrypted under KeyId { cell: 7, generation: 0 }, which the store holds not",
         ),
     ] {
         let attempt = crashed.crash(0);
         attempt.open(&path, false).unwrap().write_at(&changed, 0).unwrap();
         // Recovery holds no key, and takes the log as it is.
-        assert_eq!(LocalCell::recover(attempt.clone()).unwrap().branch(), branch);
+        assert_eq!(LocalCell::recover(attempt.clone()).unwrap().cell(), cell);
         let refused = open_with(&world, &host, &attempt, quiet.clone()).map(drop).unwrap_err();
         assert!(format!("{refused:#}").contains(refusal), "{refused:#}");
         let segments = files_of(&attempt, "segments/");
@@ -1450,7 +1449,7 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     let (writer, reader) = (world.host(5), world.host(6));
     // A segment the guest fills is closed by a commit waiting for its upload alone.
     let filling = Options { filling_wait: Duration::from_secs(3600), ..Options::default() };
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, uploader) = open_with(&world, &writer, &dir, filling).unwrap();
     let (uploaded, open) = (ExtentId::new(7, 1), ExtentId::new(7, 2));
     const LEN: usize = 8 * 4096;
@@ -1471,7 +1470,7 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
     let their_at = location(&their_store, their_extent);
     let child = child_in(OTHER, 8);
     forked(&store, &uploader, child).unwrap();
-    let child_dir = made(child.branch);
+    let child_dir = made(child.cell);
     let (child_store, _child_uploader) = open_on(&world, &writer, &child_dir).unwrap();
     let first = uploaded_data[..4096].to_vec();
     assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
@@ -1495,10 +1494,10 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
         assert_eq!(kms.refuses(TENANT), Some(bucket_cell::Error::Kms(why.into())));
         assert_eq!(kms.in_pool(TENANT), 0);
     }
-    // Host 5's fetchers keep the fork's ring, which holds the DEK it inherited of branch 7.
-    assert_eq!(writer.memory.keys().ring().branches(), BTreeSet::from([7, 8, 9]));
-    assert_eq!(reader.memory.keys().ring().branches(), BTreeSet::from([9]));
-    let refused = bucket_cell::Error::NoKey(KeyId { branch: 7, generation: 1 });
+    // Host 5's fetchers keep the fork's ring, which holds the DEK it inherited of cell 7.
+    assert_eq!(writer.memory.keys().ring().cells(), BTreeSet::from([7, 8, 9]));
+    assert_eq!(reader.memory.keys().ring().cells(), BTreeSet::from([9]));
+    let refused = bucket_cell::Error::NoKey(KeyId { cell: 7, generation: 1 });
     assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Err(refused));
     assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
     assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
@@ -1530,25 +1529,25 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
 fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable() {
     let world = World::new();
     let (writer, reader) = (world.host(5), world.host(6));
-    let ours = test_branch(7);
+    let ours = test_cell(7);
     let sibling = CellId { tenant: TENANT, id: 8 };
     let dirs = [made(ours), made(sibling)];
     let cache_dir = tempfile::tempdir().unwrap();
     let fetcher = caching_fetcher(&world, &reader.memory, cache_dir.path());
     let mut opened = Vec::new();
     let mut at = Vec::new();
-    for (dir, branch) in dirs.iter().zip([ours, sibling]) {
+    for (dir, cell) in dirs.iter().zip([ours, sibling]) {
         let (store, uploader) = open_on(&world, &writer, dir).unwrap();
         // Two extents, one freed: a segment the collector would compact.
-        let (kept, freed) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
+        let (kept, freed) = (ExtentId::new(cell.id, 1), ExtentId::new(cell.id, 2));
         store.write(freed, 0, &noise(9, 4096)).unwrap();
-        written(&store, &uploader, kept, &noise(branch.id, 4096));
+        written(&store, &uploader, kept, &noise(cell.id, 4096));
         store.free(freed).unwrap();
         store.commit(None).unwrap();
         uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
         let location = location(&store, kept);
         let _held = reader.memory.keys().hold(store.keys().clone());
-        assert_eq!(fetched_by(&world, &fetcher, kept, &location, 4096), Ok(noise(branch.id, 4096)));
+        assert_eq!(fetched_by(&world, &fetcher, kept, &location, 4096), Ok(noise(cell.id, 4096)));
         drop(_held);
         at.push((kept, location));
         opened.push((store, uploader));
@@ -1569,10 +1568,10 @@ fn shredded_cells_leave_their_cells_unreadable_and_the_tenants_others_readable()
     for host in [&writer, &reader] {
         assert_eq!(host.runtime.keys.forget(keys::Scope::Cell(TEST_CELL), why), 1);
         host.memory.forget_kept(keys::Scope::Cell(TEST_CELL));
-        assert_eq!(host.memory.keys().ring().branches(), BTreeSet::from([8]));
+        assert_eq!(host.memory.keys().ring().cells(), BTreeSet::from([8]));
     }
     let (ours_extent, ours_at) = &at[0];
-    let key = KeyId { branch: 7, generation: 1 };
+    let key = KeyId { cell: 7, generation: 1 };
     let unread = fetched_by(&world, &fetcher, *ours_extent, ours_at, 4096);
     assert_eq!(unread, Err(bucket_cell::Error::NoKey(key)));
     let (sibling_extent, sibling_at) = &at[1];
@@ -1644,15 +1643,15 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
     let (first_kms, second_kms) = (bucket_kms(), bucket_kms());
     let (first, second) =
         (host_over(&world, first_kms.clone(), 5), host_over(&world, second_kms, 6));
-    let branch = test_branch(7);
-    let extent = ExtentId::new(branch.id, 1);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let extent = ExtentId::new(cell.id, 1);
+    let dir = made(cell);
     let kek_key = layout::kek(TENANT);
     assert!(world.objects().is_empty());
     let (store, remote) = open_on(&world, &first, &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, extent, &data);
-    assert_eq!(store.keys().encrypting().1, KeyId { branch: branch.id, generation: 1 });
+    assert_eq!(store.keys().encrypting().1, KeyId { cell: cell.id, generation: 1 });
     drop((store, remote));
     let kek_object = world.object(&kek_key);
     assert_eq!(kek_object.len(), extent_keys::kms::bucket::KEK_OBJECT_LEN);
@@ -1662,15 +1661,15 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
     let cell_kek = futures::executor::block_on(first_kms.unwrap(TENANT, &kek.wrapped)).unwrap();
     let objects = world.objects();
     let segments: Vec<_> =
-        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
-    assert!(!segments.is_empty(), "no segment of {branch}");
+        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(cell))).collect();
+    assert!(!segments.is_empty(), "no segment of {cell}");
     for (key, segment) in segments {
         // Noise: framed in place, its raw file's sectors, or in a copy, encrypted with AES-GCM.
         let encryption = extent_frame::Frame::of(segment).unwrap().encryption;
         let encrypted = matches!(
             encryption,
             extent_frame::Encryption::Encrypted { key, .. } | extent_frame::Encryption::Sectors { key, .. }
-                if key.branch == branch.id
+                if key.cell == cell.id
         );
         assert!(encrypted, "{key}: {encryption:?}");
     }
@@ -1727,26 +1726,26 @@ fn local_kms_encrypted_stores_open_through_aws_kms() {
     let key_id = emulator.create_key();
     emulator.create_alias("alias/cladefs-tenant-1", &key_id);
     let url = emulator.url("alias/cladefs-tenant-{tenant}");
-    let branch = test_branch(7);
-    let extent = ExtentId::new(branch.id, 1);
-    let dir = made(branch);
+    let cell = test_cell(7);
+    let extent = ExtentId::new(cell.id, 1);
+    let dir = made(cell);
     let first = host_of_kms(&world, &url, 5);
     let (store, remote) = open_on(&world, &first, &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, extent, &data);
-    assert_eq!(store.keys().encrypting().1, KeyId { branch: branch.id, generation: 1 });
+    assert_eq!(store.keys().encrypting().1, KeyId { cell: cell.id, generation: 1 });
     drop((store, remote));
 
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
     assert_eq!(&kek.wrapped.0[..29], b"fxka\x01\x00\x16alias/cladefs-tenant-1");
-    // Every segment of the branch encrypted, whatever its number and its writer's epoch (TASK-407).
+    // Every segment of the cell encrypted, whatever its number and its writer's epoch (TASK-407).
     let objects = world.objects();
     let segments: Vec<_> =
-        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
-    assert!(!segments.is_empty(), "no segment of {branch}");
+        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(cell))).collect();
+    assert!(!segments.is_empty(), "no segment of {cell}");
     for (key, segment) in segments {
-        assert_eq!(segment_key(key, segment), KeyId { branch: branch.id, generation: 1 });
+        assert_eq!(segment_key(key, segment), KeyId { cell: cell.id, generation: 1 });
     }
     for (key, bytes) in objects {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
@@ -1798,11 +1797,11 @@ fn sealed_stores_open_through_openbao() {
     let url = bao.url("transit", "key=cladefs-tenant-{tenant}");
     let world = World::with_kms(OpenBao::new(&url, Token::Value(bao.token("cladefs"))).unwrap());
 
-    let dir = made(test_branch(7));
+    let dir = made(test_cell(7));
     let (store, remote) = open_on(&world, &world.host(5), &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, ExtentId::new(7, 1), &data);
-    assert_eq!(store.keys().encrypting().1, KeyId { branch: 7, generation: 1 });
+    assert_eq!(store.keys().encrypting().1, KeyId { cell: 7, generation: 1 });
     assert_eq!(world.calls(), (1, 0));
     drop((store, remote));
     let object = world.cell();

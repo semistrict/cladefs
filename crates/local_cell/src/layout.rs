@@ -17,16 +17,16 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;
 
 /// The first line of a store's description: its format. cladefs: 6 names the bucket a host's store
-/// keeps its branches in (TASK-165.6); 7 places an extent whose data is in the bucket by its
-/// location there (TASK-165.8), and holds one branch, no branch records (TASK-165.7); 8 has no
-/// index: its branch is the bucket's, its write-ahead log and its segments' logs of their
+/// keeps its cells in (TASK-165.6); 7 places an extent whose data is in the bucket by its
+/// location there (TASK-165.8), and holds one cell, no cell records (TASK-165.7); 8 has no
+/// index: its cell is the bucket's, its write-ahead log and its segments' logs of their
 /// commits, and its description names its capacity until a commit sets one, and its placement's
 /// fencing token, if placed (TASK-165.9); 9's footers and its logs' records name the runs of a
 /// commit spanning segments in each segment it spans (TASK-92.41); 10's logs' headers name their
-/// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
+/// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its cell
 /// with its tenant's cell, `TENANT/CELL/ID` (TASK-364); 12's names the cell it is as
 /// `cell NAME`, not `volume NAME` (TASK-482); 13's footers and its logs' records name the versions
-/// cut at their ends, and its description may name a version of its branch it is a copy of
+/// cut at their ends, and its description may name a version of its cell it is a copy of
 /// (TASK-476); 14 writes every ID in base 32, its description's and its files' names, which
 /// were in hexadecimal (`base32_id`, TASK-504); 15's description names its cell's kind alone, as a
 /// cell has one kind, of no cell's name (doc-20, TASK-508.1). A store of another format is
@@ -43,30 +43,30 @@ pub struct Format {
 }
 
 /// A store, as its user sees it: the size of the blocks extents are read and written in, the most
-/// bytes its extents may hold, and its branch, whose extents its user mints.
+/// bytes its extents may hold, and its cell, whose extents its user mints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Description {
     pub block_size: u32,
     pub capacity: u64,
-    pub branch: CellId,
+    pub cell: CellId,
 }
 
-/// The store's description, its `store` file: its format, block size, and branch; and cladefs: the
-/// URL of the bucket its branch is kept in, which every store in a host's directory names
-/// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its branch has
-/// until a commit sets one, as a branch made for it, or taken into it, says none; and the fencing
-/// token of its placement, if it was placed (TASK-39.7), which takes the branch's cell,
+/// The store's description, its `store` file: its format, block size, and cell; and cladefs: the
+/// URL of the bucket its cell is kept in, which every store in a host's directory names
+/// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its cell has
+/// until a commit sets one, as a cell made for it, or taken into it, says none; and the fencing
+/// token of its placement, if it was placed (TASK-39.7), which takes the cell,
 /// and so its head (TASK-165.9, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CellFile {
     pub block_size: u32,
-    pub branch: CellId,
+    pub cell: CellId,
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
     /// cladefs: its cell's kind, if it is kept in a bucket (TASK-364, doc-20).
     pub kind: Option<Kind>,
-    /// cladefs: the version of its branch it is at, if it is one: its branch's state at the
+    /// cladefs: the version of its cell it is at, if it is one: its cell's state at the
     /// version, which nothing writes, as a store at a version (doc-18, TASK-476).
     pub version: Option<u64>,
 }
@@ -104,9 +104,9 @@ impl CellFile {
             .transpose()?;
         Ok(Self {
             block_size: number(&fields, "block_size")?.try_into().context("bad block_size")?,
-            branch: (fields.get("branch").ok_or_else(|| anyhow!("no branch"))?)
+            cell: (fields.get("cell").ok_or_else(|| anyhow!("no cell"))?)
                 .parse()
-                .map_err(|err: String| anyhow!("bad branch: {err}"))?,
+                .map_err(|err: String| anyhow!("bad cell: {err}"))?,
             bucket: fields.get("bucket").cloned(),
             capacity: number(&fields, "capacity")?,
             token,
@@ -116,8 +116,8 @@ impl CellFile {
     }
 
     pub(crate) fn text(&self) -> String {
-        let Self { block_size, branch, bucket, capacity, token, kind, version } = self;
-        let mut text = format!("{FORMAT}\nblock_size {block_size}\nbranch {branch}\n");
+        let Self { block_size, cell, bucket, capacity, token, kind, version } = self;
+        let mut text = format!("{FORMAT}\nblock_size {block_size}\ncell {cell}\n");
         text += &format!("capacity {capacity}\n");
         if let Some(url) = bucket {
             text += &format!("bucket {url}\n");
@@ -137,77 +137,77 @@ impl CellFile {
 
 /// The description's file.
 pub(crate) const DESCRIPTION: &str = "store";
-/// The directory of segments, a directory for each branch's.
+/// The directory of segments, a directory for each cell's.
 pub(crate) const SEGMENTS: &str = "segments";
-/// The directory of extents stored on their own, a directory for each branch's.
+/// The directory of extents stored on their own, a directory for each cell's.
 pub(crate) const EXTENTS: &str = "extents";
-/// cladefs: the directory of the open segments' logs, a directory for each branch's: the commits each
+/// cladefs: the directory of the open segments' logs, a directory for each cell's: the commits each
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
-/// The directory of open segments' files, raw, a directory for each branch's.
+/// The directory of open segments' files, raw, a directory for each cell's.
 pub(crate) const OPEN_SEGMENTS: &str = "open-segments";
 /// The directory of the files of open extents stored on their own, raw, a directory for each
-/// branch's.
+/// cell's.
 pub(crate) const OPEN_EXTENTS: &str = "open-extents";
 
-/// The directory of `branch`'s files of `kind` (`SEGMENTS`, `EXTENTS`, `LOGS`, ...).
-pub(crate) fn branch_dir(kind: &'static str, branch: u64) -> String {
-    format!("{kind}/{}", Padded(branch))
+/// The directory of `cell`'s files of `kind` (`SEGMENTS`, `EXTENTS`, `LOGS`, ...).
+pub(crate) fn cell_dir(kind: &'static str, cell: u64) -> String {
+    format!("{kind}/{}", Padded(cell))
 }
 
-/// The path of file `number` of `branch`'s of `kind`: a segment's, a log's, an extent's.
-pub(crate) fn numbered_path(kind: &'static str, branch: u64, number: u64) -> String {
-    format!("{}/{}", branch_dir(kind, branch), Padded(number))
+/// The path of file `number` of `cell`'s of `kind`: a segment's, a log's, an extent's.
+pub(crate) fn numbered_path(kind: &'static str, cell: u64, number: u64) -> String {
+    format!("{}/{}", cell_dir(kind, cell), Padded(number))
 }
 
-/// A segment: the branch that wrote it, and its number among the branch's.
+/// A segment: the cell that wrote it, and its number among the cell's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) struct SegmentId {
-    pub branch: u64,
+    pub cell: u64,
     pub number: u64,
 }
 
 /// The path of a segment.
 pub(crate) fn segment_path(segment: SegmentId) -> String {
-    numbered_path(SEGMENTS, segment.branch, segment.number)
+    numbered_path(SEGMENTS, segment.cell, segment.number)
 }
 
 /// The path of the raw file of a segment while it is open.
 pub(crate) fn open_segment_path(segment: SegmentId) -> String {
-    numbered_path(OPEN_SEGMENTS, segment.branch, segment.number)
+    numbered_path(OPEN_SEGMENTS, segment.cell, segment.number)
 }
 
 /// The path of the raw file of `extent`, stored on its own, while it is open.
 pub(crate) fn open_extent_path(extent: ExtentId) -> String {
-    numbered_path(OPEN_EXTENTS, extent.branch, extent.sequence)
+    numbered_path(OPEN_EXTENTS, extent.cell, extent.sequence)
 }
 
-/// The path of the file of `extent`, stored on its own, in its branch's directory.
+/// The path of the file of `extent`, stored on its own, in its cell's directory.
 pub(crate) fn extent_path(extent: ExtentId) -> String {
-    numbered_path(EXTENTS, extent.branch, extent.sequence)
+    numbered_path(EXTENTS, extent.cell, extent.sequence)
 }
 
 /// cladefs: the path of the log of the commits of a segment, while it is open (TASK-165.9).
 pub(crate) fn log_path(segment: SegmentId) -> String {
-    numbered_path(LOGS, segment.branch, segment.number)
+    numbered_path(LOGS, segment.cell, segment.number)
 }
 
-/// The number in a file's name: a segment's, a log's, an extent's sequence number, or a branch's
+/// The number in a file's name: a segment's, a log's, an extent's sequence number, or a cell's
 /// directory's.
 pub(crate) fn parse_number(name: &str) -> Option<u64> {
     base32_id::parse_padded(name)
 }
 
-/// cladefs: the prefix of the names of spare logs, in a branch's directory of logs: logs of segments
+/// cladefs: the prefix of the names of spare logs, in a cell's directory of logs: logs of segments
 /// gone, kept to be the logs of segments to come (`segments::Segments::recycle`, TASK-301).
 pub(crate) const SPARE: &str = "spare-";
 
 /// cladefs: the path of the spare log that was the log of `segment`.
 pub(crate) fn spare_path(segment: SegmentId) -> String {
-    format!("{}/{SPARE}{}", branch_dir(LOGS, segment.branch), Padded(segment.number))
+    format!("{}/{SPARE}{}", cell_dir(LOGS, segment.cell), Padded(segment.number))
 }
 
-/// cladefs: the prefix of the names of segments' framed files being made durable, in a branch's
+/// cladefs: the prefix of the names of segments' framed files being made durable, in a cell's
 /// directory of segments: renamed to theirs once their raw files' and logs' entries are durable
 /// (`segments::make_durable`, TASK-310), so that no framed file's entry is durable before those;
 /// an opening removes any left.
@@ -215,7 +215,7 @@ pub(crate) const FRAMING: &str = "framing-";
 
 /// cladefs: the path of `segment`'s framed file being made durable ([`FRAMING`]).
 pub(crate) fn framing_path(segment: SegmentId) -> String {
-    format!("{}/{FRAMING}{}", branch_dir(SEGMENTS, segment.branch), Padded(segment.number))
+    format!("{}/{FRAMING}{}", cell_dir(SEGMENTS, segment.cell), Padded(segment.number))
 }
 
 /// The numbers of the files in `path`, in order; cladefs: but spare logs, which hold none, and
@@ -230,13 +230,13 @@ pub(crate) fn list_numbers<D: Dir>(dir: &D, path: &str) -> Result<Vec<u64>, Erro
     Ok(numbers)
 }
 
-/// The directories of a store's files, each a directory for each branch's.
+/// The directories of a store's files, each a directory for each cell's.
 pub(crate) const KINDS: [&str; 5] = [SEGMENTS, EXTENTS, LOGS, OPEN_SEGMENTS, OPEN_EXTENTS];
 
-/// Creates `branch`'s directories of segments, extents, logs and open files, where it has none.
-pub(crate) fn create_branch_dirs<D: Dir>(dir: &D, branch: u64) -> Result<(), Error> {
+/// Creates `cell`'s directories of segments, extents, logs and open files, where it has none.
+pub(crate) fn create_cell_dirs<D: Dir>(dir: &D, cell: u64) -> Result<(), Error> {
     for kind in KINDS {
-        let path = branch_dir(kind, branch);
+        let path = cell_dir(kind, cell);
         match dir.create_dir(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
             created => created.with_context(|| format!("creating {path}"))?,
@@ -327,7 +327,7 @@ impl FileKey {
     }
 }
 
-/// The files `extents`' data is in: of a branch's, those of its own layer
+/// The files `extents`' data is in: of a cell's, those of its own layer
 /// ([`Extents::own`](crate::extents::Extents::own)), the bucket's in the bucket.
 pub(crate) fn files_of<'a>(
     extents: impl IntoIterator<Item = (&'a ExtentId, &'a Extent)>,
@@ -347,7 +347,7 @@ pub(crate) fn files_of<'a>(
     files
 }
 
-/// A change a commit makes to the branch, which the next commit records.
+/// A change a commit makes to the cell, which the next commit records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Change {
     /// A piece of the extent's data was written to a segment.
@@ -365,7 +365,7 @@ pub(crate) enum Change {
 
 /// cladefs: of `changes`, an epoch's, the extents it freed that a commit held: but those written in
 /// it, open, which their frees let go of before any commit held them (TASK-79.1). Those of them
-/// that are the branch's own it spends, as the store spends them as it frees them (TASK-79.6);
+/// that are the cell's own it spends, as the store spends them as it frees them (TASK-79.6);
 /// and a footer frees them alone, so that what its readers spend of it, all its frees, is that
 /// too (TASK-160.15).
 pub(crate) fn held_frees(changes: &[Change]) -> HashSet<ExtentId> {
@@ -387,8 +387,8 @@ pub(crate) fn held_frees(changes: &[Change]) -> HashSet<ExtentId> {
 /// Where an extent's data is, as a store's user sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// One run in a segment of a branch's, at an offset: the extent is sealed.
-    Run { branch: u64, number: u64, offset: u64 },
+    /// One run in a segment of a cell's, at an offset: the extent is sealed.
+    Run { cell: u64, number: u64, offset: u64 },
     /// Its own file.
     Own,
     /// cladefs: in the bucket, at its location there.
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn pieces_of_one_run_are_one() {
         let piece = |number, offset, extent_offset, len| Piece {
-            segment: SegmentId { branch: 1, number },
+            segment: SegmentId { cell: 1, number },
             offset,
             extent_offset,
             len,
@@ -537,7 +537,7 @@ mod tests {
     fn descriptions() {
         let file = CellFile {
             block_size: 4096,
-            branch: CellId { tenant: 0xa, id: u64::MAX },
+            cell: CellId { tenant: 0xa, id: u64::MAX },
             bucket: None,
             capacity: 1,
             token: None,
@@ -560,19 +560,19 @@ mod tests {
             "cladefs extent store 13",
             "cladefs extent store 14",
         ] {
-            let refused = CellFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
+            let refused = CellFile::parse(&format!("{older}\nblock_size 4096\ncell 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
             assert_eq!(found, older);
         }
         let capacity = "capacity 4096\n";
         assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\n{capacity}")).is_err());
-        assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\nbranch 1\n")).is_err());
-        // cladefs: its branch is named with its cell, as the bucket names it (TASK-364).
+        assert!(CellFile::parse(&format!("{FORMAT}\nblock_size 4096\ncell 1\n")).is_err());
+        // cladefs: its cell is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
-        assert!(text.contains("\nbranch a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
-        let bare = format!("{FORMAT}\nblock_size 4096\nbranch 1\n{capacity}");
+        assert!(text.contains("\ncell a/fzzzzzzzzzzzz/fzzzzzzzzzzzz\n"), "{text}");
+        let bare = format!("{FORMAT}\nblock_size 4096\ncell 1\n{capacity}");
         let refused = CellFile::parse(&bare).unwrap_err().to_string();
-        assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in base 32: 1");
+        assert_eq!(refused, "bad cell: no cell, TENANT/CELL/ID in base 32: 1");
         // cladefs: a store kept in a bucket names its cell's kind (doc-20).
         let named = CellFile { kind: Some(Kind::Sqlite), ..kept.clone() };
         assert!(named.text().ends_with("\nkind sqlite\n"));
@@ -594,7 +594,7 @@ mod tests {
     fn names() {
         let extent = ExtentId::new(11, 90);
         assert_eq!(extent_path(extent), "extents/000000000000b/000000000002t");
-        let segment = SegmentId { branch: 11, number: 77 };
+        let segment = SegmentId { cell: 11, number: 77 };
         assert_eq!(segment_path(segment), "segments/000000000000b/000000000002d");
         assert_eq!(log_path(segment), "logs/000000000000b/000000000002d");
         assert_eq!(parse_number("000000000002d"), Some(77));

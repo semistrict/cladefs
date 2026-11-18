@@ -115,7 +115,7 @@ The atomics in test modules (`#[cfg(test)]`), in Shuttle builds (whose atomics a
 whatever they ask) and in `tests/` are switches a test sets before the threads it affects start,
 or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` store (`shut`,
 `full`, `held`, `went`, `writes`), `cladefsd::tests`, `cell_table`'s and `cell_requests`' Shuttle
-tests, `follower`'s test listener, and `bucket_cell::{branch, collector, fetch}` tests. The join
+tests, `follower`'s test listener, and `bucket_cell::{cell, collector, fetch}` tests. The join
 or channel that ends the test orders the read after the writes.
 
 ## What the audit found

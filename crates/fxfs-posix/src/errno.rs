@@ -106,7 +106,7 @@ errnos! {
     ETIMEDOUT = 110,
     /// Connection refused.
     ECONNREFUSED = 111,
-    /// Stale handle: a later placement of a store holds its branch (TASK-39.7); a follower cut
+    /// Stale handle: a later placement of a store holds its cell (TASK-39.7); a follower cut
     /// off (doc-8).
     ESTALE = 116,
     /// Structure needs cleaning: metadata found inconsistent, as ext4's and XFS's `EFSCORRUPTED`.

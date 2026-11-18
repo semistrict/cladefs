@@ -65,7 +65,7 @@ pub(crate) enum Request<'a> {
     Window { size: u64, private_max: Option<u64>, budget: u64 },
     /// [`FAULT`].
     Fault(Fault),
-    /// [`FORK`]: to `branch`, a new directory at `path`.
+    /// [`FORK`]: to `cell`, a new directory at `path`.
     Fork { path: PathBuf },
     /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the store's cell, a VM snapshot's.
     Version,
@@ -279,9 +279,9 @@ impl<'a> Request<'a> {
                 open
             }
             Request::Read { extent, offset, len, into } => match into {
-                ReadInto::Reply => message(0, [extent.branch, extent.sequence, *offset, *len, 0]),
+                ReadInto::Reply => message(0, [extent.cell, extent.sequence, *offset, *len, 0]),
                 ReadInto::Transfer { at } => {
-                    let args = [extent.branch, extent.sequence, *offset, *len, *at];
+                    let args = [extent.cell, extent.sequence, *offset, *len, *at];
                     message(READ_TRANSFER, args)
                 }
             },
@@ -296,28 +296,28 @@ impl<'a> Request<'a> {
                 // cladefs: the root the commit sets, after the data in the payload (TASK-153.13).
                 flags |= flag(barriers.root.is_some(), WRITE_ROOT);
                 let root = barriers.root.unwrap_or_default();
-                let (branch, sequence) = (extent.branch, extent.sequence);
+                let (cell, sequence) = (extent.cell, extent.sequence);
                 match data {
                     Data::Inline(data) => {
-                        let args = [branch, sequence, *offset, 0, data.len() as u64];
+                        let args = [cell, sequence, *offset, 0, data.len() as u64];
                         message(flags, args).carrying(*data).followed_by(root)
                     }
                     Data::Transfer { at, len } => {
-                        let args = [branch, sequence, *offset, *at, *len];
+                        let args = [cell, sequence, *offset, *at, *len];
                         message(flags | WRITE_TRANSFER, args).carrying(root)
                     }
                 }
             }
             Request::Free(extent) | Request::Pin(extent) | Request::Unpin(extent) => {
-                message(0, [extent.branch, extent.sequence, 0, 0, 0])
+                message(0, [extent.cell, extent.sequence, 0, 0, 0])
             }
             Request::FreeMany { first, rest } => {
-                let args = [first.branch, first.sequence, 0, 0, 0];
+                let args = [first.cell, first.sequence, 0, 0, 0];
                 message(0, args).carrying(extent_ids_payload(rest))
             }
             Request::Map(WindowMapping { window_offset, len, contents }) => match *contents {
                 MappingContents::Extent { extent, offset } => {
-                    message(0, [extent.branch, extent.sequence, offset, *len, *window_offset])
+                    message(0, [extent.cell, extent.sequence, offset, *len, *window_offset])
                 }
                 MappingContents::Zeros => message(MAP_ZEROS, [0, 0, 0, *len, *window_offset]),
             },
@@ -384,7 +384,7 @@ impl<'a> Request<'a> {
         let has = |flag: u32| flags & flag != 0;
         // The payload of a request that carries none.
         let nothing = || if payload.is_empty() { Ok(()) } else { Err(Errno::EINVAL) };
-        let extent = ExtentId { branch: args[0], sequence: args[1] };
+        let extent = ExtentId { cell: args[0], sequence: args[1] };
         Ok(match kind {
             OPEN => {
                 let (named, opening) = match flags {
@@ -631,7 +631,7 @@ fn stats_text(payload: &[u8]) -> Result<&str, Errno> {
 /// cladefs: `extents`, as a [`FREE_MANY`]'s payload names them.
 fn extent_ids_payload(extents: &[ExtentId]) -> Vec<u8> {
     (extents.iter())
-        .flat_map(|extent| [extent.branch, extent.sequence])
+        .flat_map(|extent| [extent.cell, extent.sequence])
         .flat_map(u64::to_le_bytes)
         .collect()
 }
@@ -641,7 +641,7 @@ fn extent_ids(payload: &[u8]) -> Result<impl Iterator<Item = ExtentId> + '_, Err
     let (ids, []) = payload.as_chunks::<EXTENT_ID_BYTES>() else {
         return Err(Errno::EINVAL);
     };
-    Ok(ids.iter().map(|id| ExtentId { branch: word(&id[..8]), sequence: word(&id[8..]) }))
+    Ok(ids.iter().map(|id| ExtentId { cell: word(&id[..8]), sequence: word(&id[8..]) }))
 }
 
 /// The little-endian word `bytes`, eight of them, hold.
@@ -866,8 +866,8 @@ pub(crate) fn with_version(mut header: Header) -> Header {
 /// What a reply to an [`OPEN`] says, with the physical memory it carries (TASK-43, TASK-79.17).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Opened {
-    /// The store's branch.
-    pub branch: u64,
+    /// The store's cell.
+    pub cell: u64,
     /// The arena of the memory it carries first: the VM process's tenant's.
     pub arena: ArenaId,
     /// cladefs: a follower's view's commit number; 0 of a store opened to write.
@@ -882,7 +882,7 @@ pub(crate) struct Opened {
 impl Opened {
     /// Its arguments, with this daemon's wire [`VERSION`], last ([`VERSION_ARG`]).
     pub fn args(&self) -> [u64; 5] {
-        [self.branch, self.arena.0.into(), self.commit, self.max_map_count.unwrap_or(0), VERSION]
+        [self.cell, self.arena.0.into(), self.commit, self.max_map_count.unwrap_or(0), VERSION]
     }
 
     /// What a reply of `args` says: `EINVAL` of an arena that is none; cladefs: `EPROTONOSUPPORT`
@@ -893,7 +893,7 @@ impl Opened {
         }
         let arena = ArenaId(u32::try_from(args[1]).map_err(|_| Errno::EINVAL)?);
         let max_map_count = (args[3] != 0).then_some(args[3]);
-        Ok(Self { branch: args[0], arena, commit: args[2], max_map_count })
+        Ok(Self { cell: args[0], arena, commit: args[2], max_map_count })
     }
 }
 
@@ -919,9 +919,9 @@ pub(crate) struct Advanced {
     pub commit: u64,
 }
 
-/// cladefs: a [`FORK`]'s reply: the fork's branch's ID, the bucket's to give (TASK-364).
+/// cladefs: a [`FORK`]'s reply: the fork's cell's ID, the bucket's to give (TASK-364).
 pub(crate) struct Forked {
-    pub branch: u64,
+    pub cell: u64,
     /// cladefs: of a quiescent [`FORK`], the version of the store's cell made, a VM snapshot's, and
     /// the cell's tenant; else 0.
     pub version: u64,
@@ -930,11 +930,11 @@ pub(crate) struct Forked {
 
 impl Forked {
     pub fn args(&self) -> [u64; 5] {
-        [self.branch, self.version, self.tenant, 0, 0]
+        [self.cell, self.version, self.tenant, 0, 0]
     }
 
     pub fn from_args(args: [u64; 5]) -> Self {
-        Self { branch: args[0], version: args[1], tenant: args[2] }
+        Self { cell: args[0], version: args[1], tenant: args[2] }
     }
 }
 
@@ -955,7 +955,7 @@ pub(crate) fn mappings_payload(mappings: &[WindowMapping]) -> Vec<u8> {
         .flat_map(|mapping| {
             let words = match mapping.contents {
                 MappingContents::Extent { extent, offset } => {
-                    [extent.branch, extent.sequence, offset, 0]
+                    [extent.cell, extent.sequence, offset, 0]
                 }
                 MappingContents::Zeros => [0, 0, 0, MAPPING_ZEROS],
             };
@@ -973,10 +973,10 @@ pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
     };
     (mappings.iter())
         .map(|mapping| {
-            let [window_offset, len, branch, sequence, offset, flags] =
+            let [window_offset, len, cell, sequence, offset, flags] =
                 std::array::from_fn(|at| word(&mapping[8 * at..8 * (at + 1)]));
             let contents = match flags {
-                0 => MappingContents::Extent { extent: ExtentId { branch, sequence }, offset },
+                0 => MappingContents::Extent { extent: ExtentId { cell, sequence }, offset },
                 MAPPING_ZEROS => MappingContents::Zeros,
                 _ => return Err(Errno::EINVAL),
             };
@@ -1008,8 +1008,8 @@ mod tests {
     }
 
     fn fields() -> impl Strategy<Value = Fields> {
-        let extent = (any::<u64>(), any::<u64>())
-            .prop_map(|(branch, sequence)| ExtentId { branch, sequence });
+        let extent =
+            (any::<u64>(), any::<u64>()).prop_map(|(cell, sequence)| ExtentId { cell, sequence });
         let path = || "[a-z0-9/._-]{1,24}".prop_map(PathBuf::from);
         let bytes = || proptest::collection::vec(any::<u8>(), 0..64);
         (
@@ -1030,8 +1030,8 @@ mod tests {
     /// each of its ways.
     fn requests<'a>(fields: &'a Fields, area: BorrowedFd<'a>) -> Vec<Request<'a>> {
         let Fields { words: [a, b, c, d, e], flags: [one, two, three], .. } = *fields;
-        let extent = ExtentId { branch: a, sequence: b };
-        let other = ExtentId { branch: c, sequence: d };
+        let extent = ExtentId { cell: a, sequence: b };
+        let other = ExtentId { cell: c, sequence: d };
         let path = fields.path.clone();
         let commit = fields.commit;
         let root = (one && two).then_some(&fields.root[..]);
@@ -1119,7 +1119,7 @@ mod tests {
             data: (0..64).collect(),
             root: b"root".to_vec(),
             path: PathBuf::from("store"),
-            extents: vec![ExtentId { branch: 7, sequence: 9 }],
+            extents: vec![ExtentId { cell: 7, sequence: 9 }],
             build: "build".into(),
             stats: "stats".into(),
             commit: Commit::Ordered,
@@ -1205,7 +1205,7 @@ mod tests {
             data: vec![7; 4096],
             root: Vec::new(),
             path: PathBuf::from("store"),
-            extents: vec![ExtentId { branch: 1, sequence: 3 }],
+            extents: vec![ExtentId { cell: 1, sequence: 3 }],
             build: "abc".into(),
             stats: "seals 1\n".into(),
             commit: Commit::Ordered,
@@ -1329,7 +1329,7 @@ mod tests {
     /// TASK-160.9: the bytes are those the VM process and the daemon wrote by hand before.
     #[test]
     fn requests_are_the_bytes_they_were() {
-        let extent = ExtentId { branch: 7, sequence: 9 };
+        let extent = ExtentId { cell: 7, sequence: 9 };
         let area = area();
         let root =
             WriteBarriers { before: true, after: Some(Commit::Uploaded), root: Some(&b"r"[..]) };
@@ -1555,7 +1555,7 @@ mod tests {
             mappings_of in proptest::collection::vec((any::<[u64; 5]>(), any::<bool>()), 0..16),
         ) {
             let max_map_count = (c != 0).then_some(c);
-            let opened = Opened { branch: a, arena: ArenaId(arena), commit: b, max_map_count };
+            let opened = Opened { cell: a, arena: ArenaId(arena), commit: b, max_map_count };
             prop_assert_eq!(Opened::from_args(opened.args()), Ok(opened));
             let info = Info(ExtentInfo {
                 capacity: a,
@@ -1568,13 +1568,13 @@ mod tests {
             let advanced = Advanced { commit: a };
             prop_assert_eq!(Advanced::from_args(advanced.args()), advanced);
             let mapped: Vec<WindowMapping> = (mappings_of.into_iter())
-                .map(|([window_offset, len, branch, sequence, offset], zeros)| WindowMapping {
+                .map(|([window_offset, len, cell, sequence, offset], zeros)| WindowMapping {
                     window_offset,
                     len,
                     contents: match zeros {
                         true => MappingContents::Zeros,
                         false => {
-                            let extent = ExtentId { branch, sequence };
+                            let extent = ExtentId { cell, sequence };
                             MappingContents::Extent { extent, offset }
                         }
                     },
@@ -1618,14 +1618,14 @@ mod tests {
                 }
             }
         });
-        let opened = Opened { branch: 1, arena: ArenaId::DEFAULT, commit: 0, max_map_count: None };
+        let opened = Opened { cell: 1, arena: ArenaId::DEFAULT, commit: 0, max_map_count: None };
         assert_eq!(version(&Header::new(REPLY, 1).with_args(&opened.args())), VERSION);
         for other in [0, VERSION + 1] {
-            let [branch, arena, commit, max_map_count, _] = opened.args();
-            let args = [branch, arena, commit, max_map_count, other];
+            let [cell, arena, commit, max_map_count, _] = opened.args();
+            let args = [cell, arena, commit, max_map_count, other];
             assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
             // Before its arena, which another version may say otherwise.
-            let args = [branch, u64::MAX, commit, max_map_count, other];
+            let args = [cell, u64::MAX, commit, max_map_count, other];
             assert_eq!(Opened::from_args(args).err(), Some(Errno::EPROTONOSUPPORT), "{other}");
         }
     }
@@ -1671,10 +1671,7 @@ mod tests {
             data: (0..64).collect(),
             root: b"root".to_vec(),
             path: PathBuf::from("store"),
-            extents: vec![
-                ExtentId { branch: 7, sequence: 9 },
-                ExtentId { branch: 7, sequence: 11 },
-            ],
+            extents: vec![ExtentId { cell: 7, sequence: 9 }, ExtentId { cell: 7, sequence: 11 }],
             build: "build".into(),
             stats: "stats".into(),
             commit: Commit::Uploaded,
@@ -1718,8 +1715,7 @@ mod tests {
         for made in [Made::Ack { id: 2, counts }, Made::Counts(other), private] {
             header(&mut hashed, made.encode());
         }
-        let opened =
-            Opened { branch: 3, arena: ArenaId(6), commit: 12, max_map_count: Some(65530) };
+        let opened = Opened { cell: 3, arena: ArenaId(6), commit: 12, max_map_count: Some(65530) };
         let info = ExtentInfo {
             capacity: 1 << 30,
             used: 4096,
@@ -1732,7 +1728,7 @@ mod tests {
             &replies.as_flattened().iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>(),
         );
         let extent =
-            MappingContents::Extent { extent: ExtentId { branch: 3, sequence: 4 }, offset: 8192 };
+            MappingContents::Extent { extent: ExtentId { cell: 3, sequence: 4 }, offset: 8192 };
         hashed(&mappings_payload(&[
             WindowMapping { window_offset: 0, len: 4096, contents: extent },
             WindowMapping { window_offset: 4096, len: 8192, contents: MappingContents::Zeros },
@@ -1760,7 +1756,7 @@ mod tests {
     #[test]
     fn free_many_payloads_name_their_extents() {
         let extents =
-            [ExtentId { branch: 1, sequence: 2 }, ExtentId { branch: u64::MAX, sequence: 1 << 40 }];
+            [ExtentId { cell: 1, sequence: 2 }, ExtentId { cell: u64::MAX, sequence: 1 << 40 }];
         let payload = extent_ids_payload(&extents);
         assert_eq!(payload.len(), 2 * EXTENT_ID_BYTES);
         assert_eq!(extent_ids(&payload).unwrap().collect::<Vec<_>>(), extents);

@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
+//! cladefs's own: cells of extent stores kept in object storage (backlog doc-7, TASK-28).
 //!
-//! A branch is a VM's filesystem: extents its guest wrote, in segments whose footers say what
-//! each commit did, with checkpoints of its index. A writer holds the branch's head; its segments,
+//! A cell is a VM's filesystem: extents its guest wrote, in segments whose footers say what
+//! each commit did, with checkpoints of its index. A writer holds the cell's head; its segments,
 //! created only where none is, are numbered without gaps, and each names the one it follows, so a
-//! writer taken over can add nothing to the branch once the next one's first segment, its fence,
+//! writer taken over can add nothing to the cell once the next one's first segment, its fence,
 //! is in it. Forks
 //! record where they were made, and inherit the parent's extents without copying them. The
-//! collector, alone, deletes: what no live branch can reach, and objects it compacts.
+//! collector, alone, deletes: what no live cell can reach, and objects it compacts.
 //!
 //! The object store is anything with conditional writes ([`Bucket`]): S3 and GCS through the
 //! `object_store` crate ([`object_bucket::ObjectBucket`]) over cladefs's HTTP client ([`client`]),
@@ -49,7 +49,6 @@ compile_error!(
 );
 
 pub mod batch;
-pub mod branch;
 pub mod bucket;
 pub mod bucket_kms;
 pub mod cache;
@@ -66,6 +65,7 @@ mod heap;
 pub mod keys;
 pub mod known;
 pub mod layout;
+pub mod lifecycle;
 pub mod local;
 pub mod marks;
 mod moves;
@@ -93,7 +93,7 @@ pub use bytes::Bytes;
 pub use fetch::read;
 pub use layout::Location;
 pub use recovery::{Recovered, State, recover};
-pub use wal::{Rebased, TakenBranch, Wal};
+pub use wal::{Rebased, TakenCell, Wal};
 pub use writer::{Body, Objects, Taker, Writer};
 
 /// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,
@@ -103,23 +103,23 @@ pub const EPOCH_SHIFT: u32 = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    /// Another writer took the branch over.
-    #[error("another writer took the branch")]
+    /// Another writer took the cell over.
+    #[error("another writer took the cell")]
     Fenced,
-    #[error("the branch was deleted")]
+    #[error("the cell was deleted")]
     Deleted,
-    /// A later placement, whose fencing token is higher, holds the branch's head: this one, cut off
+    /// A later placement, whose fencing token is higher, holds the cell's head: this one, cut off
     /// from it, takes it back no more (TASK-39.7).
-    #[error("a later placement holds the branch")]
+    #[error("a later placement holds the cell")]
     Stale,
-    #[error("no such branch")]
-    NoBranch,
-    /// A fork's child has a record naming another origin: another branch has the ID the fork's
-    /// guest gave it, which that branch took while the fork was made (TASK-79.82). The fork failed;
-    /// its parent's branch is as sound as before.
-    #[error("branch {0} has another origin")]
+    #[error("no such cell")]
+    NoCell,
+    /// A fork's child has a record naming another origin: another cell has the ID the fork's
+    /// guest gave it, which that cell took while the fork was made (TASK-79.82). The fork failed;
+    /// its parent's cell is as sound as before.
+    #[error("cell {0} has another origin")]
     IdTaken(layout::CellId),
-    /// Something a branch needs is gone.
+    /// Something a cell needs is gone.
     #[error("lost: {0}")]
     Lost(String),
     #[error("corrupt: {0}")]
@@ -133,39 +133,36 @@ pub enum Error {
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
-    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are encrypted, and its
+    /// cladefs: `cell` inherits from `from`, of another cell, whose objects are encrypted, and its
     /// record holds not `from`'s keys (TASK-411.4): it was given its own without them. A fork so
     /// is refused before anything of it is made (`keys::inheriting`).
     #[error(
-        "branch {branch} inherits from branch {from}, of another cell, whose objects are \
+        "cell {cell} inherits from cell {from}, of another cell, whose objects are \
          encrypted, and its record holds not their keys"
     )]
-    Inherited { branch: layout::CellId, from: layout::CellId },
-    /// The branch's record says its objects are of another format than this one's, newer or
+    Inherited { cell: layout::CellId, from: layout::CellId },
+    /// The cell's record says its objects are of another format than this one's, newer or
     /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
     #[error(
-        "branch {branch} is of format {format}, which this reader, of format {ours}, doesn't read",
+        "cell {cell} is of format {format}, which this reader, of format {ours}, doesn't read",
         ours = layout::FORMAT
     )]
-    Format { branch: layout::CellId, format: u32 },
+    Format { cell: layout::CellId, format: u32 },
     /// What a writer was to upload, it could not read where it is kept: a store's file.
     #[error("reading {0}")]
     Read(String),
-    /// Another writer's commits moved the branch on from the host's write-ahead log's: the branch's
+    /// Another writer's commits moved the cell on from the host's write-ahead log's: the cell's
     /// last commit is neither one of the log's nor the one the log started from. Its commits were
     /// never acknowledged, and no writer puts them after another's: the store opens only once
     /// `cladefsctl take` drops the log (doc-14, Opening a store).
-    #[error("another writer's commits moved the branch on from the write-ahead log's")]
+    #[error("another writer's commits moved the cell on from the write-ahead log's")]
     Diverged,
-    /// cladefs: the cell has no object: no such cell (TASK-364).
-    #[error("no such cell")]
-    NoCell,
     /// cladefs: the cell is of another kind, this one: a cell has one (doc-20).
     #[error("the cell is of kind {0}")]
     OtherKind(&'static str),
-    /// cladefs: a fork of a version to a branch of another tenant's cell than the version's
-    /// branch's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
-    #[error("branch {0}'s version is another tenant's, not shared")]
+    /// cladefs: a fork of a version to a cell of another tenant's cell than the version's
+    /// cell's, which its head doesn't say is shared ([`layout::Version::shared`], TASK-395.7).
+    #[error("cell {0}'s version is another tenant's, not shared")]
     NotShared(layout::CellId),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
@@ -203,7 +200,7 @@ impl From<extent_frame::Error> for Error {
 /// turning it off, and specs/bucket's TLA+ by its mutation removing it (doc-7, Testing).
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
-    /// A writer acknowledges what it uploaded only by swapping the branch's head to name it, with
+    /// A writer acknowledges what it uploaded only by swapping the cell's head to name it, with
     /// the condition that the head is its own taking still ([`head::swap`]): written whatever is
     /// there, a writer taken over writes the head over its successor's, whose acknowledged commits
     /// it then names not (TASK-407).
@@ -214,7 +211,7 @@ pub struct Rules {
     /// the later over the earlier, which a head may name (TASK-407).
     /// TLA+: `specs/bucket/mutations/NoEpochKeys.cfg`.
     pub epoch_keys: bool,
-    /// The collector keeps, of a live branch's objects its head does not name, those of the head's
+    /// The collector keeps, of a live cell's objects its head does not name, those of the head's
     /// epoch it may yet name: segments and extents of their own at or past its end, checkpoints
     /// newer than its own; it deletes the rest, of epochs no swap of whose can succeed (TASK-407).
     /// TLA+: `specs/bucket/mutations/NoCollectorEpochs.cfg`.
@@ -227,34 +224,34 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoMovesByPass.cfg`.
     pub moves_by_pass: bool,
     /// A writer mints extents from its epoch's range of sequence numbers, having checked, after
-    /// recovering the branch, that the head is still its taking.
+    /// recovering the cell, that the head is still its taking.
     /// TLA+: `specs/bucket/mutations/NoEpochSequences.cfg`.
     pub epoch_sequences: bool,
     /// A fork's child gets its record once the segment holding the fork is acknowledged.
     /// TLA+: `specs/bucket/mutations/NoRecordsAfterAck.cfg`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub records_after_ack: bool,
-    /// The collector lists objects before it reads what branches need.
+    /// The collector lists objects before it reads what cells need.
     /// TLA+: `specs/bucket/mutations/NoCandidatesFirst.cfg`.
     pub candidates_first: bool,
     /// The collector finds forks in their parents' states, not only by their records.
     /// TLA+: `specs/bucket/mutations/NoForksFromStates.cfg`.
     pub forks_from_states: bool,
-    /// A writer takes a branch's head only with a fencing token as high as the head's.
+    /// A writer takes a cell's head only with a fencing token as high as the head's.
     /// TLA+: `specs/bucket/mutations/NoTokens.cfg`.
     pub tokens: bool,
-    /// A branch is deleted only with a fencing token as high as its head's (TASK-45.1).
+    /// A cell is deleted only with a fencing token as high as its head's (TASK-45.1).
     /// TLA+: `specs/bucket/mutations/NoDeleteTokens.cfg`.
     pub delete_tokens: bool,
     /// The deletion of a failed fork takes its child's ID with a record, before it ends the child's
     /// head, though its fork's segment never went (TASK-79.82).
     /// TLA+: `specs/bucket/mutations/NoForkClaimsIds.cfg`.
     pub fork_claims_ids: bool,
-    /// That record says the child lives only if the branch it was forked from holds the fork's
+    /// That record says the child lives only if the cell it was forked from holds the fork's
     /// segment, which reading it needs; and that it is a claim, which that proves no more than.
     /// TLA+: `specs/bucket/mutations/NoForkClaimsLanded.cfg`.
     pub fork_claims_landed: bool,
-    /// A fork of a version reads its branch's head after it creates its own record: a version
+    /// A fork of a version reads its cell's head after it creates its own record: a version
     /// dropped before that fails it, its pass of the collector not having seen the child.
     /// TLA+: `specs/bucket/mutations/NoForksCheckVersions.cfg`.
     pub forks_check_versions: bool,
@@ -265,19 +262,19 @@ pub struct Rules {
     /// The collector gives up on the forks being made of versions dropped.
     /// TLA+: `specs/bucket/mutations/NoCollectorAbandons.cfg`.
     pub collector_abandons: bool,
-    /// The collector lists the records again after it read the branches' states: a state it read
+    /// The collector lists the records again after it read the cells' states: a state it read
     /// names no fork deleted since, nor that fork's children, whose records came after its listing.
     /// TLA+: `specs/bucket/mutations/NoRecordsRelisted.cfg`.
     pub records_relisted: bool,
-    /// Every record names its branch's owner, chosen by its maker, unique to that making: two
-    /// makers of one branch ID, two forks naming one child, never write the same bytes, which a
+    /// Every record names its cell's owner, chosen by its maker, unique to that making: two
+    /// makers of one cell ID, two forks naming one child, never write the same bytes, which a
     /// create reading back what it finds would take for its own (TASK-79.82, TASK-153.9).
     /// TLA+: `specs/bucket/mutations/NoRecordsOwned.cfg`.
     pub records_owned: bool,
     /// The collector keeps every moves on the way to an extent from where it was sealed, not only
-    /// from where the branch's state says it is, unless that state's checkpoint is by the writer
-    /// holding the branch's head, read after the checkpoint was: a checkpoint of another writer's,
-    /// landing after the writer recovered the branch, or an inherited state, may name the extent
+    /// from where the cell's state says it is, unless that state's checkpoint is by the writer
+    /// holding the cell's head, read after the checkpoint was: a checkpoint of another writer's,
+    /// landing after the writer recovered the cell, or an inherited state, may name the extent
     /// further along its moves than the writer does (TASK-175).
     /// TLA+: `specs/bucket/mutations/NoWaysFromSeals.cfg`.
     pub ways_from_seals: bool,
@@ -294,12 +291,12 @@ pub struct Rules {
     /// Simulation only (`sim::stores_need_to_follow_moves`): specs/bucket models the writer's
     /// state, not a store's names.
     pub stores_follow_moves: bool,
-    /// A pass of the collector that finds what a live branch needs lost stops, without failing, if
+    /// A pass of the collector that finds what a live cell needs lost stops, without failing, if
     /// a later pass took the collector's lease from it: what it read before may be older than what
     /// that pass, deleting since, read (TASK-180).
     /// TLA+: `specs/bucket/mutations/NoPassesFencedStop.cfg`.
     pub passes_fenced_stop: bool,
-    /// The collector recovers a branch by every origin it finds it named by, its record's and the
+    /// The collector recovers a cell by every origin it finds it named by, its record's and the
     /// parent's states naming a fork to it, not by the first alone: a child it recovered by its
     /// parent's state, that fork refused, may have a record of another origin, a restore's that
     /// took the ID, which listing the records again finds (TASK-173).
@@ -313,12 +310,12 @@ pub struct Rules {
     /// whatever its records.
     /// TLA+: `specs/bucket/mutations/NoRecordsKept.cfg`.
     pub records_kept: bool,
-    /// A host's write-ahead log is put after the branch's end only if the branch's last commit is
+    /// A host's write-ahead log is put after the cell's end only if the cell's last commit is
     /// one of the log's or the one it started from: otherwise another writer's commits came after
     /// what the log holds, and it diverged (doc-14, Opening a store).
     /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
     pub wal_follows: bool,
-    /// cladefs: a fork of a branch to a child in another cell, a writable fork or a version's clone,
+    /// cladefs: a fork of a cell to a child in another cell, a writable fork or a version's clone,
     /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
     /// keep the parent's state at the origin: a pass lists nothing of the child's cell, and,
     /// the parent deleted, would delete what the child inherits (TASK-395.3).
@@ -326,24 +323,24 @@ pub struct Rules {
     pub references: bool,
     /// A writable fork's reference is written before its child's record, by whoever writes the
     /// record: the fork's host, the parent's writers, the parent's deletion, before that marks the
-    /// parent deleted ([`branch::record_fork`]). After it, a pass reading the parent deleted finds
+    /// parent deleted ([`lifecycle::record_fork`]). After it, a pass reading the parent deleted finds
     /// no reference.
     /// TLA+: `specs/bucket/mutations/NoReferencesFirst.cfg`.
     pub references_first: bool,
-    /// A version's clone writes its reference before it reads its branch's head (and after its own
+    /// A version's clone writes its reference before it reads its cell's head (and after its own
     /// record, [`Rules::clones_record_first`]), whatever its cell, its origin's own too
-    /// ([`branch::fork_version`]): one that read the version named then wrote it before the
+    /// ([`lifecycle::fork_version`]): one that read the version named then wrote it before the
     /// version's drop, which a pass reading the version dropped read after.
     /// TLA+: `specs/bucket/mutations/NoForksReferFirst.cfg`.
     pub clones_refer_first: bool,
     /// A reference is retired, by a pass over its child's cell, only once that cell holds no live
-    /// branch and no reference of its own: the child's forks inherit what it inherited, kept by its
+    /// cell and no reference of its own: the child's forks inherit what it inherited, kept by its
     /// reference (TASK-395.4).
     /// TLA+: `specs/bucket/mutations/NoReferencesHeld.cfg`.
     pub references_held: bool,
     /// A pass lists its cell's references after it read the states, as it lists the records
     /// again, not with its candidates: listed then, it misses a clone's of a version a checkpoint
-    /// of the version's branch dropped since (TASK-395.4).
+    /// of the version's cell dropped since (TASK-395.4).
     /// TLA+: `specs/bucket/mutations/NoReferencesRelisted.cfg`.
     pub references_relisted: bool,
     /// A pass keeps, of the parent's state at a referenced origin, what recovering it reads,
@@ -352,14 +349,14 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoForkPointsKept.cfg`.
     pub origins_kept: bool,
     /// A version's clone creates its record, saying it is being made, before its reference
-    /// ([`branch::fork_version`]): a reference then always has a record naming its origin, by which
+    /// ([`lifecycle::fork_version`]): a reference then always has a record naming its origin, by which
     /// its child's cell's pass retires it, the clone's host dying or not; and a clone refused by a
     /// record there writes none. The other way round, a host dying between the two leaves a
     /// reference no record names, which no pass retires (TASK-395.10).
     /// TLA+: `specs/bucket/mutations/NoForksRecordFirst.cfg`.
     pub clones_record_first: bool,
     /// Whoever finds the record of a fork's child naming another origin than the fork's, or none,
-    /// deletes the fork's reference: the fork made no branch, and no record will name it. Every
+    /// deletes the fork's reference: the fork made no cell, and no record will name it. Every
     /// writer of the child's record looks, the parent's next writer and its deletion among them,
     /// so that one dying first leaves it to the next (TASK-395.10).
     /// TLA+: `specs/bucket/mutations/NoReferencesTakenBack.cfg`.
@@ -386,8 +383,8 @@ pub struct Rules {
     /// writes it after its retirement, unmarked, for good.
     /// TLA+: `specs/bucket/mutations/NoForksMadeUnmarked.cfg`.
     pub clones_made_unmarked: bool,
-    /// cladefs: a head of a branch whose record the pass did not list goes only if it is not
-    /// final, and no record of the branch is there to read: a stale taker's, of a branch removed
+    /// cladefs: a head of a cell whose record the pass did not list goes only if it is not
+    /// final, and no record of the cell is there to read: a stale taker's, of a cell removed
     /// with its cell. A final one is a deletion's fence, of a fork's child whose record is yet to
     /// come, the deletion's own or its parent's slow writer's (TASK-79.78): it stays, and keeps its
     /// cell from removal ([`collector`], TASK-455's review). Without it, as a test shows it needed,
@@ -396,7 +393,7 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoFencesKept.cfg`.
     pub fences_kept: bool,
     /// cladefs: a fork of a version resumed by another than its host, a store opening its child,
-    /// writes its reference before it makes it, as its host does ([`branch::resume_version_fork`]).
+    /// writes its reference before it makes it, as its host does ([`lifecycle::resume_version_fork`]).
     /// Without it, as a test shows it needed, a host dying between the fork's record and its
     /// reference leaves a clone made of no reference, whose origin's state at the origin no
     /// pass keeps once the version is gone.
@@ -409,13 +406,13 @@ pub struct Rules {
     /// stands for good, keeping its base's state at the origin (TASK-455's review).
     /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
     pub resumes_marked: bool,
-    /// cladefs: a pass keeps, for each version a live branch's head names, the branch's whole state
+    /// cladefs: a pass keeps, for each version a live cell's head names, the cell's whole state
     /// at it and what recovering it reads, as for an origin (doc-18, TASK-476). Without it, as a
     /// test shows it needed, a checkpoint since covers the version's segments, which the pass
     /// deletes, and the version recovers not.
     /// TLA+: `specs/bucket/mutations/NoVersionsKept.cfg`.
     pub versions_kept: bool,
-    /// cladefs: a takeover's swap of a branch's head names the versions it named
+    /// cladefs: a takeover's swap of a cell's head names the versions it named
     /// ([`head::take_from`]), as it names its segments. Without it, as a test shows it needed, they
     /// are gone though no writer dropped them.
     /// TLA+: `specs/bucket/mutations/NoVersionsCarried.cfg`.

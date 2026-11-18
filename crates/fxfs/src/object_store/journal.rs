@@ -11,7 +11,7 @@
 // journal first records the flush, and flushes again (`record_device_flush`). Extents are written
 // once: each 4 KiB block of the journal is an extent of its own (`EXTENT_SIZE`), so Fxfs's block
 // size must be 4 KiB, and after replay the journal's tail, past where replay stopped, moves to new
-// extents if a crash left any of it written, or if it is a fork's parent's branch's
+// extents if a crash left any of it written, or if it is a fork's parent's cell's
 // (`renew_tail`). A read-only mount keeps its reader at the end of the last whole transaction it
 // applied, from which a follower reads on once its device holds more (`read_on`, backlog doc-8).
 // A sync's barrier records how far the journal was written in the store's root it sets
@@ -1558,8 +1558,8 @@ impl Journal {
 
     /// cladefs: after replay, before anything else writes to the journal, gives the journal file new
     /// extents past where the journal continues, if it can't write those it has there, and returns
-    /// whether it did. Extents are written once, and only by their branch (backlog doc-4): a crash
-    /// may have left some of them written, and a fork, which mounts with a branch of its own, can
+    /// whether it did. Extents are written once, and only by their cell (backlog doc-4): a crash
+    /// may have left some of them written, and a fork, which mounts with a cell of its own, can
     /// write none of its parent's. The journal can't record its new extents itself, as replay
     /// reads it through them: a super-block written next must (`write_super_block`).
     pub async fn renew_tail(&self) -> Result<bool, Error> {
@@ -1576,7 +1576,7 @@ impl Journal {
             .filter(|extent| extent.logical_range().end > offset)
             .map(|extent| extent.device_range().clone())
             .collect();
-        let mut renew = tail.iter().any(|range| range.extent.branch != device.branch());
+        let mut renew = tail.iter().any(|range| range.extent.cell != device.cell());
         if !renew {
             // The extents' first blocks, read at once, as each read is a round trip to the device.
             // Any written is renewed, whatever the others' reads say.
@@ -3097,7 +3097,7 @@ mod tests {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        let device_range = ExtentRange::new(ExtentId::new(fs.device().branch(), 1 << 50), 0..4096);
+        let device_range = ExtentRange::new(ExtentId::new(fs.device().cell(), 1 << 50), 0..4096);
         let owner_object_id = store.store_object_id();
         transaction.add(
             allocator.object_id(),

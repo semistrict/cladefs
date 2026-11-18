@@ -6,7 +6,7 @@
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
 //! hold a guest's writes until they are framed, read back by offset meanwhile. Every store is
 //! encrypted (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
-//! tweak, under a key of the file's own: derived from the branch's DEK, the newest, and a salt
+//! tweak, under a key of the file's own: derived from the cell's DEK, the newest, and a salt
 //! drawn for the file ([`RawEncryption`]). Every write reaching such a file is whole sectors
 //! (TASK-411.8), so none reads, changes and writes a sector again. An open segment's salt and DEK
 //! are in its log's header, which is MACed, as its records are, under another subkey of the same
@@ -35,7 +35,7 @@ const ENCRYPTING_MOST: usize = 1 << 20;
 const _: () = assert!((ENCRYPTING_MOST as u64).is_multiple_of(SECTOR));
 
 /// cladefs: how an encrypted store's raw file is encrypted, and its log authenticated: under subkeys of
-/// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
+/// its cell's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
 /// the key of the object the file is once framed in place (TASK-411.23).
 pub(crate) struct RawEncryption {
     pub key: KeyId,
@@ -216,7 +216,7 @@ mod tests {
     use crate::{Dir as _, MemDir};
 
     fn encryption() -> Arc<RawEncryption> {
-        let key = KeyId { branch: 7, generation: 1 };
+        let key = KeyId { cell: 7, generation: 1 };
         Arc::new(RawEncryption::new(&Secret::from_bytes(&[5; 32]), key))
     }
 

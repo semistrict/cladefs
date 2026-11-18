@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what an extent store's commits, and the requests behind them, cost as its branch
+//! cladefs's own: what an extent store's commits, and the requests behind them, cost as its cell
 //! grows, and while its segments close between commits: what the 2026-10-21 review's performance
 //! issues were measured by, before and after their changes. Say:
 //!
@@ -18,7 +18,7 @@
 //! - `lagging-view`: N commits (20,000), each writing an extent and freeing the one before, with a
 //!   view that never advances, which keeps their frees: the time of each thousand commits, as the
 //!   view lags more (TASK-92.29).
-//! - `segments`: a branch of N closed segments (2,000), each holding an extent: the time of a
+//! - `segments`: a cell of N closed segments (2,000), each holding an extent: the time of a
 //!   thousand commits after them, and of opening the store, and the bytes opening it reads
 //!   (TASK-92.16).
 //! - `close-now`: a writer writing extents of 1 MiB and closing the open segment between commits
@@ -76,15 +76,15 @@ use std::time::{Duration, Instant};
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-/// The benchmark's branch: of a cell of the default tenant's (TASK-364).
-const BRANCH: local_cell::CellId = local_cell::CellId { tenant: 0, id: 1 };
+/// The benchmark's cell: of a cell of the default tenant's (TASK-364).
+const CELL: local_cell::CellId = local_cell::CellId { tenant: 0, id: 1 };
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
 fn create<D: Dir>(dir: D, options: Options) -> LocalCell<D> {
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, cell: CELL };
     LocalCell::create(dir, description, options).unwrap()
 }
 
@@ -263,7 +263,7 @@ fn burst(mib: u64) {
     let framed = started.elapsed();
     let after = local_cell::written();
     let own =
-        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(BRANCH.id))))
+        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(CELL.id))))
             .unwrap();
     writes.print("writes");
     let ms = |took: Duration| took.as_secs_f64() * 1e3;
@@ -307,7 +307,7 @@ fn durable(files: u64) {
         flushes.add(started.elapsed());
     }
     let own =
-        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(BRANCH.id))))
+        std::fs::read_dir(temp.path().join(format!("extents/{}", base32_id::Padded(CELL.id))))
             .unwrap();
     flushes.print(&format!("flushes of commits sealing {files} extents in files of their own"));
     println!("{} extents in files of their own", own.count());
@@ -379,7 +379,7 @@ fn nice(nice: i32) {
     panic!("nice {nice} on Linux alone");
 }
 
-/// cladefs: a host with a KMS, whose stores' uploaders keep their branches in a bucket in memory, a
+/// cladefs: a host with a KMS, whose stores' uploaders keep their cells in a bucket in memory, a
 /// runtime of their own, to open stores as `CLADEFS_BENCH_ENCRYPTED` says ([`Host::from_env`],
 /// TASK-411.5).
 struct Host {
@@ -417,7 +417,7 @@ impl Host {
         Some(Self { runtime, bucket, upload, _kms: kms })
     }
 
-    /// The store in `dir`, made, of branch `id` of the host's cell, encrypted, opened through its
+    /// The store in `dir`, made, of cell `id` of the host's cell, encrypted, opened through its
     /// uploader, which closes no segment between commits, holding the parts it packs ahead in
     /// `held` (TASK-400).
     fn open(
@@ -428,8 +428,8 @@ impl Host {
         held: Arc<HeldParts>,
     ) -> (Arc<LocalCell<HostDir>>, local_cell::upload::Uploader<HostDir>) {
         let tenant = Self::ENCRYPTED;
-        let branch = local_cell::CellId { tenant: tenant, id: id };
-        let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
+        let cell = local_cell::CellId { tenant, id };
+        let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         let kind = kind;
         LocalCell::make(&dir, description, Some("memory:///bench"), Some(kind)).unwrap();
@@ -558,21 +558,21 @@ fn framing(segments: u64) {
                         let description = Description {
                             block_size: BLOCK as u32,
                             capacity: 64 << 30,
-                            branch: BRANCH,
+                            cell: CELL,
                         };
                         LocalCell::make(&dir, description, None, None).unwrap();
-                        let opening = Opening { held: Some(held.clone()), ..Opening::new(BRANCH) };
+                        let opening = Opening { held: Some(held.clone()), ..Opening::new(CELL) };
                         let store =
                             LocalCell::recover_unmade(dir).unwrap().open(options, opening).unwrap();
                         store.made().unwrap();
                         (Arc::new(store), None)
                     }
                 };
-                let (branch, mut sequence) = (store.description().branch.id, 0);
+                let (cell, mut sequence) = (store.description().cell.id, 0);
                 for _ in 0..segments / stores {
                     let started = Instant::now();
                     for _ in 0..SEGMENT {
-                        let extent = ExtentId::new(branch, sequence);
+                        let extent = ExtentId::new(cell, sequence);
                         store.write(extent, 0, &bytes(sequence)).unwrap();
                         sequence += 1;
                     }

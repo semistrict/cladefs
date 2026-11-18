@@ -101,7 +101,7 @@ void sim_device_init(u64 window_len)
 	INIT_LIST_HEAD(&device.extents);
 	device.config = (struct vext_config) {
 		.tag = "sim", .block_size = PAGE_SIZE, .map_alignment = PAGE_SIZE,
-		.max_transfer = 1 << 20, .max_segments = 256, .max_root = 4096, .branch = 1,
+		.max_transfer = 1 << 20, .max_segments = 256, .max_root = 4096, .cell = 1,
 		.max_extent = 64 << 20,
 	};
 	/* A quarter of the window's pages, the host's default (doc-13). */

@@ -59,19 +59,19 @@ impl JournalUsages {
 }
 
 /// cladefs: a filesystem of 4 KiB blocks, as the guest's, which writes the journal only when
-/// something waits for it, on a device of `branch`; the round trips its device's requests
+/// something waits for it, on a device of `cell`; the round trips its device's requests
 /// take; and what its transactions take of its journal.
 pub(super) async fn writeback_filesystem(
-    branch: u64,
+    cell: u64,
 ) -> (OpenFxFilesystem, Arc<storage_device::fake_device::RoundTrips>, Arc<JournalUsages>) {
-    let (fs, trips, journal, ..) = counted_filesystem(branch).await;
+    let (fs, trips, journal, ..) = counted_filesystem(cell).await;
     (fs, trips, journal)
 }
 
 /// cladefs: `writeback_filesystem`, with what its commits hold of records, which `Hooks` sees
 /// while it's kept.
 pub(super) async fn counted_filesystem(
-    branch: u64,
+    cell: u64,
 ) -> (
     OpenFxFilesystem,
     Arc<storage_device::fake_device::RoundTrips>,
@@ -88,7 +88,7 @@ pub(super) async fn counted_filesystem(
         Ok(())
     });
     let trips = Arc::new(storage_device::fake_device::RoundTrips::default());
-    let device = FakeDevice::new(1 << 15, 4096).with_branch(branch).with_round_trips(trips.clone());
+    let device = FakeDevice::new(1 << 15, 4096).with_cell(cell).with_round_trips(trips.clone());
     let lazy_flush = LazyFlush { bytes: 1 << 20, delay: Duration::from_secs(3600) };
     let journal = Arc::new(JournalUsages::default());
     let fs = FxFilesystemBuilder::new()

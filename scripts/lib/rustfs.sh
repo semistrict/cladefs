@@ -6,8 +6,8 @@
 # Sourced by the scripts that keep what they test in an S3 bucket on this machine: RustFS
 # (github.com/rustfs/rustfs, Apache-2.0), an S3 server, run as a process of this script's, its
 # release's static binary, fetched once and checked against its digest. scripts/test-rustfs.sh
-# runs the branches' tests against it, scripts/test-e2e-rustfs.sh the guest tests, their extent
-# daemons' branches in it, and scripts/sandboxes.sh LangSmith's sandboxes' run. A process, not a
+# runs the cells' tests against it, scripts/test-e2e-rustfs.sh the guest tests, their extent
+# daemons' cells in it, and scripts/sandboxes.sh LangSmith's sandboxes' run. A process, not a
 # container: one way to start it on every host, CI's runners, ubu1 and macOS; and on ubu1 its CPU,
 # memory and I/O are the run's own, in its fxjob cgroup and on its CPUs, as LangSmith's RustFS
 # shared their runner with their sandboxes (TASK-330.5), where a container's ran in the engine's

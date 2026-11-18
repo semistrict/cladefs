@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a file set on an cladefs image: an extent store on disk, its branch kept in a bucket
+//! SQLite on a file set on an cladefs image: an extent store on disk, its cell kept in a bucket
 //! beside it (TASK-296).
 
 mod common;
@@ -144,7 +144,7 @@ fn open(path: &Path) -> Storage {
     Storage::open(path).unwrap()
 }
 
-/// A fork of an image, its branch forked in its bucket, holds the image's database as it was,
+/// A fork of an image, its cell forked in its bucket, holds the image's database as it was,
 /// inheriting its extents; the two then change apart, the fork rewriting and so freeing all it
 /// inherited, and each reads its own, before and after opening again.
 #[test]

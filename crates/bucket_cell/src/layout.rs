@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Where branches keep what, in a bucket, and what the objects hold (doc-7, Layout).
+//! Where cells keep what, in a bucket, and what the objects hold (doc-7, Layout).
 //!
 //! Numbers in keys are fixed-width base 32 ([`Padded`]), so keys list in numeric order. Objects are read from a
 //! bucket, by ranged reads, as [`crate::object`] reads them.
@@ -18,47 +18,47 @@ pub use extent_frame::segment::{
     writer_of,
 };
 
-/// cladefs: the format of a branch's objects, which its record says first
-/// ([`Record::format`](crate::record::Record::format)): a reader refuses a branch of any other,
+/// cladefs: the format of a cell's objects, which its record says first
+/// ([`Record::format`](crate::record::Record::format)): a reader refuses a cell of any other,
 /// newer or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds
-/// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the branch's
+/// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the cell's
 /// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may span
 /// segments, a footer naming the runs in its data of the commit it goes on with
-/// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the branch's
+/// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the cell's
 /// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences), TASK-371);
-/// nothing reads 3's. 5: a branch's objects are under its tenant's cell's prefix, and footers,
-/// forks and origins name branches with their cells ([`CellId`], TASK-364); nothing reads 4's. 6: a
-/// checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose fences lack
-/// them. 7: a checkpoint names the branch's strays apart from its fences, each void or late
+/// nothing reads 3's. 5: a cell's objects are under its tenant's cell's prefix, and footers,
+/// forks and origins name cells with their cells ([`CellId`], TASK-364); nothing reads 4's. 6: a
+/// checkpoint's fences count the cell's strays (TASK-383); nothing reads 5's, whose fences lack
+/// them. 7: a checkpoint names the cell's strays apart from its fences, each void or late
 /// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a version's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
 /// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
-/// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
+/// [`marks`]), and the references of forks of its cells ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
 /// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
-/// a KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
-/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their branch's DEK
+/// a KMS, and a record its cell's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
+/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their cell's DEK
 /// (none in the clear since TASK-411.28, which changed no format), own extents' footers naming
 /// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints'
-/// keys name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it
+/// keys name their writers' epochs, a cell's head ([`head`], [`Head`]) names the segments it
 /// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
 /// nothing reads 10's. 12: a fork of a version, made, says so
 /// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
 /// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a version says whether
 /// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
-/// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a branch's head
+/// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a cell's head
 /// names its versions, and a footer those made at its end ([`Head::versions`], [`NewVersion`];
 /// doc-18, TASK-476); a fork being made says whether it is of a version or a version; nothing reads
 /// 13's. 15: every number in a key is in base 32 ([`Padded`], TASK-504), as a [`CellId`] is
 /// displayed in its records; nothing reads 14's, whose keys were in hexadecimal. 16: a cell has one
-/// kind (doc-20, TASK-508.1): its object names its one branch and kind, not a map of cells,
-/// and a version names no cut of a cell's cells; nothing reads 15's. 17: forks are of versions
+/// kind (doc-20, TASK-508.1): its object names its one cell and kind, not a map of cells,
+/// and a version names no cut of several cells; nothing reads 15's. 17: forks are of versions
 /// alone: a record names no version, nor a version it is being forked from (TASK-508.2); nothing reads
 /// 16's.
 pub const FORMAT: u32 = 17;
 
-/// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
+/// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
 /// cladefs: under a cell's prefix, the collector's own: its lease, its marks, and what else its
 /// passes over the cell keep there; never a pass's candidate (TASK-395.2).
@@ -67,7 +67,7 @@ const GC_LEASE: &str = "gc/lease";
 const GC_MARKS: &str = "gc/marks/";
 /// Under a cell's prefix, the moves of its objects, and the moves of those, `moves/moves/...`.
 const MOVES: &str = "moves/";
-/// cladefs: under a cell's prefix, the references of forks of its branches ([`reference`]).
+/// cladefs: under a cell's prefix, the references of forks of its cells ([`reference`]).
 const REFS: &str = "refs/";
 /// cladefs: under a cell's prefix, the marks of the references retired or taken back ([`retired`]).
 const RETIRED: &str = "retired/";
@@ -82,13 +82,13 @@ pub fn segments(cell: CellId) -> String {
     format!("{}segments/", cell.prefix())
 }
 
-/// Segment `segment` of `branch` by the writer of epoch `epoch`: `segment` counts from 0 without
+/// Segment `segment` of `cell` by the writer of epoch `epoch`: `segment` counts from 0 without
 /// gaps, and a writer writes each of its numbers once, so that no key is written twice; the segment
-/// is the branch's once its head names it ([`Head`], TASK-407). The epoch first, as an extent's
+/// is the cell's once its head names it ([`Head`], TASK-407). The epoch first, as an extent's
 /// key has it: a writer's keys share all but their numbers, which a checkpoint's table, keeping
 /// keys front-coded, stores once.
-pub fn segment(branch: CellId, segment: u64, epoch: u64) -> String {
-    format!("{}{}.{}", segments(branch), Padded(keyed(epoch)), Padded(segment))
+pub fn segment(cell: CellId, segment: u64, epoch: u64) -> String {
+    format!("{}{}.{}", segments(cell), Padded(keyed(epoch)), Padded(segment))
 }
 
 /// The epoch a key names: its writer's (rule `epoch_keys`); without the rule, none, every writer's
@@ -111,10 +111,10 @@ pub fn checkpoints(cell: CellId) -> String {
     format!("{}checkpoints/", cell.prefix())
 }
 
-/// The checkpoint of `branch` as of its segment `segment`, by the writer of epoch `epoch`: the
-/// branch's newest once its head names it ([`Head::checkpoint`], TASK-407).
-pub fn checkpoint(branch: CellId, segment: u64, epoch: u64) -> String {
-    format!("{}{}.{}", checkpoints(branch), Padded(keyed(epoch)), Padded(segment))
+/// The checkpoint of `cell` as of its segment `segment`, by the writer of epoch `epoch`: the
+/// cell's newest once its head names it ([`Head::checkpoint`], TASK-407).
+pub fn checkpoint(cell: CellId, segment: u64, epoch: u64) -> String {
+    format!("{}{}.{}", checkpoints(cell), Padded(keyed(epoch)), Padded(segment))
 }
 
 /// cladefs: `cell`'s record: where it came from, and whether it was deleted (doc-20).
@@ -243,7 +243,7 @@ pub fn marks_of(cell: CellId) -> String {
 }
 
 /// cladefs: what the mark-only pass over `cell` of the collector that took the cell's lease at
-/// `epoch` found no live branch needs, and would have deleted ([`Marks`]; doc-7, Garbage
+/// `epoch` found no live cell needs, and would have deleted ([`Marks`]; doc-7, Garbage
 /// collection; TASK-264): keyed by the epoch, so that the newest lists last.
 pub fn marks(cell: CellId, epoch: u64) -> String {
     format!("{}{}", marks_of(cell), Padded(epoch))
@@ -320,26 +320,26 @@ pub fn further(key: &str, later: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind<'a> {
     Segment {
-        branch: CellId,
+        cell: CellId,
         segment: u64,
         epoch: u64,
     },
     Extent {
-        branch: CellId,
+        cell: CellId,
         epoch: u64,
         segment: u64,
         sequence: u64,
     },
     Checkpoint {
-        branch: CellId,
+        cell: CellId,
         segment: u64,
         epoch: u64,
     },
     Record {
-        branch: CellId,
+        cell: CellId,
     },
     Head {
-        branch: CellId,
+        cell: CellId,
     },
     /// cladefs: a cell's own object ([`cell`]).
     Cell {
@@ -414,16 +414,16 @@ impl Kind<'_> {
 
 /// cladefs: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of
 /// its objects and of their moves, its collector's lease and marks, and the references of forks of
-/// its branches, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
+/// its cells, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
 pub fn owner(key: &str) -> Option<CellId> {
     match kind(key) {
-        Kind::Segment { branch, .. }
-        | Kind::Extent { branch, .. }
-        | Kind::Checkpoint { branch, .. }
-        | Kind::Record { branch }
-        | Kind::Head { branch }
-        | Kind::Reference { parent: branch, .. }
-        | Kind::Retired { parent: branch, .. } => Some(branch),
+        Kind::Segment { cell, .. }
+        | Kind::Extent { cell, .. }
+        | Kind::Checkpoint { cell, .. }
+        | Kind::Record { cell }
+        | Kind::Head { cell }
+        | Kind::Reference { parent: cell, .. }
+        | Kind::Retired { parent: cell, .. } => Some(cell),
         Kind::Cell { cell } | Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => {
             Some(cell)
         }
@@ -481,10 +481,10 @@ pub fn kind(key: &str) -> Kind<'_> {
             return Some(Kind::Retired { parent, at, child });
         }
         if rest == "record" {
-            return Some(Kind::Record { branch: cell });
+            return Some(Kind::Record { cell });
         }
         if rest == "head" {
-            return Some(Kind::Head { branch: cell });
+            return Some(Kind::Head { cell });
         }
         // A segment's or a checkpoint's key: its writer's epoch, then its number.
         let numbered = |rest: &str| -> Option<(u64, u64)> {
@@ -493,25 +493,25 @@ pub fn kind(key: &str) -> Kind<'_> {
         };
         if let Some(rest) = rest.strip_prefix("segments/") {
             let (segment, epoch) = numbered(rest)?;
-            return Some(Kind::Segment { branch: cell, segment, epoch });
+            return Some(Kind::Segment { cell, segment, epoch });
         }
         if let Some(rest) = rest.strip_prefix("checkpoints/") {
             let (segment, epoch) = numbered(rest)?;
-            return Some(Kind::Checkpoint { branch: cell, segment, epoch });
+            return Some(Kind::Checkpoint { cell, segment, epoch });
         }
         if let Some(rest) = rest.strip_prefix("extents/") {
             let [epoch, segment, sequence] = rest.split('.').collect::<Vec<_>>()[..] else {
                 return None;
             };
             let (epoch, segment, sequence) = (number(epoch)?, number(segment)?, number(sequence)?);
-            return Some(Kind::Extent { branch: cell, epoch, segment, sequence });
+            return Some(Kind::Extent { cell, epoch, segment, sequence });
         }
         None
     };
     parsed().unwrap_or(Kind::Unknown)
 }
 
-/// A fork of a branch, made at the end of the commits of its segment `at`.
+/// A fork of a cell, made at the end of the commits of its segment `at`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fork {
     pub child: CellId,
@@ -524,7 +524,7 @@ pub struct Fork {
 impl Fork {
     /// The fork its segment `at`'s footer names, `child`.
     pub fn at(at: u64, child: &Child) -> Self {
-        Self { child: child.branch, at, owner: child.owner }
+        Self { child: child.cell, at, owner: child.owner }
     }
 }
 
@@ -535,24 +535,24 @@ pub struct Segment {
     pub footer: Footer,
 }
 
-/// The child of a fork to `branch`, a branch, of no owner: tests', which name no two children
+/// The child of a fork to `cell`, a cell, of no owner: tests', which name no two children
 /// alike.
 #[cfg(test)]
-pub(crate) fn child(branch: CellId) -> Child {
-    Child { branch, owner: 0 }
+pub(crate) fn child(cell: CellId) -> Child {
+    Child { cell, owner: 0 }
 }
 
-/// cladefs: the cell of tests' branches, of tenant 1.
+/// cladefs: the cell of tests' cells, of tenant 1.
 #[cfg(any(test, feature = "testing"))]
 pub const TEST_CELL: CellId = CellId { tenant: 1, id: 1 };
 
 /// cladefs: tests' cell `id`, of [`TEST_CELL`]'s tenant.
 #[cfg(any(test, feature = "testing"))]
-pub const fn test_branch(id: u64) -> CellId {
+pub const fn test_cell(id: u64) -> CellId {
     CellId { tenant: TEST_CELL.tenant, id }
 }
 
-/// Where a branch was forked from: ordered by its parent, then its segment, so that the forks made
+/// Where a cell was forked from: ordered by its parent, then its segment, so that the forks made
 /// at one segment sort together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Origin {
@@ -560,13 +560,13 @@ pub struct Origin {
     pub at: u64,
 }
 
-/// A branch's head (TASK-407): its writer's taking, of the epoch after the taking before, by
-/// `holder`, with the fencing token `token`; and what the branch holds, its segments to `end` and
+/// A cell's head (TASK-407): its writer's taking, of the epoch after the taking before, by
+/// `holder`, with the fencing token `token`; and what the cell holds, its segments to `end` and
 /// its newest checkpoint. Swapped with a condition (S3 If-Match, GCS generation), by its writer
-/// alone while it holds it: a segment or a checkpoint is the branch's only once the head names it,
+/// alone while it holds it: a segment or a checkpoint is the cell's only once the head names it,
 /// so that one its writer uploaded, taken over before it swapped the head, never is, nor ever will
 /// be, and the collector deletes it. A takeover swaps it to the next epoch, which fences the writer
-/// before: its next swap fails. A head of [`Head::FINAL`] is a deleted branch's: no writer takes it
+/// before: its next swap fails. A head of [`Head::FINAL`] is a deleted cell's: no writer takes it
 /// again. Heads are never deleted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
@@ -574,17 +574,17 @@ pub struct Head {
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
     /// The fencing token it was taken with, which no lower one takes the head from (TASK-39.7): the
-    /// epoch of the taking of the branch's cell by its writer's placement ([`crate::cell::Held`],
+    /// epoch of the taking of the cell by its writer's placement ([`crate::cell::Held`],
     /// TASK-364), which a later taking of the cell exceeds; `u64::MAX` once deleted.
     pub token: u64,
-    /// The number of segments the branch holds: 0 to `end`, without gaps.
+    /// The number of segments the cell holds: 0 to `end`, without gaps.
     pub end: u64,
     /// The epochs of the writers of those segments, in runs: from each run's first number on, to
     /// the next run's, the segments are of its epoch. A run a takeover, at most.
     pub runs: Vec<(u64, u64)>,
-    /// The branch's newest checkpoint, by its number and its writer's epoch, if it has one.
+    /// The cell's newest checkpoint, by its number and its writer's epoch, if it has one.
     pub checkpoint: Option<(u64, u64)>,
-    /// cladefs: the branch's versions, oldest first (doc-18, TASK-476): each a name for its state
+    /// cladefs: the cell's versions, oldest first (doc-18, TASK-476): each a name for its state
     /// as of a segment it names, kept for as long as it names it. The acknowledgement naming a
     /// segment names the versions cut at its end, in the same swap; a takeover names what the
     /// head did; its writer drops one by a swap; a deletion's final head names none.
@@ -629,14 +629,14 @@ impl Head {
             .map(|segment| (segment, self.epoch_of(segment).expect("runs name every segment")))
     }
 
-    /// The key of segment `segment` of `branch`, if the head names it.
-    pub fn segment(&self, branch: CellId, segment: u64) -> Option<String> {
-        self.epoch_of(segment).map(|epoch| self::segment(branch, segment, epoch))
+    /// The key of segment `segment` of `cell`, if the head names it.
+    pub fn segment(&self, cell: CellId, segment: u64) -> Option<String> {
+        self.epoch_of(segment).map(|epoch| self::segment(cell, segment, epoch))
     }
 
-    /// The key of `branch`'s newest checkpoint, if it has one.
-    pub fn checkpoint(&self, branch: CellId) -> Option<String> {
-        self.checkpoint.map(|(segment, epoch)| checkpoint(branch, segment, epoch))
+    /// The key of `cell`'s newest checkpoint, if it has one.
+    pub fn checkpoint(&self, cell: CellId) -> Option<String> {
+        self.checkpoint.map(|(segment, epoch)| checkpoint(cell, segment, epoch))
     }
 
     /// The head with the segments of the writer of `epoch` to `end` named too: the next ones its
@@ -786,7 +786,7 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
-/// How a writer encrypts what it frames: under its branch's DEK, the newest, and which it is
+/// How a writer encrypts what it frames: under its cell's DEK, the newest, and which it is
 /// ([`crate::keys::Ring::encrypting`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
 pub type EncryptionKey<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
@@ -849,58 +849,57 @@ mod tests {
         super::moves(key, 1).unwrap()
     }
 
-    /// A branch's extents stored on their own, whichever writer uploaded them, are under its
-    /// prefix, and no other branch's are, of its cell or another.
+    /// A cell's extents stored on their own, whichever writer uploaded them, are under its
+    /// prefix, and no other cell's are, of its cell or another.
     #[test]
-    fn extents_are_under_their_branchs_prefix() {
-        let branch = test_branch(0x12);
+    fn extents_are_under_their_cells_prefix() {
+        let cell = test_cell(0x12);
         let elsewhere = CellId { tenant: 1, id: 2 };
         let expected = "tenants/0000000000001/cells/0000000000001/extents/000000000000j/";
-        assert_eq!(extents(branch), expected);
+        assert_eq!(extents(cell), expected);
         for epoch in [1, 7] {
             let key = extent(TEST_CELL, epoch, 3, ExtentId::new(0x12, 5));
-            assert!(key.starts_with(&extents(branch)));
+            assert!(key.starts_with(&extents(cell)));
         }
-        assert!(!extent(TEST_CELL, 1, 3, ExtentId::new(0x13, 5)).starts_with(&extents(branch)));
-        assert!(!extent(elsewhere, 1, 3, ExtentId::new(0x12, 5)).starts_with(&extents(branch)));
+        assert!(!extent(TEST_CELL, 1, 3, ExtentId::new(0x13, 5)).starts_with(&extents(cell)));
+        assert!(!extent(elsewhere, 1, 3, ExtentId::new(0x12, 5)).starts_with(&extents(cell)));
     }
 
-    /// cladefs: every object of a branch, and its cell's own, is under the cell's prefix, by tenant
+    /// cladefs: every object of a cell, and its cell's own, is under the cell's prefix, by tenant
     /// then cell (TASK-364); and since format 9 everything the cell's collection reads: its
     /// objects' moves and their moves, its collector's lease and marks, and the references of forks
-    /// of its branches, whatever the children's cells (TASK-395.2).
+    /// of its cells, whatever the children's cells (TASK-395.2).
     #[test]
     fn a_cells_objects_are_under_its_tenants_prefix() {
         let cell = CellId { tenant: 0xa, id: 0xc };
-        let branch = CellId { tenant: cell.tenant, id: 3 };
         let elsewhere = CellId { tenant: 0xb, id: 4 };
         let prefix = "tenants/000000000000a/cells/000000000000c/";
         assert_eq!(cell.prefix(), prefix);
         for key in [
-            segment(branch, 7, 2),
+            segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
-            checkpoint(branch, 7, 2),
-            record(branch),
-            head(branch),
+            checkpoint(cell, 7, 2),
+            record(cell),
+            head(cell),
             self::cell(cell),
-            moves(&segment(branch, 7, 2)),
-            moves(&moves(&segment(branch, 7, 2))),
+            moves(&segment(cell, 7, 2)),
+            moves(&moves(&segment(cell, 7, 2))),
             collector_lease(cell),
             marks(cell, 2),
-            reference(branch, 7, elsewhere),
+            reference(cell, 7, elsewhere),
         ] {
             assert!(key.starts_with(prefix) && key.starts_with(TENANTS), "{key}");
         }
-        assert_eq!(record(branch), format!("{prefix}branches/0000000000003"));
+        assert_eq!(record(cell), format!("{prefix}cells/0000000000003"));
         assert_eq!(
-            moves(&segment(branch, 7, 2)),
+            moves(&segment(cell, 7, 2)),
             format!(
                 "{prefix}moves/segments/0000000000003/0000000000002.0000000000007/\
                  0000000000001"
             )
         );
         assert_eq!(
-            moves(&moves(&segment(branch, 7, 2))),
+            moves(&moves(&segment(cell, 7, 2))),
             format!(
                 "{prefix}moves/moves/segments/0000000000003/0000000000002.0000000000007/\
                  0000000000001/0000000000001"
@@ -909,7 +908,7 @@ mod tests {
         assert_eq!(collector_lease(cell), format!("{prefix}gc/lease"));
         assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000001a"));
         assert_eq!(
-            reference(branch, 7, elsewhere),
+            reference(cell, 7, elsewhere),
             format!(
                 "{prefix}refs/0000000000003/0000000000007/\
                  000000000000b.000000000000d.0000000000004"
@@ -981,20 +980,16 @@ mod tests {
     #[test]
     fn kinds() {
         let cell = CellId { tenant: 0xa, id: 0xc };
-        let branch = CellId { tenant: cell.tenant, id: 3 };
         let id = ExtentId::new(3, 9);
-        assert_eq!(kind(&segment(branch, 7, 2)), Kind::Segment { branch, segment: 7, epoch: 2 });
-        let own = Kind::Extent { branch, epoch: 2, segment: 4, sequence: 9 };
+        assert_eq!(kind(&segment(cell, 7, 2)), Kind::Segment { cell, segment: 7, epoch: 2 });
+        let own = Kind::Extent { cell, epoch: 2, segment: 4, sequence: 9 };
         assert_eq!(kind(&extent(cell, 2, 4, id)), own);
         // A key naming no segment declares nothing: no extent's.
         let earlier = format!("{}extents/0000000000003/0000000000002.0000000000009", cell.prefix());
         assert_eq!(kind(&earlier), Kind::Unknown);
-        assert_eq!(
-            kind(&checkpoint(branch, 7, 2)),
-            Kind::Checkpoint { branch, segment: 7, epoch: 2 }
-        );
-        assert_eq!(kind(&record(branch)), Kind::Record { branch });
-        assert_eq!(kind(&head(branch)), Kind::Head { branch });
+        assert_eq!(kind(&checkpoint(cell, 7, 2)), Kind::Checkpoint { cell, segment: 7, epoch: 2 });
+        assert_eq!(kind(&record(cell)), Kind::Record { cell });
+        assert_eq!(kind(&head(cell)), Kind::Head { cell });
         assert_eq!(kind(&self::cell(cell)), Kind::Cell { cell });
         assert_eq!(objectid_block(0x2a), "objectid/000000000001a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
@@ -1010,7 +1005,7 @@ mod tests {
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
-        let from = segment(branch, 7, 2);
+        let from = segment(cell, 7, 2);
         let of = "segments/0000000000003/0000000000002.0000000000007";
         assert_eq!(kind(&moves(&from)), Kind::Moves { cell, of, pass: 1 });
         let moved = format!("moves/{of}/0000000000001");
@@ -1019,23 +1014,20 @@ mod tests {
         assert_eq!(kind(&format!("{}moves/{of}", cell.prefix())), Kind::Unknown);
         let child = CellId { tenant: 1, id: 5 };
         assert_eq!(
-            kind(&reference(branch, 7, child)),
-            Kind::Reference { parent: branch, at: 7, child }
+            kind(&reference(cell, 7, child)),
+            Kind::Reference { parent: cell, at: 7, child }
         );
-        assert_eq!(
-            kind(&retired(branch, 7, child)),
-            Kind::Retired { parent: branch, at: 7, child }
-        );
-        assert_eq!(retired_of(&reference(branch, 7, child)), Some(retired(branch, 7, child)));
-        assert_eq!(retired_of(&retired(branch, 7, child)), None);
-        assert!(!retired(branch, 7, child).starts_with(&references(cell)));
-        assert_eq!(kind(&format!("{}2", origin(branch, 7))), Kind::Unknown);
-        assert_eq!(kind(&origin(branch, 7)), Kind::Unknown);
+        assert_eq!(kind(&retired(cell, 7, child)), Kind::Retired { parent: cell, at: 7, child });
+        assert_eq!(retired_of(&reference(cell, 7, child)), Some(retired(cell, 7, child)));
+        assert_eq!(retired_of(&retired(cell, 7, child)), None);
+        assert!(!retired(cell, 7, child).starts_with(&references(cell)));
+        assert_eq!(kind(&format!("{}2", origin(cell, 7))), Kind::Unknown);
+        assert_eq!(kind(&origin(cell, 7)), Kind::Unknown);
         // The layout before cells, and keys of cells' prefixes malformed, are no objects of a
-        // branch; nor the collector's lease, marks and moves at the bucket's root, as format 8 had
+        // cell; nor the collector's lease, marks and moves at the bucket's root, as format 8 had
         // them (TASK-395.2).
         assert_eq!(kind("segments/0000000000003/0000000000007"), Kind::Unknown);
-        assert_eq!(kind("branches/0000000000003"), Kind::Unknown);
+        assert_eq!(kind("cells/0000000000003"), Kind::Unknown);
         assert_eq!(kind("tenants/a/cells/000000000000c/cell"), Kind::Unknown);
         assert_eq!(kind("tenants/000000000000a/cell/000000000000c/cell"), Kind::Unknown);
         let short = format!("{}segments/0000000000003/7", cell.prefix());
@@ -1053,25 +1045,24 @@ mod tests {
 
     /// TASK-394, TASK-395.2: every kind of a cell's objects is the cell's, its moves however many
     /// times moved, its collector's lease and marks, and the references under it, of forks of its
-    /// branches to other cells; object-ID blocks and keys of no kind are no cell's.
+    /// cells to other cells; object-ID blocks and keys of no kind are no cell's.
     #[test]
     fn owners() {
         let cell = CellId { tenant: 0xa, id: 0xc };
-        let branch = CellId { tenant: cell.tenant, id: 3 };
         let child = CellId { tenant: 1, id: 5 };
         let keys = [
-            segment(branch, 7, 2),
+            segment(cell, 7, 2),
             extent(cell, 2, 4, ExtentId::new(3, 9)),
-            checkpoint(branch, 7, 2),
-            record(branch),
-            head(branch),
+            checkpoint(cell, 7, 2),
+            record(cell),
+            head(cell),
             self::cell(cell),
-            moves(&segment(branch, 7, 2)),
+            moves(&segment(cell, 7, 2)),
             moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
             collector_lease(cell),
             marks(cell, 1),
-            reference(branch, 7, child),
-            retired(branch, 7, child),
+            reference(cell, 7, child),
+            retired(cell, 7, child),
         ];
         for key in keys {
             assert_eq!(owner(&key), Some(cell), "{key}");
@@ -1131,7 +1122,7 @@ mod tests {
     /// it is the writer's, or start one.
     #[test]
     fn heads_name_their_segments_by_epoch() {
-        let branch = test_branch(1);
+        let cell = test_cell(1);
         let head = Head { end: 0, ..Head::default() }.holding(1, 3).holding(1, 4).holding(3, 6);
         assert_eq!((head.end, &head.runs[..]), (6, &[(0, 1), (4, 3)][..]));
         let named: Vec<_> = head.segments(2).collect();
@@ -1140,16 +1131,16 @@ mod tests {
             (head.epoch_of(3), head.epoch_of(4), head.epoch_of(6)),
             (Some(1), Some(3), None)
         );
-        assert_eq!(head.segment(branch, 5), Some(segment(branch, 5, 3)));
+        assert_eq!(head.segment(cell, 5), Some(segment(cell, 5, 3)));
         assert_eq!(head.clone().holding(3, 5), head, "nothing named twice, nor taken back");
         let checkpointed = Head { checkpoint: Some((4, 3)), ..head };
-        assert_eq!(checkpointed.checkpoint(branch), Some(checkpoint(branch, 4, 3)));
+        assert_eq!(checkpointed.checkpoint(cell), Some(checkpoint(cell, 4, 3)));
     }
 
     #[test]
     fn segments_hold_their_footers() {
         let footer = Footer {
-            branch: test_branch(1),
+            cell: test_cell(1),
             segment: 2,
             epoch: 3,
             contents: Contents {
@@ -1159,15 +1150,15 @@ mod tests {
                 frees: vec![ExtentId::new(1, 1)],
                 root: Some(b"root".to_vec()),
                 next_sequence: 6,
-                forks: vec![Child { branch: test_branch(7), owner: 8 }],
+                forks: vec![Child { cell: test_cell(7), owner: 8 }],
                 capacity: Some(1 << 30),
                 continued: None,
                 versions: vec![NewVersion { id: 9, keep_last: Some(11) }],
             },
         };
         let segment = Segment { data: b"abc".to_vec(), footer: footer.clone() };
-        let bytes = segment.encode(crate::testing::encrypting(test_branch(1)));
-        let keys = crate::testing::ring([test_branch(1)]);
+        let bytes = segment.encode(crate::testing::encrypting(test_cell(1)));
+        let keys = crate::testing::ring([test_cell(1)]);
         assert_eq!(data_under(&bytes, &keys.of(1)).unwrap(), b"abc");
         assert!(!bytes.windows(3).any(|bytes| bytes == b"abc"), "encrypted");
         assert_eq!(Segment::footer(&bytes).unwrap(), footer);
@@ -1177,10 +1168,10 @@ mod tests {
     /// Objects' footers are found by their frames.
     #[test]
     fn objects_hold_their_footers() {
-        let encrypting = crate::testing::encrypting(test_branch(1));
+        let encrypting = crate::testing::encrypting(test_cell(1));
         let bytes = with_footer(&[1; 5000], &"footer", encrypting);
         assert_eq!(footer::<String>(&bytes).unwrap(), "footer");
-        let keys = crate::testing::ring([test_branch(1)]);
+        let keys = crate::testing::ring([test_cell(1)]);
         let keys = keys.of(1);
         assert_eq!(data_under(&bytes, &keys).unwrap(), &[1; 5000][..]);
         let mut flipped = bytes.clone();

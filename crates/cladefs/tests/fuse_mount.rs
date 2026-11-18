@@ -368,7 +368,7 @@ fn a_store_mounted_is_not_mounted_again() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "mounted twice");
     assert!(stderr.contains(&format!("opening {}", store.display())), "{stderr}");
-    assert!(stderr.contains("another process has the store's branches open"), "{stderr}");
+    assert!(stderr.contains("another process has the store's cells open"), "{stderr}");
     assert_eq!(names(&other), Vec::<String>::new());
     mount.unmount(false).unwrap();
     block_on(mount.join().unwrap().check()).unwrap();
@@ -450,12 +450,12 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let lines = |args: &[&str]| -> Vec<String> {
         cladefsctl_mount(socket, args).lines().map(str::to_owned).collect()
     };
-    // Three new cells, two of tenant 1's, one of tenant 2's: each its cell and its branch.
+    // Three new cells, two of tenant 1's, one of tenant 2's.
     let create = |tenant: &str| match &lines(&["create", tenant, &capacity])[..] {
-        [cell, branch] => (cell.clone(), branch.clone()),
+        [cell] => cell.clone(),
         printed => panic!("created {printed:?}"),
     };
-    let ((a, root), (c, data), (b, other)) = (create("1"), create("1"), create("2"));
+    let (a, c, b) = (create("1"), create("1"), create("2"));
     assert_eq!(names(&m), [one, two]);
     let mut cells = vec![a.clone(), c.clone()];
     cells.sort();
@@ -479,26 +479,26 @@ fn one_mount_attaches_and_detaches_many_stores() {
         std::fs::metadata(at_a.join("file")).unwrap().ino(),
         std::fs::metadata(at_c.join("file")).unwrap().ino()
     );
-    let mut listed = vec![format!("{one} {a} {root}"), format!("{one} {c} {data}")];
+    let mut listed = vec![format!("{one} {a}"), format!("{one} {c}")];
     listed.sort();
-    listed.push(format!("{two} {b} {other}"));
+    listed.push(format!("{two} {b}"));
     assert_eq!(cladefsctl_mount(socket, &["list"]), listed.join("\n") + "\n");
-    // The cells' objects are under their tenants' prefixes: each cell's object and its branch.
+    // The cells' objects are under their tenants' prefixes: each cell's object and its record.
     let bucket = dir.path().join("bucket");
     let cell_a = bucket.join(format!("tenants/{one}/cells/{a}"));
     assert!(cell_a.join("cell").exists(), "no cell object at {}", cell_a.display());
-    assert_eq!(names(&cell_a.join("branches")), [root.clone()]);
-    assert!(bucket.join(format!("tenants/{two}/cells/{b}/branches/{other}")).exists());
+    assert!(cell_a.join("record").exists(), "no record at {}", cell_a.display());
+    assert!(bucket.join(format!("tenants/{two}/cells/{b}/record")).exists());
 
     // Detached, and attached again from its store; another cell detached, its store gone, then
     // attached again from the bucket.
     cladefsctl_mount(socket, &["detach", "1", &a]);
     assert_eq!(names(&m.join(one)), [c.as_str()]);
-    assert_eq!(lines(&["attach", "1", &a]), [a.clone(), root.clone()]);
+    assert_eq!(lines(&["attach", "1", &a]), [a.clone()]);
     assert_eq!(std::fs::read_to_string(at_a.join("file")).unwrap(), "in a");
     cladefsctl_mount(socket, &["detach", "2", &b]);
     std::fs::remove_dir_all(dir.path().join("stores").join(two)).unwrap();
-    assert_eq!(lines(&["attach", "2", &b]), [b.clone(), other.clone()]);
+    assert_eq!(lines(&["attach", "2", &b]), [b.clone()]);
     assert_eq!(std::fs::read_to_string(at_b.join("file")).unwrap(), "in b");
 
     // A file open holds its cell's detach until it is closed.
@@ -571,7 +571,7 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     std::fs::create_dir(&second).unwrap();
     let (child, socket, m) = cladefsd_mounting(&second, &bucket, 2);
     let socket = socket.to_str().unwrap();
-    assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]).lines().count(), 2);
+    assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]), format!("{cell}\n"));
     let shown = m.join("0000000000001").join(&cell);
     assert_eq!(std::fs::read_to_string(shown.join("file")).unwrap(), "drained");
     terminate(child, &m);

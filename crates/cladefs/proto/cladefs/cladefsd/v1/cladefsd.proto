@@ -56,9 +56,9 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364, doc-20): a tenant's cell has one kind and one branch, kept under the cell's
-// prefix in the bucket, and a host takes a cell whole, its branch's head with it. A branch
-// is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
+// Cells (TASK-364, doc-20): a tenant's cell has one kind, kept under the cell's prefix in the
+// bucket, and a host takes a cell whole, its head with it. A cell is named by its tenant and its
+// ID: `tenant` and `cell` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
 // tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
 // one Grant named; the daemon's own socket's VM processes make stores of the default tenant, whose
@@ -223,20 +223,17 @@ message CreateCellRequest {
   string path = 1;
   // The most bytes it holds.
   uint64 capacity = 2;
-  // The branch kept in the daemon's bucket to take, of `cell` (NOT_FOUND, ENOENT, if it has none;
-  // INVALID_ARGUMENT, EINVAL, of a cell of 0); or 0, with a cell of 0, for a new cell, its ID the
-  // bucket's to give (TASK-364), which the response says.
-  uint64 branch = 3;
+  // Once the branch to take: a cell named is taken.
+  reserved 3;
   // The fencing token to place it at (PlaceCell), if any: of a placement no earlier than the
-  // last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE).
+  // last writer's of the cell to take, or the take fails (FAILED_PRECONDITION, ESTALE).
   optional uint64 token = 4;
-  // The tenant whose cell's branch it is. Of a new cell in a granted tenant's
-  // directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
-  // (PERMISSION_DENIED, EPERM).
+  // The cell's tenant. Of a new cell in a granted tenant's directory, that tenant's ID (Grant's
+  // `tenant`), or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
   uint64 tenant = 5;
-  // The cell, or 0 for a new one, whose ID, unique in the daemon's bucket, is its branch's too,
-  // the bucket's to give, which the response says. A cell named takes `branch`, which must be
-  // named: its own (INVALID_ARGUMENT, EINVAL, otherwise).
+  // The cell kept in the daemon's bucket to take (NOT_FOUND, ENOENT, if it has none), or 0 for a
+  // new one, its ID, unique in the daemon's bucket, the bucket's to give (TASK-364), which the
+  // response says.
   uint64 cell = 6;
   // The cell's kind, which says what opens it.
   CellKind kind = 7;
@@ -257,8 +254,7 @@ enum CellKind {
 
 // The store made.
 message CreateCellResponse {
-  // Its branch: the one taken, or the new one.
-  uint64 branch = 1;
+  reserved 1;
   // Its tenant.
   uint64 tenant = 2;
   // Its cell: the one named, or the new one.
@@ -284,8 +280,7 @@ message ImportImageRequest {
 
 // The store made.
 message ImportImageResponse {
-  // Its branch, a new one.
-  uint64 branch = 1;
+  reserved 1;
   // Its tenant.
   uint64 tenant = 2;
   // Its cell, a new one.
@@ -321,8 +316,7 @@ message ForkCellRequest {
 
 // The fork made.
 message ForkCellResponse {
-  // Its branch.
-  uint64 branch = 1;
+  reserved 1;
   // Its tenant: `from`'s.
   uint64 tenant = 2;
   // Its cell, a new one.
@@ -472,8 +466,8 @@ message StatCellRequest {
 
 // What a store is, and holds.
 message StatCellResponse {
-  // The branch whose extents its guest mints.
-  uint64 branch = 1;
+  // Once its branch: its cell's ID, `cell`.
+  reserved 1;
   // The most bytes it holds.
   uint64 capacity = 2;
   // The bytes its extents hold.
@@ -508,11 +502,11 @@ message StatCellResponse {
   // How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
   // uploader's interval (a second): 0 if none waits.
   uint64 oldest_pending_ms = 16;
-  // The tenant whose cell's branch it is (TASK-364).
+  // Its cell's tenant (TASK-364).
   uint64 tenant = 17;
-  // The cell whose branch it is.
+  // Its cell, whose extents its guest mints.
   uint64 cell = 18;
-  // How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
+  // How many extents it holds that it wrote: those whose bytes are `own` (TASK-454). What
   // the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
   // hundred bytes an extent (TASK-443.2).
   uint64 own_extents = 19;
@@ -617,10 +611,10 @@ message GetStatsResponse {
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
 message VmStats {
   // Its connection's number, the daemon's count of connections as it connected: what tells apart
-  // a store's writer and its followers, of one branch.
+  // a store's writer and its followers, of one cell.
   uint64 connection = 1;
-  // Its store's branch.
-  uint64 branch = 2;
+  // Its store's cell.
+  uint64 cell = 2;
   // Its store's directory, without symbolic links.
   string path = 3;
   // Whether it follows its store, read-only, or writes it.

@@ -3,16 +3,16 @@
 // found in the LICENSE file.
 
 //! cladefs: cells (TASK-364, doc-20). A tenant's cell has one kind, and is its unit of placement:
-//! a host at a time holds it, and with it its branch, kept under the cell's prefix
+//! a host at a time holds it, and with it its cell, kept under the cell's prefix
 //! ([`CellId::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
-//! which placement's fencing token, and its branch and kind.
+//! which placement's fencing token, and its cell and kind.
 //!
 //! Taking a cell is one compare-and-swap of its object, to the next epoch, refused to a placement
-//! of a lower token than the one holding it ([`Error::Stale`]), as a branch's head is. The taker
-//! then takes its branch's head with the cell's epoch as its token: a later taking of the cell, of
+//! of a lower token than the one holding it ([`Error::Stale`]), as a cell's head is. The taker
+//! then takes its cell's head with the cell's epoch as its token: a later taking of the cell, of
 //! a higher epoch, takes it from it, and its writer learns of it as any writer taken over does, at
 //! its next upload; it can't take it back, its epoch lower. So a cell moves whole, fenced by its
-//! branch's own head, which nothing about cells changes.
+//! cell's own head, which nothing about cells changes.
 //!
 //! A cell is made with no kind, and is given one by the first store of it its holder makes
 //! ([`hold`]): one kind, never another ([`Error::OtherKind`]).
@@ -22,14 +22,14 @@
 //! [`make`]): every cell is made with one, none in the clear (TASK-411.28; [`crate::keys`]).
 //!
 //! cladefs: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
-//! ([`shred`], doc-16, Shredding; TASK-411.7): its branch's DEK unwraps no more, and no one takes
-//! the cell again, nor writes its branch in the clear. Only as strong as the bucket keeps no
+//! ([`shred`], doc-16, Shredding; TASK-411.7): its cell's DEK unwraps no more, and no one takes
+//! the cell again, nor writes its cell in the clear. Only as strong as the bucket keeps no
 //! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
 
-use crate::branch::{Start, Step, transition, transition_leaving};
 use crate::bucket::Bucket;
 use crate::keys::Kek;
 use crate::layout::{self, CellId, FORMAT};
+use crate::lifecycle::{Start, Step, transition, transition_leaving};
 use crate::{Error, bucket, rules};
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
@@ -64,10 +64,10 @@ impl Kind {
 /// A cell's object.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Object {
-    /// The format of the cell's objects, its branches' among them ([`FORMAT`]), first, so that a
+    /// The format of the cell's objects, its cells' among them ([`FORMAT`]), first, so that a
     /// reader of any format reads it before the rest.
     pub format: u32,
-    /// The epoch of its holder's taking, the token its branch's head is taken with.
+    /// The epoch of its holder's taking, the token its cell's head is taken with.
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
@@ -81,7 +81,7 @@ pub struct Object {
     /// (TASK-411.3): never none, but a shredded cell's (TASK-411.28).
     pub keks: Vec<Kek>,
     /// cladefs: whether it was shredded ([`shred`], TASK-411.7): its KEKs gone, so that its
-    /// branches' data is unreadable, and no one takes it again.
+    /// cells' data is unreadable, and no one takes it again.
     pub shredded: bool,
 }
 
@@ -104,18 +104,17 @@ impl Object {
     fn decode(cell: CellId, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
         if format != FORMAT {
-            let branch = CellId { tenant: cell.tenant, id: 0 };
-            return Err(Error::Format { branch, format });
+            return Err(Error::Format { cell, format });
         }
         layout::decode(bytes)
     }
 }
 
-/// A taking of a cell: what changing it, and taking its branch's head, goes by.
+/// A taking of a cell: what changing it, and taking its cell's head, goes by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
     pub cell: CellId,
-    /// The epoch of the taking: the token its branch's head is taken with.
+    /// The epoch of the taking: the token its cell's head is taken with.
     pub epoch: u64,
     pub holder: u64,
 }
@@ -131,7 +130,7 @@ async fn change<R>(
     transition(bucket, &layout::cell(cell), start, decode, step).await
 }
 
-/// Creates `cell`, of no branch or kind yet, held by `holder` of the placement of `token` at epoch 1: a
+/// Creates `cell`, of no cell or kind yet, held by `holder` of the placement of `token` at epoch 1: a
 /// create of another's finds its object there. cladefs: its KEK `kek` (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
@@ -149,7 +148,7 @@ pub async fn create(
     Ok(Held { cell, epoch: 1, holder })
 }
 
-/// cladefs: makes `cell`, of no branch or kind yet, its KEK `kek`, as `holder` makes it, held by no placement
+/// cladefs: makes `cell`, of no cell or kind yet, its KEK `kek`, as `holder` makes it, held by no placement
 /// (token 0), so that any placement takes it (TASK-411.4): what a fork into a new cell makes as it
 /// gives its child its keys, before the child's store opens, wherever it does. Returns the cell's
 /// object, and whether this made it: one there already, another's, is left as it is.
@@ -206,7 +205,7 @@ pub async fn read(bucket: &impl Bucket, cell: CellId) -> Result<Option<Object>, 
 
 /// cladefs: whether `held` holds its cell still, read: [`Error::Stale`] if another took it since,
 /// [`Error::Deleted`] if it was deleted, refused if it was shredded. What a writer's taking of a
-/// branch reads once its head is taken, of a holding its host remembers rather than read before,
+/// cell reads once its head is taken, of a holding its host remembers rather than read before,
 /// whose epoch the head was taken with (`Taker::remembered`, TASK-449's review): found so, it
 /// held the cell as the head was taken, as epochs only grow, holding by holding.
 pub async fn still_held(bucket: &impl Bucket, held: Held) -> Result<(), Error> {
@@ -318,7 +317,7 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
 }
 
 /// cladefs: shreds `cell` (doc-16, Shredding; TASK-411.7): takes every generation of its KEK out of
-/// its object and marks it shredded, by one conditional update, whoever holds it: its branches'
+/// its object and marks it shredded, by one conditional update, whoever holds it: its cells'
 /// DEKs, wrapped by those KEKs, unwrap no more, and no one takes it again ([`take`], [`hold`]).
 /// Its holder, if any, goes on until told (the mark stays, as every change
 /// keeps the rest of the object); a host that unwrapped its KEK before keeps it until told too
@@ -350,9 +349,7 @@ pub fn shredded(cell: CellId) -> Error {
 /// holds the cell, which changes nothing of who holds it, nor its epoch.
 pub async fn forget(bucket: &impl Bucket, cell: CellId) -> Result<(), Error> {
     change(bucket, cell, Start::Read, |found| match found {
-        Some(found) if found.kind.is_some() => {
-            Ok(Step::Write(Object { kind: None, ..found }, ()))
-        }
+        Some(found) if found.kind.is_some() => Ok(Step::Write(Object { kind: None, ..found }, ())),
         _ => Ok(Step::Stop(())),
     })
     .await
@@ -457,11 +454,11 @@ mod tests {
             CellId { tenant: 1, id: 0x10 },
             CellId { tenant: 3, id: 1 },
         ];
-        let branch = |cell: CellId, id| CellId { tenant: cell.tenant, id };
+        let cell = |cell: CellId, id| CellId { tenant: cell.tenant, id };
         let keys = [
             layout::cell(cells[2]),
-            layout::record(branch(cells[0], 4)),
-            layout::segment(branch(cells[0], 4), 0, 1),
+            layout::record(cell(cells[0], 4)),
+            layout::segment(cell(cells[0], 4), 0, 1),
             layout::collector_lease(cells[1]),
             layout::objectid_block(1),
         ];
@@ -623,8 +620,7 @@ mod tests {
                 shredded: false,
             };
             block_on(bucket::create(&bucket, &layout::cell(TEST_CELL), layout::encode(&object)));
-            let refused =
-                Error::Format { branch: CellId { tenant: TEST_CELL.tenant, id: 0 }, format };
+            let refused = Error::Format { cell: TEST_CELL, format };
             assert_eq!(block_on(read(&bucket, TEST_CELL)), Err(refused.clone()));
             assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 5)), Err(refused));
         }

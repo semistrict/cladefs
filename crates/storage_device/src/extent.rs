@@ -10,28 +10,28 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::ops::Range;
 
-/// An extent's ID: the branch that wrote the extent, and the sequence number that branch gave it.
+/// An extent's ID: the cell that wrote the extent, and the sequence number that cell gave it.
 ///
-/// IDs sort by sequence number, then branch, so that keys holding them sort by when their extents
+/// IDs sort by sequence number, then cell, so that keys holding them sort by when their extents
 /// were made, and a tree can seek by the sequence number.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TypeFingerprint,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
 pub struct ExtentId {
-    pub branch: u64,
+    pub cell: u64,
     pub sequence: u64,
 }
 
 impl ExtentId {
-    pub const fn new(branch: u64, sequence: u64) -> Self {
-        Self { branch, sequence }
+    pub const fn new(cell: u64, sequence: u64) -> Self {
+        Self { cell, sequence }
     }
 }
 
 impl Ord for ExtentId {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.sequence, self.branch).cmp(&(other.sequence, other.branch))
+        (self.sequence, self.cell).cmp(&(other.sequence, other.cell))
     }
 }
 
@@ -51,11 +51,11 @@ pub struct NoExtent(pub ExtentId);
 #[error("extent {0:?} is sealed")]
 pub struct SealedExtent(pub ExtentId);
 
-/// The error of writing an extent of another branch than the device's: one a fork inherited
+/// The error of writing an extent of another cell than the device's: one a fork inherited
 /// (backlog doc-4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("extent {0:?} is another branch's")]
-pub struct OtherBranch(pub ExtentId);
+#[error("extent {0:?} is another cell's")]
+pub struct OtherCell(pub ExtentId);
 
 /// What a device knows to be open: the extents its filesystem minted since the last seal. An extent
 /// goes minted, open, sealed, and never back (TASK-153.3). A write opens nothing: one sent after a
@@ -68,21 +68,21 @@ pub struct OtherBranch(pub ExtentId);
 #[derive(Debug, Default)]
 pub struct OpenExtents(Mutex<Minted>);
 
-/// The sequence numbers `first..next` of `branch` minted since the last seal.
+/// The sequence numbers `first..next` of `cell` minted since the last seal.
 #[derive(Debug, Default)]
 struct Minted {
-    branch: u64,
+    cell: u64,
     first: u64,
     next: u64,
 }
 
 impl OpenExtents {
-    /// Records that `extent` was just minted. One no newer than the last of its branch is as it
-    /// was, sealed if it is. A branch takes over from another as a store forks, sealed.
+    /// Records that `extent` was just minted. One no newer than the last of its cell is as it
+    /// was, sealed if it is. A cell takes over from another as a store forks, sealed.
     pub fn minted(&self, extent: ExtentId) {
         let mut minted = self.0.lock();
-        if extent.branch != minted.branch {
-            *minted = Minted { branch: extent.branch, first: extent.sequence, next: 0 };
+        if extent.cell != minted.cell {
+            *minted = Minted { cell: extent.cell, first: extent.sequence, next: 0 };
         }
         if extent.sequence >= minted.next {
             if minted.first == minted.next {
@@ -101,7 +101,7 @@ impl OpenExtents {
     /// Whether `extent` is open: minted, and no seal since.
     pub fn contains(&self, extent: ExtentId) -> bool {
         let minted = self.0.lock();
-        extent.branch == minted.branch && (minted.first..minted.next).contains(&extent.sequence)
+        extent.cell == minted.cell && (minted.first..minted.next).contains(&extent.sequence)
     }
 }
 
@@ -186,9 +186,9 @@ mod tests {
         assert!(!open.contains(b));
     }
 
-    /// Sequence numbers are a branch's: another's isn't open for having one in the range.
+    /// Sequence numbers are a cell's: another's isn't open for having one in the range.
     #[test]
-    fn test_open_extents_are_of_one_branch() {
+    fn test_open_extents_are_of_one_cell() {
         let open = OpenExtents::default();
         open.minted(ExtentId::new(1, 5));
         assert!(!open.contains(ExtentId::new(2, 5)));

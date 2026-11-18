@@ -48,16 +48,16 @@
 
 /*
  * A device request Fxfs's Rust submitted (cladefs_device_submit), which it doesn't wait for here:
- * `len` bytes of data at `offset` in extent `branch`:`sequence`.
+ * `len` bytes of data at `offset` in extent `cell`:`sequence`.
  */
 TRACE_EVENT(cladefs_device_submit,
-	TP_PROTO(u64 id, u32 type, u32 flags, u64 branch, u64 sequence, u64 offset, u64 len),
-	TP_ARGS(id, type, flags, branch, sequence, offset, len),
+	TP_PROTO(u64 id, u32 type, u32 flags, u64 cell, u64 sequence, u64 offset, u64 len),
+	TP_ARGS(id, type, flags, cell, sequence, offset, len),
 	TP_STRUCT__entry(
 		__field(__u64, id)
 		__field(__u32, type)
 		__field(__u32, flags)
-		__field(__u64, branch)
+		__field(__u64, cell)
 		__field(__u64, sequence)
 		__field(__u64, offset)
 		__field(__u64, len)
@@ -66,14 +66,14 @@ TRACE_EVENT(cladefs_device_submit,
 		__entry->id = id;
 		__entry->type = type;
 		__entry->flags = flags;
-		__entry->branch = branch;
+		__entry->cell = cell;
 		__entry->sequence = sequence;
 		__entry->offset = offset;
 		__entry->len = len;
 	),
 	TP_printk("id=%llu type=%s flags=0x%x extent=%llx:%llu offset=%llu len=%llu", __entry->id,
 		  __print_symbolic(__entry->type, cladefs_trace_request_types), __entry->flags,
-		  __entry->branch, __entry->sequence, __entry->offset, __entry->len)
+		  __entry->cell, __entry->sequence, __entry->offset, __entry->len)
 );
 
 /* That request completed, or failed to be submitted: 0, or a -errno. */
@@ -99,12 +99,12 @@ TRACE_EVENT(cladefs_device_done,
  * a MAP_MANY's, the first's extent, offset and window offset given, `len` all of theirs.
  */
 TRACE_EVENT(cladefs_window_map_start,
-	TP_PROTO(u64 id, u64 branch, u64 sequence, u64 offset, u64 len, u64 window_offset,
+	TP_PROTO(u64 id, u64 cell, u64 sequence, u64 offset, u64 len, u64 window_offset,
 		 unsigned int count, bool zeros),
-	TP_ARGS(id, branch, sequence, offset, len, window_offset, count, zeros),
+	TP_ARGS(id, cell, sequence, offset, len, window_offset, count, zeros),
 	TP_STRUCT__entry(
 		__field(__u64, id)
-		__field(__u64, branch)
+		__field(__u64, cell)
 		__field(__u64, sequence)
 		__field(__u64, offset)
 		__field(__u64, len)
@@ -114,7 +114,7 @@ TRACE_EVENT(cladefs_window_map_start,
 	),
 	TP_fast_assign(
 		__entry->id = id;
-		__entry->branch = branch;
+		__entry->cell = cell;
 		__entry->sequence = sequence;
 		__entry->offset = offset;
 		__entry->len = len;
@@ -123,7 +123,7 @@ TRACE_EVENT(cladefs_window_map_start,
 		__entry->zeros = zeros;
 	),
 	TP_printk("id=%llu extent=%llx:%llu offset=%llu len=%llu window=0x%llx count=%u zeros=%d",
-		  __entry->id, __entry->branch, __entry->sequence, __entry->offset, __entry->len,
+		  __entry->id, __entry->cell, __entry->sequence, __entry->offset, __entry->len,
 		  __entry->window_offset, __entry->count, __entry->zeros)
 );
 

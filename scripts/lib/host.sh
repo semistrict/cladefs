@@ -307,7 +307,7 @@ host_command() {
 # write; sent, every build, test and daemon on the test host would use them in place of its own.
 # Those the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFSD
 # (scripts/test-e2e.sh), need no place here. The others go: knobs a driver's caller sets for the
-# test host, what runs and how, and where its stores keep their branches and its daemons what they
+# test host, what runs and how, and where its stores keep their cells and its daemons what they
 # read from them (CLADEFSD_BUCKET, CLADEFS_S3_URL, CLADEFSD_PART_CACHE), or a driver's own,
 # which nothing there reads.
 host_env_local() {

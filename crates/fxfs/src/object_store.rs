@@ -180,9 +180,9 @@ pub struct StoreInfoV61 {
     /// wrote, which the store merges over and never rewrites (backlog doc-10).
     pub base_layers: Vec<BaseLayerV61>,
 
-    /// cladefs: the branches of the extents the base layers, and the data they name, are in. The
+    /// cladefs: the cells of the extents the base layers, and the data they name, are in. The
     /// allocator holds none of them.
-    pub base_branches: Vec<u64>,
+    pub base_cells: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint)]
@@ -2132,10 +2132,10 @@ impl ObjectStore {
         assert!(store.store_info_handle.set(handle).is_ok(), "Failed to set store_info_handle!");
 
         if !is_encrypted {
-            let (object_tree_layer_object_ids, base_layers, base_branches) = {
+            let (object_tree_layer_object_ids, base_layers, base_cells) = {
                 let info = store.store_info.lock();
                 let info = info.as_ref().unwrap();
-                (info.layers.clone(), info.base_layers.clone(), info.base_branches.clone())
+                (info.layers.clone(), info.base_layers.clone(), info.base_cells.clone())
             };
             total_layer_size = store
                 .tree
@@ -2144,7 +2144,7 @@ impl ObjectStore {
                 .context("Failed to read object store layers")?;
             // cladefs: below them, what the store has of a base, which is no part of the size above:
             // no compaction rewrites it, so no reservation pays for that.
-            fs.allocator().add_base_branches(&base_branches);
+            fs.allocator().add_base_cells(&base_cells);
             let block_size = store.block_size();
             let handles = base_layers
                 .into_iter()
@@ -2551,8 +2551,8 @@ impl ObjectStore {
         let allocator = self.allocator();
         let mut owners = allocator.shared_owners(self.store_object_id);
         owners.push(allocator.data_owner(self.store_object_id));
-        let mut branches = allocator.branches_of(&owners);
-        branches.append(&mut info.base_branches);
+        let mut cells = allocator.cells_of(&owners);
+        cells.append(&mut info.base_cells);
 
         let parent_store = self.parent_store.as_ref().ok_or(FxfsError::NotSupported)?;
         let mut layers = Vec::with_capacity(info.layers.len() + info.base_layers.len());
@@ -2563,7 +2563,7 @@ impl ObjectStore {
             let mut extents = Vec::new();
             for extent in handle.device_extents().await? {
                 let range = extent.device_range();
-                branches.push(range.extent.branch);
+                cells.push(range.extent.cell);
                 extents.push(BaseExtent {
                     offset: extent.logical_offset(),
                     length: extent.length(),
@@ -2575,9 +2575,9 @@ impl ObjectStore {
         }
         layers.append(&mut info.base_layers);
         info.base_layers = layers;
-        branches.sort_unstable();
-        branches.dedup();
-        info.base_branches = branches;
+        cells.sort_unstable();
+        cells.dedup();
+        info.base_cells = cells;
 
         let mut manifest = Vec::new();
         info.serialize_with_version(&mut manifest)?;
@@ -5090,7 +5090,7 @@ mod tests {
             encrypted_mutations_object_id: 0x1234567812345678,
             internal_directory_object_id: INVALID_OBJECT_ID,
             base_layers: Vec::new(),
-            base_branches: Vec::new(),
+            base_cells: Vec::new(),
         };
         let mut serialized_info = Vec::new();
         info.serialize_with_version(&mut serialized_info).unwrap();

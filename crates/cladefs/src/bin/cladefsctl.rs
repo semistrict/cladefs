@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's host tool for VMs' disks, the extent stores cladefsd serves: makes them, of branches kept
+//! cladefs's host tool for VMs' disks, the extent stores cladefsd serves: makes them, of cells kept
 //! in object storage (backlog doc-7) or of container images, places, forks, deletes and resizes
 //! them, makes them public bases, and waits for their uploads:
 //!
 //! ```sh
-//! cladefsctl take DIR CAPACITY BRANCH [TOKEN]
+//! cladefsctl take DIR CAPACITY CELL [TOKEN]
 //! cladefsctl create DIR CAPACITY
 //! cladefsctl place DIR TOKEN
 //! cladefsctl sync DIR
@@ -43,21 +43,21 @@
 //! acts on stores itself, on stores nothing has open, as their lock says, which an extent daemon
 //! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
 //! make new stores, work so anywhere, as when building base images where no daemon runs. The others change
-//! existing stores' branches, which are in the bucket each store's description names: they need
+//! existing stores' cells, which are in the bucket each store's description names: they need
 //! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
-//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, a new cell's of the
-//! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the branch.
-//! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in base 32,
+//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new cell, a new cell's of the
+//! default tenant's (doc-20), its ID its bucket's to give (TASK-364), and prints the cell.
+//! `take` makes an empty store at DIR, of CAPACITY bytes, of CELL (`TENANT/CELL/ID`, each in base 32,
 //! its cell's, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! cladefsd opens it,
-//! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
+//! with `CLADEFSD_BUCKET` naming the cell's bucket, it takes what the cell holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
 //! version, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
 //! `place` places the store at DIR at the placement whose fencing token,
-//! its boot ID, is TOKEN (TASK-39.7): its writer takes its branch in object storage with that token
-//! from then on, which a later placement's exceeds, so that a placement cut off takes no branch
+//! its boot ID, is TOKEN (TASK-39.7): its writer takes its cell in object storage with that token
+//! from then on, which a later placement's exceeds, so that a placement cut off takes no cell
 //! back from the one after it (`ESTALE`), and its commits fail once a later one takes it. `sync`
 //! returns once every commit of the store at DIR is durable and in object storage, as before a
 //! clean stop: through the daemon, a store a VM has open as of then. `import` makes a store at DIR, of CAPACITY bytes,
@@ -66,9 +66,9 @@
 //! is one, once extracted), holding the image REF names, or its only image; or a tar archive of one
 //! layer, gzipped or not, as `docker export` makes. Files keep their owners, permissions, times
 //! and extended attributes; see `cladefs::import`. `fork` copies the store at SRC to a new store at
-//! DST, of a new branch, which it prints: through the daemon, live, if a VM has SRC open, once
+//! DST, of a new cell, which it prints: through the daemon, live, if a VM has SRC open, once
 //! nothing is open on it, as with the guest's filesystem frozen (fsfreeze), and refused otherwise
-//! (TASK-39.3). The new branch is a fork of SRC's in its bucket, made once SRC's commits are
+//! (TASK-39.3). The new cell is a fork of SRC's in its bucket, made once SRC's commits are
 //! uploaded, holding its extents without uploading them again; DST is a store of its own, which
 //! reads them there (TASK-165.7). `version` makes a version of the cell of the store at DIR, once
 //! nothing is open on it: one commit here, uploaded behind, which it prints the ID of, in
@@ -78,17 +78,17 @@
 //! a version (TASK-395.7): it forks into cells of other tenants' than its own, as a base image
 //! many tenants fork, which a version not shared refuses (`EACCES`); `unshare` stops such forks,
 //! those made living on. The cell's head says it, for every
-//! host. `delete` deletes a store, a fork or not: its branch in its bucket, its forks' living on,
+//! host. `delete` deletes a store, a fork or not: its cell in its bucket, its forks' living on,
 //! and its directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
-//! host's copy of it, its branch staying in the bucket (TASK-154): what `take` made, once this host
+//! host's copy of it, its cell staying in the bucket (TASK-154): what `take` made, once this host
 //! is done with it. `resize` sets the store's capacity, the size of the disk
 //! its guest sees, to CAPACITY bytes: through the daemon, a store its VM has open grows at once,
 //! the guest seeing the new size while mounted, and shrinks if the guest's filesystem agrees, no
 //! lower than what it holds; otherwise, it grows, and does not shrink. `public` makes the store at
 //! DIR a public base, whose pages every tenant's forks of it share (TASK-43). `stat` prints what the
-//! store at DIR is and holds, one `name value` a line: its branch (base 32), capacity, used and
-//! available bytes, and of those used, its own (its branch wrote them) and inherited (from the
-//! branches it was forked from), what billing it alone charges it and what it shares (TASK-49);
+//! store at DIR is and holds, one `name value` a line: its cell (base 32), capacity, used and
+//! available bytes, and of those used, its own (its cell wrote them) and inherited (from the
+//! cells it was forked from), what billing it alone charges it and what it shares (TASK-49);
 //! how many extents it holds, own and inherited (`own_extents`, `inherited_extents`), which what an
 //! open store takes of the daemon's memory grows with (TASK-443.2, TASK-454); whether it is public,
 //! and, through the daemon, open. A store no VM has open, it opens, locally or through the daemon,
@@ -102,7 +102,7 @@
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
 //! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `cladefsd`
-//! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `branch` (base 32),
+//! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `cell` (base 32),
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
 //! path through that object and a value, `vms.0.guest.counters.seals 12`. Counters only grow: a
@@ -141,12 +141,12 @@
 //! (`base32_id`).
 //! `attach` takes CELL from the daemon's bucket, at the placement whose fencing token is TOKEN if
 //! given, the daemon's otherwise, and shows it, if an Fxfs cell, at `MOUNT/TENANT/CELL`; it
-//! prints the cell, then its branch, if shown. `create` makes a new Fxfs cell of TENANT's, its
-//! filesystem empty, of CAPACITY bytes, attached so, and prints the same.
+//! prints the cell. `create` makes a new Fxfs cell of TENANT's, its filesystem empty, of CAPACITY
+//! bytes, attached so, and prints the same.
 //! `detach` takes the cell away, and returns once its store is unmounted and written
 //! back: once nothing has a file of it open, or a directory of it as its current one; with
 //! `--force`, at once, what is open of it failing from then on. `list` prints the cells attached,
-//! a line each, `TENANT CELL BRANCH`, and `detaching` after one being detached.
+//! a line each, `TENANT CELL`, and `detaching` after one being detached.
 
 use anyhow::{Context as _, bail};
 use cladefs::OpenCell;
@@ -173,7 +173,7 @@ fn print_versions(versions: &[cladefs::VersionInfo]) {
 
 fn usage() -> anyhow::Error {
     anyhow::anyhow!(
-        "usage: cladefsctl take DIR CAPACITY BRANCH [TOKEN] | cladefsctl create DIR CAPACITY | \
+        "usage: cladefsctl take DIR CAPACITY CELL [TOKEN] | cladefsctl create DIR CAPACITY | \
          cladefsctl place DIR TOKEN | \
          cladefsctl sync DIR | cladefsctl import DIR CAPACITY IMAGE [REF] | cladefsctl fork SRC DST | \
          cladefsctl version DIR | cladefsctl versions DIR | \
@@ -205,7 +205,7 @@ fn forgotten_lines(forgotten: &cladefs::cladefsd::control::proto::Forgotten) -> 
 
 /// What cladefsctl was asked to do.
 enum Command {
-    /// cladefs: a new store of a new branch, its ID its bucket's to give (TASK-364).
+    /// cladefs: a new store of a new cell, its ID its bucket's to give (TASK-364).
     Create {
         dir: PathBuf,
         capacity: u64,
@@ -213,7 +213,7 @@ enum Command {
     Take {
         dir: PathBuf,
         capacity: u64,
-        branch: cladefs::CellId,
+        cell: cladefs::CellId,
         token: Option<u64>,
     },
     Place {
@@ -364,19 +364,15 @@ impl Mount {
 #[cfg(target_os = "linux")]
 impl Mount {
     /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
-    /// it answers: `attach` and `create`, the cell, then its branch, if shown, a line each;
-    /// `list`, each cell, `TENANT CELL BRANCH`, `detaching` after one being
-    /// detached. IDs padded, as the mount's paths have them.
+    /// it answers: `attach` and `create`, the cell; `list`, each cell, `TENANT CELL`, `detaching`
+    /// after one being detached. IDs padded, as the mount's paths have them.
     fn through(self, socket: &Path) -> anyhow::Result<()> {
         let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
         let mount = cladefs::fuse::control::Client::connect(socket).map_err(failed)?;
         match self {
             Self::Attach { cell, capacity, token } => {
-                let (cell, branch) = mount.attach(cell, capacity, token).map_err(failed)?;
+                let cell = mount.attach(cell, capacity, token).map_err(failed)?;
                 println!("{}", base32_id::Padded(cell.id));
-                if branch != 0 {
-                    println!("{}", base32_id::Padded(branch));
-                }
             }
             Self::Detach { cell, force } => mount.detach(cell, force).map_err(failed)?,
             Self::List => {
@@ -384,7 +380,7 @@ impl Mount {
                     let detaching = if cell.detaching { " detaching" } else { "" };
                     let (tenant, id) =
                         (base32_id::Padded(cell.tenant), base32_id::Padded(cell.cell));
-                    println!("{tenant} {id} {}{detaching}", base32_id::Padded(cell.branch));
+                    println!("{tenant} {id}{detaching}");
                 }
             }
         }
@@ -399,10 +395,10 @@ impl Command {
         let id = |id: &str, what| id.parse().with_context(|| format!("{what} must be a number"));
         let tenant = |tenant: &str| self::id("TENANT", tenant);
         Ok(match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-            ["take", dir, size, branch, ref rest @ ..] if rest.len() <= 1 => Self::Take {
+            ["take", dir, size, cell, ref rest @ ..] if rest.len() <= 1 => Self::Take {
                 dir: dir.into(),
                 capacity: capacity(size)?,
-                branch: branch.parse().map_err(anyhow::Error::msg).context("BRANCH")?,
+                cell: cell.parse().map_err(anyhow::Error::msg).context("CELL")?,
                 token: rest.first().map(|rest| token(rest)).transpose()?,
             },
             ["create", dir, size] => Self::Create { dir: dir.into(), capacity: capacity(size)? },
@@ -479,8 +475,8 @@ impl Command {
                 let new = cladefs::CellId { tenant: 0, id: 0 };
                 println!("{}", daemon.create_cell(&dir, capacity, new, None)?);
             }
-            Self::Take { dir, capacity, branch, token } => {
-                daemon.create_cell(&dir, capacity, branch, token)?;
+            Self::Take { dir, capacity, cell, token } => {
+                daemon.create_cell(&dir, capacity, cell, token)?;
             }
             Self::Place { dir, token } => daemon.place_cell(&dir, token)?,
             Self::Sync { dir } => daemon.sync_cell(&dir)?,
@@ -506,7 +502,7 @@ impl Command {
                 print!(
                     "{}",
                     Stat {
-                        branch: cladefs::CellId { tenant: cell.tenant, id: stat.branch },
+                        cell: cladefs::CellId { tenant: cell.tenant, id: stat.cell },
                         capacity: stat.capacity,
                         used: stat.used,
                         available: stat.available,
@@ -568,10 +564,10 @@ impl Command {
         if let Some(what) = daemons {
             bail!("{what} the extent daemon's: name its control socket (CLADEFSD_GRPC)");
         }
-        // cladefs: every store it opens here, or deletes the branch of, is encrypted under the host's
+        // cladefs: every store it opens here, or deletes the cell of, is encrypted under the host's
         // KMS: none chosen, it refuses before it touches any (TASK-411.28).
         cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
-        // What stat reads needs no branch changed, nor does a copy dropped, its branch left be.
+        // What stat reads needs no cell changed, nor does a copy dropped, its cell left be.
         let existing = !matches!(
             self,
             Self::Create { .. }
@@ -583,15 +579,15 @@ impl Command {
         if let Some(Err(why)) = existing.then(cladefs::bucket::Host::from_env) {
             bail!(
                 "without the extent daemon (CLADEFSD_GRPC), cladefsctl changes no existing \
-                 store's branch here: {why}"
+                 store's cell here: {why}"
             );
         }
         match self {
             Self::Create { dir, capacity } => {
-                println!("{}", OpenCell::create(&dir, capacity)?.branch());
+                println!("{}", OpenCell::create(&dir, capacity)?.cell());
             }
-            Self::Take { dir, capacity, branch, token } => {
-                OpenCell::take(&dir, capacity, branch, token)?;
+            Self::Take { dir, capacity, cell, token } => {
+                OpenCell::take(&dir, capacity, cell, token)?;
             }
             Self::Place { dir, token } => OpenCell::place(&dir, token)?,
             Self::Sync { dir } => {
@@ -606,7 +602,7 @@ impl Command {
             Self::Fork { src, dst } => {
                 let store = OpenCell::open(&src)?;
                 // A new cell of the store's tenant's (TASK-364).
-                let tenant = store.branch().tenant;
+                let tenant = store.cell().tenant;
                 println!("{}", store.fork(&dst, tenant)?);
             }
             Self::Version { dir } => println!("{:x}", OpenCell::open(&dir)?.make_version(None)?),
@@ -659,7 +655,7 @@ impl Command {
                 print!(
                     "{}",
                     Stat {
-                        branch: store.branch(),
+                        cell: store.cell(),
                         capacity: info.capacity,
                         used: info.used,
                         available: info.available,
@@ -676,7 +672,7 @@ impl Command {
 
 /// What `stat` says of a store, which it prints one `name value` a line.
 struct Stat {
-    branch: cladefs::CellId,
+    cell: cladefs::CellId,
     capacity: u64,
     used: u64,
     available: u64,
@@ -688,9 +684,9 @@ struct Stat {
 
 impl std::fmt::Display for Stat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { branch, capacity, used, available, holding, public, open } = self;
+        let Self { cell, capacity, used, available, holding, public, open } = self;
         let cladefs::CellHolding { bytes, extents } = holding;
-        writeln!(f, "branch {branch}\ncapacity {capacity}\nused {used}\navailable {available}")?;
+        writeln!(f, "cell {cell}\ncapacity {capacity}\nused {used}\navailable {available}")?;
         writeln!(f, "own {}\ninherited {}", bytes.own, bytes.inherited)?;
         writeln!(f, "own_extents {}\ninherited_extents {}", extents.own, extents.inherited)?;
         writeln!(f, "public {public}")?;
@@ -723,7 +719,7 @@ fn stats_json(stats: &cladefs::cladefsd::control::proto::GetStatsResponse) -> se
         });
         json!({
             "connection": vm.connection,
-            "branch": base32_id::Short(vm.branch).to_string(),
+            "cell": base32_id::Short(vm.cell).to_string(),
             "path": vm.path,
             "follower": vm.follower,
             "vmm": {

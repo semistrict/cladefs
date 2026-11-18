@@ -848,7 +848,7 @@ pub mod fuzz {
         writer.pad_to_block().expect("padding");
         let mut buffer = device.allocate_buffer(writer.flushable_bytes()).await;
         writer.take_flushable(buffer.as_mut());
-        let extent = ExtentId::new(device.branch(), device.next_sequence().await.expect("numbers"));
+        let extent = ExtentId::new(device.cell(), device.next_sequence().await.expect("numbers"));
         device.write(extent, 0, buffer.as_ref()).await.expect("writing");
         let range = 0..buffer.len() as u64;
         let root = Root { a: Some(ExtentRange::new(extent, range)), ..Root::default() };
@@ -1183,7 +1183,7 @@ mod tests {
         buf: BufferRef<'_>,
     ) {
         static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(1000);
-        let extent = ExtentId::new(device.branch(), NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let extent = ExtentId::new(device.cell(), NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed));
         device.write(extent, 0, buf).await.expect("write failed");
         let mut root = Root::read(&**device).await.expect("read root failed");
         root.set_first_extent(instance, ExtentRange::new(extent, 0..buf.len() as u64));

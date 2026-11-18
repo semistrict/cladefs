@@ -56,9 +56,9 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364, doc-20): a tenant's cell has one kind and one branch, kept under the cell's
-// prefix in the bucket, and a host takes a cell whole, its branch's head with it. A branch
-// is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
+// Cells (TASK-364, doc-20): a tenant's cell has one kind, kept under the cell's prefix in the
+// bucket, and a host takes a cell whole, its head with it. A cell is named by its tenant and its
+// ID: `tenant` and `cell` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
 // tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
 // one Grant named; the daemon's own socket's VM processes make stores of the default tenant, whose
@@ -148,20 +148,15 @@ type CreateCellRequest struct {
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// The most bytes it holds.
 	Capacity uint64 `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
-	// The branch kept in the daemon's bucket to take, of `cell` (NOT_FOUND, ENOENT, if it has none;
-	// INVALID_ARGUMENT, EINVAL, of a cell of 0); or 0, with a cell of 0, for a new cell, its ID the
-	// bucket's to give (TASK-364), which the response says.
-	Branch uint64 `protobuf:"varint,3,opt,name=branch,proto3" json:"branch,omitempty"`
 	// The fencing token to place it at (PlaceCell), if any: of a placement no earlier than the
-	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE).
+	// last writer's of the cell to take, or the take fails (FAILED_PRECONDITION, ESTALE).
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
-	// The tenant whose cell's branch it is. Of a new cell in a granted tenant's
-	// directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
-	// (PERMISSION_DENIED, EPERM).
+	// The cell's tenant. Of a new cell in a granted tenant's directory, that tenant's ID (Grant's
+	// `tenant`), or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
 	Tenant uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell, or 0 for a new one, whose ID, unique in the daemon's bucket, is its branch's too,
-	// the bucket's to give, which the response says. A cell named takes `branch`, which must be
-	// named: its own (INVALID_ARGUMENT, EINVAL, otherwise).
+	// The cell kept in the daemon's bucket to take (NOT_FOUND, ENOENT, if it has none), or 0 for a
+	// new one, its ID, unique in the daemon's bucket, the bucket's to give (TASK-364), which the
+	// response says.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The cell's kind, which says what opens it.
 	Kind          CellKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.cladefsd.v1.CellKind" json:"kind,omitempty"`
@@ -213,13 +208,6 @@ func (x *CreateCellRequest) GetCapacity() uint64 {
 	return 0
 }
 
-func (x *CreateCellRequest) GetBranch() uint64 {
-	if x != nil {
-		return x.Branch
-	}
-	return 0
-}
-
 func (x *CreateCellRequest) GetToken() uint64 {
 	if x != nil && x.Token != nil {
 		return *x.Token
@@ -251,8 +239,6 @@ func (x *CreateCellRequest) GetKind() CellKind {
 // The store made.
 type CreateCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its branch: the one taken, or the new one.
-	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell: the one named, or the new one.
@@ -289,13 +275,6 @@ func (x *CreateCellResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use CreateCellResponse.ProtoReflect.Descriptor instead.
 func (*CreateCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *CreateCellResponse) GetBranch() uint64 {
-	if x != nil {
-		return x.Branch
-	}
-	return 0
 }
 
 func (x *CreateCellResponse) GetTenant() uint64 {
@@ -400,8 +379,6 @@ func (x *ImportImageRequest) GetTenant() uint64 {
 // The store made.
 type ImportImageResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its branch, a new one.
-	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell, a new one.
@@ -438,13 +415,6 @@ func (x *ImportImageResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ImportImageResponse.ProtoReflect.Descriptor instead.
 func (*ImportImageResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *ImportImageResponse) GetBranch() uint64 {
-	if x != nil {
-		return x.Branch
-	}
-	return 0
 }
 
 func (x *ImportImageResponse) GetTenant() uint64 {
@@ -554,8 +524,6 @@ func (x *ForkCellRequest) GetCell() uint64 {
 // The fork made.
 type ForkCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Its branch.
-	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant: `from`'s.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell, a new one.
@@ -592,13 +560,6 @@ func (x *ForkCellResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ForkCellResponse.ProtoReflect.Descriptor instead.
 func (*ForkCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *ForkCellResponse) GetBranch() uint64 {
-	if x != nil {
-		return x.Branch
-	}
-	return 0
 }
 
 func (x *ForkCellResponse) GetTenant() uint64 {
@@ -1733,8 +1694,6 @@ func (x *StatCellRequest) GetPath() string {
 // What a store is, and holds.
 type StatCellResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The branch whose extents its guest mints.
-	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// The most bytes it holds.
 	Capacity uint64 `protobuf:"varint,2,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	// The bytes its extents hold.
@@ -1769,11 +1728,11 @@ type StatCellResponse struct {
 	// How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
 	// uploader's interval (a second): 0 if none waits.
 	OldestPendingMs uint64 `protobuf:"varint,16,opt,name=oldest_pending_ms,json=oldestPendingMs,proto3" json:"oldest_pending_ms,omitempty"`
-	// The tenant whose cell's branch it is (TASK-364).
+	// Its cell's tenant (TASK-364).
 	Tenant uint64 `protobuf:"varint,17,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell whose branch it is.
+	// Its cell, whose extents its guest mints.
 	Cell uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
-	// How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
+	// How many extents it holds that it wrote: those whose bytes are `own` (TASK-454). What
 	// the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
 	// hundred bytes an extent (TASK-443.2).
 	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
@@ -1811,13 +1770,6 @@ func (x *StatCellResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use StatCellResponse.ProtoReflect.Descriptor instead.
 func (*StatCellResponse) Descriptor() ([]byte, []int) {
 	return file_cladefs_cladefsd_v1_cladefsd_proto_rawDescGZIP(), []int{30}
-}
-
-func (x *StatCellResponse) GetBranch() uint64 {
-	if x != nil {
-		return x.Branch
-	}
-	return 0
 }
 
 func (x *StatCellResponse) GetCapacity() uint64 {
@@ -2474,10 +2426,10 @@ func (x *GetStatsResponse) GetVms() []*VmStats {
 type VmStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its connection's number, the daemon's count of connections as it connected: what tells apart
-	// a store's writer and its followers, of one branch.
+	// a store's writer and its followers, of one cell.
 	Connection uint64 `protobuf:"varint,1,opt,name=connection,proto3" json:"connection,omitempty"`
-	// Its store's branch.
-	Branch uint64 `protobuf:"varint,2,opt,name=branch,proto3" json:"branch,omitempty"`
+	// Its store's cell.
+	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	// Its store's directory, without symbolic links.
 	Path string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
 	// Whether it follows its store, read-only, or writes it.
@@ -2541,9 +2493,9 @@ func (x *VmStats) GetConnection() uint64 {
 	return 0
 }
 
-func (x *VmStats) GetBranch() uint64 {
+func (x *VmStats) GetCell() uint64 {
 	if x != nil {
-		return x.Branch
+		return x.Cell
 	}
 	return 0
 }
@@ -4068,40 +4020,36 @@ var File_cladefs_cladefsd_v1_cladefsd_proto protoreflect.FileDescriptor
 
 const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\n" +
-	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xe5\x01\n" +
+	"\"cladefs/cladefsd/v1/cladefsd.proto\x12\x13cladefs.cladefsd.v1\"\xd3\x01\n" +
 	"\x11CreateCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
-	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
-	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
+	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
 	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.cladefsd.v1.CellKindR\x04kindB\b\n" +
-	"\x06_tokenJ\x04\b\b\x10\t\"X\n" +
+	"\x06_tokenJ\x04\b\x03\x10\x04J\x04\b\b\x10\t\"F\n" +
 	"\x12CreateCellResponse\x12\x16\n" +
-	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x90\x01\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x90\x01\n" +
 	"\x12ImportImageRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x14\n" +
 	"\x05image\x18\x03 \x01(\tR\x05image\x12\x1c\n" +
 	"\treference\x18\x04 \x01(\tR\treference\x12\x16\n" +
-	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\"Y\n" +
+	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\"G\n" +
 	"\x13ImportImageResponse\x12\x16\n" +
-	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"\x8d\x01\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"\x8d\x01\n" +
 	"\x0fForkCellRequest\x12\x12\n" +
 	"\x04from\x18\x01 \x01(\tR\x04from\x12\x0e\n" +
 	"\x02to\x18\x02 \x01(\tR\x02to\x12\x18\n" +
 	"\aversion\x18\x06 \x01(\x04R\aversion\x12\x16\n" +
 	"\x06tenant\x18\a \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\b \x01(\x04R\x04cellJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"V\n" +
+	"\x04cell\x18\b \x01(\x04R\x04cellJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06\"D\n" +
 	"\x10ForkCellResponse\x12\x16\n" +
-	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
 	"\x06tenant\x18\x02 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x03 \x01(\x04R\x04cell\"'\n" +
+	"\x04cell\x18\x03 \x01(\x04R\x04cellJ\x04\b\x01\x10\x02\"'\n" +
 	"\x11DeleteCellRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x14\n" +
 	"\x12DeleteCellResponse\"%\n" +
@@ -4151,9 +4099,8 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
 	"\x10SyncCellResponse\"%\n" +
 	"\x0fStatCellRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xf0\x04\n" +
-	"\x10StatCellResponse\x12\x16\n" +
-	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xde\x04\n" +
+	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
 	"\tavailable\x18\x04 \x01(\x04R\tavailable\x12\x16\n" +
@@ -4176,7 +4123,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
 	"\vown_extents\x18\x13 \x01(\x04R\n" +
 	"ownExtents\x12+\n" +
-	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x15\x10\x16\"\x12\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtentsJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"[\n" +
@@ -4223,12 +4170,12 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
 	"\vGaugesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x85\x05\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x81\x05\n" +
 	"\aVmStats\x12\x1e\n" +
 	"\n" +
 	"connection\x18\x01 \x01(\x04R\n" +
-	"connection\x12\x16\n" +
-	"\x06branch\x18\x02 \x01(\x04R\x06branch\x12\x12\n" +
+	"connection\x12\x12\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x12\n" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1a\n" +
 	"\bfollower\x18\x04 \x01(\bR\bfollower\x12\x14\n" +
 	"\x05build\x18\x05 \x01(\tR\x05build\x12F\n" +

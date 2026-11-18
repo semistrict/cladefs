@@ -558,7 +558,7 @@ mod arm64 {
             }
         }
 
-        // Single branch check for 8 KiB (BLOCK_SIZE) vs 4 KiB buffer_len:
+        // Single cell check for 8 KiB (BLOCK_SIZE) vs 4 KiB buffer_len:
         if buffer_len >= BLOCK_SIZE {
             // Fast path for 8 KiB page: 127 full 64-byte vector blocks
             for block_idx in 0..127 {

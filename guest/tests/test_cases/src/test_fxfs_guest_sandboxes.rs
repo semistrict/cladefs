@@ -842,10 +842,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
         #[test]
         fn a_daemons_slow_framings_read_back() {
             let log = "\
-WARN local_cell::timings: extent store: framing SegmentId { branch: 3670381491063303249, number: 28 } took 497.0 ms (own 0.0, write 26.6, sync 28.6, dirs 441.8 ms)
-WARN local_cell::timings: extent store: branch 0x32efd08504ff2c51's flush of 10 commits took 407.4 ms (wait 0.0)
-WARN local_cell::timings: extent store: framing SegmentId { branch: 1, number: 2 } took 1291.8 ms (own 0.0, write 110.1, sync 1175.0, dirs 6.7 ms)
-WARN local_cell::timings: extent store: framing SegmentId { branch: 1, number: 3 } took 1045.0 ms (own 0.0, read 5.0, compress 900.0, write 140.0 ms; runnable 800.5 ms)
+WARN local_cell::timings: extent store: framing SegmentId { cell: 3670381491063303249, number: 28 } took 497.0 ms (own 0.0, write 26.6, sync 28.6, dirs 441.8 ms)
+WARN local_cell::timings: extent store: cell 0x32efd08504ff2c51's flush of 10 commits took 407.4 ms (wait 0.0)
+WARN local_cell::timings: extent store: framing SegmentId { cell: 1, number: 2 } took 1291.8 ms (own 0.0, write 110.1, sync 1175.0, dirs 6.7 ms)
+WARN local_cell::timings: extent store: framing SegmentId { cell: 1, number: 3 } took 1045.0 ms (own 0.0, read 5.0, compress 900.0, write 140.0 ms; runnable 800.5 ms)
 ";
             let slow = slow_framings(log);
             let ms: Vec<f64> = slow.iter().map(|framing| framing.ms).collect();

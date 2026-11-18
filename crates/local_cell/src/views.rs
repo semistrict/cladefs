@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: views of a branch as of a commit, through which followers read the store while
+//! cladefs's own: views of a cell as of a commit, through which followers read the store while
 //! its writer goes on (backlog doc-8, LocalCell views; TASK-42.2).
 //!
 //! A commit seals every extent written before it, and an extent's ID is never used again, so the
-//! branch as of commit N is the extents it held then, each as it is still, wherever its data is
+//! cell as of commit N is the extents it held then, each as it is still, wherever its data is
 //! now, here or in the bucket (TASK-165.8), and its root then. A view is no copy of the extent table: it is an epoch
 //! and a root, and reads through the store. What it needs kept is the extents freed since N: a
 //! free of an extent sealed before is kept while a view older than the free lives, or a view pins
@@ -42,7 +42,7 @@ pub struct CutOff;
 #[error("the view let go of {0:?}, freed before the commit it holds since")]
 pub struct NotHeld(pub ExtentId);
 
-/// A view of a branch as of a commit (see the module docs). Dropping it lets go of what it keeps.
+/// A view of a cell as of a commit (see the module docs). Dropping it lets go of what it keeps.
 ///
 /// It holds what its commit holds; and, advanced keeping ([`View::advance_keeping`]), what the
 /// commits since the one it advanced from held, until it lets go of them ([`View::let_go`]): what
@@ -67,7 +67,7 @@ impl View {
         self.since
     }
 
-    /// The branch's root as of its commit.
+    /// The cell's root as of its commit.
     pub fn root(&self) -> &[u8] {
         &self.root
     }
@@ -177,7 +177,7 @@ impl std::fmt::Debug for View {
     }
 }
 
-/// A branch's views, shared with them.
+/// A cell's views, shared with them.
 pub(crate) struct Views {
     inner: Mutex<Inner>,
     /// Notified as each commit is published.
@@ -203,7 +203,7 @@ struct Follower {
     stale_since: Option<Instant>,
 }
 
-/// What a branch's live views are, which the followers' measurements report (TASK-42.7): how
+/// What a cell's live views are, which the followers' measurements report (TASK-42.7): how
 /// many, how many commits the furthest behind is, and how long the stalest has been behind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ViewStats {
@@ -314,7 +314,7 @@ impl Sealed {
 }
 
 impl Views {
-    /// The views of a branch as of `epoch`, its root `root`.
+    /// The views of a cell as of `epoch`, its root `root`.
     pub fn new(epoch: u64, root: &[u8]) -> Arc<Self> {
         let inner = Inner { epoch, root: root.into(), next_id: 0, live: HashMap::new() };
         Arc::new(Self { inner: Mutex::new(inner), published: Condvar::new() })
@@ -365,7 +365,7 @@ impl Views {
 
     /// Fails with [`CutOff`] if `view` was cut off.
     pub fn check(&self, view: &View) -> Result<(), Error> {
-        debug_assert!(std::ptr::eq(self, &*view.views), "a view of another branch");
+        debug_assert!(std::ptr::eq(self, &*view.views), "a view of another cell");
         if self.inner.lock().unwrap().live[&view.id].cut {
             bail!(CutOff);
         }

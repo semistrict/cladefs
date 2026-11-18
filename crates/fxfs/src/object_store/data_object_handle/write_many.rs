@@ -127,7 +127,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     fn writes_in_room(&self, transaction: &Transaction<'_>, writes: &[BlocksWrite<'_>]) -> usize {
         let store = self.store();
         let journaled = !store.filesystem().options().barriers_enabled;
-        // Extents' branches and sequences may be as long as they can be, but their offsets don't
+        // Extents' cells and sequences may be as long as they can be, but their offsets don't
         // reach 32 bits.
         let extent = ExtentId::new(u64::MAX, u64::MAX);
         let blocks = ExtentRange::new(extent, u32::MAX as u64..u32::MAX as u64);
@@ -706,8 +706,7 @@ mod tests {
     /// (TASK-92.10).
     #[fuchsia::test]
     async fn test_writeback_of_scattered_pages() {
-        let (fs, trips, _) =
-            writeback_filesystem(storage_device::fake_device::DEFAULT_BRANCH).await;
+        let (fs, trips, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
         let bs = fs.block_size().get() as usize;
         let pages: Vec<Vec<u8>> = (1..=64).map(|page| vec![page as u8; bs]).collect();
         let mut writes: Vec<(u64, &[u8])> = pages
@@ -751,7 +750,7 @@ mod tests {
     /// one's end. Writes out of order, or sharing a block, are refused.
     #[fuchsia::test]
     async fn test_write_many_writes_as_each_write_would() {
-        let (fs, _, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_BRANCH).await;
+        let (fs, _, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
         let bs = fs.block_size().get() as usize;
         let old = vec![1u8; 4 * bs];
         let (head, span, tail) = (vec![2u8; 50], vec![3u8; bs], vec![4u8; 9]);
@@ -795,8 +794,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_write_many_splits_its_transactions() {
         const LARGE: usize = 1 << 20;
-        let (fs, trips, _) =
-            writeback_filesystem(storage_device::fake_device::DEFAULT_BRANCH).await;
+        let (fs, trips, _) = writeback_filesystem(storage_device::fake_device::DEFAULT_CELL).await;
         let bs = fs.block_size().get() as usize;
         let data = vec![5u8; 4 * LARGE];
         let file = create_file(&fs).await;
@@ -827,7 +825,7 @@ mod tests {
     /// cladefs: `write_many`'s transactions, of as many writes as they have room for, that overwrite
     /// as many records as they can, take no more than the room it counted on, which leaves what
     /// else they take within what a transaction may take of the journal, their records' integers
-    /// as long as a branch's and a large file's make them; and one holds the
+    /// as long as a cell's and a large file's make them; and one holds the
     /// BLOCKS_PER_TRANSACTION writes of a block that dirty data pays its metadata for.
     #[fuchsia::test]
     async fn test_write_many_transactions_fit_the_journal() {

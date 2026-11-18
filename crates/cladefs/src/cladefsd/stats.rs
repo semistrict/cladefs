@@ -52,10 +52,10 @@ pub(crate) struct HostStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Vm {
     /// Its connection's number, which the daemon gives each in turn: what tells a store's writer
-    /// and followers apart, of one branch.
+    /// and followers apart, of one cell.
     pub connection: u64,
-    /// Its store's branch.
-    pub branch: u64,
+    /// Its store's cell.
+    pub cell: u64,
     /// Its store's directory, as the daemon has it: without symbolic links.
     pub path: PathBuf,
     /// Whether it follows its store (backlog doc-8), or writes it.
@@ -202,14 +202,14 @@ pub(super) fn vms() -> Vec<Vm> {
     reports().iter().filter_map(|report| report.vm()).collect()
 }
 
-/// The builds the VM processes connected said, by their stores' branches, each with how many said
-/// it (`metrics`, TASK-111.7): a writer and its followers are of one branch. In order of branch and
+/// The builds the VM processes connected said, by their stores' cells, each with how many said
+/// it (`metrics`, TASK-111.7): a writer and its followers are of one cell. In order of cell and
 /// commit.
 pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
     let mut counted = BTreeMap::new();
     for vm in vms() {
         if let Some(build) = vm.build {
-            *counted.entry((vm.branch, build)).or_insert(0) += 1;
+            *counted.entry((vm.cell, build)).or_insert(0) += 1;
         }
     }
     counted.into_iter().collect()
@@ -245,7 +245,7 @@ pub(super) struct Report {
 struct Opened {
     /// Its directory, without symbolic links.
     path: PathBuf,
-    branch: u64,
+    cell: u64,
     /// Whether the connection follows it (backlog doc-8), or writes it.
     follower: bool,
 }
@@ -296,10 +296,10 @@ impl Report {
         report
     }
 
-    /// The connection opened the store of `branch` at `path`, which it follows if `follower`, once
+    /// The connection opened the store of `cell` at `path`, which it follows if `follower`, once
     /// for good.
-    pub fn opened(&self, path: PathBuf, branch: u64, follower: bool) {
-        let opened = self.opened.set(Opened { path, branch, follower });
+    pub fn opened(&self, path: PathBuf, cell: u64, follower: bool) {
+        let opened = self.opened.set(Opened { path, cell, follower });
         assert!(opened.is_ok(), "a connection opened a second store");
     }
 
@@ -358,13 +358,13 @@ impl Report {
 
     /// Its VM process, as the daemon has it now, if it opened a store: not yet answered.
     fn vm(&self) -> Option<Vm> {
-        let Opened { path, branch, follower } = self.opened.get()?;
+        let Opened { path, cell, follower } = self.opened.get()?;
         let costs = self.costs.each_ref().map(|count| count.load(Ordering::Relaxed));
         let installed = self.installed.load(Ordering::Relaxed);
         let window = self.window.get();
         Some(Vm {
             connection: self.id,
-            branch: *branch,
+            cell: *cell,
             path: path.clone(),
             follower: *follower,
             build: self.build.get().cloned(),

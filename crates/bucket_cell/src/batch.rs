@@ -7,7 +7,7 @@
 //! the writer's next segment, framed as the store frames its own ([`Unframed::frame`]), which the
 //! writer takes as it takes a store's ([`Writer::add_segment`](crate::Writer::add_segment)).
 //!
-//! What is too much to hold at once, what a store holds that its branch doesn't, goes in segments
+//! What is too much to hold at once, what a store holds that its cell doesn't, goes in segments
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
 //! as they upload ([`objects`]).
 
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use storage_device::ExtentId;
 
 /// A commit: the extents it seals, which it minted, stored in its segment or, `own`, by their
-/// sequence numbers, on their own; the extents it frees; and the root and the branch's capacity,
+/// sequence numbers, on their own; the extents it frees; and the root and the cell's capacity,
 /// if it sets them. `tag` names it in footers.
 #[derive(Clone, Debug, Default)]
 pub struct Commit {
@@ -44,7 +44,7 @@ impl Commit {
 /// What one segment's commits make, by the lengths of the extents they seal: the contents of its
 /// footer, once closed on its writer's chain ([`Plan::close`]); the extents in its data one after
 /// another, from where its data begins. cladefs: as a store's segment does, its footer seals what its
-/// commits sealed that the branch holds as of its last, and frees what they freed that a commit
+/// commits sealed that the cell holds as of its last, and frees what they freed that a commit
 /// held: one sealed by a commit and freed by a later is a free alone, which spends it; one a commit
 /// seals and frees itself no commit held, and is neither (TASK-160.15, TASK-165.3).
 #[derive(Default)]
@@ -65,7 +65,7 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Seals `extent`, of `len` bytes, in its data, after those before it. The branch's next
+    /// Seals `extent`, of `len` bytes, in its data, after those before it. The cell's next
     /// sequence number is past it.
     pub fn seal(&mut self, extent: ExtentId, len: u64) {
         self.extents.push(((extent, self.data, len), self.committing()));
@@ -73,8 +73,8 @@ impl Plan {
         self.sealed(extent.sequence, len);
     }
 
-    /// Seals the extent of the branch whose sequence number is `sequence`, of `len` bytes, on its
-    /// own. The branch's next sequence number is past it.
+    /// Seals the extent of the cell whose sequence number is `sequence`, of `len` bytes, on its
+    /// own. The cell's next sequence number is past it.
     pub fn seal_own(&mut self, sequence: u64, len: u64) {
         self.own.push(((sequence, len), self.committing()));
         self.sealed(sequence, len);
@@ -97,7 +97,7 @@ impl Plan {
     }
 
     /// Commits what it seals, as commit `tag`, which frees `frees`, and sets `root` and the
-    /// branch's `capacity`, if given: after the commits before it.
+    /// cell's `capacity`, if given: after the commits before it.
     pub fn commit(
         &mut self,
         tag: u64,
@@ -121,13 +121,12 @@ impl Plan {
         self.contents.commits.is_empty()
     }
 
-    /// Its footer's contents, as `branch`'s: what its commits sealed that none of them freed, and
+    /// Its footer's contents, as `cell`'s: what its commits sealed that none of them freed, and
     /// what they freed that a commit before held.
-    fn contents(self, branch: CellId) -> Contents {
+    fn contents(self, cell: CellId) -> Contents {
         let Self { mut contents, extents, own, frees, .. } = self;
         let in_data = extents.iter().map(|&((extent, ..), by)| (extent, by));
-        let on_own =
-            own.iter().map(|&((sequence, _), by)| (ExtentId::new(branch.id, sequence), by));
+        let on_own = own.iter().map(|&((sequence, _), by)| (ExtentId::new(cell.id, sequence), by));
         let sealed: HashMap<ExtentId, usize> = in_data.chain(on_own).collect();
         let mut freed = HashSet::new();
         for (extent, by) in frees {
@@ -149,7 +148,7 @@ impl Plan {
             .collect();
         contents.own = (own.into_iter())
             .map(|(sealed, _)| sealed)
-            .filter(|&(sequence, _)| held(&ExtentId::new(branch.id, sequence)))
+            .filter(|&(sequence, _)| held(&ExtentId::new(cell.id, sequence)))
             .collect();
         contents
     }
@@ -160,7 +159,7 @@ impl Plan {
         self.close_ending(chain, Vec::new(), Vec::new())
     }
 
-    /// Closes it on `chain`, as [`Plan::close`] does, with forks of the branch at its end to
+    /// Closes it on `chain`, as [`Plan::close`] does, with forks of the cell at its end to
     /// `forks`, their children, and the versions `versions` cut there (TASK-476).
     fn close_ending(
         self,
@@ -168,7 +167,7 @@ impl Plan {
         forks: Vec<Child>,
         versions: Vec<NewVersion>,
     ) -> Footer {
-        chain.close(Contents { forks, versions, ..self.contents(chain.branch()) })
+        chain.close(Contents { forks, versions, ..self.contents(chain.cell()) })
     }
 }
 
@@ -253,7 +252,7 @@ impl SegmentBuilder {
         self.close_ending(chain, Vec::new(), Vec::new())
     }
 
-    /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the branch to
+    /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the cell to
     /// `child` at its end, of its owner, a version if it says so: a fork ends its segment, which its
     /// child inherits the whole of (doc-7, Forks, Versions).
     pub fn fork(self, child: Child, chain: &mut Chain) -> Unframed {
@@ -261,8 +260,8 @@ impl SegmentBuilder {
     }
 
     /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its end:
-    /// a name for the branch's state there, which the acknowledgement naming the segment names in
-    /// the branch's head (doc-18, TASK-476).
+    /// a name for the cell's state there, which the acknowledgement naming the segment names in
+    /// the cell's head (doc-18, TASK-476).
     pub fn cut(self, cut: NewVersion, chain: &mut Chain) -> Unframed {
         self.close_ending(chain, Vec::new(), vec![cut])
     }
@@ -294,7 +293,7 @@ impl Unframed {
 
 /// A closed segment's data, and that of its extents stored on their own, by their sequence
 /// numbers, unframed: framed with the footer that stamps it ([`Data::frame`]), the one its writer's
-/// chain stamped, or, a takeover putting it after the branch's end, the next writer's
+/// chain stamped, or, a takeover putting it after the cell's end, the next writer's
 /// ([`Wal::rebase`](crate::wal::Wal::rebase)), which keeps its extents of their own at that
 /// writer's keys.
 #[derive(Clone, Debug, Default)]
@@ -322,14 +321,14 @@ impl Data {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::layout::{Footer, child};
 
     /// The next sequence number the footer of `commit`'s segment, closed on `chain`, names.
     fn next_sequence(commit: Commit, chain: &mut Chain) -> u64 {
         let objects = SegmentBuilder::from(commit)
             .close(chain)
-            .frame(crate::testing::encrypting(test_branch(1)));
+            .frame(crate::testing::encrypting(test_cell(1)));
         layout::footer::<Footer>(&objects.segment.read().unwrap()).unwrap().contents.next_sequence
     }
 
@@ -338,7 +337,7 @@ mod tests {
     #[test]
     fn writers_mint_past_what_their_commits_seal() {
         let first = 5 << crate::EPOCH_SHIFT;
-        let mut chain = Chain::new(test_branch(1), 5, 1, first);
+        let mut chain = Chain::new(test_cell(1), 5, 1, first);
         let extents = vec![(ExtentId::new(1, first + 3), b"in".to_vec())];
         assert_eq!(
             next_sequence(Commit { tag: 1, extents, ..Commit::default() }, &mut chain),
@@ -364,7 +363,7 @@ mod tests {
     /// a fork is at its end.
     #[test]
     fn batches_frame_their_commits() {
-        let mut chain = Chain::new(test_branch(1), 2, 0, 0);
+        let mut chain = Chain::new(test_cell(1), 2, 0, 0);
         let (small, large, freed) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 1));
         let mut batch = SegmentBuilder::default();
         assert!(batch.is_empty());
@@ -378,8 +377,8 @@ mod tests {
         batch.commit(Commit { tag: 9, ..Commit::default() });
         assert!(!batch.is_empty());
         let objects = batch
-            .fork(child(test_branch(9)), &mut chain)
-            .frame(crate::testing::encrypting(test_branch(1)));
+            .fork(child(test_cell(9)), &mut chain)
+            .frame(crate::testing::encrypting(test_cell(1)));
         let segment = objects.segment.read().unwrap();
         let footer: Footer = layout::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
@@ -394,9 +393,9 @@ mod tests {
         let contents = footer.contents;
         assert_eq!(
             (contents.frees, contents.root, contents.forks, contents.capacity),
-            (vec![freed], Some(b"two".to_vec()), vec![child(test_branch(9))], Some(2 << 20))
+            (vec![freed], Some(b"two".to_vec()), vec![child(test_cell(9))], Some(2 << 20))
         );
-        let keys = crate::testing::ring([test_branch(1)]);
+        let keys = crate::testing::ring([test_cell(1)]);
         let data = |bytes: &[u8]| layout::data_under(bytes, &keys.of(1)).unwrap();
         assert_eq!(data(&segment), b"small");
         let [(own_key, own)] = &objects.own[..] else {
@@ -414,7 +413,7 @@ mod tests {
     /// is freed as it is.
     #[test]
     fn batches_free_what_a_commit_before_held() {
-        let mut chain = Chain::new(test_branch(1), 2, 0, 0);
+        let mut chain = Chain::new(test_cell(1), 2, 0, 0);
         let (small, large, other) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 5));
         let (written, inherited, kept) =
             (ExtentId::new(1, 6), ExtentId::new(9, 4), ExtentId::new(1, 7));
@@ -425,7 +424,7 @@ mod tests {
         let extents = vec![(written, b"written".to_vec())];
         let frees = vec![small, large, written, inherited];
         batch.commit(Commit { tag: 8, extents, frees, ..Commit::default() });
-        let objects = batch.close(&mut chain).frame(crate::testing::encrypting(test_branch(1)));
+        let objects = batch.close(&mut chain).frame(crate::testing::encrypting(test_cell(1)));
         let footer = objects.footer;
         assert_eq!(footer.contents.extents, [(kept, 5, 4)]);
         let key = layout::extent(layout::TEST_CELL, 2, 0, other);
@@ -458,10 +457,10 @@ mod tests {
             root: root.clone(),
             capacity: Some(1 << 20),
         };
-        let chain = Chain::new(test_branch(1), 2, 0, 0);
+        let chain = Chain::new(test_cell(1), 2, 0, 0);
         let batch = SegmentBuilder::from(commit)
             .close(&mut chain.clone())
-            .frame(crate::testing::encrypting(test_branch(1)));
+            .frame(crate::testing::encrypting(test_cell(1)));
         let mut plan = Plan::default();
         for (extent, own) in [(small, false), (other, false), (large, true)] {
             let len = data[&extent].len() as u64;
@@ -481,14 +480,14 @@ mod tests {
                 Ok(())
             })
         };
-        let (dek, id) = crate::testing::encrypting(test_branch(1));
+        let (dek, id) = crate::testing::encrypting(test_cell(1));
         let encrypting = (Arc::new(extent_frame::Secret::from_bytes(dek.expose())), id);
         let planned = objects(plan.close(&mut chain.clone()), read, encrypting);
         assert_eq!(planned.footer, batch.footer);
         let read = || reads.lock().unwrap().clone();
         assert_eq!(read(), []);
         // Each encrypted under a salt of its own: alike once opened.
-        let keys = crate::testing::ring([test_branch(1)]);
+        let keys = crate::testing::ring([test_cell(1)]);
         let opened = |bytes: Vec<u8>| {
             let footer: Footer = layout::footer(&bytes).unwrap();
             (footer, layout::data_under(&bytes, &keys.of(1)).unwrap())

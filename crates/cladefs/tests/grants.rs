@@ -79,8 +79,8 @@ fn tenants_stores_are_their_own_cells() {
 
     let vm = CellClient::connect(&ours, acme.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(1), b"acme");
-    assert_eq!(daemon.branch(&acme.join("vm")).unwrap().tenant, 0xa);
-    let new = |tenant| cladefs::CellId { tenant: tenant, id: 0 };
+    assert_eq!(daemon.cell(&acme.join("vm")).unwrap().tenant, 0xa);
+    let new = |tenant| cladefs::CellId { tenant, id: 0 };
     assert_eq!(daemon.create(&acme.join("made"), new(0), None).unwrap().tenant, 0xa);
     assert_eq!(daemon.create(&acme.join("named"), new(0xa), None).unwrap().tenant, 0xa);
     let theirs = daemon.create(&acme.join("theirs"), new(0xb), None);
@@ -121,7 +121,7 @@ fn tenants_reach_no_store_of_another_tenants_cell() {
     std::fs::rename(&moved, globex.join("vm")).unwrap();
     let their_vm = CellClient::connect(&theirs, globex.join("vm"), CAPACITY).unwrap();
     assert_eq!(their_vm.root().unwrap(), b"globex");
-    assert_eq!(daemon.branch(&globex.join("vm")).unwrap().tenant, 0xb);
+    assert_eq!(daemon.cell(&globex.join("vm")).unwrap().tenant, 0xb);
 }
 
 /// TASK-456.2: a tenant's memory cell, a VM's memory in a cell of the tenant's, opens through
@@ -142,7 +142,7 @@ fn tenants_reach_no_memory_cell_of_another_tenants_cell() {
     their_memory.write(0, &[7; 4096]).unwrap();
     their_memory.commit().unwrap();
     their_memory.close().unwrap();
-    assert_eq!(daemon.branch(&globex.join("memory")).unwrap().tenant, 0xb);
+    assert_eq!(daemon.cell(&globex.join("memory")).unwrap().tenant, 0xb);
 
     let moved = acme.join("moved");
     std::fs::rename(globex.join("memory"), &moved).unwrap();
@@ -179,8 +179,8 @@ fn tenants_restore_shared_versions_of_others_into_cells_of_their_own() {
     here.daemon.share(&globex.join("vm"), version.version, true).unwrap();
     let restored = restore(&there.socket, &there.acme.join("restored"), version).unwrap();
     assert_eq!(restored.root().unwrap(), b"globex");
-    let made = there.daemon.branch(&there.acme.join("restored")).unwrap();
-    assert_eq!((made.tenant, made.id), (1, restored.branch()));
+    let made = there.daemon.cell(&there.acme.join("restored")).unwrap();
+    assert_eq!((made.tenant, made.id), (1, restored.cell()));
     here.daemon.share(&globex.join("vm"), version.version, false).unwrap();
     assert_eq!(restore(&there.socket, &refused, version).map(drop), Err(Some(Errno::EACCES)));
     assert!(!refused.exists(), "a refused restore made a store");
@@ -388,7 +388,7 @@ impl Host {
     fn snapshot(&mut self) -> Snapshot {
         let vm = CellClient::connect(&self.socket, self.acme.join("vm"), CAPACITY).unwrap();
         write(&vm, &pattern(5), b"snapshotted");
-        let extent = ExtentId { branch: vm.branch(), sequence: 1 };
+        let extent = ExtentId { cell: vm.cell(), sequence: 1 };
         let version = vm.make_version().unwrap();
         drop(vm);
         self.daemon.sync(&self.acme.join("vm")).unwrap();
@@ -437,7 +437,7 @@ fn tenants_restore_on_another_host() {
     let fetched = there.daemon.counters().fetched_bytes;
 
     let restored = restore(&there.socket, &there.acme.join("vm"), snapshot.version).unwrap();
-    assert_ne!(restored.branch(), snapshot.version.cell);
+    assert_ne!(restored.cell(), snapshot.version.cell);
     assert_eq!(restored.root().unwrap(), b"snapshotted");
     assert!(snapshotted(&restored, snapshot.extent), "the restored VM reads other bytes");
     let read = there.daemon.counters().fetched_bytes - fetched;
@@ -481,8 +481,8 @@ fn vm_processes_make_no_version_of_another_cell() {
     write(&theirs, &pattern(2), b"theirs");
 
     let made = vm.make_version().unwrap();
-    assert_eq!(made.cell, vm.branch());
-    assert_ne!(made.cell, here.daemon.branch(&theirs_path).unwrap().id);
+    assert_eq!(made.cell, vm.cell());
+    assert_ne!(made.cell, here.daemon.cell(&theirs_path).unwrap().id);
     let restored = restore(&here.socket, &here.acme.join("restored"), made).unwrap();
     assert_eq!(restored.root().unwrap(), b"ours");
 }
@@ -544,10 +544,10 @@ fn several_hosts_restore_one_snapshot_at_once() {
             .collect();
         restores.into_iter().map(|restore| restore.join().unwrap().unwrap()).collect()
     });
-    let mut branches: Vec<_> = restored.iter().map(CellClient::branch).collect();
-    branches.sort();
-    branches.dedup();
-    assert_eq!(branches.len(), HOSTS * RESTORES, "two restores of one branch");
+    let mut cells: Vec<_> = restored.iter().map(CellClient::cell).collect();
+    cells.sort();
+    cells.dedup();
+    assert_eq!(cells.len(), HOSTS * RESTORES, "two restores of one cell");
     for (at, vm) in restored.iter().enumerate() {
         assert_eq!(vm.root().unwrap(), b"snapshotted", "restore {at}");
         assert!(snapshotted(vm, snapshot.extent), "restore {at} reads other bytes");
@@ -588,7 +588,7 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
     let base = hosts[0].acme.join("base");
     let vm = hosts[0].daemon.open(&base, CAPACITY);
     write(&vm, &pattern(7), b"base");
-    let extent = ExtentId { branch: vm.branch(), sequence: 1 };
+    let extent = ExtentId { cell: vm.cell(), sequence: 1 };
     drop(vm);
     let version = hosts[0].daemon.version(&base).unwrap();
     hosts[0].daemon.sync(&base).unwrap();
@@ -599,8 +599,8 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
                 scope.spawn(move || {
                     let fork = |n| {
                         let to = host.acme.join(format!("fork{n}"));
-                        let branch = host.daemon.fork_version(version, &to).unwrap();
-                        (at, to, branch)
+                        let cell = host.daemon.fork_version(version, &to).unwrap();
+                        (at, to, cell)
                     };
                     (0..FORKS).map(fork).collect::<Vec<_>>()
                 })
@@ -608,10 +608,10 @@ fn versions_of_bases_fork_on_several_hosts_at_once() {
             .collect();
         forking.into_iter().flat_map(|forking| forking.join().unwrap()).collect()
     });
-    let mut branches: Vec<_> = forks.iter().map(|&(_, _, branch)| branch).collect();
-    branches.sort();
-    branches.dedup();
-    assert_eq!(branches.len(), HOSTS * FORKS, "two forks of one branch");
+    let mut cells: Vec<_> = forks.iter().map(|&(_, _, cell)| cell).collect();
+    cells.sort();
+    cells.dedup();
+    assert_eq!(cells.len(), HOSTS * FORKS, "two forks of one cell");
     let opened: Vec<_> =
         forks.iter().map(|(at, to, _)| hosts[*at].daemon.open(to, CAPACITY)).collect();
     for (n, vm) in opened.iter().enumerate() {
@@ -688,7 +688,7 @@ fn refuses_other_users(test: &str, jailed: fn(Sockets) -> PathBuf) {
     let (vms, control) = (dir.path().join("cladefsd.sock"), dir.path().join("cladefsd.control"));
     let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     daemon.arg(&vms).env("CLADEFSD_GRPC", &control);
-    daemon.env("CLADEFSD_BUCKET", "memory:///branches").env("CLADEFSD_TOKEN", "1");
+    daemon.env("CLADEFSD_BUCKET", "memory:///cells").env("CLADEFSD_TOKEN", "1");
     // SAFETY: umask is async-signal-safe.
     unsafe {
         daemon.pre_exec(|| {

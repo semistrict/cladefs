@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefsctl's branches in a bucket: a file bucket in a test's directory, in every run, and a real
+//! cladefsctl's cells in a bucket: a file bucket in a test's directory, in every run, and a real
 //! S3 server's, ignored but by `scripts/test-rustfs.sh`, which starts RustFS and runs those with
 //! `CLADEFS_S3_URL` naming a bucket of it, and the `AWS_*` variables to reach it. Each S3 test was
 //! that alone until TASK-149.20, which found `cladefsctl take` of a new copy at a later placement
@@ -20,7 +20,7 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
 
 /// Runs cladefsctl with `args`, the bucket at `url` the stores', as a host whose placement's
 /// token is 1: what it prints.
-fn branch(url: &str, args: &[&str]) -> String {
+fn cell(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
         .env("CLADEFSD_BUCKET", url)
@@ -33,7 +33,7 @@ fn branch(url: &str, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// The store at `path`, which keeps its branch in the bucket its description names, opened as a
+/// The store at `path`, which keeps its cell in the bucket its description names, opened as a
 /// copy never placed here takes it, as the first placement (TASK-165.9).
 fn attached(path: &Path) -> OpenCell {
     OpenCell::open(path).unwrap()
@@ -56,48 +56,48 @@ fn file_bucket(dir: &tempfile::TempDir) -> String {
 }
 
 #[test]
-fn forks_and_takes_branches() {
+fn forks_and_takes_cells() {
     let bucket = tempfile::tempdir().unwrap();
-    forks_and_takes_branches_in(&file_bucket(&bucket));
+    forks_and_takes_cells_in(&file_bucket(&bucket));
 }
 
 #[test]
 #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh"]
-fn rustfs_forks_and_takes_branches() {
-    forks_and_takes_branches_in(&s3_url());
+fn rustfs_forks_and_takes_cells() {
+    forks_and_takes_cells_in(&s3_url());
 }
 
-/// A store forked with cladefsctl is a fork of its branch in the bucket at `url`, and a branch taken
+/// A store forked with cladefsctl is a fork of its cell in the bucket at `url`, and a cell taken
 /// with it onto another host's empty store is read there from the bucket; deleted with it, the
 /// fork goes, and then its parent.
-fn forks_and_takes_branches_in(url: &str) {
+fn forks_and_takes_cells_in(url: &str) {
     let url = url.to_owned();
     let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name);
 
     // Made by cladefsctl, naming the bucket at `url`.
-    branch(&url, &["create", path("parent").to_str().unwrap(), &(1u64 << 30).to_string()]);
+    cell(&url, &["create", path("parent").to_str().unwrap(), &(1u64 << 30).to_string()]);
     let parent = attached(&path("parent"));
     let data = pattern(7, 5 << 20);
-    let extent = ExtentId { branch: parent.branch().id, sequence: 1 };
+    let extent = ExtentId { cell: parent.cell().id, sequence: 1 };
     parent.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     parent.commit(Some(b"root")).unwrap();
-    let parent_branch = parent.branch();
+    let parent_cell = parent.cell();
     drop(parent);
 
     let child =
-        branch(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
-    let child_branch: cladefs::CellId = child.trim().parse().unwrap();
+        cell(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
+    let child_cell: cladefs::CellId = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let record = runtime.block_on(bucket_cell::branch::record(&*bucket, child_branch));
-    assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_branch));
+    let record = runtime.block_on(bucket_cell::lifecycle::record(&*bucket, child_cell));
+    assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_cell));
     let forked = attached(&path("child"));
-    assert_eq!(forked.branch(), child_branch);
+    assert_eq!(forked.cell(), child_cell);
     assert_eq!(read(&forked, extent, data.len()), data);
     drop(forked);
 
-    branch(
+    cell(
         &url,
         &["take", path("elsewhere").to_str().unwrap(), &(1u64 << 30).to_string(), child.trim()],
     );
@@ -106,15 +106,15 @@ fn forks_and_takes_branches_in(url: &str) {
     assert_eq!(read(&elsewhere, extent, data.len()), data);
 
     // The fork deleted, then its parent's store.
-    branch(&url, &["delete", path("child").to_str().unwrap()]);
+    cell(&url, &["delete", path("child").to_str().unwrap()]);
     assert!(!path("child").exists());
-    branch(&url, &["delete", path("parent").to_str().unwrap()]);
+    cell(&url, &["delete", path("parent").to_str().unwrap()]);
     assert!(!path("parent").exists());
 }
 
 /// Runs cladefsctl with `args`, the bucket at `url` the stores', expecting it to fail: what it
 /// says.
-fn branch_fails(url: &str, args: &[&str]) -> String {
+fn cell_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
         .env("CLADEFSD_BUCKET", url)
@@ -139,7 +139,7 @@ fn rustfs_places_and_syncs_stores() {
 }
 
 /// TASK-39.7: `cladefsctl sync` returns once a store's commits are in the bucket at `url`; a store's
-/// copy placed earlier than the placement that took its branch last takes it no more, and placed
+/// copy placed earlier than the placement that took its cell last takes it no more, and placed
 /// later, does.
 fn places_and_syncs_stores_in(url: &str) {
     let url = url.to_owned();
@@ -147,31 +147,31 @@ fn places_and_syncs_stores_in(url: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
 
-    // Made by cladefsctl, naming the bucket at `url`, its branch the bucket's to name (TASK-364).
-    let made = branch(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
+    // Made by cladefsctl, naming the bucket at `url`, its cell the bucket's to name (TASK-364).
+    let made = cell(&url, &["create", &path("first"), &(1u64 << 30).to_string()]);
     let store = OpenCell::open(path("first")).unwrap();
-    let branch_id = store.branch();
-    assert_eq!(made.parse::<cladefs::CellId>(), Ok(branch_id));
-    let extent = ExtentId { branch: branch_id.id, sequence: 1 };
+    let cell_id = store.cell();
+    assert_eq!(made.parse::<cladefs::CellId>(), Ok(cell_id));
+    let extent = ExtentId { cell: cell_id.id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&pattern(3, 1 << 20)[..])]).unwrap();
     store.commit(Some(b"synced")).unwrap();
     drop(store);
-    branch(&url, &["place", &path("first"), "5"]);
-    branch(&url, &["sync", &path("first")]);
+    cell(&url, &["place", &path("first"), "5"]);
+    cell(&url, &["sync", &path("first")]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let state = runtime.block_on(bucket_cell::recover(&*bucket, branch_id, None)).unwrap().state;
+    let state = runtime.block_on(bucket_cell::recover(&*bucket, cell_id, None)).unwrap().state;
     assert_eq!(state.root, Some(b"synced".to_vec()));
 
     let capacity = (1u64 << 30).to_string();
-    let hex = branch_id.to_string();
-    // Refused as it takes the branch's head, which a later placement holds, leaving nothing
-    // (TASK-165.9: before, it took the branch and its sync was refused); taken placed later, its
+    let hex = cell_id.to_string();
+    // Refused as it takes the cell's head, which a later placement holds, leaving nothing
+    // (TASK-165.9: before, it took the cell and its sync was refused); taken placed later, its
     // head taken with that placement's token as it is made (TASK-149.20).
-    let stale = branch_fails(&url, &["take", &path("earlier"), &capacity, &hex, "3"]);
-    assert!(stale.contains("a later placement holds the branch"), "{stale}");
+    let stale = cell_fails(&url, &["take", &path("earlier"), &capacity, &hex, "3"]);
+    assert!(stale.contains("a later placement holds the cell"), "{stale}");
     assert!(!Path::new(&path("earlier")).exists());
-    branch(&url, &["take", &path("earlier"), &capacity, &hex, "6"]);
-    branch(&url, &["sync", &path("earlier")]);
+    cell(&url, &["take", &path("earlier"), &capacity, &hex, "6"]);
+    cell(&url, &["sync", &path("earlier")]);
     let later = attached(Path::new(&path("earlier")));
     assert_eq!(later.root().unwrap(), b"synced");
     assert_eq!(read(&later, extent, 1 << 20), pattern(3, 1 << 20));

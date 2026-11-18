@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Checkpoints: a branch's state as of a segment (doc-7, Checkpoints): a table of where its extents
+//! Checkpoints: a cell's state as of a segment (doc-7, Checkpoints): a table of where its extents
 //! are (`extent_frame::table`), as local stores' checkpoints are, whose footer holds the rest of
-//! the state. A writer recovering the branch reads it whole; a host after one extent looks it up by
+//! the state. A writer recovering the cell reads it whole; a host after one extent looks it up by
 //! its table ([`Table`]), through its fetcher, which reads the checkpoint's tail, with the footer,
 //! and the part holding one block ([`Fetcher::lookup`](crate::fetch::Fetcher::lookup)).
 
@@ -37,7 +37,7 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
 }
 
 /// cladefs: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
-/// and MACs if they hold its key, and refused if they hold its branch encrypted and not its key
+/// and MACs if they hold its key, and refused if they hold its cell encrypted and not its key
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
     let (footer, entries) = table::decode(bytes, keys)?;
@@ -90,14 +90,14 @@ impl Table {
 mod tests {
     use super::*;
     use crate::bucket::{Bucket, ByteRange, Meta, Object, PutMode, Version};
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::testing::{Direct, SimBucket};
     use std::future::Future;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// How the tests' checkpoints are authenticated: under the tests' DEK (`testing::encrypting`).
     fn encrypting() -> layout::EncryptionKey<'static> {
-        crate::testing::encrypting(test_branch(1))
+        crate::testing::encrypting(test_cell(1))
     }
 
     fn state(extents: u64) -> State {
@@ -106,9 +106,9 @@ mod tests {
 
     /// A state of `extents` extents, `per_object` in each object.
     fn state_in(extents: u64, per_object: u64) -> State {
-        let mut state = State::new(test_branch(3));
+        let mut state = State::new(test_cell(3));
         for sequence in 0..extents {
-            let key = layout::segment(test_branch(3), sequence / per_object, 1);
+            let key = layout::segment(test_cell(3), sequence / per_object, 1);
             let location = Location { key, offset: sequence * 4096, len: 4096 };
             state.extents.insert(ExtentId::new(3, sequence), location);
         }
@@ -244,7 +244,7 @@ mod tests {
         use crate::object::TAIL;
         let state = state_in(2_000_000, 250);
         let bytes = encode(&state, encrypting());
-        let key = layout::checkpoint(test_branch(3), 7, 1);
+        let key = layout::checkpoint(test_cell(3), 7, 1);
         let bucket = Counting {
             bucket: Direct(SimBucket::new()),
             requests: AtomicU64::new(0),
@@ -290,7 +290,7 @@ mod tests {
                 assert!(read.1 < extent_frame::PART / 2, "{read:?} read");
             }
             // Past the last extent, its block is read; before the first, none: IDs sort by
-            // sequence number, then branch, as the table's entries do.
+            // sequence number, then cell, as the table's entries do.
             let past = ExtentId::new(3, 2_000_000);
             assert_eq!(lookup(past).await, (Ok(None), block(past)));
             assert_eq!(lookup(ExtentId::new(2, 0)).await, (Ok(None), (0, 0)));

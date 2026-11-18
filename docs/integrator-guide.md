@@ -24,7 +24,7 @@ follows from that.
 2. For each tenant, call `Grant` with the tenant's ID, the directory of its stores, and its jails'
    uid and gid. It returns the path of a socket.
 3. Bind-mount **that socket alone** into the tenant's jails. Never mount the daemon's default VM
-   socket into a jail: it can take any branch by its ID.
+   socket into a jail: it can take any cell by its ID.
 4. Run jails with Firecracker's jailer, as a uid other than the daemon's. The default VM socket is
    mode `0600`, owned by the daemon, so that a mistake in step 3 still can't connect.
 5. Start Firecracker with `--enable-pci`, on x86-64 and aarch64 alike: the extent device attaches
@@ -145,7 +145,7 @@ version to pass that on. `DropVersions` drops it everywhere, and the forks keep 
 ## Limits
 
 **Forks of a store with a writer.** A fork of anything but a version, a VM's store or a base, is a
-commit on that store's branch, so its host needs to be the branch's writer. Fork those on one host
+commit on that store's cell, so its host needs to be the cell's writer. Fork those on one host
 at a time, or make a version first (above).
 
 **Memory.** The pages a guest writes through its DAX window are its own, private copies, in its VM
@@ -173,5 +173,5 @@ whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it
 how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
 open, StatCell reads the count kept as it changes, at no cost; of one none has, it opens the store
-as a VM's would (its state read, its branch's head taken, the map of its extents built: time and,
+as a VM's would (its state read, its cell's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.

@@ -58,11 +58,11 @@ impl std::str::FromStr for CellId {
     }
 }
 
-/// cladefs: a fork made at a segment's end: its child's branch, the child's owner, which every
+/// cladefs: a fork made at a segment's end: its child's cell, the child's owner, which every
 /// record of the child names, whoever writes it (TASK-79.82, TASK-153.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Child {
-    pub branch: CellId,
+    pub cell: CellId,
     pub owner: u64,
 }
 
@@ -71,10 +71,10 @@ pub struct Child {
 /// set the root, or forks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Footer {
-    pub branch: CellId,
+    pub cell: CellId,
     pub segment: u64,
-    /// The epoch of its writer's taking, which its key names too: a segment is the branch's only
-    /// once the branch's head names it, by its number and epoch (doc-7, The head; TASK-407).
+    /// The epoch of its writer's taking, which its key names too: a segment is the cell's only
+    /// once the cell's head names it, by its number and epoch (doc-7, The head; TASK-407).
     pub epoch: u64,
     /// What its commits made.
     pub contents: Contents,
@@ -89,24 +89,24 @@ impl Footer {
         bincode::deserialize(bytes).map_err(|err| Corrupt(format!("a footer: {err}")))
     }
 
-    /// The extents its commits sealed that are stored on their own, the branch's, and where each
+    /// The extents its commits sealed that are stored on their own, the cell's, and where each
     /// is: the object its writer uploaded before it, at the key naming the writer's epoch and it
     /// ([`extent_key`]), which tells the collector whose it is.
     pub fn own(&self) -> impl Iterator<Item = (ExtentId, Location)> + '_ {
-        self.contents.own_at(self.branch, self.epoch, self.segment)
+        self.contents.own_at(self.cell, self.epoch, self.segment)
     }
 }
 
 /// What a segment's commits made, which its footer holds, stamped with its place by its writer's
 /// chain ([`Chain::close`]): its commits' tags, unique to each commit (a store's segment names the
 /// last of its commits, [`tag`]); the extents they sealed in its data, at an offset, of a length;
-/// the branch's extents they sealed that are stored on their own, by their sequence numbers, of a
-/// length, at the writer's keys ([`Footer::own`]): an inherited extent a branch uploads goes in its
-/// data, as a key of the extents a branch uploads names that branch alone (TASK-150.1); the extents
-/// they free, the branch's, or inherited; the root, if they set one; the branch's next sequence
-/// number as of them, at least; the forks made at its end, by their children; and the branch's
+/// the cell's extents they sealed that are stored on their own, by their sequence numbers, of a
+/// length, at the writer's keys ([`Footer::own`]): an inherited extent a cell uploads goes in its
+/// data, as a key of the extents a cell uploads names that cell alone (TASK-150.1); the extents
+/// they free, the cell's, or inherited; the root, if they set one; the cell's next sequence
+/// number as of them, at least; the forks made at its end, by their children; and the cell's
 /// capacity, the most bytes its extents may hold, if they set it: a resize is a commit's, ordered
-/// with the others, so that the branch has it wherever it is taken, its forks inherit it, and a
+/// with the others, so that the cell has it wherever it is taken, its forks inherit it, and a
 /// version keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
 /// inside of, if it does, which the next segment goes on with ([`Continued`], TASK-92.41).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +130,7 @@ pub struct Contents {
 /// naming the segment does, in the same swap. Making it is local: the commit closing the segment
 /// in the store's log, nothing in the bucket, which the upload names later. Its ID is random,
 /// unique to its making, as an owner is: the segment's number may change, as a WAL is put after the
-/// branch's end (a store's `Wal::rebase`), its ID never. The commit making it seals nothing, its
+/// cell's end (a store's `Wal::rebase`), its ID never. The commit making it seals nothing, its
 /// store quiescent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NewVersion {
@@ -183,30 +183,30 @@ impl Contents {
             && self.continued.as_ref().is_some_and(|continued| continued.commit == commit)
     }
 
-    /// The extents sealed on their own, `branch`'s, and where each is, in segment `segment` of the
+    /// The extents sealed on their own, `cell`'s, and where each is, in segment `segment` of the
     /// writer of epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
     pub fn own_at(
         &self,
-        branch: CellId,
+        cell: CellId,
         epoch: u64,
         segment: u64,
     ) -> impl Iterator<Item = (ExtentId, Location)> + '_ {
         self.own.iter().map(move |&(sequence, len)| {
-            let extent = ExtentId { branch: branch.id, sequence };
-            (extent, Location { key: extent_key(branch, epoch, segment, extent), offset: 0, len })
+            let extent = ExtentId { cell: cell.id, sequence };
+            (extent, Location { key: extent_key(cell, epoch, segment, extent), offset: 0, len })
         })
     }
 }
 
 /// One writer's footers, in the order its segments close (doc-7, The head): numbered on without
-/// gaps from the branch's end as its head named it; all of the writer's epoch, their extents
+/// gaps from the cell's end as its head named it; all of the writer's epoch, their extents
 /// of their own at its keys; the next sequence number each names never below its floor nor the one
 /// before's. Whatever closes a writer's segments, a store
 /// or the writer, stamps their footers with the writer's chain, and the writer admits each footer
 /// only if its chain would have stamped it so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chain {
-    branch: CellId,
+    cell: CellId,
     epoch: u64,
     /// The number of the next segment.
     next_segment: u64,
@@ -215,15 +215,15 @@ pub struct Chain {
 }
 
 impl Chain {
-    /// The chain of the writer of epoch `epoch` of `branch`, whose next segment is numbered
+    /// The chain of the writer of epoch `epoch` of `cell`, whose next segment is numbered
     /// `next_segment`; the footers it stamps name `next_sequence`, the writer's floor, as the
-    /// branch's next sequence number at least.
-    pub const fn new(branch: CellId, epoch: u64, next_segment: u64, next_sequence: u64) -> Self {
-        Self { branch, epoch, next_segment, next_sequence }
+    /// cell's next sequence number at least.
+    pub const fn new(cell: CellId, epoch: u64, next_segment: u64, next_sequence: u64) -> Self {
+        Self { cell, epoch, next_segment, next_sequence }
     }
 
-    pub fn branch(&self) -> CellId {
-        self.branch
+    pub fn cell(&self) -> CellId {
+        self.cell
     }
 
     /// The epoch of its writer's taking.
@@ -236,7 +236,7 @@ impl Chain {
         self.next_segment
     }
 
-    /// The branch's next sequence number, as of the last footer: what the writer's guest mints
+    /// The cell's next sequence number, as of the last footer: what the writer's guest mints
     /// from.
     pub fn next_sequence(&self) -> u64 {
         self.next_sequence
@@ -252,7 +252,7 @@ impl Chain {
     pub fn close(&mut self, contents: Contents) -> Footer {
         let next_sequence = contents.next_sequence.max(self.next_sequence);
         let footer = Footer {
-            branch: self.branch,
+            cell: self.cell,
             segment: self.next_segment,
             epoch: self.epoch,
             contents: Contents { next_sequence, ..contents },
@@ -262,13 +262,13 @@ impl Chain {
     }
 
     /// The chain after `footer`, which another closed for it, if it is the next footer it would
-    /// have stamped: of its branch, number and epoch.
+    /// have stamped: of its cell, number and epoch.
     pub fn admit(&self, footer: &Footer) -> Result<Self, Corrupt> {
-        let wanted = (self.branch, self.next_segment, self.epoch);
-        if (footer.branch, footer.segment, footer.epoch) != wanted {
+        let wanted = (self.cell, self.next_segment, self.epoch);
+        if (footer.cell, footer.segment, footer.epoch) != wanted {
             return Err(Corrupt(format!(
-                "a segment of branch {}, number {}, epoch {}, not {wanted:?}",
-                footer.branch, footer.segment, footer.epoch
+                "a segment of cell {}, number {}, epoch {}, not {wanted:?}",
+                footer.cell, footer.segment, footer.epoch
             )));
         }
         let mut chain = *self;
@@ -305,9 +305,9 @@ pub fn writer_of(tag: u64) -> u64 {
 /// The key of the object of an extent stored on its own, uploaded by the writer of epoch
 /// `epoch` before its segment `segment`, whose footer names it. cladefs: the segment's number tells
 /// the collector whether the object is ahead of its segment, which may yet land, or a landed one's,
-/// which no state naming it frees it: what the branch's next sequence number can't tell, as its
+/// which no state naming it frees it: what the cell's next sequence number can't tell, as its
 /// extents are committed in no order of their sequence numbers (TASK-79.3). Under the prefix of
-/// `cell`, its branch's (TASK-364).
+/// `cell`, its cell's (TASK-364).
 pub fn extent_key(cell: CellId, epoch: u64, segment: u64, extent: ExtentId) -> String {
     format!(
         "{}extents/{}.{}.{}",
@@ -322,11 +322,11 @@ pub fn extent_key(cell: CellId, epoch: u64, segment: u64, extent: ExtentId) -> S
 mod tests {
     use super::*;
 
-    /// The cell of the tests' branches.
+    /// The cell of the tests' cells.
     const CELL: CellId = CellId { tenant: 1, id: 2 };
 
     /// The cell `id` of `CELL`'s tenant.
-    const fn branch(id: u64) -> CellId {
+    const fn cell(id: u64) -> CellId {
         CellId { tenant: CELL.tenant, id }
     }
 
@@ -334,24 +334,24 @@ mod tests {
     #[test]
     fn footers_decode_as_encoded() {
         let footer = Footer {
-            branch: branch(2),
+            cell: cell(2),
             segment: 9,
             epoch: 4,
             contents: Contents {
                 commits: vec![tag(4, 11), tag(4, 12)],
-                extents: vec![(ExtentId { branch: 2, sequence: 5 }, 0, 4096)],
+                extents: vec![(ExtentId { cell: 2, sequence: 5 }, 0, 4096)],
                 own: vec![(6, 512)],
-                frees: vec![ExtentId { branch: 1, sequence: 1 }],
+                frees: vec![ExtentId { cell: 1, sequence: 1 }],
                 root: Some(b"root".to_vec()),
                 next_sequence: 13,
                 forks: vec![
-                    Child { branch: branch(3), owner: 0x33 },
-                    Child { branch: CellId { tenant: 5, id: 4 }, owner: 0x44 },
+                    Child { cell: cell(3), owner: 0x33 },
+                    Child { cell: CellId { tenant: 5, id: 4 }, owner: 0x44 },
                 ],
                 capacity: Some(1 << 30),
                 continued: Some(Continued {
                     commit: tag(4, 13),
-                    extents: vec![(ExtentId { branch: 2, sequence: 14 }, 4096, 8192)],
+                    extents: vec![(ExtentId { cell: 2, sequence: 14 }, 4096, 8192)],
                 }),
                 versions: vec![NewVersion { id: 0xbe, keep_last: Some(3) }],
             },
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn continued_commits_end_in_their_writers_segments() {
         let commit = tag(4, 13);
-        let extent = |sequence| ExtentId { branch: 2, sequence };
+        let extent = |sequence| ExtentId { cell: 2, sequence };
         let continuing = |commit| Contents {
             continued: Some(Continued { commit, extents: vec![(extent(2), 0, 8)] }),
             ..Contents::default()
@@ -387,16 +387,16 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in base 32; anything else is no
-    /// branch.
+    /// cladefs: a cell reads as it displays, `TENANT/CELL/ID` in base 32; anything else is no
+    /// cell.
     #[test]
-    fn branches_parse_as_they_display() {
-        let branch = CellId { tenant: 10, id: 33 };
-        assert_eq!(branch.to_string(), "a/bp/11");
-        assert_eq!("a/bp/11".parse(), Ok(branch));
-        assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(branch));
+    fn cells_parse_as_they_display() {
+        let cell = CellId { tenant: 10, id: 33 };
+        assert_eq!(cell.to_string(), "a/bp/11");
+        assert_eq!("a/bp/11".parse(), Ok(cell));
+        assert_eq!("000000000000a/bp/0000000000011".parse(), Ok(cell));
         for wrong in ["11", "a/bp", "a/bp/11/4", "a/bp/xu", "a/bp/B", "a/bp/", ""] {
-            let refused = format!("no branch, TENANT/CELL/ID in base 32: {wrong}");
+            let refused = format!("no cell, TENANT/CELL/ID in base 32: {wrong}");
             assert_eq!(wrong.parse::<CellId>(), Err(refused));
         }
     }
@@ -417,11 +417,11 @@ mod tests {
     /// least, and never below the one before's.
     #[test]
     fn chains_number_what_they_close() {
-        let own = ExtentId { branch: 2, sequence: 7 };
-        let mut chain = Chain::new(branch(2), 4, 9, 100);
+        let own = ExtentId { cell: 2, sequence: 7 };
+        let mut chain = Chain::new(cell(2), 4, 9, 100);
         let contents = Contents {
             commits: vec![tag(4, 1)],
-            extents: vec![(ExtentId { branch: 2, sequence: 6 }, 0, 4096)],
+            extents: vec![(ExtentId { cell: 2, sequence: 6 }, 0, 4096)],
             own: vec![(own.sequence, 512)],
             next_sequence: 50,
             ..Contents::default()
@@ -429,12 +429,12 @@ mod tests {
         assert_eq!(
             chain.close(contents),
             Footer {
-                branch: branch(2),
+                cell: cell(2),
                 segment: 9,
                 epoch: 4,
                 contents: Contents {
                     commits: vec![tag(4, 1)],
-                    extents: vec![(ExtentId { branch: 2, sequence: 6 }, 0, 4096)],
+                    extents: vec![(ExtentId { cell: 2, sequence: 6 }, 0, 4096)],
                     own: vec![(own.sequence, 512)],
                     next_sequence: 100,
                     ..Contents::default()
@@ -446,26 +446,26 @@ mod tests {
         assert_eq!(place(&second), (10, 200));
         let third = chain.close(Contents { next_sequence: 150, ..Contents::default() });
         assert_eq!(place(&third), (11, 200));
-        let place = (chain.branch(), chain.epoch(), chain.next_segment());
-        assert_eq!((place, chain.next_sequence()), ((branch(2), 4, 12), 200));
+        let place = (chain.cell(), chain.epoch(), chain.next_segment());
+        assert_eq!((place, chain.next_sequence()), ((cell(2), 4, 12), 200));
         assert_eq!(chain.tag(5), tag(4, 5));
     }
 
     /// A copy of a chain admits the footer the chain closed, and goes on from it as the chain did;
-    /// it refuses one of another branch, number or epoch, and goes on from none.
+    /// it refuses one of another cell, number or epoch, and goes on from none.
     #[test]
     fn chains_admit_only_what_they_would_close() {
-        let start = Chain::new(branch(2), 4, 9, 100);
+        let start = Chain::new(cell(2), 4, 9, 100);
         let mut closing = start;
         let footer = closing.close(Contents { own: vec![(7, 512)], ..Contents::default() });
         assert_eq!(start.admit(&footer), Ok(closing));
         // A footer of another place than the next the chain closes: refused, saying both.
         let misplaced =
-            |place: &str| format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4));
+            |place: &str| format!("a segment of cell {place}, not {:?}", (cell(2), 9, 4));
         for (wrong, refused) in [
-            (Footer { branch: branch(3), ..footer.clone() }, misplaced("1/3, number 9, epoch 4")),
+            (Footer { cell: cell(3), ..footer.clone() }, misplaced("1/3, number 9, epoch 4")),
             (
-                Footer { branch: CellId { tenant: 5, ..branch(2) }, ..footer.clone() },
+                Footer { cell: CellId { tenant: 5, ..cell(2) }, ..footer.clone() },
                 misplaced("5/2, number 9, epoch 4"),
             ),
             (Footer { segment: 10, ..footer.clone() }, misplaced("1/2, number 10, epoch 4")),
@@ -473,17 +473,16 @@ mod tests {
         ] {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
         }
-        assert_eq!(start, Chain::new(branch(2), 4, 9, 100));
+        assert_eq!(start, Chain::new(cell(2), 4, 9, 100));
     }
 
-    /// A footer's extents of their own are the branch's, at the keys of its writer's epoch and its
+    /// A footer's extents of their own are the cell's, at the keys of its writer's epoch and its
     /// number: wherever it was closed, no other.
     #[test]
     fn footers_name_their_own_extents_at_their_writers_keys() {
-        let mut chain = Chain::new(branch(2), 4, 9, 100);
+        let mut chain = Chain::new(cell(2), 4, 9, 100);
         let footer = chain.close(Contents { own: vec![(7, 512), (5, 8)], ..Contents::default() });
-        let (seven, five) =
-            (ExtentId { branch: 2, sequence: 7 }, ExtentId { branch: 2, sequence: 5 });
+        let (seven, five) = (ExtentId { cell: 2, sequence: 7 }, ExtentId { cell: 2, sequence: 5 });
         assert_eq!(
             footer.own().collect::<Vec<_>>(),
             [
@@ -494,12 +493,12 @@ mod tests {
     }
 
     /// The keys of extents stored on their own: under their cell's prefix, by tenant and cell; then
-    /// by branch, the writer's epoch, the segment that names them, and sequence, in fixed-width
+    /// by cell, the writer's epoch, the segment that names them, and sequence, in fixed-width
     /// base 32, so that a listing is in that order.
     #[test]
-    fn extent_keys_order_by_cell_branch_epoch_segment_and_sequence() {
+    fn extent_keys_order_by_cell_cell_epoch_segment_and_sequence() {
         let cell = CellId { tenant: 10, id: 12 };
-        let key = extent_key(cell, 7, 42, ExtentId { branch: 2, sequence: 31 });
+        let key = extent_key(cell, 7, 42, ExtentId { cell: 2, sequence: 31 });
         let expected = "tenants/000000000000a/cells/000000000000c/extents/\
                         0000000000007.000000000001a.000000000000z";
         assert_eq!(key, expected);

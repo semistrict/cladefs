@@ -7,12 +7,12 @@
 //! read (TASK-395.2).
 //!
 //! A mark-only pass over a cell deletes nothing: it writes what it would have deleted to
-//! `<C>gc/marks/<epoch>` ([`layout::Marks`]). No correct reader reaches what no live branch reached,
+//! `<C>gc/marks/<epoch>` ([`layout::Marks`]). No correct reader reaches what no live cell reached,
 //! so a read of a key the newest marks name is a bug in the collector, which a pass that deleted
 //! would have turned into data lost; unless the reader is one the protocol lets find it gone, and
 //! start again: a recovery that, finding a segment missing, finds a newer checkpoint covering it,
 //! or a reader within the grace period of an object compacted. Each such read is logged, at `warn`,
-//! with the key, its kind (which names its branch), the request, the marks' epoch, and the IDs of
+//! with the key, its kind (which names its cell), the request, the marks' epoch, and the IDs of
 //! the span current if spans are on; in the extent daemon, its log names the guest request it is
 //! for too (`request_id`, `cladefs::request::current`).
 //!
@@ -26,8 +26,8 @@
 //! listing a minute for every cell each host reads was thousands a second).
 //!
 //! Listings are not warned of. A listing names what its caller passes over as well as what it goes
-//! by: a branch's older checkpoints, which recovery lists past to its newest; the segments a
-//! checkpoint covers, among which a writer finds its branch's last; a fork's parent's checkpoints
+//! by: a cell's older checkpoints, which recovery lists past to its newest; the segments a
+//! checkpoint covers, among which a writer finds its cell's last; a fork's parent's checkpoints
 //! newer than the fork. Those are what the collector deletes, which their callers find gone
 //! without harm. What a caller goes by of a listing, it reads, which is warned of. A marked key in
 //! a listing is logged at `debug`, but the collector's census of every object of a cell, which
@@ -210,7 +210,7 @@ impl Watch {
         drop(cells);
         let marks = layout::marks(cell, epoch);
         let saying = "a reader reached what the collector's newest mark-only pass found no live \
-                      branch needs, and would have deleted";
+                      cell needs, and would have deleted";
         match crate::trace::current_ids() {
             Some((trace_id, span_id)) => log::warn!(
                 key, kind:?, request, marks = epoch, trace_id, span_id;
@@ -298,7 +298,7 @@ pub(crate) fn captured() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{Marked, TEST_CELL, test_branch};
+    use crate::layout::{Marked, TEST_CELL, test_cell};
 
     fn meta(key: &str, e_tag: &str) -> Meta {
         let version = Version { e_tag: Some(e_tag.to_owned()), version: None };
@@ -330,7 +330,7 @@ mod tests {
         let watch = Watch { started: Instant::now() - 3 * REFRESH, ..Watch::new() };
         watch.hold_marking(true);
         assert!(watch.take_refresh(TEST_CELL));
-        let segment = layout::segment(test_branch(1), 2, 1);
+        let segment = layout::segment(test_cell(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
         watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn marks_held_are_of_their_object() {
         let watch = Watch::new();
-        let segment = layout::segment(test_branch(1), 2, 1);
+        let segment = layout::segment(test_cell(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
         watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
@@ -360,7 +360,7 @@ mod tests {
                 .is_some_and(|held| held.keys.contains(key))
         };
         assert!(held(&segment));
-        assert!(!held(&layout::segment(test_branch(1), 3, 1)));
+        assert!(!held(&layout::segment(test_cell(1), 3, 1)));
         let other = CellId { tenant: 1, id: 2 };
         let elsewhere = layout::segment(layout::CellId { tenant: other.tenant, id: 1 }, 2, 1);
         assert!(!held(&elsewhere));

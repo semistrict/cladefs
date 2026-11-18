@@ -71,13 +71,13 @@ fn public_bases_are_shared_read_only() {
     let base_path = dir.path().join("base");
     let base = OpenCell::create(&base_path, 1 << 24).unwrap();
     let base_bytes = pattern(3);
-    let extent = ExtentId { branch: base.branch().id, sequence: 1 };
+    let extent = ExtentId { cell: base.cell().id, sequence: 1 };
     base.write(extent, 0, &[cladefs::VolatileSlice::from(&base_bytes[..])]).unwrap();
     base.commit(None).unwrap();
     base.make_public().unwrap();
     drop(base);
     let forks = [dir.path().join("one/fork"), dir.path().join("two/fork")];
-    // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the branch with.
+    // A fork is the bucket's (TASK-165.7), made by the uploader its opening took the cell with.
     let base = OpenCell::open(&base_path).unwrap();
     for (fork, tenant) in forks.iter().zip(1..) {
         // Each a cell of its tenant's (TASK-364).

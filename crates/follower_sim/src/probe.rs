@@ -6,7 +6,7 @@
 //! read-only through a view, which reads what the view's commit held while the writer goes on,
 //! until it follows the writer.
 
-use crate::BRANCH;
+use crate::CELL;
 use crate::device::{CellDevice, ViewDevice};
 use fuchsia_async as fasync;
 use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, SyncOptions};
@@ -45,7 +45,7 @@ async fn read(fs: &OpenFxFilesystem, file: &str) -> Vec<u8> {
 }
 
 async fn write_and_follow() {
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store =
         Arc::new(LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap());
     let device = DeviceHolder::new(CellDevice::new(store.clone()));

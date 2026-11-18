@@ -14,7 +14,7 @@
 //! STORE is a store's directory, whose filesystem's `default` volume is mounted at MOUNTPOINT, a
 //! directory. With `--new`, STORE, which must not exist, is made a new store of CAPACITY bytes, its
 //! filesystem empty, as a scratch filesystem's or a test's (CI's pjdfstest, TASK-149.38): its
-//! branch kept in a file bucket in its directory, or in the host's bucket on a host of cladefs's
+//! cell kept in a file bucket in its directory, or in the host's bucket on a host of cladefs's
 //! system (`CLADEFSD_BUCKET`), as `cladefs::Storage::create` keeps it.
 //!
 //! Mounted, it prints MOUNTPOINT on standard output, and serves until it is unmounted: by `umount`

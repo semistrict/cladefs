@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Stores in directories of the host's: a store a directory, of one branch (TASK-165.7), deleting
+//! Stores in directories of the host's: a store a directory, of one cell (TASK-165.7), deleting
 //! them, and taking a store's directory for one process at a time (TASK-44.1), and once in it.
 
 use local_cell::{
     Description, Dir, File as _, HostDir, LocalCell, Opening, Options, Unmade, create_host,
-    delete_host, host_branch, host_bucket, host_token, place_host,
+    delete_host, host_bucket, host_cell, host_token, place_host,
 };
 use std::path::Path;
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 const OPTIONS: Options = Options {
     max_extent: 64 << 20,
     segment_size: 64 << 10,
@@ -27,32 +27,32 @@ const OPTIONS: Options = Options {
 
 fn create(path: &Path) -> local_cell::LocalCell<HostDir> {
     std::fs::create_dir(path).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     create_host(path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs).unwrap();
     let store = LocalCell::recover_unmade(HostDir::new(path).unwrap()).unwrap();
-    let store = store.open(OPTIONS, Opening::new(BRANCH)).unwrap();
+    let store = store.open(OPTIONS, Opening::new(CELL)).unwrap();
     store.made().unwrap();
     store
 }
 
-/// The store at `path`, opened where the bucket holds nothing of its branch.
+/// The store at `path`, opened where the bucket holds nothing of its cell.
 fn open_host(path: &Path) -> anyhow::Result<LocalCell<HostDir>> {
     LocalCell::open(HostDir::new(path)?, OPTIONS)
 }
 
-/// cladefs: a host's store names its branch, and the bucket it is kept in (TASK-165.6), which its
+/// cladefs: a host's store names its cell, and the bucket it is kept in (TASK-165.6), which its
 /// description says, opened or not.
 #[test]
-fn stores_name_their_branch_and_bucket() {
+fn stores_name_their_cell_and_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let store = create(&path);
     assert_eq!(store.bucket(), Some("memory:///host"));
     assert_eq!(host_bucket(&path).unwrap().as_deref(), Some("memory:///host"));
-    assert_eq!(host_branch(&path).unwrap(), BRANCH);
+    assert_eq!(host_cell(&path).unwrap(), CELL);
     drop(store);
     let opened = open_host(&path).unwrap();
-    assert_eq!((opened.bucket(), opened.description().branch), (Some("memory:///host"), BRANCH));
+    assert_eq!((opened.bucket(), opened.description().cell), (Some("memory:///host"), CELL));
 }
 
 /// A store is opened once in a process, as in all: a second opening, and a deletion, of one open
@@ -82,22 +82,22 @@ fn stores_unmade_refuse_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     std::fs::create_dir(&path).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     create_host(&path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs).unwrap();
     let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
-    let store = making.open(OPTIONS, Opening::new(BRANCH)).unwrap();
-    store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; BLOCK]).unwrap();
+    let store = making.open(OPTIONS, Opening::new(CELL)).unwrap();
+    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
     // Its maker gone, part way.
     drop(store);
     let refused = open_host(&path).err().expect("an unmade store opened");
     assert_eq!(refused.downcast_ref::<Unmade>(), Some(&Unmade), "{refused:#}");
     let making = LocalCell::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
-    let store = making.open(OPTIONS, Opening::new(BRANCH)).unwrap();
+    let store = making.open(OPTIONS, Opening::new(CELL)).unwrap();
     store.made().unwrap();
     drop(store);
     let store = open_host(&path).unwrap();
-    assert_eq!(store.extent(ExtentId::new(BRANCH.id, 1)).unwrap(), Some((BLOCK as u64, false)));
+    assert_eq!(store.extent(ExtentId::new(CELL.id, 1)).unwrap(), Some((BLOCK as u64, false)));
 }
 
 /// cladefs: a store in a directory whose file system can't bypass the host's page cache, as the
@@ -108,7 +108,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     std::fs::create_dir(&path).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let scenario = fail::FailScenario::setup();
     fail::cfg("direct::bypass", "return").unwrap();
     let err = create_host(&path, description, "memory:///host", bucket_cell::cell::Kind::Fxfs)
@@ -123,7 +123,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
 }
 
 /// cladefs: a store's placement's token is its description's, placed durably, which opening it
-/// takes its branch's cell with (TASK-39.7, TASK-165.9); none, never placed.
+/// takes its cell with (TASK-39.7, TASK-165.9); none, never placed.
 #[test]
 fn placements_name_their_token_in_the_description() {
     let dir = tempfile::tempdir().unwrap();
@@ -139,18 +139,18 @@ fn placements_name_their_token_in_the_description() {
     assert!(recovering.is_err(), "the store's parent opened");
 }
 
-/// Deleting a store removes its directory, whole, once `before` deleted its branch elsewhere.
+/// Deleting a store removes its directory, whole, once `before` deleted its cell elsewhere.
 #[test]
 fn deleting_stores() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
     let store = create(&path);
-    store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; BLOCK]).unwrap();
+    store.write(ExtentId::new(CELL.id, 1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
     drop(store);
     let deleted = std::cell::Cell::new(None);
-    delete_host(&path, |branch| Ok(deleted.set(Some(branch)))).unwrap();
-    assert_eq!((deleted.get(), path.exists()), (Some(BRANCH), false));
+    delete_host(&path, |cell| Ok(deleted.set(Some(cell)))).unwrap();
+    assert_eq!((deleted.get(), path.exists()), (Some(CELL), false));
     assert!(open_host(&path).is_err(), "the deleted store opened");
 }
 

@@ -20,7 +20,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 const MIB: usize = 1 << 20;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 
 /// Segments of a few parts, and extents on their own from 8 MiB.
 const OPTIONS: Options = Options {
@@ -35,7 +35,7 @@ const OPTIONS: Options = Options {
 };
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
 /// Bytes each their offset modulo 251, plus `seed`: they compress.
@@ -44,7 +44,7 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
 }
 
 fn create(dir: &MemDir, options: Options) -> LocalCell<MemDir> {
-    let description = Description { block_size: BLOCK as u32, capacity: 256 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 256 << 20, cell: CELL };
     LocalCell::create(dir.clone(), description, options).unwrap()
 }
 
@@ -82,11 +82,11 @@ struct Stored {
 /// a part stored raw, the middle of the part's stored bytes in one stored compressed.
 fn stored(dir: &MemDir, store: &LocalCell<MemDir>, extent: ExtentId, offset: u64) -> Stored {
     let (path, at) = match store.place(extent).unwrap().unwrap() {
-        Place::Run { branch, number, offset: run } => {
-            (format!("segments/{}/{}", Padded(branch), Padded(number)), run + offset)
+        Place::Run { cell, number, offset: run } => {
+            (format!("segments/{}/{}", Padded(cell), Padded(number)), run + offset)
         }
         Place::Own => {
-            (format!("extents/{}/{}", Padded(extent.branch), Padded(extent.sequence)), offset)
+            (format!("extents/{}/{}", Padded(extent.cell), Padded(extent.sequence)), offset)
         }
         place => panic!("{extent:?} is {place:?}"),
     };
@@ -166,7 +166,7 @@ fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments() {
     store.write(extent(2), 0, &noise(2, BLOCK)).unwrap();
     assert!(store.close_now().unwrap());
     store.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).unwrap();
-    let segment = format!("segments/{}/{}", Padded(BRANCH.id), Padded(0));
+    let segment = format!("segments/{}/{}", Padded(CELL.id), Padded(0));
     let bytes = local_cell::read_whole(&dir.open(&segment, true).unwrap()).unwrap();
     let part = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
     assert_eq!(part.encoding, Encoding::Raw);
@@ -194,8 +194,7 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
         assert_eq!(
-            extent_frame::data(&bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id))
-                .unwrap(),
+            extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
             data
         );
         // The framed file under its own name, which the thread making framings durable renames it

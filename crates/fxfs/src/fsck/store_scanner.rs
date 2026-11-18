@@ -165,8 +165,8 @@ struct ScannedStore<'a> {
     store_id: u64,
     /// cladefs: the owner the store allocates under, which a snapshot may have changed.
     data_owner: u64,
-    // cladefs: the branches of the extents of the store's base, if it has one (backlog doc-10).
-    base_branches: HashSet<u64>,
+    // cladefs: the cells of the extents of the store's base, if it has one (backlog doc-10).
+    base_cells: HashSet<u64>,
     is_root_store: bool,
     is_encrypted: bool,
     current_object: Option<CurrentObject>,
@@ -200,7 +200,7 @@ impl<'a> ScannedStore<'a> {
             root_objects: root_objects.as_ref().into(),
             store_id,
             data_owner: store_id,
-            base_branches: HashSet::default(),
+            base_cells: HashSet::default(),
             is_root_store,
             is_encrypted,
             current_object: None,
@@ -1065,8 +1065,7 @@ impl<'a> ScannedStore<'a> {
         // cladefs: the extent is the store's current data owner's, unless it is shared with other
         // stores (snapshots), which fsck checks no store for, or is its base's, which the allocator
         // doesn't hold.
-        if !self.fsck.is_shared(&store_extent) && !self.base_branches.contains(&store_extent.branch)
-        {
+        if !self.fsck.is_shared(&store_extent) && !self.base_cells.contains(&store_extent.cell) {
             self.fsck.reference(store_extent, device_offset..device_offset + len, self.data_owner);
         }
         Ok(())
@@ -1470,8 +1469,8 @@ pub(super) async fn scan_store(
         store.root_directory_object_id(),
     );
     scanned.data_owner = store.filesystem().allocator().data_owner(store_id);
-    scanned.base_branches =
-        store.store_info().iter().flat_map(|info| info.base_branches.iter().copied()).collect();
+    scanned.base_cells =
+        store.store_info().iter().flat_map(|info| info.base_cells.iter().copied()).collect();
 
     // Scan the store for objects, attributes, and parent/child relationships.
     let layer_set = store.tree().layer_set();

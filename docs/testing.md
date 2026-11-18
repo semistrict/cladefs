@@ -27,7 +27,7 @@ Each case is in suites, which the scripts run it by: `scripts/test-e2e.sh --tag 
 by name, `--tag e2e` if none (the runner's `list --help` names the suites). A run's outcomes are
 data, a repeat's in `CASE/repeat-K.json` and the run's in `summary.json` (`scripts/guest_results.py`).
 
-`scripts/test-e2e-rustfs.sh` runs them with their branches in an S3 bucket on the host (RustFS, a
+`scripts/test-e2e-rustfs.sh` runs them with their cells in an S3 bucket on the host (RustFS, a
 process of its release's binary), as production keeps them in object storage. The nightly suite (`--tag nightly`)
 runs so every night on GitHub's runners, whose nested KVM boots the guests
 (`.github/workflows/nightly.yml`), Firecracker in its jailer under its seccomp filter: built once,
@@ -64,7 +64,7 @@ sandbox's commands all the while. It fails on a guest kernel's report, a VM let 
 a second, a command past its budget, or a daemon past its own; LangSmith's pin's double writes,
 put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
 minutes, runs on GitHub's runners' nested KVM on every push to main
-(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
+(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a cell. The long mode is
 LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
 hand, in the qualification before each candidate (below), as no CI runner has its memory (TASK-330.5).
 Each run keeps what the host and the run spent every 30 s (`resources.log`):
@@ -133,7 +133,7 @@ The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
 model-checks exhaustively over small bounds (`specs/`): live read-only
 followers (`specs/follower`, backlog doc-8), the guest Fxfs's copy-on-write
 DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/cladefs/dax.c`),
-branches in the bucket with the host's write-ahead log (`specs/bucket`,
+cells in the bucket with the host's write-ahead log (`specs/bucket`,
 backlog doc-7 and doc-14), and Fxfs's super-block claiming only what its
 journal flushed (`specs/journal`). Each rule
 of a protocol has a mutation, the spec with that rule removed, which TLC must

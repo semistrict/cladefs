@@ -4,7 +4,7 @@
 
 //! A bucket of S3 or GCS, or of anything else the `object_store` crate reaches, under a prefix.
 //!
-//! Branches rely on conditional writes (doc-7, The head): a create where an object is must fail,
+//! Cells rely on conditional writes (doc-7, The head): a create where an object is must fail,
 //! and an update of a version that is not the object's. `object_store` sends S3's `If-None-Match`
 //! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a store honours them
 //! before anything relies on it, once for each bucket ([`ObjectBucket::probed`]).
@@ -64,7 +64,7 @@ pub struct ObjectBucket {
     /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
     /// (TASK-264).
     marks: crate::marks::Watch,
-    /// cladefs: what gives this process's new branches their IDs, out of blocks of the bucket's
+    /// cladefs: what gives this process's new cells their IDs, out of blocks of the bucket's
     /// (TASK-364).
     objectids: crate::objectid::Allocator,
 }
@@ -147,7 +147,7 @@ pub enum Upload {
     Checkpoints,
     /// The collector's moves of what it compacted.
     Moves,
-    /// Branches' records and heads, and whatever else.
+    /// Cells' records and heads, and whatever else.
     Other,
 }
 
@@ -462,7 +462,7 @@ struct Timed<'a> {
 }
 
 impl Timed<'_> {
-    /// `answered`, the request's answer, as branches take it ([`error`]), said on its span: its
+    /// `answered`, the request's answer, as cells take it ([`error`]), said on its span: its
     /// bytes, as `bytes` counts those of what it answered, or its error. cladefs: and logged, at
     /// debug, with its kind, object, time, and bytes or error (TASK-260): in the extent daemon,
     /// its log gives the record the guest request the work is for, if any (`cladefs::request`). A
@@ -543,13 +543,13 @@ impl ObjectBucket {
         Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids }
     }
 
-    /// cladefs: a new object ID of the bucket's, which no other branch of it has, nor will
+    /// cladefs: a new object ID of the bucket's, which no other cell of it has, nor will
     /// ([`crate::objectid`], TASK-364).
     pub async fn new_objectid(&self) -> u64 {
         self.objectids.next(self).await
     }
 
-    /// Checks that it honours the conditional writes branches rely on ([`probe`]), with an object
+    /// Checks that it honours the conditional writes cells rely on ([`probe`]), with an object
     /// of `nonce`'s, unless it found it does before: a host's stores share their bucket, which it
     /// checks once, at their first attach, not at each (doc-7, The head).
     pub async fn probed(&self, nonce: u64) -> Result<(), String> {
@@ -795,8 +795,8 @@ fn cloud(
     Ok((store, pages, path))
 }
 
-/// What a request's failure means to branches. Failures other than the ones the protocol answers
-/// are retried: the store may be unreachable for a while, and branches wait (doc-7, decision 3).
+/// What a request's failure means to cells. Failures other than the ones the protocol answers
+/// are retried: the store may be unreachable for a while, and cells wait (doc-7, decision 3).
 fn error(error: &object_store::Error) -> Error {
     match error {
         object_store::Error::NotFound { .. } => Error::NotFound,
@@ -1057,7 +1057,7 @@ fn backoff(failures: u32) -> std::time::Duration {
     std::time::Duration::from_millis((50u64 << failures.saturating_sub(1).min(7)).min(5_000))
 }
 
-/// Checks that `bucket` honours the conditional writes branches rely on, with an object of its
+/// Checks that `bucket` honours the conditional writes cells rely on, with an object of its
 /// own at `probe/<nonce>`, which it removes: a create where an object is fails, so does an update
 /// of a version that is not the object's, and one of the object's version succeeds.
 pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
@@ -1089,7 +1089,7 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
 
     /// Requests that failed wait from 50 ms, doubling, to at most 5 s.
     #[test]
@@ -1113,7 +1113,7 @@ pub(crate) mod tests {
         let start = tokio::time::Instant::now();
         let creates: Vec<_> = (0..48)
             .map(|segment| {
-                let (store, key) = (store.clone(), layout::segment(test_branch(1), segment, 1));
+                let (store, key) = (store.clone(), layout::segment(test_cell(1), segment, 1));
                 tokio::spawn(async move {
                     let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
                     assert!(matches!(created, crate::bucket::Created::Created(_)), "{key}");
@@ -1157,7 +1157,7 @@ pub(crate) mod tests {
         let objects = Arc::new(object_store::memory::InMemory::new());
         let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
-        let key = layout::segment(test_branch(1), 0, 1);
+        let key = layout::segment(test_cell(1), 0, 1);
         let creating = tokio::spawn({
             let (store, key) = (store.clone(), key.clone());
             async move { crate::bucket::create(&*store, &key, vec![1, 2, 3]).await }
@@ -1219,7 +1219,7 @@ pub(crate) mod tests {
     use crate::layout::Origin;
     use crate::s3_server::S3Server;
     use crate::writer::Writer;
-    use crate::{Error as BranchError, branch, collector, recovery};
+    use crate::{Error as CellError, collector, lifecycle, recovery};
     use object_store::memory::InMemory;
     use storage_device::ExtentId;
 
@@ -1286,13 +1286,13 @@ pub(crate) mod tests {
         let log = crate::marks::captured();
         let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (old, marked) =
-            (layout::checkpoint(test_branch(1), 3, 1), layout::checkpoint(test_branch(1), 4, 1));
+            (layout::checkpoint(test_cell(1), 3, 1), layout::checkpoint(test_cell(1), 4, 1));
         let other = CellId { tenant: 1, id: 2 };
         let theirs = layout::checkpoint(CellId { tenant: other.tenant, id: 2 }, 1, 1);
         let warned = || -> Vec<String> { log.lock().unwrap().clone() };
         futures::executor::block_on(async {
             let writer = ObjectBucket::new(objects.clone(), "p");
-            for key in [&old, &marked, &layout::checkpoint(test_branch(1), 5, 1), &theirs] {
+            for key in [&old, &marked, &layout::checkpoint(test_cell(1), 5, 1), &theirs] {
                 writer.put(key, vec![1, 2].into(), PutMode::Create).await.unwrap();
             }
             let unmarked = ObjectBucket::new(objects.clone(), "p");
@@ -1328,11 +1328,11 @@ pub(crate) mod tests {
 
             let reader = ObjectBucket::new(objects.clone(), "p");
             // Its first read reads the marks, alongside: what it reads after, it warns of.
-            reader.head(&layout::checkpoint(test_branch(1), 5, 1)).await.unwrap();
+            reader.head(&layout::checkpoint(test_cell(1), 5, 1)).await.unwrap();
             assert_eq!(reader.stats().requests(Request::List), 0);
             assert_eq!(reader.stats().requests(Request::Head), 1);
             reader.get(&old).await.unwrap();
-            reader.list(&layout::checkpoints(test_branch(1))).await.unwrap();
+            reader.list(&layout::checkpoints(test_cell(1))).await.unwrap();
             assert_eq!(warned(), Vec::<String>::new());
             reader.head(&marked).await.unwrap();
             let range = ByteRange::Bounded(0..1);
@@ -1344,16 +1344,16 @@ pub(crate) mod tests {
             assert_eq!(reader.stats().requests(Request::List), 1, "its own listing alone");
         });
         let saying = "a reader reached what the collector's newest mark-only pass found no live \
-                      branch needs, and would have deleted";
+                      cell needs, and would have deleted";
         let reached = |request: &str, key: &str, marks: String, kind: &str, epoch| {
             format!(
                 "WARN bucket_cell: {request} {key}: {saying} ({marks}) key={key} kind={kind} \
                  request={request} marks={epoch}"
             )
         };
-        let ours = "Checkpoint { branch: CellId { tenant: 1, id: 1 }, segment: 4, epoch: 1 }";
+        let ours = "Checkpoint { cell: CellId { tenant: 1, id: 1 }, segment: 4, epoch: 1 }";
         let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
-        let other = "Checkpoint { branch: CellId { tenant: 1, id: 2 }, segment: 1, epoch: 1 }";
+        let other = "Checkpoint { cell: CellId { tenant: 1, id: 2 }, segment: 1, epoch: 1 }";
         let theirs =
             reached("get", &theirs, layout::marks(CellId { tenant: 1, id: 2 }, 3), other, 3);
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
@@ -1365,16 +1365,16 @@ pub(crate) mod tests {
     fn counts_requests_and_bytes() {
         let store = memory();
         futures::executor::block_on(async {
-            let segment = layout::segment(test_branch(1), 0, 1);
+            let segment = layout::segment(test_cell(1), 0, 1);
             let version = store.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
             assert!(store.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
             store.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
             store
-                .put(&layout::checkpoint(test_branch(1), 0, 1), vec![4; 30].into(), PutMode::Create)
+                .put(&layout::checkpoint(test_cell(1), 0, 1), vec![4; 30].into(), PutMode::Create)
                 .await
                 .unwrap();
             store
-                .put(&layout::head(test_branch(1)), vec![5; 9].into(), PutMode::Overwrite)
+                .put(&layout::head(test_cell(1)), vec![5; 9].into(), PutMode::Overwrite)
                 .await
                 .unwrap();
             let extent =
@@ -1387,7 +1387,7 @@ pub(crate) mod tests {
             assert_eq!(store.get(&segment).await.unwrap().bytes.len(), 50);
             let range = ByteRange::Bounded(10..30);
             assert_eq!(store.get_range(&segment, range).await.unwrap().len(), 20);
-            assert!(store.get(&layout::segment(test_branch(1), 9, 1)).await.is_err());
+            assert!(store.get(&layout::segment(test_cell(1), 9, 1)).await.is_err());
             store.head(&segment).await.unwrap();
             store.list("segments/").await.unwrap();
             store.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
@@ -1551,8 +1551,8 @@ pub(crate) mod tests {
     fn recoveries_share_the_checkpoints_they_decode() {
         let bucket = memory();
         futures::executor::block_on(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 1).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let commit = Commit { tag: 1, extents: vec![(extent, vec![1])], ..Commit::default() };
             let segment = add(&writer, commit);
@@ -1564,7 +1564,7 @@ pub(crate) mod tests {
             let mut states = Vec::new();
             for _ in 0..2 {
                 let before = gets();
-                states.push(recovery::recover(&*bucket, test_branch(1), None).await.unwrap().state);
+                states.push(recovery::recover(&*bucket, test_cell(1), None).await.unwrap().state);
                 read.push(gets() - before);
             }
             assert_eq!(read, [2, 1], "the head's and the checkpoint's GETs, by recovery");
@@ -1584,12 +1584,12 @@ pub(crate) mod tests {
             .unwrap()
     }
 
-    /// A branch's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
+    /// A cell's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
     /// then what it and its fork freed, reclaimed.
-    pub(crate) async fn branch_lifecycle(bucket: Arc<impl Bucket>, root: u64) {
+    pub(crate) async fn cell_lifecycle(bucket: Arc<impl Bucket>, root: u64) {
         let child = root + 1;
-        branch::create(&*bucket, test_branch(root), 0).await.unwrap();
-        let first = Writer::open(bucket.clone(), test_branch(root), 10, 1).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(root), 0).await.unwrap();
+        let first = Writer::open(bucket.clone(), test_cell(root), 10, 1).await.unwrap();
         let small = ExtentId::new(root, first.chain().next_sequence());
         let large = ExtentId::new(root, small.sequence + 1);
         let commit = Commit {
@@ -1602,7 +1602,7 @@ pub(crate) mod tests {
         first.upload(segment).await.unwrap();
         assert_eq!(first.acknowledge().await, Ok(Some(segment)));
         let forking = SegmentBuilder::default()
-            .fork(crate::layout::child(test_branch(child)), &mut first.chain())
+            .fork(crate::layout::child(test_cell(child)), &mut first.chain())
             .frame(first.keys().encrypting());
         let fork = first.add_segment(forking).unwrap();
         first.upload(fork).await.unwrap();
@@ -1612,7 +1612,7 @@ pub(crate) mod tests {
         first.acknowledge().await.unwrap();
         assert_eq!(first.checkpoint().await, Ok(Some(segment)));
         // Looked up a block at a time, by ranged reads, by a host's fetcher.
-        let checkpoint = crate::layout::checkpoint(test_branch(root), segment, 1);
+        let checkpoint = crate::layout::checkpoint(test_cell(root), segment, 1);
         let tail = crate::object::tail(&*bucket, &checkpoint).await.unwrap().unwrap();
         let table = crate::checkpoint::Table::decode(tail.footer()).unwrap();
         assert_eq!(table.state().last_commit, Some(2));
@@ -1622,25 +1622,24 @@ pub(crate) mod tests {
         assert!(fetcher.lookup(&checkpoint, large).await.unwrap().is_some());
         assert_eq!(fetcher.lookup(&checkpoint, small).await, Ok(None));
 
-        // Another writer takes the branch; the first one's next segment is not the branch's.
-        let second = Writer::open(bucket.clone(), test_branch(root), 11, 2).await.unwrap();
+        // Another writer takes the cell; the first one's next segment is not the cell's.
+        let second = Writer::open(bucket.clone(), test_cell(root), 11, 2).await.unwrap();
         let segment = add(&first, Commit { tag: 3, frees: vec![large], ..Commit::default() });
         let taken = match first.upload(segment).await {
             Ok(()) => first.acknowledge().await.map(|_| ()),
             Err(error) => Err(error),
         };
-        assert_eq!(taken, Err(BranchError::Fenced));
+        assert_eq!(taken, Err(CellError::Fenced));
         assert_eq!(second.state().last_commit, Some(2));
 
-        let state = recovery::recover(&*bucket, test_branch(root), None).await.unwrap().state;
+        let state = recovery::recover(&*bucket, test_cell(root), None).await.unwrap().state;
         assert_eq!(state.extents.keys().copied().collect::<Vec<_>>(), [large]);
-        let origin = Some(Origin { parent: test_branch(root), at: fork });
+        let origin = Some(Origin { parent: test_cell(root), at: fork });
         assert_eq!(
-            branch::record(&*bucket, test_branch(child)).await.unwrap().unwrap().origin(),
+            lifecycle::record(&*bucket, test_cell(child)).await.unwrap().unwrap().origin(),
             origin
         );
-        let inherited =
-            recovery::recover(&*bucket, test_branch(child), origin).await.unwrap().state;
+        let inherited = recovery::recover(&*bucket, test_cell(child), origin).await.unwrap().state;
         assert_eq!(inherited.extents.keys().copied().collect::<Vec<_>>(), [small, large]);
 
         // The collector keeps what the child inherited, though the parent freed it.
@@ -1657,7 +1656,7 @@ pub(crate) mod tests {
         second.upload(segment).await.unwrap();
         second.acknowledge().await.unwrap();
         second.checkpoint().await.unwrap();
-        let heir = Writer::open(bucket.clone(), test_branch(child), 12, 1).await.unwrap();
+        let heir = Writer::open(bucket.clone(), test_cell(child), 12, 1).await.unwrap();
         let segment = add(&heir, Commit { tag: 1, frees: vec![small, large], ..Commit::default() });
         heir.upload(segment).await.unwrap();
         heir.acknowledge().await.unwrap();
@@ -1670,8 +1669,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn branches_on_a_memory_store() {
-        futures::executor::block_on(branch_lifecycle(memory(), 1));
+    fn cells_on_a_memory_store() {
+        futures::executor::block_on(cell_lifecycle(memory(), 1));
     }
 
     /// cladefs: the bucket of the directory `dir`, by its URL (TASK-165.1).
@@ -1715,9 +1714,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn branches_on_a_file_store() {
+    fn cells_on_a_file_store() {
         let dir = tempfile::tempdir().unwrap();
-        futures::executor::block_on(branch_lifecycle(file(dir.path()), 1));
+        futures::executor::block_on(cell_lifecycle(file(dir.path()), 1));
     }
 
     /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
@@ -1759,7 +1758,7 @@ pub(crate) mod tests {
         assert_eq!([(); 3].map(|()| connects(&on_shared)), [1, 0, 0]);
     }
 
-    /// cladefs: S3 over HTTP, through cladefs's client, does what every bucket must, and branches live
+    /// cladefs: S3 over HTTP, through cladefs's client, does what every bucket must, and cells live
     /// there: the server in memory the tests below slow is as S3 is to them (TASK-205).
     #[test]
     fn s3_buckets_conform() {
@@ -1767,7 +1766,7 @@ pub(crate) mod tests {
             let server = S3Server::start(None);
             let bucket = s3(&server, "conformance", &Client::DEFAULT);
             crate::bucket::conformance(&*bucket, "conformance").await;
-            branch_lifecycle(s3(&server, "branches", &Client::DEFAULT), 1).await;
+            cell_lifecycle(s3(&server, "cells", &Client::DEFAULT), 1).await;
         });
     }
 
@@ -1904,8 +1903,8 @@ pub(crate) mod tests {
         runtime().block_on(async {
             let server = S3Server::start(Some(RATE));
             let bucket = s3(&server, "slow", &client);
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 1).await.unwrap();
             let segments: Vec<u64> = (1..=SEGMENTS)
                 .map(|tag| {
                     let sequence = writer.chain().next_sequence();
@@ -2005,16 +2004,16 @@ pub(crate) mod tests {
         });
     }
 
-    /// Probes the bucket at `url`'s conditional writes, and runs branches' lifecycle there.
+    /// Probes the bucket at `url`'s conditional writes, and runs cells' lifecycle there.
     fn over_a_real_store(url: &str) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let store = Arc::new(ObjectBucket::from_url(url).unwrap());
             probe(&*store, std::process::id().into()).await.unwrap();
-            // Each run its own branches, and objects.
+            // Each run its own cells, and objects.
             let root = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
             crate::bucket::conformance(&*store, &format!("conformance-{root:x}")).await;
-            branch_lifecycle(store, root & !1).await;
+            cell_lifecycle(store, root & !1).await;
         });
     }
 
@@ -2029,7 +2028,7 @@ pub(crate) mod tests {
     }
 
     /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a bucket
-    /// and a prefix, under which the run leaves its branches, reached with the environment's
+    /// and a prefix, under which the run leaves its cells, reached with the environment's
     /// credentials. Then 32 objects of 8 MiB uploaded at once, which a host's upstream below
     /// 9 MB/s took longer to carry than `object_store`'s 30 s: each lands at its first attempt.
     #[test]

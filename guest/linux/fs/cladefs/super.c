@@ -1031,7 +1031,7 @@ struct cladefs_vfs_fiemap {
 	struct fiemap_extent_info *fieinfo;
 	bool have;
 	u64 logical, len;
-	u64 branch, sequence, extent_end;
+	u64 cell, sequence, extent_end;
 };
 
 /* Reports the extent gathered, if any, with `flags`: 1 once the caller's array is full. */
@@ -1050,7 +1050,7 @@ static int cladefs_vfs_fiemap_extent(void *arg, const struct cladefs_dax_extent 
 	struct cladefs_vfs_fiemap *m = arg;
 	int ret;
 
-	if (m->have && m->logical + m->len == e->offset && m->branch == e->branch &&
+	if (m->have && m->logical + m->len == e->offset && m->cell == e->cell &&
 	    m->sequence == e->sequence && m->extent_end == e->extent_offset) {
 		m->len += e->len;
 		m->extent_end += e->len;
@@ -1062,7 +1062,7 @@ static int cladefs_vfs_fiemap_extent(void *arg, const struct cladefs_dax_extent 
 	m->have = true;
 	m->logical = e->offset;
 	m->len = e->len;
-	m->branch = e->branch;
+	m->cell = e->cell;
 	m->sequence = e->sequence;
 	m->extent_end = e->extent_offset + e->len;
 	return 0;
@@ -2650,7 +2650,7 @@ MODULE_PARM_DESC(fail_thaw_at, "Fail the next thaw before this step: 1 telling t
  * filesystem's volumes are frozen, read-only ones too (cladefs_vfs_settle_frozen), the filesystem is
  * made durable, and holds its background work, compacting and freeing, which writes nothing until
  * it thaws: nothing is open on the device, the point a snapshot of the VM is taken at (cladefs's
- * TASK-39.1). With the first volume to thaw, it learns the device's branch, which a VM restored
+ * TASK-39.1). With the first volume to thaw, it learns the device's cell, which a VM restored
  * from the snapshot has its own of. With the lock held.
  */
 static int cladefs_vfs_filesystem_freeze(struct cladefs_vfs_filesystem *filesystem)

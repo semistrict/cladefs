@@ -2,22 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
+//! cladefs: the kept rounds (TASK-165.9's AC #4): a store keeping its cell in a bucket, its
 //! uploader uploading and acknowledging on a runtime's threads as the workload goes, crashes at a
-//! random version; then the branch is taken from the bucket alone, its disk lost, and the store is
+//! random version; then the cell is taken from the bucket alone, its disk lost, and the store is
 //! opened again from what the crash left. Taken from the bucket, it holds a prefix of the commits
 //! at least as late as the last its uploader acknowledged; opened from its disk, one at least as
-//! late as the last made durable, its write-ahead log following the branch, which the store
+//! late as the last made durable, its write-ahead log following the cell, which the store
 //! taking it fenced. Not a function of its seed alone, as the rounds of `rounds` are: the
 //! uploader's threads interleave with the workload as they will.
 //!
 //! cladefs: passes of the collector run over the bucket all along the workload, compacting, each
 //! after the last, on the host's runtime, as its collector would; one is cut at a random request
 //! of its, as the host dies under it ([`Cut`]); and a full pass runs after the crash, before the
-//! branch is taken and the store opened again (TASK-291.2). Once it was, passes run alone, and
+//! cell is taken and the store opened again (TASK-291.2). Once it was, passes run alone, and
 //! leave nothing they should have collected (TASK-390).
 
-use super::rounds::{BLOCK, BRANCH, Model, OPTIONS, workload};
+use super::rounds::{BLOCK, CELL, Model, OPTIONS, workload};
 use bucket_cell::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
 use bucket_cell::collector;
 use bucket_cell::fetch::{Budget, Limits};
@@ -43,7 +43,7 @@ pub const CUT_ROUNDS: u64 = 30;
 /// What the bucket's URL is to the store's description; the rounds hand the uploader the bucket.
 const URL: &str = "memory:///kept";
 
-/// A host's: its stores' uploaders' runtime, and the bucket their branches are kept in, as it
+/// A host's: its stores' uploaders' runtime, and the bucket their cells are kept in, as it
 /// reaches it: since its last crash, a copy of what the bucket held then ([`Host::crash`]).
 struct Host {
     runtime: tokio::runtime::Runtime,
@@ -81,7 +81,7 @@ impl Host {
     }
 
     /// The store `recovering` recovered, opened by an uploader uploading every `interval`, as
-    /// holder `holder` of its branch's head.
+    /// holder `holder` of its cell's head.
     fn open(
         &self,
         recovering: Recovering<MemDir>,
@@ -265,7 +265,7 @@ struct Crashed {
 }
 
 const DESCRIPTION: Description =
-    Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+    Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
 
 /// A store made on `host`, kept in its bucket, its uploader uploading every `interval`, crashing
 /// in a random workload, as `rng` says, as its file system fails from a random version on.
@@ -275,7 +275,7 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
     let (store, uploader) =
         host.open(LocalCell::recover_unmade(dir.clone()).unwrap(), 1, interval).unwrap();
     store.made().unwrap();
-    // The commits opening it made, the branch's capacity set, hold nothing.
+    // The commits opening it made, the cell's capacity set, hold nothing.
     let first = store.last_commit().unwrap() as usize;
     let mut epochs = vec![Model::default(); first + 1];
     let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..400).into() });
@@ -351,7 +351,7 @@ pub fn kept(round: u64) -> Found {
     let pass = collector::collect(&*bucket, 1 << 20, &COLLECTING);
     host.runtime.block_on(pass).unwrap_or_else(|err| panic!("round {round}: the pass: {err}"));
 
-    // Its disk lost, a store of the branch's on another host takes it from the bucket.
+    // Its disk lost, a store of the cell's on another host takes it from the bucket.
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
@@ -367,7 +367,7 @@ pub fn kept(round: u64) -> Found {
     drop(uploader);
     drop(taken);
 
-    // Its disk kept, the store opens again: its log follows the branch, which the taking fenced
+    // Its disk kept, the store opens again: its log follows the cell, which the taking fenced
     // past no commit, and what it made durable it holds.
     let reopened = reopened(&host, round, &crashed, crashed.dir.clone(), 3, (*durable).max(epoch));
     collected_alone(&host, round);

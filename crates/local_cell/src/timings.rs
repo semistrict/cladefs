@@ -238,17 +238,17 @@ pub fn timings() -> Timings {
     *TIMINGS.lock().unwrap()
 }
 
-/// A flush of a store of this process's, `flush`, of branch `branch`, ended: one past cladefsd's
+/// A flush of a store of this process's, `flush`, of cell `cell`, ended: one past cladefsd's
 /// turn said as it happens, what it synced with it, which a daemon killed leaves in its log.
-pub(crate) fn flushed(branch: u64, flush: &Flush) {
+pub(crate) fn flushed(cell: u64, flush: &Flush) {
     let Flush { phases, commits, synced } = flush;
     if phases.total_us() > 50_000 {
         let ms = |us: u64| us as f64 / 1000.0;
         log::warn!(
-            "extent store: branch {}'s flush of {commits} commits took {:.1} ms ({}); \
+            "extent store: cell {}'s flush of {commits} commits took {:.1} ms ({}); \
              synced {} own extents' files, the longest {:.1} ms, and {} raw files, the longest \
              {:.1} ms",
-            base32_id::Short(branch),
+            base32_id::Short(cell),
             ms(phases.total_us()),
             named(&FLUSH_PHASES, *phases),
             synced.files,
@@ -290,15 +290,15 @@ pub(crate) fn framed(
     TIMINGS.lock().unwrap().framings.record(phases);
 }
 
-/// cladefs: making `segments` segments of branch `branch` framed durable together took `phases`
+/// cladefs: making `segments` segments of cell `cell` framed durable together took `phases`
 /// (`segments::make_durable`, TASK-310): past cladefsd's turn, said as it happens, as a slow
 /// framing is ([`framed`]).
-pub(crate) fn made_durable(branch: u64, segments: usize, phases: Phases<4>) {
+pub(crate) fn made_durable(cell: u64, segments: usize, phases: Phases<4>) {
     if phases.total_us() > 50_000 {
         log::warn!(
-            "extent store: making branch {}'s {segments} segments framed durable took \
+            "extent store: making cell {}'s {segments} segments framed durable took \
              {:.1} ms ({})",
-            base32_id::Short(branch),
+            base32_id::Short(cell),
             phases.total_us() as f64 / 1000.0,
             named(&DURABLE_PHASES, phases)
         );

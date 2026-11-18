@@ -101,7 +101,7 @@ struct cladefs_device *cladefs_device_find(const char *tag, size_t len, struct c
 			 (virtio_extent_freeze(vext) ? CLADEFS_DEVICE_FREEZE : 0) |
 			 (virtio_extent_read_only(vext) ? CLADEFS_DEVICE_READ_ONLY : 0) |
 			 (virtio_extent_free_many(vext) ? CLADEFS_DEVICE_FREE_MANY : 0),
-		.branch = config->branch,
+		.cell = config->cell,
 		.max_extent = config->max_extent,
 	};
 	return dev;
@@ -132,7 +132,7 @@ int cladefs_device_submit(struct cladefs_device *dev, const struct cladefs_devic
 		return -ENOMEM;
 	r->req.type = op->type;
 	r->req.flags = op->flags;
-	r->req.id = (struct vext_id) { op->branch, op->sequence };
+	r->req.id = (struct vext_id) { op->cell, op->sequence };
 	r->req.offset = op->offset;
 	r->req.data = op->data;
 	r->req.data_len = op->len;
@@ -144,7 +144,7 @@ int cladefs_device_submit(struct cladefs_device *dev, const struct cladefs_devic
 	r->trace_id = cladefs_device_trace_id(trace_cladefs_device_submit_enabled());
 	if (op->type == VIRTIO_EXTENT_T_WRITE)
 		atomic64_add(op->len, &dev->unsealed_bytes);
-	trace_cladefs_device_submit(r->trace_id, op->type, op->flags, op->branch, op->sequence,
+	trace_cladefs_device_submit(r->trace_id, op->type, op->flags, op->cell, op->sequence,
 				 op->offset, op->len);
 	err = virtio_extent_submit(dev->vext, &r->req);
 	if (err) {
@@ -270,12 +270,12 @@ static int cladefs_device_map_one(struct cladefs_device *dev, const struct clade
 	req->flags = cladefs_device_map_flags(dev, map);
 	/* Zeros name no extent. */
 	if (!map->zeros)
-		req->id = (struct vext_id) { map->branch, map->sequence };
+		req->id = (struct vext_id) { map->cell, map->sequence };
 	req->offset = map->zeros ? 0 : map->offset;
 	req->len = map->len;
 	req->window_offset = map->window_offset;
 	id = cladefs_device_trace_id(trace_cladefs_window_map_start_enabled());
-	trace_cladefs_window_map_start(id, req->id.branch, req->id.sequence, req->offset, req->len,
+	trace_cladefs_window_map_start(id, req->id.cell, req->id.sequence, req->offset, req->len,
 				    req->window_offset, 1, map->zeros);
 	began = ktime_get_ns();
 	err = virtio_extent_call(dev->vext, req);
@@ -288,11 +288,11 @@ static int cladefs_device_map_one(struct cladefs_device *dev, const struct clade
 	return err;
 }
 
-int cladefs_device_map(struct cladefs_device *dev, u64 branch, u64 sequence, u64 offset, u64 len,
+int cladefs_device_map(struct cladefs_device *dev, u64 cell, u64 sequence, u64 offset, u64 len,
 		    u64 window_offset, bool prefault)
 {
 	const struct cladefs_device_map map = {
-		.branch = branch, .sequence = sequence, .offset = offset, .len = len,
+		.cell = cell, .sequence = sequence, .offset = offset, .len = len,
 		.window_offset = window_offset, .prefault = prefault,
 	};
 
@@ -373,7 +373,7 @@ static int cladefs_device_map_one_request(struct cladefs_device *dev, const stru
 		entries[i - 1] = (struct virtio_extent_map_entry) {
 			.map = {
 				.id = {
-					cpu_to_le64(maps[i].zeros ? 0 : maps[i].branch),
+					cpu_to_le64(maps[i].zeros ? 0 : maps[i].cell),
 					cpu_to_le64(maps[i].zeros ? 0 : maps[i].sequence),
 				},
 				.offset = cpu_to_le64(maps[i].zeros ? 0 : maps[i].offset),
@@ -385,7 +385,7 @@ static int cladefs_device_map_one_request(struct cladefs_device *dev, const stru
 	req->type = VIRTIO_EXTENT_T_MAP;
 	req->flags = VIRTIO_EXTENT_MAP_MANY | cladefs_device_map_flags(dev, &maps[0]);
 	if (!maps[0].zeros)
-		req->id = (struct vext_id) { maps[0].branch, maps[0].sequence };
+		req->id = (struct vext_id) { maps[0].cell, maps[0].sequence };
 	req->offset = maps[0].zeros ? 0 : maps[0].offset;
 	req->len = maps[0].len;
 	req->window_offset = maps[0].window_offset;
@@ -395,7 +395,7 @@ static int cladefs_device_map_one_request(struct cladefs_device *dev, const stru
 	if (id) {
 		for (i = 0, len = 0; i < count; i++)
 			len += maps[i].len;
-		trace_cladefs_window_map_start(id, req->id.branch, req->id.sequence, req->offset, len,
+		trace_cladefs_window_map_start(id, req->id.cell, req->id.sequence, req->offset, len,
 					    req->window_offset, count, maps[0].zeros);
 	}
 	began = ktime_get_ns();

@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Run the branches' tests against Azurite, Azure Blob Storage's emulator
+# Run the cells' tests against Azurite, Azure Blob Storage's emulator
 # (github.com/Azure/Azurite, MIT), on this machine (TASK-46): start it in a
 # container (docker, or podman: scripts/lib/containers.sh), create a container of
 # blobs with a request signed with the emulator's well-known key, run the Azure

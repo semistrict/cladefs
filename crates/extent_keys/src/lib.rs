@@ -5,7 +5,7 @@
 //! cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
 //! each of which wraps its cells' DEKs ([`Secret::wrap`]); an object's data is encrypted
-//! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
+//! ([`Aead`]) under a subkey of its cell's DEK ([`Secret::derive`]), from a salt of its own
 //! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]); raw files on local disk are
 //! encrypted a sector at a time ([`xts::Xts`]). Every primitive the workspace encrypts with is
 //! here, over aws-lc-rs, but AES-256-XTS, which it has not (`storage_xts` over `aes`), so that one
@@ -162,10 +162,10 @@ impl Salt {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Wrapped(pub Vec<u8>);
 
-/// Which DEK an object's subkey came from: its branch's, of that generation (doc-16, Keys).
+/// Which DEK an object's subkey came from: its cell's, of that generation (doc-16, Keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct KeyId {
-    pub branch: u64,
+    pub cell: u64,
     pub generation: u32,
 }
 

@@ -62,12 +62,12 @@ pub enum Fault {
     UploadFail,
     /// The bucket answering late: uploads lag behind the commits, which a lost host loses.
     Latency,
-    /// The host lost: its stores and cache taken away, every branch taken again from the bucket
+    /// The host lost: its stores and cache taken away, every cell taken again from the bucket
     /// by a daemon of a later placement.
     HostLoss,
     /// The host's cache of the bucket lost between two daemons.
     CacheLoss,
-    /// A VM's store deleted, its branch with it, and forked again from the base.
+    /// A VM's store deleted, its cell with it, and forked again from the base.
     Refork,
 }
 

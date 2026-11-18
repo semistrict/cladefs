@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A branch's segments (see the crate's docs): those it tracks, each where it is in its life
+//! A cell's segments (see the crate's docs): those it tracks, each where it is in its life
 //! ([`Phase`]), with the bytes of extents' data it holds; the open segment's closing, its footer
 //! of what the commits since it opened changed, each footer following the one before; cladefs: a
 //! closed segment's data framed, with its footer, off the commit that closed it, its log of the
@@ -16,7 +16,7 @@ use crate::framed::{Files, Framed, Source, read_parts};
 use crate::framing::{self, Look, Looked, Seen};
 use crate::held::Hold;
 use crate::layout::{
-    Change, Data, EXTENTS, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId, branch_dir,
+    Change, Data, EXTENTS, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId, cell_dir,
     extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number, segment_path,
     spare_path,
 };
@@ -61,7 +61,7 @@ impl Unsectored {
     }
 }
 
-/// Where a segment the branch tracks is in its life.
+/// Where a segment the cell tracks is in its life.
 enum Phase<F> {
     /// Taking writes, in its raw file; cladefs: its commits recorded in its log, which the flushes
     /// append to (TASK-165.9).
@@ -100,7 +100,7 @@ impl<F> Clone for Log<F> {
     }
 }
 
-/// A segment the branch tracks.
+/// A segment the cell tracks.
 struct Segment<F> {
     phase: Phase<F>,
     /// The bytes of its data.
@@ -112,8 +112,8 @@ struct Segment<F> {
     /// The writes to it in progress, and the bytes they reserved: neither live nor dead yet.
     writers: u64,
     pending: u64,
-    /// cladefs: the sealed extents the branch holds whose data is in it: what is read in the bucket
-    /// once it is acknowledged there, found without going through every extent the branch holds
+    /// cladefs: the sealed extents the cell holds whose data is in it: what is read in the bucket
+    /// once it is acknowledged there, found without going through every extent the cell holds
     /// (TASK-165.8).
     sealed: HashSet<ExtentId>,
     /// cladefs: the bytes of its raw file, from its start, whose writing back has begun, as the
@@ -195,7 +195,7 @@ impl<F> Segment<F> {
     }
 }
 
-/// The segments a branch tracks: those its extents' data is in, its own, taking writes or not,
+/// The segments a cell tracks: those its extents' data is in, its own, taking writes or not,
 /// and those it inherited that it holds otherwise than the state it shares does, having let
 /// extents in them go. It holds the others, untracked, as that state does. Its own segments' files
 /// it keeps open itself: the open segment's, and one's being framed, which their phases hold, and
@@ -210,7 +210,7 @@ impl<F> Segment<F> {
 pub(crate) struct Segments<F> {
     tracked: BTreeMap<SegmentId, Segment<F>>,
     /// cladefs: those reaping lets go of ([`Segment::is_empty`]), but for those kept: so that a commit
-    /// looks over them alone, not every segment the branch tracks, thousands as it grows
+    /// looks over them alone, not every segment the cell tracks, thousands as it grows
     /// (TASK-92.16).
     empty: BTreeSet<SegmentId>,
     /// The segment taking writes.
@@ -232,10 +232,10 @@ pub(crate) struct Segments<F> {
     cutting: Vec<NewVersion>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
-    /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
+    /// cladefs: the chain of the footers' writer, the writer of the cell in object storage, as the
     /// store opened, which stamps each footer with its place: its number, its writer's epoch
-    /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
-    /// numbered on from the segment open as the branch was opened, one for each segment closed.
+    /// and its floor of the cell's next sequence number. Without one, the footers are of epoch 0,
+    /// numbered on from the segment open as the cell was opened, one for each segment closed.
     chain: Chain,
     /// The closed segments' framed files kept open.
     files: Files<SegmentId, F>,
@@ -266,7 +266,7 @@ pub(crate) struct Segments<F> {
     /// TASK-333, TASK-384).
     prepared: Option<Placed<F>>,
     preparing: bool,
-    /// cladefs: what the salts of the logs this opening of the branch makes are of ([`new_salt`]).
+    /// cladefs: what the salts of the logs this opening of the cell makes are of ([`new_salt`]).
     lifetime: u64,
     /// cladefs: the store's keys, which its segments are framed and read under (TASK-411.3).
     keys: Arc<Ring>,
@@ -275,33 +275,33 @@ pub(crate) struct Segments<F> {
     seeing: Vec<(SegmentId, u64)>,
 }
 
-/// cladefs: how many spare logs a branch keeps ([`Segments::spare`]).
+/// cladefs: how many spare logs a cell keeps ([`Segments::spare`]).
 const SPARES: usize = 2;
 
-/// cladefs: a segment the branch let go of, no extent being in it any more, acknowledged in the
+/// cladefs: a segment the cell let go of, no extent being in it any more, acknowledged in the
 /// bucket, with its key there if its file is the object there, which goes into the host's cache
 /// (TASK-165.8).
 pub(crate) type Reaped = (SegmentId, Option<String>);
 
 impl<F: File> Segments<F> {
-    /// The segments of `branch`, opened as of commit `epoch`: those of its write-ahead log,
+    /// The segments of `cell`, opened as of commit `epoch`: those of its write-ahead log,
     /// `tracked`, each with the bytes of extents' data it holds, whose files must be there; and
     /// another, open, `next`, past them, whose raw file and log are made, their entries durable.
     /// Its footer, and those after it, `chain` stamps. At most `open_files` of their files stay
     /// open between reads. cladefs: framed and read under `keys`, the store's (TASK-411.3).
     pub fn open<D: Dir<File = F>>(
         dir: &D,
-        (branch, tracked): (u64, BTreeMap<SegmentId, u64>),
+        (cell, tracked): (u64, BTreeMap<SegmentId, u64>),
         (epoch, next, chain): (u64, u64, Chain),
         (open_files, keys): (usize, Arc<Ring>),
     ) -> Result<Self, Error> {
         let mut segments = BTreeMap::new();
         for (id, live) in tracked {
-            ensure!(id.branch == branch, "{id:?} is another branch's");
+            ensure!(id.cell == cell, "{id:?} is another cell's");
             let path = segment_path(id);
             let file = dir.open(&path, true).with_context(|| format!("segment {path}"))?;
             // cladefs: its trailer and table, a block, not its footer (TASK-92.16).
-            let parts = read_parts(&file, &keys.of(branch))?
+            let parts = read_parts(&file, &keys.of(cell))?
                 .ok_or_else(|| anyhow!("{path} is not a whole framed file"))?;
             let segment = Segment {
                 len: parts.frame.data_len,
@@ -310,14 +310,14 @@ impl<F: File> Segments<F> {
             };
             segments.insert(id, segment);
         }
-        let open = SegmentId { branch, number: next };
-        let logs = dir.list(&branch_dir(LOGS, branch))?;
+        let open = SegmentId { cell, number: next };
+        let logs = dir.list(&cell_dir(LOGS, cell))?;
         let spared =
             logs.iter().filter_map(|name| name.strip_prefix(SPARE)).filter_map(parse_number);
-        let mut spares: Vec<_> = spared.map(|number| SegmentId { branch, number }).collect();
+        let mut spares: Vec<_> = spared.map(|number| SegmentId { cell, number }).collect();
         let lifetime = {
             let mut bytes = [0; 24];
-            for (at, word) in [branch, epoch, next].into_iter().enumerate() {
+            for (at, word) in [cell, epoch, next].into_iter().enumerate() {
                 bytes[at * 8..][..8].copy_from_slice(&word.to_le_bytes());
             }
             rapidhash::rapidhash(&bytes)
@@ -325,7 +325,7 @@ impl<F: File> Segments<F> {
         let salt = new_salt(lifetime, open);
         let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, keys.encrypting())?;
         for kind in [OPEN_SEGMENTS, LOGS] {
-            dir.sync_dir(&branch_dir(kind, branch))?;
+            dir.sync_dir(&cell_dir(kind, cell))?;
         }
         segments.insert(open, Segment::new(phase, 0));
         Ok(Self {
@@ -338,7 +338,7 @@ impl<F: File> Segments<F> {
             close_wanted: false,
             forking: Vec::new(),
             cutting: Vec::new(),
-            window: Window::starting(branch, epoch + 1),
+            window: Window::starting(cell, epoch + 1),
             chain,
             files: Files::new(open_files),
             written: false,
@@ -679,9 +679,9 @@ impl<F: File> Segments<F> {
         windows.flat_map(|window| window.sealed.values()).map(|(_, len)| len).sum()
     }
 
-    /// Records commit `epoch`, which changed `changes`, and set its root and the branch's
-    /// capacity, if it set them, `extents` the branch's extents as of it, its extents sealed in
-    /// the open segment or in files of their own, `next_sequence` the branch's next sequence
+    /// Records commit `epoch`, which changed `changes`, and set its root and the cell's
+    /// capacity, if it set them, `extents` the cell's extents as of it, its extents sealed in
+    /// the open segment or in files of their own, `next_sequence` the cell's next sequence
     /// number: its contents, as the chain tags it, fold into the open segment's footer to be
     /// ([`Window`]), with the forks it makes ([`Segments::close_for_fork`]). cladefs: and those it
     /// sealed in one run of a segment filled since the last commit, the runs it goes on with, into
@@ -730,7 +730,7 @@ impl<F: File> Segments<F> {
         open.writers == 0 && (open.len >= options.segment_size || old || self.close_wanted)
     }
 
-    /// Closes the open segment, after commit `epoch`, the branch's next sequence number
+    /// Closes the open segment, after commit `epoch`, the cell's next sequence number
     /// `next_sequence`: its footer, of what the commits since it opened changed, stamped by the
     /// chain, after its data, to be framed in a file of its own, as object storage keeps segments;
     /// and opens the next, in `dir`. Nothing changes if it fails.
@@ -747,8 +747,7 @@ impl<F: File> Segments<F> {
         let placing = (&mut self.spares, &mut self.prepared);
         let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
         // Nothing fails from here on.
-        let window =
-            std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
+        let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         // What was written to it since the last commit, the next flush syncs, before it appends
         // the records of the commits in it to its log (TASK-165.9): little, written back as it
         // was written (`write_behind`), where the sync wrote it all at once beside the framing,
@@ -809,7 +808,7 @@ impl<F: File> Segments<F> {
 
     /// cladefs: segment `number`, open or full, closes after commit `epoch`, the last whose data is
     /// in it ([`Phase::Framing`]): its footer, of what `window` folds, naming `last`, its last
-    /// commit, if any, stamped by the chain, the branch's next sequence number `next_sequence`;
+    /// commit, if any, stamped by the chain, the cell's next sequence number `next_sequence`;
     /// its raw file synced by the next flush, if `written` since the last commit. Its data, unless no extent's
     /// is in it, nor write in progress, which is framed then as none, its footer alone: a segment
     /// filled whose extents a commit copied out, or freed.
@@ -857,8 +856,7 @@ impl<F: File> Segments<F> {
         let salt = new_salt(self.lifetime, next);
         let placing = (&mut self.spares, &mut self.prepared);
         let (phase, synced) = create_open(dir, next, placing, salt, self.keys.encrypting())?;
-        let window =
-            std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
+        let window = std::mem::replace(&mut self.window, Window::starting(number.cell, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
         let Phase::Open { raw, log } = &segment.phase else {
             unreachable!("the open segment is open")
@@ -1059,7 +1057,7 @@ impl<F: File> Segments<F> {
     /// ([`Segments::placed_synced`]), the preparation running until then; or, one prepared for a
     /// segment opened meanwhile, with a log of its own, the next's to prepare then, of the log
     /// prepared, the preparation going on; or, one failed, the spare it took a spare again, if the
-    /// branch keeps another ([`SPARES`]), else its name to remove, the preparation ended.
+    /// cell keeps another ([`SPARES`]), else its name to remove, the preparation ended.
     pub fn prepared<D: Dir<File = F>>(
         &mut self,
         dir: &D,
@@ -1155,7 +1153,7 @@ impl<F: File> Segments<F> {
         self.preparing
     }
 
-    /// cladefs: whether the branch keeps another spare log ([`SPARES`]).
+    /// cladefs: whether the cell keeps another spare log ([`SPARES`]).
     pub fn wants_spare(&self) -> bool {
         self.spares.len() < SPARES
     }
@@ -1186,7 +1184,7 @@ impl<F: File> Segments<F> {
             return Ok(Source::Framed(framed));
         }
         let path = segment_path(number);
-        let keys = self.keys.of(number.branch);
+        let keys = self.keys.of(number.cell);
         let framed = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
         Ok(Source::Framed(self.files.insert(number, framed)))
     }
@@ -1218,7 +1216,7 @@ impl<F: File> Segments<F> {
             return BTreeSet::new();
         }
         for kind in [OPEN_SEGMENTS, LOGS] {
-            syncs.dir(branch_dir(kind, self.open.branch));
+            syncs.dir(cell_dir(kind, self.open.cell));
         }
         self.unsynced_entries.clone()
     }
@@ -1254,7 +1252,7 @@ impl<F: File> Segments<F> {
     }
 
     /// cladefs: panics unless what it counts of the segments it tracks is what `recount` says they
-    /// hold, as the branch holds them; and it tracks every segment the branch holds extents in
+    /// hold, as the cell holds them; and it tracks every segment the cell holds extents in
     /// (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
     pub fn audit(&self, recount: &Recount) {
@@ -1271,8 +1269,8 @@ impl<F: File> Segments<F> {
     }
 }
 
-/// cladefs: what each segment holds, recounted from what the branch holds, for [`Segments::audit`]
-/// (TASK-160.16): the pieces of extents' data in it, of the extents the branch holds, open or
+/// cladefs: what each segment holds, recounted from what the cell holds, for [`Segments::audit`]
+/// (TASK-160.16): the pieces of extents' data in it, of the extents the cell holds, open or
 /// sealed, and of those it keeps, freed; and the extents sealed in it.
 #[cfg(any(test, feature = "audit"))]
 #[derive(Default)]
@@ -1285,7 +1283,7 @@ use crate::layout::Extent;
 
 #[cfg(any(test, feature = "audit"))]
 impl Recount {
-    /// The branch holds `extent` as `entry` says, sealed if `sealed`, or open.
+    /// The cell holds `extent` as `entry` says, sealed if `sealed`, or open.
     pub fn holds(&mut self, extent: ExtentId, entry: &Extent, sealed: bool) {
         let Data::Pieces(pieces) = &entry.data else { return };
         for piece in pieces {
@@ -1297,7 +1295,7 @@ impl Recount {
         }
     }
 
-    /// The branch keeps `entry`'s data, freed.
+    /// The cell keeps `entry`'s data, freed.
     pub fn keeps(&mut self, entry: &Extent) {
         let Data::Pieces(pieces) = &entry.data else { return };
         for piece in pieces {
@@ -1317,7 +1315,7 @@ pub(crate) struct Unframed<F> {
     /// cladefs: whether no write was in progress in it as it closed, none to come: what framing it
     /// in place needs, which leaves its data where it is (TASK-310).
     quiet: bool,
-    /// cladefs: the store's keys, whose newest DEK of its branch it is encrypted under, if any
+    /// cladefs: the store's keys, whose newest DEK of its cell it is encrypted under, if any
     /// (TASK-411.3).
     keys: Arc<Ring>,
 }
@@ -1354,7 +1352,7 @@ impl<F: File> Unframed<F> {
         let mut own = Syncs::default();
         for (extent, _) in self.footer.own() {
             own.file(Arc::new(dir.open(&extent_path(extent), true)?));
-            own.dir(branch_dir(EXTENTS, self.number.branch));
+            own.dir(cell_dir(EXTENTS, self.number.cell));
         }
         own.sync(dir)?;
         timing.took(framing_phase::OWN);
@@ -1370,7 +1368,7 @@ impl<F: File> Unframed<F> {
     }
 }
 
-/// cladefs: makes `framed`, segments of `branch` framed since the last such call, whose framings
+/// cladefs: makes `framed`, segments of `cell` framed since the last such call, whose framings
 /// wrote them, the oldest written at `since`, durable together: each framed file synced, several
 /// at once, then renamed its segment's ([`framing_path`]), and the directory of framed files, their
 /// entries, synced once for them all (TASK-310); first, if `entries`, the directories of raw files
@@ -1381,14 +1379,14 @@ impl<F: File> Unframed<F> {
 /// disk VMs share keeps full, 2-4 s each with eight VMs writing at once, the framings after it
 /// waiting (TASK-92.41's A/B on ubu1). The segments' framings end once it returns: what waits for
 /// their framed files to be durable waits for that (the uploader, a closing between commits, a
-/// branch's closing), and their raw files and logs go no sooner, as before. A crash meanwhile may
+/// cell's closing), and their raw files and logs go no sooner, as before. A crash meanwhile may
 /// keep any of the framed files whole, each torn or not as the others are, under its own name or
 /// its segment's: an opening removes the first, and reads one whole only while those before it
 /// are whole too, checking each whose raw file is still there, and closes again from its raw file
 /// and log any after the first that isn't (`wal::recover`).
 pub(crate) fn make_durable<D: Dir>(
     dir: &D,
-    branch: u64,
+    cell: u64,
     (framed, entries): (&[(SegmentId, Arc<Framed<D::File>>)], bool),
     since: Instant,
 ) -> Result<(), Error> {
@@ -1399,7 +1397,7 @@ pub(crate) fn make_durable<D: Dir>(
     if entries {
         let mut opened = Syncs::default();
         for kind in [OPEN_SEGMENTS, LOGS] {
-            opened.dir(branch_dir(kind, branch));
+            opened.dir(cell_dir(kind, cell));
         }
         opened.sync_dirs(dir)?;
     }
@@ -1416,7 +1414,7 @@ pub(crate) fn make_durable<D: Dir>(
         write_back_by_pieces(&*framed.file)?;
         syncs.file(framed.file.clone());
     }
-    syncs.dir(branch_dir(SEGMENTS, branch));
+    syncs.dir(cell_dir(SEGMENTS, cell));
     syncs.sync_files(dir)?;
     timing.took(durable::FILES);
     for &(number, _) in framed {
@@ -1426,7 +1424,7 @@ pub(crate) fn make_durable<D: Dir>(
     syncs.sync_dirs(dir)?;
     dir.barrier()?;
     timing.took(durable::DIRS);
-    timings::made_durable(branch, framed.len(), timing.end());
+    timings::made_durable(cell, framed.len(), timing.end());
     Ok(())
 }
 
@@ -1537,7 +1535,7 @@ impl Ahead {
 /// writers waiting behind it, on a disk VMs share. Or else in a file of its own, as before. Its
 /// parts looked at `ahead`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a
 /// copy, and not those packed then, held still (TASK-400). cladefs: encrypted, if `encrypting` gives a
-/// DEK, its branch's newest: in a copy, its parts compressed and encrypted with AES-GCM (TASK-411.3);
+/// DEK, its cell's newest: in a copy, its parts compressed and encrypted with AES-GCM (TASK-411.3);
 /// in place as in the clear, its raw file, encrypted, AES-256-XTS by sector, the object of its
 /// sectors as they are, each part tagged ([`extent_frame::Encryption::Sectors`], TASK-411.23). Framed in
 /// a copy, an encrypted segment wrote every byte twice, the guests' writes 1.9 times over on
@@ -1684,8 +1682,8 @@ fn frame_in_place<D: Dir>(
 }
 
 /// What commit `changes` made, as the footer of `segment`, the open segment, names it: the extents
-/// it sealed or moved, which the branch holds as of it, `extents`, each in one run of `segment`
-/// or in a file of its own, the branch's, by its sequence number; and of its frees, those of
+/// it sealed or moved, which the cell holds as of it, `extents`, each in one run of `segment`
+/// or in a file of its own, the cell's, by its sequence number; and of its frees, those of
 /// extents a commit held, which the store spent, if its own: so that the footer's readers spend
 /// all it frees, as the store did (TASK-160.15). Those of extents written in it, open, it frees
 /// not: no commit held them, nor names them, and the store writes them again. Those held
@@ -1734,7 +1732,7 @@ fn commit_contents(
                 }
             }
             Data::Own => {
-                ensure!(extent.branch == segment.branch, "{extent:?} is another branch's");
+                ensure!(extent.cell == segment.cell, "{extent:?} is another cell's");
                 contents.own.push((extent.sequence, entry.len));
             }
             Data::Bucket(_) => {}
@@ -1748,7 +1746,7 @@ fn commit_contents(
 type Run = (ExtentId, u64, u64);
 
 /// What the commits since a segment opened made, as its footer says: their contents
-/// ([`commit_contents`]) folded, each over those before, so that applying it to the branch's state
+/// ([`commit_contents`]) folded, each over those before, so that applying it to the cell's state
 /// as of any of those commits gives its state as of the last. cladefs: one fold, of the commits as
 /// they are made and of the records of a segment's log of them alike (TASK-165.9).
 #[derive(Default)]
@@ -1757,9 +1755,9 @@ struct Window {
     first: u64,
     /// cladefs: its last commit's, if it has one: the commit its footer names (TASK-92.41).
     last: Option<u64>,
-    /// The branch whose extents are stored on their own.
-    branch: u64,
-    /// The extents its commits sealed, which the branch holds as of its last, where they sealed
+    /// The cell whose extents are stored on their own.
+    cell: u64,
+    /// The extents its commits sealed, which the cell holds as of its last, where they sealed
     /// them: in a run of its segment's data, at an offset, of a length, or on their own, of a
     /// length.
     sealed: BTreeMap<ExtentId, (Option<u64>, u64)>,
@@ -1777,8 +1775,8 @@ struct Window {
 }
 
 impl Window {
-    fn starting(branch: u64, first: u64) -> Self {
-        Self { first, branch, ..Self::default() }
+    fn starting(cell: u64, first: u64) -> Self {
+        Self { first, cell, ..Self::default() }
     }
 
     /// Folds `commit`'s contents over those of the commits before it: its frees take out what
@@ -1792,7 +1790,7 @@ impl Window {
         let own = commit
             .own
             .iter()
-            .map(|&(sequence, len)| (ExtentId::new(self.branch, sequence), (None, len)));
+            .map(|&(sequence, len)| (ExtentId::new(self.cell, sequence), (None, len)));
         let runs =
             commit.extents.iter().map(|&(extent, offset, len)| (extent, (Some(offset), len)));
         for (extent, sealed) in runs.chain(own).collect::<Vec<_>>() {
@@ -1840,12 +1838,12 @@ impl Window {
     }
 }
 
-/// cladefs: the contents of a segment of `branch`'s whose commits' contents are `commits`, in order,
+/// cladefs: the contents of a segment of `cell`'s whose commits' contents are `commits`, in order,
 /// as its footer names them: their last commit, and the largest next sequence number they name
 /// (TASK-165.9). The one fold of a segment's commits ([`Window`]), of a log of them as of the
 /// commits as they are made.
-pub(crate) fn fold(branch: u64, commits: &[Contents]) -> Contents {
-    let mut window = Window::starting(branch, 0);
+pub(crate) fn fold(cell: u64, commits: &[Contents]) -> Contents {
+    let mut window = Window::starting(cell, 0);
     for commit in commits {
         window.fold(commit);
     }
@@ -1891,7 +1889,7 @@ pub(crate) enum Preparing {
     /// Its segment opened meanwhile, with a log of its own: the next's to prepare, of the log it
     /// made, the preparation running on (TASK-404).
     Again(Preparation),
-    /// The preparation ended, a spare log's name to remove, if it left one the branch keeps not.
+    /// The preparation ended, a spare log's name to remove, if it left one the cell keeps not.
     Ended(Option<SegmentId>),
 }
 
@@ -1972,7 +1970,7 @@ fn create_open<D: Dir>(
         let log = Log { file: Arc::new(ready.log), salt, encryption: ready.encryption };
         return Ok((Phase::Open { raw, log }, ready.synced));
     }
-    // cladefs: encrypted, as every store is, under its branch's newest DEK (TASK-411.5).
+    // cladefs: encrypted, as every store is, under its cell's newest DEK (TASK-411.5).
     let encryption = new_encryption(encrypting);
     let raw =
         Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, encryption.clone()));
@@ -2003,7 +2001,7 @@ fn create_open<D: Dir>(
     Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, encryption } }, false))
 }
 
-/// cladefs: the encryption of a new segment's raw file and log, under `encrypting`'s DEK, its branch's
+/// cladefs: the encryption of a new segment's raw file and log, under `encrypting`'s DEK, its cell's
 /// newest, from a salt of their own (TASK-411.5).
 fn new_encryption((dek, key): bucket_cell::layout::EncryptionKey<'_>) -> Arc<RawEncryption> {
     Arc::new(RawEncryption::new(dek, key))
@@ -2019,7 +2017,7 @@ pub(crate) fn footer_last(footer: &Footer) -> u64 {
 }
 
 /// The footer of a closed segment, `bytes`: none if the segment closed with none, as one whose
-/// footer named commits not durable, which opening its branch closes again.
+/// footer named commits not durable, which opening its cell closes again.
 pub(crate) fn segment_footer(bytes: &[u8]) -> Result<Option<Footer>, Error> {
     if bytes.is_empty() {
         return Ok(None);
@@ -2074,25 +2072,25 @@ mod tests {
     use super::*;
     use crate::dir::read_file;
     use crate::framed::read_whole;
-    use crate::layout::create_branch_dirs;
+    use crate::layout::create_cell_dirs;
     use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = SECTOR;
-    const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+    const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 
     fn segment(number: u64) -> SegmentId {
-        SegmentId { branch: BRANCH.id, number }
+        SegmentId { cell: CELL.id, number }
     }
 
-    /// The segments of a branch with none closed, `open_files` of whose files stay open.
+    /// The segments of a cell with none closed, `open_files` of whose files stay open.
     fn opened(dir: &MemDir, open_files: usize) -> Segments<MemFile> {
-        create_branch_dirs(dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 0, 0, 0);
+        create_cell_dirs(dir, CELL.id).unwrap();
+        let chain = Chain::new(CELL, 0, 0, 0);
         Segments::open(
             dir,
-            (BRANCH.id, BTreeMap::new()),
+            (CELL.id, BTreeMap::new()),
             (0, 0, chain),
-            (open_files, bucket_cell::testing::ring([BRANCH])),
+            (open_files, bucket_cell::testing::ring([CELL])),
         )
         .unwrap()
     }
@@ -2101,7 +2099,7 @@ mod tests {
     fn framed_durably(dir: &MemDir, unframed: Unframed<MemFile>) -> Arc<Framed<MemFile>> {
         let number = unframed.number();
         let framed = unframed.frame(dir, Vec::new()).unwrap();
-        make_durable(dir, BRANCH.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
+        make_durable(dir, CELL.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
         framed
     }
 
@@ -2133,7 +2131,7 @@ mod tests {
             Source::Raw(file) => read_file(&*file).unwrap(),
             Source::Framed(framed) => extent_frame::data(
                 &read_whole(&*framed.file).unwrap(),
-                &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+                &bucket_cell::testing::ring([CELL]).of(CELL.id),
             )
             .unwrap(),
         }
@@ -2297,19 +2295,19 @@ mod tests {
         let framed = unframed.frame(&dir, seen).unwrap();
         assert_eq!(framing_reads().0 - before.0, BLOCK, "the last part alone read");
         assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
-        make_durable(&dir, BRANCH.id, (&[(segment(0), framed.clone())], false), Instant::now())
+        make_durable(&dir, CELL.id, (&[(segment(0), framed.clone())], false), Instant::now())
             .unwrap();
         segments.framed(segment(0), framed);
         assert_eq!(data(&mut segments, &dir, segment(0)), raw_data, "framed as it was written");
     }
 
-    /// The segments of an encrypted branch, under `dek`, with none closed, and its keys.
+    /// The segments of an encrypted cell, under `dek`, with none closed, and its keys.
     fn encrypted_opened(dir: &MemDir, dek: [u8; 32]) -> (Segments<MemFile>, Arc<Ring>) {
-        create_branch_dirs(dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 0, 0, 0);
+        create_cell_dirs(dir, CELL.id).unwrap();
+        let chain = Chain::new(CELL, 0, 0, 0);
         let keys =
-            Ring::encrypting_for_tests(BRANCH.id, 1, extent_frame::Secret::from_bytes(&dek), []);
-        let tracked = (BRANCH.id, BTreeMap::new());
+            Ring::encrypting_for_tests(CELL.id, 1, extent_frame::Secret::from_bytes(&dek), []);
+        let tracked = (CELL.id, BTreeMap::new());
         let segments = Segments::open(dir, tracked, (0, 0, chain), (64, keys.clone())).unwrap();
         (segments, keys)
     }
@@ -2341,7 +2339,7 @@ mod tests {
     /// cladefs: TASK-400 in an encrypted store (TASK-411.23, TASK-421): an encrypted segment's parts that
     /// compress, written whole or appended, are looked at ahead, packed and held, in the clear, in
     /// memory; its framing in a copy reads none of them back, and encrypts them under its object's
-    /// key, the bytes it framed opening to its data under the branch's key. No file holds its
+    /// key, the bytes it framed opening to its data under the cell's key. No file holds its
     /// data in the clear.
     #[test]
     fn encrypted_segments_parts_are_held_ahead_and_encrypted_framing() {
@@ -2375,17 +2373,17 @@ mod tests {
         assert!(object.len() < 2 * PART as usize, "compressed: {} bytes", object.len());
         let encryption = extent_frame::Frame::of(&object).unwrap().encryption;
         assert!(
-            matches!(encryption, extent_frame::Encryption::Encrypted { key, .. } if key == extent_frame::KeyId { branch: BRANCH.id, generation: 1 }),
+            matches!(encryption, extent_frame::Encryption::Encrypted { key, .. } if key == extent_frame::KeyId { cell: CELL.id, generation: 1 }),
             "{encryption:?}"
         );
-        assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), text);
+        assert_eq!(extent_frame::data(&object, &keys.of(CELL.id)).unwrap(), text);
         assert_eq!(in_the_clear(&dir, &text), Vec::<String>::new());
     }
 
     /// cladefs: TASK-411.23: an encrypted segment of noise is framed in place as a clear one is (TASK-310,
     /// TASK-400): its parts seen ahead as stored, the last alone read, its raw file its framed file,
     /// nothing of its data written again but its tail; the object of its raw file's XTS sectors,
-    /// under the raw file's DEK and salt, which opens to its data under the branch's key, to none
+    /// under the raw file's DEK and salt, which opens to its data under the cell's key, to none
     /// without it, and holds none of it in the clear.
     #[test]
     fn encrypted_segments_of_noise_are_framed_in_place() {
@@ -2415,14 +2413,13 @@ mod tests {
         let tail = object.len() as u64 - noise.len() as u64;
         assert_eq!(crate::written().framed - before.2, tail, "its tail alone written");
         let frame = extent_frame::Frame::of(&object).unwrap();
-        let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
+        let key = extent_frame::KeyId { cell: CELL.id, generation: 1 };
         assert_eq!(frame.encryption, extent_frame::Encryption::Sectors { key, salt });
-        assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), noise);
+        assert_eq!(extent_frame::data(&object, &keys.of(CELL.id)).unwrap(), noise);
         let locked = extent_frame::data(&object, &extent_frame::NoKeys);
         assert_eq!(locked, Err(extent_frame::Error::NoKey(key)));
         assert_eq!(in_the_clear(&dir, &noise), Vec::<String>::new());
-        make_durable(&dir, BRANCH.id, (&[(number, framed.clone())], false), Instant::now())
-            .unwrap();
+        make_durable(&dir, CELL.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
         segments.framed(number, framed);
         let Source::Framed(read) = segments.source(&dir, number).unwrap() else { panic!() };
         let parts = &read.parts;
@@ -2443,13 +2440,13 @@ mod tests {
     fn footers_chain_from_their_writers_chain() {
         use extent_frame::segment::tag;
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 3, 5, 100);
+        create_cell_dirs(&dir, CELL.id).unwrap();
+        let chain = Chain::new(CELL, 3, 5, 100);
         let segments = Segments::open(
             &dir,
-            (BRANCH.id, BTreeMap::new()),
+            (CELL.id, BTreeMap::new()),
             (0, 2, chain),
-            (64, bucket_cell::testing::ring([BRANCH])),
+            (64, bucket_cell::testing::ring([CELL])),
         );
         let mut segments = segments.unwrap();
         assert_eq!(segments.open_segment(), segment(2));
@@ -2512,7 +2509,7 @@ mod tests {
         use extent_frame::segment::tag;
         let dir = MemDir::new();
         let mut segments = opened(&dir, 64);
-        let (first, second) = (ExtentId::new(BRANCH.id, 1), ExtentId::new(BRANCH.id, 2));
+        let (first, second) = (ExtentId::new(CELL.id, 1), ExtentId::new(CELL.id, 2));
         let mut extents = Extents::default();
         let mut commit = |segments: &mut Segments<MemFile>, epoch, extent, piece: Piece| {
             let data = Data::Pieces(vec![piece]);
@@ -2683,7 +2680,7 @@ mod tests {
         assert_eq!(syncs(&mut segments), ((0, 0), vec![]));
         write(&mut segments, 2);
         segments.close(&dir, 1, 0).unwrap();
-        let dirs = vec![branch_dir(LOGS, BRANCH.id), branch_dir(OPEN_SEGMENTS, BRANCH.id)];
+        let dirs = vec![cell_dir(LOGS, CELL.id), cell_dir(OPEN_SEGMENTS, CELL.id)];
         assert_eq!(syncs(&mut segments), ((0, 1), dirs));
         segments.append(BLOCK).unwrap();
         assert_eq!(syncs(&mut segments), ((0, 1), vec![]));

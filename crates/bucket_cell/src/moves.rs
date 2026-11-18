@@ -4,7 +4,7 @@
 
 //! The collector's moves (doc-7, Layout): where the live extents of an object it compacted went,
 //! which a reader that finds the object gone follows, a writer records in its next checkpoint, and
-//! the collector keeps while a branch's way to its extents goes through them.
+//! the collector keeps while a cell's way to its extents goes through them.
 
 use crate::bucket::{self, Bucket};
 use crate::layout::{self, Location, Moves};
@@ -21,7 +21,7 @@ pub enum Moved {
     /// It did not compact the object.
     No,
     To(Location),
-    /// It compacted the object and left the extent out: no live branch held it.
+    /// It compacted the object and left the extent out: no live cell held it.
     Dropped,
 }
 
@@ -36,7 +36,7 @@ const READ_AT_ONCE: usize = 32;
 
 impl MovesMaps {
     /// Reads the moves of the objects at `keys` not read yet: a checkpoint follows every extent of
-    /// its branch, each object's a round trip, which one at a time, as the branch grew, held the
+    /// its cell, each object's a round trip, which one at a time, as the cell grew, held the
     /// uploader up for tens of seconds at 25 ms of latency (TASK-91.2). Few objects have moves:
     /// a listing of each of the keys' prefixes' says which, whose moves are read, several at once.
     /// A collector's moves written since are missed, as a read of them before they were would.
@@ -120,7 +120,7 @@ impl MovesMaps {
         location: &Location,
     ) -> Result<Location, Error> {
         let mut location = location.clone();
-        // An extent the collector dropped no live branch held.
+        // An extent the collector dropped no live cell held.
         while let Moved::To(to) = self.moved(bucket, extent, &location.key).await? {
             location = to;
         }

@@ -35,13 +35,13 @@ fn bounds() -> Bounds {
 }
 
 /// Makes this process a host of the multi-node system, as an extent daemon's must be: its stores'
-/// branches in a bucket in its memory, as of placement 1, unless the test's environment names
+/// cells in a bucket in its memory, as of placement 1, unless the test's environment names
 /// others (scripts/test.sh's firecracker part names memory:///vmm). The daemon logs to standard
 /// error, which a failed test shows: its EIO opening a store with no bucket named said nothing of
 /// why (cladefs TASK-220).
 fn host() {
     let _ = cladefs::cladefsd::logging::to_stderr();
-    for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
+    for (name, value) in [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.
@@ -174,7 +174,7 @@ fn read<T: FromBytes>(bytes: &[u8]) -> T {
 
 fn io(store: &CellClient, sequence: u64, offset: u64, len: usize) -> IoArgs {
     IoArgs {
-        id: ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() },
+        id: ExtentIdLe { cell: store.cell().to_le(), sequence: sequence.to_le() },
         offset: offset.to_le(),
         len: (len as u32).to_le(),
         root_len: 0,
@@ -272,9 +272,9 @@ fn frees_many_in_one_request() {
     let data = vec![7; BLOCK];
     let ids: Vec<ExtentIdLe> = (1..=EXTENTS)
         .map(|sequence| {
-            let id = cladefs::ExtentId { branch: store.branch(), sequence };
+            let id = cladefs::ExtentId { cell: store.cell(), sequence };
             store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
-            ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() }
+            ExtentIdLe { cell: store.cell().to_le(), sequence: sequence.to_le() }
         })
         .collect();
     store.commit(None).unwrap();
@@ -330,15 +330,15 @@ fn roots_and_info() {
             used: 0,
             available: (1u64 << 20).to_le(),
             next_sequence: 0,
-            // The store's branch is kept in the daemon's bucket: its writer mints from its range,
+            // The store's cell is kept in the daemon's bucket: its writer mints from its range,
             // its first taking's (cladefs's doc-7, The head).
             sequence_floor: (1u64 << 40).to_le(),
-            branch: store.branch().to_le(),
+            cell: store.cell().to_le(),
         }
     );
-    // cladefs: room for what comes before the branch alone, as a driver without F_FREEZE had, is
+    // cladefs: room for what comes before the cell alone, as a driver without F_FREEZE had, is
     // refused (TASK-141.3).
-    let short = std::mem::offset_of!(Info, branch);
+    let short = std::mem::offset_of!(Info, cell);
     assert_eq!(request(&store, &info, short + RESPONSE).1, errno(Errno::EINVAL));
 
     // cladefs: a WRITE's commit sets the root after its data, which isn't the data's; there is no
@@ -352,7 +352,7 @@ fn roots_and_info() {
     assert_eq!(status, 0);
     assert_eq!(&written[..6], b"second");
     let mut back = vec![0; BLOCK];
-    let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
+    let id = cladefs::ExtentId { cell: store.cell(), sequence: 1 };
     store.read(id, 0, &mut [cladefs::VolatileSliceMut::from(&mut back[..])]).unwrap();
     assert_eq!(back, data);
     let uncommitted = bytes(
@@ -378,7 +378,7 @@ fn follows_a_writer() {
         let _ = heard.send(committed);
     });
     let data = vec![7; BLOCK];
-    let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
+    let id = cladefs::ExtentId { cell: store.cell(), sequence: 1 };
     store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
     store.commit(None).unwrap();
     let committed = commits.recv().unwrap();
@@ -419,7 +419,7 @@ fn follows_a_writer() {
 }
 
 /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
-/// it may name, of extents of its branch or another's, at offsets near the store's ends or at the
+/// it may name, of extents of its cell or another's, at offsets near the store's ends or at the
 /// ends of a u64, the device answers it, with a status, no more than the room it was given
 /// written, and goes on serving. Seeded by proptest, which says the case if one fails.
 #[test]
@@ -437,8 +437,8 @@ fn answers_whatever_a_driver_asks() {
             (0u64..4096).prop_map(|back| u64::MAX - back)
         ]
     };
-    let branch = prop_oneof![Just(store.branch()), any::<u64>()];
-    let args = (branch, 0u64..64, near_or_far(), near_or_far(), any::<u32>());
+    let cell = prop_oneof![Just(store.cell()), any::<u64>()];
+    let args = (cell, 0u64..64, near_or_far(), near_or_far(), any::<u32>());
     let word = || prop_oneof![0u32..18, any::<u32>()];
     let data = proptest::collection::vec(any::<u8>(), 0..2 * BLOCK);
     let requests = (word(), word(), args, data, 0usize..4 * BLOCK);
@@ -447,9 +447,9 @@ fn answers_whatever_a_driver_asks() {
     let served = AtomicU32::new(0);
     TestRunner::new(config)
         .run(&requests, |(type_, flags, args, data, room)| {
-            let (branch, sequence, first, second, last) = args;
+            let (cell, sequence, first, second, last) = args;
             let mut readable = bytes::<Info>(type_, flags, None, &[]);
-            for word in [branch, sequence, first, second, u64::from(last)] {
+            for word in [cell, sequence, first, second, u64::from(last)] {
                 readable.extend_from_slice(&word.to_le_bytes());
             }
             readable.extend_from_slice(&data);
@@ -626,7 +626,7 @@ fn serve_with(device: &Device, readable: &[u8], writable: usize) -> (u32, u32) {
     (len, u32::from_le(response.status))
 }
 
-/// A writer's device opens its store, says its version, tag, queues, branch and capacity in its
+/// A writer's device opens its store, says its version, tag, queues, cell and capacity in its
 /// configuration, takes its guest's freezing, refuses a snapshot unfrozen, and, frozen, forks its
 /// store to a version, which a device restored from its state opens a store of its own from, as
 /// frozen as it was.
@@ -647,7 +647,7 @@ fn devices_are_snapshotted_and_restored() {
         (VIRTIO_EXTENT_VERSION, &b"fxfs\0"[..], 2)
     );
     assert_eq!(u64::from_le(original.capacity), 1 << 20);
-    assert_ne!(u64::from_le(original.branch), 0);
+    assert_ne!(u64::from_le(original.cell), 0);
 
     let interrupt = Arc::new(Counted::default());
     device.activate(device.features() | (1 << 32), interrupt.clone()).unwrap();
@@ -665,7 +665,7 @@ fn devices_are_snapshotted_and_restored() {
     let state = device.state();
     assert_eq!((state.frozen, state.window_addr), (true, None));
     assert_eq!(state.version, device.snapshot().unwrap().version);
-    assert_eq!(state.version.cell, u64::from_le(original.branch));
+    assert_eq!(state.version.cell, u64::from_le(original.cell));
 
     let mut restored_state = state.clone();
     restored_state.config.path_on_host = dir.0.join("restored").display().to_string();
@@ -673,9 +673,9 @@ fn devices_are_snapshotted_and_restored() {
     assert!(restored.snapshot().is_some());
     let mut space = [0u8; size_of::<ConfigSpace>()];
     restored.read_config(0, &mut space);
-    let (restored_branch, original_branch) =
-        (ConfigSpace::read_from_bytes(&space).unwrap().branch, original.branch);
-    assert_ne!(restored_branch, original_branch);
+    let (restored_cell, original_cell) =
+        (ConfigSpace::read_from_bytes(&space).unwrap().cell, original.cell);
+    assert_ne!(restored_cell, original_cell);
     assert!(restored.state().frozen);
 }
 

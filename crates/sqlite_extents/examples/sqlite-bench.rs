@@ -186,7 +186,7 @@ fn on_file_set(config: &str, file_set: std::sync::Arc<FileSet>, pragmas: &str, s
 }
 
 /// An extent daemon serving stores under `root` on a thread of this process, as a host's would
-/// from its own, keeping their branches in a file bucket there: its socket.
+/// from its own, keeping their cells in a file bucket there: its socket.
 #[cfg(target_os = "linux")]
 fn daemon(root: &Path) -> PathBuf {
     let socket = root.join("cladefsd.sock");
@@ -195,7 +195,7 @@ fn daemon(root: &Path) -> PathBuf {
     socket
 }
 
-/// The bytes the bucket under `root` the stores keep their branches in takes, if it is there yet.
+/// The bytes the bucket under `root` the stores keep their cells in takes, if it is there yet.
 fn bucket_bytes(root: &Path) -> u64 {
     let bucket = root.join("daemon.bucket");
     if bucket.exists() { disk_bytes(&bucket) } else { 0 }
@@ -207,7 +207,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let root = root.canonicalize().unwrap();
-    // A host of the multi-node system, as the daemon's is, and the image's then: their branches
+    // A host of the multi-node system, as the daemon's is, and the image's then: their cells
     // kept in a file bucket here, placement 1.
     // SAFETY: before this process starts any other thread.
     unsafe {
@@ -228,7 +228,7 @@ fn main() {
         let device = Storage::create(&image, 64 << 30).unwrap().into_device();
         let file_set = FileSet::open(device, Options::default()).unwrap();
         on_file_set("extents", file_set, "", scale);
-        // The image, and what the bucket its branch is kept in holds (CLADEFSD_BUCKET).
+        // The image, and what the bucket its cell is kept in holds (CLADEFSD_BUCKET).
         sizes.push(("extents", disk_bytes(&image) + bucket_bytes(&root)));
     }
     #[cfg(target_os = "linux")]

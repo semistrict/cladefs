@@ -6,7 +6,7 @@
 //! upstream may be a link of so many bytes a second: what it reads of its connections, a host's
 //! uploads, it reads no faster, all its connections sharing it.
 //!
-//! It serves what branches ask of S3 ([`crate::bucket::conformance`] checks it does), path-style
+//! It serves what cells ask of S3 ([`crate::bucket::conformance`] checks it does), path-style
 //! and unsigned: objects' PUTs, conditional on `If-None-Match: *` or `If-Match`, their GETs, whole
 //! or of a range, HEADs, DELETEs and DeleteObjects, and ListObjectsV2 by prefix, by delimiter `/`
 //! too (TASK-395.5), in pages of `max-keys` (1,000 by default) objects and prefixes together, each

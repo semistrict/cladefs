@@ -95,8 +95,8 @@ impl Device for DaemonDevice {
         written.await.map_err(Error::new).with_context(|| format!("writing {extent:?} at {offset}"))
     }
 
-    fn branch(&self) -> u64 {
-        self.store.branch()
+    fn cell(&self) -> u64 {
+        self.store.cell()
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
@@ -128,7 +128,7 @@ impl Device for DaemonDevice {
         self.store.commit_async(Some(root), Commit::Local).await.map_err(Error::new)
     }
 
-    /// Waits for what it committed to be in object storage, as a closed image's branch is whole
+    /// Waits for what it committed to be in object storage, as a closed image's cell is whole
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
         self.store.commit_async(None, Commit::Uploaded).await.map_err(Error::new)

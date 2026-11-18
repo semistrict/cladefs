@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// An extent store that an extent daemon serves this process. See the module docs.
 pub struct CellClient {
     client: Arc<Client>,
-    branch: u64,
+    cell: u64,
     /// The daemon's physical memory, which the window maps pages of, by arena: its
     /// tenant's, the default tenant's if of none, and the default arena, read-only (TASK-43,
     /// TASK-79.17).
@@ -113,7 +113,7 @@ impl CellClient {
             ))),
             errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
         })?;
-        let Opened { branch, arena, commit, max_map_count } = opened;
+        let Opened { cell, arena, commit, max_map_count } = opened;
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
@@ -130,7 +130,7 @@ impl CellClient {
             .map_err(|err| err.context("giving the daemon a transfer area"))?;
         let copying = std::sync::atomic::AtomicBool::new(false);
         let faults = Mutex::new(None);
-        Ok(Self { client, branch, memories, faults, read_only, transfer, copying, max_map_count })
+        Ok(Self { client, cell, memories, faults, read_only, transfer, copying, max_map_count })
     }
 
     /// cladefs: whether it is a follower's, read-only ([`CellClient::connect_read_only`]).
@@ -237,9 +237,9 @@ impl CellClient {
         self.client.answer_stats(ask, guest).await.map(drop)
     }
 
-    /// The branch whose extents the guest mints.
-    pub fn branch(&self) -> u64 {
-        self.branch
+    /// The cell whose extents the guest mints.
+    pub fn cell(&self) -> u64 {
+        self.cell
     }
 
     /// The daemon's physical memory, which it handed this VM process as it connected,
@@ -434,13 +434,13 @@ impl CellClient {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
 
-    /// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
+    /// Forks the store, as of its last commit made uploaded, to a new cell, whose handle is a new
     /// directory at `path`, which the daemon serves sharing the store's pages (`FORK`), and returns
-    /// the branch's ID, the bucket's to give (TASK-364).
+    /// the cell's ID, the bucket's to give (TASK-364).
     pub fn fork(&self, path: &Path) -> Result<u64> {
         let fork = Request::Fork { path: path.to_owned() };
         let reply = self.client.request_blocking(&fork)?;
-        Ok(Forked::from_args(reply.header.args).branch)
+        Ok(Forked::from_args(reply.header.args).cell)
     }
 
     /// Makes a version of the store's cell, once nothing is open
@@ -449,8 +449,8 @@ impl CellClient {
     /// fork at once ([`DaemonConnection::open_forked`]), and none writes.
     pub fn make_version(&self) -> Result<CellVersion> {
         let reply = self.client.request_blocking(&Request::Version)?;
-        let Forked { branch, version, tenant } = Forked::from_args(reply.header.args);
-        Ok(CellVersion { tenant, cell: branch, version })
+        let Forked { cell, version, tenant } = Forked::from_args(reply.header.args);
+        Ok(CellVersion { tenant, cell, version })
     }
 
     /// The window's mappings, which a snapshot of the VM records (`MAPPINGS`).

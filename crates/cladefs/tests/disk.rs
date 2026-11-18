@@ -32,7 +32,7 @@ fn contents(seed: u64) -> Vec<u8> {
 
 /// Writes extent `sequence` of `store`, `seed`'s bytes.
 fn write(store: &CellClient, sequence: u64, seed: u64) -> Result<(), Errno> {
-    let extent = ExtentId { branch: store.branch(), sequence };
+    let extent = ExtentId { cell: store.cell(), sequence };
     store.write(extent, 0, &[VolatileSlice::from(&contents(seed)[..])])
 }
 
@@ -151,7 +151,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     for (index, vm) in vms.iter().enumerate() {
         let sequences = (0..written).filter(|written| *written as usize % vms.len() == index);
         for sequence in sequences {
-            vm.free(ExtentId { branch: vm.branch(), sequence: 100 + sequence }).unwrap();
+            vm.free(ExtentId { cell: vm.cell(), sequence: 100 + sequence }).unwrap();
         }
         vm.commit(None).unwrap();
     }

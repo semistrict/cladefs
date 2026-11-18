@@ -59,7 +59,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     let store = store.unwrap();
     let data = vec![0x5a; EXTENT];
     for sequence in 1..=EXTENTS {
-        let extent = ExtentId { branch: store.branch().id, sequence };
+        let extent = ExtentId { cell: store.cell().id, sequence };
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
     store.commit(Some(b"root")).unwrap();

@@ -1,4 +1,4 @@
-# cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
+# cladefs's own: cells of extent stores kept in object storage (backlog doc-7, TASK-28).
 [package]
 name = "bucket_cell"
 version = "0.1.0"

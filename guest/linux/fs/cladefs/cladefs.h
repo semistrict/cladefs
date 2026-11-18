@@ -172,7 +172,7 @@ int cladefs_sync(struct cladefs *fs);
 /*
  * cladefs: freezes the filesystem, each of whose volumes the VFS has synced, its writers stopped:
  * makes it durable, holds its background work, and closes the device to writes until it thaws,
- * nothing open on it; -EBUSY if writes kept coming. Thawing, it takes the device's branch, a fork's
+ * nothing open on it; -EBUSY if writes kept coming. Thawing, it takes the device's cell, a fork's
  * of its own in a VM restored from a snapshot taken frozen, and writes again (TASK-39.1).
  */
 int cladefs_freeze(struct cladefs_filesystem *filesystem);
@@ -406,13 +406,13 @@ enum cladefs_dax_access {
 
 /*
  * A piece of a file's data, which the DAX window maps (dax.c): `len` bytes at `offset` in the file,
- * at `extent_offset` in the extent {branch, sequence}, as `access`, an enum cladefs_dax_access, says.
+ * at `extent_offset` in the extent {cell, sequence}, as `access`, an enum cladefs_dax_access, says.
  * Offsets and lengths are multiples of the block, the page.
  */
 struct cladefs_dax_extent {
 	u64 offset;
 	u64 len;
-	u64 branch;
+	u64 cell;
 	u64 sequence;
 	u64 extent_offset;
 	/* enum cladefs_dax_access. */

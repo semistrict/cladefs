@@ -151,7 +151,7 @@ mod guest {
 
     fn make_upstream() {
         give(UPSTREAM);
-        git(UPSTREAM, &["init", "--initial-branch=main"]);
+        git(UPSTREAM, &["init", "--initial-cell=main"]);
         for directory in 0..DIRECTORIES {
             give(&format!("{UPSTREAM}/d{directory}"));
         }
@@ -164,7 +164,7 @@ mod guest {
         git(UPSTREAM, &["add", "."]);
         git(UPSTREAM, &["commit", "-m", "first"]);
         git(UPSTREAM, &["checkout", "-b", "side"]);
-        fs::write(format!("{UPSTREAM}/d0/f000"), "only on the side branch\n").unwrap();
+        fs::write(format!("{UPSTREAM}/d0/f000"), "only on the side cell\n").unwrap();
         git(UPSTREAM, &["commit", "-am", "side"]);
         git(UPSTREAM, &["checkout", "main"]);
     }
@@ -203,15 +203,15 @@ mod guest {
         let mut host = connect();
         publish(&mut host);
 
-        // The second generation: upstream moves on, and its side branch goes, which leaves that
-        // branch's commit unreachable here. The publisher keeps it, for alternates pointing here.
+        // The second generation: upstream moves on, and its side cell goes, which leaves that
+        // cell's commit unreachable here. The publisher keeps it, for alternates pointing here.
         let side = git(REPO, &["rev-parse", "side"]);
         write_tracked(1);
         git(UPSTREAM, &["commit", "-am", "second"]);
-        git(UPSTREAM, &["branch", "-D", "side"]);
+        git(UPSTREAM, &["cell", "-D", "side"]);
         git(REPO, &["fetch", "--prune", "origin"]);
         git(REPO, &["merge", "--ff-only", "origin/main"]);
-        git(REPO, &["branch", "-D", "side"]);
+        git(REPO, &["cell", "-D", "side"]);
         fs::write(format!("{REPO}/{UNREACHABLE}"), side).unwrap();
         settle_index();
         publish(&mut host);

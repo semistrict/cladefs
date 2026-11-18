@@ -145,7 +145,7 @@ class HostCommand(unittest.TestCase):
 
     def test_this_machines_own_setup_stays_here(self):
         here = {name: "/laptop/" + name for name in KEPT}
-        # Knobs for the host: where its stores keep their branches, and its daemons what they read
+        # Knobs for the host: where its stores keep their cells, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
             "CLADEFSD_BUCKET": "s3://bucket/prefix",
@@ -1278,7 +1278,7 @@ class Drivers(unittest.TestCase):
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
             self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
             self.assertIn(f"CLADEFSD_TOKEN={token}", side)
-            self.assertIn(f"CLADEFSD_BUCKET=file://{held}/bucket/branches", side)
+            self.assertIn(f"CLADEFSD_BUCKET=file://{held}/bucket/cells", side)
             self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"

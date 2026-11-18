@@ -11,7 +11,7 @@
 //! a file of many extents, over several transactions trimming them before the tombstone. A held
 //! file its writer truncates isn't kept: its holder reads it truncated.
 
-use crate::BRANCH;
+use crate::CELL;
 use crate::device::ViewDevice;
 use crate::model::{Contents, NAMES, Op, Writer, lookup, read};
 use fuchsia_async as fasync;
@@ -45,7 +45,7 @@ struct Held {
 }
 
 async fn holding(blocks: u64) -> Held {
-    let description = Description { block_size: 4096, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: 4096, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, StoreOptions::default()).unwrap();
     let store = Arc::new(store);
     let writer = Writer::new(store.clone()).await;

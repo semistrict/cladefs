@@ -189,7 +189,7 @@ mod bench {
         let mut sealed = Vec::new();
         let data = vec![7u8; len as usize];
         for i in 0..maps {
-            let extent = ExtentId { branch: store.branch(), sequence: i + 1 };
+            let extent = ExtentId { cell: store.cell(), sequence: i + 1 };
             // The guest's Fxfs writes a small file's data into each, as it writes back.
             write.time(|| store.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
             sealed.push(extent);
@@ -221,7 +221,7 @@ mod bench {
             let mut back = vec![0u8; data.len()];
             for _ in 0..maps {
                 sequence += 1;
-                let extent = ExtentId { branch: store.branch(), sequence };
+                let extent = ExtentId { cell: store.cell(), sequence };
                 write.time(|| store.write(extent, 0, &[VolatileSlice::from(&data[..])])).unwrap();
                 read.time(|| store.read(extent, 0, &mut [VolatileSliceMut::from(&mut back[..])]))
                     .unwrap();
@@ -251,7 +251,7 @@ mod bench {
         let data = vec![7u8; len as usize];
         let extents: Vec<_> = (0..count)
             .map(|i| {
-                let extent = ExtentId { branch: store.branch(), sequence: sequence + i };
+                let extent = ExtentId { cell: store.cell(), sequence: sequence + i };
                 store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
                 (extent, (i % slots) * len)
             })
@@ -282,14 +282,14 @@ mod bench {
     fn fsyncs(store: &CellClient, memory: NonNull<u8>, count: u64, pages: u64, sequence: u64) {
         let page_size = 4096u64;
         let len = pages * page_size;
-        let file = ExtentId { branch: store.branch(), sequence };
+        let file = ExtentId { cell: store.cell(), sequence };
         store.write(file, 0, &[VolatileSlice::from(&vec![1u8; len as usize][..])]).unwrap();
         store.commit(None).unwrap();
         let (mut copy, mut commit) = (Timer::default(), Timer::default());
         let journal = vec![7u8; page_size as usize];
         let ordered = WriteBarriers { after: Some(Commit::Ordered), ..Default::default() };
         for i in 0..count {
-            let block = ExtentId { branch: store.branch(), sequence: sequence + 1 + i };
+            let block = ExtentId { cell: store.cell(), sequence: sequence + 1 + i };
             store.map(file, 0, len, 0).unwrap();
             copy.time(|| {
                 for page in 0..pages {

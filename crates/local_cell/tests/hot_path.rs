@@ -13,14 +13,14 @@ use std::time::Instant;
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 /// The extents the store holds, and as many it keeps, freed.
 const EXTENTS: u64 = 20_000;
 /// The rounds of each call timed, over every extent.
 const ROUNDS: u32 = 5;
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
 /// The nanoseconds a call of `call` took, on average, over `calls` calls.
@@ -34,7 +34,7 @@ fn timed(calls: u64, mut call: impl FnMut()) -> f64 {
 #[ignore = "a benchmark: --run-ignored only, in release"]
 fn hot_paths() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 30, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 4 << 30, cell: CELL };
     let dir = HostDir::new(temp.path()).unwrap();
     let store = LocalCell::create(dir, description, Options::default()).unwrap();
     let data = vec![7u8; BLOCK];

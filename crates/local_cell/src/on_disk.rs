@@ -28,9 +28,9 @@ pub const CLEAR_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 /// What [`on_disk`] found of a store's directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OnDisk {
-    /// Its branch, as its description names it.
-    pub branch: CellId,
-    /// The bucket its branch is kept in, as its description names it, if it does.
+    /// Its cell, as its description names it.
+    pub cell: CellId,
+    /// The bucket its cell is kept in, as its description names it, if it does.
     pub bucket: Option<String>,
     /// How many of its framed files and logs it read, each by its trailer or header.
     pub read: usize,
@@ -61,8 +61,7 @@ pub fn on_disk(dir: &impl Dir) -> io::Result<Option<OnDisk>> {
     let description = String::from_utf8_lossy(&description);
     let store =
         CellFile::parse(&description).map_err(|err| io::Error::other(format!("{err:#}")))?;
-    let mut found =
-        OnDisk { branch: store.branch, bucket: store.bucket, read: 0, clear: Vec::new() };
+    let mut found = OnDisk { cell: store.cell, bucket: store.bucket, read: 0, clear: Vec::new() };
     for (kind, what) in [(SEGMENTS, "a framed segment"), (EXTENTS, "a framed extent")] {
         for path in files(dir, kind)? {
             let Some(clear) = in_the_clear(dir, &path)? else { continue };
@@ -87,20 +86,20 @@ pub fn on_disk(dir: &impl Dir) -> io::Result<Option<OnDisk>> {
     Ok(Some(found))
 }
 
-/// The paths of the files of each branch's directory of `kind` in `dir` (`<kind>/<branch>/<file>`)
+/// The paths of the files of each cell's directory of `kind` in `dir` (`<kind>/<cell>/<file>`)
 /// named by numbers, as segments', extents' and logs' are, or spare logs (`spare-<number>`): not a
 /// framed file being made durable (`framing-`), whole only once renamed.
 fn files(dir: &impl Dir, kind: &str) -> io::Result<Vec<String>> {
     let numbered = |name: &str| parse_number(name.strip_prefix(SPARE).unwrap_or(name)).is_some();
     let mut files = Vec::new();
-    for branch in listed(dir, kind)? {
-        if parse_number(&branch).is_none() {
+    for cell in listed(dir, kind)? {
+        if parse_number(&cell).is_none() {
             continue;
         }
-        let branch = format!("{kind}/{branch}");
-        let names = listed(dir, &branch)?;
+        let cell = format!("{kind}/{cell}");
+        let names = listed(dir, &cell)?;
         files.extend(
-            names.into_iter().filter(|name| numbered(name)).map(|name| format!("{branch}/{name}")),
+            names.into_iter().filter(|name| numbered(name)).map(|name| format!("{cell}/{name}")),
         );
     }
     files.sort();

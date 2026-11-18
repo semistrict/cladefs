@@ -739,7 +739,7 @@ fn deep_images_make_stores_on_a_daemons_thread() {
 
 /// A store made of an image where no extent daemon is, as `cladefsctl import` makes one, forks once
 /// opened there too, as fxfs-guest-import forks the base it imports for its guest: the fork is
-/// the bucket's alone (TASK-165.7), made by the store's uploader, which keeps its branch in the
+/// the bucket's alone (TASK-165.7), made by the store's uploader, which keeps its cell in the
 /// bucket its description names, its own beside it, as an image's does. Opened so, it had none,
 /// and the fork failed (`ENOTSUP`, GCE r701). The fork holds the image's files, read from the
 /// bucket, and the base is as it was.
@@ -754,7 +754,7 @@ fn stores_made_of_images_fork_where_no_daemon_is() {
     let manifest = store_manifest(&base);
     let fork = dir.path().join("fork");
     let base_store = cladefs::OpenCell::open(&base).unwrap();
-    base_store.fork(&fork, base_store.branch().tenant).unwrap();
+    base_store.fork(&fork, base_store.cell().tenant).unwrap();
     drop(base_store);
     assert_eq!(store_manifest(&fork), manifest);
     assert_eq!(store_manifest(&base), manifest);

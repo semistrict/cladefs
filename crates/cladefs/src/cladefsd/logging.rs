@@ -321,11 +321,11 @@ mod tests {
         let record = log::Record::builder()
             .level(log::Level::Warn)
             .target("cladefs::cladefsd::cells")
-            .args(format_args!("cladefsd: keeping branch 1 in object storage"))
+            .args(format_args!("cladefsd: keeping cell 1 in object storage"))
             .build();
         assert_eq!(
             line(Format::Text, &record, None, at()),
-            "WARN cladefs::cladefsd::cells: cladefsd: keeping branch 1 in object storage"
+            "WARN cladefs::cladefsd::cells: cladefsd: keeping cell 1 in object storage"
         );
     }
 

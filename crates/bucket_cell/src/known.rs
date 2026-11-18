@@ -7,14 +7,14 @@
 //! what the host had just read or written itself. Two kinds of knowledge, each safe for its own
 //! reason (doc-7, What a host knows):
 //!
-//! - **Facts that never change once seen**: the epoch of the writer of a branch's segment, once a
+//! - **Facts that never change once seen**: the epoch of the writer of a cell's segment, once a
 //!   head names it ([`Known::epoch`]). A head's runs of epochs only grow: a takeover goes on from
 //!   its end, a deletion keeps what it names, and nothing renames a segment named (specs/bucket's
 //!   NamedEpochsStay). So an origin's checkpoint, at the key of that epoch, is found by its key
 //!   with no read of the origin's head, whichever host or however long after.
-//! - **What a host learned of a branch it is about to open** ([`Learned`]): its record as its own
+//! - **What a host learned of a cell it is about to open** ([`Learned`]): its record as its own
 //!   fork or take left it, its cell's object as its fork held it, and whether it has no head. The
-//!   branch's store, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
+//!   cell's store, opened next, takes it ([`Known::take`]) in place of its first reads. Each is
 //!   what a read at the moment of the write would have found: so using it is that read, made
 //!   earlier, which every step after allows for: the head's taking, and the cell's holding when it
 //!   writes, are conditional on the version found, going on from what is there if another's write
@@ -31,7 +31,7 @@ use crate::record::Record;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-/// What a host learned of a branch before it opens it ([`Known`]).
+/// What a host learned of a cell before it opens it ([`Known`]).
 #[derive(Clone, Debug)]
 pub struct Learned {
     /// Its record, as this host's last write or read of it left it.
@@ -55,29 +55,29 @@ impl Known {
     /// host forks.
     const EPOCHS: usize = 1 << 16;
 
-    /// How many branches' learnings it keeps, the oldest going first: those of forks not opened
+    /// How many cells' learnings it keeps, the oldest going first: those of forks not opened
     /// (yet), which a host's restores open at once.
     const LEARNED: usize = 1 << 12;
 
-    /// The epoch of the writer of segment `segment` of `branch`, if a head was seen naming it.
-    pub fn epoch(&self, branch: CellId, segment: u64) -> Option<u64> {
-        self.epochs.lock().unwrap().get(&(branch, segment)).copied()
+    /// The epoch of the writer of segment `segment` of `cell`, if a head was seen naming it.
+    pub fn epoch(&self, cell: CellId, segment: u64) -> Option<u64> {
+        self.epochs.lock().unwrap().get(&(cell, segment)).copied()
     }
 
-    /// Notes that a head of `branch` names its segment `segment` as of the writer of `epoch`: so it
+    /// Notes that a head of `cell` names its segment `segment` as of the writer of `epoch`: so it
     /// does for good.
-    pub fn named(&self, branch: CellId, segment: u64, epoch: u64) {
-        self.epochs.lock().unwrap().insert((branch, segment), epoch, Self::EPOCHS);
+    pub fn named(&self, cell: CellId, segment: u64, epoch: u64) {
+        self.epochs.lock().unwrap().insert((cell, segment), epoch, Self::EPOCHS);
     }
 
-    /// Notes what this host learned of `branch`, which it is about to open.
-    pub fn learn(&self, branch: CellId, learned: Learned) {
-        self.learned.lock().unwrap().insert(branch, learned, Self::LEARNED);
+    /// Notes what this host learned of `cell`, which it is about to open.
+    pub fn learn(&self, cell: CellId, learned: Learned) {
+        self.learned.lock().unwrap().insert(cell, learned, Self::LEARNED);
     }
 
-    /// What this host learned of `branch`, if anything, which its opening takes: once.
-    pub fn take(&self, branch: CellId) -> Option<Learned> {
-        self.learned.lock().unwrap().remove(&branch)
+    /// What this host learned of `cell`, if anything, which its opening takes: once.
+    pub fn take(&self, cell: CellId) -> Option<Learned> {
+        self.learned.lock().unwrap().remove(&cell)
     }
 }
 
@@ -118,7 +118,7 @@ impl<K: std::hash::Hash + Eq + Clone, V> Bounded<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
 
     /// What it keeps is bounded, the oldest going first; a learning is taken once.
     #[test]
@@ -134,12 +134,12 @@ mod tests {
         assert_eq!(bounded.map.len(), 3);
 
         let known = Known::default();
-        let branch = test_branch(3);
-        known.named(branch, 7, 2);
-        assert_eq!((known.epoch(branch, 7), known.epoch(branch, 6)), (Some(2), None));
+        let cell = test_cell(3);
+        known.named(cell, 7, 2);
+        assert_eq!((known.epoch(cell, 7), known.epoch(cell, 6)), (Some(2), None));
         let record = crate::record::Kind::Root.of(1);
-        known.learn(branch, Learned { record, cell: None, headless: true });
-        assert!(known.take(branch).is_some_and(|learned| learned.headless));
-        assert!(known.take(branch).is_none());
+        known.learn(cell, Learned { record, cell: None, headless: true });
+        assert!(known.take(cell).is_some_and(|learned| learned.headless));
+        assert!(known.take(cell).is_none());
     }
 }

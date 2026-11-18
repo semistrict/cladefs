@@ -141,11 +141,11 @@ any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
 is separated.
-A tenant's VM process names no branch: what it says is ignored, so that another
+A tenant's VM process names no cell: what it says is ignored, so that another
 tenant's ID gets it nothing. A VM snapshot restored on another host needs its version
 there, which the VM manager makes in the tenant's directory first (`CreateCell`
-of the version's branch), and may drop once done (`DropCell`, which leaves the
-branch in the bucket); the proto says how (TASK-154). A version is immutable: any
+of the version's cell), and may drop once done (`DropCell`, which leaves the
+cell in the bucket); the proto says how (TASK-154). A version is immutable: any
 number of hosts fork one at once, and none writes it (TASK-158). A base forked
 on several hosts is made a version first (`ForkCell`'s `version`).
 The daemon must be able to kill each VM process (it is the daemon's user's, or

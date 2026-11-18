@@ -337,11 +337,11 @@ impl ChecksumList {
 mod tests {
     use super::ChecksumList;
     use crate::checksum::fletcher64;
-    use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice};
+    use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
     use storage_device::{Device, ExtentId, ExtentRange};
 
     /// The device's one extent.
-    const E: ExtentId = ExtentId::new(DEFAULT_BRANCH, 0);
+    const E: ExtentId = ExtentId::new(DEFAULT_CELL, 0);
 
     /// A block a reflink shares is alive until its last reference goes, and a write of it the
     /// device lost is found until then, whichever reference went first.

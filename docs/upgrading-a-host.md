@@ -23,8 +23,8 @@ Read the release's notes for which of these changed. Each one changed means what
 |---|---|---|
 | VM process and daemon wire (`wire::VERSION`) | A VMM and a daemon of different versions meet: the daemon refuses its `OPEN` | The VMM fails to make its extent device: "the extent daemon refused this VM process's wire version N". The daemon's log says "refusing a VM process of wire version N: this daemon's is M". |
 | Device protocol (`VIRTIO_EXTENT_VERSION`) | A guest's driver meets a device of another version, or a snapshot of another version is restored | The guest's kernel log says "the device is of protocol version N, this driver of M: refused", and its extent filesystem doesn't mount. The VMM refuses the snapshot's load: "The snapshot's extent device is of protocol version N, this VMM's M". |
-| Store files (`local_cell` `FORMAT`) | The new daemon opens a store of the old format | `ENOTSUP`. The store is made again, from its branch in the bucket if that format didn't change too. |
-| Branches in the bucket (`bucket_cell` `layout::FORMAT`) | A daemon reads a branch of another format | The branch is refused, and the collector's pass stops, deleting nothing. |
+| Store files (`local_cell` `FORMAT`) | The new daemon opens a store of the old format | `ENOTSUP`. The store is made again, from its cell in the bucket if that format didn't change too. |
+| Cells in the bucket (`bucket_cell` `layout::FORMAT`) | A daemon reads a cell of another format | The cell is refused, and the collector's pass stops, deleting nothing. |
 | Fxfs (`LATEST_VERSION`) | A guest mounts a filesystem of another version (TASK-141.1) | The mount fails. |
 | VM snapshots (Firecracker's) | A VMM restores a snapshot of another snapshot version | The load fails. |
 
@@ -39,7 +39,7 @@ with `mount -t cladefs` (`fxfs` is an unknown type), sets `cladefs.*` parameters
 `cladefs` tracepoints and `/proc/fs/cladefs`, so guest images and agents move with the guest
 kernel. The VM snapshots and stores are unchanged.
 
-A wire or device protocol change alone leaves stores and branches readable: VMs move by snapshot
+A wire or device protocol change alone leaves stores and cells readable: VMs move by snapshot
 to a host of the new build only if the device protocol is the same, and stop and boot again there
 otherwise. A store or bucket format change means its stores are made again, not upgraded.
 
@@ -70,7 +70,7 @@ otherwise. A store or bucket format change means its stores are made again, not 
    build: `cladefsd_build_info{commit="..."} 1`. Call `Grant` again for each tenant, because
    grants don't survive a restart.
 6. **Uncordon the host.** Moving VMs back is step 2 again, onto this host. Each one restored here
-   then runs on the new Firecracker, which `cladefsd_vm_build_info` shows by branch.
+   then runs on the new Firecracker, which `cladefsd_vm_build_info` shows by cell.
 
 ## Rolling back
 

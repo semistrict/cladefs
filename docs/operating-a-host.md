@@ -64,9 +64,9 @@ and its open segment.
 
 ## Multi-node only
 
-A branch's durable copy is in a bucket, and hosts hold
+A cell's durable copy is in a bucket, and hosts hold
 copies of it, whose placements fence each other with their tokens: a placement
-cut off neither takes a branch back nor deletes it from under a later one
+cut off neither takes a cell back nor deletes it from under a later one
 (TASK-39.7, TASK-45). The daemon runs as a host of that system, with the bucket
 (`CLADEFSD_BUCKET`) and its placement's token from the control plane
 (`CLADEFSD_TOKEN`, not 0), and refuses to start without them: there is no
@@ -77,7 +77,7 @@ acknowledged leaves the store's directory (TASK-165.8): an in-memory bucket is
 its process's, and what left for it is gone once that process exits, so a store
 used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing stores'
-branches on the same terms, and makes new stores (`take`, `import`) anywhere.
+cells on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 ## Encryption and shredding
 

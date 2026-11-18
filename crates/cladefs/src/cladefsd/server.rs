@@ -333,13 +333,13 @@ impl Tenant {
 
     /// cladefs: `EACCES` if it is granted and the store at `path` is another tenant's cell, or
     /// cell (TASK-364), as its description says, read before it is opened, which would take its
-    /// branch from its writer: the daemon makes its own cells' stores alone in its directory, but
+    /// cell from its writer: the daemon makes its own cells' stores alone in its directory, but
     /// for the versions of others' its VM manager gives it, which it restores from, as forks of its
     /// own; and a store put there by other means is no more its than it was.
     fn reaches(&self, path: &Path) -> Result<(), Errno> {
         let Some(id) = self.granted() else { return Ok(()) };
-        match local_cell::host_branch(path) {
-            Ok(branch) if branch.tenant != id => Err(Errno::EACCES),
+        match local_cell::host_cell(path) {
+            Ok(cell) if cell.tenant != id => Err(Errno::EACCES),
             // No store yet, which it makes of its own cell; or one its opening fails, saying why.
             _ => Ok(()),
         }
@@ -757,8 +757,8 @@ impl Answer {
         guest: Option<&crate::request::RequestId>,
     ) -> Self {
         let started = std::time::Instant::now();
-        let branch = connection.store().map(|store| store.branch());
-        let span = super::otel::request_span(&request, branch, guest);
+        let cell = connection.store().map(|store| store.cell());
+        let span = super::otel::request_span(&request, cell, guest);
         Self { connection: connection.clone(), request, started, sent: false, span }
     }
 
@@ -1032,7 +1032,7 @@ impl Opening<'_> {
         let follower = matches!(opened, Phase::Following);
         let key = store_key(path);
         drop(self.0.named.set(key.to_string_lossy().into()));
-        self.0.report.opened(key, store.branch().id, follower);
+        self.0.report.opened(key, store.cell().id, follower);
         assert!(self.0.store.set(store).is_ok(), "a connection opened a second store");
         let was = std::mem::replace(&mut *self.0.phase.with(Mutex::lock), opened);
         assert!(matches!(was, Phase::Opening), "a connection opened a store not opening one");
@@ -1302,10 +1302,10 @@ impl Connection {
         fds: &mut Vec<std::os::fd::BorrowedFd<'a>>,
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
-            let branch = self.follow(path)?;
+            let cell = self.follow(path)?;
             let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
-            reply.args = Opened { branch, arena: self.arena_id(), commit, max_map_count }.args();
+            reply.args = Opened { cell, arena: self.arena_id(), commit, max_map_count }.args();
             fds.extend(self.memories());
             return Ok(());
         }
@@ -1385,8 +1385,8 @@ impl Connection {
                     }
                     cells::errno_of(format_args!("making a version"), err)
                 })?;
-                let branch = store.branch();
-                reply.args = Forked { branch: branch.id, version, tenant: branch.tenant }.args();
+                let cell = store.cell();
+                reply.args = Forked { cell: cell.id, version, tenant: cell.tenant }.args();
                 Ok(())
             }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
@@ -1394,18 +1394,18 @@ impl Connection {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
                 // cladefs: a new cell of the store's tenant's, its ID the bucket's (TASK-364).
-                let forked = store.fork(path, store.branch().tenant);
+                let forked = store.fork(path, store.cell().tenant);
                 if let Err(err) = &forked
                     && err.errno() == Some(Errno::EBUSY)
                 {
                     log::warn!("cladefsd: forking to {} refused: {err:#}", path.display());
                 }
-                let branch = forked.map_err(|err| {
+                let cell = forked.map_err(|err| {
                     cells::errno_of(format_args!("forking to {}", path.display()), err)
                 })?;
                 // cladefs: the fork made, its reply lost: its guest takes it to have failed.
                 fail::fail_point!("cladefsd::forked", |_| Err(Errno::EIO));
-                reply.args = Forked { branch: branch.id, version: 0, tenant: 0 }.args();
+                reply.args = Forked { cell: cell.id, version: 0, tenant: 0 }.args();
                 Ok(())
             }
             Request::Info => store.info().map(|info| reply.args = Info(info).args()),
@@ -1520,7 +1520,7 @@ impl Connection {
     /// cladefs: opens a follower of the store at `path`, authorized (backlog doc-8), of the store
     /// a writer's connection, or followers', have open, or, if none has, of the store as of its
     /// last commit, which a writer opening it then takes over ([`cells::followed`]); tells its VM
-    /// process of the writer's commits after its view's ([`COMMITTED`]); and returns its branch.
+    /// process of the writer's commits after its view's ([`COMMITTED`]); and returns its cell.
     fn follow(&self, path: &Path) -> Result<u64, Errno> {
         let opening = self.opening()?;
         self.tenant.reaches(path)?;
@@ -1532,9 +1532,9 @@ impl Connection {
         let (commit, sender, told) =
             (store.view_commit()?, self.peer.sender.clone(), store.clone());
         self.start_behind(move |stopped| tell_commits(told, commit, sender, stopped));
-        let branch = store.branch().id;
+        let cell = store.cell().id;
         opening.opened(path, store, Phase::Following);
-        Ok(branch)
+        Ok(cell)
     }
 
     /// cladefs: the connection's one [`OPEN`] at a time: `EBUSY` if another is in progress, as its
@@ -1552,15 +1552,15 @@ impl Connection {
     }
 
     /// cladefs: serves an [`OPEN`] of the store at `path` to write, as `how` says
-    /// ([`Connection::open`]), and replies with its branch and physical memory: a future, which
+    /// ([`Connection::open`]), and replies with its cell and physical memory: a future, which
     /// holds no thread while it waits (TASK-92.5), served so ([`serve_future`]).
     async fn serve_open(self: Arc<Self>, path: PathBuf, how: codec::Opening, answer: Answer) {
         let mut reply = answer.reply_header();
         let opened = self.open(&path, how).await;
         let fds = match &opened {
-            Ok(branch) => {
-                let (branch, arena, max_map_count) = (*branch, self.arena_id(), max_map_count());
-                reply.args = Opened { branch, arena, commit: 0, max_map_count }.args();
+            Ok(cell) => {
+                let (cell, arena, max_map_count) = (*cell, self.arena_id(), max_map_count());
+                reply.args = Opened { cell, arena, commit: 0, max_map_count }.args();
                 Vec::from(self.memories())
             }
             Err(_) => Vec::new(),
@@ -1570,7 +1570,7 @@ impl Connection {
 
     /// Opens the store at `path`, authorized, as `how` says: creating it if it doesn't exist, or
     /// forking it from the version `how` names if it doesn't exist ([`cells::fork_version`]);
-    /// unless another connection has it open; and returns its branch. cladefs: a store followers
+    /// unless another connection has it open; and returns its cell. cladefs: a store followers
     /// have open, it takes over ([`cells::take_over`]). Its waits, for a connection whose VM
     /// process is gone to let the store go, and for a restore's version, hold no thread
     /// (TASK-92.5); its I/O blocks. A version of another tenant's than the connection's forks only
@@ -1595,14 +1595,14 @@ impl Connection {
         store.access().may_write()?;
         let flushed = store.clone();
         self.start_behind(move |stopped| flush_behind(flushed, stopped));
-        let branch = store.branch().id;
+        let cell = store.cell().id;
         // cladefs: should its VM process go, and a writer wait for its store to close, the store's
         // uploader stops at once rather than upload what it holds first (TASK-216).
         if let Some(cut_short) = store.cut_short() {
             hold.when_wanted(cut_short);
         }
         opening.opened(path, store, Phase::Writing(Arc::new(hold)));
-        Ok(branch)
+        Ok(cell)
     }
 
     /// Opens the store at `path`, which `hold` holds, as [`Connection::open`] does: the store
@@ -1625,8 +1625,13 @@ impl Connection {
                 Some((store, _)) => store,
                 None => Arc::new(open_store(path, None, Some(arena))?),
             };
-            cells::at_version((version_cell(tenant, cell), version), capacity, path, &store)
-                .await?;
+            cells::at_version(
+                (crate::CellId { tenant, id: cell }, version),
+                capacity,
+                path,
+                &store,
+            )
+            .await?;
             there = Some(store);
         }
         if let Some(store) = cells::take_over(hold, arena)? {
@@ -1638,7 +1643,7 @@ impl Connection {
             // store: removed first, as deleting it would (TASK-79.84).
             (None, &codec::Opening::ForkOf { tenant, cell, version, capacity }) => {
                 cells::removed_if_unmade(path)?;
-                let forked = (version_cell(tenant, cell), version);
+                let forked = (crate::CellId { tenant, id: cell }, version);
                 cells::fork_version(forked, capacity, (path, self.tenant.granted())).await?;
                 Arc::new(open_store(path, None, Some(arena))?)
             }
@@ -2766,10 +2771,4 @@ mod in_dir_tests {
             assert!(!in_dir(&path, &ours), "{}", path.display());
         }
     }
-}
-
-/// cladefs: the branch of the cell `id` of `tenant`'s, which a version a restore forks is of: a
-/// cell's ID is its branch's (doc-20).
-fn version_cell(tenant: u64, id: u64) -> crate::CellId {
-    crate::CellId { tenant, id }
 }

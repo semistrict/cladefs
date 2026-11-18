@@ -25,7 +25,7 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// A daemon serving at `socket`, of placement `token`, keeping its stores' branches in the bucket
+/// A daemon serving at `socket`, of placement `token`, keeping its stores' cells in the bucket
 /// `bucket`, a directory: what it uploads stays there once it exits, for another to read.
 fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
@@ -62,8 +62,8 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     let store = CellClient::connect(&socket, &path, 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     store.on_daemon_lost(move || told.send(()).unwrap());
-    let branch = store.branch();
-    let extent = ExtentId { branch, sequence: 1 };
+    let cell = store.cell();
+    let extent = ExtentId { cell, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     store.commit_ordered(Some(b"drained")).unwrap();
 
@@ -80,15 +80,15 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     drop(closed);
 
     // Uploaded: a later placement's daemon, on another host, with nothing of the store, restores a
-    // VM of the branch from the bucket, its commit there.
+    // VM of the cell from the bucket, its commit there.
     let other = dir.path().join("other");
     std::fs::create_dir(&other).unwrap();
     let second_socket = other.join("cladefsd.sock");
     let _second = daemon(&second_socket, &bucket, 2);
     let taken: PathBuf = other.join("taken");
-    // TASK-364: its VM manager makes the cell's store there first, of the branch its tenant, cell
+    // TASK-364: its VM manager makes the cell's store there first, of the cell its tenant, cell
     // and ID name; taken from the bucket.
-    let full = local_cell::host_branch(&path).unwrap();
+    let full = local_cell::host_cell(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
     unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
     OpenCell::take(&taken, 1 << 28, full, Some(2)).unwrap();

@@ -623,7 +623,7 @@ mod tests {
     const MIB: usize = 1 << 20;
 
     /// The key the tests' encrypted segments are encrypted under.
-    const KEY: extent_frame::KeyId = extent_frame::KeyId { branch: 1, generation: 0 };
+    const KEY: extent_frame::KeyId = extent_frame::KeyId { cell: 1, generation: 0 };
 
     /// `len` bytes that don't compress, of `seed`'s.
     fn noise(seed: u64, len: usize) -> Vec<u8> {

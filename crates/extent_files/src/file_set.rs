@@ -207,8 +207,8 @@ impl FileSet {
             let pages = Pages::open(block_size, file).with_context(|| format!("opening {name}"))?;
             inner.files.insert(name.clone(), File::new(pages, true));
         }
-        let branch = device.branch();
-        let orphans = orphans(root.minted, next).map(|sequence| ExtentId::new(branch, sequence));
+        let cell = device.cell();
+        let orphans = orphans(root.minted, next).map(|sequence| ExtentId::new(cell, sequence));
         let mut freeing: Vec<_> = root.dying.iter().copied().chain(orphans).collect();
         if let Some((list, count)) = root.dying_list {
             let mut buffer = device.allocate_buffer(format::list_len(count, block_size)).await;
@@ -532,14 +532,14 @@ impl FileSet {
     /// Commits file `name`'s changes, if any, or makes it if no commit has.
     fn commit(&self, inner: &mut Inner, name: &str) -> Result<(), Error> {
         let device = &**self.device;
-        let (branch, mut next) = (device.branch(), inner.mint);
+        let (cell, mut next) = (device.cell(), inner.mint);
         let file = Self::file(inner, name);
         if !file.pages.changed() && file.committed {
             return Ok(());
         }
         let mint = || {
             next += 1;
-            ExtentId::new(branch, next - 1)
+            ExtentId::new(cell, next - 1)
         };
         let plan = block_on(file.pages.plan(device, mint, self.options.max_extent_blocks));
         // What it minted is spent, whatever came of it.
@@ -584,7 +584,7 @@ impl FileSet {
         // Too many for the root: listed in an extent of their own.
         let list = (dying.len() > FREE_BATCH).then(|| {
             inner.mint += 1;
-            ExtentId::new(device.branch(), inner.mint - 1)
+            ExtentId::new(device.cell(), inner.mint - 1)
         });
         let root = match list {
             Some(list) => Root {

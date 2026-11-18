@@ -11,8 +11,8 @@
 //! whose one VM process uses the protocol as it allows, beside mallory's, its every result checked
 //! against a model of its store and window; and the default tenant's bob, whose store waits. A case
 //! is one to three of mallory's connections at once, each saying anything, of any kind, flags and
-//! words, naming alice's and bob's branches, extents and stores, paths that lead out of its
-//! directory, forks to their branches, transfer areas of any make, storms of `PRIVATE`s and
+//! words, naming alice's and bob's cells, extents and stores, paths that lead out of its
+//! directory, forks to their cells, transfer areas of any make, storms of `PRIVATE`s and
 //! `UNMAP`s, acknowledgements forged, early or never sent, and hanging up as it likes, mid-request
 //! or with its framing broken; or flooding the daemon with reads whose replies it leaves unread;
 //! or filling the host's disk, its tenant's limited a few MiB past what it takes (TASK-94);
@@ -23,7 +23,7 @@
 //!
 //! - **Alice is served as her model says**, her commits among it, which go on succeeding
 //!   (TASK-150.7); and her store closed, which mallory names, holds what she wrote.
-//! - **Mallory gets nothing of theirs**: no reply, no stage operation, names their branches or
+//! - **Mallory gets nothing of theirs**: no reply, no stage operation, names their cells or
 //!   holds their bytes; it maps no arena but its tenant's and the public one, gets no other
 //!   tenant's memory, and finds none of their bytes in the memory it gets, read whole.
 //! - **The daemon holds no more of mallory's than the protocol's bounds say**
@@ -32,7 +32,7 @@
 //!   let go. Nor more of the host's disk than its tenant's limit (TASK-94): its writes past it
 //!   refused with `ENOSPC`, as alice's go on.
 //! - **Nothing of mallory's stays, nor goes**: its every connection ends; every store it named opens
-//!   again (TASK-150.5), every one it wrote commits; no version is taken of a branch it named
+//!   again (TASK-150.5), every one it wrote commits; no version is taken of a cell it named
 //!   (TASK-150.4); nothing comes into the others' directories; nothing panics, nor crashes; bob's
 //!   store reads, writes and commits.
 //!
@@ -147,11 +147,11 @@ fn credit(window: u64) -> u64 {
     MAX_STREAM_BYTES + QUEUED_CREDIT + window / page_size() * MAPPING_BYTES
 }
 
-/// A word of a message mallory says: as it is, or naming a branch, as the case has it.
+/// A word of a message mallory says: as it is, or naming a cell, as the case has it.
 #[derive(Clone, Copy, Debug)]
 enum Word {
     Is(u64),
-    /// Its own store's branch, as of what it was answered so far.
+    /// Its own store's cell, as of what it was answered so far.
     Own,
     Alice,
     Bob,
@@ -281,7 +281,7 @@ enum Opens {
     /// One somewhere else, out of its directory, or a name there it may not open.
     Elsewhere(Place),
     /// A restore of its own, of the version its VM manager made for it, as a restored VM opens its
-    /// store, naming the version's branch.
+    /// store, naming the version's cell.
     Restores,
     /// Two stores of its own at once, two OPENs in flight, of which a connection has one
     /// (TASK-150.5).
@@ -566,7 +566,7 @@ fn message() -> BoxedStrategy<Said> {
             }
         ),
     ];
-    // What names another tenant's: their extents, branches and stores.
+    // What names another tenant's: their extents, cells and stores.
     let reaching = prop_oneof![
         1 => (theirs(), sequence(), pages()).prop_map(|(whose, extent, len)| {
             said(READ, 0, [whose, extent, Is(0), len, Is(0)], Payload::Bytes(Vec::new()))
@@ -583,10 +583,10 @@ fn message() -> BoxedStrategy<Said> {
         1 => (theirs(), proptest::collection::vec((theirs(), 1u64..16), 0..8)).prop_map(|(whose, rest)| {
             said(FREE_MANY, 0, [whose, Is(1), Is(0), Is(0), Is(0)], Payload::Extents(rest))
         }),
-        // Forks of its own store to another's branch, or its own.
+        // Forks of its own store to another's cell, or its own.
         1 => (0u8..4, prop_oneof![Just(Alice), Just(Bob), Just(Given), Just(Own), any::<u64>().prop_map(Is)], 0u32..2)
-            .prop_map(|(store, branch, flags)| {
-                said(FORK, flags, [branch, Is(0), Is(0), Is(0), Is(0)], Payload::Path(Place::Own(store)))
+            .prop_map(|(store, cell, flags)| {
+                said(FORK, flags, [cell, Is(0), Is(0), Is(0), Is(0)], Payload::Path(Place::Own(store)))
             }),
         3 => (place(), prop_oneof![Just(0), Just(OPEN_CREATE), Just(OPEN_READ_ONLY)]).prop_map(|(at, flags)| {
             said(OPEN, flags, [Is(STORE_BYTES), Is(0), Is(0), Is(0), Is(VERSION)], Payload::Path(at))
@@ -813,7 +813,7 @@ enum Page {
 struct Alice {
     store: CellClient,
     window: NonNull<u8>,
-    branch: u64,
+    cell: u64,
     /// The sequence of her next extent.
     next: u64,
     extents: BTreeMap<u64, LiveExtent>,
@@ -863,12 +863,12 @@ impl Alice {
         crate::guest_thread_started();
         let root = marked(ALICE_MARK, u64::MAX >> 24, 64);
         store.commit(Some(&root)).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         let pages = vec![Page::Unmapped; ALICE_PAGES];
         Self {
             store,
             window,
-            branch,
+            cell,
             next: 1,
             extents: BTreeMap::new(),
             freed: BTreeSet::new(),
@@ -878,7 +878,7 @@ impl Alice {
     }
 
     fn id(&self, sequence: u64) -> ExtentId {
-        ExtentId { branch: self.branch, sequence }
+        ExtentId { cell: self.cell, sequence }
     }
 
     fn page_addr(&self, page: usize) -> usize {
@@ -1192,7 +1192,7 @@ impl Names {
             Payload::Filled(byte, len) => vec![*byte; *len],
             Payload::Path(place) => self.place(*place).as_os_str().as_bytes().to_vec(),
             Payload::Extents(extents) => (extents.iter())
-                .flat_map(|(branch, sequence)| [self.word(*branch, own), *sequence])
+                .flat_map(|(cell, sequence)| [self.word(*cell, own), *sequence])
                 .flat_map(u64::to_le_bytes)
                 .collect(),
         }
@@ -1353,7 +1353,7 @@ impl Answers {
 struct Seen {
     served: u64,
     restored: u64,
-    /// What it got of another tenant's: replies and stage operations naming their branches or
+    /// What it got of another tenant's: replies and stage operations naming their cells or
     /// holding their bytes, arenas and memory not its tenant's or the public one.
     stolen: Vec<String>,
     /// Windows it was granted past the most the daemon makes room for.
@@ -1395,7 +1395,7 @@ struct Shared {
 
 /// The tenants beside mallory's, what it may not reach of theirs.
 struct Theirs {
-    branches: [u64; 3],
+    cells: [u64; 3],
     memories: [(u64, u64); 2],
     arenas: [ArenaId; 2],
 }
@@ -1415,9 +1415,9 @@ fn receive(
     let mut early = false;
     while let Ok(Some(message)) = receiver.receive(|| u64::MAX) {
         let header = message.header;
-        let theirs_named = |word: &u64| theirs.branches.contains(word);
+        let theirs_named = |word: &u64| theirs.cells.contains(word);
         let mut said = header.args.iter().any(theirs_named);
-        // A window's mappings name their extents' branches.
+        // A window's mappings name their extents' cells.
         said |= message
             .payload
             .as_chunks::<8>()
@@ -1426,7 +1426,7 @@ fn receive(
             .map(|word| u64::from_le_bytes(*word))
             .any(|word| theirs_named(&word));
         if said {
-            seen.stolen.push(format!("their branch named: {header:?}"));
+            seen.stolen.push(format!("their cell named: {header:?}"));
         }
         for mark in [ALICE_MARK, BOB_MARK] {
             if memchr::memmem::find(&message.payload, &mark).is_some() {
@@ -1784,7 +1784,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let archive = alices.join("archive");
     let archived = {
         let store = CellClient::connect(&alice_socket, &archive, STORE_BYTES).unwrap();
-        let extent = ExtentId { branch: store.branch(), sequence: 1 };
+        let extent = ExtentId { cell: store.cell(), sequence: 1 };
         write(&store, extent, 0, &marked(ALICE_MARK, 0, 4 * BLOCK)).unwrap();
         store.commit(Some(b"archived")).unwrap();
         extent
@@ -1792,15 +1792,15 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     // Bob's, the default tenant's, which waits.
     let bob_path = dir.path().join("bob");
     let bob = CellClient::connect(&bob_socket, &bob_path, STORE_BYTES).unwrap();
-    let bobs = ExtentId { branch: bob.branch(), sequence: 1 };
+    let bobs = ExtentId { cell: bob.cell(), sequence: 1 };
     write(&bob, bobs, 0, &marked(BOB_MARK, 1, BLOCK)).unwrap();
     bob.commit(None).unwrap();
-    // A snapshot in the bucket, of a branch mallory's VM manager makes a version of in its directory.
+    // A snapshot in the bucket, of a cell mallory's VM manager makes a version of in its directory.
     // Its extents a MiB each, which mallory's floods of page-ins page in (TASK-149.34).
     let given = CellClient::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
-    let given_branch = given.branch();
+    let given_cell = given.cell();
     for sequence in 1..=GIVEN_EXTENTS {
-        let extent = ExtentId { branch: given_branch, sequence };
+        let extent = ExtentId { cell: given_cell, sequence };
         write(&given, extent, 0, &vec![0x88; 1 << 20]).unwrap();
     }
     given.commit(Some(b"given")).unwrap();
@@ -1817,16 +1817,16 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let (alice_path, socket) = (alices.join("store"), alice_socket.clone());
     std::thread::spawn(move || {
         let mut alice = Alice::new(&socket, &alice_path);
-        ready.send((alice.branch, identity(alice.store.physical_memory()))).unwrap();
+        ready.send((alice.cell, identity(alice.store.physical_memory()))).unwrap();
         for ops in asked {
             if answering.send(alice.case(&ops)).is_err() {
                 break;
             }
         }
     });
-    let (alice_branch, alice_memory) = alice_ready.recv_timeout(WAIT).unwrap();
+    let (alice_cell, alice_memory) = alice_ready.recv_timeout(WAIT).unwrap();
     let theirs = Arc::new(Theirs {
-        branches: [alice_branch, archived.branch, bob.branch()],
+        cells: [alice_cell, archived.cell, bob.cell()],
         memories: [alice_memory, identity(bob.physical_memory())],
         arenas: [alice_tenant.arena(), super::super::server::default_tenant().unwrap().arena()],
     });
@@ -1864,10 +1864,10 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 case,
                 vms: vms.clone(),
                 alices: alices.clone(),
-                alice: alice_branch,
+                alice: alice_cell,
                 bob: bob_path.clone(),
-                bobs: bob.branch(),
-                given: given_branch,
+                bobs: bob.cell(),
+                given: given_cell,
                 given_version: given_version.version,
                 given_tenant: given_version.tenant,
                 arena: mallory.arena(),
@@ -1953,7 +1953,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             prop_assert!(ended.is_ok(), "{stayed} connections of mallory's stayed");
             // It took no more of the host's disk than its limit, whatever it said: what was
             // admitted, and what its stores' own work adds beside it, a MiB at most (TASK-94).
-            // That work: their logs, branches and segments' tails, tens of KiB; and their
+            // That work: their logs, cells and segments' tails, tens of KiB; and their
             // extents' holes, zeros a commit seals with them, admitted for no write. A segment
             // holding them is framed in a copy, compressed, where they take nothing, unless
             // compressing it saves under an eighth of it (`local_cell`'s `IN_PLACE_SAVING`),
@@ -1990,7 +1990,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 prop_assert_ne!(errno, Some(Errno::EBUSY), "{} stayed held", path.display());
             }
             let nothing = vms.join(format!("nothing-{case}"));
-            prop_assert!(!nothing.exists(), "a version of a branch named was taken");
+            prop_assert!(!nothing.exists(), "a version of a cell named was taken");
             // Every store it opened to write opens again, and commits, whatever it said to it,
             // as far as it was served.
             let wrote: BTreeSet<&PathBuf> =
@@ -2016,7 +2016,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             prop_assert_eq!(archived_bytes, Ok(Ok(marked(ALICE_MARK, 0, 4 * BLOCK))));
             prop_assert_eq!(reopened.map(|store| store.root()), Ok(Ok(b"archived".to_vec())));
             prop_assert_eq!(read(&bob, bobs, 0, BLOCK), Ok(marked(BOB_MARK, 1, BLOCK)));
-            let later = ExtentId { branch: bob.branch(), sequence: 2 + case };
+            let later = ExtentId { cell: bob.cell(), sequence: 2 + case };
             prop_assert_eq!(write(&bob, later, 0, &marked(BOB_MARK, 2 + case, BLOCK)), Ok(()));
             prop_assert_eq!(bob.commit(None), Ok(()));
             prop_assert_eq!(read(&bob, later, 0, BLOCK), Ok(marked(BOB_MARK, 2 + case, BLOCK)));
@@ -2071,7 +2071,7 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     let tenant = Tenant::new(1, &vms).unwrap();
     std::thread::spawn(move || serve_tenant(listener, tenant));
     let store = CellClient::connect(&socket, vms.join("store"), 1 << 26).unwrap();
-    let extent = |sequence| ExtentId { branch: store.branch(), sequence };
+    let extent = |sequence| ExtentId { cell: store.cell(), sequence };
     write(&store, extent(1), 0, &super::pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
     // In the extent cache, the arena's pages.
@@ -2129,7 +2129,7 @@ fn what_requests_hold_is_within_the_credit() {
     let socket = dir.path().join("cladefsd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
-    let (sender, mut receiver, _stream, branch) =
+    let (sender, mut receiver, _stream, cell) =
         super::raw_connection(&socket, &dir.path().join("store"), 1 << 33);
     let len = MAX_PAYLOAD;
     let area = area_fd(Area::Sealed(len), &Mutex::default()).unwrap();
@@ -2137,7 +2137,7 @@ fn what_requests_hold_is_within_the_credit() {
     sender.send(transfer, &[], &[area.as_fd()]).unwrap();
     let transferred = receiver.receive(|| 0).unwrap().unwrap().header;
     assert_eq!((transferred.id, transferred.status), (1, 0));
-    let extent = |sequence| [branch, sequence];
+    let extent = |sequence| [cell, sequence];
     let written = Header::new(WRITE, 2).with_args(&extent(1));
     assert_eq!(
         super::call(&sender, &mut receiver, written, &vec![7; len as usize]).header.status,
@@ -2146,7 +2146,7 @@ fn what_requests_hold_is_within_the_credit() {
     let committed = Header::new(COMMIT, 3);
     assert_eq!(super::call(&sender, &mut receiver, committed, &[]).header.status, 0);
     // In the extent cache, so that what bringing it in holds isn't counted here.
-    let warm = Header::new(READ, 4).with_args(&[branch, 1, 0, len]);
+    let warm = Header::new(READ, 4).with_args(&[cell, 1, 0, len]);
     assert_eq!(super::call(&sender, &mut receiver, warm, &[]).header.status, 0);
     // Its root, no larger than a root holds, read back as many at once as the connection serves:
     // one as large as a payload refused, as it would be copied into each reply, uncounted.
@@ -2179,16 +2179,16 @@ fn what_requests_hold_is_within_the_credit() {
     };
     let stream = (MAX_STREAM_BYTES / len) as usize;
     let many = 16;
-    let reads = (0..many).map(|id| Header::new(READ, 10 + id).with_args(&[branch, 1, 0, len]));
+    let reads = (0..many).map(|id| Header::new(READ, 10 + id).with_args(&[cell, 1, 0, len]));
     let into_area = (0..many).map(|id| {
-        Header::new(READ, 100 + id).with_args(&[branch, 1, 0, len, 0]).with_flags(READ_TRANSFER)
+        Header::new(READ, 100 + id).with_args(&[cell, 1, 0, len, 0]).with_flags(READ_TRANSFER)
     });
     let from_area = (0..many).map(|id| {
         Header::new(WRITE, 200 + id)
-            .with_args(&[branch, 2 + id, 0, 0, len])
+            .with_args(&[cell, 2 + id, 0, 0, len])
             .with_flags(WRITE_TRANSFER)
     });
-    let writes = (0..many).map(|id| Header::new(WRITE, 300 + id).with_args(&[branch, 20 + id, 0]));
+    let writes = (0..many).map(|id| Header::new(WRITE, 300 + id).with_args(&[cell, 20 + id, 0]));
     let roots = (0..many).map(|id| Header::new(ROOT, 400 + id));
     let held = [
         burst("roots", roots.collect(), &[], many as usize),
@@ -2226,7 +2226,7 @@ fn page_ins_in_flight_are_bounded() {
     let gated = Arc::new(super::GatedReads::new());
     super::super::cells::use_bucket(bucket_cell::object_bucket::ObjectBucket::new(
         gated.clone(),
-        "branches",
+        "cells",
     ));
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("cladefsd.sock");
@@ -2235,21 +2235,17 @@ fn page_ins_in_flight_are_bounded() {
     // A version of the extents, made here, restored on another host, which has them in the bucket
     // alone.
     let path = dir.path().join("store");
-    let branch = {
+    let cell = {
         let store = OpenCell::create(&path, 1 << 30).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         for sequence in 1..=EXTENTS {
             let data = super::pattern(sequence as u8, MIB as usize);
             store
-                .write(
-                    ExtentId { branch: branch.id, sequence },
-                    0,
-                    &[VolatileSlice::from(&data[..])],
-                )
+                .write(ExtentId { cell: cell.id, sequence }, 0, &[VolatileSlice::from(&data[..])])
                 .unwrap();
         }
         store.commit(None).unwrap();
-        branch
+        cell
     };
     let store = CellClient::connect(&socket, &path, 1 << 30).unwrap();
     let version = store.make_version().unwrap();
@@ -2290,7 +2286,7 @@ fn page_ins_in_flight_are_bounded() {
     assert_eq!(answer(2), 0);
     for sequence in 1..=EXTENTS {
         let mapped = Header::new(MAP, 2 + sequence).with_args(&[
-            branch.id,
+            cell.id,
             sequence,
             0,
             MIB,
@@ -2335,7 +2331,7 @@ fn page_ins_in_flight_are_bounded() {
     });
     // A page of each, through the stream.
     let reads = (1..=EXTENTS).map(|sequence| {
-        Header::new(READ, 2000 + sequence).with_args(&[branch.id, sequence, 0, page_size()])
+        Header::new(READ, 2000 + sequence).with_args(&[cell.id, sequence, 0, page_size()])
     });
     let held = [burst("faults", faults.collect()), burst("reads", reads.collect())];
     // A connection's page-ins, each a part and those it reads ahead, as many at once as it
@@ -2395,16 +2391,16 @@ fn a_tenants_in_flight_data_is_bounded() {
     // never returns: the test's process ends with it (nextest runs each in its own).
     fn flood(socket: PathBuf, path: PathBuf) {
         std::thread::spawn(move || {
-            let (sender, mut receiver, _stream, branch) =
+            let (sender, mut receiver, _stream, cell) =
                 super::raw_connection(&socket, &path, 1 << 30);
-            let written = Header::new(WRITE, 2).with_args(&[branch, 1]);
+            let written = Header::new(WRITE, 2).with_args(&[cell, 1]);
             sender.send(written, &super::pattern(1, MIB as usize), &[]).unwrap();
             assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
             // Reads past any room, none of whose replies it reads: what the daemon admits of them
             // it queues, held in the tenant's bytes in flight; the rest block here, as a full
             // socket does.
             for id in 0..300u64 {
-                let read = Header::new(READ, 100 + id).with_args(&[branch, 1, 0, MIB]);
+                let read = Header::new(READ, 100 + id).with_args(&[cell, 1, 0, MIB]);
                 if sender.send(read, &[], &[]).is_err() {
                     break;
                 }
@@ -2437,9 +2433,9 @@ fn a_tenants_in_flight_data_is_bounded() {
 
     // Alice, flooding as hard on her own bytes in flight, is served: her write commits and her read
     // answers.
-    let (asender, mut areceiver, _astream, abranch) =
+    let (asender, mut areceiver, _astream, acell) =
         super::raw_connection(&asocket, &astores.join("store"), 1 << 24);
-    let awritten = Header::new(WRITE, 2).with_args(&[abranch, 1]);
+    let awritten = Header::new(WRITE, 2).with_args(&[acell, 1]);
     let alice_write =
         super::call(&asender, &mut areceiver, awritten, &super::pattern(2, MIB as usize))
             .header
@@ -2449,7 +2445,7 @@ fn a_tenants_in_flight_data_is_bounded() {
     let alice_read = super::call(
         &asender,
         &mut areceiver,
-        Header::new(READ, 4).with_args(&[abranch, 1, 0, MIB]),
+        Header::new(READ, 4).with_args(&[acell, 1, 0, MIB]),
         &[],
     );
     let alice_budget = alice.in_flight().budget();
@@ -2536,7 +2532,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
                 let store = store.unwrap();
                 let mut written = 0;
                 let refused = loop {
-                    let extent = ExtentId { branch: store.branch(), sequence: 1 + written };
+                    let extent = ExtentId { cell: store.cell(), sequence: 1 + written };
                     match write(&store, extent, 0, &noise(n << 32 | written, MIB as usize)) {
                         Ok(()) => written += 1,
                         Err(errno) => break errno,
@@ -2550,7 +2546,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     start.wait();
     let alices: Vec<_> = (1..=ALICES)
         .map(|sequence| {
-            let extent = ExtentId { branch: alice.branch(), sequence };
+            let extent = ExtentId { cell: alice.cell(), sequence };
             let written = write(&alice, extent, 0, &noise(1 << 40 | sequence, MIB as usize));
             (written, alice.commit(None))
         })
@@ -2569,7 +2565,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
 
     // Alice wrote and committed throughout, and reads what she wrote.
     assert_eq!(alices, vec![(Ok(()), Ok(())); ALICES as usize], "alice was refused");
-    let last = ExtentId { branch: alice.branch(), sequence: ALICES };
+    let last = ExtentId { cell: alice.cell(), sequence: ALICES };
     assert_eq!(read(&alice, last, 0, MIB as usize), Ok(noise(1 << 40 | ALICES, MIB as usize)));
     // Mallory's VM processes were refused at its limit, having written within it: what its stores
     // were admitted as made, and what they wrote, its room.
@@ -2583,7 +2579,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     }
     disk::set_limit(Some(MALLORY), None).unwrap();
     let (store, written, _) = &filled[0];
-    let extent = ExtentId { branch: store.branch(), sequence: 1 + written };
+    let extent = ExtentId { cell: store.cell(), sequence: 1 + written };
     assert_eq!(write(store, extent, 0, &noise(0, MIB as usize)), Ok(()));
     assert_eq!(store.commit(None), Ok(()));
 }

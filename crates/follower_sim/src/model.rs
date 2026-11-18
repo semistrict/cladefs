@@ -99,7 +99,7 @@ impl Op {
     }
 }
 
-/// The writer: Fxfs, read-write, on the store's branch.
+/// The writer: Fxfs, read-write, on the store's cell.
 pub struct Writer {
     pub fs: OpenFxFilesystem,
     root: Directory<ObjectStore>,

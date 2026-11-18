@@ -3,23 +3,23 @@
 // found in the LICENSE file.
 
 //! Forks with something going wrong at each of their steps (TASK-44.10), on the host, in seconds,
-//! with no VM: a step failing ([`crate::faults`]), the host dying there, another branch taking the
+//! with no VM: a step failing ([`crate::faults`]), the host dying there, another cell taking the
 //! child's ID there, or a write of the bucket's going wrong ([`Mishap`]); then, whatever came of
-//! the fork, what [`World::settle`] checks: no data lost, no other branch harmed, nothing leaked
+//! the fork, what [`World::settle`] checks: no data lost, no other cell harmed, nothing leaked
 //! for good, and a later fork succeeding, or the same one failing cleanly.
 //!
 //! A fork is the bucket's alone (TASK-165.7): its child's store is made only once the bucket has
 //! the child's record, so that nothing here names a child the bucket may not have. What a fork
 //! whose host died, or whose cleanup failed, leaves in the bucket stands, as the bucket's protocol
-//! has it (doc-14): an orphan, a live branch no store holds, which an operator finds among the live
-//! branches and deletes ([`World::settle`], `cladefs-gc --branches`).
+//! has it (doc-14): an orphan, a live cell no store holds, which an operator finds among the live
+//! cells and deletes ([`World::settle`], `cladefs-gc --cells`).
 //!
 //! A host dying is its disk, copied there and then, restarted, and its bucket cut off, so that what
 //! it had going runs to its end unseen ([`Gated::sever`]): every write of a dead host's kept, synced
 //! or not, as its file system may keep them.
 //!
 //! The extents are a guest's: minted from its store's next sequence number or its writer's floor,
-//! which jumps at each writer, on from 1 << 40, its branches random; never counted from nothing, as
+//! which jumps at each writer, on from 1 << 40, its cells random; never counted from nothing, as
 //! the extents of `bucket`'s other tests are, which no store's are.
 
 use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, restart, uploaded};
@@ -27,7 +27,7 @@ use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
 use crate::{Errno, ExtentId, OpenCell, VolatileSlice, VolatileSliceMut};
 use bucket_cell::layout::{self, Kind};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::{EPOCH_SHIFT, branch};
+use bucket_cell::{EPOCH_SHIFT, lifecycle};
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -49,7 +49,7 @@ enum Fault {
     FailsAfter(&'static str, usize),
     /// The host dies at the step of this name.
     Dies(&'static str),
-    /// Another branch takes the child's ID at the step of this name, if none has it yet.
+    /// Another cell takes the child's ID at the step of this name, if none has it yet.
     Taken(&'static str),
     /// This goes wrong with the write numbered so, counting from the fork's first.
     Write(usize, Mishap),
@@ -82,7 +82,7 @@ struct World {
     bucket: Arc<ObjectBucket>,
     gated: Arc<Gated>,
     parent: Option<OpenCell>,
-    branch: crate::CellId,
+    cell: crate::CellId,
     /// The child of the fork.
     child: crate::CellId,
     /// The parent's extents, with their data.
@@ -91,7 +91,7 @@ struct World {
     other_held: Vec<(ExtentId, Vec<u8>)>,
     /// Whether the host died.
     dead: Arc<AtomicBool>,
-    /// Whether another branch took the child's ID.
+    /// Whether another cell took the child's ID.
     taken: Arc<AtomicBool>,
 }
 
@@ -101,9 +101,7 @@ fn mint(store: &OpenCell, count: u64) -> Vec<ExtentId> {
     let info = store.info().unwrap();
     let first = info.next_sequence.max(info.sequence_floor);
     assert!(first >= 1 << EPOCH_SHIFT, "a guest mints from its writer's floor: {info:?}");
-    (first..first + count)
-        .map(|sequence| ExtentId { branch: store.branch().id, sequence })
-        .collect()
+    (first..first + count).map(|sequence| ExtentId { cell: store.cell().id, sequence }).collect()
 }
 
 fn write(store: &OpenCell, extent: ExtentId, data: &[u8]) {
@@ -165,7 +163,7 @@ impl World {
 
         let path = host.join("parent");
         let parent = kept_in(&path, (1 << 30, None), &reached, options()).unwrap();
-        let branch = parent.branch();
+        let cell = parent.cell();
         let mut held = commit(&parent, 1, &[BLOCK], b"first");
         parent.wait_uploaded().unwrap();
         let floor = parent.info().unwrap().sequence_floor;
@@ -180,7 +178,7 @@ impl World {
             bucket,
             gated,
             parent: Some(parent),
-            branch,
+            cell,
             child: crate::host_cell::new_alone(),
             held,
             other,
@@ -222,7 +220,7 @@ impl World {
                 let (bucket, child, taken) = (self.bucket.clone(), self.child, self.taken.clone());
                 FailGuard::with_callback(step, move || {
                     if !taken.load(Ordering::SeqCst)
-                        && block_on(branch::create(&*bucket, child, 0)).is_ok()
+                        && block_on(lifecycle::create(&*bucket, child, 0)).is_ok()
                     {
                         taken.store(true, Ordering::SeqCst);
                         let taking =
@@ -261,7 +259,7 @@ impl World {
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
-    /// Opens the store at `path`, and takes its branch.
+    /// Opens the store at `path`, and takes its cell.
     fn open(&self, path: &Path) -> Result<OpenCell, String> {
         naming(path, &self.bucket);
         reopened(path, options()).map_err(|err| err.to_string())
@@ -288,17 +286,17 @@ impl World {
 
     /// The child's record, if it has one.
     fn record(&self, child: crate::CellId) -> Option<bucket_cell::record::Record> {
-        block_on(branch::record(&*self.bucket, child)).unwrap()
+        block_on(lifecycle::record(&*self.bucket, child)).unwrap()
     }
 
-    /// The branches live in the bucket.
+    /// The cells live in the bucket.
     fn live(&self) -> Vec<crate::CellId> {
         block_on(bucket_cell::testing::live(&*self.bucket)).unwrap().into_keys().collect()
     }
 
-    /// The branches live in the bucket that no store holds, of those `named`: what a fork whose
+    /// The cells live in the bucket that no store holds, of those `named`: what a fork whose
     /// host died, or whose cleanup failed, leaves standing, which an operator finds so, and
-    /// deletes, whichever placement took it last, as `cladefs-gc --branches` and `--delete-branch`
+    /// deletes, whichever placement took it last, as `cladefs-gc --cells` and `--delete-cell`
     /// do. Only the fork's child may be one, and only if the fork failed.
     fn delete_orphans(&self, named: &[crate::CellId], failed: bool, case: &str) {
         let orphans: Vec<_> =
@@ -308,7 +306,7 @@ impl World {
         }
         assert!(failed, "{case}: a fork made left orphans: {orphans:x?}");
         assert_eq!(orphans, [self.child], "{case}: orphans");
-        let deleted = block_on(branch::delete(
+        let deleted = block_on(lifecycle::delete(
             &*self.bucket,
             self.child,
             rand::random(),
@@ -323,7 +321,7 @@ impl World {
     fn settle(self, forked: Result<(), crate::Error>, leftover: Leftover, case: &str) {
         let path = self.path("child");
         let mut children = Vec::new();
-        // Those to check, once the parent's next writer took its branch.
+        // Those to check, once the parent's next writer took its cell.
         let mut unchecked: Vec<(PathBuf, &[u8])> = Vec::new();
         self.collect(case);
 
@@ -351,7 +349,7 @@ impl World {
         }
         self.collect(case);
 
-        // The parent's next writer takes its branch, and it holds what it held.
+        // The parent's next writer takes its cell, and it holds what it held.
         let parent_path = self.path("parent");
         let parent =
             self.open(&parent_path).unwrap_or_else(|err| panic!("{case}: the parent: {err}"));
@@ -362,19 +360,19 @@ impl World {
         }
         let later = commit(&parent, 7, &[BLOCK], b"later");
         assert_eq!(parent.wait_uploaded(), Ok(()), "{case}");
-        let (mut extents, root) = uploaded(&self.bucket, self.branch);
+        let (mut extents, root) = uploaded(&self.bucket, self.cell);
         extents.sort();
         let mut all: Vec<_> = (self.held.iter().chain(&later))
             .map(|(extent, data)| (extent.sequence, data.clone()))
             .collect();
         all.sort();
-        assert!(extents == all, "{case}: the parent's branch holds other extents");
+        assert!(extents == all, "{case}: the parent's cell holds other extents");
         assert_eq!(root, Some(b"later".to_vec()), "{case}");
         self.collect(case);
 
         // What the fork left standing in the bucket, no store holding it, an operator deletes.
         let taken = self.taken.load(Ordering::SeqCst);
-        let mut named = vec![self.branch, self.other.branch()];
+        let mut named = vec![self.cell, self.other.cell()];
         named.extend(children.iter().map(|_| self.child));
         if taken {
             named.push(self.child);
@@ -404,25 +402,25 @@ impl World {
             self.check_fork(&opened, root, case);
         }
 
-        // No branch lives that no store holds, none another's was harmed, and it goes on.
+        // No cell lives that no store holds, none another's was harmed, and it goes on.
         let mut live = self.live();
         live.sort();
-        let mut named = vec![self.branch, self.other.branch()];
-        named.extend(children.iter().map(|child| OpenCell::open(child).unwrap().branch()));
+        let mut named = vec![self.cell, self.other.cell()];
+        named.extend(children.iter().map(|child| OpenCell::open(child).unwrap().cell()));
         if taken {
             named.push(self.child);
         }
         named.sort();
-        assert_eq!(live, named, "{case}: branches no store holds, or lost");
+        assert_eq!(live, named, "{case}: cells no store holds, or lost");
         for (extent, data) in &self.other_held {
             assert!(read(&self.other, *extent, data.len()) == *data, "{case}: another's extent");
         }
         commit(&self.other, 8, &[BLOCK], b"other, later");
-        assert_eq!(self.other.wait_uploaded(), Ok(()), "{case}: another's branch");
+        assert_eq!(self.other.wait_uploaded(), Ok(()), "{case}: another's cell");
         if taken {
             let writer =
                 bucket_cell::Writer::open(self.bucket.clone(), self.child, rand::random(), TOKEN);
-            assert_eq!(block_on(writer).map(drop), Ok(()), "{case}: the branch that took the ID");
+            assert_eq!(block_on(writer).map(drop), Ok(()), "{case}: the cell that took the ID");
         }
 
         // Everything but the other's deleted, nothing is left of it, in the bucket or here.
@@ -433,22 +431,22 @@ impl World {
         self.delete(&parent_path, case);
         self.collect(case);
         let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
-        let kept = |branch| branch == self.other.branch() || taken && branch == self.child;
+        let kept = |cell| cell == self.other.cell() || taken && cell == self.child;
         let leaked: Vec<_> = (keys.into_iter().map(|meta| meta.key))
             .filter(|key| match layout::kind(key) {
-                Kind::Segment { branch, .. }
-                | Kind::Checkpoint { branch, .. }
-                | Kind::Extent { branch, .. } => !kept(branch),
-                // cladefs: no reference stays: the branch that took the fork's child's ID holds
+                Kind::Segment { cell, .. }
+                | Kind::Checkpoint { cell, .. }
+                | Kind::Extent { cell, .. } => !kept(cell),
+                // cladefs: no reference stays: the cell that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
-                // A deleted branch's record stays, but with its dead cell, removed whole, if its
-                // branch's ID is an allocator's (TASK-455): gone, it is not listed.
-                Kind::Record { branch } => {
-                    !kept(branch) && !self.record(branch).is_some_and(|record| record.deleted)
+                // A deleted cell's record stays, but with its dead cell, removed whole, if its
+                // cell's ID is an allocator's (TASK-455): gone, it is not listed.
+                Kind::Record { cell } => {
+                    !kept(cell) && !self.record(cell).is_some_and(|record| record.deleted)
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
-                // retired or taken back (TASK-395.13), every branch's head, a deleted one's
+                // retired or taken back (TASK-395.13), every cell's head, a deleted one's
                 // final, fencing its writers (TASK-407), and a tenant's KEK object, for good
                 // (TASK-411.27).
                 Kind::Head { .. }
@@ -516,7 +514,7 @@ fn forks_take_their_steps_in_order() {
     let traced = |faults: &[Fault]| {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let guards: Vec<_> = (FORK_STEPS.into_iter().chain(CLEANUP_STEPS))
-            .chain(["branch::record_fork", "branch::recorded_fork"])
+            .chain(["lifecycle::record_fork", "lifecycle::recorded_fork"])
             .filter(|step| !faults.contains(&Fault::Fails(step)))
             .map(|step| {
                 let steps = steps.clone();
@@ -538,7 +536,7 @@ fn forks_take_their_steps_in_order() {
     assert_eq!(traced(&[]), FORK_STEPS);
     let cleanup = traced(&[Fault::Fails("writer::acknowledge")]);
     let cleaned: Vec<_> = cleanup.into_iter().filter(|step| !FORK_STEPS.contains(step)).collect();
-    assert_eq!(cleaned, ["branch::claimed", "branch::claim_head_ended"]);
+    assert_eq!(cleaned, ["lifecycle::claimed", "lifecycle::claim_head_ended"]);
 }
 
 /// A step of a fork that fails fails the fork, and what must hold holds.
@@ -560,17 +558,17 @@ fn hosts_dying_at_each_step_of_a_fork() {
     }));
 }
 
-/// Another branch taking the child's ID, as a guest may name one that was free, whichever step of
+/// Another cell taking the child's ID, as a guest may name one that was free, whichever step of
 /// the fork it comes at, keeps it, and the parent goes on.
 #[test]
-fn branches_taking_the_childs_id_at_each_step() {
+fn cells_taking_the_childs_id_at_each_step() {
     host();
     all(FORK_STEPS.map(|step| (vec![Fault::Taken(step)], Leftover::Deleted)));
 }
 
 /// So does it whose host dies later in the fork, whatever is done with what it left.
 #[test]
-fn branches_taking_the_id_of_a_fork_whose_host_dies() {
+fn cells_taking_the_id_of_a_fork_whose_host_dies() {
     host();
     let after_free = FORK_STEPS.iter().position(|step| *step == "upload::child_free").unwrap();
     all(FORK_STEPS[after_free + 1..].iter().flat_map(|&step| {
@@ -600,7 +598,7 @@ fn each_write_of_a_fork_going_wrong() {
 }
 
 /// TASK-150.1: a pass of the collector, which nothing keeps away from any step of a fork, just
-/// before each of the fork's writes takes nothing a branch holds, or is about to.
+/// before each of the fork's writes takes nothing a cell holds, or is about to.
 #[test]
 fn each_write_of_a_fork_meeting_the_collector() {
     host();
@@ -643,10 +641,10 @@ fn each_write_of_a_failed_forks_cleanup_going_wrong() {
 }
 
 /// TASK-79.78: a fork its parent's head names, its host lost with its disk before anything else
-/// came of it, is an orphan: a live branch no host holds, once the parent's next writer, elsewhere, gives
+/// came of it, is an orphan: a live cell no host holds, once the parent's next writer, elsewhere, gives
 /// it its record. The collector keeps what it inherited, though its parent freed it, as it cannot
-/// tell it from a branch held idle; an operator finds it among the live branches, as `cladefs-gc
-/// --branches` does, and deletes it, whichever placement took it last, as `--delete-branch` does;
+/// tell it from a cell held idle; an operator finds it among the live cells, as `cladefs-gc
+/// --cells` does, and deletes it, whichever placement took it last, as `--delete-cell` does;
 /// and the next pass frees what only it held.
 #[test]
 fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
@@ -657,10 +655,10 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     assert!(world.dead.load(Ordering::SeqCst), "the host lives");
 
     let moved = world.temp.path().join("moved");
-    let parent = kept_in(&moved, (1 << 30, Some(world.branch)), &world.bucket, options()).unwrap();
+    let parent = kept_in(&moved, (1 << 30, Some(world.cell)), &world.bucket, options()).unwrap();
     let reopen = moved.clone();
     assert!(world.record(world.child).is_some_and(|record| !record.deleted), "no orphan");
-    let state = block_on(bucket_cell::recover(&*world.bucket, world.branch, None));
+    let state = block_on(bucket_cell::recover(&*world.bucket, world.cell, None));
     let key = state.unwrap().state.extents[&large].key.clone();
     assert!(matches!(layout::kind(&key), Kind::Extent { .. }), "{key}");
     for (extent, _) in &world.held {
@@ -676,11 +674,11 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     world.collect("orphaned");
     assert!(stored(), "what the fork inherited went while it is live");
 
-    let held = [world.branch, world.other.branch()];
+    let held = [world.cell, world.other.cell()];
     let orphans: Vec<_> = world.live().into_iter().filter(|live| !held.contains(live)).collect();
     assert_eq!(orphans, [world.child]);
     assert_eq!(
-        block_on(branch::delete(
+        block_on(lifecycle::delete(
             &*world.bucket,
             world.child,
             9,

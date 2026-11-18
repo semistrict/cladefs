@@ -15,8 +15,8 @@ use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
 use crate::faults::RESTORE_STEPS;
 use crate::{CellRole, Errno, ExtentId, OpenCell};
-use bucket_cell::branch;
 use bucket_cell::layout::{self, Kind};
+use bucket_cell::lifecycle;
 use bucket_cell::object_bucket::ObjectBucket;
 use fail::FailGuard;
 use futures::executor::block_on;
@@ -62,7 +62,7 @@ struct Hosts {
     segments: Vec<String>,
     /// What the version holds, and its root.
     held: Vec<(ExtentId, Vec<u8>)>,
-    /// The forks made, by their branches, with their stores' paths.
+    /// The forks made, by their cells, with their stores' paths.
     children: Arc<Mutex<Vec<(crate::CellId, PathBuf)>>>,
     /// Whether a host died.
     dead: Arc<AtomicBool>,
@@ -75,12 +75,12 @@ fn copy_at(disk: &Path) -> PathBuf {
     disk.join("copy")
 }
 
-/// The keys of the segments of `branch` in `bucket`.
+/// The keys of the segments of `cell` in `bucket`.
 fn segments_of(bucket: &Arc<ObjectBucket>, of: crate::CellId) -> Vec<String> {
     let keys = block_on(bucket_cell::Bucket::list(&**bucket, "")).unwrap();
     let segments = keys.into_iter().map(|meta| meta.key);
     segments
-        .filter(|key| matches!(layout::kind(key), Kind::Segment { branch, .. } if branch == of))
+        .filter(|key| matches!(layout::kind(key), Kind::Segment { cell, .. } if cell == of))
         .collect()
 }
 
@@ -92,7 +92,7 @@ fn in_bucket(
     child: crate::CellId,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
-        let record = branch::record(&**bucket, child).await.map_err(|err| err.to_string())?;
+        let record = lifecycle::record(&**bucket, child).await.map_err(|err| err.to_string())?;
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::bucket::kms().map_err(|err| err.to_string())?;
@@ -114,15 +114,15 @@ fn in_bucket(
     })
 }
 
-/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS: what
-/// the deletion records of a branch's forks to other cells is authenticated (TASK-411.4).
+/// Deletes `cell` as an operator does, as `holder`, of no placement, under the host's KMS: what
+/// the deletion records of a cell's forks to other cells is authenticated (TASK-411.4).
 async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
-    branch: crate::CellId,
+    cell: crate::CellId,
     holder: u64,
 ) -> Result<(), bucket_cell::Error> {
     let kms = crate::bucket::kms().unwrap();
-    branch::delete(&**bucket, branch, holder, u64::MAX, &kms).await
+    lifecycle::delete(&**bucket, cell, holder, u64::MAX, &kms).await
 }
 
 impl Hosts {
@@ -163,7 +163,7 @@ impl Hosts {
                 let description = local_cell::Description {
                     block_size: OpenCell::BLOCK_SIZE,
                     capacity: 1 << 30,
-                    branch: source.branch(),
+                    cell: source.cell(),
                 };
                 let kind = bucket_cell::cell::Kind::Fxfs;
                 OpenCell::create_at_version(&path, (&url, kind), description, version).unwrap();
@@ -172,7 +172,7 @@ impl Hosts {
             assert_eq!(copy.access().role, CellRole::Version, "host {host} holds no copy");
             copies.push(Some(Arc::new(copy)));
         }
-        let segments = segments_of(&bucket, source.branch());
+        let segments = segments_of(&bucket, source.cell());
         Self {
             temp,
             bucket,
@@ -201,8 +201,8 @@ impl Hosts {
     /// Asserts no restore wrote a segment of the version's cell: those there were there as the
     /// hosts were made, the collector having reclaimed some since.
     fn check_unwritten(&self, case: &str) {
-        let branch = self.source.as_ref().unwrap().branch();
-        let written: Vec<_> = (segments_of(&self.bucket, branch).into_iter())
+        let cell = self.source.as_ref().unwrap().cell();
+        let written: Vec<_> = (segments_of(&self.bucket, cell).into_iter())
             .filter(|segment| !self.segments.contains(segment))
             .collect();
         assert_eq!(written, Vec::<String>::new(), "{case}: the cell was written");
@@ -384,8 +384,8 @@ impl Hosts {
         Self::collect(&self.bucket, case);
         self.check_unwritten(case);
         // What a restore whose host died left standing in the bucket, no store holding it, an
-        // operator finds among the live branches, and deletes (TASK-165.7).
-        let mut named = vec![self.source.as_ref().unwrap().branch()];
+        // operator finds among the live cells, and deletes (TASK-165.7).
+        let mut named = vec![self.source.as_ref().unwrap().cell()];
         named.extend(self.children.lock().unwrap().iter().map(|(child, _)| *child));
         let live = block_on(bucket_cell::testing::live(&*self.bucket)).unwrap();
         let orphans: Vec<_> = live.into_keys().filter(|live| !named.contains(live)).collect();
@@ -434,7 +434,7 @@ impl Hosts {
             assert_eq!(deleted.map_err(|err| err.to_string()), Ok(()), "{case}: deleting a fork");
         }
         let source = self.source.take().unwrap();
-        let branch = source.branch();
+        let cell = source.cell();
         drop(source);
         for disk in &self.disks {
             let copy = copy_at(disk);
@@ -442,7 +442,7 @@ impl Hosts {
                 OpenCell::delete(&copy, None).unwrap();
             }
         }
-        let gone = block_on(operator_delete(&self.bucket, branch, rand::random()));
+        let gone = block_on(operator_delete(&self.bucket, cell, rand::random()));
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
         let keys = block_on(bucket_cell::Bucket::list(&*self.bucket, "")).unwrap();
@@ -454,21 +454,21 @@ impl Hosts {
                 | Kind::Checkpoint { .. }
                 | Kind::Extent { .. }
                 | Kind::Moves { .. } => true,
-                Kind::Record { branch } => !block_on(branch::record(&*self.bucket, branch))
+                Kind::Record { cell } => !block_on(lifecycle::record(&*self.bucket, cell))
                     .unwrap()
                     .is_some_and(|record| record.deleted),
-                // cladefs: a cell's object stays, as its branch's record does, its epoch fencing
-                // its branch's head (TASK-364): left over only if it names a live branch.
+                // cladefs: a cell's object stays, as its cell's record does, its epoch fencing
+                // its cell's head (TASK-364): left over only if it names a live cell.
                 Kind::Cell { cell } => {
                     let object = block_on(bucket_cell::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
                     object.kind.is_some() && {
-                        let record = block_on(branch::record(&*self.bucket, cell)).unwrap();
+                        let record = block_on(lifecycle::record(&*self.bucket, cell)).unwrap();
                         record.is_some_and(|record| !record.deleted)
                     }
                 }
                 // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
-                // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a
+                // mark, retired or taken back (TASK-395.13), every cell's head (TASK-407), and a
                 // tenant's KEK object (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::CollectorLease { .. }
@@ -518,7 +518,7 @@ fn restores_with_nothing_going_wrong() {
 }
 
 /// A restore's steps come in the order [`RESTORE_STEPS`] says, each passed, and none of a fork's
-/// on a branch with a writer: no upload, no segment, no acknowledgement.
+/// on a cell with a writer: no upload, no segment, no acknowledgement.
 #[test]
 fn restores_take_their_steps_in_order() {
     use crate::faults::FORK_STEPS;
@@ -633,9 +633,9 @@ fn encrypted_restores_with_nothing_going_wrong() {
     let copy = hosts.copies[1].as_ref().unwrap();
     let child = crate::host_cell::new_alone();
     copy.fork_to(hosts.disks[1].join("child"), child).unwrap();
-    let record = block_on(branch::record(&*hosts.bucket, child)).unwrap().unwrap();
-    let source = hosts.source.as_ref().unwrap().branch();
-    let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
+    let record = block_on(lifecycle::record(&*hosts.bucket, child)).unwrap().unwrap();
+    let source = hosts.source.as_ref().unwrap().cell();
+    let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
     assert_eq!((record.deks.len(), inherited), (1, vec![source]));
 }
 

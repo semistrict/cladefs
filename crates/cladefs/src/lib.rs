@@ -100,7 +100,7 @@
 //! An image's I/O bypasses the host's page cache where the host filesystem allows, and runs on
 //! threads of its own. Freeing an extent removes its file.
 //!
-//! An image keeps its branch in a bucket, as every extent store does: a file bucket of its own,
+//! An image keeps its cell in a bucket, as every extent store does: a file bucket of its own,
 //! in its directory, which its description names (or, on a host of cladefs's system, the host's).
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
@@ -108,7 +108,7 @@
 //! An image can be forked: [`Storage::fork_to`] forks closed storage, and
 //! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
 //! Forking forks the image's extent store, which shares the image's data rather than copies it,
-//! whatever it holds, and its branch in its bucket, which the fork shares.
+//! whatever it holds, and its cell in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
 
@@ -192,7 +192,7 @@ pub use dax::uffd::{
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 pub use filesystem::{Filesystem, Node, Options};
-pub use host_cell::BranchOf;
+pub use host_cell::CellOf;
 pub use image::{Compactions, Image, TreeCompactions, VolumeMetadata};
 pub use memory::{VolatileSlice, VolatileSliceMut};
 pub use node::{

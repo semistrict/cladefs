@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: when a branch's commits are durable (see the crate's docs). Commits are ordered as they
+//! cladefs: when a cell's commits are durable (see the crate's docs). Commits are ordered as they
 //! are made, and a flush makes those ordered so far durable, in order, together
 //! ([`LocalCell::flush`](crate::LocalCell::flush)): it takes them first, and syncs what they wrote then,
 //! the store's state not locked meanwhile, so that commits go on behind it. The commits it took are
@@ -17,7 +17,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A branch's commits, as they become durable: each `T`, what a flush needs of it, from the time
+/// A cell's commits, as they become durable: each `T`, what a flush needs of it, from the time
 /// it is ordered until a flush takes it.
 pub(crate) struct Durability<T> {
     /// The epochs of the last commit ordered, and of the last durable.
@@ -99,7 +99,7 @@ pub(crate) struct Due<T> {
 }
 
 impl<T> Durability<T> {
-    /// A branch's, whose commits up to `epoch` are durable: as opened.
+    /// A cell's, whose commits up to `epoch` are durable: as opened.
     pub fn new(epoch: u64) -> Self {
         Self { ordered: epoch, durable: epoch, queue: VecDeque::new(), ordered_at: VecDeque::new() }
     }

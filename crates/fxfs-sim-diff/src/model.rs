@@ -36,7 +36,7 @@ struct WritePart {
 pub struct Extent {
     pub offset: u64,
     pub len: u64,
-    pub branch: u64,
+    pub cell: u64,
     pub sequence: u64,
     pub extent_offset: u64,
     pub access: u32,

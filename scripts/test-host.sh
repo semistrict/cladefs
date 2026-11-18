@@ -31,7 +31,7 @@
 # (timeout's DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone,
 # CLADEFS_GUEST_TESTS=0 the workspace's alone, and CLADEFS_TEST_ARGS are cargo nextest's arguments
 # for the workspace's, such as a filter. CLADEFSD_BUCKET, if set, names a bucket the guest tests'
-# extent daemons keep their stores' branches in (an object store's URL the test host reaches), under
+# extent daemons keep their stores' cells in (an object store's URL the test host reaches), under
 # a prefix of the run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here
 # reaches the test host too (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and
 # CLADEFS_PJDFSTEST_TESTS, and the run's CLADEFS_TEST_HOST_* settings are scripts/lib/host.sh's.

@@ -13,8 +13,7 @@ const BLOCK: usize = OpenCell::BLOCK_SIZE as usize;
 
 /// The environment of a host of the multi-node system, as tests have it: a bucket in each
 /// process's memory, and placement 1.
-const HOST: [(&str, &str); 2] =
-    [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")];
+const HOST: [(&str, &str); 2] = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "1")];
 
 /// cladefsctl, acting on stores itself, with `env` in its environment, or through a daemon,
 /// `cladefsd`, of its own.
@@ -98,25 +97,25 @@ fn read(store: &OpenCell, extent: ExtentId) -> Vec<u8> {
     data
 }
 
-/// TASK-39.4: `cladefsctl delete` deletes a store whose fork lives: its branch in its bucket and its
+/// TASK-39.4: `cladefsctl delete` deletes a store whose fork lives: its cell in its bucket and its
 /// directory, the fork living on, a store of its own, reading what it inherited in the bucket
 /// (TASK-165.7). Before, the store's directory stayed, holding what the fork shared of it.
 fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path) {
     let (path, fork) = (dir.join("store"), dir.join("fork"));
     let store = OpenCell::create(&path, 1 << 24).unwrap();
-    let extent = ExtentId { branch: store.branch().id, sequence: 1 };
+    let extent = ExtentId { cell: store.cell().id, sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     store.commit(None).unwrap();
     drop(store);
     let printed = cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
-    let branch: cladefs::CellId = printed.trim().parse().unwrap();
+    let cell: cladefs::CellId = printed.trim().parse().unwrap();
 
     cladefsctl.run(&[Path::new("delete"), &path]).unwrap();
     assert!(!path.exists(), "the store's directory stayed");
     let forked = OpenCell::open(&fork).unwrap();
-    assert_eq!(forked.branch(), branch);
+    assert_eq!(forked.cell(), cell);
     assert_eq!(read(&forked, extent), [7; BLOCK]);
-    let own = ExtentId { branch: branch.id, sequence: 1 };
+    let own = ExtentId { cell: cell.id, sequence: 1 };
     forked.write(own, 0, &[VolatileSlice::from(&[9; BLOCK][..])]).unwrap();
     forked.commit(None).unwrap();
     drop(forked);
@@ -134,14 +133,14 @@ fn stores_are_deleted_while_their_forks_live(cladefsctl: Cladefsctl, dir: &Path)
     assert!(!fork.exists());
 }
 
-/// TASK-154: `cladefsctl drop` deletes what `take` made, a copy of a branch this host holds nothing
+/// TASK-154: `cladefsctl drop` deletes what `take` made, a copy of a cell this host holds nothing
 /// of, and a second finds nothing there.
 fn copies_are_dropped(cladefsctl: Cladefsctl, dir: &Path) {
     let (made, path) = (dir.join("made"), dir.join("taken"));
     let capacity = Path::new("16777216");
-    let branch = cladefsctl.run(&[Path::new("create"), &made, capacity]).unwrap();
-    let branch = Path::new(branch.trim());
-    cladefsctl.run(&[Path::new("take"), &path, capacity, branch]).unwrap();
+    let cell = cladefsctl.run(&[Path::new("create"), &made, capacity]).unwrap();
+    let cell = Path::new(cell.trim());
+    cladefsctl.run(&[Path::new("take"), &path, capacity, cell]).unwrap();
     assert!(path.exists(), "nothing was taken");
     cladefsctl.run(&[Path::new("drop"), &path]).unwrap();
     assert!(!path.exists(), "the copy stayed");
@@ -151,7 +150,7 @@ fn copies_are_dropped(cladefsctl: Cladefsctl, dir: &Path) {
 #[test]
 fn copies_are_dropped_locally() {
     let dir = tempfile::tempdir().unwrap();
-    // A host's bucket, which the copy takes the branch from.
+    // A host's bucket, which the copy takes the cell from.
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
     copies_are_dropped(Cladefsctl::with_env(&[("CLADEFSD_BUCKET", &bucket)]), dir.path());
@@ -222,8 +221,8 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     };
     let block = BLOCK as u64;
     let store = OpenCell::create(&path, 1 << 24).unwrap();
-    let base = store.branch().id;
-    let extent = |store: &OpenCell, sequence| ExtentId { branch: store.branch().id, sequence };
+    let base = store.cell().id;
+    let extent = |store: &OpenCell, sequence| ExtentId { cell: store.cell().id, sequence };
     let write = |store: &OpenCell, extent, offset, byte| {
         store.write(extent, offset, &[VolatileSlice::from(&[byte; BLOCK][..])]).unwrap();
     };
@@ -243,7 +242,7 @@ fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
     cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
     assert_eq!(held(&fork), [0, 4 * block, 0, 3]);
     let forked = OpenCell::open(&fork).unwrap();
-    let inherited = |sequence| ExtentId { branch: base, sequence };
+    let inherited = |sequence| ExtentId { cell: base, sequence };
     for sequence in 1..=2 {
         write(&forked, extent(&forked, sequence), 0, 7);
     }
@@ -268,7 +267,7 @@ fn stat_counts_extents_through_the_daemon() {
     stat_counts_extents(Cladefsctl::through_daemon(dir.path(), &[]), dir.path());
 }
 
-/// cladefsctl changes no store whose branches another process has open, as an extent daemon serving
+/// cladefsctl changes no store whose cells another process has open, as an extent daemon serving
 /// them does: it waits a while for them to close, then refuses, saying `refusal`.
 fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refusal: &str) {
     let path = dir.join("store");
@@ -284,7 +283,7 @@ fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refu
 #[test]
 fn stores_open_elsewhere_are_left_alone_locally() {
     let dir = tempfile::tempdir().unwrap();
-    let refusal = "another process has the store's branches open";
+    let refusal = "another process has the store's cells open";
     stores_open_elsewhere_are_left_alone(Cladefsctl::local(), dir.path(), refusal);
 }
 
@@ -296,10 +295,10 @@ fn stores_open_elsewhere_are_left_alone_through_the_daemon() {
     stores_open_elsewhere_are_left_alone(cladefsctl, dir.path(), "EBUSY (errno 16)");
 }
 
-/// cladefsctl imports an image where no daemon is, into a store keeping its branch in the host's
+/// cladefsctl imports an image where no daemon is, into a store keeping its cell in the host's
 /// bucket, and forks it there too, as fxfs-guest-import forks the base it imports for its guest:
 /// the fork is the bucket's (TASK-165.7), made by the uploader the store, opened there, keeps its
-/// branch with. The fork holds the image's file, read from the bucket; the base is as it was. The
+/// cell with. The fork holds the image's file, read from the bucket; the base is as it was. The
 /// host's bucket is a file bucket: what the import uploaded has left the store, which a bucket in
 /// the import's memory would have taken with it (TASK-165.8).
 #[test]
@@ -319,8 +318,8 @@ fn images_imported_where_no_daemon_is_fork_there() {
     };
     run(&[&"import", &base, &"67108864", &image]).unwrap();
     let printed = run(&[&"fork", &base, &fork]).unwrap();
-    let branch: cladefs::CellId = printed.trim().parse().unwrap();
-    assert_eq!(OpenCell::open(&fork).unwrap().branch(), branch);
+    let cell: cladefs::CellId = printed.trim().parse().unwrap();
+    assert_eq!(OpenCell::open(&fork).unwrap().cell(), cell);
     // The file `hello` of the store at `path`, as its filesystem has it.
     let hello = |path: &Path| {
         block_on(async {
@@ -339,7 +338,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
 }
 
 /// Every command through the daemon: a store imported, made a public base, grown, forked, synced
-/// to object storage, its fork's branch taken to a new store placed after it, and deleted. The
+/// to object storage, its fork's cell taken to a new store placed after it, and deleted. The
 /// daemon's bucket a file bucket, which the stores it left open from here: what it acknowledged
 /// has left them (TASK-165.9).
 #[cfg(target_os = "linux")]
@@ -362,9 +361,9 @@ fn commands_through_the_daemon() {
     run(&[&"import", &base, &"67108864", &image]);
     run(&[&"public", &base]);
     run(&[&"resize", &base, &"134217728"]);
-    let branch = run(&[&"fork", &base, &fork]).trim().to_owned();
+    let cell = run(&[&"fork", &base, &fork]).trim().to_owned();
     run(&[&"sync", &fork]);
-    run(&[&"take", &taken, &"67108864", &branch.as_str(), &"2"]);
+    run(&[&"take", &taken, &"67108864", &cell.as_str(), &"2"]);
     run(&[&"place", &taken, &"3"]);
     run(&[&"delete", &taken]);
     assert!(!taken.exists());
@@ -374,9 +373,9 @@ fn commands_through_the_daemon() {
     let base = OpenCell::open(&base).unwrap();
     assert_eq!(base.info().unwrap().capacity, 134217728);
     assert!(base.is_public());
-    // The fork's store names its branch, which deleting the store that took it deleted in the
-    // bucket: it opens no more (TASK-165.9: opening takes the branch's head).
-    assert_eq!(local_cell::host_branch(&fork).unwrap().to_string(), branch);
+    // The fork's store names its cell, which deleting the store that took it deleted in the
+    // bucket: it opens no more (TASK-165.9: opening takes the cell's head).
+    assert_eq!(local_cell::host_cell(&fork).unwrap().to_string(), cell);
     let refused = OpenCell::open(&fork).err().and_then(|err| err.errno());
     assert_eq!(refused, Some(cladefs::Errno::EROFS));
 }
@@ -416,7 +415,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     assert!(json["taken_unix_ns"].as_u64() > Some(0), "{json}");
     let vm = &json["vms"][0];
     assert_eq!(vm["path"], path.canonicalize().unwrap().to_str().unwrap());
-    assert_eq!(vm["branch"], base32_id::Short(store.branch()).to_string());
+    assert_eq!(vm["cell"], base32_id::Short(store.cell()).to_string());
     assert_eq!((&vm["follower"], &vm["answered"]), (&false.into(), &true.into()));
     assert_eq!(vm["vmm"]["build"], cladefs::BUILD_COMMIT);
     assert_eq!(vm["vmm"]["counters"]["stage_ops"], 0);
@@ -591,7 +590,7 @@ fn the_daemon_stops_on_sigterm() {
     assert!(status.success(), "{status}");
 }
 
-/// TASK-45: without a daemon, cladefsctl changes no existing store's branch unless it has the bucket
+/// TASK-45: without a daemon, cladefsctl changes no existing store's cell unless it has the bucket
 /// and this host's placement token; it makes new stores anywhere.
 #[test]
 fn existing_stores_change_only_with_a_bucket_and_a_token() {
@@ -603,10 +602,10 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
 
     let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
     assert!(error.contains("CLADEFSD_BUCKET names no bucket"), "{error}");
-    let bucket = [("CLADEFSD_BUCKET", "memory:///branches")];
+    let bucket = [("CLADEFSD_BUCKET", "memory:///cells")];
     let error = Cladefsctl::with_env(&bucket).run(&delete).expect_err("deleted with no token");
     assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
-    let zero = [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "0")];
+    let zero = [("CLADEFSD_BUCKET", "memory:///cells"), ("CLADEFSD_TOKEN", "0")];
     let error = Cladefsctl::with_env(&zero).run(&delete).expect_err("deleted with token 0");
     assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(path.exists());
@@ -643,7 +642,7 @@ fn commands_with_more_arguments_print_the_usage() {
             arg => Path::new(arg),
         }));
         let error = cladefsctl.run(&all).expect_err("ran with more arguments");
-        assert!(error.contains("usage: cladefsctl take DIR CAPACITY BRANCH [TOKEN]"), "{error}");
+        assert!(error.contains("usage: cladefsctl take DIR CAPACITY CELL [TOKEN]"), "{error}");
         assert!(!path.exists());
     }
 }
@@ -694,7 +693,7 @@ fn the_daemon_needs_a_bucket_and_a_token() {
     };
     let error = start(&[]);
     assert!(error.contains("CLADEFSD_BUCKET names no bucket"), "{error}");
-    let error = start(&[("CLADEFSD_BUCKET", "memory:///branches")]);
+    let error = start(&[("CLADEFSD_BUCKET", "memory:///cells")]);
     assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     let error = start(&[("CLADEFSD_BUCKET", "memory:///b"), ("CLADEFSD_TOKEN", "0")]);
     assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");

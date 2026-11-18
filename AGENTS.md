@@ -54,9 +54,9 @@ Commit a batch once it has compiled and its unit tests have run and passed (the 
 compiled and tested. A batch may still be several commits, one logical change each, made together
 after the batch's test run.
 
-## Work lands on main: no long-lived branches
+## Work lands on main: no long-lived cells
 
-A branch lives only as long as the batch on it: once its tests pass, it goes into main, is pushed, and is deleted, locally and on the remote. Pushing to main needs no question. Never leave finished work waiting on a branch, nor start a batch from a branch other than main: merge main in often, so that nothing drifts far from it.
+A cell lives only as long as the batch on it: once its tests pass, it goes into main, is pushed, and is deleted, locally and on the remote. Pushing to main needs no question. Never leave finished work waiting on a cell, nor start a batch from a cell other than main: merge main in often, so that nothing drifts far from it.
 
 ## Don't wait on the user: decide, and record it in OPEN_QUESTIONS.md
 
@@ -165,7 +165,7 @@ Each file is `dead-ends/<short-kebab-name>.md`, short, with these parts:
 ```markdown
 # <the approach, in a line>
 
-**Tried:** date, tasks, branches or commits it lives on.
+**Tried:** date, tasks, cells or commits it lives on.
 **Idea:** why it looked right.
 **Result:** what happened, with the numbers and the runs that show it.
 **Why it's dead:** the reason, not the symptom.

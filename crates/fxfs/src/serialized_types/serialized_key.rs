@@ -468,7 +468,7 @@ impl SerializeKey for std::ops::Range<u64> {
     }
 }
 
-/// cladefs: extent IDs sort by sequence number, then branch (see `storage_device::ExtentId`), which
+/// cladefs: extent IDs sort by sequence number, then cell (see `storage_device::ExtentId`), which
 /// a key holding one leads with.
 impl SerializeKey for storage_device::ExtentId {
     type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;
@@ -479,13 +479,13 @@ impl SerializeKey for storage_device::ExtentId {
         serializer: KeySerializer<'a, B>,
     ) -> Self::Output<'a, B> {
         let serializer = self.sequence.serialize_key_to(serializer);
-        self.branch.serialize_key_to(serializer)
+        self.cell.serialize_key_to(serializer)
     }
     #[inline]
     fn deserialize_key_from(deserializer: &mut KeyDeserializer<'_>) -> Result<Self, Error> {
         let sequence = u64::deserialize_key_from(deserializer)?;
-        let branch = u64::deserialize_key_from(deserializer)?;
-        Ok(Self::new(branch, sequence))
+        let cell = u64::deserialize_key_from(deserializer)?;
+        Ok(Self::new(cell, sequence))
     }
 }
 

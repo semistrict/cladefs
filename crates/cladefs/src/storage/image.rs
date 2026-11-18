@@ -13,7 +13,7 @@
 //! - Extents' I/O runs off Fxfs's executor threads (see `io`), which only await it, as do commits,
 //!   which sync the image.
 //! - Flushing commits the store: a barrier, durable, which seals the extents written before it.
-//! - cladefs: the store's branch is kept in its bucket (see `kept`): its commits are uploaded behind
+//! - cladefs: the store's cell is kept in its bucket (see `kept`): its commits are uploaded behind
 //!   them, and closing the device waits for them to be.
 
 use super::gate::WriteGate;
@@ -55,11 +55,11 @@ pub(crate) struct ImageDevice {
 
 impl ImageDevice {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of
-    /// `branch`, whole if `whole`, its branch kept as `keeping` says ([`KeptImage::create`]), and
+    /// `cell`, whole if `whole`, its cell kept as `keeping` says ([`KeptImage::create`]), and
     /// its device, whose writes, frees and commits go through `writes`.
     pub fn create(
         dir: &Path,
-        made: (u64, crate::host_cell::BranchOf, bool),
+        made: (u64, crate::host_cell::CellOf, bool),
         keeping: local_cell::upload::Options,
         writes: Arc<WriteGate>,
     ) -> Result<Self, Error> {
@@ -296,8 +296,8 @@ impl Device for ImageDevice {
         Ok(())
     }
 
-    fn branch(&self) -> u64 {
-        self.description.branch.id
+    fn cell(&self) -> u64 {
+        self.description.cell.id
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
@@ -317,7 +317,7 @@ impl Device for ImageDevice {
         self.commit(Some(root.to_vec())).await.context("committing the image's root")
     }
 
-    /// Flushes, and waits for the image's commits to be uploaded: a closed image's branch is whole
+    /// Flushes, and waits for the image's commits to be uploaded: a closed image's cell is whole
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
         self.flush().await?;
@@ -343,7 +343,7 @@ mod tests {
 
     const BLOCK: u32 = crate::host_cell::BLOCK_SIZE;
     const MIB: usize = 1 << 20;
-    const BRANCH: crate::CellId = bucket_cell::layout::test_branch(7);
+    const CELL: crate::CellId = bucket_cell::layout::test_cell(7);
 
     /// A new directory, a device on a new image in it holding `capacity` bytes, and the image: in
     /// that order, so that a test's bindings of them drop the device before the directory, as a
@@ -352,13 +352,13 @@ mod tests {
     fn device(capacity: u64) -> (tempfile::TempDir, ImageDevice, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
-        let made = (capacity, crate::host_cell::BranchOf::Named(BRANCH), true);
+        let made = (capacity, crate::host_cell::CellOf::Named(CELL), true);
         let keeping = crate::host_cell::keeping().unwrap();
         (dir, ImageDevice::create(&image, made, keeping, Default::default()).unwrap(), image)
     }
 
     fn extent(sequence: u64) -> ExtentId {
-        ExtentId::new(BRANCH.id, sequence)
+        ExtentId::new(CELL.id, sequence)
     }
 
     /// Bytes each their offset modulo 251, from `offset`.
@@ -388,7 +388,7 @@ mod tests {
     fn reads_what_was_written() {
         let (_dir, device, _) = device(64 * MIB as u64);
         assert_eq!(device.block_count(), 64 * MIB as u64 / BLOCK as u64);
-        assert_eq!(device.branch(), BRANCH.id);
+        assert_eq!(device.cell(), CELL.id);
         block_on(async {
             // Many at once, which all complete, and one large enough for a file of its own.
             let data: Vec<Vec<u8>> = (0..16).map(|i| pattern(i * MIB, MIB)).collect();
@@ -442,7 +442,7 @@ mod tests {
                 // The middle of its fourth part's stored bytes: of its data at 3.5 MiB, if raw.
                 let path = image.join(format!(
                     "extents/{}/{}",
-                    base32_id::Padded(BRANCH.id),
+                    base32_id::Padded(CELL.id),
                     base32_id::Padded(extent.sequence)
                 ));
                 let mut bytes = std::fs::read(&path).unwrap();
@@ -597,12 +597,12 @@ mod tests {
         crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
-        let made = (64 * MIB as u64, crate::host_cell::BranchOf::New(5), true);
+        let made = (64 * MIB as u64, crate::host_cell::CellOf::New(5), true);
         let keeping = crate::host_cell::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
         assert!(device.store.keys().encrypts());
-        let branch = device.branch();
-        let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
+        let cell = device.cell();
+        let (small, large) = (ExtentId::new(cell, 1), ExtentId::new(cell, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);
         let large_data = crate::test_data::noise(2, 5 * MIB);
         let in_the_clear = |device: &ImageDevice| {

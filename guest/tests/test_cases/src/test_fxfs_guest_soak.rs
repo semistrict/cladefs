@@ -14,13 +14,13 @@
 //! syncing the filesystem every so often, saying what returned; or fsx-style scripts against their
 //! model; or pgbench. VMs are killed mid-write and booted again; the daemon is killed, started
 //! again, and its VMs booted again; the host is lost, its stores and cache taken away, and every
-//! branch taken again from the bucket by a daemon of a later placement; the cache is lost.
+//! cell taken again from the bucket by a daemon of a later placement; the cache is lost.
 //!
 //! Then a daemon with no faults, and a VM on every store, which checks it: every file a writer was
 //! told of is there whole (a prefix of each writer's fsyncs where the daemon died or the host was
 //! lost, with every file a syncfs was told of: `crate::soak::kept`), every fork reads its base,
 //! fsx's files are their model's, the database is consistent; the collector lists every live
-//! branch. The repeat's stores, cache and bucket are measured, and each daemon's peak memory, said
+//! cell. The repeat's stores, cache and bucket are measured, and each daemon's peak memory, said
 //! on a line of the log (`soak-repeat {...}`), and a measure grown past twice the warm repeats'
 //! most fails the repeat (`crate::soak::Bound`).
 //!
@@ -109,7 +109,7 @@ mod host {
         repeats: u64,
         /// The placement's fencing token, which each lost host's successor's exceeds.
         token: u64,
-        /// The base's branch, once made.
+        /// The base's cell, once made.
         base: Option<cladefs::CellId>,
         slots: Vec<SlotState>,
         measures: Vec<Measure>,
@@ -120,7 +120,7 @@ mod host {
     struct SlotState {
         /// How many times it was forked again.
         generation: u32,
-        branch: Option<cladefs::CellId>,
+        cell: Option<cladefs::CellId>,
         /// Its writers' runs, by name.
         runs: BTreeMap<String, RunState>,
         /// The fsx script whose files and models it holds, synced, if any.
@@ -434,22 +434,20 @@ mod host {
             Ok(child)
         }
 
-        /// The live branches the collector finds in the bucket.
-        fn live_branches(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
+        /// The live cells the collector finds in the bucket.
+        fn live_cells(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
             let output = std::process::Command::new(&self.paths.gc)
-                .args([&self.paths.bucket, "--branches"])
+                .args([&self.paths.bucket, "--cells"])
                 .output()?;
             ensure!(
                 output.status.success(),
-                "cladefs-gc --branches: {}: {}",
+                "cladefs-gc --cells: {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
             (String::from_utf8(output.stdout)?.lines())
                 .filter_map(|line| line.split_whitespace().next())
-                .map(|branch| {
-                    branch.parse().map_err(|err: String| anyhow::anyhow!("a branch: {err}"))
-                })
+                .map(|cell| cell.parse().map_err(|err: String| anyhow::anyhow!("a cell: {err}")))
                 .collect()
         }
 
@@ -538,30 +536,30 @@ mod host {
             );
             let control = control(&self.paths.socket)?;
             control.sync_cell(&base)?;
-            let branch = control.branch(&base)?;
-            self.ledger.base = Some(branch);
-            self.say(format_args!("the base made: branch {branch}"));
+            let cell = control.cell(&base)?;
+            self.ledger.base = Some(cell);
+            self.say(format_args!("the base made: cell {cell}"));
             Ok(())
         }
 
         /// Forks each slot's store from the base where it has none, or the plan forks it again,
-        /// deleting its old one, branch and all.
+        /// deleting its old one, cell and all.
         fn fork_slots(&mut self) -> anyhow::Result<()> {
             let control = control(&self.paths.socket)?;
             for slot in 0..SLOTS {
                 let path = self.paths.slot(slot);
                 let state = &mut self.ledger.slots[slot];
-                if self.plan.slots[slot].refork && state.branch.is_some() {
+                if self.plan.slots[slot].refork && state.cell.is_some() {
                     control.delete_cell(&path).with_context(|| format!("deleting slot {slot}"))?;
                     *state = SlotState { generation: state.generation + 1, ..Default::default() };
                 }
-                if state.branch.is_none() {
-                    let branch = control.fork_cell(&self.paths.base(), &path)?;
-                    state.branch = Some(branch);
+                if state.cell.is_none() {
+                    let cell = control.fork_cell(&self.paths.base(), &path)?;
+                    state.cell = Some(cell);
                     let generation = state.generation;
                     self.say(format_args!(
-                        "slot {slot} forked from the base: generation {generation}, branch \
-                         {branch}"
+                        "slot {slot} forked from the base: generation {generation}, cell \
+                         {cell}"
                     ));
                 }
             }
@@ -725,10 +723,10 @@ mod host {
                 let base = self.ledger.base.context("no base")?;
                 control.create_cell(&self.paths.base(), CAPACITY, base, token)?;
                 for slot in 0..SLOTS {
-                    let branch = self.ledger.slots[slot].branch.context("a slot with no store")?;
-                    control.create_cell(&self.paths.slot(slot), CAPACITY, branch, token)?;
+                    let cell = self.ledger.slots[slot].cell.context("a slot with no store")?;
+                    control.create_cell(&self.paths.slot(slot), CAPACITY, cell, token)?;
                 }
-                self.say("every branch taken again from the bucket");
+                self.say("every cell taken again from the bucket");
             }
             let mut failures = Failures::default();
             let uploads_stopped = self.uploads_stopped()?;
@@ -746,7 +744,7 @@ mod host {
                 };
                 let state = &mut slots[boot.slot];
                 let lossy = happened.lossy(boot.at);
-                let stopped = state.branch.is_some_and(|branch| uploads_stopped.contains(&branch));
+                let stopped = state.cell.is_some_and(|cell| uploads_stopped.contains(&cell));
                 for problem in load_problems(boot.ended, &said, lossy, stopped) {
                     failures.add(format!("VM {} ({}): {problem}", boot.name, boot.load.name()));
                 }
@@ -812,13 +810,12 @@ mod host {
                     failures.add(format!("VM {name} exited {status} unchecked, saying {said:?}"));
                 }
             }
-            let live = self.live_branches()?;
-            let branches = (slots.iter().filter_map(|slot| slot.branch)).chain(self.ledger.base);
-            for branch in branches {
-                if !live.contains(&branch) {
-                    failures.add(format!(
-                        "the collector finds branch {branch} dead, which a store holds"
-                    ));
+            let live = self.live_cells()?;
+            let cells = (slots.iter().filter_map(|slot| slot.cell)).chain(self.ledger.base);
+            for cell in cells {
+                if !live.contains(&cell) {
+                    failures
+                        .add(format!("the collector finds cell {cell} dead, which a store holds"));
                 }
             }
             let measure = Measure {
@@ -865,7 +862,7 @@ mod host {
             Ok(())
         }
 
-        /// The branches whose uploads the repeat's daemons failed, as their logs say: those stores'
+        /// The cells whose uploads the repeat's daemons failed, as their logs say: those stores'
         /// uploaders stopped, and their commits fail until they are attached again
         /// (`local_cell::upload`).
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::CellId>> {
@@ -1002,13 +999,13 @@ mod host {
         problems
     }
 
-    /// The branches a daemon's log, `log`, says it failed an upload of (FAILPOINTS'
+    /// The cells a daemon's log, `log`, says it failed an upload of (FAILPOINTS'
     /// `writer::upload`).
     fn upload_failures(log: &str) -> BTreeSet<cladefs::CellId> {
         (log.lines())
             .filter(|line| line.contains("failpoint writer::upload"))
-            .filter_map(|line| line.split("uploading branch ").nth(1)?.split(':').next())
-            .filter_map(|branch| branch.parse().ok())
+            .filter_map(|line| line.split("uploading cell ").nth(1)?.split(':').next())
+            .filter_map(|cell| cell.parse().ok())
             .collect()
     }
 
@@ -1166,13 +1163,12 @@ RUN apk add --no-cache postgresql postgresql-contrib
         /// Only a store whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
-            let log = "ERROR local_cell::upload: cladefs: uploading branch \
+            let log = "ERROR local_cell::upload: cladefs: uploading cell \
                        0/3t/fp8sd8wwxate0: reading failpoint writer::upload\nERROR \
                        cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
                        writer::upload\n";
-            let cell = cladefs::CellId { tenant: 0, id: 0x7a };
-            let branch = cladefs::CellId { tenant: cell.tenant, id: 0xfb23_2d47_39d5_69c0 };
-            assert_eq!(upload_failures(log), BTreeSet::from([branch]));
+            let cell = cladefs::CellId { tenant: 0, id: 0xfb23_2d47_39d5_69c0 };
+            assert_eq!(upload_failures(log), BTreeSet::from([cell]));
             let failed = "base ok\nfsx script 7\nscript failed: operation 989: errno 5: fsync: \
                           I/O error (os error 5)\n";
             let died = Some(Ended::Exited(Some(0)));
@@ -1432,7 +1428,7 @@ mod guest {
             "select (select count(*) from pgbench_accounts), \
              (select coalesce(sum(abalance), 0) from pgbench_accounts), \
              (select coalesce(sum(tbalance), 0) from pgbench_tellers), \
-             (select coalesce(sum(bbalance), 0) from pgbench_branches)",
+             (select coalesce(sum(bbalance), 0) from pgbench_cells)",
         )?;
         let sums: Vec<&str> = sums.split('|').collect();
         let accounts = (SCALE * 100_000).to_string();
@@ -1440,7 +1436,7 @@ mod guest {
             return Err(format!("accounts and balances {sums:?}: not {accounts} and three alike"));
         }
         psql("create extension if not exists amcheck")?;
-        let tables = "array['pgbench_accounts', 'pgbench_branches', 'pgbench_tellers', \
+        let tables = "array['pgbench_accounts', 'pgbench_cells', 'pgbench_tellers', \
                       'pgbench_history']::regclass[]";
         let corrupt =
             psql(&format!("select count(*) from unnest({tables}) as t(rel), verify_heapam(rel)"))?;

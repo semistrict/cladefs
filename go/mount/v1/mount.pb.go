@@ -59,8 +59,8 @@ type AttachRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The tenant.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket and its branch's
-	// too, the bucket gives.
+	// Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket, the bucket
+	// gives.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
 	// The fencing token of the placement to take the cell at, if any: as CreateCell's.
 	Token *uint64 `protobuf:"varint,3,opt,name=token,proto3,oneof" json:"token,omitempty"`
@@ -133,9 +133,8 @@ type AttachResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The cell: the one asked for, or the new one made.
 	Cell uint64 `protobuf:"varint,1,opt,name=cell,proto3" json:"cell,omitempty"`
-	// The cell's branch, if it is shown; 0 if it is not, a cell of another kind, or of no branch
-	// yet.
-	Branch        uint64 `protobuf:"varint,3,opt,name=branch,proto3" json:"branch,omitempty"`
+	// Whether it is shown: not a cell of another kind, or of no kind yet.
+	Shown         bool `protobuf:"varint,3,opt,name=shown,proto3" json:"shown,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -177,11 +176,11 @@ func (x *AttachResponse) GetCell() uint64 {
 	return 0
 }
 
-func (x *AttachResponse) GetBranch() uint64 {
+func (x *AttachResponse) GetShown() bool {
 	if x != nil {
-		return x.Branch
+		return x.Shown
 	}
-	return 0
+	return false
 }
 
 // What to detach.
@@ -376,8 +375,8 @@ type AttachedCell struct {
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// Its cell.
 	Cell uint64 `protobuf:"varint,2,opt,name=cell,proto3" json:"cell,omitempty"`
-	// The cell's branch, if it is shown; 0 if not.
-	Branch uint64 `protobuf:"varint,4,opt,name=branch,proto3" json:"branch,omitempty"`
+	// Whether it is shown.
+	Shown bool `protobuf:"varint,4,opt,name=shown,proto3" json:"shown,omitempty"`
 	// Whether it is being detached.
 	Detaching     bool `protobuf:"varint,5,opt,name=detaching,proto3" json:"detaching,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -428,11 +427,11 @@ func (x *AttachedCell) GetCell() uint64 {
 	return 0
 }
 
-func (x *AttachedCell) GetBranch() uint64 {
+func (x *AttachedCell) GetShown() bool {
 	if x != nil {
-		return x.Branch
+		return x.Shown
 	}
-	return 0
+	return false
 }
 
 func (x *AttachedCell) GetDetaching() bool {
@@ -452,10 +451,10 @@ const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x19\n" +
 	"\x05token\x18\x03 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x1a\n" +
 	"\bcapacity\x18\x04 \x01(\x04R\bcapacityB\b\n" +
-	"\x06_token\"B\n" +
+	"\x06_token\"@\n" +
 	"\x0eAttachResponse\x12\x12\n" +
-	"\x04cell\x18\x01 \x01(\x04R\x04cell\x12\x16\n" +
-	"\x06branch\x18\x03 \x01(\x04R\x06branchJ\x04\b\x02\x10\x03\"Q\n" +
+	"\x04cell\x18\x01 \x01(\x04R\x04cell\x12\x14\n" +
+	"\x05shown\x18\x03 \x01(\bR\x05shownJ\x04\b\x02\x10\x03\"Q\n" +
 	"\rDetachRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x14\n" +
@@ -463,11 +462,11 @@ const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\x0eDetachResponse\"\r\n" +
 	"\vListRequest\"D\n" +
 	"\fListResponse\x124\n" +
-	"\x05cells\x18\x01 \x03(\v2\x1e.cladefs.mount.v1.AttachedCellR\x05cells\"v\n" +
+	"\x05cells\x18\x01 \x03(\v2\x1e.cladefs.mount.v1.AttachedCellR\x05cells\"t\n" +
 	"\fAttachedCell\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x16\n" +
-	"\x06branch\x18\x04 \x01(\x04R\x06branch\x12\x1c\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x14\n" +
+	"\x05shown\x18\x04 \x01(\bR\x05shown\x12\x1c\n" +
 	"\tdetaching\x18\x05 \x01(\bR\tdetachingJ\x04\b\x03\x10\x042\xe8\x01\n" +
 	"\x05Mount\x12K\n" +
 	"\x06Attach\x12\x1f.cladefs.mount.v1.AttachRequest\x1a .cladefs.mount.v1.AttachResponse\x12K\n" +

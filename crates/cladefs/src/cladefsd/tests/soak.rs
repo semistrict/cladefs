@@ -115,19 +115,19 @@ fn vm_process(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (store, served) = connect(&path, 8 << 30);
-        let branch = store.branch();
+        let cell = store.cell();
         let started = Instant::now();
         let mut sequence = 0;
         while !stop.load(Ordering::Relaxed) {
             sequence += 1;
-            let extent = ExtentId { branch, sequence };
-            let data = noise(branch ^ sequence, EXTENT);
+            let extent = ExtentId { cell, sequence };
+            let data = noise(cell ^ sequence, EXTENT);
             for (at, piece) in data.chunks(WRITE).enumerate() {
                 let offset = (at * WRITE) as u64;
                 store.write(extent, offset, &[VolatileSlice::from(piece)]).unwrap();
             }
             if sequence > LIVE {
-                store.free(ExtentId { branch, sequence: sequence - LIVE }).unwrap();
+                store.free(ExtentId { cell, sequence: sequence - LIVE }).unwrap();
             }
             let bytes = wrote.bytes.fetch_add(EXTENT as u64, Ordering::Relaxed) + EXTENT as u64;
             if sequence % COMMIT_EVERY == 0 {
@@ -144,9 +144,9 @@ fn vm_process(
             }
         }
         store.commit(None).unwrap();
-        let last = ExtentId { branch, sequence };
+        let last = ExtentId { cell, sequence };
         let read = read(&store, last, 0, EXTENT).unwrap();
-        assert!(read == noise(branch ^ sequence, EXTENT), "{last:?} reads otherwise");
+        assert!(read == noise(cell ^ sequence, EXTENT), "{last:?} reads otherwise");
         drop(store);
         served.join().unwrap();
     })
@@ -302,8 +302,8 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
         );
         if name == "out of service" {
             // Its commits waited at the lag bound, every store's.
-            for (branch, status) in &statuses {
-                assert!(status.stalls > 0, "{branch}: no commit waited at the lag bound");
+            for (cell, status) in &statuses {
+                assert!(status.stalls > 0, "{cell}: no commit waited at the lag bound");
             }
         }
     }

@@ -118,11 +118,11 @@ fn default_sampler() -> Result<Option<Sampler>, String> {
 }
 
 /// The span of the request `header` heads, a trace's root, served by a connection to the store
-/// of `branch`, if it has one open, a call for the guest request `guest`, if any: `cladefsd.KIND`
+/// of `cell`, if it has one open, a call for the guest request `guest`, if any: `cladefsd.KIND`
 /// (`metrics::span_name`); nothing while spans are off, at the cost of a load.
 pub(super) fn request_span(
     header: &Header,
-    branch: Option<crate::CellId>,
+    cell: Option<crate::CellId>,
     guest: Option<&crate::request::RequestId>,
 ) -> bucket_cell::trace::Span {
     use bucket_cell::trace::{self, Span};
@@ -138,8 +138,8 @@ pub(super) fn request_span(
     if let Some(id) = request_id(guest) {
         span.set_with(REQUEST_ID, || id.to_string());
     }
-    if let Some(branch) = branch {
-        span.set_branch(branch);
+    if let Some(cell) = cell {
+        span.set_cell(cell);
     }
     span
 }

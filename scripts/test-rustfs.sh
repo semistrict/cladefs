@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Run the branches' tests against RustFS, an S3 server (github.com/rustfs/rustfs, Apache-2.0), on
+# Run the cells' tests against RustFS, an S3 server (github.com/rustfs/rustfs, Apache-2.0), on
 # this machine, as scripts/lib/rustfs.sh starts it, a process, its bucket made: run the S3
 # tests (ignored in the workspace's run), collect what they left, and stop it. CI's object-stores
 # job runs it (TASK-149.20). Arguments are passed to cargo nextest.

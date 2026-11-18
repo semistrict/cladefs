@@ -340,9 +340,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
             std::fs::create_dir_all(&stores)?;
             let base = stores.join("base");
             role(test_setup, "base", &base, &cladefsd, None)?;
-            let branch = opened(&cladefsd, &base)?.branch();
+            let cell = opened(&cladefsd, &base)?.cell();
             // The base's boot profile, which a fork records (cladefs's `profile`).
-            let profile = base.join("profiles").join(base32_id::Padded(branch).to_string());
+            let profile = base.join("profiles").join(base32_id::Padded(cell).to_string());
             let iterations = iterations().unwrap_or(1);
             if backend == Backend::FxfsGuestDaxForkProfiled {
                 // A fork, before the iterations, which records the profile: its output is not

@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Tables of where a branch's extents are, which its checkpoints are, locally and in object
+//! Tables of where a cell's extents are, which its checkpoints are, locally and in object
 //! storage (doc-7, Checkpoints): entries sorted by extent ID, in blocks of [`TABLE_BLOCK`] bytes,
 //! each with a CRC32C; after them, a footer of the rest of the state, the keys of the objects the
 //! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]). A reader
 //! after every extent reads the table whole; one after a single extent reads the footer, and one
-//! block. cladefs: under its branch's DEK, if it has one, authenticated, not encrypted
+//! block. cladefs: under its cell's DEK, if it has one, authenticated, not encrypted
 //! ([`crate::Encryption::Authenticated`], TASK-411.3): metadata, which the collector reads holding
 //! no key (doc-16, What is encrypted).
 
@@ -18,7 +18,7 @@ use storage_device::ExtentId;
 /// The most bytes of entries a block holds.
 pub const TABLE_BLOCK: usize = 64 * 1024;
 
-/// An entry: the extent's branch and sequence, the index of its object's key, its offset and
+/// An entry: the extent's cell and sequence, the index of its object's key, its offset and
 /// length there.
 const ENTRY: usize = 8 + 8 + 4 + 8 + 8;
 
@@ -37,8 +37,8 @@ pub struct TableFooter {
     /// The rest of the state, as its writer encoded it.
     pub rest: Vec<u8>,
     /// The keys of the objects the entries name: stored each as what it shares with the one before
-    /// it and the rest ([`front_coded`]), as a branch's keys share their cell's prefix and their
-    /// kind's, and most their branch's (TASK-364).
+    /// it and the rest ([`front_coded`]), as a cell's keys share their cell's prefix and their
+    /// kind's, and most their cell's (TASK-364).
     #[serde(with = "front_coded")]
     pub keys: Vec<String>,
     pub blocks: Vec<Block>,
@@ -54,7 +54,7 @@ pub struct Block {
 }
 
 /// The table of `entries`, which are in their IDs' order ([`ExtentId`]'s: by sequence number, then
-/// branch, the order [`TableFooter::block`] finds them by), and `rest`: cladefs: authenticated under
+/// cell, the order [`TableFooter::block`] finds them by), and `rest`: cladefs: authenticated under
 /// the DEK `key` gives, and which it is ([`crate::Packer::keyed`], TASK-411.3).
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (ExtentId, &'a str, u64, u64)>,
@@ -83,7 +83,7 @@ pub fn encode<'a>(
             keys.push(key.to_owned());
             keys.len() as u32 - 1
         });
-        block.extend_from_slice(&id.branch.to_le_bytes());
+        block.extend_from_slice(&id.cell.to_le_bytes());
         block.extend_from_slice(&id.sequence.to_le_bytes());
         block.extend_from_slice(&key.to_le_bytes());
         block.extend_from_slice(&offset.to_le_bytes());
@@ -205,7 +205,7 @@ mod tests {
     }
 
     /// The DEK of the tests' tables, and which it is.
-    const ID: KeyId = KeyId { branch: 3, generation: 0 };
+    const ID: KeyId = KeyId { cell: 3, generation: 0 };
 
     fn dek() -> Secret {
         Secret::from_bytes(&[1; 32])
@@ -222,7 +222,7 @@ mod tests {
         encode(rows, b"rest".to_vec(), key)
     }
 
-    /// A reader holding `keys`, which holds its objects encrypted: a reader of a branch with a DEK.
+    /// A reader holding `keys`, which holds its objects encrypted: a reader of a cell with a DEK.
     struct Holding<'a>(&'a std::collections::HashMap<KeyId, Secret>);
 
     impl Keys for Holding<'_> {

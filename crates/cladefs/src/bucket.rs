@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a host keeps its stores' branches in object storage with (backlog doc-7;
+//! cladefs's own: what a host keeps its stores' cells in object storage with (backlog doc-7;
 //! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its stores' uploaders and
 //! fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each failure
 //! ([`errno`]). The uploader is local_cell's (`local_cell::upload`, TASK-165.9).
@@ -28,8 +28,8 @@ use storage_device::ExtentId;
 
 /// The fencing token of this host's placement, `CLADEFSD_TOKEN`, which the system's control
 /// plane gives it, and which the copies of stores here that were never placed ([`place`]) take
-/// their branches with, as stores restored or taken here are. Not 0, which would fence nothing:
-/// a host without one keeps no branch (TASK-45).
+/// their cells with, as stores restored or taken here are. Not 0, which would fence nothing:
+/// a host without one keeps no cell (TASK-45).
 pub fn host_token() -> Result<u64, Failure> {
     let missing = || {
         Failure::msg(
@@ -48,7 +48,7 @@ pub fn host_token() -> Result<u64, Failure> {
 }
 
 /// This host, as one of cladefs's multi-node system, the only kind there is (TASK-45): the bucket
-/// its stores' branches are kept in, and its placement's fencing token, as the environment names
+/// its stores' cells are kept in, and its placement's fencing token, as the environment names
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
@@ -64,7 +64,7 @@ impl Host {
         let bucket = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
         let bucket = bucket.ok_or_else(|| {
             "CLADEFSD_BUCKET names no bucket: a host of cladefs's multi-node system keeps its \
-             stores' branches in one (tests and development: memory:///NAME)"
+             stores' cells in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;
         let token = host_token().map_err(|err| err.to_string())?;
@@ -72,12 +72,12 @@ impl Host {
     }
 }
 
-/// The errno of `failure`, as doc-4 and doc-7 have them: a branch this writer lost, to another
+/// The errno of `failure`, as doc-4 and doc-7 have them: a cell this writer lost, to another
 /// writer or deleted, or one nothing writes, is one the store takes no more commits for (`EROFS`);
 /// one a later placement holds, which a placement cut off takes back no more, or one another
 /// writer moved on from this host's write-ahead log, which the store opens no more until
-/// `cladefsctl take` drops it, `ESTALE`; a branch, or a version, gone, `ENOENT`; a fork's child's ID
-/// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell
+/// `cladefsctl take` drops it, `ESTALE`; a cell, or a version, gone, `ENOENT`; a fork's child's ID
+/// taken, `EEXIST`; a cell of a newer format, `ENOTSUP`. cladefs: a cell
 /// gone, `ENOENT`; a cell's name taken, `EEXIST`, or no cell's, `EINVAL` (TASK-364); a fork of
 /// another tenant's version not shared, `EACCES`, and sharing what is no version, `EINVAL`
 /// (TASK-395.7). None for
@@ -89,17 +89,15 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     match failure {
         Failure::Bucket(Error::Fenced | Error::Deleted) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
-        Failure::Bucket(Error::NoBranch | Error::NoCell) | Failure::VersionDropped => {
-            Some(Errno::ENOENT)
-        }
+        Failure::Bucket(Error::NoCell) | Failure::VersionDropped => Some(Errno::ENOENT),
         Failure::Bucket(Error::IdTaken(_) | Error::OtherKind(_)) => Some(Errno::EEXIST),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
-        // cladefs: an encrypted branch inherited by one whose record holds not its keys (TASK-411.4).
+        // cladefs: an encrypted cell inherited by one whose record holds not its keys (TASK-411.4).
         Failure::Bucket(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
-        // A branch of a newer format than this host reads, until it is upgraded (doc-11).
+        // A cell of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Bucket(Error::Format { .. }) => Some(Errno::ENOTSUP),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
@@ -285,8 +283,8 @@ pub struct Forgotten {
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let halted = format!("as {scope}'s keys are forgotten: {why}");
-    let stores = crate::halt::halt_stores(|branch| scope.covers(branch), Errno::EACCES, &halted);
-    let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch));
+    let stores = crate::halt::halt_stores(|cell| scope.covers(cell), Errno::EACCES, &halted);
+    let (bytes, extents) = crate::cache::forget(|cell| scope.covers(cell));
     let kept = MEMORY.forget_kept(scope);
     // Its KMS, if it made it: one not made yet unwrapped nothing.
     if let Some(kms) = POOLED.get() {
@@ -551,7 +549,7 @@ mod tests {
     use bucket_cell::cache::Cache;
     use bucket_cell::object_bucket::ObjectBucket;
     use bucket_cell::testing::read;
-    use bucket_cell::{branch, recover};
+    use bucket_cell::{lifecycle, recover};
     use object_store::memory::InMemory;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -566,19 +564,19 @@ mod tests {
         url
     }
 
-    /// A new store at `path`, of `capacity` bytes, of `branch`, a new one if none, its branch kept
+    /// A new store at `path`, of `capacity` bytes, of `cell`, a new one if none, its cell kept
     /// in `bucket`, its uploader uploading as `keeping` says.
     pub(super) fn kept_in(
         path: impl AsRef<std::path::Path>,
-        (capacity, branch): (u64, Option<crate::CellId>),
+        (capacity, cell): (u64, Option<crate::CellId>),
         bucket: &Arc<ObjectBucket>,
         keeping: local_cell::upload::Options,
     ) -> Result<OpenCell, crate::Error> {
-        let branch = branch.unwrap_or_else(crate::host_cell::new_alone);
-        OpenCell::create_kept_with(path, capacity, branch, &url_of(bucket), keeping)
+        let cell = cell.unwrap_or_else(crate::host_cell::new_alone);
+        OpenCell::create_kept_with(path, capacity, cell, &url_of(bucket), keeping)
     }
 
-    /// Has the store at `path` name `bucket` as the bucket its branch is kept in: a host restarted
+    /// Has the store at `path` name `bucket` as the bucket its cell is kept in: a host restarted
     /// whose stores reach the bucket otherwise than before, as the fault tests' do (TASK-165.9).
     /// A store whose host died before it described it names nothing.
     pub(super) fn naming(path: &std::path::Path, bucket: &Arc<ObjectBucket>) {
@@ -608,7 +606,7 @@ mod tests {
     }
 
     /// Uploads only when a commit waits.
-    /// How this process's stores keep their branches ([`crate::host_cell::keeping`]), but
+    /// How this process's stores keep their cells ([`crate::host_cell::keeping`]), but
     /// uploading nothing until a commit waits for it, or the hour is up.
     pub(super) fn idle() -> local_cell::upload::Options {
         let keeping = crate::host_cell::keeping().unwrap();
@@ -620,18 +618,18 @@ mod tests {
     }
 
     fn write(store: &OpenCell, sequence: u64, data: &[u8]) -> ExtentId {
-        let extent = ExtentId { branch: store.branch().id, sequence };
+        let extent = ExtentId { cell: store.cell().id, sequence };
         store.write(extent, 0, &[VolatileSlice::from(data)]).unwrap();
         extent
     }
 
-    /// A branch's extents, by sequence number, with their data, and its root.
+    /// A cell's extents, by sequence number, with their data, and its root.
     pub(super) type Uploaded = (Vec<(u64, Vec<u8>)>, Option<Vec<u8>>);
 
-    /// The branch's extents and root, read back from `bucket`.
-    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, branch: crate::CellId) -> Uploaded {
+    /// The cell's extents and root, read back from `bucket`.
+    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, cell: crate::CellId) -> Uploaded {
         futures::executor::block_on(async {
-            let state = recover(&**bucket, branch, None).await.unwrap().state;
+            let state = recover(&**bucket, cell, None).await.unwrap().state;
             let mut extents = Vec::new();
             for (extent, location) in &state.extents {
                 extents.push((extent.sequence, read(bucket, *extent, location).await.unwrap()));
@@ -645,15 +643,15 @@ mod tests {
     #[test]
     fn uploads_what_the_store_makes_durable() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "branches"));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cells"));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
         store.commit(Some(b"first")).unwrap();
         // What it held before is uploaded on attaching.
         assert_eq!(
-            uploaded(&bucket, branch),
+            uploaded(&bucket, cell),
             (vec![(1, pattern(1, BLOCK))], Some(b"first".to_vec()))
         );
 
@@ -662,11 +660,11 @@ mod tests {
         write(&store, 3, &large);
         write(&store, 4, &pattern(4, BLOCK));
         store.commit_ordered(None).unwrap();
-        store.free(ExtentId { branch: branch.id, sequence: 1 }).unwrap();
-        store.free(ExtentId { branch: branch.id, sequence: 4 }).unwrap();
+        store.free(ExtentId { cell: cell.id, sequence: 1 }).unwrap();
+        store.free(ExtentId { cell: cell.id, sequence: 4 }).unwrap();
         store.commit(Some(b"second")).unwrap();
         assert_eq!(
-            uploaded(&bucket, branch),
+            uploaded(&bucket, cell),
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
         );
         // Extent 4, written and freed between two uploads, never was.
@@ -690,7 +688,7 @@ mod tests {
             })
             .count();
 
-        // Opened again, the store's uploader finds the branch as it left it.
+        // Opened again, the store's uploader finds the cell as it left it.
         drop(store);
         let store = reopened(dir.path().join("store"), idle()).unwrap();
         // Its guest mints from the second writer's range.
@@ -699,7 +697,7 @@ mod tests {
         // What the store holds ends far below: the guest looks for what a crash left there only.
         assert!(info.next_sequence < 1 << bucket_cell::EPOCH_SHIFT, "{info:?}");
         let keys = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, "")).unwrap();
-        // No segment more: the store takes the branch by its head alone.
+        // No segment more: the store takes the cell by its head alone.
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
@@ -711,26 +709,26 @@ mod tests {
         );
         write(&store, 5, &pattern(5, BLOCK));
         store.commit(None).unwrap();
-        let (extents, root) = uploaded(&bucket, branch);
+        let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [2, 3, 5]);
         assert_eq!(root, Some(b"second".to_vec()));
     }
 
-    /// doc-7, The head: a store taking a branch over from a writer still uploading, two segments
+    /// doc-7, The head: a store taking a cell over from a writer still uploading, two segments
     /// of it in flight, commits on. The writer's segments land at keys naming its epoch, which the
     /// store's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and the
     /// store keeps its head. Before (TASK-407), its late segment landed where the store's first
-    /// went, and the store took the branch again.
+    /// went, and the store took the cell again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use bucket_cell::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let (branch, token) = (crate::host_cell::new_alone(), crate::host_cell::token().unwrap());
+        let (cell, token) = (crate::host_cell::new_alone(), crate::host_cell::token().unwrap());
         // The writer before, its two segments in flight.
         let before = futures::executor::block_on(async {
-            branch::create(&*bucket, branch, 1).await.unwrap();
-            Writer::open(bucket.clone(), branch, 10, token).await.unwrap()
+            lifecycle::create(&*bucket, cell, 1).await.unwrap();
+            Writer::open(bucket.clone(), cell, 10, token).await.unwrap()
         });
         let mut segments = Vec::new();
         for tag in [1, 2] {
@@ -740,9 +738,9 @@ mod tests {
                 .frame(before.keys().encrypting());
             segments.push(before.add_segment(objects).unwrap());
         }
-        // A store takes the branch over, opening, its fence after the writer's.
+        // A store takes the cell over, opening, its fence after the writer's.
         let path = dir.path().join("store");
-        made_for(&path, branch, &bucket);
+        made_for(&path, cell, &bucket);
         let store = reopened(&path, idle()).unwrap();
         // Both land, the second first, at keys of the writer's epoch; its head swap fails.
         futures::executor::block_on(async {
@@ -750,7 +748,7 @@ mod tests {
             before.upload(segments[0]).await.unwrap();
             assert_eq!(before.acknowledge().await, Err(bucket_cell::Error::Fenced));
         });
-        // The store's commit is the branch's, its head as it was.
+        // The store's commit is the cell's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
         let epoch = store.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
         let committed = store.commit(Some(b"after"));
@@ -758,7 +756,7 @@ mod tests {
         assert_eq!((committed, uploader.failed()), (Ok(()), None));
         assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
-        assert_eq!(uploaded(&bucket, branch), after);
+        assert_eq!(uploaded(&bucket, cell), after);
     }
 
     /// TASK-195: a store reads what it holds after the collector compacted it twice, its writer
@@ -767,7 +765,7 @@ mod tests {
     /// collector keeps the moves: compacted from its segment into moves, and from those into moves
     /// of moves, the segment goes, and the first moves. Before, the store named it in the segment
     /// as long as it held it: gone, and its moves gone, the guest's read failed (`EIO`) on a live
-    /// branch, which a recovery read through the moves of moves.
+    /// cell, which a recovery read through the moves of moves.
     #[test]
     fn extents_compacted_twice_read_where_the_store_names_them() {
         compacted_twice(false);
@@ -777,11 +775,11 @@ mod tests {
     /// TASK-217: a store whose host died, its disk as the death left it and the host's cache lost
     /// with it, opens and reads what it holds after the collector compacted its segment and took
     /// it, the writer's checkpoint having followed the moves: opening names its extents as the
-    /// branch's newest checkpoint does, in the moves. Before (GCE r757, round 40, a soak's daemon
+    /// cell's newest checkpoint does, in the moves. Before (GCE r757, round 40, a soak's daemon
     /// killed and its cache lost), the store opened from its own index, which named the extent in
     /// the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ... in
-    /// segments/<branch>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
-    /// branch.
+    /// segments/<cell>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
+    /// cell.
     #[test]
     fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
         const EXTENT: usize = 64 * BLOCK;
@@ -801,13 +799,13 @@ mod tests {
         let keeping = local_cell::upload::Options { cache, ..idle() };
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &reached, keeping).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         for sequence in 1..=16 {
             write(&store, sequence, &noise(sequence, EXTENT));
         }
         store.commit(None).unwrap();
         for sequence in 4..=16 {
-            store.free(ExtentId { branch: branch.id, sequence }).unwrap();
+            store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
         checkpointed(&store, &bucket);
         // The segment compacted, 1 to 3 into its moves; the writer's checkpoint follows them; the
@@ -821,9 +819,8 @@ mod tests {
                 .into_iter()
                 .map(|meta| meta.key)
                 .collect();
-        let moves =
-            bucket_cell::layout::moves_under(&bucket_cell::layout::segments(branch)).unwrap();
-        let first = bucket_cell::layout::segment(branch, 0, 1);
+        let moves = bucket_cell::layout::moves_under(&bucket_cell::layout::segments(cell)).unwrap();
+        let first = bucket_cell::layout::segment(cell, 0, 1);
         assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
         assert!(!keys.contains(&first), "{keys:?}");
         // The host dies: its disk copied as it is, its cache not, its store cut off.
@@ -834,7 +831,7 @@ mod tests {
         let opened = reopened(&restarted, idle()).unwrap();
         let mut data = vec![0; EXTENT];
         let read = opened.read(
-            ExtentId { branch: branch.id, sequence: 1 },
+            ExtentId { cell: cell.id, sequence: 1 },
             0,
             &mut [crate::VolatileSliceMut::from(&mut data[..])],
         );
@@ -849,7 +846,7 @@ mod tests {
     /// fork lives, by its reference, what the fork frees of it since no matter: the moves, which
     /// hold that state's extents, are compacted no further, as they were when the collector went
     /// by the fork's state (`extents_compacted_twice_read_where_the_store_names_them` shows a
-    /// branch's own compacted twice).
+    /// cell's own compacted twice).
     #[test]
     fn forks_read_what_they_inherited_compacted_twice() {
         inherited_compacted_twice();
@@ -881,18 +878,18 @@ mod tests {
         // fork, which inherits them there; and the parent deleted.
         let path = dir.path().join("parent");
         let parent = kept_in(&path, (16 * EXTENT as u64, None), &bucket, idle()).unwrap();
-        let branch = parent.branch();
+        let cell = parent.cell();
         for sequence in 1..=16 {
             write(&parent, sequence, &noise(sequence, EXTENT));
         }
         parent.commit(None).unwrap();
         for sequence in 4..=16 {
-            parent.free(ExtentId { branch: branch.id, sequence }).unwrap();
+            parent.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
         parent.commit(None).unwrap();
         let child = dir.path().join("child");
-        let forked = crate::host_cell::fork_child(branch);
-        assert_ne!(forked, branch, "a fork in a cell of its own");
+        let forked = crate::host_cell::fork_child(cell);
+        assert_ne!(forked, cell, "a fork in a cell of its own");
         parent.fork_to(&child, forked).unwrap();
         drop(parent);
         crate::host_cell::delete(&path, Some(&bucket), crate::host_cell::token).unwrap();
@@ -900,8 +897,8 @@ mod tests {
         let child = reopened(&child, idle()).unwrap();
         assert_eq!(collect(1).compacted, 1);
         // It frees 2 and 3, and its writer checkpoints, naming 1 in the moves.
-        child.free(ExtentId { branch: branch.id, sequence: 2 }).unwrap();
-        child.free(ExtentId { branch: branch.id, sequence: 3 }).unwrap();
+        child.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
+        child.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
         checkpointed(&child, &bucket);
         // The segment goes, no state naming it there; the moves stay as they are, the origin
         // holding 1 to 3 in them.
@@ -917,10 +914,10 @@ mod tests {
                         bucket_cell::layout::kind(key),
                         bucket_cell::layout::Kind::Moves { .. }
                             | bucket_cell::layout::Kind::Segment { .. }
-                    ) && key.starts_with(&branch.prefix())
+                    ) && key.starts_with(&cell.prefix())
                 })
                 .collect();
-        let sealed = bucket_cell::layout::segments(branch);
+        let sealed = bucket_cell::layout::segments(cell);
         let once = bucket_cell::layout::moves_under(&sealed).unwrap();
         let twice = bucket_cell::layout::moves_under(&once).unwrap();
         let compacted: Vec<String> = (keys.iter())
@@ -931,7 +928,7 @@ mod tests {
         assert!(!keys.contains(&compacted[0]), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         let mut data = vec![0; EXTENT];
-        let extent = ExtentId { branch: branch.id, sequence: 1 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
         let read = child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
         assert_eq!(read.map(|()| data == noise(1, EXTENT)), Ok(true));
     }
@@ -954,13 +951,13 @@ mod tests {
         // One segment, of extents 1 to 16, which don't compress, freed but 1 to 3.
         let store = kept_in(&path, (16 * EXTENT as u64, None), &bucket, keeping).unwrap();
         let store = Arc::new(store);
-        let branch = store.branch();
+        let cell = store.cell();
         for sequence in 1..=16 {
             write(&store, sequence, &noise(sequence, EXTENT));
         }
         store.commit(None).unwrap();
         for sequence in 4..=16 {
-            store.free(ExtentId { branch: branch.id, sequence }).unwrap();
+            store.free(ExtentId { cell: cell.id, sequence }).unwrap();
         }
         // Its writer checkpoints, as every so many segments, each commit here one.
         checkpointed(&store, &bucket);
@@ -968,8 +965,8 @@ mod tests {
         assert_eq!(collect(1).compacted, 1);
         // The store frees 2 and 3, and its writer checkpoints, as every so many segments, naming 1
         // in the moves, which hold a third of what they did.
-        store.free(ExtentId { branch: branch.id, sequence: 2 }).unwrap();
-        store.free(ExtentId { branch: branch.id, sequence: 3 }).unwrap();
+        store.free(ExtentId { cell: cell.id, sequence: 2 }).unwrap();
+        store.free(ExtentId { cell: cell.id, sequence: 3 }).unwrap();
         checkpointed(&store, &bucket);
         // A follower of the store, which reads what the store names.
         let follower = store.follow();
@@ -989,13 +986,12 @@ mod tests {
                     )
                 })
                 .collect();
-        let once =
-            bucket_cell::layout::moves_under(&bucket_cell::layout::segments(branch)).unwrap();
+        let once = bucket_cell::layout::moves_under(&bucket_cell::layout::segments(cell)).unwrap();
         let twice = bucket_cell::layout::moves_under(&once).unwrap();
         assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
         // The store, open all along, reads it there, and so does its follower.
-        let extent = ExtentId { branch: branch.id, sequence: 1 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
         let reads = |store: &OpenCell| {
             let mut data = vec![0; EXTENT];
             let read = store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
@@ -1004,11 +1000,11 @@ mod tests {
         assert_eq!([reads(&store), reads(&follower)], [Ok(true), Ok(true)], "cached: {cached}");
     }
 
-    /// The footers of `branch`'s segments in `bucket`, in order.
-    fn footers(bucket: &ObjectBucket, branch: crate::CellId) -> Vec<bucket_cell::layout::Footer> {
+    /// The footers of `cell`'s segments in `bucket`, in order.
+    fn footers(bucket: &ObjectBucket, cell: crate::CellId) -> Vec<bucket_cell::layout::Footer> {
         use bucket_cell::layout;
         futures::executor::block_on(async {
-            let listed = bucket_cell::Bucket::list(bucket, &layout::segments(branch)).await;
+            let listed = bucket_cell::Bucket::list(bucket, &layout::segments(cell)).await;
             let mut footers = Vec::new();
             for meta in listed.unwrap() {
                 let object = bucket_cell::Bucket::get(bucket, &meta.key).await.unwrap();
@@ -1020,14 +1016,14 @@ mod tests {
 
     /// TASK-165.9: a store whose bucket was out of reach holds its commits in its write-ahead log,
     /// segments the commits closed, which upload once it is in reach again, in order, each the
-    /// object its file is; what the commits made, and the root, the branch has then. (Before, a store attaching uploaded what its branch lacked in batches.)
+    /// object its file is; what the commits made, and the root, the cell has then. (Before, a store attaching uploaded what its cell lacked in batches.)
     #[test]
     fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut written = Vec::new();
         for sequence in 1..=3 {
@@ -1039,13 +1035,13 @@ mod tests {
         store.flush().unwrap();
         // Out of reach: the store holds what it committed, the bucket nothing of it.
         let behind = Arc::new(ObjectBucket::new(gated.store.clone(), ""));
-        assert_eq!(uploaded(&behind, branch), (vec![], None));
+        assert_eq!(uploaded(&behind, cell), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
         store.wait_uploaded().unwrap();
-        let footers = footers(&bucket, branch);
+        let footers = footers(&bucket, cell);
         let commits: Vec<_> = footers.iter().map(|footer| footer.contents.commits.len()).collect();
         assert_eq!(commits, [1], "the segment of the commits");
-        assert_eq!(uploaded(&bucket, branch), (written, Some(b"root 3".to_vec())));
+        assert_eq!(uploaded(&bucket, cell), (written, Some(b"root 3".to_vec())));
     }
 
     /// A store whose commit, of more bytes than `options` let wait, is in a segment closed for want
@@ -1061,7 +1057,7 @@ mod tests {
         let opened = crate::host_cell::create_unmade(
             &path,
             1 << 30,
-            crate::host_cell::BranchOf::Named(bucket_cell::layout::test_branch(7)),
+            crate::host_cell::CellOf::Named(bucket_cell::layout::test_cell(7)),
             bucket_cell::cell::Kind::Fxfs,
             Some(&url_of(&bucket)),
             options,
@@ -1105,7 +1101,7 @@ mod tests {
 
     /// A store's uploader holds its directory taken until it stops, after the store closed: the
     /// store's closing let it go, and its uploader, which uploads the store's last commits as it
-    /// stops, wrote the branch's marker in the directory after, while another process, a crash
+    /// stops, wrote the cell's marker in the directory after, while another process, a crash
     /// test's copy, had taken it, and the store at the version found the marker's new file gone (TASK-129, GCE, the
     /// DAX gate's second run).
     #[test]
@@ -1119,11 +1115,11 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let branch = crate::host_cell::new_alone();
+        let cell = crate::host_cell::new_alone();
         let opened = crate::host_cell::create(
             &path,
             1 << 30,
-            crate::host_cell::BranchOf::Named(branch),
+            crate::host_cell::CellOf::Named(cell),
             bucket_cell::cell::Kind::Fxfs,
             idle(),
         )
@@ -1268,7 +1264,7 @@ mod tests {
             }
         }
         base.commit(None).unwrap();
-        let base_branch = base.branch().id;
+        let base_cell = base.cell().id;
         let parent = match version {
             false => base,
             true => {
@@ -1282,7 +1278,7 @@ mod tests {
         let mut paths: Vec<_> = (0..forks + 2)
             .map(|n| {
                 let path = dir.path().join(format!("fork-{n}"));
-                parent.fork_to(&path, fork_child(parent.branch())).unwrap();
+                parent.fork_to(&path, fork_child(parent.cell())).unwrap();
                 path
             })
             .collect();
@@ -1356,14 +1352,14 @@ mod tests {
 
         // A map of them sharing nothing, as the writer's of a base written live is, which a store
         // over it counts as its own.
-        let branch = stores[0].branch();
+        let cell = stores[0].cell();
         let state = futures::executor::block_on(async {
-            let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
-            recover(&*bucket, branch, record.origin()).await.unwrap().state
+            let record = lifecycle::record(&*bucket, cell).await.unwrap().unwrap();
+            recover(&*bucket, cell, record.origin()).await.unwrap().state
         });
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
         let weighed = held();
-        let mut rebuilt = bucket_cell::State::new(branch).extents;
+        let mut rebuilt = bucket_cell::State::new(cell).extents;
         for (extent, at) in &state.extents {
             rebuilt.insert(*extent, at.clone());
         }
@@ -1427,7 +1423,7 @@ mod tests {
         let (idle, opened) = (open(&paths[0]), open(&freeing));
         let (counted_before, _) = extents_counted();
         let frees =
-            (1..=extents).step_by(32).map(|sequence| ExtentId { branch: base_branch, sequence });
+            (1..=extents).step_by(32).map(|sequence| ExtentId { cell: base_cell, sequence });
         let frees: Vec<_> = frees.collect();
         for &extent in &frees {
             opened.free(extent).unwrap();
@@ -1486,8 +1482,8 @@ mod tests {
                 write(&base, sequence, &pattern(sequence as u8, BLOCK));
             }
             base.commit(None).unwrap();
-            let base_branch = base.branch().id;
-            let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+            let base_cell = base.cell().id;
+            let inherited = |sequence| ExtentId { cell: base_cell, sequence };
             let parent = match version {
                 false => base,
                 true => {
@@ -1498,7 +1494,7 @@ mod tests {
             };
             let fork = |n: usize| {
                 let path = dir.path().join(format!("fork-{n}"));
-                parent.fork_to(&path, fork_child(parent.branch())).unwrap();
+                parent.fork_to(&path, fork_child(parent.cell())).unwrap();
                 path
             };
             let paths: Vec<_> = (0..=FORKS).map(fork).collect();
@@ -1569,10 +1565,10 @@ mod tests {
             }
         }
         base.commit(None).unwrap();
-        let base_branch = base.branch().id;
-        let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+        let base_cell = base.cell().id;
+        let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        base.fork_to(&path, fork_child(base.branch())).unwrap();
+        base.fork_to(&path, fork_child(base.cell())).unwrap();
         let fork = reopened(&path, idle()).unwrap();
         let held = Ok(Some((BLOCK as u64, false)));
         let mut data = vec![0; BLOCK];
@@ -1623,10 +1619,10 @@ mod tests {
             }
         }
         base.commit(None).unwrap();
-        let base_branch = base.branch().id;
-        let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+        let base_cell = base.cell().id;
+        let inherited = |sequence| ExtentId { cell: base_cell, sequence };
         let path = dir.path().join("fork");
-        base.fork_to(&path, fork_child(base.branch())).unwrap();
+        base.fork_to(&path, fork_child(base.cell())).unwrap();
         let fork = reopened(&path, idle()).unwrap();
         let mut read = vec![0; BLOCK];
         for sequence in 1..=extents {
@@ -1674,7 +1670,7 @@ mod tests {
         }
     }
 
-    /// A store's closed segments are the objects of its branch in the bucket, byte for byte, as
+    /// A store's closed segments are the objects of its cell in the bucket, byte for byte, as
     /// are its extents stored on their own (doc-7, decision 1): the uploader puts its files; and
     /// once the bucket has acknowledged them, they leave the store whole, into the host's cache,
     /// as those objects, which the store's reads read there with the bucket's gone (TASK-165.8).
@@ -1688,7 +1684,7 @@ mod tests {
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
         write(&store, 2, &pattern(2, 4 << 20));
         store.commit(Some(b"one")).unwrap();
@@ -1698,7 +1694,7 @@ mod tests {
         // The store's files of `kind`, by their contents.
         let files = |kind: &str| -> Vec<Vec<u8>> {
             let path =
-                dir.path().join("store").join(kind).join(base32_id::Padded(branch.id).to_string());
+                dir.path().join("store").join(kind).join(base32_id::Padded(cell.id).to_string());
             let mut files: Vec<_> = std::fs::read_dir(path)
                 .unwrap()
                 .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
@@ -1718,19 +1714,19 @@ mod tests {
                 objects
             })
         };
-        // The branch's segments but its writer's fence, which holds no commit.
-        let mut segments: Vec<_> = objects(layout::segments(branch))
+        // The cell's segments but its writer's fence, which holds no commit.
+        let mut segments: Vec<_> = objects(layout::segments(cell))
             .into_iter()
             .filter(|bytes| !layout::footer::<Footer>(bytes).unwrap().contents.commits.is_empty())
             .collect();
         segments.sort();
         assert_eq!(segments.len(), 2);
-        let mut own = objects(layout::extents(branch));
+        let mut own = objects(layout::extents(cell));
         own.sort();
         assert_eq!(own.len(), 1);
         assert_eq!((files("segments"), files("extents")), (Vec::new(), Vec::new()));
         assert_eq!(
-            uploaded(&bucket, branch),
+            uploaded(&bucket, cell),
             (
                 vec![(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))],
                 Some(b"two".to_vec())
@@ -1749,7 +1745,7 @@ mod tests {
         let written =
             [(1, pattern(1, BLOCK)), (2, pattern(2, 4 << 20)), (3, pattern(3, 2 * BLOCK))];
         for (sequence, data) in written {
-            let extent = ExtentId { branch: branch.id, sequence };
+            let extent = ExtentId { cell: cell.id, sequence };
             let mut read = vec![0; data.len()];
             store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).unwrap();
             assert!(read == data, "extent {sequence} reads other data");
@@ -1766,7 +1762,7 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         // Stored on its own, raw, as it doesn't compress.
         let extent = write(&store, 1, &noise(1, 4 << 20));
         store.commit_ordered(None).unwrap();
@@ -1774,7 +1770,7 @@ mod tests {
         local_cell::pages::shared().write_back_all().unwrap();
         let path = dir.path().join(format!(
             "store/extents/{}/{}",
-            base32_id::Padded(branch.id),
+            base32_id::Padded(cell.id),
             base32_id::Padded(extent.sequence)
         ));
         let mut bytes = std::fs::read(&path).unwrap();
@@ -1790,13 +1786,13 @@ mod tests {
             let listed = bucket_cell::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
         };
-        assert_eq!(listed(layout::extents(branch)), Vec::<String>::new());
+        assert_eq!(listed(layout::extents(cell)), Vec::<String>::new());
     }
 
-    /// A commit waits for its upload no longer than it takes: once another writer has the branch,
+    /// A commit waits for its upload no longer than it takes: once another writer has the cell,
     /// a durable commit fails.
     #[test]
-    fn durable_commits_fail_once_another_takes_the_branch() {
+    fn durable_commits_fail_once_another_takes_the_cell() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
@@ -1805,7 +1801,7 @@ mod tests {
         store.commit(None).unwrap();
         let other = bucket_cell::Writer::open(
             bucket.clone(),
-            store.branch(),
+            store.cell(),
             2,
             crate::host_cell::token().unwrap(),
         );
@@ -1814,22 +1810,22 @@ mod tests {
         assert_eq!(store.commit(None), Err(crate::Errno::EROFS));
     }
 
-    /// TASK-39.7: a store's copy takes its branch with its placement's fencing token: a later
-    /// placement's, higher, fences it, its commits failing, and it takes the branch back no more,
-    /// though its store is as current as the branch; a placement later still takes it.
+    /// TASK-39.7: a store's copy takes its cell with its placement's fencing token: a later
+    /// placement's, higher, fences it, its commits failing, and it takes the cell back no more,
+    /// though its store is as current as the cell; a placement later still takes it.
     #[test]
     fn later_placements_fence_earlier_ones() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"first")).unwrap();
 
-        // The branch moves to another host, a later placement, while the first still runs.
-        drop(kept_in(&second_path, (1 << 30, Some(branch)), &bucket, idle()).unwrap());
+        // The cell moves to another host, a later placement, while the first still runs.
+        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
         OpenCell::place(&second_path, 2).unwrap();
         let second = reopened(&second_path, idle()).unwrap();
         assert_eq!(second.root(), Ok(b"first".to_vec()));
@@ -1840,7 +1836,7 @@ mod tests {
         // The first, restarted, takes it back no more: its token is the earlier.
         let refused = reopened(&first_path, idle()).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ESTALE));
-        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, branch));
+        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, cell));
         assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
@@ -1849,8 +1845,8 @@ mod tests {
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
 
-    /// TASK-45.1: a placement cut off deletes no branch from under a later one: its delete fails
-    /// (`ESTALE`), leaving the branch in the bucket, which the later placement goes on writing; the
+    /// TASK-45.1: a placement cut off deletes no cell from under a later one: its delete fails
+    /// (`ESTALE`), leaving the cell in the bucket, which the later placement goes on writing; the
     /// later placement's delete deletes it.
     #[test]
     fn earlier_placements_delete_nothing() {
@@ -1858,13 +1854,13 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         OpenCell::place(&first_path, 1).unwrap();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"first")).unwrap();
         drop(first);
-        // The branch moves to another host, a later placement.
-        drop(kept_in(&second_path, (1 << 30, Some(branch)), &bucket, idle()).unwrap());
+        // The cell moves to another host, a later placement.
+        drop(kept_in(&second_path, (1 << 30, Some(cell)), &bucket, idle()).unwrap());
         OpenCell::place(&second_path, 2).unwrap();
         let second = reopened(&second_path, idle()).unwrap();
 
@@ -1873,17 +1869,16 @@ mod tests {
         write(&second, 2, &pattern(2, BLOCK));
         second.commit(Some(b"second")).unwrap();
         drop(second);
-        let state = futures::executor::block_on(bucket_cell::recover(&*bucket, branch, None))
-            .unwrap()
-            .state;
+        let state =
+            futures::executor::block_on(bucket_cell::recover(&*bucket, cell, None)).unwrap().state;
         assert_eq!(state.root, Some(b"second".to_vec()));
 
         OpenCell::delete(&second_path, Some(&bucket)).unwrap();
-        let deleted = futures::executor::block_on(bucket_cell::branch::record(&*bucket, branch));
-        assert!(deleted.unwrap().unwrap().deleted, "the branch lives");
+        let deleted = futures::executor::block_on(bucket_cell::lifecycle::record(&*bucket, cell));
+        assert!(deleted.unwrap().unwrap().deleted, "the cell lives");
     }
 
-    /// TASK-39.7: a store's copy never placed takes its branch with its host's token, as a store
+    /// TASK-39.7: a store's copy never placed takes its cell with its host's token, as a store
     /// restored or taken on a host is.
     #[test]
     fn unplaced_copies_take_their_hosts_token() {
@@ -1892,20 +1887,20 @@ mod tests {
         let options = local_cell::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.branch()));
+        let head = futures::executor::block_on(bucket_cell::head::get(&*bucket, store.cell()));
         let head = head.unwrap().unwrap();
-        // cladefs: its cell taken with the host's token, its branch's head with the cell's epoch
+        // cladefs: its cell taken with the host's token, its cell's head with the cell's epoch
         // (TASK-364).
-        let cell = bucket_cell::cell::read(&*bucket, store.branch());
+        let cell = bucket_cell::cell::read(&*bucket, store.cell());
         let cell = futures::executor::block_on(cell).unwrap().unwrap();
         assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
     }
 
-    /// TASK-165.9: a store whose bucket acknowledged commits of its branch, opened where the
-    /// bucket has no such branch, deleted or another bucket, refuses (`ENOENT`), rather than make
-    /// the branch anew without them.
+    /// TASK-165.9: a store whose bucket acknowledged commits of its cell, opened where the
+    /// bucket has no such cell, deleted or another bucket, refuses (`ENOENT`), rather than make
+    /// the cell anew without them.
     #[test]
-    fn stores_whose_bucket_lacks_their_branch_refuse() {
+    fn stores_whose_bucket_lacks_their_cell_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
@@ -1932,19 +1927,19 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = store.branch();
+        let cell = store.cell();
         write(&store, 1, &pattern(1, BLOCK));
         store.commit_ordered(Some(b"ordered")).unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
-        assert_eq!(uploaded(&bucket, branch), (vec![], None));
+        assert_eq!(uploaded(&bucket, cell), (vec![], None));
         drop(store);
         assert_eq!(
-            uploaded(&bucket, branch),
+            uploaded(&bucket, cell),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
         );
     }
 
-    /// TASK-39.7: waiting for uploads returns once every commit so far is in the branch.
+    /// TASK-39.7: waiting for uploads returns once every commit so far is in the cell.
     #[test]
     fn waits_for_uploads() {
         let dir = tempfile::tempdir().unwrap();
@@ -1954,10 +1949,10 @@ mod tests {
         write(&store, 1, &pattern(1, BLOCK));
         store.commit_ordered(Some(b"ordered")).unwrap();
         // Not uploaded yet: the uploader waits an hour, unless asked.
-        assert_eq!(uploaded(&bucket, store.branch()).1, None);
+        assert_eq!(uploaded(&bucket, store.cell()).1, None);
         store.wait_uploaded().unwrap();
         assert_eq!(
-            uploaded(&bucket, store.branch()),
+            uploaded(&bucket, store.cell()),
             (vec![(1, pattern(1, BLOCK))], Some(b"ordered".to_vec()))
         );
     }
@@ -1973,7 +1968,7 @@ mod tests {
         /// The write of the object at this key.
         Key(String),
         /// The first write of the object at this key, those after it while it waits going on: a
-        /// takeover's of a branch's head, its writer's swaps of it meanwhile not (TASK-407).
+        /// takeover's of a cell's head, its writer's swaps of it meanwhile not (TASK-407).
         First(String),
     }
 
@@ -2325,7 +2320,7 @@ mod tests {
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(third.join().unwrap(), Ok(()));
         store.commit(None).unwrap();
-        let (extents, _) = uploaded(&bucket, store.branch());
+        let (extents, _) = uploaded(&bucket, store.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
@@ -2418,7 +2413,7 @@ mod tests {
         for commit in commits {
             assert_eq!(commit.join().unwrap(), Ok(()));
         }
-        let (extents, _) = uploaded(&bucket, store.branch());
+        let (extents, _) = uploaded(&bucket, store.cell());
         assert_eq!(extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
@@ -2436,7 +2431,7 @@ mod tests {
         let store = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
-        let branch = store.branch();
+        let cell = store.cell();
         // The commits' segments are 0 to 3.
         gated.hold.send_replace(Hold::Segments);
         let waiting: Vec<_> = (1..=local_cell::upload::IN_FLIGHT as u64)
@@ -2462,20 +2457,20 @@ mod tests {
             assert_eq!(commit.join().unwrap(), Ok(()));
         }
         // The store's segments closed, in the bucket: those of the commits waiting.
-        let prefix = bucket_cell::layout::segments(branch);
+        let prefix = bucket_cell::layout::segments(cell);
         let closed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
         assert_eq!(closed.len(), local_cell::upload::IN_FLIGHT);
         store.wait_uploaded().unwrap();
-        let (extents, _) = uploaded(&bucket, branch);
+        let (extents, _) = uploaded(&bucket, cell);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, (1..=ordered).collect::<Vec<_>>());
     }
 
-    /// A branch survives the loss of its host. Cut off from object storage, the host's store goes
+    /// A cell survives the loss of its host. Cut off from object storage, the host's store goes
     /// on committing, ordered, until the lag reaches its bound, `max_lag` commits, then waits.
     /// Lost then, its store, its uploader and its disk, its commits made durable, which waited for
-    /// their uploads, are all in the branch, which another host's empty store takes, losing the
+    /// their uploads, are all in the cell, which another host's empty store takes, losing the
     /// lag's commits at most; and writes on. In the objects of `store` under `prefix`.
     fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
         use bucket_cell::layout;
@@ -2497,7 +2492,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let branch = lost.branch();
+        let cell = lost.cell();
         write(&lost, 1, &pattern(1, BLOCK));
         lost.commit(Some(b"durable")).unwrap();
         gated.shut.store(true, Relaxed);
@@ -2524,7 +2519,7 @@ mod tests {
         // runs on, forgotten (TASK-165.9: the write-ahead log's segments, before a marker).
         let last = lost.committed().unwrap();
         let segments =
-            dir.path().join("lost").join(format!("segments/{}", base32_id::Padded(branch.id)));
+            dir.path().join("lost").join(format!("segments/{}", base32_id::Padded(cell.id)));
         let framed = || -> Vec<u64> {
             let files = std::fs::read_dir(&segments).into_iter().flatten();
             let bytes = files.filter_map(|file| std::fs::read(file.unwrap().path()).ok());
@@ -2545,11 +2540,11 @@ mod tests {
 
         let bucket = Arc::new(ObjectBucket::new(store, prefix));
         let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket.clone(), idle())
+            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .unwrap();
         assert_eq!(taken.root(), Ok(b"durable".to_vec()));
         let mut data = vec![0; BLOCK];
-        let durable = ExtentId { branch: branch.id, sequence: 1 };
+        let durable = ExtentId { cell: cell.id, sequence: 1 };
         taken.read(durable, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, pattern(1, BLOCK));
         let info = taken.info().unwrap();
@@ -2562,7 +2557,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (extents, root) = {
             let _entered = runtime.enter();
-            uploaded(&bucket, branch)
+            uploaded(&bucket, cell)
         };
         let sequences: Vec<u64> = extents.iter().map(|(sequence, _)| *sequence).collect();
         assert_eq!(sequences, [1, sequence]);
@@ -2570,21 +2565,21 @@ mod tests {
     }
 
     #[test]
-    fn branches_survive_their_hosts_loss() {
+    fn cells_survive_their_hosts_loss() {
         survives_its_hosts_loss(Arc::new(InMemory::new()), "");
     }
 
-    /// TASK-79.68: an extent freed while open and written anew before the commit is the branch's
-    /// still once a store taking the branch recovers it from object storage: its segment's footer
+    /// TASK-79.68: an extent freed while open and written anew before the commit is the cell's
+    /// still once a store taking the cell recovers it from object storage: its segment's footer
     /// named it among the commit's frees too, which recovery applies after its extents, and the
-    /// branch recovered lacked it.
+    /// cell recovered lacked it.
     #[test]
     fn extents_freed_and_written_anew_survive_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
             kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = lost.branch();
+        let cell = lost.cell();
         let extent = write(&lost, 1, &pattern(1, BLOCK));
         lost.free(extent).unwrap();
         write(&lost, 1, &pattern(2, BLOCK));
@@ -2593,14 +2588,14 @@ mod tests {
         std::mem::forget(lost);
 
         let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle()).unwrap();
+            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
         let mut data = vec![0; BLOCK];
         taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert!(data == pattern(2, BLOCK), "the extent read back is not its second write");
     }
 
-    /// TASK-92.6: a store taking a branch its host lost, the branch's segments since its last
-    /// checkpoint many, recovers the branch once, its head taken between the start and the rest:
+    /// TASK-92.6: a store taking a cell its host lost, the cell's segments since its last
+    /// checkpoint many, recovers the cell once, its head taken between the start and the rest:
     /// by the tails of its segments, which hold their footers, a window of them at once, not by
     /// the segments whole. The bucket, which the lost host's store probed, it probes not again.
     /// TASK-165.11: what a durable commit, an open, a fork and a fork's first open cost on a real
@@ -2641,10 +2636,10 @@ mod tests {
             phases.entry(phase).or_default().push(took);
         };
         let base = dir.path().join("base");
-        let branch = crate::host_cell::new_alone();
+        let cell = crate::host_cell::new_alone();
         let mut store = None;
         measure("create", &mut || {
-            let made = OpenCell::create_kept_with(&base, 1 << 30, branch, &url, idle());
+            let made = OpenCell::create_kept_with(&base, 1 << 30, cell, &url, idle());
             store = Some(made.unwrap());
         });
         let store = store.unwrap();
@@ -2680,7 +2675,7 @@ mod tests {
 
     /// TASK-165.11: a durable commit, as a guest's sync makes one, costs the bucket what doc-7's
     /// The head say it needs: the create of the segment its commit closes, then the swap of the
-    /// branch's head that names it, which acknowledges it (TASK-407: before, the create alone, the
+    /// cell's head that names it, which acknowledges it (TASK-407: before, the create alone, the
     /// fencing; TASK-371: before that, a read of the head after it); nothing else, as no
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
@@ -2717,14 +2712,14 @@ mod tests {
     }
 
     #[test]
-    fn takes_recover_their_branches_once_by_their_segments_tails() {
+    fn takes_recover_their_cells_once_by_their_segments_tails() {
         use bucket_cell::layout;
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
             kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = lost.branch();
+        let cell = lost.cell();
         // A segment of a MiB for each commit, uploaded as it is durable.
         for sequence in 1..=4 {
             write(&lost, sequence, &noise(sequence, 1 << 20));
@@ -2735,7 +2730,7 @@ mod tests {
 
         let before = bucket.stats();
         let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket.clone(), idle())
+            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .unwrap();
         let after = bucket.stats();
         let asked: Vec<_> = (Request::ALL.iter())
@@ -2748,15 +2743,13 @@ mod tests {
                 .map(|meta| (meta.key, meta.size))
                 .collect();
         let tails: u64 = (0..4)
-            .map(|segment| {
-                sizes[&layout::segment(branch, segment, 1)].min(bucket_cell::object::TAIL)
-            })
+            .map(|segment| sizes[&layout::segment(cell, segment, 1)].min(bucket_cell::object::TAIL))
             .sum();
-        let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
-        let cell = sizes[&layout::cell(branch)];
+        let (record, head) = (sizes[&layout::record(cell)], sizes[&layout::head(cell)]);
+        let cell_object = sizes[&layout::cell(cell)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
-        // holder's as it was and naming the branch (TASK-364), and read before for the KEK its
-        // recovery unwraps the branch's DEK under, every branch encrypted (TASK-411.28, TASK-460);
+        // holder's as it was and naming the cell (TASK-364), and read before for the KEK its
+        // recovery unwraps the cell's DEK under, every cell encrypted (TASK-411.28, TASK-460);
         // the head, read once, at once with the record and the cell, the recovery starting from it,
         // then swapped to take it (TASK-449). The segments' tails it names, all at once: no listing
         // (TASK-407).
@@ -2775,20 +2768,20 @@ mod tests {
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + head + 2 * cell
+                tails + 2 * record + head + 2 * cell_object
             )
         );
         let mut data = vec![0; 1 << 20];
-        let extent = ExtentId { branch: branch.id, sequence: 4 };
+        let extent = ExtentId { cell: cell.id, sequence: 4 };
         taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, noise(4, 1 << 20));
     }
 
-    /// As `branches_survive_their_hosts_loss`, in the bucket CLADEFS_S3_URL names: RustFS's
+    /// As `cells_survive_their_hosts_loss`, in the bucket CLADEFS_S3_URL names: RustFS's
     /// (scripts/test-rustfs.sh), or another S3 store's.
     #[test]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
-    fn rustfs_branches_survive_their_hosts_loss() {
+    fn rustfs_cells_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
         let (store, prefix) = bucket_cell::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
@@ -2829,15 +2822,15 @@ mod tests {
         waits_at_the_lag_bound(options, |gated| &gated.full);
     }
 
-    /// A branch opens on a host without it: an empty store of it takes what the branch holds, and
-    /// writes on; the store it came from, opened again, finds the branch moved on, and refuses.
+    /// A cell opens on a host without it: an empty store of it takes what the cell holds, and
+    /// writes on; the store it came from, opened again, finds the cell moved on, and refuses.
     #[test]
-    fn opens_branches_elsewhere() {
+    fn opens_cells_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         let large = pattern(2, 4 << 20);
         write(&first, 1, &pattern(1, BLOCK));
         write(&first, 2, &large);
@@ -2845,11 +2838,11 @@ mod tests {
         drop(first);
 
         let second =
-            kept_in(dir.path().join("second"), (1 << 30, Some(branch)), &bucket.clone(), idle())
+            kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .unwrap();
         assert_eq!(second.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; 4 << 20];
-        let extent = ExtentId { branch: branch.id, sequence: 2 };
+        let extent = ExtentId { cell: cell.id, sequence: 2 };
         second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, large);
         let info = second.info().unwrap();
@@ -2858,16 +2851,16 @@ mod tests {
         second.commit(None).unwrap();
         drop(second);
 
-        // cladefs: the first, opened again, its write-ahead log empty, takes the branch as it is
-        // (TASK-165.9): before, a store that held the branch refused once it moved on.
+        // cladefs: the first, opened again, its write-ahead log empty, takes the cell as it is
+        // (TASK-165.9): before, a store that held the cell refused once it moved on.
         let first = reopened(dir.path().join("first"), idle()).unwrap();
         assert_eq!(first.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; BLOCK];
-        let extent = ExtentId { branch: branch.id, sequence };
+        let extent = ExtentId { cell: cell.id, sequence };
         first.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, pattern(3, BLOCK));
         drop(first);
-        let (extents, root) = uploaded(&bucket, branch);
+        let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(
             extents.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(),
             [1, 2, sequence]
@@ -2886,12 +2879,12 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(None).unwrap();
         drop(first);
         let second =
-            kept_in(dir.path().join("second"), (1 << 30, Some(branch)), &bucket.clone(), idle())
+            kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                 .unwrap();
         lines.lock().unwrap().clear();
         let request = RequestId {
@@ -2899,7 +2892,7 @@ mod tests {
             store: Some("/stores/vm1".into()),
         };
         let mut data = vec![0; BLOCK];
-        let extent = ExtentId { branch: branch.id, sequence: 1 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
         within_now(Some(request), || {
             second.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap()
         });
@@ -2919,15 +2912,15 @@ mod tests {
         drop(second);
     }
 
-    /// Opens the store at `path`, whose bucket's objects `gated` reaches, the write of its branch's
+    /// Opens the store at `path`, whose bucket's objects `gated` reaches, the write of its cell's
     /// head that takes it held until `meanwhile` ran.
     fn open_racing(
         path: std::path::PathBuf,
         gated: &Arc<Gated>,
-        branch: crate::CellId,
+        cell: crate::CellId,
         meanwhile: impl FnOnce(),
     ) -> Result<OpenCell, crate::Error> {
-        gated.hold.send_replace(Hold::First(bucket_cell::layout::head(branch)));
+        gated.hold.send_replace(Hold::First(bucket_cell::layout::head(cell)));
         let opening = std::thread::spawn(move || reopened(path, idle()));
         gated.wait_held(1);
         meanwhile();
@@ -2935,32 +2928,32 @@ mod tests {
         opening.join().unwrap()
     }
 
-    /// The directory of a store of `branch` at `path`, its branch kept in `bucket`, made whole, and
-    /// not opened: what opening takes the branch into, as the bucket holds it.
-    fn made_for(path: &std::path::Path, branch: crate::CellId, bucket: &Arc<ObjectBucket>) {
+    /// The directory of a store of `cell` at `path`, its cell kept in `bucket`, made whole, and
+    /// not opened: what opening takes the cell into, as the bucket holds it.
+    fn made_for(path: &std::path::Path, cell: crate::CellId, bucket: &Arc<ObjectBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
-            local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
+            local_cell::Description { block_size: BLOCK as u32, capacity: 1 << 30, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         local_cell::create_host(path, description, &url_of(bucket), kind).unwrap();
         local_cell::made_host(path).unwrap();
     }
 
-    /// TASK-79.4: a store opening takes the branch as of its taking of the head, not as of what it
-    /// found before: the commit another writer made meanwhile, which frees the extent the branch
-    /// held before and writes another, is the branch's, and the store's.
+    /// TASK-79.4: a store opening takes the cell as of its taking of the head, not as of what it
+    /// found before: the commit another writer made meanwhile, which frees the extent the cell
+    /// held before and writes another, is the cell's, and the store's.
     #[test]
-    fn takes_take_what_the_branch_holds_once_taken() {
+    fn takes_take_what_the_cell_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         let before = write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"before")).unwrap();
 
-        made_for(&dir.path().join("second"), branch, &bucket);
-        let second = open_racing(dir.path().join("second"), &gated, branch, || {
+        made_for(&dir.path().join("second"), cell, &bucket);
+        let second = open_racing(dir.path().join("second"), &gated, cell, || {
             write(&first, 2, &pattern(2, BLOCK));
             first.free(before).unwrap();
             first.commit(Some(b"meanwhile")).unwrap();
@@ -2968,22 +2961,22 @@ mod tests {
         let second = second.unwrap();
         assert_eq!(second.root(), Ok(b"meanwhile".to_vec()));
         let mut data = vec![0; BLOCK];
-        let written = ExtentId { branch: branch.id, sequence: 2 };
+        let written = ExtentId { cell: cell.id, sequence: 2 };
         second.read(written, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, pattern(2, BLOCK));
         assert_eq!(
-            uploaded(&bucket, branch),
+            uploaded(&bucket, cell),
             (vec![(2, pattern(2, BLOCK))], Some(b"meanwhile".to_vec()))
         );
     }
 
-    /// TASK-79.4, TASK-165.9: a store whose write-ahead log holds commits the branch moved past
+    /// TASK-79.4, TASK-165.9: a store whose write-ahead log holds commits the cell moved past
     /// refuses to open (`ESTALE`), those commits never acknowledged: before its head is taken, its
-    /// log diverged as recovery first finds the branch; and once it holds it, another writer having
+    /// log diverged as recovery first finds the cell; and once it holds it, another writer having
     /// committed between the two (`wal_follows`), having fenced that writer, whose commits stay the
-    /// branch's. `OpenCell::take` drops the log, and opens the store as the branch is.
+    /// cell's. `OpenCell::take` drops the log, and opens the store as the cell is.
     #[test]
-    fn stores_whose_branch_moved_on_before_their_taking_refuse() {
+    fn stores_whose_cell_moved_on_before_their_taking_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -2998,7 +2991,7 @@ mod tests {
             idle(),
         );
         let first = first.unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"before")).unwrap();
         // A commit its log holds, durable on its disk alone, as its host dies: restarted with its
@@ -3012,20 +3005,20 @@ mod tests {
         drop(first);
         naming(&path, &bucket);
 
-        // The branch moves to another host, which takes it, as the bucket has it.
-        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle());
+        // The cell moves to another host, which takes it, as the bucket has it.
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle());
         let taken = taken.unwrap();
         assert_eq!(taken.root(), Ok(b"before".to_vec()));
-        // Its writer's fence moved the branch past no commit: the first's log follows it still.
-        let opened = open_racing(path.clone(), &gated, branch, || {
+        // Its writer's fence moved the cell past no commit: the first's log follows it still.
+        let opened = open_racing(path.clone(), &gated, cell, || {
             let info = taken.info().unwrap();
             let sequence = info.next_sequence.max(info.sequence_floor);
             write(&taken, sequence, &pattern(3, BLOCK));
             taken.commit(Some(b"meanwhile")).unwrap();
         });
         assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));
-        // The writer that committed meanwhile was fenced, its commit the branch's.
-        let (extents, root) = uploaded(&bucket, branch);
+        // The writer that committed meanwhile was fenced, its commit the cell's.
+        let (extents, root) = uploaded(&bucket, cell);
         assert_eq!(extents.len(), 2);
         assert_eq!(root, Some(b"meanwhile".to_vec()));
         drop(taken);
@@ -3034,13 +3027,13 @@ mod tests {
             reopened(&path, idle()).err().and_then(|err| err.errno()),
             Some(crate::Errno::ESTALE)
         );
-        // Taken, its log dropped: the store holds the branch as it is, its local commit lost.
-        OpenCell::take(&path, 1 << 30, branch, None).unwrap();
+        // Taken, its log dropped: the store holds the cell as it is, its local commit lost.
+        OpenCell::take(&path, 1 << 30, cell, None).unwrap();
         let first = reopened(&path, idle()).unwrap();
         assert_eq!(first.root(), Ok(b"meanwhile".to_vec()));
     }
 
-    /// A fork of a store kept in object storage is a fork of its branch there, recorded once the
+    /// A fork of a store kept in object storage is a fork of its cell there, recorded once the
     /// parent uploaded through it: it inherits the parent's extents rather than upload them again,
     /// and what either commits after is its own.
     /// TASK-160.10: a store at a version refuses all that would change what it holds, with `EROFS`,
@@ -3061,7 +3054,7 @@ mod tests {
         let version = reopened(&path, idle()).unwrap();
         assert_eq!(version.access().role, crate::CellRole::Version);
         let capacity = version.info().unwrap().capacity;
-        let own = ExtentId { branch: version.branch().id, sequence: 2 };
+        let own = ExtentId { cell: version.cell().id, sequence: 2 };
         let refused = [
             ("set_capacity", version.set_capacity(2 * capacity)),
             ("write", version.write(own, 0, &[VolatileSlice::from(&pattern(2, BLOCK)[..])])),
@@ -3076,7 +3069,7 @@ mod tests {
         assert_eq!(version.info().unwrap().capacity, capacity);
         assert_eq!(version.root().unwrap(), b"root");
         version
-            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.branch()))
+            .fork_to(dir.path().join("fork"), crate::host_cell::fork_child(version.cell()))
             .unwrap();
         version.make_public().unwrap();
     }
@@ -3107,7 +3100,7 @@ mod tests {
             crate::host_cell::delete(path, Some(&bucket), crate::host_cell::token).unwrap()
         };
         let later = dir.path().join("later");
-        source.fork_to(&later, crate::host_cell::fork_child(source.branch())).unwrap();
+        source.fork_to(&later, crate::host_cell::fork_child(source.cell())).unwrap();
         delete(&later);
         let copy = reopened(&path, idle()).unwrap();
         let fork = |name: &str, tenant| {
@@ -3182,10 +3175,10 @@ mod tests {
         source.share_version(version, true).unwrap();
         assert_eq!(fork("theirs", 2), (Ok(()), true));
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
-        let record = futures::executor::block_on(branch::record(&*bucket, theirs.branch()));
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, theirs.cell()));
         let record = record.unwrap().unwrap();
-        let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
-        assert_eq!((record.deks.len(), inherited), (1, vec![source.branch()]));
+        let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
+        assert_eq!((record.deks.len(), inherited), (1, vec![source.cell()]));
         drop(theirs);
 
         drop(copy);
@@ -3223,11 +3216,11 @@ mod tests {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::host_cell::named(tenant);
         for (name, tenant) in [("forgotten", 1), ("never", 2)] {
-            let branch = of(tenant);
-            let refused = kept_in(dir.path().join(name), (1 << 30, Some(branch)), &bucket, idle());
+            let cell = of(tenant);
+            let refused = kept_in(dir.path().join(name), (1 << 30, Some(cell)), &bucket, idle());
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
-            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, branch));
+            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, cell));
             assert_eq!(cell, Ok(None), "{name}");
         }
     }
@@ -3279,7 +3272,7 @@ mod tests {
             reopened(dir.path().join(names[at]), idle()).map(drop).map_err(|err| err.errno())
         };
 
-        let cell = stores[0].0.branch();
+        let cell = stores[0].0.cell();
         let shredded = futures::executor::block_on(crate::bucket::shred_cell(&bucket, cell));
         let (removed, forgotten) = shredded.unwrap();
         assert_eq!(removed, 1);
@@ -3358,10 +3351,9 @@ mod tests {
             .collect();
         assert!(crate::bucket::bucket_kms().is_some());
         for (store, _, _) in &stores {
-            let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
+            let record = futures::executor::block_on(lifecycle::record(&*bucket, store.cell()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
-            let cell =
-                futures::executor::block_on(bucket_cell::cell::read(&*bucket, store.branch()));
+            let cell = futures::executor::block_on(bucket_cell::cell::read(&*bucket, store.cell()));
             assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
         }
         let kek = |tenant| {
@@ -3464,7 +3456,7 @@ mod tests {
             let fork = reopened(&to, idle()).unwrap();
             assert_eq!(fork.root().unwrap(), b"base");
             let mut data = vec![0; BLOCK];
-            let extent = ExtentId { branch: base.branch().id, sequence: 1 };
+            let extent = ExtentId { cell: base.cell().id, sequence: 1 };
             fork.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
             assert!(data == pattern(0, BLOCK), "tenant {tenant}'s fork reads other bytes");
         }
@@ -3481,9 +3473,9 @@ mod tests {
         let own = write(&parent, 2, &large);
         // Committed, not yet durable: the fork makes it so, and uploads it, first.
         parent.commit_ordered(Some(b"root")).unwrap();
-        let child = crate::host_cell::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.cell());
         let checkpoints = || {
-            let prefix = bucket_cell::layout::checkpoints(parent.branch());
+            let prefix = bucket_cell::layout::checkpoints(parent.cell());
             futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix)).unwrap()
         };
         assert_eq!(checkpoints().len(), 0);
@@ -3493,14 +3485,15 @@ mod tests {
         write(&parent, 3, &pattern(3, BLOCK));
         parent.commit(None).unwrap();
 
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap().unwrap();
+        let record =
+            futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap().unwrap();
         let origin = record.origin().unwrap();
 
-        assert_eq!(origin.parent, parent.branch());
+        assert_eq!(origin.parent, parent.cell());
         let inherited = |state: &bucket_cell::State| {
             let parents = [
-                bucket_cell::layout::segments(parent.branch()),
-                bucket_cell::layout::extents(parent.branch()),
+                bucket_cell::layout::segments(parent.cell()),
+                bucket_cell::layout::extents(parent.cell()),
             ];
             state
                 .extents
@@ -3531,14 +3524,14 @@ mod tests {
         let held: Vec<_> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(held, [small.sequence, own.sequence, mine.sequence]);
         // And one when the parent's uploader stops, the store closing.
-        let parent_branch = parent.branch();
+        let parent_cell = parent.cell();
         drop(parent);
-        let prefix = bucket_cell::layout::checkpoints(parent_branch);
+        let prefix = bucket_cell::layout::checkpoints(parent_cell);
         let listed = futures::executor::block_on(bucket_cell::Bucket::list(&*bucket, &prefix));
         assert_eq!(listed.unwrap().len(), 2);
     }
 
-    /// TASK-79.39: a fork's child takes its branch through its marker, which names the fork's
+    /// TASK-79.39: a fork's child takes its cell through its marker, which names the fork's
     /// commit, the last the child inherits, though a later commit's segment is acknowledged with
     /// the fork's.
     #[test]
@@ -3549,14 +3542,14 @@ mod tests {
         let parent = Arc::new(
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
-        let branch = parent.branch();
+        let cell = parent.cell();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         // The fork's segment, after the commit's, lands after the next.
-        let segment = |number| bucket_cell::layout::segment(branch, number, 1);
+        let segment = |number| bucket_cell::layout::segment(cell, number, 1);
         let (forking, next) = (segment(1), segment(2));
         gated.hold.send_replace(Hold::Key(forking));
-        let child = crate::host_cell::fork_child(branch);
+        let child = crate::host_cell::fork_child(cell);
         let fork = {
             let (parent, path) = (parent.clone(), dir.path().join("child"));
             std::thread::spawn(move || parent.fork_to(path, child))
@@ -3584,33 +3577,33 @@ mod tests {
         assert_eq!(forked.root(), Ok(b"root".to_vec()));
     }
 
-    /// TASK-150.6: an extent's ID is its branch's to write once, on any host: one sealed and freed
-    /// is spent on a host that takes the branch, whose local index knows nothing of it, whether
-    /// the branch's state there comes from a checkpoint or from its segments' footers; and one
+    /// TASK-150.6: an extent's ID is its cell's to write once, on any host: one sealed and freed
+    /// is spent on a host that takes the cell, whose local index knows nothing of it, whether
+    /// the cell's state there comes from a checkpoint or from its segments' footers; and one
     /// freed while open, never sealed, as a journal's tail is, is written still.
     #[test]
-    fn extents_freed_are_spent_on_the_host_that_takes_their_branch() {
+    fn extents_freed_are_spent_on_the_host_that_takes_their_cell() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
                 .unwrap();
-            let branch = first.branch();
+            let cell = first.cell();
             let sealed = write(&first, 1, &pattern(1, BLOCK));
             first.commit(Some(b"root")).unwrap();
             first.free(sealed).unwrap();
             let open = write(&first, 2, &pattern(2, BLOCK));
             first.free(open).unwrap();
             first.commit(None).unwrap();
-            // The store closing checkpoints the branch; a host lost doesn't.
+            // The store closing checkpoints the cell; a host lost doesn't.
             if checkpointed {
                 drop(first);
             } else {
                 std::mem::forget(first);
             }
 
-            let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle())
-                .unwrap();
+            let taken =
+                kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
             let data = pattern(3, BLOCK);
             let again = [crate::VolatileSlice::from(&data[..])];
             assert_eq!(taken.write(sealed, 0, &again), Err(crate::Errno::EPERM), "{checkpointed}");
@@ -3619,50 +3612,50 @@ mod tests {
     }
 
     /// TASK-165.3: an extent sealed by one commit and freed by the next, both in one segment, whose
-    /// footer frees it and seals it not, is spent on a host that takes the branch, as it is on the
-    /// store that made it: every reader of a footer spends every free of the branch's own extents.
+    /// footer frees it and seals it not, is spent on a host that takes the cell, as it is on the
+    /// store that made it: every reader of a footer spends every free of the cell's own extents.
     #[test]
-    fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_branch_is_taken() {
+    fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_cell_is_taken() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         let sealed = write(&first, 1, &pattern(1, BLOCK));
         first.commit_ordered(Some(b"root")).unwrap();
         first.free(sealed).unwrap();
         first.commit(None).unwrap();
-        let footers = footers(&bucket, branch);
+        let footers = footers(&bucket, cell);
         let last = footers.last().unwrap();
-        let freed = storage_device::ExtentId::new(branch.id, sealed.sequence);
+        let freed = storage_device::ExtentId::new(cell.id, sealed.sequence);
         let contents = &last.contents;
         let (commits, extents) = (contents.commits.len(), contents.extents.len());
         assert_eq!((commits, extents, &contents.frees), (1, 0, &vec![freed]));
         let data = pattern(3, BLOCK);
         let again = [crate::VolatileSlice::from(&data[..])];
         assert_eq!(first.write(sealed, 0, &again), Err(crate::Errno::EPERM));
-        // Its host lost: the branch's state is its footers'.
+        // Its host lost: the cell's state is its footers'.
         std::mem::forget(first);
 
         let taken =
-            kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle()).unwrap();
+            kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle()).unwrap();
         assert_eq!(taken.write(sealed, 0, &again), Err(crate::Errno::EPERM));
     }
 
-    /// TASK-165.3: a branch's capacity is its state, set by the commit after a resize: a host that
-    /// takes the branch has it, not the capacity it made its store with, whether the branch's state
+    /// TASK-165.3: a cell's capacity is its state, set by the commit after a resize: a host that
+    /// takes the cell has it, not the capacity it made its store with, whether the cell's state
     /// there comes from a checkpoint or from its segments' footers; and a store attaching to a
-    /// branch that has none, or another, sets its own with its next commit.
+    /// cell that has none, or another, sets its own with its next commit.
     #[test]
-    fn resizes_hold_where_their_branch_is_taken() {
+    fn resizes_hold_where_their_cell_is_taken() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
                 .unwrap();
-            let branch = first.branch();
+            let cell = first.cell();
             let recovered = || {
-                let recovered = recover(&*bucket, branch, None);
+                let recovered = recover(&*bucket, cell, None);
                 futures::executor::block_on(recovered).unwrap().state.capacity
             };
             assert_eq!(recovered(), None, "{checkpointed}");
@@ -3679,7 +3672,7 @@ mod tests {
             }
 
             let taken =
-                kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket.clone(), idle())
+                kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket.clone(), idle())
                     .unwrap();
             assert_eq!(taken.info().unwrap().capacity, 3 << 29, "{checkpointed}");
             taken.set_capacity(1 << 31).unwrap();
@@ -3688,18 +3681,18 @@ mod tests {
         }
     }
 
-    /// TASK-141.2: a branch whose record says a format newer than this daemon's is refused, naming
-    /// the branch and the format, before anything of it is read or written: no store takes it, its
+    /// TASK-141.2: a cell whose record says a format newer than this daemon's is refused, naming
+    /// the cell and the format, before anything of it is read or written: no store takes it, its
     /// head is as it was, and no segment of it is written.
     #[test]
-    fn branches_of_newer_formats_are_refused() {
+    fn cells_of_newer_formats_are_refused() {
         use bucket_cell::Bucket as _;
         use bucket_cell::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         write(&first, 1, &pattern(1, BLOCK));
         first.commit(Some(b"root")).unwrap();
         drop(first);
@@ -3707,7 +3700,7 @@ mod tests {
         // read.
         let mut newer = (bucket_cell::layout::FORMAT + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
-        let (key, overwrite) = (bucket_cell::layout::record(branch), PutMode::Overwrite);
+        let (key, overwrite) = (bucket_cell::layout::record(cell), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
         let listed = || {
             let listed = futures::executor::block_on(bucket.list("")).unwrap();
@@ -3715,17 +3708,17 @@ mod tests {
         };
         let before = listed();
 
-        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle());
+        let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(cell)), &bucket, idle());
         let refused = taken.err().unwrap();
         let format = bucket_cell::layout::FORMAT;
         let named = format!(
-            "branch {branch} is of format {}, which this reader, of format {format}, doesn't \
+            "cell {cell} is of format {}, which this reader, of format {format}, doesn't \
              read",
             format + 1
         );
         assert!(format!("{refused:#}").contains(&named), "{refused:#}");
         assert_eq!(refused.errno(), Some(crate::Errno::ENOTSUP));
-        assert_eq!(listed(), before, "a branch of a newer format was written to");
+        assert_eq!(listed(), before, "a cell of a newer format was written to");
     }
 
     /// Forks `parent`, attached to `bucket`, to `child`, whose handle is at `path`, the parent
@@ -3739,20 +3732,20 @@ mod tests {
         write(parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         parent.fork_to(path, child).unwrap();
-        futures::executor::block_on(branch::record(&**bucket, child)).unwrap().unwrap()
+        futures::executor::block_on(lifecycle::record(&**bucket, child)).unwrap().unwrap()
     }
 
     /// TASK-79.78: a fork to a child it made before, as a fork retried to another path, fails
     /// having made nothing, the bucket having the child's record: no commit of the parent's names
     /// the child again, from another version, which its writers, finding the child forked twice,
-    /// would fail on for ever, the parent's branch taken by none again. The parent attaches again.
+    /// would fail on for ever, the parent's cell taken by none again. The parent attaches again.
     #[test]
     fn forks_to_a_child_forked_before_make_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let child = crate::host_cell::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.cell());
         forked(&parent, &bucket, &dir.path().join("child"), child);
         let again = dir.path().join("again");
         let forked = parent.fork_to(&again, child);
@@ -3763,7 +3756,7 @@ mod tests {
         drop(parent);
 
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
-        let parents = futures::executor::block_on(recover(&*bucket, parent.branch(), None));
+        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
         let forks = parents.unwrap().state.forks;
         let forks: Vec<_> = forks.iter().map(|fork| (fork.child, fork.at)).collect();
         assert_eq!(forks, [(child, 1)]);
@@ -3774,8 +3767,8 @@ mod tests {
     /// child's record: the directory it began at the fork's path is no store, and goes as one left
     /// unmade. The swap, landing late, is the fork, which stands (doc-14): the parent's next writer gives the child its
     /// record, and a store naming the child, made anywhere, takes what it inherited. Before, the
-    /// fork's handle, a store of the child's at once, took no branch of its own while the segment
-    /// might land, but took its parent's branch itself, through markers naming the fork
+    /// fork's handle, a store of the child's at once, took no cell of its own while the segment
+    /// might land, but took its parent's cell itself, through markers naming the fork
     /// (TASK-79.72), and gave the child its record from the parent's state (TASK-79.20).
     #[test]
     fn forks_whose_host_crashed_stand_once_their_heads_swap_lands() {
@@ -3784,7 +3777,7 @@ mod tests {
         let gated = Arc::new(Gated::over(memory.clone()));
         let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
-        let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
+        let (cell, child, fork) = forking_held(dir.path(), &gated, &path);
         // The host gone: what it has in flight may land still.
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(crate::host_cell::unmade(&path), "the fork's directory is a store already");
@@ -3797,35 +3790,31 @@ mod tests {
         // Its fork goes on unseen, in a copy of the bucket only it reaches, as a dead host's.
         gated.sever();
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        let next = bucket_cell::Writer::open(
-            bucket.clone(),
-            branch,
-            3,
-            crate::host_cell::token().unwrap(),
-        );
+        let next =
+            bucket_cell::Writer::open(bucket.clone(), cell, 3, crate::host_cell::token().unwrap());
         futures::executor::block_on(next).unwrap();
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
-        let origin = bucket_cell::layout::Origin { parent: branch, at: 1 };
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
+        let origin = bucket_cell::layout::Origin { parent: cell, at: 1 };
         assert_eq!(record.map(|record| record.origin()), Some(Some(origin)));
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(child)), &bucket, idle());
         let taken = taken.unwrap();
         assert_eq!(taken.root(), Ok(b"root".to_vec()));
         let mut data = vec![0; BLOCK];
-        let extent = ExtentId { branch: branch.id, sequence: 1 };
+        let extent = ExtentId { cell: cell.id, sequence: 1 };
         taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, pattern(1, BLOCK));
         // The crashed host's fork, its writer reaching the bucket no more, fails, its next swap of
-        // the head refused, as a dead host's finds the branch taken (its copy holds the head at
+        // the head refused, as a dead host's finds the cell taken (its copy holds the head at
         // another version), and deletes nothing there.
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
         assert_eq!((forked, path.exists()), (taken_over(child), false));
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(|record| record.deleted), Some(false));
     }
 
-    /// Why a fork to `child` fails, its writer finding its branch taken.
+    /// Why a fork to `child` fails, its writer finding its cell taken.
     fn taken_over(child: crate::CellId) -> Result<(), String> {
-        Err(format!("forking to branch {child}: another writer took the branch"))
+        Err(format!("forking to cell {child}: another writer took the cell"))
     }
 
     /// The host whose disk is at `from`, crashed, restarted with its disk as the crash left it at
@@ -3869,14 +3858,14 @@ mod tests {
 
     /// A fork that fails once its segment landed, its parent's writer taken over before it
     /// acknowledged it (TASK-79.72): the parent, in `dir`, reaches the bucket, `memory`, through
-    /// `gated`, which holds the fork's segment while its next writer takes its branch, swapping
+    /// `gated`, which holds the fork's segment while its next writer takes its cell, swapping
     /// its head (TASK-407): the fork's segment, landing then, is no head's, and the parent's
     /// writer's swap fails. The parent holds an extent in a segment and one stored on its own,
     /// [`FailedFork::OWN`], which the child inherits.
     struct FailedFork {
         memory: Arc<dyn object_store::ObjectStore>,
         gated: Arc<Gated>,
-        branch: crate::CellId,
+        cell: crate::CellId,
         child: crate::CellId,
     }
 
@@ -3885,7 +3874,7 @@ mod tests {
         const OWN: u64 = 2;
 
         /// Forks the parent to a handle in `dir`, the fork's segment held, and the next writer
-        /// takes the parent's branch: the fork, waiting for the segment in a thread of its own.
+        /// takes the parent's cell: the fork, waiting for the segment in a thread of its own.
         fn new(dir: &std::path::Path) -> (Self, Forking) {
             let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
             let gated = Arc::new(Gated::over(memory.clone()));
@@ -3898,13 +3887,13 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let branch = parent.branch();
+            let cell = parent.cell();
             write(&parent, 1, &pattern(1, BLOCK));
             write(&parent, Self::OWN, &pattern(2, (4 << 20) as usize));
             parent.commit(Some(b"root")).unwrap();
-            let forking = bucket_cell::layout::segment(branch, 1, 1);
+            let forking = bucket_cell::layout::segment(cell, 1, 1);
             gated.hold.send_replace(Hold::Key(forking));
-            let child = crate::host_cell::fork_child(branch);
+            let child = crate::host_cell::fork_child(cell);
             let fork = {
                 let path = dir.join("child");
                 std::thread::spawn(move || parent.fork_to(path, child))
@@ -3912,12 +3901,11 @@ mod tests {
             gated.wait_held(1);
             let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
             let token = crate::host_cell::token().unwrap();
-            futures::executor::block_on(bucket_cell::Writer::open(bucket, branch, 3, token))
-                .unwrap();
-            (Self { memory, gated, branch, child }, fork)
+            futures::executor::block_on(bucket_cell::Writer::open(bucket, cell, 3, token)).unwrap();
+            (Self { memory, gated, cell, child }, fork)
         }
 
-        /// Lands the fork's segment, after which the parent's writer finds its branch taken, and
+        /// Lands the fork's segment, after which the parent's writer finds its cell taken, and
         /// the fork fails: the writes of what follows held as `then` says.
         fn land(&self, then: Hold) {
             self.gated.hold.send_replace(then);
@@ -3931,16 +3919,16 @@ mod tests {
 
         /// The child's record.
         fn record(&self) -> Option<bucket_cell::record::Record> {
-            futures::executor::block_on(branch::record(&*self.bucket(), self.child)).unwrap()
+            futures::executor::block_on(lifecycle::record(&*self.bucket(), self.child)).unwrap()
         }
     }
 
     /// A fork that failed, its writer taken over once the fork's segment landed, before it
-    /// acknowledged it, leaves its child no branch in object storage, as it leaves it no handle:
-    /// the child's branch there is deleted from the first, as the parent's head never names the
+    /// acknowledged it, leaves its child no cell in object storage, as it leaves it no handle:
+    /// the child's cell there is deleted from the first, as the parent's head never names the
     /// fork's segment (TASK-407), and the collector keeps nothing the child inherited for it.
     #[test]
-    fn forks_failed_once_their_segment_landed_leave_their_child_no_branch() {
+    fn forks_failed_once_their_segment_landed_leave_their_child_no_cell() {
         let dir = tempfile::tempdir().unwrap();
         let (failed, fork) = FailedFork::new(dir.path());
         failed.land(Hold::Nothing);
@@ -3949,8 +3937,8 @@ mod tests {
         assert_eq!((forked, handle.exists()), (taken_over(failed.child), false));
 
         // TASK-79.82: its deletion gave it the record its fork would first, naming the fork:
-        // deleted, as its parent's branch holds no fork.
-        let origin = bucket_cell::layout::Origin { parent: failed.branch, at: 1 };
+        // deleted, as its parent's cell holds no fork.
+        let origin = bucket_cell::layout::Origin { parent: failed.cell, at: 1 };
         // Of the fork's owner, which its footer names.
         let owner = failed.record().unwrap().owner;
         let deleted = bucket_cell::record::Record {
@@ -3958,25 +3946,25 @@ mod tests {
             ..bucket_cell::record::Kind::Fork(origin).of(owner)
         };
         assert_eq!(failed.record(), Some(deleted));
-        let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.branch, None));
+        let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.cell, None));
         assert_eq!(parents.unwrap().state.forks, []);
     }
 
     /// TASK-79.78: a fork that failed whose deletion in object storage is refused changes nothing
     /// there, and leaves nothing here. Here its parent's head names it, and its child has its
     /// record, live, when its store is not made, its path gone; and a later placement takes the
-    /// child's branch as the deletion's first write, of the child's head, goes, so that the
+    /// child's cell as the deletion's first write, of the child's head, goes, so that the
     /// deletion, as this host's placement, refuses (`ESTALE`): the child's record stays live, the
-    /// later placement's. Before, the fork's handle stayed, naming the branch, and its store held
+    /// later placement's. Before, the fork's handle stayed, naming the cell, and its store held
     /// it here; now a child's store is made only once its fork is (TASK-165.7).
     #[test]
-    fn forks_failed_whose_deletion_is_refused_leave_their_branch_to_its_placement() {
+    fn forks_failed_whose_deletion_is_refused_leave_their_cell_to_its_placement() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
         let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
-        let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
+        let (cell, child, fork) = forking_held(dir.path(), &gated, &path);
         crate::OpenCell::delete(&path, None).unwrap();
         gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(child)));
         gated.wait_went(1);
@@ -3985,16 +3973,16 @@ mod tests {
         assert_eq!(later.map(|held| held.head.epoch), Ok(1));
         gated.hold.send_replace(Hold::Nothing);
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
-        let unmade = format!("forking to branch {child}: making its store");
+        let unmade = format!("forking to cell {child}: making its store");
         assert_eq!((forked, path.exists()), (Err(unmade), false));
 
-        let origin = bucket_cell::layout::Origin { parent: branch, at: 1 };
+        let origin = bucket_cell::layout::Origin { parent: cell, at: 1 };
         let live = bucket_cell::record::Kind::Fork(origin).of(0);
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(live));
     }
 
-    /// The record of a branch no fork made, its store's own, of no parent, but for its owner
+    /// The record of a cell no fork made, its store's own, of no parent, but for its owner
     /// ([`unowned`]).
     fn own_record() -> bucket_cell::record::Record {
         bucket_cell::record::Kind::Root.of(0)
@@ -4007,47 +3995,43 @@ mod tests {
         bucket_cell::record::Record { owner: 0, deks: Vec::new(), inherited: Vec::new(), ..record }
     }
 
-    /// The store of another branch, `branch`, at `path`, attached to `bucket`, holding an extent
+    /// The store of another cell, `cell`, at `path`, attached to `bucket`, holding an extent
     /// and a root: what a guest may name as its fork's child.
-    fn others(
-        path: &std::path::Path,
-        bucket: &Arc<ObjectBucket>,
-        branch: crate::CellId,
-    ) -> OpenCell {
-        let others = kept_in(path, (1 << 30, Some(branch)), &bucket.clone(), idle()).unwrap();
+    fn others(path: &std::path::Path, bucket: &Arc<ObjectBucket>, cell: crate::CellId) -> OpenCell {
+        let others = kept_in(path, (1 << 30, Some(cell)), &bucket.clone(), idle()).unwrap();
         write(&others, 1, &pattern(3, BLOCK));
         others.commit(Some(b"other")).unwrap();
         others
     }
 
-    /// What a store committing, and its commit uploading, gave, and what its branch then holds.
+    /// What a store committing, and its commit uploading, gave, and what its cell then holds.
     type Committed = (Result<(), crate::Errno>, Result<(), crate::Errno>, Uploaded);
 
-    /// Whether the branch of `others`, its store, is live still: it commits, and uploads its
+    /// Whether the cell of `others`, its store, is live still: it commits, and uploads its
     /// commits.
     fn live(others: &OpenCell, bucket: &Arc<ObjectBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK));
         let committed = others.commit(Some(b"again"));
-        (committed, others.wait_uploaded(), uploaded(bucket, others.branch()))
+        (committed, others.wait_uploaded(), uploaded(bucket, others.cell()))
     }
 
-    /// What [`live`] gives for a branch live still.
+    /// What [`live`] gives for a cell live still.
     fn lives() -> Committed {
         let extents = vec![(1, pattern(3, BLOCK)), (2, pattern(4, BLOCK))];
         (Ok(()), Ok(()), (extents, Some(b"again".to_vec())))
     }
 
-    /// TASK-79.82: a fork to a child whose ID another branch has in object storage, as a guest may
+    /// TASK-79.82: a fork to a child whose ID another cell has in object storage, as a guest may
     /// name, fails with `EEXIST`, having made nothing: no footer of the parent's names the child,
     /// whose record the parent's writers would find another's, failing on it for ever, and the
-    /// other branch is left as it was.
+    /// other cell is left as it was.
     #[test]
-    fn forks_to_a_branch_the_bucket_has_fail_with_eexist() {
+    fn forks_to_a_cell_the_bucket_has_fail_with_eexist() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let other = crate::host_cell::fork_child(parent.branch());
+        let other = crate::host_cell::fork_child(parent.cell());
         let others = others(&dir.path().join("other"), &bucket, other);
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
@@ -4055,19 +4039,19 @@ mod tests {
         let forked = parent.fork_to(&path, other).map_err(|err| err.errno());
         assert_eq!((forked, path.exists()), (Err(Some(crate::Errno::EEXIST)), false));
 
-        // The parent commits and uploads on, its branch naming no fork.
+        // The parent commits and uploads on, its cell naming no fork.
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-        let parents = futures::executor::block_on(recover(&*bucket, parent.branch(), None));
+        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
         assert_eq!(parents.unwrap().state.forks, []);
-        let record = futures::executor::block_on(branch::record(&*bucket, other)).unwrap();
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, other)).unwrap();
         assert_eq!((record.map(unowned), live(&others, &bucket)), (Some(own_record()), lives()));
     }
 
     /// A parent attached to the bucket through `gated`, in `dir`, holding an extent and a root,
     /// and its fork to a child whose handle is `path`, waiting in a thread of its own for the swap
     /// of the parent's head that names the fork's segment, which `gated` holds: the parent's
-    /// branch and the child.
+    /// cell and the child.
     fn forking_held(
         dir: &std::path::Path,
         gated: &Arc<Gated>,
@@ -4082,33 +4066,33 @@ mod tests {
             )
             .unwrap(),
         );
-        let branch = parent.branch();
+        let cell = parent.cell();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(branch)));
-        let child = crate::host_cell::fork_child(branch);
+        gated.hold.send_replace(Hold::Key(bucket_cell::layout::head(cell)));
+        let child = crate::host_cell::fork_child(cell);
         let fork = {
             let path = path.to_owned();
             std::thread::spawn(move || parent.fork_to(path, child))
         };
         gated.wait_held(1);
-        (branch, child, fork)
+        (cell, child, fork)
     }
 
     /// Why a fork to `child` fails whose parent's writer, giving the child its record, found it
-    /// another branch's.
+    /// another cell's.
     fn anothers(child: crate::CellId) -> Result<(), String> {
-        Err(format!("forking to branch {child}: another branch has its ID"))
+        Err(format!("forking to cell {child}: another cell has its ID"))
     }
 
-    /// TASK-79.82: a fork whose child's ID another branch took in object storage while the fork
-    /// was being made, once it found the ID free, as a store of that branch made elsewhere then,
+    /// TASK-79.82: a fork whose child's ID another cell took in object storage while the fork
+    /// was being made, once it found the ID free, as a store of that cell made elsewhere then,
     /// fails, its parent's writer finding the child's record another's: and its cleanup deletes
-    /// the child here alone, leaving the other branch as it was. A fork deletes no branch it did
+    /// the child here alone, leaving the other cell as it was. A fork deletes no cell it did
     /// not make, whatever ID its guest gives. And it harms no parent: its writers go on, as a
-    /// writer taking its branch again does, its footer naming a child that is another's.
+    /// writer taking its cell again does, its footer naming a child that is another's.
     #[test]
-    fn forks_failed_leave_branches_that_took_their_childs_id_be() {
+    fn forks_failed_leave_cells_that_took_their_childs_id_be() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -4123,7 +4107,7 @@ mod tests {
         assert_eq!((forked, errno), (anothers(child), Err(Some(crate::Errno::EEXIST))));
         assert!(!path.exists(), "the handle of a fork that failed is left");
 
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
         assert_eq!((record.map(unowned), live(&others, &bucket)), (Some(own_record()), lives()));
         let parent = reopened(dir.path().join("parent"), idle()).unwrap();
         parent.commit(Some(b"later")).unwrap();
@@ -4133,17 +4117,17 @@ mod tests {
     /// TASK-79.78, TASK-79.82: a fork that fails once its commit was made, here as its flush
     /// fails, is deleted in object storage, as one failing later is: the segment its commit ends,
     /// which names the fork, uploads after, and the parent's writer, giving the child its record,
-    /// finds it deleted, so that no branch is kept there that no store holds. It leaves nothing at
+    /// finds it deleted, so that no cell is kept there that no store holds. It leaves nothing at
     /// its path.
     #[test]
-    fn forks_failed_once_committed_leave_their_child_no_branch() {
+    fn forks_failed_once_committed_leave_their_child_no_cell() {
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        let child = crate::host_cell::fork_child(parent.branch());
+        let child = crate::host_cell::fork_child(parent.cell());
         let path = dir.path().join("child");
         let flushed = fail::FailGuard::new("fork::flushed", "return").unwrap();
         let forked = parent.fork_to(&path, child).map_err(|err| format!("{err:#}"));
@@ -4154,19 +4138,19 @@ mod tests {
         assert_eq!(parent.wait_uploaded(), Ok(()));
         let deleted =
             bucket_cell::record::Record { deleted: true, ..bucket_cell::record::Kind::Own.of(0) };
-        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
+        let record = futures::executor::block_on(lifecycle::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(deleted));
         // The checkpoint at the fork, its child deleted, names it no more.
-        let parents = futures::executor::block_on(recover(&*bucket, parent.branch(), None));
+        let parents = futures::executor::block_on(recover(&*bucket, parent.cell(), None));
         assert_eq!(parents.unwrap().state.forks, []);
         let unflushed = format!(
-            "forking to branch {child}: the fork to branch {child} failed once its commit was \
+            "forking to cell {child}: the fork to cell {child} failed once its commit was \
              made: failpoint fork::flushed"
         );
         assert_eq!(forked, Err(unflushed));
     }
 
-    /// A store of a branch taken elsewhere keeps what it reads from the bucket in the host's cache,
+    /// A store of a cell taken elsewhere keeps what it reads from the bucket in the host's cache,
     /// and reads it there next.
     #[test]
     fn reads_keep_what_they_fetch() {
@@ -4177,14 +4161,14 @@ mod tests {
         let options = local_cell::upload::Options { cache: Some(cache.clone()), ..idle() };
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         let data = pattern(2, 2 << 20);
         let extent = write(&first, 1, &data);
         first.commit(None).unwrap();
         drop(first);
 
         let second =
-            kept_in(dir.path().join("second"), (1 << 30, Some(branch)), &bucket.clone(), options)
+            kept_in(dir.path().join("second"), (1 << 30, Some(cell)), &bucket.clone(), options)
                 .unwrap();
         let read = || {
             let mut read = vec![0; 2 << 20];
@@ -4196,7 +4180,7 @@ mod tests {
         assert_ne!(cache.bytes(), 0);
         assert!(cache.bytes() < (2 << 20) / 100, "{} bytes kept", cache.bytes());
 
-        // With the branch's segments gone from the bucket, its data is read from the cache.
+        // With the cell's segments gone from the bucket, its data is read from the cache.
         futures::executor::block_on(async {
             use futures::StreamExt as _;
             use object_store::{ObjectStore as _, ObjectStoreExt as _};

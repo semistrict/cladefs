@@ -5,10 +5,10 @@
 
 # Move a VM between hosts through a bucket (TASK-28.11), on test hosts, Linux machines of one's own,
 # over ssh (scripts/lib/host.sh). On the first, the guest test fxfs-guest-migrate-dax runs a VM
-# whose store's branch its extent daemon keeps in the bucket, and snapshots it, the snapshot, its
+# whose store's cell its extent daemon keeps in the bucket, and snapshots it, the snapshot, its
 # memory and the VM's root filesystem left in a bundle; then the run there ends, its directory gone;
 # on the second, which has nothing of the store, the same test restores the VM from the bundle, its
-# store forked from the snapshot's version, whose branch the daemon takes from the bucket, and the
+# store forked from the snapshot's version, whose cell the daemon takes from the bucket, and the
 # guest checks what it wrote before, and writes and reads more (test_fxfs_guest_snapshot.rs). Both
 # run the commit from the same paths, as the restored VM goes on reading its root filesystem where
 # it was. The test hosts' results go to RESULTS/a and RESULTS/b; the bundle, and the bucket if it is
@@ -19,7 +19,7 @@
 # CLADEFS_MIGRATE_HOSTS names the two test hosts, as ssh does (default: CLADEFS_TEST_HOST twice,
 # ubu1's, the second run on the same test host as the first, after it): of one CPU model, which a
 # snapshot restores on. CLADEFS_MIGRATE_BUCKET names the bucket and prefix the run keeps its
-# branches under, an object store's URL both test hosts reach, under a prefix of the run's own,
+# cells under, an object store's URL both test hosts reach, under a prefix of the run's own,
 # which the run leaves; by default, with one test host for both, a directory of the run's own there
 # (file://). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here, or
 # CLADEFS_GUEST_KERNEL_BUILD the one each test host builds (release by default,
@@ -66,7 +66,7 @@ cleanup() {
 trap cleanup EXIT
 
 # migrate SIDE PHASE TOKEN runs the test's PHASE, alone, on the host of SIDE (0 for a, 1 for b), as
-# of the placement TOKEN, its branches in the bucket, its results in RESULTS/a or b; and ends the
+# of the placement TOKEN, its cells in the bucket, its results in RESULTS/a or b; and ends the
 # run there.
 migrate() {
     local side=$1 phase=$2 token=$3 status=0
@@ -76,7 +76,7 @@ migrate() {
     trap cleanup EXIT
     (( status == 0 )) || return "$status"
     host_ssh "mkdir -p $(printf %q "$held")" || return
-    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_BUCKET=$remote/branches" \
+    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_BUCKET=$remote/cells" \
         "CLADEFSD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
         test-linux-host.sh fxfs-guest-migrate-dax > "$results/remote.log" 2>&1 || status=$?
     if [[ $host_state == ended ]]; then

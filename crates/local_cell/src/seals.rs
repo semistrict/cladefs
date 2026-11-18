@@ -167,8 +167,8 @@ impl Sealing {
         }
     }
 
-    /// Logs it, the commit of `epoch` of branch `branch`'s, if it copied anything.
-    pub fn log(&self, branch: u64, epoch: u64) {
+    /// Logs it, the commit of `epoch` of cell `cell`'s, if it copied anything.
+    pub fn log(&self, cell: u64, epoch: u64) {
         let copied: u64 = self.bytes[1..].iter().sum();
         if copied == 0 {
             return;
@@ -178,9 +178,9 @@ impl Sealing {
             .map(|(why, name)| format!("{name} {} {} KiB", self.count[why], self.bytes[why] >> 10))
             .collect();
         log::info!(
-            "extent store: seal stats: branch {} commit {epoch}: copied {} KiB; {}; \
+            "extent store: seal stats: cell {} commit {epoch}: copied {} KiB; {}; \
              committed new {} KiB; most pieces {}",
-            base32_id::Short(branch),
+            base32_id::Short(cell),
             copied >> 10,
             whys.join(", "),
             self.committed_new >> 10,
@@ -193,8 +193,8 @@ impl Sealing {
 mod tests {
     use super::*;
 
-    const OPEN: SegmentId = SegmentId { branch: 1, number: 5 };
-    const OLD: SegmentId = SegmentId { branch: 1, number: 4 };
+    const OPEN: SegmentId = SegmentId { cell: 1, number: 5 };
+    const OLD: SegmentId = SegmentId { cell: 1, number: 4 };
 
     fn piece(segment: SegmentId, offset: u64, extent_offset: u64, len: u64) -> Piece {
         Piece { segment, offset, extent_offset, len }
@@ -220,8 +220,8 @@ mod tests {
         assert_eq!(why(&[piece(OPEN, 9, 0, 4), piece(OPEN, 0, 4, 4)], 8), Why::Rewritten);
         assert_eq!(why(&[piece(OPEN, 0, 0, 4), piece(OPEN, 4, 4, 4)], 8), Why::Adjacent);
         assert_eq!(Why::of_pieces(&[piece(OPEN, 0, 0, 8)], 8, standing, true), Why::Large);
-        let full = SegmentId { branch: 1, number: 3 };
-        let framing = SegmentId { branch: 1, number: 2 };
+        let full = SegmentId { cell: 1, number: 3 };
+        let framing = SegmentId { cell: 1, number: 2 };
         assert_eq!(why(&[piece(full, 0, 0, 4), piece(OPEN, 0, 4, 4)], 8), Why::Spanning);
         assert_eq!(why(&[piece(full, 0, 0, 8)], 8), Why::OneRun);
         assert_eq!(why(&[piece(full, 0, 0, 4), piece(full, 9, 4, 4)], 8), Why::Interleaved);

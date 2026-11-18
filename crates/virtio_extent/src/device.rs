@@ -191,7 +191,7 @@ impl Device {
                 }
             })
             .map_err(|err| Error::Store(config.path_on_host.clone(), err))?;
-        config_space.branch = store.branch().to_le();
+        config_space.cell = store.cell().to_le();
         let notices = Arc::new(Notices::default());
         let info =
             store.info().map_err(|err| Error::Store(config.path_on_host.clone(), err.into()))?;
@@ -389,7 +389,7 @@ impl Device {
         self.following = Arc::new(Following::default());
         hear_commits(&store, &self.following);
         hear_stats_asks(&store, &self.notices);
-        self.config_space.branch = store.branch().to_le();
+        self.config_space.cell = store.cell().to_le();
         self.store = Some(Arc::new(store));
         self.window_created = false;
         Ok(())

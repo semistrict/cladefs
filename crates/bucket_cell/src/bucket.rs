@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What branches need of an object store: objects under keys, read whole, listed by prefix, and
+//! What cells need of an object store: objects under keys, read whole, listed by prefix, and
 //! written with conditions (S3's `If-None-Match` and `If-Match`, GCS's generation preconditions).
 //!
 //! The helpers below retry requests the store failed, which may or may not have taken effect, so
@@ -489,7 +489,7 @@ pub(crate) async fn update(
     }
 }
 
-/// cladefs: what every bucket must do, which branches rely on (TASK-165.1), with objects under
+/// cladefs: what every bucket must do, which cells rely on (TASK-165.1), with objects under
 /// `root`, which it leaves as it found them: a bucket in memory, on the host's filesystem, the
 /// simulation's, and S3's and Azure's servers alike run it.
 #[cfg(test)]
@@ -791,7 +791,7 @@ mod tests {
         let long = layout::with_footer(
             &data,
             &vec![2u8; crate::object::TAIL as usize + 5000],
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         let tail = Frame::of(&long).unwrap().tail();
         let short = long[(tail.end - tail.start) as usize..].to_vec();

@@ -155,13 +155,13 @@ pub struct Rules {
     /// A commit waits for the writes in progress to finish before it seals the open extents.
     pub commit_waits_for_writes: bool,
     /// A commit, or a closing between commits, that waited for the writes in progress goes on
-    /// only if the store did not fail, nor the branch close, meanwhile (TASK-83).
+    /// only if the store did not fail, nor the cell close, meanwhile (TASK-83).
     pub recheck_after_waiting: bool,
     /// A write to an extent freed since it began is dropped as it finishes (TASK-79.1).
     pub drop_writes_to_freed_extents: bool,
-    /// Closing a branch waits for a flush in flight to finish.
+    /// Closing a cell waits for a flush in flight to finish.
     pub close_waits_for_flushes: bool,
-    /// Closing a branch waits for every segment being framed, whatever closed it, a commit no
+    /// Closing a cell waits for every segment being framed, whatever closed it, a commit no
     /// flush took or one that failed among them (TASK-41.1, TASK-79.99).
     pub close_waits_for_framings: bool,
     /// A segment closed is framed at once, and its framing ends itself, whatever closed it: those

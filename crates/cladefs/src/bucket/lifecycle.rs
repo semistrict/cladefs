@@ -313,14 +313,14 @@ fn chain(events: &[Event]) -> usize {
     longest.into_iter().max().unwrap_or(0)
 }
 
-/// The names of the branches and cells a run made, by their IDs as keys have them.
+/// The names of the cells a run made, by their IDs as keys have them.
 #[derive(Default)]
 struct Names(BTreeMap<String, String>);
 
 impl Names {
-    fn name(&mut self, branch: CellId, name: &str) {
-        self.0.insert(Padded(branch.id).to_string(), name.to_owned());
-        self.0.insert(Padded(branch.id).to_string(), format!("{name}'s"));
+    fn name(&mut self, cell: CellId, name: &str) {
+        self.0.insert(Padded(cell.id).to_string(), name.to_owned());
+        self.0.insert(Padded(cell.id).to_string(), format!("{name}'s"));
     }
 
     /// `key`, each of its segments that is a named ID as its name.
@@ -337,7 +337,7 @@ struct Run {
     log: Arc<Log>,
     faults: Arc<Faults>,
     names: Names,
-    /// The phases run, what each asked, and its requests: said once every branch is named.
+    /// The phases run, what each asked, and its requests: said once every cell is named.
     phases: Vec<(&'static str, Asked, Vec<Event>)>,
 }
 
@@ -404,7 +404,7 @@ impl Run {
 fn write_and_commit(store: &OpenCell) {
     let info = store.info().unwrap();
     let sequence = info.next_sequence.max(info.sequence_floor);
-    let extent = ExtentId { branch: store.branch().id, sequence };
+    let extent = ExtentId { cell: store.cell().id, sequence };
     let data = pattern(sequence as u8, BLOCK);
     store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     store.commit(None).unwrap();
@@ -441,12 +441,12 @@ impl Made {
     /// A copy of the version, made at `name` on the host measured, kept in `bucket`, and opened:
     /// as the daemon's `CreateCell` with a version, then the store's opening, make it.
     fn copied(&self, bucket: &Arc<ObjectBucket>, name: &str) -> OpenCell {
-        let ((branch, version), capacity) = (self.version, self.capacity);
+        let ((cell, version), capacity) = (self.version, self.capacity);
         let url = super::tests::url_of(bucket);
-        let description = local_cell::Description { block_size: BLOCK as u32, capacity, branch };
+        let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
         let kind = bucket_cell::cell::Kind::Fxfs;
         OpenCell::create_at_version(&self.at(name), (&url, kind), description, version).unwrap();
-        OpenCell::take_with(self.at(name), (capacity, branch, None), opening()).unwrap()
+        OpenCell::take_with(self.at(name), (capacity, cell, None), opening()).unwrap()
     }
 
     /// The path of the store `name` on the host measured.
@@ -464,12 +464,12 @@ fn based(
     run: &mut Run,
 ) -> (CellId, u64) {
     let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).unwrap();
-    run.names.name(base.branch(), "base");
+    run.names.name(base.cell(), "base");
     // Extents of one to four blocks, so that their lengths and places in their segments vary, as
     // an image's do: a checkpoint of extents all alike packs smaller than one of a real base.
     let blocks = pattern(7, 4 * BLOCK);
     for sequence in 1..=extents {
-        let extent = ExtentId { branch: base.branch().id, sequence };
+        let extent = ExtentId { cell: base.cell().id, sequence };
         let len = BLOCK * (1 + (sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 62) as usize);
         base.write(extent, 0, &[VolatileSlice::from(&blocks[..len])]).unwrap();
         if sequence % COMMIT_EVERY == 0 {
@@ -482,7 +482,7 @@ fn based(
     let (version, asked, _) = run.asked(|| base.uploaded_version_at(made.join("copy")).unwrap());
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} version of the base: {line}");
-    (base.branch(), version)
+    (base.cell(), version)
 }
 
 /// Has `bucket` be the measured host's, as the daemon's stores are made in it, and does what a
@@ -491,7 +491,7 @@ fn based(
 fn host(bucket: &Arc<ObjectBucket>) {
     unsafe { std::env::set_var("CLADEFSD_BUCKET", url_of(bucket)) };
     local_cell::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_cell::new_branch(bucket, DEFAULT_TENANT).unwrap();
+    host_cell::new_cell(bucket, DEFAULT_TENANT).unwrap();
 }
 
 /// A bucket's objects in memory.
@@ -737,7 +737,7 @@ fn uploads_after_restores() {
         let info = writer.info().unwrap();
         let first = info.next_sequence.max(info.sequence_floor);
         for sequence in first..first + mib {
-            let id = ExtentId { branch: writer.branch().id, sequence };
+            let id = ExtentId { cell: writer.cell().id, sequence };
             writer.write(id, 0, &[VolatileSlice::from(&extent[..])]).unwrap();
         }
         let began = Instant::now();

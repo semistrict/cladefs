@@ -39,7 +39,7 @@ pub const VIRTIO_EXTENT_F_WRITE_COMMIT: u32 = 2;
 pub const VIRTIO_EXTENT_F_RESIZE: u32 = 3;
 /// cladefs: `VIRTIO_EXTENT_T_FREEZE` tells the device the guest's filesystem is frozen, or thawed: a
 /// snapshot of the VM is taken frozen, and a VM restored from it, with a store of its own, learns
-/// its branch, which `INFO` says, as its filesystem thaws (TASK-39.1).
+/// its cell, which `INFO` says, as its filesystem thaws (TASK-39.1).
 pub const VIRTIO_EXTENT_F_FREEZE: u32 = 4;
 /// cladefs: the device follows a store another VM writes, read-only (backlog doc-8): `ADVANCE`,
 /// `LET_GO`, `PIN` and `UNPIN` work, and the configuration's `committed` changes as the writer
@@ -298,7 +298,7 @@ pub fn check_version(protocol: u32) -> Result<(), VersionRefused> {
 )]
 #[repr(C)]
 pub struct ExtentIdLe {
-    pub branch: u64,
+    pub cell: u64,
     pub sequence: u64,
 }
 
@@ -401,8 +401,8 @@ pub struct Info {
     pub next_sequence: u64,
     /// cladefs: the lowest sequence number the guest may mint from.
     pub sequence_floor: u64,
-    /// cladefs: the branch the guest mints extents of.
-    pub branch: u64,
+    /// cladefs: the cell the guest mints extents of.
+    pub cell: u64,
 }
 
 /// What `ADVANCE` writes, the number of the commit the follower's view is as of now, and `LET_GO`
@@ -440,7 +440,7 @@ pub struct ConfigSpace {
     pub max_transfer: u32,
     pub max_segments: u32,
     pub max_root: u32,
-    pub branch: u64,
+    pub cell: u64,
     pub max_extent: u64,
     /// cladefs: the store's capacity, and the shrink the guest is asked to take, if any, 0 if none
     /// (`VIRTIO_EXTENT_F_RESIZE`).
@@ -475,7 +475,7 @@ impl ConfigSpace {
 
 impl From<ExtentIdLe> for cladefs::ExtentId {
     fn from(id: ExtentIdLe) -> Self {
-        Self { branch: u64::from_le(id.branch), sequence: u64::from_le(id.sequence) }
+        Self { cell: u64::from_le(id.cell), sequence: u64::from_le(id.sequence) }
     }
 }
 
@@ -540,7 +540,7 @@ mod tests {
 
     /// cladefs TASK-141.3: a driver activating the device having taken fewer features than it
     /// offers, or others, is refused, naming them; one taking every one isn't. Before, it was
-    /// served, as negotiation has it, its INFOs short of the branch without F_FREEZE.
+    /// served, as negotiation has it, its INFOs short of the cell without F_FREEZE.
     #[test]
     fn drivers_take_every_feature_offered() {
         let offered = (1u64 << 32)

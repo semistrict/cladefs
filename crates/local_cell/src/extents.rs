@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a branch's extents, as its store holds them, in two layers (TASK-453). Under, the
+//! cladefs: a cell's extents, as its store holds them, in two layers (TASK-453). Under, the
 //! bucket's: where its recovered state, as the store opened, places what the bucket held of the
-//! branch, a persistent map (`bucket_cell::recovery::Extents`) shared, never changed here, with the
-//! branch's writer and with every other store open on the host that started from the same decoded
+//! cell, a persistent map (`bucket_cell::recovery::Extents`) shared, never changed here, with the
+//! cell's writer and with every other store open on the host that started from the same decoded
 //! state, as a base's forks do (`bucket_cell::recovery::Decoded`). Over it, the store's own:
 //! what it wrote, encrypted, acknowledged or followed where the collector moved it since, and the
 //! extents of the bucket's layer it holds no more there, freed or overlaid. A lookup reads its own
@@ -30,9 +30,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use storage_device::ExtentId;
 
-/// A branch's extents, in layers. See the module's docs.
+/// A cell's extents, in layers. See the module's docs.
 pub(crate) struct Extents {
-    /// The bucket's layer: where the branch's state as the store opened placed its extents.
+    /// The bucket's layer: where the cell's state as the store opened placed its extents.
     bucket: bucket_cell::recovery::Extents,
     /// The decoded state the bucket's layer shares, if it started from one: held, so that the
     /// stores opened after this one find it decoded, and share it too, while this one is open.
@@ -66,7 +66,7 @@ pub struct Own {
     /// The runs their writers' maps, each the bucket's layer's shared with others, change of it,
     /// each a path of the persistent map's nodes copied ([`RUN_BYTES`]): the runs of the entries
     /// each hides of the bucket's layer, in its order, which its writer removes or places anew as
-    /// it acknowledges or follows them; and its own entries', acknowledged, the branch's newest,
+    /// it acknowledges or follows them; and its own entries', acknowledged, the cell's newest,
     /// side by side, one more. As many as copy the whole map at most.
     pub runs: u64,
 }
@@ -186,7 +186,7 @@ impl Extents {
     }
 
     /// `extent`'s entry, which a write to it changes: its own, or `make`'s, entered, if it holds
-    /// none. An extent written is open, or new, the branch's: never in the bucket's layer.
+    /// none. An extent written is open, or new, the cell's: never in the bucket's layer.
     pub fn written(&mut self, extent: ExtentId, make: impl FnOnce() -> Extent) -> &mut Extent {
         debug_assert!(self.in_bucket(&extent).is_none(), "{extent:?}, written, is the bucket's");
         if !self.own.contains_key(&extent) {
@@ -326,7 +326,7 @@ mod tests {
 
     /// Where the bucket holds an extent: in a segment of the base's, at `offset`.
     fn at(offset: u64) -> Location {
-        let key = bucket_cell::layout::segment(bucket_cell::layout::test_branch(1), 1, 1);
+        let key = bucket_cell::layout::segment(bucket_cell::layout::test_cell(1), 1, 1);
         Location { key, offset, len: 4096 }
     }
 
@@ -336,7 +336,7 @@ mod tests {
 
     fn pieces(number: u64) -> Extent {
         let piece =
-            Piece { segment: SegmentId { branch: 2, number }, offset: 0, extent_offset: 0, len: 8 };
+            Piece { segment: SegmentId { cell: 2, number }, offset: 0, extent_offset: 0, len: 8 };
         Extent { len: 8, data: Data::Pieces(vec![piece]) }
     }
 
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn stores_layer_their_own_over_the_buckets() {
         let base = bucket();
-        let decoded = bucket_cell::State::of(bucket_cell::layout::test_branch(1), base.clone());
+        let decoded = bucket_cell::State::of(bucket_cell::layout::test_cell(1), base.clone());
         let layer = Some(Arc::new(decoded));
         let counted = own_held();
         let (mut one, other) =
@@ -384,7 +384,7 @@ mod tests {
         let key = bucket_cell::layout::moves(&at(60).key, 1).unwrap();
         let moved = Location { key, offset: 0, len: 4096 };
         one.follow(&extent(6), &moved);
-        let elsewhere = bucket_cell::layout::segment(bucket_cell::layout::test_branch(1), 2, 1);
+        let elsewhere = bucket_cell::layout::segment(bucket_cell::layout::test_cell(1), 2, 1);
         let unrelated = Location { key: elsewhere, offset: 0, len: 4096 };
         one.follow(&extent(7), &unrelated);
         one.follow(&extent(4), &moved);
@@ -435,7 +435,7 @@ mod tests {
     fn stores_count_the_runs_their_writers_change() {
         let base: bucket_cell::recovery::Extents =
             (0..1000).map(|sequence| (extent(sequence), at(sequence * 10))).collect();
-        let layer = bucket_cell::State::of(bucket_cell::layout::test_branch(1), base.clone());
+        let layer = bucket_cell::State::of(bucket_cell::layout::test_cell(1), base.clone());
         let counted = own_held();
         let mut extents = Extents::over(base, Some(Arc::new(layer)));
         let runs = |extents: &Extents| extents.weight().runs;

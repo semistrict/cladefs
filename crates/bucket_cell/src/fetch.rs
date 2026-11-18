@@ -242,8 +242,8 @@ impl Tail {
                 let extents = moves.extents.into_iter();
                 (extents.map(|(extent, to)| (extent, (to.offset, to.len))).collect(), None)
             }
-            Kind::Extent { branch, sequence, .. } => {
-                let extent = ExtentId::new(branch.id, sequence);
+            Kind::Extent { cell, sequence, .. } => {
+                let extent = ExtentId::new(cell.id, sequence);
                 let named: ExtentId = layout::decode(footer)?;
                 if named != extent {
                     return Err(Error::Corrupt(format!("{key} holds extent {named:?}")));
@@ -270,7 +270,7 @@ impl Tail {
     /// cladefs: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
     /// table and footer checked against their MACs, under its key if `ring` holds it, and kept so;
     /// as read otherwise, an encrypted one's unread. Refused if it is authenticated under a key it
-    /// doesn't hold, and `ring` holds the object's branch encrypted (TASK-411.3).
+    /// doesn't hold, and `ring` holds the object's cell encrypted (TASK-411.3).
     fn opened(&self, ring: &HostRing, key: &str) -> Result<Cow<'_, extent_frame::Parts>, Error> {
         if let Some(opened) = self.opened.get() {
             return Ok(Cow::Borrowed(opened));
@@ -1079,7 +1079,7 @@ impl<B: Bucket> Fetching<B> {
 mod tests {
     use super::*;
     use crate::bucket::PutMode;
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::layout::{self, Frame, Moves};
     use crate::object::TAIL;
     use crate::testing::{Direct, Fault, SimBucket};
@@ -1088,10 +1088,10 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// The keys of a host serving the tests' branch: the tests' DEK (`testing::encrypting`), which
+    /// The keys of a host serving the tests' cell: the tests' DEK (`testing::encrypting`), which
     /// their objects are encrypted under (TASK-411.28).
     fn ring() -> Arc<keys::Ring> {
-        crate::testing::ring([test_branch(1)])
+        crate::testing::ring([test_cell(1)])
     }
 
     /// A host's memory, holding [`ring`] for as long as it lives.
@@ -1127,9 +1127,9 @@ mod tests {
     /// length.
     fn segment(data: &[u8], extents: Vec<(ExtentId, u64, u64)>) -> Vec<u8> {
         let contents = layout::Contents { extents, ..layout::Contents::default() };
-        let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
+        let footer = layout::Chain::new(test_cell(1), 1, 0, 0).close(contents);
         layout::Segment { data: data.to_vec(), footer }
-            .encode(crate::testing::encrypting(test_branch(1)))
+            .encode(crate::testing::encrypting(test_cell(1)))
     }
 
     /// A segment's object of `data`, all of which is [`EXTENT`].
@@ -1629,7 +1629,7 @@ mod tests {
         let moves = layout::with_footer(
             &moved,
             &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] },
-            crate::testing::encrypting(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_cell(1)),
         );
         block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create))
             .unwrap();
@@ -1730,12 +1730,12 @@ mod tests {
     /// holds no table.
     #[test]
     fn lookups_read_blocks_of_checkpoints_by_their_parts() {
-        let mut state = crate::recovery::State::new(test_branch(1));
+        let mut state = crate::recovery::State::new(test_cell(1));
         let location = Location { key: KEY.into(), offset: 7, len: 9 };
         state.extents.insert(EXTENT, location.clone());
-        let checkpoint = layout::checkpoint(test_branch(1), 3, 1);
+        let checkpoint = layout::checkpoint(test_cell(1), 3, 1);
         let bytes =
-            crate::checkpoint::encode(&state, crate::testing::encrypting(layout::test_branch(1)));
+            crate::checkpoint::encode(&state, crate::testing::encrypting(layout::test_cell(1)));
         let bucket = SimBucket::new();
         block_on(Direct(bucket.clone()).put(&checkpoint, bytes.clone().into(), PutMode::Create))
             .unwrap();
@@ -1847,7 +1847,7 @@ mod tests {
     fn tails_are_kept_for_each_object() {
         let data = noise(100);
         let bucket = bucket(&data);
-        let other = &layout::segment(test_branch(1), 1, 1);
+        let other = &layout::segment(test_cell(1), 1, 1);
         block_on(Direct(bucket.clone()).put(other, whole(&data).into(), PutMode::Create)).unwrap();
         let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), memory(), None));
         let mut reads = Reads::new();
@@ -1870,7 +1870,7 @@ mod tests {
         // last; then another read in flight: the other's tail, used least recently, goes, then
         // the first read in flight.
         let kept = |key: &str| fetcher.shared.memory.tails.lock().unwrap().kept.contains_key(key);
-        let key = |number: u64| layout::segment(test_branch(2), number as u64, 1);
+        let key = |number: u64| layout::segment(test_cell(2), number as u64, 1);
         let reading = TAILS / TAIL;
         for number in 0..reading - 1 {
             drop(fetcher.shared.tail(&key(number)));
@@ -2036,7 +2036,7 @@ mod tests {
         const OBJECTS: u64 = 4097;
         let data = noise(100);
         let bucket = SimBucket::new();
-        let key = |object: u64| layout::segment(test_branch(1), object as u64, 1);
+        let key = |object: u64| layout::segment(test_cell(1), object as u64, 1);
         for object in 0..OBJECTS {
             block_on(Direct(bucket.clone()).put(
                 &key(object),
@@ -2150,7 +2150,7 @@ mod tests {
         const PARTS: u64 = 24;
         let data = noise(PARTS * PART);
         let bucket = SimBucket::new();
-        let key = |object: u64| layout::segment(test_branch(1), object as u64, 1);
+        let key = |object: u64| layout::segment(test_cell(1), object as u64, 1);
         for object in 0..4 {
             block_on(Direct(bucket.clone()).put(
                 &key(object),
@@ -2184,9 +2184,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
         let fetchers = host(&SimBucket::new(), &cache, 2);
-        for (fetcher, branch) in fetchers.iter().zip(2..) {
+        for (fetcher, cell) in fetchers.iter().zip(2..) {
             for number in 0..TAILS / TAIL {
-                drop(fetcher.shared.tail(&layout::segment(test_branch(branch), number as u64, 1)));
+                drop(fetcher.shared.tail(&layout::segment(test_cell(cell), number as u64, 1)));
             }
         }
         let (_, tails) = held(&fetchers);
@@ -2412,7 +2412,7 @@ mod tests {
         let fetcher =
             Fetcher::new(bucket, limits(8), memory(), Some(cache)).reading_ahead(reads.spawn());
         let streams = || fetcher.streams.lock().unwrap().len();
-        let key = |number: usize| layout::segment(test_branch(1), number as u64, 1);
+        let key = |number: usize| layout::segment(test_cell(1), number as u64, 1);
         for number in 0..STREAMS {
             fetcher.read_ahead(&key(number), 0, 0);
         }

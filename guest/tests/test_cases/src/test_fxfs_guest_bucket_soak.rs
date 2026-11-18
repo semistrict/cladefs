@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: guests writing all the while against a degraded bucket (TASK-330.3): the case's daemon,
-//! its own, keeps its stores' branches in an S3 server's bucket (RustFS, scripts/test-e2e-rustfs.sh
+//! its own, keeps its stores' cells in an S3 server's bucket (RustFS, scripts/test-e2e-rustfs.sh
 //! starts it), through a proxy that degrades it as the case says ([`crate::faulty_s3`]):
 //! answering, then slow (300 ms a request), then full (its writes failing, 507), then out of
 //! service (every request failing, 503), then answering again, 300 ms a request, each a fraction

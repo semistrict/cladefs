@@ -351,7 +351,7 @@ pub fn spawn_daemon(
     // A host keeps stores in a bucket, `env`'s or this process's, or a file bucket of its own in
     // the test's directory, as of placement 1, unless one is named. Not one in its memory: the
     // cases open the stores it made in processes of their own, after it, which keep a store's
-    // branch in the bucket its description names, and opening one whose branch the bucket lacks,
+    // cell in the bucket its description names, and opening one whose cell the bucket lacks,
     // its commits acknowledged, is refused (TASK-165.9), as scripts/test-e2e.sh's daemon's.
     let named = |var: &str| {
         env.iter().any(|(given, value)| *given == var && !value.is_empty())

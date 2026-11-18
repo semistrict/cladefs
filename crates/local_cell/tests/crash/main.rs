@@ -40,7 +40,7 @@ fn recovers_a_prefix_of_its_commits() {
     assert!(spanning > ROUNDS, "{spanning} commits spanned segments in {ROUNDS} rounds");
 }
 
-/// cladefs: a store keeping its branch in a bucket, crashing as its uploader uploads, recovers from
+/// cladefs: a store keeping its cell in a bucket, crashing as its uploader uploads, recovers from
 /// the bucket alone at least what its uploader acknowledged, and from its disk at least what it
 /// made durable (TASK-165.9's AC #4); the host's collector passing over the bucket all along, cut
 /// in a pass as it crashes, or before, and a full pass after (TASK-291.2); then passes alone,

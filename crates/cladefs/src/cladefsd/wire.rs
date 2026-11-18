@@ -76,7 +76,7 @@ impl Header {
 /// Version 5: a commit may complete once local, synced to the host's disk ([`COMMIT_LOCAL`],
 /// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite cell
 /// ([`OPEN_SQLITE`], TASK-364), and stores are cells, in their prefixes. Version
-/// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364). Version 8:
+/// 7: a [`FORK`] names no cell: its reply says the one the daemon gave (TASK-364). Version 8:
 /// an [`OPEN`] may make a memory cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
 /// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
@@ -99,7 +99,7 @@ pub(crate) const REQUEST_BYTES: usize = 8;
 /// `args[2]` of the cell `args[1]` of tenant `args[3]` if it doesn't exist (TASK-39.1: a VM restored
 /// from a snapshot), or is a fork that failed, whose deletion it finishes first (TASK-79.84), of
 /// `args[0]` bytes: a fork into a cell of the connection's tenant, of another tenant's version only
-/// if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such version. The reply's `args[0]` is its branch, and it carries the kernel's physical memory.
+/// if it is shared (`EACCES` otherwise), `ENOENT` if the bucket has no such version. The reply's `args[0]` is its cell, and it carries the kernel's physical memory.
 /// cladefs: with [`OPEN_READ_ONLY`], a follower of the store (backlog doc-8), as of its latest
 /// commit, whose commit number is the reply's `args[2]`. The reply's `args[3]` is how many mappings
 /// the host lets a process make, 0 if it doesn't limit them, which a VM process in a jail without
@@ -145,7 +145,7 @@ pub(crate) const FAULT: u32 = 11;
 /// Acknowledges stage operation `id`, which the VM process has made; and says, as
 /// [`STAGE_COUNTS`] does, what its stage operations have cost it so far.
 pub(crate) const ACK: u32 = 12;
-/// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
+/// Forks the store, as of its last commit made uploaded, to a new cell, whose handle is a new
 /// directory at the path the payload holds, nothing there (`EEXIST`)
 /// ([`OpenCell::fork`](crate::OpenCell)): a fork the daemon serves, sharing its extents'
 /// pages with the store's. cladefs: a new cell of the store's tenant's, its ID the
@@ -160,7 +160,7 @@ pub(crate) const FORK: u32 = 13;
 pub(crate) const RESIZED: u32 = 16;
 /// The window's mappings ([`OpenCell::window_mappings`](crate::OpenCell::window_mappings)):
 /// the reply's payload, each six little-endian words ([`MAPPING_BYTES`]): its offset in the
-/// window, its length, the extent's branch and sequence and the offset in it, and 0 or
+/// window, its length, the extent's cell and sequence and the offset in it, and 0 or
 /// [`MAPPING_ZEROS`]. As many as a window of its size holds, a mapping a
 /// page at most, which may be more than [`MAX_PAYLOAD`] holds (TASK-79.43).
 pub(crate) const MAPPINGS: u32 = 17;
@@ -209,7 +209,7 @@ pub(crate) const MAX_WINDOW: u64 = 64 << 30;
 pub(crate) const STAGE_COUNTS: u32 = 27;
 /// cladefs: the VM process's build, the commit it was built of ([`crate::BUILD_COMMIT`]), the
 /// payload, [`MAX_BUILD`] bytes at most, of letters, digits, `.`, `_` and `-`: which the daemon's
-/// metrics show by its store's branch (TASK-111.7). Said once, after [`OPEN`], as every VM process
+/// metrics show by its store's cell (TASK-111.7). Said once, after [`OPEN`], as every VM process
 /// does: refused, the VM process's connection fails (TASK-141.3).
 pub(crate) const BUILD: u32 = 28;
 // 29 was the guest's answer to an ask to seal, writable DAX's (TASK-153.15), not reused.
@@ -300,7 +300,7 @@ pub(crate) const FAULT_PAGE: u32 = 1 << 1;
 /// mapping it ahead of the guest's accesses, not the guest's access: the daemon tells of no
 /// refusal of it, as the guest may map nothing there.
 pub(crate) const FAULT_PROBE: u32 = 1 << 2;
-/// cladefs: the bytes an extent's ID takes in a [`FREE_MANY`]'s payload: its branch and its
+/// cladefs: the bytes an extent's ID takes in a [`FREE_MANY`]'s payload: its cell and its
 /// sequence, little-endian words.
 pub(crate) const EXTENT_ID_BYTES: usize = 16;
 

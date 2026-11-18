@@ -8,14 +8,14 @@
 //! collects them: what their segments hold that no extent is in leaves with the segments, once
 //! acknowledged in the bucket, whose collector takes it back (TASK-165.8).
 //!
-//! Every store keeps its branch in a bucket, which its description names (TASK-165.6): one made on
+//! Every store keeps its cell in a bucket, which its description names (TASK-165.6): one made on
 //! a host of cladefs's system, this host's (`CLADEFSD_BUCKET`); one made elsewhere, as an image
 //! of the cladefs CLI's or a test's is, a file bucket of its own, beside its directory, which its
 //! forks share ([`create`]). Opening a store opens its bucket ([`Opened`]), the one this process
 //! has of that URL ([`bucket`]). A store made by older code, of an older format, is refused
 //! (`local_cell::Format`), opened or deleted alike: nothing reads or converts it.
 //!
-//! A store's directory holds its branch alone. Forks, versions and deletions are the bucket's
+//! A store's directory holds its cell alone. Forks, versions and deletions are the bucket's
 //! (TASK-165.7): a fork is a commit of its parent's naming the child, made once its segment is
 //! acknowledged, which gives the child its record; the child's directory is made only then, a
 //! store of its own taking the child's state from the bucket ([`fork`]).
@@ -26,7 +26,7 @@ use anyhow::Context as _;
 use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Child};
 use bucket_cell::object_bucket::ObjectBucket;
-use bucket_cell::{branch, cell};
+use bucket_cell::{cell, lifecycle};
 use local_cell::upload::{self, Failure, Uploader};
 use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
 use std::collections::BTreeMap;
@@ -47,7 +47,7 @@ pub(crate) const DEFAULT_TENANT: u64 = 0;
 /// unless its own is the default tenant's ([`DEFAULT_TENANT`]), as the daemon's own stores and
 /// public bases are. Inheritance across tenants is the default tenant's and shared versions' alone: a
 /// fork of a version is checked at the read of the head naming the version its child's making makes instead
-/// (`branch::finish_point_fork`, TASK-395.7).
+/// (`lifecycle::finish_point_fork`, TASK-395.7).
 pub(crate) fn may_fork_into(
     parent: CellId,
     uploader: &Uploader<HostDir>,
@@ -58,32 +58,30 @@ pub(crate) fn may_fork_into(
         return Ok(());
     }
     let refused = format!(
-        "forking branch {parent} to a cell of tenant {tenant}: a branch with a writer forks to \
+        "forking cell {parent} to a cell of tenant {tenant}: a cell with a writer forks to \
          another tenant's cell only from the default tenant's"
     );
     Err(Error::new(anyhow::Error::new(Errno::EACCES).context(refused)))
 }
 
-/// The branch of a new cell of `tenant`'s, of `bucket`: the cell's ID and its branch's one no
+/// The cell of a new cell of `tenant`'s, of `bucket`: the cell's ID and its cell's one no
 /// other cell of the bucket has, nor will (`bucket_cell::objectid`), so that stores made apart,
 /// and the forks of one, mint extent IDs of their own (backlog doc-4), which a host's cache of
-/// extents keys them by (TASK-364). A cell's ID is its branch's: no caller names a new one.
-pub(crate) fn new_branch(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
+/// extents keys them by (TASK-364). A cell's ID is its cell's: no caller names a new one.
+pub(crate) fn new_cell(bucket: &ObjectBucket, tenant: u64) -> Result<CellId, Failure> {
     let id = upload::block_on(bucket.new_objectid())?;
-    Ok(CellId { tenant: tenant, id: id })
-}
-
-/// A new cell of `tenant`'s, of the bucket at `url`, its ID given as [`new_branch`] gives it: for a
-/// cell made before its branch, which takes its ID ([`BranchOf::Cell`]), as the FUSE mount's are. It
-/// blocks.
-#[cfg(target_os = "linux")]
-pub(crate) fn new_cell(url: &str, tenant: u64) -> Result<CellId, Failure> {
-    let id = upload::block_on(bucket(url)?.new_objectid())?;
     Ok(CellId { tenant, id })
 }
 
-/// A branch of a new cell of the default tenant's, of a random ID no allocator gave: for tests
-/// that write a branch's objects themselves, as no store does, or name a fork's child
+/// A new cell of `tenant`'s, of the bucket at `url`, as [`new_cell`] gives it: for a cell whose
+/// object is made before its store ([`CellOf::Named`]), as the FUSE mount's are. It blocks.
+#[cfg(target_os = "linux")]
+pub(crate) fn new_cell_at(url: &str, tenant: u64) -> Result<CellId, Failure> {
+    new_cell(&*bucket(url)?, tenant)
+}
+
+/// A cell of a new cell of the default tenant's, of a random ID no allocator gave: for tests
+/// that write a cell's objects themselves, as no store does, or name a fork's child
 /// (`OpenCell::fork_to`).
 #[cfg(test)]
 pub(crate) fn new_alone() -> CellId {
@@ -104,33 +102,29 @@ pub(crate) fn fork_child(parent: CellId) -> CellId {
     named(parent.tenant)
 }
 
-/// The branch a store is made of (TASK-364).
+/// The cell a store is made of (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BranchOf {
-    /// The branch of a new cell of the tenant's, its ID the store's bucket's to give
-    /// ([`new_branch`]).
+pub enum CellOf {
+    /// A new cell of the tenant's, its ID the store's bucket's to give ([`new_cell`]).
     New(u64),
-    /// The branch of `CellId`, made with its ID the bucket gave ([`new_cell`]), the branch's too.
-    Cell(CellId),
-    /// A branch the store's bucket has (`ENOENT` otherwise), which the store takes as it opens, or
+    /// A cell the store's bucket has (`ENOENT` otherwise), which the store takes as it opens, or
     /// reads, if a version.
     Taken(CellId),
-    /// A new branch of an ID a test chose, no allocator's: for tests that write extents of a
-    /// branch they name.
-    #[cfg(test)]
+    /// A new cell of an ID given: the bucket's already ([`new_cell_at`]), as the FUSE mount's
+    /// are, or one a test chose, no allocator's, for tests that write extents of a cell they name.
     Named(CellId),
 }
 
 /// What the name of the directory beside a store's that is its own file bucket ends with, where no
-/// host's bucket is ([`create`]): beside it, not in it, as its forks keep their branches there,
+/// host's bucket is ([`create`]): beside it, not in it, as its forks keep their cells there,
 /// which outlive it.
 const OWN_BUCKET: &str = ".bucket";
 
-/// The fencing token a copy of a store never placed takes its branch with where no placement names
+/// The fencing token a copy of a store never placed takes its cell with where no placement names
 /// one, as for the cladefs CLI's images ([`token`]): the first placement's.
 const FIRST_PLACEMENT: u64 = 1;
 
-/// The buckets this process keeps stores' branches in, by their URLs: one each, which every store
+/// The buckets this process keeps stores' cells in, by their URLs: one each, which every store
 /// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
 /// bucket elsewhere is one for every process.
 static BUCKETS: Mutex<BTreeMap<String, Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
@@ -146,7 +140,7 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
     Ok(bucket)
 }
 
-/// cladefs: what the decoded states of the branches this process's buckets keep, or its stores hold
+/// cladefs: what the decoded states of the cells this process's buckets keep, or its stores hold
 /// as the maps of the extents they share, hold: each once, however many stores share it
 /// (`bucket_cell::recovery::Decoded::held`, TASK-453).
 #[cfg(any(target_os = "linux", test))]
@@ -167,7 +161,7 @@ pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
     assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
 }
 
-/// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
+/// The URL of the bucket a store made at `path`, a directory, keeps its cells in: this host's,
 /// if it is a host of cladefs's system (`CLADEFSD_BUCKET`, as [`crate::bucket::Host`] has
 /// it); else a file bucket of the store's own ([`bucket_named`]).
 pub(crate) fn bucket_for(path: &Path) -> anyhow::Result<String> {
@@ -175,7 +169,7 @@ pub(crate) fn bucket_for(path: &Path) -> anyhow::Result<String> {
     bucket_named(host, path)
 }
 
-/// The URL of the bucket a store made at `path`, a directory, keeps its branch in, on the host
+/// The URL of the bucket a store made at `path`, a directory, keeps its cell in, on the host
 /// whose bucket's URL is `host`, if it is one: that; or a file bucket of the store's own, beside
 /// its directory ([`OWN_BUCKET`]), which its forks share, and which outlives it.
 fn bucket_named(host: Option<String>, path: &Path) -> anyhow::Result<String> {
@@ -190,7 +184,7 @@ fn bucket_named(host: Option<String>, path: &Path) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
-/// Whether `store` keeps its branch in a file bucket no host's collector collects: one made beside
+/// Whether `store` keeps its cell in a file bucket no host's collector collects: one made beside
 /// a store's directory, where no host's bucket was ([`bucket_named`]), its own or that of the
 /// store it was forked from, which its forks share.
 pub(crate) fn keeps_own_bucket(store: &LocalCell<HostDir>) -> bool {
@@ -198,10 +192,10 @@ pub(crate) fn keeps_own_bucket(store: &LocalCell<HostDir>) -> bool {
     url.starts_with("file:") && url.trim_end_matches('/').ends_with(OWN_BUCKET)
 }
 
-/// The fencing token copies of stores never placed take their branches with where this process
+/// The fencing token copies of stores never placed take their cells with where this process
 /// opens them as no host's daemon does, as [`crate::Storage`] does: this host's placement's, if it
 /// is a host of cladefs's system (`CLADEFSD_TOKEN`, [`crate::bucket::host_token`]); else the
-/// first placement's. So the daemon and the cladefs CLI on one host take each other's branches.
+/// first placement's. So the daemon and the cladefs CLI on one host take each other's cells.
 pub(crate) fn token() -> Result<u64, Failure> {
     match std::env::var_os("CLADEFSD_TOKEN").filter(|token| !token.is_empty()) {
         Some(_) => crate::bucket::host_token(),
@@ -209,14 +203,14 @@ pub(crate) fn token() -> Result<u64, Failure> {
     }
 }
 
-/// How a store this process opens where no host's daemon serves it keeps its branch in its bucket:
-/// its uploader's options, as a copy never placed takes its branch's head here ([`token`]).
+/// How a store this process opens where no host's daemon serves it keeps its cell in its bucket:
+/// its uploader's options, as a copy never placed takes its cell's head here ([`token`]).
 pub(crate) fn keeping() -> Result<upload::Options, Failure> {
     Ok(upload::Options { token: token()?, ..Default::default() })
 }
 
-/// A store opened ([`open`]), with the bucket its description names, which its branch is kept in,
-/// and its uploader, which took the branch's head, or holds its version (TASK-165.9).
+/// A store opened ([`open`]), with the bucket its description names, which its cell is kept in,
+/// and its uploader, which took the cell's head, or holds its version (TASK-165.9).
 pub(crate) struct Opened {
     pub store: Arc<LocalCell<HostDir>>,
     pub bucket: Arc<ObjectBucket>,
@@ -248,14 +242,14 @@ pub(crate) fn options() -> Options {
 }
 
 /// Makes a new store at `path`, which must not exist, holding at most `capacity` bytes, of the
-/// branch `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), its
+/// cell `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), its
 /// cell's, of `kind` (doc-20), and opens it, its uploader as `keeping` says ([`open`]): whole, as
 /// made. Its directory entry is as durable as
 /// it is. A store that is not made whole is removed; what is at `path` already is left as it is.
 pub(crate) fn create(
     path: &Path,
     capacity: u64,
-    of: BranchOf,
+    of: CellOf,
     kind: cell::Kind,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
@@ -271,7 +265,7 @@ pub(crate) fn create(
 pub(crate) fn create_unmade(
     path: &Path,
     capacity: u64,
-    of: BranchOf,
+    of: CellOf,
     kind: cell::Kind,
     bucket: Option<&str>,
     keeping: upload::Options,
@@ -280,25 +274,23 @@ pub(crate) fn create_unmade(
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = || -> Result<Opened, Failure> {
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
-        let branch = match of {
-            BranchOf::New(tenant) => new_branch(&*self::bucket(&url)?, tenant)?,
-            BranchOf::Cell(cell) => CellId { tenant: cell.tenant, id: cell.id },
+        let cell = match of {
+            CellOf::New(tenant) => new_cell(&*self::bucket(&url)?, tenant)?,
             // Its record, read to see the bucket has it, is what the store's opening, next, would
             // read first: learned for it, a read less (`bucket_cell::known`, TASK-449).
-            BranchOf::Taken(branch) => {
+            CellOf::Taken(cell) => {
                 let bucket = self::bucket(&url)?;
-                let found = upload::block_on(branch::record(&*bucket, branch))??;
-                let record = found.ok_or(bucket_cell::Error::NoBranch)?;
+                let found = upload::block_on(lifecycle::record(&*bucket, cell))??;
+                let record = found.ok_or(bucket_cell::Error::NoCell)?;
                 if let Some(known) = bucket_cell::Bucket::known(&*bucket) {
                     let learned = Learned { record, cell: None, headless: false };
-                    known.learn(branch, learned);
+                    known.learn(cell, learned);
                 }
-                branch
+                cell
             }
-            #[cfg(test)]
-            BranchOf::Named(branch) => branch,
+            CellOf::Named(cell) => cell,
         };
-        let description = Description { block_size: BLOCK_SIZE, capacity, branch };
+        let description = Description { block_size: BLOCK_SIZE, capacity, cell };
         local_cell::create_host(path, description, &url, kind)?;
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
         let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
@@ -314,9 +306,9 @@ pub(crate) fn create_unmade(
 }
 
 /// Opens the store at `path` as of its last commit, with the bucket it names: its uploader, as
-/// `keeping` says, takes its branch's head, with the token its placement names or `keeping`'s,
+/// `keeping` says, takes its cell's head, with the token its placement names or `keeping`'s,
 /// and recovers it, the store's write-ahead log put after its end (`local_cell::upload::open`,
-/// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a branch
+/// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a cell
 /// deleted (`ENOENT`) or a later placement's (`ESTALE`); and a store never made whole (`Unmade`).
 pub(crate) fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
     let recovering = LocalCell::recover(host_dir(path)?)?;
@@ -329,7 +321,7 @@ fn host_dir(path: &Path) -> Result<HostDir, Failure> {
 }
 
 /// Opens the store at `path` as [`open`] does, its write-ahead log dropped if another writer's
-/// commits moved its branch past it (`bucket_cell::Error::Diverged`): what `cladefsctl take` does
+/// commits moved its cell past it (`bucket_cell::Error::Diverged`): what `cladefsctl take` does
 /// of a store that refuses to open so, the commits the log held, never acknowledged, lost (doc-14,
 /// Opening a store; doc-7, Recovery on the same host).
 pub(crate) fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
@@ -337,9 +329,9 @@ pub(crate) fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Fail
         Err(Failure::Bucket(bucket_cell::Error::Diverged)) => {
             let mut recovering = LocalCell::recover(host_dir(path)?)?;
             log::warn!(
-                "cladefs: dropping {}'s write-ahead log: another writer moved branch {} past it",
+                "cladefs: dropping {}'s write-ahead log: another writer moved cell {} past it",
                 path.display(),
-                recovering.branch()
+                recovering.cell()
             );
             recovering.drop_wal()?;
             opened(recovering, keeping)
@@ -362,7 +354,7 @@ fn opened(recovering: Recovering<HostDir>, keeping: upload::Options) -> Result<O
 
 /// The path of the directory `recovering` is of, for what fails of it.
 fn recovering_path(recovering: &Recovering<HostDir>) -> String {
-    format!("branch {}'s store", recovering.branch())
+    format!("cell {}'s store", recovering.cell())
 }
 
 /// Whether `path` is a directory a store's making, or a fork's, left unmade, its host crashing:
@@ -372,7 +364,7 @@ pub(crate) fn unmade(path: &Path) -> bool {
     local_cell::unmade_host(path)
 }
 
-/// Forks `store`, as of its last commit, made durable first, to `child`, a new branch holding what
+/// Forks `store`, as of its last commit, made durable first, to `child`, a new cell holding what
 /// it holds, whose store is a new directory at `path`, which [`open`] opens: `EEXIST` if anything is
 /// at `path`. The fork is made in the bucket alone (doc-7, Forks; TASK-165.7): `uploader`, the
 /// store's uploader, uploads the store's commit naming the child ([`LocalCell::commit_fork`]), whose
@@ -386,8 +378,8 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// (`storage::kept`), and an extent store's opened where no daemon serves it
 /// (`OpenCell::kept_in_bucket`).
 ///
-/// The caller names the child: a fork to a child whose ID another branch has in the bucket fails
-/// with `EEXIST`, making nothing; and so does one whose child's ID another branch took as it was
+/// The caller names the child: a fork to a child whose ID another cell has in the bucket fails
+/// with `EEXIST`, making nothing; and so does one whose child's ID another cell took as it was
 /// made, its commit standing, which names a child its parent's writers leave be (TASK-79.82). A
 /// fork that fails once its commit was made, its upload failing, or the store's, is deleted in the
 /// bucket as the fork's alone (`Uploader::unfork`), so that its segment, landing late, makes
@@ -395,7 +387,7 @@ pub(crate) fn unmade(path: &Path) -> bool {
 ///
 /// A fork of a version commits nothing: its child's record is the fork, which fails with `ENOENT`
 /// once the version is deleted (`Uploader::forked`), and with `EACCES` if the child is of another
-/// tenant's cell than the version, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
+/// tenant's cell than the version, which isn't shared (`lifecycle::finish_point_fork`, TASK-395.7). A
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
 /// made, unless the store is the default tenant's ([`may_fork_into`], TASK-395.9).
 ///
@@ -412,7 +404,7 @@ pub(crate) fn fork<H>(
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
-    may_fork_into(store.description().branch, uploader, child.branch.tenant)?;
+    may_fork_into(store.description().cell, uploader, child.cell.tenant)?;
     let inheriting = uploader.inheriting(child)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
@@ -437,24 +429,23 @@ fn fork_in<H>(
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
-    let branch = child.branch;
+    let cell = child.cell;
     let failed = |err: Failure| match err {
-        Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(branch),
+        Failure::Bucket(bucket_cell::Error::IdTaken(_)) => taken(cell),
         Failure::VersionDropped => anyhow::Error::new(Errno::ENOENT)
-            .context(format!("forking to branch {branch}: the version was deleted")),
+            .context(format!("forking to cell {cell}: the version was deleted")),
         // cladefs: another tenant's version, not shared (TASK-395.7).
         Failure::Bucket(refused @ bucket_cell::Error::NotShared(_)) => {
-            anyhow::Error::new(Errno::EACCES)
-                .context(format!("forking to branch {branch}: {refused}"))
+            anyhow::Error::new(Errno::EACCES).context(format!("forking to cell {cell}: {refused}"))
         }
-        err => anyhow::anyhow!("forking to branch {branch}: {err}"),
+        err => anyhow::anyhow!("forking to cell {cell}: {err}"),
     };
     // A fork of a version needs no look first: its child's record's create refuses a record there
     // alike (`Uploader::child_free`, TASK-449).
     if !uploader.is_at_version()
-        && !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))?
+        && !uploader.child_free(cell).map_err(|err| Error::new(failed(err)))?
     {
-        return Err(Error::new(taken(branch)));
+        return Err(Error::new(taken(cell)));
     }
     let made = match uploader.is_at_version() {
         true => {
@@ -467,7 +458,7 @@ fn fork_in<H>(
             match committed {
                 Ok(epoch) => uploader.forked(epoch, child, inheriting).map_err(failed),
                 Err(err) if err.downcast_ref::<local_cell::ForkCommitted>().is_some() => {
-                    Err(err.context(format!("forking to branch {branch}")))
+                    Err(err.context(format!("forking to cell {cell}")))
                 }
                 // It made nothing.
                 Err(err) => return Err(Error::new(err)),
@@ -476,26 +467,26 @@ fn fork_in<H>(
     };
     let made = made.and_then(|()| {
         failpoint!("fork::recorded");
-        make_child(store, path, branch, prepare)
-            .with_context(|| format!("forking to branch {branch}: making its store"))?;
+        make_child(store, path, cell, prepare)
+            .with_context(|| format!("forking to cell {cell}: making its store"))?;
         failpoint!("fork::made");
         Ok(())
     });
     let Err(err) = made else { return Ok(()) };
     // Leave no fork whose store went behind, as the fork's alone: its segment may land yet.
     if let Err(why) = uploader.unfork(child) {
-        log::warn!("cladefs: leaving branch {branch}, whose fork failed: {why}");
+        log::warn!("cladefs: leaving cell {cell}, whose fork failed: {why}");
     }
     Err(Error::new(err))
 }
 
-/// The error of a fork to `branch`, whose ID another branch has in the bucket.
-fn taken(branch: CellId) -> anyhow::Error {
-    let refused = format!("forking to branch {branch}: another branch has its ID");
+/// The error of a fork to `cell`, whose ID another cell has in the bucket.
+fn taken(cell: CellId) -> anyhow::Error {
+    let refused = format!("forking to cell {cell}: another cell has its ID");
     anyhow::Error::new(Errno::EEXIST).context(refused)
 }
 
-/// Makes the store of `branch`, a fork of `parent`'s branch the bucket has the record of, in the
+/// Makes the store of `cell`, a fork of `parent`'s cell the bucket has the record of, in the
 /// directory at `path`, made empty: `prepare` writes into it first; then the store's directory, of
 /// the parent's capacity, naming the parent's bucket, of the parent's kind, its own cell's, whole
 /// (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
@@ -503,7 +494,7 @@ fn taken(branch: CellId) -> anyhow::Error {
 fn make_child(
     parent: &LocalCell<HostDir>,
     path: &Path,
-    branch: CellId,
+    cell: CellId,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     prepare(path)?;
@@ -513,7 +504,7 @@ fn make_child(
     let kind = parent
         .kind()
         .ok_or_else(|| anyhow::anyhow!("{} names no cell's kind", parent.dir().path().display()))?;
-    let description = Description { block_size: BLOCK_SIZE, capacity, branch };
+    let description = Description { block_size: BLOCK_SIZE, capacity, cell };
     local_cell::create_host(path, description, &url, kind)?;
     local_cell::made_host(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
@@ -521,13 +512,13 @@ fn make_child(
     Ok(())
 }
 
-/// Deletes the store at `path`, which nothing has open: with `bucket`, its branch there first, its
-/// forks' branches living on, as the placement its copy was placed at, or, never placed, as the one
+/// Deletes the store at `path`, which nothing has open: with `bucket`, its cell there first, its
+/// forks' cells living on, as the placement its copy was placed at, or, never placed, as the one
 /// `token` gives; then its directory. A deletion that stopped partway is finished by deleting
 /// again (TASK-79.71), and a directory a store's or a fork's making left unmade ([`unmade`]) goes.
 ///
 /// Fails with `ENOENT` if nothing is at `path`, and with `ESTALE` if a later placement of the
-/// store holds its branch in `bucket`.
+/// store holds its cell in `bucket`.
 pub(crate) fn delete(
     path: &Path,
     bucket: Option<&ObjectBucket>,
@@ -535,23 +526,23 @@ pub(crate) fn delete(
 ) -> Result<(), Error> {
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
     // A store at a version deletes nothing in the bucket: the version is its cell's.
-    delete_with(path, |dir, branch| match bucket {
+    delete_with(path, |dir, cell| match bucket {
         Some(_) if local_cell::host_version(dir)?.is_some() => Ok(()),
         Some(bucket) => {
             let placed = local_cell::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
             let kms = crate::bucket::kms()?;
-            local_cell::upload::delete_branch(bucket, branch, token, &kms)
+            local_cell::upload::delete_cell(bucket, cell, token, &kms)
         }
         None => Ok(()),
     })
 }
 
-/// Deletes the store at `path` as [`delete`] does, `elsewhere` deleting its branch where else it
-/// is kept, given the store's directory and the branch: once the store is found open nowhere here,
+/// Deletes the store at `path` as [`delete`] does, `elsewhere` deleting its cell where else it
+/// is kept, given the store's directory and the cell: once the store is found open nowhere here,
 /// before it goes here (`local_cell::delete_host`), so that a deletion that stopped partway, the
 /// host crashing or `elsewhere` failing, leaves the store still, which deleting again finishes,
-/// never a branch kept elsewhere alone. What a store's making, or a fork's, left unmade, which is
+/// never a cell kept elsewhere alone. What a store's making, or a fork's, left unmade, which is
 /// no store, goes, `elsewhere` called for nothing.
 pub(crate) fn delete_with(
     path: &Path,
@@ -560,12 +551,12 @@ pub(crate) fn delete_with(
     if !path.exists() {
         return Err(Errno::ENOENT.into());
     }
-    let deleting = |branch| -> anyhow::Result<()> {
+    let deleting = |cell| -> anyhow::Result<()> {
         failpoint!("delete::elsewhere");
-        Ok(elsewhere(path, branch)?)
+        Ok(elsewhere(path, cell)?)
     };
     local_cell::delete_host(path, deleting).map_err(|err| {
-        // Its errno, if deleting the branch elsewhere failed with one: `ESTALE` for a branch a
+        // Its errno, if deleting the cell elsewhere failed with one: `ESTALE` for a cell a
         // later placement holds.
         let failure = err.chain().find_map(|cause| cause.downcast_ref::<Failure>());
         match failure.and_then(crate::bucket::errno) {
@@ -581,9 +572,9 @@ mod tests {
 
     const MIB: u64 = 1 << 20;
 
-    /// A new branch of a new cell of the default tenant's.
-    fn new() -> BranchOf {
-        BranchOf::New(DEFAULT_TENANT)
+    /// A new cell of a new cell of the default tenant's.
+    fn new() -> CellOf {
+        CellOf::New(DEFAULT_TENANT)
     }
 
     /// TASK-196: a store its maker never made whole is no store: it refuses to open, and
@@ -593,7 +584,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let made = create_unmade(&path, MIB, new(), cell::Kind::Fxfs, None, keeping().unwrap());
-        let branch = made.unwrap().store.description().branch;
+        let cell = made.unwrap().store.description().cell;
         assert!(unmade(&path));
         let refused = open(&path, keeping().unwrap()).err().unwrap();
         let Failure::Local(refused) = refused else { panic!("{refused}") };
@@ -601,23 +592,23 @@ mod tests {
         local_cell::made_host(&path).unwrap();
         assert!(!unmade(&path));
         assert_eq!(
-            open(&path, keeping().unwrap()).map(|opened| opened.store.description().branch).ok(),
-            Some(branch)
+            open(&path, keeping().unwrap()).map(|opened| opened.store.description().cell).ok(),
+            Some(cell)
         );
     }
 
-    /// TASK-364: a new store's branch's ID is its bucket's to give, one of a block this process
-    /// took there, the next store's the next of it; a store of a branch the bucket has not is
-    /// refused (`NoBranch`), and leaves nothing.
+    /// TASK-364: a new store's cell's ID is its bucket's to give, one of a block this process
+    /// took there, the next store's the next of it; a store of a cell the bucket has not is
+    /// refused (`NoCell`), and leaves nothing.
     #[test]
-    fn new_branches_ids_are_their_buckets() {
+    fn new_cells_ids_are_their_buckets() {
         let dir = tempfile::tempdir().unwrap();
         let (one, two) = (dir.path().join("one"), dir.path().join("two"));
-        let url = format!("memory:///new-branches-{}", std::process::id());
+        let url = format!("memory:///new-cells-{}", std::process::id());
         let made = |path: &Path, of| {
             let made =
                 create_unmade(path, MIB, of, cell::Kind::Fxfs, Some(&url), keeping().unwrap());
-            made.unwrap().store.description().branch
+            made.unwrap().store.description().cell
         };
         let first = made(&one, new());
         let second = made(&two, new());
@@ -633,20 +624,20 @@ mod tests {
         let refused = create_unmade(
             &path,
             MIB,
-            BranchOf::Taken(absent),
+            CellOf::Taken(absent),
             cell::Kind::Fxfs,
             Some(&url),
             keeping().unwrap(),
         );
         let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
-        assert_eq!(refused, bucket_cell::Error::NoBranch);
-        assert!(!path.exists(), "a store of no branch was left");
+        assert_eq!(refused, bucket_cell::Error::NoCell);
+        assert!(!path.exists(), "a store of no cell was left");
     }
 
     /// TASK-165.6: a store made on a host of cladefs's system names the host's bucket; one made
-    /// elsewhere, a file bucket of its own, beside its directory, where its branch is kept: its
+    /// elsewhere, a file bucket of its own, beside its directory, where its cell is kept: its
     /// forks' too, which name it. Beside it, not in it, so that it outlives the store, its forks'
-    /// branches living on (TASK-165.7).
+    /// cells living on (TASK-165.7).
     #[test]
     fn stores_name_their_hosts_bucket_or_one_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -662,8 +653,8 @@ mod tests {
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
         let Opened { store, bucket, uploader } =
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
-        let forked = new_branch(&bucket, store.description().branch.tenant).unwrap();
-        let child = Child { branch: forked, owner: 1 };
+        let forked = new_cell(&bucket, store.description().cell.tenant).unwrap();
+        let child = Child { cell: forked, owner: 1 };
         super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
@@ -674,14 +665,14 @@ mod tests {
         // The bucket is this process's one of its URL, whose objects are in its directory.
         assert!(Arc::ptr_eq(&bucket, &self::bucket(&url).unwrap()));
         // cladefs: under its cell's prefix (TASK-364).
-        let cell = own.join(store.description().branch.prefix());
-        assert!(cell.join("branches").exists(), "{:?}", std::fs::read_dir(&own).unwrap());
-        // The store deleted, its fork's branch lives on in it.
+        let cell = own.join(store.description().cell.prefix());
+        assert!(cell.join("cells").exists(), "{:?}", std::fs::read_dir(&own).unwrap());
+        // The store deleted, its fork's cell lives on in it.
         drop(uploader);
         drop(store);
         delete(&made, Some(&bucket), || Ok(1)).unwrap();
         assert!(!made.exists() && own.exists());
-        let record = futures::executor::block_on(bucket_cell::branch::record(&*bucket, forked));
+        let record = futures::executor::block_on(bucket_cell::lifecycle::record(&*bucket, forked));
         assert_eq!(record.unwrap().map(|record| record.deleted), Some(false));
     }
 

@@ -10,7 +10,7 @@ use super::*;
 use bucket_cell::bucket::{Bucket as _, PutMode};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{Budget, Fetcher, Limits, Memory, Priority};
-use bucket_cell::layout::{self, Contents, Location, test_branch};
+use bucket_cell::layout::{self, Contents, Location, test_cell};
 use bucket_cell::object_bucket::{ObjectBucket, Request};
 use bucket_cell::peer::Peers as _;
 use std::sync::atomic::AtomicBool;
@@ -36,13 +36,13 @@ pub(crate) fn noise(len: u64) -> Vec<u8> {
 /// A bucket holding a segment of `data`, all of which is [`EXTENT`]: where it is.
 pub(crate) fn holding(data: &[u8]) -> (Arc<ObjectBucket>, Location) {
     let bucket = Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
-    let key = layout::segment(test_branch(1), 1, 1);
+    let key = layout::segment(test_cell(1), 1, 1);
     let contents =
         Contents { extents: vec![(EXTENT, 0, data.len() as u64)], ..Contents::default() };
-    let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
+    let footer = layout::Chain::new(test_cell(1), 1, 0, 0).close(contents);
     // cladefs: encrypted under the tests' DEK, which the hosts' fetchers hold (TASK-411.28).
     let object = layout::Segment { data: data.to_vec(), footer }
-        .encode(bucket_cell::testing::encrypting(test_branch(1)));
+        .encode(bucket_cell::testing::encrypting(test_cell(1)));
     futures::executor::block_on(bucket.put(&key, object.into(), PutMode::Create)).unwrap();
     (bucket, Location { key, offset: 0, len: data.len() as u64 })
 }
@@ -97,7 +97,7 @@ fn hosts(
             let kept = Arc::new(Cache::open(cache.path(), u64::MAX, 0).unwrap());
             let (budget, memory) = (Budget::new(Limits::UNBOUNDED), Memory::new());
             // cladefs: holding the tests' keys, which the objects are encrypted under, for good.
-            std::mem::forget(memory.keys().hold(bucket_cell::testing::ring([test_branch(1)])));
+            std::mem::forget(memory.keys().hold(bucket_cell::testing::ring([test_cell(1)])));
             let fetcher =
                 || Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), Some(kept.clone()));
             (fetcher(), Arc::new(fetcher()), cache)
@@ -213,7 +213,7 @@ fn a_peer_without_the_part_stays_up() {
 /// share, from the others, and no part moves among those that stay.
 #[test]
 fn ownership_moves_only_with_the_hosts_added() {
-    let key = layout::segment(test_branch(1), 1, 1);
+    let key = layout::segment(test_cell(1), 1, 1);
     let three = ["10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"];
     let four = ["10.0.0.4:7070", "10.0.0.3:7070", "10.0.0.2:7070", "10.0.0.1:7070"];
     let mut moved = 0;
@@ -259,18 +259,18 @@ fn peers_set_again_stay_as_they_were() {
     assert!(member().health.up_at(Instant::now()), "down, added again");
 }
 
-/// Only parts of framed objects are asked of peers: never a branch's record, a head, or a cell's
+/// Only parts of framed objects are asked of peers: never a cell's record, a head, or a cell's
 /// object, which change in place. And a host asks no peer for what it owns.
 #[test]
 fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {
     let me = "10.0.0.1:7070";
     let peers = Peers::new(me, |_: &str| -> Arc<dyn Link> { panic!("no link made") });
-    let segment = layout::segment(test_branch(1), 1, 1);
+    let segment = layout::segment(test_cell(1), 1, 1);
     assert!(peers.owner(&segment, 0).is_none(), "asked with no peers");
     peers.set([me]);
     assert!(peers.owner(&segment, 0).is_none(), "asked itself");
     assert_eq!(peers.addresses(), [me]);
-    for key in [layout::record(test_branch(1)), layout::head(test_branch(1))] {
+    for key in [layout::record(test_cell(1)), layout::head(test_cell(1))] {
         assert!(!bucket_cell::peer::served(&key), "{key} served");
     }
     assert!(bucket_cell::peer::served(&segment));

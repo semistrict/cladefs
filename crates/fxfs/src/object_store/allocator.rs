@@ -4,7 +4,7 @@
 
 // Fuchsia's `src/storage/fxfs/src/object_store/allocator.rs`, over an extent store (backlog doc-4,
 // TASK-26.3). The device holds extents, named by IDs the allocator mints: one per allocation, of
-// the device's branch and a sequence number the allocator keeps (AllocatorInfoV60). The tree holds
+// the device's cell and a sequence number the allocator keeps (AllocatorInfoV60). The tree holds
 // each extent's ranges with their owners: allocated (count 1), or deallocated while the rest of the
 // extent is not (count 0), so that the extent's size is known until it dies. An extent dies when
 // its last range is deallocated, or its owner deleted; the allocator frees it on the device once
@@ -19,7 +19,7 @@
 // changes; a snapshot freezes the source's owner, whose extents the stores sharing them never
 // deallocate one by one, and which is deleted once no store shares it (AllocatorInfoV60, the
 // Snapshot mutation, `deallocate`, `is_shared`, `frozen_ranges`). A base's extents, which a store
-// reads and the allocator never holds, are treated likewise (`add_base_branches`, backlog doc-10).
+// reads and the allocator never holds, are treated likewise (`add_base_cells`, backlog doc-10).
 
 //! # The Allocator
 //!
@@ -615,7 +615,7 @@ pub struct AllocatorInfoV60 {
     pub frozen_owners: BTreeMap<u64, u64>,
     /// cladefs: the frozen owners whose extents each store shares, by store object id.
     pub shared_owners: BTreeMap<u64, Vec<u64>>,
-    /// cladefs: one more than the highest sequence number of any extent allocated, of any branch.
+    /// cladefs: one more than the highest sequence number of any extent allocated, of any cell.
     pub next_sequence: u64,
     /// cladefs: the extents that died before the compaction that wrote this, and that the device
     /// might hold, as it might not have their frees, which a mount repeats.
@@ -630,7 +630,7 @@ impl Versioned for AllocatorInfoV60 {
     }
 }
 
-/// An extent for tests whose records need one, of branch 0, which no allocator mints.
+/// An extent for tests whose records need one, of cell 0, which no allocator mints.
 #[cfg(test)]
 pub(crate) const TEST_EXTENT: ExtentId = ExtentId::new(0, 100);
 
@@ -655,9 +655,9 @@ pub struct Allocator {
     /// The device's capacity. cladefs: it changes while mounted, as the extent store is resized
     /// ([`Allocator::set_device_size`]).
     device_size: AtomicU64,
-    /// The branch whose extents the allocator mints. cladefs: it changes as the filesystem thaws in
-    /// a VM restored from a snapshot, whose store is a fork of its own ([`Allocator::set_branch`]).
-    branch: AtomicU64,
+    /// The cell whose extents the allocator mints. cladefs: it changes as the filesystem thaws in
+    /// a VM restored from a snapshot, whose store is a fork of its own ([`Allocator::set_cell`]).
+    cell: AtomicU64,
     object_id: u64,
     max_extent_size_bytes: u64,
     tree: LSMTree<AllocatorKey, AllocatorValue>,
@@ -806,9 +806,9 @@ struct Inner {
     /// cladefs: the extents, from their minting to the seal of their frees.
     extents: ExtentTable,
 
-    /// cladefs: the branches of the bases of the stores opened (backlog doc-10), whose extents the
+    /// cladefs: the cells of the bases of the stores opened (backlog doc-10), whose extents the
     /// tree never holds, nor does `extents`. In memory: only their stores touch those extents.
-    base_branches: HashSet<u64>,
+    base_cells: HashSet<u64>,
 
     /// cladefs: the ranges of shared extents that allocations which dropped took, with their owners,
     /// which the journal doesn't yet record (`record_reaches`, TASK-213).
@@ -934,8 +934,8 @@ impl Inner {
                 reservation.commit(len);
             }
         }
-        // Branch 0's extents are those no allocator mints.
-        if range.extent.branch != 0 {
+        // Cell 0's extents are those no allocator mints.
+        if range.extent.cell != 0 {
             self.info.next_sequence = self.info.next_sequence.max(range.extent.sequence + 1);
         }
         Ok(records)
@@ -981,7 +981,7 @@ impl Allocator {
             filesystem: Arc::downgrade(&filesystem),
             block_size,
             device_size: AtomicU64::new(device_size),
-            branch: AtomicU64::new(filesystem.device().branch()),
+            cell: AtomicU64::new(filesystem.device().cell()),
             object_id,
             max_extent_size_bytes,
             tree: LSMTree::new(merge, None),
@@ -993,7 +993,7 @@ impl Allocator {
                 owner_bytes: BTreeMap::new(),
                 unattributed_reserved_bytes: 0,
                 extents: ExtentTable::default(),
-                base_branches: HashSet::new(),
+                base_cells: HashSet::new(),
                 unrecorded_reaches: Vec::new(),
                 allocation_size_histogram: [0; 64],
             }),
@@ -1040,7 +1040,7 @@ impl Allocator {
         assert_eq!(std::mem::replace(&mut self.inner.lock().opened, true), false);
 
         let filesystem = self.filesystem.upgrade().unwrap();
-        // Minting starts past any extent of the branch the device holds already, and past its
+        // Minting starts past any extent of the cell the device holds already, and past its
         // floor.
         let device = filesystem.device();
         let next_sequence = device.next_sequence().await?.max(device.sequence_floor().await?);
@@ -1139,7 +1139,7 @@ impl Allocator {
         discarded: &HashSet<ExtentId>,
     ) -> Result<(), Error> {
         let filesystem = self.filesystem.upgrade().unwrap();
-        // Minting resumes past every extent of the branch the device holds, including those a
+        // Minting resumes past every extent of the cell the device holds, including those a
         // crash left, whose transactions were lost: orphans, which die. Those what replay discarded
         // names are freed with the flush the mount makes (`Journal::flush_for_frees`), once the
         // journal records the discard, and the flush (see `Journal::flush_device`): replay
@@ -1169,13 +1169,13 @@ impl Allocator {
             // Sequence numbers are the store's, and far apart: the search is of those since the
             // last compaction, or since the oldest extent alive if it is older, as a filesystem's
             // first extent may be millions past nothing, and of few of those at most.
-            let lowest = inner.extents.lowest_sequence(self.branch()).unwrap_or(next_sequence);
+            let lowest = inner.extents.lowest_sequence(self.cell()).unwrap_or(next_sequence);
             let start = inner.next_sequence_opened.max(lowest).min(next_sequence);
             inner.extents.settle_replay(discarded);
             let mut orphans = 0;
             inner.orphans_sought = orphan_windows(start, device_next_sequence);
             for sought in inner.orphans_sought.clone() {
-                orphans += inner.extents.kill_orphans(self.branch(), sought, discarded);
+                orphans += inner.extents.kill_orphans(self.cell(), sought, discarded);
             }
             if orphans > 0 {
                 info!(count = orphans; "Extents a crash left will be freed");
@@ -1545,12 +1545,11 @@ impl Allocator {
             inner.allocation_size_histogram[std::cmp::min(63, len / self.block_size) as usize] += 1;
             let data_owner = inner.data_owner(owner_object_id);
             let result = if shared {
-                let (range, records) =
-                    inner.extents.stage(self.branch(), data_owner, len, &*device);
+                let (range, records) = inner.extents.stage(self.cell(), data_owner, len, &*device);
                 self.record(records);
                 range
             } else {
-                ExtentRange::new(inner.extents.mint(self.branch(), &*device), 0..len)
+                ExtentRange::new(inner.extents.mint(self.cell(), &*device), 0..len)
             };
             let owner_entry = inner.owner_bytes.entry(data_owner).or_default();
             owner_entry.uncommitted_allocated_bytes += len;
@@ -1590,7 +1589,7 @@ impl Allocator {
             let owner_id_bytes_left = inner.owner_id_bytes_left(owner_object_id);
             let data_owner = inner.data_owner(owner_object_id);
             ensure!(
-                device_range.extent.branch == 0
+                device_range.extent.cell == 0
                     && !inner.extents.is_alive(device_range.extent)
                     && self.device_size().saturating_sub(device_used) >= len
                     && owner_id_bytes_left >= len,
@@ -1730,38 +1729,37 @@ impl Allocator {
     /// cladefs: whether `range`'s extent is more than its store's to deallocate: a frozen owner's, or
     /// a base's (backlog doc-10).
     fn is_held_beyond_the_store(&self, range: &ExtentRange) -> bool {
-        self.inner.lock().base_branches.contains(&range.extent.branch)
+        self.inner.lock().base_cells.contains(&range.extent.cell)
             || self.frozen_owner(range).is_some()
     }
 
-    /// cladefs: notes that a store opened has a base whose extents are in `branches`.
-    pub fn add_base_branches(&self, branches: &[u64]) {
-        self.inner.lock().base_branches.extend(branches);
+    /// cladefs: notes that a store opened has a base whose extents are in `cells`.
+    pub fn add_base_cells(&self, cells: &[u64]) {
+        self.inner.lock().base_cells.extend(cells);
     }
 
-    /// cladefs: fails unless a store may have a base whose extents are in `branches`: none may be
+    /// cladefs: fails unless a store may have a base whose extents are in `cells`: none may be
     /// the device's own, or one the allocator holds extents of, as if they were a base's the
     /// allocator would lose count of those.
-    pub fn check_base_branches(&self, branches: &[u64]) -> Result<(), Error> {
-        let branches: HashSet<u64> = branches.iter().copied().collect();
+    pub fn check_base_cells(&self, cells: &[u64]) -> Result<(), Error> {
+        let cells: HashSet<u64> = cells.iter().copied().collect();
         ensure!(
-            !branches.contains(&self.branch())
-                && !self.inner.lock().extents.holds_any_of(&branches),
+            !cells.contains(&self.cell()) && !self.inner.lock().extents.holds_any_of(&cells),
             FxfsError::InvalidArgs
         );
         Ok(())
     }
 
-    /// cladefs: the branches of the extents `owners` hold.
-    pub fn branches_of(&self, owners: &[u64]) -> Vec<u64> {
+    /// cladefs: the cells of the extents `owners` hold.
+    pub fn cells_of(&self, owners: &[u64]) -> Vec<u64> {
         let inner = self.inner.lock();
-        let branches: HashSet<u64> = inner
+        let cells: HashSet<u64> = inner
             .extents
             .alive()
             .filter(|(_, owner, _)| owners.contains(owner))
-            .map(|(extent, ..)| extent.branch)
+            .map(|(extent, ..)| extent.cell)
             .collect();
-        branches.into_iter().collect()
+        cells.into_iter().collect()
     }
 
     /// cladefs: the frozen owner holding `range`'s extent, if one does.
@@ -1852,7 +1850,7 @@ impl Allocator {
         self.inner.lock().info.data_owners.clone()
     }
 
-    /// cladefs: the sequence numbers of this allocator's branch the mount sought orphans among, for
+    /// cladefs: the sequence numbers of this allocator's cell the mount sought orphans among, for
     /// tests that look for extents no one knows (TASK-149.41).
     pub fn orphans_sought(&self) -> Vec<std::ops::Range<u64>> {
         self.inner.lock().orphans_sought.clone()
@@ -2047,16 +2045,16 @@ impl Allocator {
         self.device_size.load(Ordering::Acquire)
     }
 
-    /// The branch whose extents the allocator mints.
-    fn branch(&self) -> u64 {
-        self.branch.load(Ordering::Acquire)
+    /// The cell whose extents the allocator mints.
+    fn cell(&self) -> u64 {
+        self.cell.load(Ordering::Acquire)
     }
 
-    /// cladefs: the allocator mints extents of `branch` from now on: the device's, as the filesystem
+    /// cladefs: the allocator mints extents of `cell` from now on: the device's, as the filesystem
     /// thaws in a VM restored from a snapshot, whose store is a fork of its own, and nothing is
     /// open. Extents staged before, sealed, are not staged in again.
-    pub fn set_branch(&self, branch: u64) {
-        self.branch.store(branch, Ordering::Release);
+    pub fn set_cell(&self, cell: u64) {
+        self.cell.store(cell, Ordering::Release);
     }
 
     /// cladefs: the device's capacity is `size` bytes from now on, as the extent store is resized
@@ -2649,7 +2647,7 @@ mod tests {
     use std::ops::Bound;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-    use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice, Op};
+    use storage_device::fake_device::{DEFAULT_CELL, FakeDevice, Op};
     use storage_device::{Device, DeviceHolder, ExtentId, ExtentRange};
 
     #[test]
@@ -2949,7 +2947,7 @@ mod tests {
     }
 
     fn extent(sequence: u64) -> ExtentId {
-        ExtentId::new(DEFAULT_BRANCH, sequence)
+        ExtentId::new(DEFAULT_CELL, sequence)
     }
 
     /// cladefs: orphans are sought past what the tree holds, and below the device's next, and in one
@@ -3044,7 +3042,7 @@ mod tests {
     }
 
     /// cladefs: a filesystem reopened on a device whose floor is far past what it holds, as when
-    /// another writer of its branch takes it over (backlog doc-7, The head), mints from the floor,
+    /// another writer of its cell takes it over (backlog doc-7, The head), mints from the floor,
     /// and looks for extents a crash left below what the device holds only: not across the gap to
     /// the floor, which took a guest's allocator ever.
     #[fuchsia::test]
@@ -3899,7 +3897,7 @@ mod tests {
         assert_eq!(
             range,
             ExtentRange::new(
-                ExtentId::new(DEFAULT_BRANCH, allocated_range.extent.sequence + 1),
+                ExtentId::new(DEFAULT_CELL, allocated_range.extent.sequence + 1),
                 allocated_range.range
             )
         );
@@ -4611,7 +4609,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
         assert_eq!(
             third,
-            ExtentRange::new(ExtentId::new(DEFAULT_BRANCH, staging.sequence + 1), 0..bs)
+            ExtentRange::new(ExtentId::new(DEFAULT_CELL, staging.sequence + 1), 0..bs)
         );
         assert_eq!(allocator.extent_size(staging), None);
         assert_eq!(allocator.dead_extents(), vec![staging]);

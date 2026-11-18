@@ -26,9 +26,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The attribute of the bytes an operation read, wrote or moved.
 pub const BYTES: &str = "cladefs.bytes";
-/// The attribute of the branch an operation is of (`doc-7`), in base 32 as paths name it.
-pub const BRANCH: &str = "cladefs.branch";
-/// The attribute of an extent's sequence number in its branch ([`BRANCH`]).
+/// The attribute of the cell an operation is of (`doc-7`), in base 32 as paths name it.
+pub const CELL: &str = "cladefs.cell";
+/// The attribute of an extent's sequence number in its cell ([`CELL`]).
 pub const EXTENT: &str = "cladefs.extent";
 /// The attribute of the extents an operation took.
 pub const EXTENTS: &str = "cladefs.extents";
@@ -38,7 +38,7 @@ pub const COMMITS: &str = "cladefs.commits";
 pub const COMMIT: &str = "cladefs.commit";
 /// The attribute of the level a commit waits for: `ordered`, `local` or `uploaded` (doc-12).
 pub const LEVEL: &str = "cladefs.level";
-/// The attribute of the branch a fork makes.
+/// The attribute of the cell a fork makes.
 pub const CHILD: &str = "cladefs.child";
 /// The attribute of whether a fork makes a version (`doc-7`, Versions).
 pub const POINT: &str = "cladefs.version";
@@ -52,7 +52,7 @@ pub const OBJECT_KEY: &str = "cladefs.object_key";
 pub const OBJECTS: &str = "cladefs.objects";
 /// The attribute of the prefixes a bucket's listing by delimiter found (TASK-395.5).
 pub const PREFIXES: &str = "cladefs.prefixes";
-/// The attribute of a segment's sequence number in its branch.
+/// The attribute of a segment's sequence number in its cell.
 pub const SEGMENT: &str = "cladefs.segment";
 
 /// Whether spans are made, which [`enable`] says.
@@ -146,9 +146,9 @@ impl Span {
         self.set(key, i64::try_from(value).unwrap_or(i64::MAX));
     }
 
-    /// Sets its attribute [`BRANCH`] to `branch`, in base 32, as store paths name branches.
-    pub fn set_branch(&self, branch: CellId) {
-        self.set_with(BRANCH, || format!("{branch}"));
+    /// Sets its attribute [`CELL`] to `cell`, in base 32, as store paths name cells.
+    pub fn set_cell(&self, cell: CellId) {
+        self.set_with(CELL, || format!("{cell}"));
     }
 
     /// Says the operation failed, with `error`, its status an error's.

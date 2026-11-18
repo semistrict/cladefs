@@ -22,9 +22,9 @@ All of them are in tracefs under `events/cladefs/`.
 
 | Event | When | Fields |
 |---|---|---|
-| `cladefs_device_submit` | Fxfs's Rust submits a device request, which it does not wait for here | `id`, `type` (read, write, commit, free…), `flags`, `branch`, `sequence` (the extent), `offset`, `len` |
+| `cladefs_device_submit` | Fxfs's Rust submits a device request, which it does not wait for here | `id`, `type` (read, write, commit, free…), `flags`, `cell`, `sequence` (the extent), `offset`, `len` |
 | `cladefs_device_done` | The request completes, or it could not be submitted | `id`, `type`, `status` (0 or -errno) |
-| `cladefs_window_map_start` | A MAP of the window, read-only: an extent's pages, or zeros. A MAP_MANY counts as one, with `count` maps | `id`, `branch`, `sequence`, `offset` (the first map's), `len` (all of them), `window` (the first map's window offset), `count`, `zeros` |
+| `cladefs_window_map_start` | A MAP of the window, read-only: an extent's pages, or zeros. A MAP_MANY counts as one, with `count` maps | `id`, `cell`, `sequence`, `offset` (the first map's), `len` (all of them), `window` (the first map's window offset), `count`, `zeros` |
 | `cladefs_window_map_end` | The MAP returns | `id`, `err` |
 | `cladefs_window_unmap_start`, `_end` | An UNMAP of `len` bytes at `window` | `id`, `window`, `len`; then `id`, `err` |
 | `cladefs_window_private_start`, `_end` | A PRIVATE: a store's copy-on-write of window pages | `id`, `window`, `len`; then `id`, `err` |

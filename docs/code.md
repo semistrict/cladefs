@@ -129,13 +129,13 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
-  (fsck), and forks images: a fork's branch is a fork of the image's in the
+  (fsck), and forks images: a fork's cell is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
   (`CLADEFSD_BUCKET`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
-  deletes forks and images alike: the branch in its bucket, whose collector
-  reclaims what no other branch inherited, and the directory; forks live on.
+  deletes forks and images alike: the cell in its bucket, whose collector
+  reclaims what no other cell inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
   open (`collect.rs`), the only thing that deletes what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
@@ -148,7 +148,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `host_cell.rs` makes, opens, forks and deletes both host stacks' extent
   stores in the host's directories, images (`Storage`) and guests' stores
   (`OpenCell`), with one block size, one set of options and one way of
-  minting branches. Neither stack collects its stores: the collector alone
+  minting cells. Neither stack collects its stores: the collector alone
   deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`crates/physmem`): its size, which
   extents' pages come from, and tenants' arenas of it.
@@ -157,7 +157,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 `crates/local_cell` is cladefs's too: backlog doc-4's extent store on local
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
-store's directory holds one branch; forks, versions and deletion are the
+store's directory holds one cell; forks, versions and deletion are the
 bucket's (`crates/bucket_cell`, TASK-165.7). Nothing collects in a store:
 once a segment is acknowledged in the bucket, it and the extents' files it
 names leave the directory, for the host's cache of the bucket's objects, and
@@ -171,7 +171,7 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 | Crate | What it is |
 |---|---|
-| `bucket_cell` | Branches of extent stores kept in object storage (backlog doc-7): writers, readers, forks, versions, checkpoints and the collector, `cladefs-gc`. |
+| `bucket_cell` | Cells of extent stores kept in object storage (backlog doc-7): writers, readers, forks, versions, checkpoints and the collector, `cladefs-gc`. |
 | `extent_frame` | How objects holding extents' data are framed, locally and in object storage. |
 | `extent_keys` | The keys a tenant's data is encrypted under at rest, the KMS backends, and the primitives that use them (backlog doc-16). |
 | `virtio_extent` | The extent store device but its virtio transport (backlog doc-4), which every VMM hosting it shares; its `README.md` says what a VMM's adapter does. |
@@ -184,10 +184,10 @@ Each crate's `Cargo.toml` says in its first lines what it is. cladefs's own, bes
 
 ## `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `cladefs-v1.16.1-r10` of
+The VMM is a submodule: cell `cladefs-v1.16.1-r10` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker),
 Firecracker's v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one
-linear series, each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2,
+linear series, each release of it a cell `cladefs-v1.16.1-rN` (TASK-269; r2,
 TASK-273, the one with the extent device over virtio-PCI alone; r8, TASK-437, r7
 renamed, the releases before it named `fxdax-v1.16.1-rN`; r10, TASK-503, r8 with
 its API saying cladefs). Its first commits are general fixes, each standing
@@ -206,8 +206,8 @@ builds Firecracker goes through): the vmm crate's dependency on
 `crates/cladefs`, cladefs's lock (`vendor/firecracker.lock`, which
 `scripts/firecracker-cargo.sh --lock` updates), and frame pointers, from this
 repo's `.cargo/config.toml`. The series' own `resources/cladefs/README.md` says
-the same for its users. Branch `fxdax-v1.16.1`, the series before, a commit a
-change, `fxdax`, on Firecracker's main branch, where they began, r1's
+the same for its users. Cell `fxdax-v1.16.1`, the series before, a commit a
+change, `fxdax`, on Firecracker's main cell, where they began, r1's
 `fxdax-v1.16.1-optin` and its PCI stack, `fxdax-pci-r1`, are superseded by it
 (`vendor/firecracker.rewrites`). cladefs ran on libkrun before; it left it for
 Firecracker, which the sandboxes it serves run (TASK-40).
@@ -227,7 +227,7 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see `architecture.md`, DAX on Linux (TASK-25.4). |
 | `WRITE_COMMIT`, INFO's `sequence_floor`, and the store's capacity in the device's configuration, changed while the guest runs. | doc-4's requests (TASK-36, TASK-37). |
-| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that version and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's branch (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
+| Snapshots of a VM with the extent device: `PUT /snapshot/create` forks the store to `<snapshot>.extent-<id>` and saves the window's mappings; `PUT /snapshot/load`, with `cladefs_overrides` naming each restored VM's own store, forks it from that version and maps the window again. The guest's filesystem must be frozen (fsfreeze) as the snapshot is taken, and thawed after a restore, when it learns its store's cell (doc-4, Snapshots). | A zygote's children, suspend-to-RAM and moving VMs, each restored VM with a store of its own (TASK-39.1). |
 
 ## `guest/`: Fxfs in the guest's kernel
 

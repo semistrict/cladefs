@@ -96,7 +96,7 @@ struct cladefs {
 	struct stub_extent *staging;
 	u64 staging_next;
 	u64 next_sequence, next_ino;
-	u64 branch;
+	u64 cell;
 	u64 seals;
 };
 
@@ -158,7 +158,7 @@ struct cladefs *cladefs_sim_new(void)
 	INIT_LIST_HEAD(&fs->files);
 	fs->next_sequence = 1;
 	fs->next_ino = 100;
-	fs->branch = info.branch;
+	fs->cell = info.cell;
 	return fs;
 }
 
@@ -408,7 +408,7 @@ ssize_t cladefs_dax_extents(struct cladefs *fs, u64 ino, u64 offset, u64 len, st
 			break;
 		}
 		out[count++] = (struct cladefs_dax_extent) {
-			.offset = page << PAGE_SHIFT, .len = PAGE_SIZE, .branch = fs->branch,
+			.offset = page << PAGE_SHIFT, .len = PAGE_SIZE, .cell = fs->cell,
 			.sequence = block->sequence, .extent_offset = block->page << PAGE_SHIFT,
 			.access = access, .extent_size = extent_bytes(fs, extent),
 		};

@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a store's write-ahead log of its branch (doc-14, TASK-165.9): what the bucket doesn't
-//! have yet of the branch, on local disk, and what recovering it from there takes.
+//! cladefs: a store's write-ahead log of its cell (doc-14, TASK-165.9): what the bucket doesn't
+//! have yet of the cell, on local disk, and what recovering it from there takes.
 //!
 //! - **Its segments**, closed and not yet acknowledged in the bucket: each framed with its footer,
-//!   `segments/<branch>/<n>`, the object it is to be in the bucket, and the extents its footer
-//!   names stored on their own, `extents/<branch>/<sequence>`. They are framed in the order they
+//!   `segments/<cell>/<n>`, the object it is to be in the bucket, and the extents its footer
+//!   names stored on their own, `extents/<cell>/<sequence>`. They are framed in the order they
 //!   closed, one after another, and made durable together, those framed meanwhile
 //!   (`segments::make_durable`, TASK-310): a crash may leave any of those being made durable
 //!   whole and any torn, a later one whole and an earlier one not; their raw files and logs stay
 //!   until they are durable, and recovery checks each whose raw file or log is there (below).
-//! - **Each segment's log** of the commits made in it, `logs/<branch>/<n>`, beside its raw data,
-//!   `open-segments/<branch>/<n>`: a record of each commit's contents, as its footer will fold
+//! - **Each segment's log** of the commits made in it, `logs/<cell>/<n>`, beside its raw data,
+//!   `open-segments/<cell>/<n>`: a record of each commit's contents, as its footer will fold
 //!   them (`extent_frame::segment::Contents`), each hashed, appended and synced by the flush that
 //!   makes the commit durable, whether the segment is open, or closed since and being framed: a
 //!   flush waits for no framing. cladefs: a flush that seals little puts the runs its commits
@@ -25,7 +25,7 @@
 //!   commits that stored extents on their own, which no record checks, syncs their data first,
 //!   as before. Its raw data and log go once it is
 //!   framed and the commits it names are durable, its framed file their record then.
-//! - **Its start**, `wal`: the branch's commit its first segment goes on from, which the store
+//! - **Its start**, `wal`: the cell's commit its first segment goes on from, which the store
 //!   writes, durably, before the segments it acknowledged leave it ([`StartFile`]): a segment a
 //!   crash brings back, its removal not durable, whose last commit is the start's or before, is
 //!   acknowledged, and goes again.
@@ -50,12 +50,12 @@
 //! (TASK-165.9's crash rounds, cutting openings, and its Shuttle tests, a crash bringing back a
 //! segment's raw data without its log). The footers recovered are
 //! stamped as they were, or provisionally for those closed again: opening the store puts the log
-//! after the branch's end by its commits (`bucket_cell::Wal::rebase`), and stamps them anew.
+//! after the cell's end by its commits (`bucket_cell::Wal::rebase`), and stamps them anew.
 
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::framed::{read_frame, read_whole};
 use crate::layout::{
-    FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, branch_dir, decode, encode, extent_path,
+    FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, cell_dir, decode, encode, extent_path,
     list_numbers, log_path, open_segment_path, segment_path,
 };
 use crate::raw::{RawEncryption, SECTOR};
@@ -278,14 +278,14 @@ impl LogRecord {
 /// records is overwritten as it is appended to, a sync then syncing the records alone, not the
 /// log's size and blocks too, a third of the time on a cloud disk. The header is synced before any
 /// record is appended: a log whose new header a crash lost would read its old one's records.
-/// cladefs: after the salt, the segment the log is of, the branch's then the number: a spare is
+/// cladefs: after the salt, the segment the log is of, the cell's then the number: a spare is
 /// renamed a log, and was renamed a spare, neither rename durable until a flush syncs the
 /// directory of logs, so a crash may keep it under its last segment's name, holding the new
 /// one's header and records, which an opening took for the last one's commits (TASK-341, found by
 /// TASK-310's crash rounds, round 81); a log whose header names another segment holds none of
 /// its own.
 /// cladefs: after those fields, the DEK its segment's raw file is encrypted under and its log
-/// authenticated with, its branch's and its generation, and the salt of their subkeys
+/// authenticated with, its cell's and its generation, and the salt of their subkeys
 /// (`raw::RawEncryption`), then the header's MAC; each record of it is followed by its MAC, of its offset
 /// in the log and its bytes (TASK-411.5). Its records hold of the runs of its commits what the raw
 /// file stores, encrypted. Every store's are so (TASK-411.28): a log headed in the clear,
@@ -306,11 +306,11 @@ pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
 /// encrypts its raw file and log ([`LOG_MAGIC`]).
 pub(crate) fn log_header(salt: u64, segment: SegmentId, encryption: &RawEncryption) -> Vec<u8> {
     let mut header = vec![0; LOG_RECORDS as usize];
-    let fields = [salt, segment.branch, segment.number].map(u64::to_le_bytes);
+    let fields = [salt, segment.cell, segment.number].map(u64::to_le_bytes);
     header[..LOG_MAGIC.len()].copy_from_slice(LOG_MAGIC);
     header[LOG_MAGIC.len()..LOG_FIELDS].copy_from_slice(fields.as_flattened());
     let mut at = LOG_FIELDS;
-    let key = (encryption.key.branch.to_le_bytes(), encryption.key.generation.to_le_bytes());
+    let key = (encryption.key.cell.to_le_bytes(), encryption.key.generation.to_le_bytes());
     for field in [&key.0[..], &key.1[..], &encryption.salt.0[..]] {
         header[at..at + field.len()].copy_from_slice(field);
         at += field.len();
@@ -335,13 +335,13 @@ impl LogHeader {
             return None;
         }
         let u64_at = |at: usize| u64::from_le_bytes(log[at..at + 8].try_into().unwrap());
-        let [salt, branch, number] = [0, 1, 2].map(|field| u64_at(LOG_MAGIC.len() + field * 8));
-        if (SegmentId { branch, number }) != segment {
+        let [salt, cell, number] = [0, 1, 2].map(|field| u64_at(LOG_MAGIC.len() + field * 8));
+        if (SegmentId { cell, number }) != segment {
             return None;
         }
         let signed = log.get(..LOG_HEADER - MAC_LEN)?;
         let generation = u32::from_le_bytes(log[LOG_FIELDS + 8..][..4].try_into().unwrap());
-        let key = KeyId { branch: u64_at(LOG_FIELDS), generation };
+        let key = KeyId { cell: u64_at(LOG_FIELDS), generation };
         let salt_at = LOG_FIELDS + 12;
         let key_salt = Salt(log[salt_at..salt_at + SALT_LEN].try_into().unwrap());
         let mac = log.get(LOG_HEADER - MAC_LEN..LOG_HEADER)?.try_into().unwrap();
@@ -357,7 +357,7 @@ impl LogHeader {
         keys: &bucket_cell::keys::Ring,
     ) -> Result<Arc<RawEncryption>, Error> {
         let (key, salt, mac) = &self.encrypted;
-        let keys = keys.of(segment.branch);
+        let keys = keys.of(segment.cell);
         let dek = extent_frame::Keys::dek(&keys, *key).ok_or_else(|| {
             anyhow::anyhow!(
                 "{segment:?}'s raw file is encrypted under {key:?}, which the store holds not"
@@ -379,13 +379,13 @@ pub(crate) fn log_salt(log: &[u8], segment: SegmentId) -> Option<u64> {
 }
 
 /// cladefs: a salt for the records of a log of `segment`'s made in `lifetime`, a value of the
-/// opening of the branch that made it ([`crate::segments::Segments::open`]): none another log
-/// had, as a branch whose segments all left numbers its next from 0 again, its epoch past theirs;
+/// opening of the cell that made it ([`crate::segments::Segments::open`]): none another log
+/// had, as a cell whose segments all left numbers its next from 0 again, its epoch past theirs;
 /// and none 0, the salt of logs before they had headers.
 pub(crate) fn new_salt(lifetime: u64, segment: SegmentId) -> u64 {
     let mut bytes = [0; 24];
     bytes[..8].copy_from_slice(&lifetime.to_le_bytes());
-    bytes[8..16].copy_from_slice(&segment.branch.to_le_bytes());
+    bytes[8..16].copy_from_slice(&segment.cell.to_le_bytes());
     bytes[16..].copy_from_slice(&segment.number.to_le_bytes());
     rapidhash::rapidhash(&bytes) | 1
 }
@@ -448,11 +448,11 @@ pub(crate) struct Recovered {
 
 impl Recovered {
     /// cladefs: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
-    /// `branch`, holding `keys`, the store's: encrypted under its branch's newest DEK; each from its raw data and its log's records read again, which must still be
+    /// `cell`, holding `keys`, the store's: encrypted under its cell's newest DEK; each from its raw data and its log's records read again, which must still be
     /// those recovery kept, with the footer recovery folded them into, and synced; then the
     /// directory of framed files synced, and their raw files and logs removed, as the commits they
     /// hold are durable in the framed files then. Recovery frames nothing itself: it holds no key
-    /// yet, and a sealed branch's segment framed in the clear and resealed later left its data on
+    /// yet, and a sealed cell's segment framed in the clear and resealed later left its data on
     /// the host's disk in the clear meanwhile, and for good if the host died between (TASK-411.9).
     /// A crash before leaves the raw files and logs, which the next recovery closes again alike.
     /// cladefs: an encrypted store's raw data is decrypted first, under the DEK and salt its log's header
@@ -461,7 +461,7 @@ impl Recovered {
     pub fn close<D: Dir>(
         &mut self,
         dir: &D,
-        branch: CellId,
+        cell: CellId,
         keys: &bucket_cell::keys::Ring,
     ) -> Result<(), Error> {
         if self.closing.is_empty() {
@@ -470,7 +470,7 @@ impl Recovered {
         let encrypting = keys.encrypting();
         for (footer, number) in &self.segments {
             let Some(kept) = self.closing.get(number) else { continue };
-            let segment = SegmentId { branch: branch.id, number: *number };
+            let segment = SegmentId { cell: cell.id, number: *number };
             let Logged { records, mut data, encryption, .. } =
                 log_records(dir, segment, Some(keys))?;
             ensure!(
@@ -497,10 +497,10 @@ impl Recovered {
             crate::written::wrote(crate::written::Kind::Framed, framed.len());
             file.sync()?;
         }
-        dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
+        dir.sync_dir(&cell_dir(SEGMENTS, cell.id))?;
         dir.barrier()?;
         for number in std::mem::take(&mut self.closing).into_keys() {
-            let segment = SegmentId { branch: branch.id, number };
+            let segment = SegmentId { cell: cell.id, number };
             remove(dir, &open_segment_path(segment))?;
             remove(dir, &log_path(segment))?;
         }
@@ -509,36 +509,36 @@ impl Recovered {
 
     /// cladefs: drops what it holds of the segments closed again, not yet framed: their raw files
     /// and logs, durably, so that no recovery closes them again (`Recovering::drop_wal`).
-    pub fn drop_closing<D: Dir>(&mut self, dir: &D, branch: CellId) -> Result<(), Error> {
+    pub fn drop_closing<D: Dir>(&mut self, dir: &D, cell: CellId) -> Result<(), Error> {
         if self.closing.is_empty() {
             return Ok(());
         }
         for number in std::mem::take(&mut self.closing).into_keys() {
-            let segment = SegmentId { branch: branch.id, number };
+            let segment = SegmentId { cell: cell.id, number };
             remove(dir, &open_segment_path(segment))?;
             remove(dir, &log_path(segment))?;
         }
         for kind in [OPEN_SEGMENTS, LOGS] {
-            dir.sync_dir(&branch_dir(kind, branch.id))?;
+            dir.sync_dir(&cell_dir(kind, cell.id))?;
         }
         Ok(())
     }
 }
 
-/// Recovers the WAL of `branch` in `dir` (see the module's docs): each segment whose framed file
+/// Recovers the WAL of `cell` in `dir` (see the module's docs): each segment whose framed file
 /// is whole, in order, and each whose framed file is not that its log closes again, holding
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed
 /// files torn, closed again or holding nothing durable, go.
-pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Error> {
+pub(crate) fn recover<D: Dir>(dir: &D, cell: CellId) -> Result<Recovered, Error> {
     let (start_file, start) = StartFile::read(dir)?;
     let listed = |kind| -> Result<BTreeSet<u64>, Error> {
-        Ok(list_numbers(dir, &branch_dir(kind, branch.id))?.into_iter().collect())
+        Ok(list_numbers(dir, &cell_dir(kind, cell.id))?.into_iter().collect())
     };
     // cladefs: framed files a crash stopped being made durable, named their own: their segments are
     // closed again from their raw files and logs, which stay until they are (TASK-310).
-    for name in dir.list(&branch_dir(SEGMENTS, branch.id))? {
+    for name in dir.list(&cell_dir(SEGMENTS, cell.id))? {
         if name.starts_with(FRAMING) {
-            remove(dir, &format!("{}/{name}", branch_dir(SEGMENTS, branch.id)))?;
+            remove(dir, &format!("{}/{name}", cell_dir(SEGMENTS, cell.id)))?;
         }
     }
     let (framed, raw, logs) = (listed(SEGMENTS)?, listed(OPEN_SEGMENTS)?, listed(LOGS)?);
@@ -554,7 +554,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     // spare as soon as it opens).
     let mut own = BTreeSet::new();
     for &number in &logs {
-        if own_log(dir, SegmentId { branch: branch.id, number })? {
+        if own_log(dir, SegmentId { cell: cell.id, number })? {
             own.insert(number);
         }
     }
@@ -562,8 +562,8 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     // log go.
     let settled = |number| -> Result<(), Error> {
         if left(number) {
-            let segment = SegmentId { branch: branch.id, number };
-            dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
+            let segment = SegmentId { cell: cell.id, number };
+            dir.sync_dir(&cell_dir(SEGMENTS, cell.id))?;
             dir.barrier()?;
             remove(dir, &open_segment_path(segment))?;
             remove(dir, &log_path(segment))?;
@@ -581,10 +581,10 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     // log's, as its framing was before they went: a framed file a crash kept without them, which
     // the next recovery takes as framed whole, unchecked, is whole (TASK-318).
     let gone = |number| -> Result<(), Error> {
-        let segment = SegmentId { branch: branch.id, number };
+        let segment = SegmentId { cell: cell.id, number };
         remove(dir, &segment_path(segment))?;
         if framed.contains(&number) && left(number) {
-            dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
+            dir.sync_dir(&cell_dir(SEGMENTS, cell.id))?;
             dir.barrier()?;
         }
         remove(dir, &open_segment_path(segment))?;
@@ -596,7 +596,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     // torn one is (TASK-310). Segments are made durable several at once, a later one's framed file
     // whole while an earlier one's is not, its commits not durable then, which its log lacks: the
     // later footer, its record of commits after those, or of the rest of a commit spanning both,
-    // read whole, would hold the branch past what the earlier one lost (TASK-310's crash rounds).
+    // read whole, would hold the cell past what the earlier one lost (TASK-310's crash rounds).
     // Their logs hold every commit a flush made durable, which is all a crash must keep. One whose
     // log is gone, or its raw file, was durable, its commits too, as they go only then: its
     // making durable made their entries durable before its framed file's
@@ -614,7 +614,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     let mut ending = BTreeSet::new();
     let mut past_start = start.is_none();
     for number in numbers {
-        let segment = SegmentId { branch: branch.id, number };
+        let segment = SegmentId { cell: cell.id, number };
         let again = broken && raw.contains(&number) && own.contains(&number);
         let footer = match framed.contains(&number) && !again {
             true => whole_footer(dir, segment, left(number))?,
@@ -681,7 +681,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     let mut closing = BTreeMap::new();
     for (at, (number, found_here)) in found.iter().enumerate() {
         let number = *number;
-        let segment = SegmentId { branch: branch.id, number };
+        let segment = SegmentId { cell: cell.id, number };
         let continues = |record: &Contents| record.continued.is_some();
         // cladefs: those from `from` on go, durably, before any is closed again: those after it
         // first, then it, whose files say why they go, a log refusing a record or a commit past
@@ -690,7 +690,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
         let cut = |from: usize| -> Result<(), Error> {
             let synced = || -> Result<(), Error> {
                 for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS] {
-                    dir.sync_dir(&branch_dir(kind, branch.id))?;
+                    dir.sync_dir(&cell_dir(kind, cell.id))?;
                 }
                 dir.barrier().map_err(Error::from)
             };
@@ -768,7 +768,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
         // cladefs: framed once the store's keys are known, its raw file and log kept until then
         // (`Recovered::close`, TASK-411.9).
         let previous = segments.last().map(|(footer, _)| footer);
-        segments.push((closed_again(branch, previous, &records)?, number));
+        segments.push((closed_again(cell, previous, &records)?, number));
         closing.insert(number, records);
         if !whole {
             break;
@@ -779,7 +779,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: CellId) -> Result<Recovered, Erro
     let (gone, segments): (Vec<_>, Vec<_>) =
         segments.into_iter().partition(|(footer, _)| acknowledged(footer));
     for (footer, number) in gone {
-        remove(dir, &segment_path(SegmentId { branch: branch.id, number }))?;
+        remove(dir, &segment_path(SegmentId { cell: cell.id, number }))?;
         for (extent, _) in footer.own() {
             remove(dir, &extent_path(extent))?;
         }
@@ -924,20 +924,20 @@ fn log_records<D: Dir>(
 
 /// The footer of a segment closed again, left open, or framed part way, from the records of its
 /// log that are whole, which hold a commit at least: their contents folded, stamped provisionally
-/// as `branch`'s, after `last`, the footer before it, if any. cladefs: framed with it once the store's
+/// as `cell`'s, after `last`, the footer before it, if any. cladefs: framed with it once the store's
 /// keys are known ([`Recovered::close`], TASK-411.9).
 fn closed_again(
-    branch: CellId,
+    cell: CellId,
     last: Option<&Footer>,
     records: &[Contents],
 ) -> Result<Footer, Error> {
     let first = records.first().and_then(last_commit);
     let first = first.context("a log closed again holds a commit")?;
     let mut chain = match last {
-        Some(last) => Chain::new(branch, last.epoch, last.segment + 1, last.contents.next_sequence),
-        None => Chain::new(branch, writer_of(first), 0, 0),
+        Some(last) => Chain::new(cell, last.epoch, last.segment + 1, last.contents.next_sequence),
+        None => Chain::new(cell, writer_of(first), 0, 0),
     };
-    Ok(chain.close(fold(branch.id, records)))
+    Ok(chain.close(fold(cell.id, records)))
 }
 
 /// cladefs: the last commit `record`, a log's record, holds of: the one it goes on with past its
@@ -968,7 +968,7 @@ pub(crate) struct Queued {
 }
 
 /// The WAL's segments not yet acknowledged, in order, which the uploader takes once their
-/// commits are durable and they are framed, and acknowledges in order; and its start, the branch's
+/// commits are durable and they are framed, and acknowledges in order; and its start, the cell's
 /// commit before the first, which acknowledging moves on.
 pub(crate) struct Queue {
     segments: VecDeque<Queued>,
@@ -990,7 +990,7 @@ impl Queue {
         self.segments.push_back(Queued::new(number, footer, false, bytes));
     }
 
-    /// The WAL's start: the branch's commit before its first segment.
+    /// The WAL's start: the cell's commit before its first segment.
     pub fn start(&self) -> Option<u64> {
         self.start
     }
@@ -1056,30 +1056,30 @@ impl Queued {
 mod tests {
     use super::*;
     use crate::MemDir;
-    use crate::layout::create_branch_dirs;
+    use crate::layout::create_cell_dirs;
     use extent_frame::segment::{Continued, tag};
     use storage_device::ExtentId;
 
-    const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+    const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 
     fn segment(number: u64) -> SegmentId {
-        SegmentId { branch: BRANCH.id, number }
+        SegmentId { cell: CELL.id, number }
     }
 
     /// A commit of epoch `epoch`, sealing `extent` at `offset`, of a block.
     fn commit(epoch: u64, extent: u64, offset: u64) -> Contents {
         Contents {
             commits: vec![tag(2, epoch)],
-            extents: vec![(ExtentId::new(BRANCH.id, extent), offset, 4096)],
+            extents: vec![(ExtentId::new(CELL.id, extent), offset, 4096)],
             next_sequence: extent + 1,
             ..Contents::default()
         }
     }
 
     /// cladefs: an encryption of a segment's raw file and log, under the tests' DEK, as the store's of
-    /// [`BRANCH`] encrypts them (`bucket_cell::testing::encrypting`, TASK-411.28).
+    /// [`CELL`] encrypts them (`bucket_cell::testing::encrypting`, TASK-411.28).
     fn encryption() -> Arc<RawEncryption> {
-        let (dek, key) = bucket_cell::testing::encrypting(BRANCH);
+        let (dek, key) = bucket_cell::testing::encrypting(CELL);
         Arc::new(RawEncryption::new(dek, key))
     }
 
@@ -1087,7 +1087,7 @@ mod tests {
     fn sealer_of(dir: &MemDir, number: u64) -> Arc<RawEncryption> {
         let log = read_file(&dir.open(&log_path(segment(number)), false).unwrap()).unwrap();
         let header = LogHeader::of(&log, segment(number)).unwrap();
-        header.encryption(segment(number), &bucket_cell::testing::ring([BRANCH])).unwrap()
+        header.encryption(segment(number), &bucket_cell::testing::ring([CELL])).unwrap()
     }
 
     /// Writes segment `number`'s raw data, `blocks` blocks, and its log, of `records`, as an open
@@ -1127,13 +1127,13 @@ mod tests {
     /// cladefs: the WAL in `dir` recovered, and the segments it closed again framed, encrypted, as a
     /// store opens it holding its keys (TASK-411.9).
     fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
-        let mut recovered = recover(dir, BRANCH)?;
-        recovered.close(dir, BRANCH, &bucket_cell::testing::ring([BRANCH]))?;
+        let mut recovered = recover(dir, CELL)?;
+        recovered.close(dir, CELL, &bucket_cell::testing::ring([CELL]))?;
         Ok(recovered)
     }
 
     fn files(dir: &MemDir, kind: &'static str) -> Vec<u64> {
-        list_numbers(dir, &branch_dir(kind, BRANCH.id)).unwrap()
+        list_numbers(dir, &cell_dir(kind, CELL.id)).unwrap()
     }
 
     /// The start is the last written, whole: a writing torn leaves the one before; none before the
@@ -1159,7 +1159,7 @@ mod tests {
     #[test]
     fn segments_left_open_close_again_from_their_logs() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 3, 2, &[commit(5, 10, 0), commit(6, 11, 4096)]);
         // A torn record after them.
         let log = dir.open(&log_path(segment(3)), false).unwrap();
@@ -1171,15 +1171,14 @@ mod tests {
         };
         assert_eq!(footer.contents.commits, [tag(2, 6)]);
         let extents =
-            [(ExtentId::new(BRANCH.id, 10), 0, 4096), (ExtentId::new(BRANCH.id, 11), 4096, 4096)];
+            [(ExtentId::new(CELL.id, 10), 0, 4096), (ExtentId::new(CELL.id, 11), 4096, 4096)];
         assert_eq!(footer.contents.extents, extents);
         assert_eq!((footer.contents.next_sequence, recovered.next), (12, 5));
         assert_eq!(files(&dir, SEGMENTS), [3]);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
         let object = read_whole(&dir.open(&segment_path(segment(3)), true).unwrap()).unwrap();
         assert_eq!(
-            extent_frame::data(&object, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id))
-                .unwrap(),
+            extent_frame::data(&object, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
             vec![3; 2 * 4096]
         );
         // Recovered again, it holds the same.
@@ -1192,7 +1191,7 @@ mod tests {
     #[test]
     fn segments_framed_part_way_close_again() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         let footer = recover_closing(&dir).unwrap().segments.remove(0).0;
         // Framed whole, its raw data and log still there.
@@ -1210,42 +1209,42 @@ mod tests {
     }
 
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,
-    /// no framed file, until the store's keys frame it, encrypted under its branch's DEK, never in
+    /// no framed file, until the store's keys frame it, encrypted under its cell's DEK, never in
     /// the clear, its data as it was. TASK-411.3: an encrypted segment's framed file, whole, its
     /// raw data and log still there, is whole to a recovery holding no key, as one's in the clear
     /// is: checked by its CRCs, never closed again from its raw data.
     #[test]
     fn segments_closed_again_are_framed_under_the_keys_alone() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let mut recovered = recover(&dir, BRANCH).unwrap();
+        let mut recovered = recover(&dir, CELL).unwrap();
         let footer = recovered.segments[0].0.clone();
         assert_eq!(recovered.closing.keys().copied().collect::<Vec<_>>(), [0]);
         assert_eq!(files(&dir, SEGMENTS), Vec::<u64>::new());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![0], vec![0]));
         // Recovered again before it is framed, it holds the same.
-        assert_eq!(recover(&dir, BRANCH).unwrap().segments, recovered.segments);
-        let keys = bucket_cell::testing::ring([BRANCH]);
-        recovered.close(&dir, BRANCH, &keys).unwrap();
+        assert_eq!(recover(&dir, CELL).unwrap().segments, recovered.segments);
+        let keys = bucket_cell::testing::ring([CELL]);
+        recovered.close(&dir, CELL, &keys).unwrap();
         assert!(recovered.closing.is_empty());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
         let path = segment_path(segment(0));
         let read = || read_whole(&dir.open(&path, true).unwrap()).unwrap();
         let encrypted = read();
-        let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
+        let key = extent_frame::KeyId { cell: CELL.id, generation: 1 };
         assert!(matches!(
             extent_frame::Frame::of(&encrypted).unwrap().encryption,
             extent_frame::Encryption::Encrypted { key: under, .. } if under == key
         ));
-        assert_eq!(extent_frame::data(&encrypted, &keys.of(BRANCH.id)).unwrap(), vec![0; 4096]);
+        assert_eq!(extent_frame::data(&encrypted, &keys.of(CELL.id)).unwrap(), vec![0; 4096]);
         assert_eq!(
             extent_frame::data(&encrypted, &extent_frame::NoKeys),
             Err(extent_frame::Error::NoKey(key))
         );
         // Framed whole, encrypted, its raw data and log still there.
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover(&dir, CELL).unwrap();
         assert_eq!(recovered.segments, [(footer, 0)]);
         assert!(recovered.closing.is_empty());
         assert_eq!(read(), encrypted);
@@ -1259,7 +1258,7 @@ mod tests {
     #[test]
     fn segments_acknowledged_brought_back_are_no_logs() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         recover_closing(&dir).unwrap();
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
@@ -1283,7 +1282,7 @@ mod tests {
     #[test]
     fn segments_holding_nothing_go_framed_files_first() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
         let framed = recover_closing(&dir).unwrap().segments;
@@ -1295,12 +1294,12 @@ mod tests {
         torn.sync().unwrap();
         left_open(&dir, 1, 1, &[]);
         for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS] {
-            dir.sync_dir(&branch_dir(kind, BRANCH.id)).unwrap();
+            dir.sync_dir(&cell_dir(kind, CELL.id)).unwrap();
         }
         assert_eq!(recover_closing(&dir).unwrap().segments, framed[..1]);
         // The opening makes its next open segment, whose raw data and log it makes durable.
         for kind in [OPEN_SEGMENTS, LOGS] {
-            dir.sync_dir(&branch_dir(kind, BRANCH.id)).unwrap();
+            dir.sync_dir(&cell_dir(kind, CELL.id)).unwrap();
         }
         for seed in 0..64 {
             let recovered = recover_closing(&dir.crash(seed)).unwrap();
@@ -1311,7 +1310,7 @@ mod tests {
     /// cladefs: the record of commit `epoch` going on past its segment, sealing `extent` there at
     /// `offset`, of a block: a commit spanning segments (TASK-92.41).
     fn continuing(epoch: u64, extent: u64, offset: u64) -> Contents {
-        let extents = vec![(ExtentId::new(BRANCH.id, extent), offset, 4096)];
+        let extents = vec![(ExtentId::new(CELL.id, extent), offset, 4096)];
         let continued = Some(extent_frame::segment::Continued { commit: tag(2, epoch), extents });
         Contents { continued, ..Contents::default() }
     }
@@ -1323,7 +1322,7 @@ mod tests {
     #[test]
     fn commits_spanning_segments_are_kept_whole_or_not_at_all() {
         let ended = |dir: &MemDir| {
-            create_branch_dirs(dir, BRANCH.id).unwrap();
+            create_cell_dirs(dir, CELL.id).unwrap();
             left_open(dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
             left_open(dir, 1, 1, &[continuing(2, 3, 0)]);
         };
@@ -1373,7 +1372,7 @@ mod tests {
     #[test]
     fn segments_going_on_with_acknowledged_commits_go() {
         let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        create_cell_dirs(&dir, CELL.id).unwrap();
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
         left_open(&dir, 1, 1, &[commit(2, 3, 0)]);
         assert_eq!(recover_closing(&dir).unwrap().segments.len(), 2);
@@ -1392,7 +1391,7 @@ mod tests {
     /// commits' records to the logs of the segments they were made in, being framed or open, so
     /// that each segment left torn closes again (TASK-165.9).
     fn framed_three(dir: &MemDir) -> Vec<(Footer, u64)> {
-        create_branch_dirs(dir, BRANCH.id).unwrap();
+        create_cell_dirs(dir, CELL.id).unwrap();
         left_open(dir, 0, 1, &[commit(1, 1, 0), commit(2, 2, 0)]);
         left_open(dir, 1, 1, &[commit(3, 3, 0)]);
         left_open(dir, 2, 1, &[commit(4, 4, 0)]);
@@ -1480,7 +1479,7 @@ mod tests {
         let continued = Contents {
             continued: Some(Continued {
                 commit: tag(2, 5),
-                extents: vec![(ExtentId::new(BRANCH.id, 5), 0, 4096)],
+                extents: vec![(ExtentId::new(CELL.id, 5), 0, 4096)],
             }),
             ..Contents::default()
         };
@@ -1650,7 +1649,7 @@ mod tests {
     #[test]
     fn queues_give_what_may_upload_in_order() {
         let footer = |segment, epoch| Footer {
-            branch: BRANCH,
+            cell: CELL,
             segment,
             epoch: 2,
             contents: Contents { commits: vec![tag(2, epoch)], ..Contents::default() },
@@ -1680,7 +1679,7 @@ mod tests {
     #[test]
     fn queues_hold_acknowledged_segments_going_on_with_a_commit() {
         let footer = |segment, commits: Vec<u64>, continued: Option<u64>| Footer {
-            branch: BRANCH,
+            cell: CELL,
             segment,
             epoch: 2,
             contents: Contents {

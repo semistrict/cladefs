@@ -82,7 +82,7 @@ async-trait.workspace = true
 cladefs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
 # Panics holding a lock shared beyond one store, in tests that ask (TASK-149.24).
 local_cell = { workspace = true, features = ["testing"] }
-# Tests' branches, of a cell of their own (`layout::test_branch`, TASK-364).
+# Tests' cells, of a cell of their own (`layout::test_cell`, TASK-364).
 bucket_cell = { workspace = true, features = ["testing"] }
 # A KMS counting its calls (TASK-411.3).
 extent_keys = { workspace = true, features = ["testing"] }

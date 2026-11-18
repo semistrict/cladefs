@@ -409,10 +409,10 @@ impl Loading {
 }
 
 impl ExtentTable {
-    /// Mints an extent of `branch`, opened on `device`: open until a seal, as none can have sealed
+    /// Mints an extent of `cell`, opened on `device`: open until a seal, as none can have sealed
     /// an extent not yet minted.
-    pub(super) fn mint(&mut self, branch: u64, device: &dyn Device) -> ExtentId {
-        let extent = ExtentId::new(branch, self.next_sequence);
+    pub(super) fn mint(&mut self, cell: u64, device: &dyn Device) -> ExtentId {
+        let extent = ExtentId::new(cell, self.next_sequence);
         self.next_sequence += 1;
         self.uncommitted.insert(extent);
         device.opened(extent);
@@ -426,10 +426,10 @@ impl ExtentTable {
 
     /// Takes `len` bytes, at most STAGED_MAX, of the staging extent of `owner_object_id`, a data
     /// owner, for a transaction not yet committed, which pins it. Unless that is open on `device`,
-    /// with room, a new one of `branch` takes its place, opened on the device.
+    /// with room, a new one of `cell` takes its place, opened on the device.
     pub(super) fn stage(
         &mut self,
-        branch: u64,
+        cell: u64,
         owner_object_id: u64,
         len: u64,
         device: &dyn Device,
@@ -443,7 +443,7 @@ impl ExtentTable {
         let records = if fits {
             Records::default()
         } else {
-            self.replace_staging(branch, owner_object_id, device)
+            self.replace_staging(cell, owner_object_id, device)
         };
         let staging = self.staging.as_mut().unwrap();
         let range = ExtentRange::new(staging.extent, staging.next..staging.next + len);
@@ -452,19 +452,14 @@ impl ExtentTable {
         (range, records)
     }
 
-    /// Makes a new extent of `branch`, opened on `device`, the staging extent of
+    /// Makes a new extent of `cell`, opened on `device`, the staging extent of
     /// `owner_object_id`, in place of the last, which it no longer pins: the records that implies.
-    fn replace_staging(
-        &mut self,
-        branch: u64,
-        owner_object_id: u64,
-        device: &dyn Device,
-    ) -> Records {
+    fn replace_staging(&mut self, cell: u64, owner_object_id: u64, device: &dyn Device) -> Records {
         let records = match self.staging.take() {
             Some(old) => self.unpin(old.extent),
             None => Records::default(),
         };
-        let extent = self.mint(branch, device);
+        let extent = self.mint(cell, device);
         self.extents.insert(extent, ExtentState::Pending { pins: NonZero::<usize>::MIN, size: 0 });
         self.staging = Some(Staging { extent, owner_object_id, next: 0 });
         records
@@ -626,8 +621,8 @@ impl ExtentTable {
             };
             return Dropped { records, kept };
         }
-        // Branch 0's extents are those no allocator mints, which aren't freed.
-        if range.extent.branch != 0 {
+        // Cell 0's extents are those no allocator mints, which aren't freed.
+        if range.extent.cell != 0 {
             self.queue_dead(DeadExtent {
                 free_after: FreeAfter::Now,
                 extent: range.extent,
@@ -718,7 +713,7 @@ impl ExtentTable {
         records
     }
 
-    /// Kills the extents of `branch` with `sequences`, and those `discarded` names, of what replay
+    /// Kills the extents of `cell` with `sequences`, and those `discarded` names, of what replay
     /// read and discarded, wherever they are, that aren't alive: those a crash left, whose
     /// transactions were lost. Those `discarded` names, which a replay after may read again and
     /// verify, are freed with the next flush of the device with a record of it; the rest at once,
@@ -728,15 +723,15 @@ impl ExtentTable {
     /// many.
     pub(super) fn kill_orphans(
         &mut self,
-        branch: u64,
+        cell: u64,
         sequences: Range<u64>,
         discarded: &HashSet<ExtentId>,
     ) -> usize {
         let dying: HashSet<_> = self.dying().into_iter().collect();
         let named = (discarded.iter().copied())
-            .filter(|extent| extent.branch == branch && !sequences.contains(&extent.sequence));
+            .filter(|extent| extent.cell == cell && !sequences.contains(&extent.sequence));
         let orphans: Vec<_> = (sequences.clone())
-            .map(|sequence| ExtentId::new(branch, sequence))
+            .map(|sequence| ExtentId::new(cell, sequence))
             .chain(named)
             .filter(|extent| !self.is_alive(*extent) && !dying.contains(extent))
             .collect();
@@ -876,9 +871,9 @@ impl ExtentTable {
         self.dead.iter().map(|dead| dead.extent)
     }
 
-    /// The lowest sequence number of `branch` of the extents alive.
-    pub(super) fn lowest_sequence(&self, branch: u64) -> Option<u64> {
-        let extents = self.extents.keys().filter(|extent| extent.branch == branch);
+    /// The lowest sequence number of `cell` of the extents alive.
+    pub(super) fn lowest_sequence(&self, cell: u64) -> Option<u64> {
+        let extents = self.extents.keys().filter(|extent| extent.cell == cell);
         extents.map(|extent| extent.sequence).min()
     }
 
@@ -906,9 +901,9 @@ impl ExtentTable {
         dying
     }
 
-    /// Whether the table holds an extent of any of `branches`.
-    pub(super) fn holds_any_of(&self, branches: &HashSet<u64>) -> bool {
-        self.extents.keys().any(|extent| branches.contains(&extent.branch))
+    /// Whether the table holds an extent of any of `cells`.
+    pub(super) fn holds_any_of(&self, cells: &HashSet<u64>) -> bool {
+        self.extents.keys().any(|extent| cells.contains(&extent.cell))
     }
 
     /// The owner `extent`'s allocations are recorded under, if it is alive.
@@ -1019,7 +1014,7 @@ mod tests {
     use anyhow::anyhow;
     use std::collections::HashSet;
     use std::ops::Range;
-    use storage_device::fake_device::{DEFAULT_BRANCH, FakeDevice};
+    use storage_device::fake_device::{DEFAULT_CELL, FakeDevice};
     use storage_device::{Device, ExtentId, ExtentRange};
 
     const BS: u64 = 4096;
@@ -1088,7 +1083,7 @@ mod tests {
     fn an_extent_dies_with_its_last_allocation() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = table.mint(DEFAULT_BRANCH, &device);
+        let extent = table.mint(DEFAULT_CELL, &device);
         assert!(device.is_open(extent));
         commit(&mut table, &ExtentRange::new(extent, 0..2 * BS), Applied::Live(10));
         assert_eq!(table.alive().collect::<Vec<_>>(), [(extent, OWNER, 2 * BS)]);
@@ -1130,7 +1125,7 @@ mod tests {
     fn references_split_a_deallocation() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = table.mint(DEFAULT_BRANCH, &device);
+        let extent = table.mint(DEFAULT_CELL, &device);
         commit(&mut table, &ExtentRange::new(extent, 0..4 * BS), Applied::Live(10));
 
         // A reflink of the second block.
@@ -1165,17 +1160,17 @@ mod tests {
     async fn pins_hold_an_emptied_shared_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let (first, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (first, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert!(records.0.is_empty());
         let staging = first.extent;
         // Pending, it isn't alive, but may reach as far as staging does.
         assert!(!table.is_alive(staging));
         assert_eq!(table.extent_size(staging, &device), Some(STAGING_SIZE));
         table.check();
-        let (second, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (second, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert!(records.0.is_empty());
         assert_eq!(second, ExtentRange::new(staging, BS..2 * BS));
-        let (third, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (third, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert!(records.0.is_empty());
         assert_eq!(third, ExtentRange::new(staging, 2 * BS..3 * BS));
         commit(&mut table, &second, Applied::Live(10));
@@ -1213,8 +1208,8 @@ mod tests {
 
         // Sealed, it is replaced by the next shared allocation's, and dies.
         device.flush().await.expect("flush failed");
-        let (next, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
-        let spare = ExtentId::new(DEFAULT_BRANCH, staging.sequence + 1);
+        let (next, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
+        let spare = ExtentId::new(DEFAULT_CELL, staging.sequence + 1);
         assert_eq!(next, ExtentRange::new(spare, 0..BS));
         assert_eq!(records.0, [removed(staging, 3 * BS)]);
         assert!(!table.is_alive(staging));
@@ -1230,7 +1225,7 @@ mod tests {
     async fn a_staging_extent_nothing_committed_in_dies_unrecorded() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let (range, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (range, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert!(records.0.is_empty());
         let staging = range.extent;
         let dropped = table.drop_allocation(&range, OWNER);
@@ -1243,7 +1238,7 @@ mod tests {
 
         // Sealed, it is replaced by the next shared allocation's.
         device.flush().await.expect("flush failed");
-        let (next, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (next, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert_ne!(next.extent, staging);
         assert!(records.0.is_empty());
         assert!(!table.is_pinned(staging));
@@ -1262,8 +1257,8 @@ mod tests {
         let device = FakeDevice::new(64, BS as u32);
         for drop_first in [true, false] {
             let mut table = ExtentTable::default();
-            let (first, _) = table.stage(DEFAULT_BRANCH, OWNER, 2 * BS, &device);
-            let (second, _) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+            let (first, _) = table.stage(DEFAULT_CELL, OWNER, 2 * BS, &device);
+            let (second, _) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
             assert_eq!(second, ExtentRange::new(first.extent, 2 * BS..3 * BS));
             let kept = if drop_first {
                 let dropped = table.drop_allocation(&first, OWNER);
@@ -1291,7 +1286,7 @@ mod tests {
     fn a_dropped_allocation_kills_its_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = table.mint(DEFAULT_BRANCH, &device);
+        let extent = table.mint(DEFAULT_CELL, &device);
         let dropped = table.drop_allocation(&ExtentRange::new(extent, 0..2 * BS), OWNER);
         assert!(dropped.records.0.is_empty());
         assert_eq!(dropped.kept, 0);
@@ -1308,11 +1303,11 @@ mod tests {
     fn owners_deleted_kill_their_extents_and_the_staging_extent() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let (shared, _) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (shared, _) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         commit(&mut table, &shared, Applied::Live(10));
-        let unshared = ExtentRange::new(table.mint(DEFAULT_BRANCH, &device), 0..2 * BS);
+        let unshared = ExtentRange::new(table.mint(DEFAULT_CELL, &device), 0..2 * BS);
         commit(&mut table, &unshared, Applied::Live(20));
-        let other = ExtentRange::new(table.mint(DEFAULT_BRANCH, &device), 0..BS);
+        let other = ExtentRange::new(table.mint(DEFAULT_CELL, &device), 0..BS);
         let _ = table.commit(&other, OTHER_OWNER, Applied::Live(20)).expect("commit failed");
 
         table.kill_owners(&[OWNER], Applied::Live(30));
@@ -1332,9 +1327,9 @@ mod tests {
         table.check();
 
         // The next shared allocation takes a new staging extent.
-        let (next, records) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (next, records) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         assert!(records.0.is_empty());
-        let staging = ExtentId::new(DEFAULT_BRANCH, other.extent.sequence + 1);
+        let staging = ExtentId::new(DEFAULT_CELL, other.extent.sequence + 1);
         assert_eq!(next, ExtentRange::new(staging, 0..BS));
         table.check();
     }
@@ -1347,7 +1342,7 @@ mod tests {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
         let kill = |table: &mut ExtentTable| {
-            let extent = table.mint(DEFAULT_BRANCH, &device);
+            let extent = table.mint(DEFAULT_CELL, &device);
             let _ = table.drop_allocation(&ExtentRange::new(extent, 0..BS), OWNER);
             extent
         };
@@ -1382,7 +1377,7 @@ mod tests {
     fn extents_being_freed_are_dying() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = table.mint(DEFAULT_BRANCH, &device);
+        let extent = table.mint(DEFAULT_CELL, &device);
         commit(&mut table, &ExtentRange::new(extent, 0..BS), Applied::Live(10));
         table.kill_owners(&[OWNER], Applied::Live(20));
 
@@ -1403,7 +1398,7 @@ mod tests {
     fn a_failed_transition_changes_nothing() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = table.mint(DEFAULT_BRANCH, &device);
+        let extent = table.mint(DEFAULT_CELL, &device);
         commit(&mut table, &ExtentRange::new(extent, 0..2 * BS), Applied::Live(10));
         let second = ExtentRange::new(extent, BS..2 * BS);
         let _ = table.recount(&second, 1, Applied::Live(20)).expect("recount failed");
@@ -1424,14 +1419,14 @@ mod tests {
 
         // Nor can what isn't allocated be referenced, nor deallocated: a pending extent, an empty
         // one, or one the table doesn't hold.
-        let (shared, _) = table.stage(DEFAULT_BRANCH, OWNER, BS, &device);
+        let (shared, _) = table.stage(DEFAULT_CELL, OWNER, BS, &device);
         inconsistent(table.recount(&shared, 1, Applied::Live(40)).expect_err("recounted"));
         // Committed, then deallocated, it is empty, as staging holds it.
         commit(&mut table, &shared, Applied::Live(40));
         let _ = table.recount(&shared, -1, Applied::Live(50)).expect("recount failed");
         inconsistent(table.recount(&shared, 1, Applied::Live(60)).expect_err("recounted"));
         inconsistent(table.recount(&shared, -1, Applied::Live(60)).expect_err("recounted"));
-        let unknown = ExtentRange::new(ExtentId::new(DEFAULT_BRANCH, 1000), 0..BS);
+        let unknown = ExtentRange::new(ExtentId::new(DEFAULT_CELL, 1000), 0..BS);
         inconsistent(table.recount(&unknown, -1, Applied::Live(60)).expect_err("recounted"));
         let mut alive: Vec<_> = table.alive().collect();
         alive.sort();
@@ -1448,7 +1443,7 @@ mod tests {
     #[fuchsia::test]
     fn a_mount_loads_the_extents_alive_and_kills_the_rest() {
         let device = FakeDevice::new(64, BS as u32);
-        let [alive, empty, deleted, gone] = [1, 2, 3, 4].map(|s| ExtentId::new(DEFAULT_BRANCH, s));
+        let [alive, empty, deleted, gone] = [1, 2, 3, 4].map(|s| ExtentId::new(DEFAULT_CELL, s));
         let mut loading = Loading::default();
         for (extent, range, count, owner) in [
             (alive, 0..BS, 1, OWNER),
@@ -1480,12 +1475,12 @@ mod tests {
         );
         table.check();
 
-        let orphan = ExtentId::new(DEFAULT_BRANCH, 0);
-        assert_eq!(table.kill_orphans(DEFAULT_BRANCH, 0..2, &HashSet::new()), 1);
+        let orphan = ExtentId::new(DEFAULT_CELL, 0);
+        assert_eq!(table.kill_orphans(DEFAULT_CELL, 0..2, &HashSet::new()), 1);
         let orphaned = (orphan, FreeAfter::Now, 0, INVALID_OBJECT_ID);
         assert_eq!(table.dead_extents().last(), Some(&orphaned));
         table.mint_from(5);
-        assert_eq!(table.mint(DEFAULT_BRANCH, &device), ExtentId::new(DEFAULT_BRANCH, 5));
+        assert_eq!(table.mint(DEFAULT_CELL, &device), ExtentId::new(DEFAULT_CELL, 5));
         table.check();
     }
 
@@ -1496,15 +1491,15 @@ mod tests {
     fn orphans_die_where_sought_and_where_what_replay_discarded_names_them() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let alive = table.mint(DEFAULT_BRANCH, &device);
+        let alive = table.mint(DEFAULT_CELL, &device);
         commit(&mut table, &ExtentRange::new(alive, 0..BS), Applied::Live(0));
-        let [sought, far, other_branch] = [
-            ExtentId::new(DEFAULT_BRANCH, 20),
-            ExtentId::new(DEFAULT_BRANCH, 1 << 40),
-            ExtentId::new(DEFAULT_BRANCH + 1, 1 << 40),
+        let [sought, far, other_cell] = [
+            ExtentId::new(DEFAULT_CELL, 20),
+            ExtentId::new(DEFAULT_CELL, 1 << 40),
+            ExtentId::new(DEFAULT_CELL + 1, 1 << 40),
         ];
-        let discarded = HashSet::from([alive, far, other_branch]);
-        assert_eq!(table.kill_orphans(DEFAULT_BRANCH, 20..21, &discarded), 2);
+        let discarded = HashSet::from([alive, far, other_cell]);
+        assert_eq!(table.kill_orphans(DEFAULT_CELL, 20..21, &discarded), 2);
         let mut dead = table.dead_extents();
         dead.sort_by_key(|(extent, ..)| *extent);
         assert_eq!(
@@ -1514,7 +1509,7 @@ mod tests {
                 (far, FreeAfter::RecordedFlush(0), 0, INVALID_OBJECT_ID),
             ]
         );
-        assert_eq!(table.kill_orphans(DEFAULT_BRANCH, 20..21, &discarded), 0, "killed twice");
+        assert_eq!(table.kill_orphans(DEFAULT_CELL, 20..21, &discarded), 0, "killed twice");
         table.check();
     }
 
@@ -1525,7 +1520,7 @@ mod tests {
     fn replay_kills_an_emptied_extent_unsettled_and_revives_it() {
         let device = FakeDevice::new(64, BS as u32);
         let mut table = ExtentTable::default();
-        let extent = ExtentId::new(DEFAULT_BRANCH, 5);
+        let extent = ExtentId::new(DEFAULT_CELL, 5);
         let second = ExtentRange::new(extent, BS..2 * BS);
         commit(&mut table, &second, Applied::Replayed);
         let recount = table.recount(&second, -1, Applied::Replayed).expect("recount failed");
@@ -1553,9 +1548,9 @@ mod tests {
         let device = FakeDevice::new(64, BS as u32);
         for named in [true, false] {
             let mut compacted = ExtentTable::default();
-            let minted = compacted.mint(DEFAULT_BRANCH, &device);
+            let minted = compacted.mint(DEFAULT_CELL, &device);
             let [empty, deleted, replayed, orphan] =
-                [10, 11, 12, 13].map(|s| ExtentId::new(DEFAULT_BRANCH, s));
+                [10, 11, 12, 13].map(|s| ExtentId::new(DEFAULT_CELL, s));
             let mut loading = Loading::default();
             loading.add(&AllocatorKey::new(empty, 0..BS), 0, OWNER).expect("add failed");
             loading.add(&AllocatorKey::new(deleted, 0..BS), 1, OTHER_OWNER).expect("add failed");
@@ -1569,7 +1564,7 @@ mod tests {
             let discarded = if named { HashSet::from(all) } else { HashSet::new() };
             table.settle_replay(&discarded);
             let sought = orphan.sequence..orphan.sequence + 1;
-            assert_eq!(table.kill_orphans(DEFAULT_BRANCH, sought, &discarded), 1);
+            assert_eq!(table.kill_orphans(DEFAULT_CELL, sought, &discarded), 1);
 
             let recorded = FreeAfter::RecordedFlush(0);
             let mount = if named { recorded } else { FreeAfter::Now };

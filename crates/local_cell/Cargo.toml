@@ -50,7 +50,7 @@ workspace = true
 shuttle = ["dep:shuttle", "audit"]
 # cladefs: the store recounts each count it keeps of its state as each critical section ends, and
 # panics if one drifted (State::audit, TASK-160.16): for tests, whose stores are small, as it goes
-# through all the branch holds each time. Its own tests, the Shuttle and crash tests among them,
+# through all the cell holds each time. Its own tests, the Shuttle and crash tests among them,
 # turn it on.
 audit = []
 # cladefs: tests' panics holding a lock shared beyond one store (shared::testing, TASK-149.24): cladefs's

@@ -100,7 +100,7 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
 /// footer pass their checks. Its parts are checked as they are read. cladefs: by a reader holding
-/// `keys`, the store's branch's (TASK-411.3).
+/// `keys`, the store's cell's (TASK-411.3).
 pub(crate) fn read_frame<F: File>(
     file: &F,
     keys: &dyn Keys,
@@ -125,7 +125,7 @@ pub(crate) fn read_frame<F: File>(
 /// cladefs: the parts of the framed file `file`, if its trailer and table pass their checks: read
 /// from the blocks they are in alone, the last, but for a table that begins before them, and not
 /// its footer, which reading its data needs not (TASK-92.2). Its parts are checked as they are
-/// read. cladefs: by a reader holding `keys`, the store's branch's (TASK-411.3).
+/// read. cladefs: by a reader holding `keys`, the store's cell's (TASK-411.3).
 pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     let size = file.size()?;
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -158,7 +158,7 @@ impl<F: File> Framed<F> {
     }
 
     /// The framed file `file`, which must be whole, as far as its trailer and table say; `path`
-    /// names it. cladefs: read holding `keys`, the store's branch's (TASK-411.3).
+    /// names it. cladefs: read holding `keys`, the store's cell's (TASK-411.3).
     pub(crate) fn open(file: F, path: &str, keys: &dyn Keys) -> Result<Self, Error> {
         match read_parts(&file, keys).with_context(|| path.to_owned())? {
             Some(parts) => Ok(Self::new(Arc::new(file), parts)),
@@ -493,7 +493,7 @@ mod tests {
         let bytes = extent_frame::framed(
             &[7; 4096],
             &[],
-            bucket_cell::testing::encrypting(bucket_cell::layout::test_branch(1)),
+            bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
         );
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
@@ -522,7 +522,7 @@ mod tests {
             let bytes = extent_frame::framed(
                 &[key as u8; 4096],
                 &[],
-                bucket_cell::testing::encrypting(bucket_cell::layout::test_branch(1)),
+                bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
             );
             file.write_at(&bytes, 0).unwrap();
             Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))

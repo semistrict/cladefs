@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # Run scripts/test-e2e.sh's cases, as it selects them by its arguments, with their extent daemons'
-# branches in an S3 bucket on this machine, as production keeps them in object storage: RustFS
+# cells in an S3 bucket on this machine, as production keeps them in object storage: RustFS
 # (github.com/rustfs/rustfs, Apache-2.0), as scripts/lib/rustfs.sh starts it, a process,
 # its bucket s3://cladefs/e2e (CLADEFSD_BUCKET), its address and credentials in AWS_*, which
 # the cases' own daemons find it by too; stopped at the end. Its objects are in CLADEFS_RUSTFS_DATA,

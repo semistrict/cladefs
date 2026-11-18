@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Fxfs devices on an extent store (crates/local_cell, backlog doc-4): the writer's, on the
-//! store's branch, and a follower's, on a view of it ([`local_cell::View`]), read-only, as of the
+//! store's cell, and a follower's, on a view of it ([`local_cell::View`]), read-only, as of the
 //! view's commit. Extents' I/O, commits and frees go to the store directly, as its locks are
 //! Shuttle's in the simulation (cladefs's own image device moves them off Fxfs's threads instead).
 
@@ -34,7 +34,7 @@ impl Drop for LetGo {
     }
 }
 
-/// The writer's device: the store's branch. A flush commits the store, durably.
+/// The writer's device: the store's cell. A flush commits the store, durably.
 pub struct CellDevice<D: Dir> {
     store: Arc<LocalCell<D>>,
     description: Description,
@@ -92,8 +92,8 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
         Ok(())
     }
 
-    fn branch(&self) -> u64 {
-        self.description.branch.id
+    fn cell(&self) -> u64 {
+        self.description.cell.id
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {
@@ -125,7 +125,7 @@ impl<D: Dir + 'static> Device for CellDevice<D> {
     }
 }
 
-/// A follower's device: a view of the store's branch, as of its commit, read-only. Extents its
+/// A follower's device: a view of the store's cell, as of its commit, read-only. Extents its
 /// commit doesn't hold read as `NoExtent`, so Fxfs's journal replay ends at the view's commit.
 /// Advancing moves the view to the latest commit, holding what the commits since the one it was
 /// as of held until the follower lets go of them: what applying them, and its readers, read.
@@ -216,8 +216,8 @@ impl<D: Dir + 'static> Device for ViewDevice<D> {
         bail!("a follower's device is read-only: a write of {extent:?}")
     }
 
-    fn branch(&self) -> u64 {
-        self.description.branch.id
+    fn cell(&self) -> u64 {
+        self.description.cell.id
     }
 
     async fn next_sequence(&self) -> Result<u64, Error> {

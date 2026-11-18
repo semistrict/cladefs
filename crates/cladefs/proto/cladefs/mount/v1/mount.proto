@@ -62,8 +62,8 @@ service Mount {
 message AttachRequest {
   // The tenant.
   uint64 tenant = 1;
-  // Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket and its branch's
-  // too, the bucket gives.
+  // Its cell, or 0 for a new cell of the tenant's, whose ID, unique in the bucket, the bucket
+  // gives.
   uint64 cell = 2;
   // The fencing token of the placement to take the cell at, if any: as CreateCell's.
   optional uint64 token = 3;
@@ -76,9 +76,8 @@ message AttachResponse {
   // The cell: the one asked for, or the new one made.
   uint64 cell = 1;
   reserved 2;
-  // The cell's branch, if it is shown; 0 if it is not, a cell of another kind, or of no branch
-  // yet.
-  uint64 branch = 3;
+  // Whether it is shown: not a cell of another kind, or of no kind yet.
+  bool shown = 3;
 }
 
 // What to detach.
@@ -111,8 +110,8 @@ message AttachedCell {
   // Its cell.
   uint64 cell = 2;
   reserved 3;
-  // The cell's branch, if it is shown; 0 if not.
-  uint64 branch = 4;
+  // Whether it is shown.
+  bool shown = 4;
   // Whether it is being detached.
   bool detaching = 5;
 }

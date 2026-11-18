@@ -279,7 +279,7 @@ async fn serve<S: Backend>(
             Ok(returned)
         }
         VIRTIO_EXTENT_T_INFO => {
-            // cladefs: the whole of it, the branch too, which a driver without F_FREEZE had no room
+            // cladefs: the whole of it, the cell too, which a driver without F_FREEZE had no room
             // for, served before: a driver of this protocol has (TASK-141.3).
             if room < size_of::<Info>() {
                 return Err(Errno::EINVAL);
@@ -291,7 +291,7 @@ async fn serve<S: Backend>(
                 available: info.available.to_le(),
                 next_sequence: info.next_sequence.to_le(),
                 sequence_floor: info.sequence_floor.to_le(),
-                branch: store.branch().to_le(),
+                cell: store.cell().to_le(),
             };
             writer.obj(0, &info);
             Ok(size_of::<Info>())
@@ -399,7 +399,7 @@ mod linux {
     impl std::fmt::Debug for Requests {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("Requests")
-                .field("branch", &self.store.branch())
+                .field("cell", &self.store.cell())
                 .field("cache", &self.cache)
                 .field("bounds", &self.bounds)
                 .field("serving", &self.serving)
@@ -587,11 +587,11 @@ mod tests {
         }
     }
 
-    const BRANCH: u64 = 7;
+    const CELL: u64 = 7;
 
     impl Backend for FakeBackend {
-        fn branch(&self) -> u64 {
-            BRANCH
+        fn cell(&self) -> u64 {
+            CELL
         }
 
         fn copies_on_write(&self) -> bool {
@@ -633,7 +633,7 @@ mod tests {
             }
             let len: usize = buffers.iter().map(VolatileSlice::len).sum();
             state.extent_range("WRITE", offset, len as u64)?;
-            if extent.branch != BRANCH {
+            if extent.cell != CELL {
                 return Err(Errno::EPERM);
             }
             let (data, sealed) = state.extents.entry(extent).or_default();
@@ -821,7 +821,7 @@ mod tests {
 
     fn io(sequence: u64, offset: u64, len: usize) -> IoArgs {
         IoArgs {
-            id: ExtentIdLe { branch: BRANCH.to_le(), sequence: sequence.to_le() },
+            id: ExtentIdLe { cell: CELL.to_le(), sequence: sequence.to_le() },
             offset: offset.to_le(),
             len: (len as u32).to_le(),
             root_len: 0,
@@ -829,7 +829,7 @@ mod tests {
     }
 
     fn id(sequence: u64) -> ExtentId {
-        ExtentId { branch: BRANCH, sequence }
+        ExtentId { cell: CELL, sequence }
     }
 
     /// Writes and reads move the bytes the driver gave, across descriptors of any size; a commit
@@ -918,7 +918,7 @@ mod tests {
     }
 
     /// ROOT writes the root, zeros to its most, and its length; COMMIT with COMMIT_ROOT sets it;
-    /// INFO writes the store's whole, the branch too, refusing room for less (TASK-141.3).
+    /// INFO writes the store's whole, the cell too, refusing room for less (TASK-141.3).
     #[test]
     fn roots_and_info_are_written_whole() {
         let store = FakeBackend::default();
@@ -947,10 +947,10 @@ mod tests {
             available: (1u64 << 20).to_le(),
             next_sequence: 3u64.to_le(),
             sequence_floor: (1u64 << 40).to_le(),
-            branch: BRANCH.to_le(),
+            cell: CELL.to_le(),
         };
         assert_eq!(read_obj::<Info>(&written), expected);
-        let short = std::mem::offset_of!(Info, branch);
+        let short = std::mem::offset_of!(Info, cell);
         assert_eq!(request(&store, &info, short + RESPONSE).1, errno(Errno::EINVAL));
     }
 
@@ -960,7 +960,7 @@ mod tests {
     fn maps_carry_their_pieces() {
         let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let map = |sequence: u64, offset: u64, len: u64, window_offset: u64| MapArgs {
-            id: ExtentIdLe { branch: BRANCH.to_le(), sequence: sequence.to_le() },
+            id: ExtentIdLe { cell: CELL.to_le(), sequence: sequence.to_le() },
             offset: offset.to_le(),
             len: len.to_le(),
             window_offset: window_offset.to_le(),
@@ -1139,7 +1139,7 @@ mod tests {
             assert_eq!(request(&store, &read, writable), refused, "{offset:#x} {len:#x}");
         }
         let map = |offset: u64, len: u64, window_offset: u64| MapArgs {
-            id: ExtentIdLe { branch: BRANCH.to_le(), sequence: 1u64.to_le() },
+            id: ExtentIdLe { cell: CELL.to_le(), sequence: 1u64.to_le() },
             offset: offset.to_le(),
             len: len.to_le(),
             window_offset: window_offset.to_le(),
@@ -1191,7 +1191,7 @@ mod tests {
     }
 
     /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and
-    /// flags it may name, of extents of its branch or another's, at offsets near the store's ends
+    /// flags it may name, of extents of its cell or another's, at offsets near the store's ends
     /// or at the ends of a u64, the device answers it, with a status, no more than the room it was
     /// given written. Seeded by proptest, which says the case if one fails.
     #[test]
@@ -1209,8 +1209,8 @@ mod tests {
                 (0u64..4096).prop_map(|back| u64::MAX - back)
             ]
         };
-        let branch = prop_oneof![Just(BRANCH), any::<u64>()];
-        let args = (branch, 0u64..64, near_or_far(), near_or_far(), any::<u32>());
+        let cell = prop_oneof![Just(CELL), any::<u64>()];
+        let args = (cell, 0u64..64, near_or_far(), near_or_far(), any::<u32>());
         let word = || prop_oneof![0u32..18, any::<u32>()];
         let data = proptest::collection::vec(any::<u8>(), 0..8192);
         let requests = (word(), word(), args, data, 0usize..16384, 1usize..4096);
@@ -1219,9 +1219,9 @@ mod tests {
         let config = Config { cases, failure_persistence: None, ..Config::default() };
         TestRunner::new(config)
             .run(&requests, |(type_, flags, args, data, room, split)| {
-                let (branch, sequence, first, second, last) = args;
+                let (cell, sequence, first, second, last) = args;
                 let mut readable = bytes::<Info>(type_, flags, None, &[]);
-                for word in [branch, sequence, first, second, u64::from(last)] {
+                for word in [cell, sequence, first, second, u64::from(last)] {
                     readable.extend_from_slice(&word.to_le_bytes());
                 }
                 readable.extend_from_slice(&data);
@@ -1295,7 +1295,7 @@ mod tests {
         let config = Config { cases, failure_persistence: None, ..Config::default() };
         TestRunner::new(config)
             .run(&kinds, |(kind, offset, len, window_offset)| {
-                let id = ExtentIdLe { branch: BRANCH.to_le(), sequence: 1u64.to_le() };
+                let id = ExtentIdLe { cell: CELL.to_le(), sequence: 1u64.to_le() };
                 let map = MapArgs {
                     id,
                     offset: offset.to_le(),

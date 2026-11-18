@@ -116,9 +116,9 @@ pub trait Dir: Send + Sync + 'static {
     fn barrier(&self) -> io::Result<()>;
 
     /// Takes the directory for this process, against other processes' takings of it: what a
-    /// process holds while it has branches of the store open, or opens or deletes them, so that
+    /// process holds while it has cells of the store open, or opens or deletes them, so that
     /// two processes never change one store at once. It waits a while for another process to let
-    /// it go, as one whose last branch is closing does. A directory no other process sees takes
+    /// it go, as one whose last cell is closing does. A directory no other process sees takes
     /// nothing.
     fn take(&self) -> io::Result<()> {
         Ok(())
@@ -195,7 +195,7 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The trade-off: a sync on macOS is durable as it returns against the store's process or the
 /// host's kernel crashing, as on Linux, but against the drive losing power only once a barrier
 /// follows; and each point at which the store says that what it wrote is durable ends in one: a
-/// flush, a closing between commits, a branch's record, an index's first checkpoint. A plain
+/// flush, a closing between commits, a cell's record, an index's first checkpoint. A plain
 /// `fsync` would leave the order to the drive as well, so that a power loss could keep a commit's
 /// record, synced after its data, without the data. macOS is a development host: stores run on
 /// Linux.
@@ -414,7 +414,7 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
         if std::time::Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
-                "another process has the store's branches open",
+                "another process has the store's cells open",
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));

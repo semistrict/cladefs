@@ -43,7 +43,7 @@
 #define VIRTIO_EXTENT_F_RESIZE 3
 /*
  * FREEZE tells the device the filesystem is frozen, or thawed: a snapshot of the VM is taken
- * frozen, and a VM restored from it, whose store is a fork of its own, learns its branch, which
+ * frozen, and a VM restored from it, whose store is a fork of its own, learns its cell, which
  * INFO says, as its filesystem thaws (cladefs's TASK-39.1).
  */
 #define VIRTIO_EXTENT_F_FREEZE 4
@@ -152,7 +152,7 @@ struct virtio_extent_config {
 	__le32 max_transfer;
 	__le32 max_segments;
 	__le32 max_root;
-	__le64 branch;
+	__le64 cell;
 	__le64 max_extent;
 	/* F_RESIZE: the store's capacity, and the shrink the guest is asked to take, or 0. */
 	__le64 capacity;
@@ -166,7 +166,7 @@ struct virtio_extent_config {
 } __packed;
 
 struct virtio_extent_id {
-	__le64 branch;
+	__le64 cell;
 	__le64 sequence;
 };
 
@@ -250,8 +250,8 @@ struct virtio_extent_info {
 	__le64 next_sequence;
 	/* The lowest sequence number to mint from: its writer's range's start. */
 	__le64 sequence_floor;
-	/* F_FREEZE: the branch the guest mints extents of, its store's. */
-	__le64 branch;
+	/* F_FREEZE: the cell the guest mints extents of, its store's. */
+	__le64 cell;
 };
 
 #ifdef __KERNEL__
@@ -264,7 +264,7 @@ struct dax_device;
 
 /* An extent's ID, in the CPU's byte order. */
 struct vext_id {
-	u64 branch;
+	u64 cell;
 	u64 sequence;
 };
 
@@ -277,7 +277,7 @@ struct vext_config {
 	/* The most pages one request's data spans: the device's limit, or the queue's. */
 	u32 max_segments;
 	u32 max_root;
-	u64 branch;
+	u64 cell;
 	u64 max_extent;
 	/* F_DAX: the most private pages the device holds at once, or 0 without it. */
 	u64 private_max;
@@ -375,7 +375,7 @@ struct dax_device *virtio_extent_dax(struct virtio_extent *vext, u64 *window_len
 u64 virtio_extent_private_max(struct virtio_extent *vext);
 /* Whether a WRITE may carry WRITE_COMMIT (F_WRITE_COMMIT). */
 bool virtio_extent_write_commit(struct virtio_extent *vext);
-/* Whether the device takes FREEZE, and INFO says the branch. */
+/* Whether the device takes FREEZE, and INFO says the cell. */
 bool virtio_extent_freeze(struct virtio_extent *vext);
 /* Whether a FREE may carry FREE_MANY (F_FREE_MANY). */
 bool virtio_extent_free_many(struct virtio_extent *vext);
@@ -395,7 +395,7 @@ u64 virtio_extent_committed(struct virtio_extent *vext);
  * from opening it once it was cut off (doc-4). virtio_extent_close, as its filesystem unmounts,
  * nothing in flight that any task waits for, resets the device, which lets the store go.
  * virtio_extent_open, as one mounts, has the device open the store anew, as of its writer's latest
- * commit, and reads its branch again: 0, or -EBUSY if it couldn't, which another call may yet.
+ * commit, and reads its cell again: 0, or -EBUSY if it couldn't, which another call may yet.
  * Neither does anything to a writer's device, nor to one open or closed already.
  */
 void virtio_extent_close(struct virtio_extent *vext);

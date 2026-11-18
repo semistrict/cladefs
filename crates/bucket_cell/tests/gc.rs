@@ -23,7 +23,7 @@ fn host_kms<B: bucket_cell::Bucket>(bucket: &Arc<B>) -> Arc<bucket_cell::keys::C
 }
 
 /// The tests' cell `id`, of tenant 1.
-fn test_branch(id: u64) -> bucket_cell::layout::CellId {
+fn test_cell(id: u64) -> bucket_cell::layout::CellId {
     bucket_cell::layout::CellId { tenant: 1, id }
 }
 
@@ -72,8 +72,8 @@ fn collects_a_bucket_once() {
 }
 
 /// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect or
-/// to delete a branch, before it touches the bucket, naming both variables: every cell is encrypted,
-/// and compacting needs its KEK. What reads no data, a dry run, `--branches`, `--usage`, needs
+/// to delete a cell, before it touches the bucket, naming both variables: every cell is encrypted,
+/// and compacting needs its KEK. What reads no data, a dry run, `--cells`, `--usage`, needs
 /// none.
 #[test]
 fn refuses_to_collect_without_a_kms() {
@@ -86,18 +86,16 @@ fn refuses_to_collect_without_a_kms() {
     for args in [
         &["memory:///"][..],
         &["memory:///", "--mark-only"],
-        &["memory:///", "--delete-branch", "1/1/1"],
+        &["memory:///", "--delete-cell", "1/1/1"],
     ] {
         let out = keyless(args);
         assert_eq!(String::from_utf8_lossy(&out.stderr), refused, "{args:?}");
         assert_eq!(out.status.code(), Some(1), "{args:?}");
     }
     assert!(refused.contains("CLADEFS_KMS") && refused.contains("CLADEFS_MASTER_KEY"));
-    for args in [
-        &["memory:///", "--dry-run"][..],
-        &["memory:///", "--branches"],
-        &["memory:///", "--usage"],
-    ] {
+    for args in
+        [&["memory:///", "--dry-run"][..], &["memory:///", "--cells"], &["memory:///", "--usage"]]
+    {
         assert!(keyless(args).status.success(), "{args:?}");
     }
 }
@@ -126,35 +124,35 @@ fn sweeps_write_their_metrics() {
     assert!((1 << 20..1 << 34).contains(&peak), "a process's memory, at most: {peak}");
 }
 
-/// TASK-79.85: a bucket (in memory: empty) has no live branches, and a branch is deleted, as an
+/// TASK-79.85: a bucket (in memory: empty) has no live cells, and a cell is deleted, as an
 /// operator's commands do them.
 #[test]
-fn lists_and_deletes_branches() {
-    let out = gc(&["memory:///", "--branches"]);
+fn lists_and_deletes_cells() {
+    let out = gc(&["memory:///", "--cells"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
     assert!(out.status.success());
-    let out = gc(&["memory:///", "--delete-branch", "1/1/ff"]);
+    let out = gc(&["memory:///", "--delete-cell", "1/1/ff"]);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(out.status.success());
 }
 
 /// cladefs: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
-/// it reclaims the branch's segments its checkpoint covers, which hold no live extent (the one
-/// holding what it freed, the one freeing it), and lists the branch.
+/// it reclaims the cell's segments its checkpoint covers, which hold no live extent (the one
+/// holding what it freed, the one freeing it), and lists the cell.
 #[test]
 fn collects_a_file_bucket() {
     use bucket_cell::batch::{Commit, SegmentBuilder};
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, branch};
+    use bucket_cell::{Writer, lifecycle};
     use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
     futures::executor::block_on(async {
         let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let kms = host_kms(&bucket);
-        let writer = Writer::open_under(bucket, test_branch(1), (10, 1), &kms).await.unwrap();
+        let writer = Writer::open_under(bucket, test_cell(1), (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
@@ -208,22 +206,22 @@ fn collects_a_file_bucket() {
     });
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000001/cells/0000000000001";
-    let branch = "0000000000001";
+    let cell = "0000000000001";
     // Its head, which names its checkpoint (TASK-407); cladefs: its cell's object, keeping its
     // KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
     let kept = [
-        format!("{at}/branches/{branch}"),
+        format!("{at}/cells/{cell}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{branch}/0000000000001.0000000000001"),
-        format!("{at}/heads/{branch}"),
+        format!("{at}/checkpoints/{cell}/0000000000001.0000000000001"),
+        format!("{at}/heads/{cell}"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(left, kept);
-    let out = gc(&[&url, "--branches"]);
+    let out = gc(&[&url, "--cells"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1/1\n");
-    let out = gc(&[&url, "--branches", "--cell", "1/1"]);
+    let out = gc(&[&url, "--cells", "--cell", "1/1"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1/1/1\n");
-    let out = gc(&[&url, "--branches", "--cell", "1/2"]);
+    let out = gc(&[&url, "--cells", "--cell", "1/2"]);
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
 }
 
@@ -234,16 +232,16 @@ fn collects_a_file_bucket() {
 fn dry_runs_and_mark_only_passes_delete_nothing() {
     use bucket_cell::batch::{Commit, SegmentBuilder};
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, branch};
+    use bucket_cell::{Writer, lifecycle};
     use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
     futures::executor::block_on(async {
         let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
         let kms = host_kms(&bucket);
-        let writer = Writer::open_under(bucket, test_branch(1), (10, 1), &kms).await.unwrap();
+        let writer = Writer::open_under(bucket, test_cell(1), (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
@@ -271,10 +269,10 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     };
     let before = files();
     let out = gc(&[&url, "--dry-run", "--grace", "0"]);
-    let branch = "0000000000001";
+    let cell = "0000000000001";
     let segment = |number: u64| {
         format!(
-            "tenants/{branch}/cells/{branch}/segments/{branch}/0000000000001.{number}",
+            "tenants/{cell}/cells/{cell}/segments/{cell}/0000000000001.{number}",
             number = base32_id::Padded(number)
         )
     };
@@ -337,12 +335,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let kept = [
         // The word that the bucket is marked, which an operator removes with the marks.
         bucket_cell::layout::MARKING.to_owned(),
-        format!("{at}/branches/{branch}"),
+        format!("{at}/cells/{cell}"),
         format!("{at}/cell"),
-        format!("{at}/checkpoints/{branch}/0000000000001.0000000000001"),
+        format!("{at}/checkpoints/{cell}/0000000000001.0000000000001"),
         format!("{at}/gc/lease"),
         marks,
-        format!("{at}/heads/{branch}"),
+        format!("{at}/heads/{cell}"),
         "tenants/0000000000001/kek".to_owned(),
     ];
     assert_eq!(names, kept);
@@ -363,7 +361,7 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 
 /// TASK-394, TASK-395.8: `--usage` over a bucket on the host's filesystem says what each cell
 /// takes, by kind, as the last pass over it found it, which matches a listing of the cell after it:
-/// what the branches wrote, less what the pass deleted; when the pass listed it; nothing of a cell
+/// what the cells wrote, less what the pass deleted; when the pass listed it; nothing of a cell
 /// no pass went over; and each tenant's sum after its cells. `--tenant` says one tenant's. It
 /// writes nothing, the probe of conditional writes neither.
 #[test]
@@ -372,7 +370,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use bucket_cell::batch::{Commit, SegmentBuilder};
     use bucket_cell::layout::{self, CellId};
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Writer, branch};
+    use bucket_cell::{Writer, lifecycle};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use storage_device::ExtentId;
@@ -388,14 +386,14 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let unpassed = CellId { tenant: 1, id: 0x30 };
     futures::executor::block_on(async {
         for (id, cell) in cells.into_iter().enumerate() {
-            branch::create(&*bucket, CellId { tenant: cell.tenant, id: id as u64 + 1 }, 0)
+            lifecycle::create(&*bucket, CellId { tenant: cell.tenant, id: id as u64 + 1 }, 0)
                 .await
                 .unwrap();
         }
         // In the first cell, a segment written and one freeing it: what the pass deletes.
         let kms = host_kms(&bucket);
-        let branch = CellId { tenant: (cells[0]).tenant, id: 1 };
-        let writer = Writer::open_under(bucket.clone(), branch, (10, 1), &kms).await.unwrap();
+        let cell = CellId { tenant: (cells[0]).tenant, id: 1 };
+        let writer = Writer::open_under(bucket.clone(), cell, (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
@@ -426,7 +424,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert!(slowest.starts_with("cladefs-gc: took T s; slowest: "), "{slowest}");
     let after = now().as_millis() as u64;
     // A cell made after the pass, which no pass went over.
-    futures::executor::block_on(branch::create(
+    futures::executor::block_on(lifecycle::create(
         &*bucket,
         CellId { tenant: unpassed.tenant, id: 4 },
         0,
@@ -528,17 +526,17 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(after, listed);
 }
 
-/// TASK-411.14: `--delete-branch` of an encrypted branch whose fork into another cell has no record
+/// TASK-411.14: `--delete-cell` of an encrypted cell whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
-/// checkpoint at the origin authenticated under the branch's DEK, its cell's KEK unwrapped by
+/// checkpoint at the origin authenticated under the cell's DEK, its cell's KEK unwrapped by
 /// the KMS `CLADEFS_KMS` names. TASK-411.28: without a KMS, it refuses to start, naming
-/// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the branch as it was; run again with one, it deletes it.
+/// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the cell as it was; run again with one, it deletes it.
 #[test]
-fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
+fn deletes_encrypted_cells_recording_their_forks_into_other_cells_under_the_kms() {
     use bucket_cell::batch::{Commit, SegmentBuilder};
     use bucket_cell::layout::{self, CellId, Child, Origin};
     use bucket_cell::object_bucket::ObjectBucket;
-    use bucket_cell::{Bucket as _, Writer, branch, cell, keys};
+    use bucket_cell::{Bucket as _, Writer, cell, keys, lifecycle};
     use extent_frame::{Encryption, Frame, KeyId};
     use extent_keys::kms::LocalKms;
     use futures::executor::block_on;
@@ -552,7 +550,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
     let kms_dir = dir.path().join("kms");
     let local = Arc::new(LocalKms::open(&kms_dir).unwrap());
     local.create(1).unwrap();
-    let parent = test_branch(1);
+    let parent = test_cell(1);
     let child = CellId { tenant: 1, id: 9 };
     let at = block_on(async {
         let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
@@ -562,8 +560,8 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
         let making = Some(&kek.1);
         let (_, object) = cell::hold(&*bucket, parent, (5, 5), making, None).await.unwrap();
         let cell_keys = keys::held(&host, parent, object, Some(kek));
-        branch::create(&*bucket, parent, 0).await.unwrap();
-        let record = branch::record(&*bucket, parent).await.unwrap().unwrap();
+        lifecycle::create(&*bucket, parent, 0).await.unwrap();
+        let record = lifecycle::record(&*bucket, parent).await.unwrap().unwrap();
         let record = keys::with_dek(&*bucket, &cell_keys, parent, record).await.unwrap();
         let ring = keys::ring(&*bucket, &cell_keys, parent, &record, true).await.unwrap();
         let writer = Writer::open_keyed(bucket.clone(), parent, (10, 1), ring.clone());
@@ -578,7 +576,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
         // swaps it (TASK-407); its writer dies before it records the child.
         let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let forked = Child { branch: child, owner: 0x109 };
+        let forked = Child { cell: child, owner: 0x109 };
         let forking = forking.fork(forked, &mut writer.chain());
         let at = writer.add_segment(forking.frame(ring.encrypting())).unwrap();
         writer.upload(at).await.unwrap();
@@ -589,7 +587,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
         at
     });
     let bucket = ObjectBucket::from_url(&url).unwrap();
-    let record = |branch| block_on(branch::record(&bucket, branch)).unwrap();
+    let record = |cell| block_on(lifecycle::record(&bucket, cell)).unwrap();
     let checkpoints = || {
         let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.prefix())));
         listed.unwrap().into_iter().map(|meta| meta.key).collect::<Vec<_>>()
@@ -597,7 +595,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
     assert_eq!(record(child), None);
     let delete = |kms: Option<&std::path::Path>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
-        command.args([url.as_str(), "--delete-branch", "1/1/1"]).env_remove("CLADEFS_KMS");
+        command.args([url.as_str(), "--delete-cell", "1/1/1"]).env_remove("CLADEFS_KMS");
         command.env_remove("CLADEFS_MASTER_KEY").env_remove("CLADEFS_MASTER_KEY_FILE");
         if let Some(kms) = kms {
             command.env("CLADEFS_KMS", format!("local://{}", kms.display()));
@@ -625,7 +623,7 @@ fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_k
     let Encryption::Authenticated { key, .. } = encryption else {
         panic!("{checkpoint}: {encryption:?}")
     };
-    assert_eq!(key, KeyId { branch: 1, generation: keys::FIRST });
+    assert_eq!(key, KeyId { cell: 1, generation: keys::FIRST });
 }
 
 /// TASK-411.27: `--rotate-master-key` rewraps every tenant's KEK object under the newest master
@@ -726,8 +724,8 @@ fn without_a_bucket_prints_its_usage() {
     let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
                  [--grace SECONDS] [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] \
                  [--metrics FILE] | cladefs-gc URL [--cell TENANT/CELL] \
-                 --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc URL --branches \
-                 [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-branch \
+                 --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc URL --cells \
+                 [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-cell \
                  TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] | cladefs-gc URL \
                  --rotate-master-key (every cell, or the one --cell names; \
                  --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the bucket \

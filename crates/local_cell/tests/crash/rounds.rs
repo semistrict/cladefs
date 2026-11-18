@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use storage_device::{ExtentId, SealedExtent};
 
 pub const BLOCK: usize = 4096;
-pub const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(3);
+pub const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(3);
 /// How many recovering rounds the tests run.
 pub const ROUNDS: u64 = 300;
 const STEPS: usize = 200;
@@ -101,7 +101,7 @@ struct Run<'a> {
 impl Run<'_> {
     /// A new extent of `data`.
     fn write_new(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
-        let extent = ExtentId::new(self.store.description().branch.id, self.next_sequence);
+        let extent = ExtentId::new(self.store.description().cell.id, self.next_sequence);
         self.next_sequence += 1;
         let result = self.store.write(extent, 0, &data);
         if result.is_ok() {
@@ -231,7 +231,7 @@ fn contents(store: &LocalCell<MemDir>) -> Model {
 /// on.
 fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng) {
     let mut rng = StdRng::seed_from_u64(round);
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
     let mut epochs = vec![Model::default()];
     dir.fail_after(Some(rng.random_range(0..600)));
@@ -263,9 +263,9 @@ fn digest(dir: &MemDir) -> Digest {
                 let file = dir.open(&path, false).unwrap();
                 let mut data = vec![0; file.size().unwrap() as usize];
                 file.read_at(&mut data, 0).unwrap();
-                let keys = bucket_cell::testing::ring([BRANCH]);
+                let keys = bucket_cell::testing::ring([CELL]);
                 let opened = match path.starts_with("segments/") || path.starts_with("extents/") {
-                    true => extent_frame::data(&data, &keys.of(BRANCH.id)).ok(),
+                    true => extent_frame::data(&data, &keys.of(CELL.id)).ok(),
                     false => None,
                 };
                 Some((data.len() as u64, opened.map_or(0, |data| rapidhash::rapidhash(&data))))

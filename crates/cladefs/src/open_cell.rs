@@ -13,7 +13,7 @@
 //! store and window in the process shares: each a table of its pages, which are read in from the
 //! store as they are first read or mapped, and evicted as memory runs out. Windows map them
 //! read-only: one copy of each page, whichever store or fork maps it, as an extent never changes
-//! once sealed, its ID its branch's to write once, which the store keeps to (TASK-79.6). Its pages
+//! once sealed, its ID its cell's to write once, which the store keeps to (TASK-79.6). Its pages
 //! are read from any of the stores that asked for it, open still, that hold it (TASK-79.7). Reads
 //! of sealed extents read it too (TASK-32): the guest's filesystem reads its metadata, which it
 //! maps not, so a fork reads what its base's other forks read before from memory, not the store.
@@ -31,7 +31,7 @@ use crate::dax::{Dax, DaxMapping, DaxWindow, SecondStage, Source};
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
 use crate::halt::{CellGuard, CellMutex, Halt, StoreRwLock};
-use crate::host_cell::{self, BranchOf};
+use crate::host_cell::{self, CellOf};
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
 use crate::profile::{self, Recorder};
@@ -46,7 +46,7 @@ use local_cell::{
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
+use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 /// What a store holds, as doc-4's `INFO` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +57,7 @@ pub struct ExtentInfo {
     pub used: u64,
     /// The bytes it can still take.
     pub available: u64,
-    /// One more than the highest sequence number of the extents the store's branch holds, as of
+    /// One more than the highest sequence number of the extents the store's cell holds, as of
     /// its opening, and of those written since: where fxfs looks for orphans below. A number
     /// freed past it is minted no more, its writer minting from [`Info::sequence_floor`]
     /// (TASK-165.9).
@@ -67,8 +67,8 @@ pub struct ExtentInfo {
     pub sequence_floor: u64,
 }
 
-/// cladefs: what a store's branch holds, and whose it is: the bytes its extents hold (TASK-49), what
-/// billing a store alone charges it and what it shares with the branches it was forked from; and
+/// cladefs: what a store's cell holds, and whose it is: the bytes its extents hold (TASK-49), what
+/// billing a store alone charges it and what it shares with the cells it was forked from; and
 /// how many extents they are (TASK-454), which what an open store holds in memory grows with
 /// (TASK-443.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -82,9 +82,9 @@ pub struct CellHolding {
 /// cladefs: a count of what a store holds ([`CellHolding`]), split by whose it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Whose {
-    /// Of the extents its branch wrote.
+    /// Of the extents its cell wrote.
     pub own: u64,
-    /// Of the extents it inherited from the branches it was forked from, which may still share
+    /// Of the extents it inherited from the cells it was forked from, which may still share
     /// them.
     pub inherited: u64,
 }
@@ -123,7 +123,7 @@ pub enum MappingContents {
 pub struct CellAccess {
     /// Who writes it.
     pub role: CellRole,
-    /// Whether its branch is public ([`OpenCell::make_public`]): a base every tenant's VM
+    /// Whether its cell is public ([`OpenCell::make_public`]): a base every tenant's VM
     /// processes fork, its pages the default arena's, which each holds. As its directory said as
     /// it opened, which fails if it can't be read: a store made public is so to those opened since.
     pub public: bool,
@@ -178,7 +178,7 @@ impl CellAccess {
 /// An extent store a guest's filesystem lives on. See the module docs.
 pub struct OpenCell {
     store: Arc<LocalCell<HostDir>>,
-    /// cladefs: the bucket the store's description names, which its branch is kept in
+    /// cladefs: the bucket the store's description names, which its cell is kept in
     /// (`host_cell::Opened`, TASK-165.6).
     bucket: Arc<bucket_cell::object_bucket::ObjectBucket>,
     /// cladefs: where it was opened: its directory, which keeps what is attached to it (backlog
@@ -191,7 +191,7 @@ pub struct OpenCell {
     arenas: Arenas,
     /// cladefs: the stores it was forked from, nearest first, as of the forks ([`cell_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
-    /// cladefs: the uploader of the store's branch to object storage, which opened it, taking its
+    /// cladefs: the uploader of the store's cell to object storage, which opened it, taking its
     /// head, or holds its version: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
     uploader: Option<local_cell::upload::Uploader<HostDir>>,
@@ -217,7 +217,7 @@ pub struct OpenCell {
     /// serves nothing more (`crate::halt`, TASK-153.16).
     halt: Halt,
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader keeps
-    /// the branch in, keeping what it fetches in the host's cache, if it has one.
+    /// the cell in, keeping what it fetches in the host's cache, if it has one.
     fetcher: Arc<crate::bucket::HostFetcher>,
 }
 
@@ -228,7 +228,7 @@ pub struct OpenCell {
 pub struct CellVersion {
     /// The cell's tenant.
     pub tenant: u64,
-    /// The cell's ID, its branch's.
+    /// The cell's ID, its cell's.
     pub cell: u64,
     /// The version's ID.
     pub version: u64,
@@ -252,13 +252,13 @@ pub struct Opening {
     /// Whether its base's boot profile is read into the extent cache, or recorded
     /// ([`OpenCell::profile`]).
     pub profiled: bool,
-    /// How its uploader keeps its branch in its bucket, taking its head.
+    /// How its uploader keeps its cell in its bucket, taking its head.
     pub keeping: local_cell::upload::Options,
 }
 
 impl Opening {
     /// As this process opens stores where no host's daemon serves them, as [`crate::Storage`]
-    /// does: a copy never placed taking its branch with this host's token, or the first
+    /// does: a copy never placed taking its cell with this host's token, or the first
     /// placement's (`host_cell::keeping`); its pages the default arena's, its profile read or
     /// recorded.
     pub fn here() -> Result<Self, Error> {
@@ -484,7 +484,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         // A follower's too, of one written after its view's commit: as Fxfs's journal replay
         // finds the end of the commit.
         Errno::ENOENT
-    } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherBranch>() {
+    } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherCell>() {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
@@ -496,7 +496,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
     }
 }
 
-// cladefs: closing the store frees its branch to be opened again, though caches of its extents may
+// cladefs: closing the store frees its cell to be opened again, though caches of its extents may
 // hold its store still, to read them.
 impl Drop for OpenCell {
     fn drop(&mut self) {
@@ -530,7 +530,7 @@ impl OpenCell {
     /// protocol bounds of it.
     pub const PIECE: usize = 1 << 20;
 
-    /// A new store at `path`, which must not exist, holding at most `capacity` bytes, with a branch
+    /// A new store at `path`, which must not exist, holding at most `capacity` bytes, with a cell
     /// of its own. cladefs: kept in this host's bucket, or, where this is no host of cladefs's system, a
     /// file bucket of its own, which its description names (`host_cell::create`, TASK-165.6),
     /// opened as this process opens stores ([`Opening::here`]).
@@ -541,53 +541,53 @@ impl OpenCell {
     /// cladefs: a new store at `path`, as [`OpenCell::create`] makes, of a new cell of `tenant`'s,
     /// its ID its bucket's to give (`bucket_cell::objectid`, TASK-364).
     pub fn create_in(path: impl AsRef<Path>, capacity: u64, tenant: u64) -> Result<Self, Error> {
-        Self::create_with(path, capacity, BranchOf::New(tenant), Opening::here()?)
+        Self::create_with(path, capacity, CellOf::New(tenant), Opening::here()?)
     }
 
-    /// cladefs: a new store at `path`, as [`OpenCell::create`] makes, of `branch`, which its
+    /// cladefs: a new store at `path`, as [`OpenCell::create`] makes, of `cell`, which its
     /// bucket holds (`ENOENT` otherwise): made on a host without it, recovered as it opens
     /// (TASK-165.9).
-    pub fn create_for_branch(
+    pub fn create_for_cell(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: CellId,
+        cell: CellId,
     ) -> Result<Self, Error> {
-        Self::create_with(path, capacity, BranchOf::Taken(branch), Opening::here()?)
+        Self::create_with(path, capacity, CellOf::Taken(cell), Opening::here()?)
     }
 
-    /// cladefs: a new store at `path`, of the branch `of` says, as [`OpenCell::create_in`] or
-    /// [`OpenCell::create_for_branch`] makes it, opened as `opening` says
+    /// cladefs: a new store at `path`, of the cell `of` says, as [`OpenCell::create_in`] or
+    /// [`OpenCell::create_for_cell`] makes it, opened as `opening` says
     /// ([`OpenCell::open_with`]): its cell's, an Fxfs one (TASK-364, doc-20). cladefs: in a span of its own, `store.create`
     /// (`bucket_cell::trace`, TASK-258).
     pub fn create_with(
         path: impl AsRef<Path>,
         capacity: u64,
-        of: BranchOf,
+        of: CellOf,
         opening: Opening,
     ) -> Result<Self, Error> {
         Self::create_kind_with(path, capacity, (of, Kind::Fxfs), opening)
     }
 
     /// cladefs: a new store at `path`, as [`OpenCell::create_with`] makes, a cell of `kind`,
-    /// its branch's cell (TASK-364): a SQLite one, which the sqlite_extents VFS alone opens, as a
+    /// its cell (TASK-364): a SQLite one, which the sqlite_extents VFS alone opens, as a
     /// store a database is made in through the daemon is.
     pub fn create_kind_with(
         path: impl AsRef<Path>,
         capacity: u64,
-        (of, kind): (BranchOf, Kind),
+        (of, kind): (CellOf, Kind),
         opening: Opening,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         Self::creating(path, |span| {
             let keeping = opening.keeping.clone();
             let opened = host_cell::create(path, capacity, of, kind, keeping)?;
-            span.set_branch(opened.store.description().branch);
+            span.set_cell(opened.store.description().cell);
             Self::new(path, opened, opening)
         })
     }
 
     /// cladefs: `make`'s making of a new store at `path`, in a span of its own, `store.create`
-    /// (`bucket_cell::trace`, TASK-258), which it names the store's branch in once it knows it:
+    /// (`bucket_cell::trace`, TASK-258), which it names the store's cell in once it knows it:
     /// a store made, opened, or made closed ([`OpenCell::create_placed`]).
     fn creating<T>(
         path: &Path,
@@ -598,26 +598,26 @@ impl OpenCell {
         span.run(|| make(&span))
     }
 
-    /// cladefs: a new store at `path`, as [`OpenCell::create_with`] makes, of `branch`, kept in
+    /// cladefs: a new store at `path`, as [`OpenCell::create_with`] makes, of `cell`, kept in
     /// the bucket at `url`, its uploader as `keeping` says: in tests, a memory bucket, which this
     /// process's stores naming it share.
     #[cfg(test)]
     pub(crate) fn create_kept_with(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: CellId,
+        cell: CellId,
         url: &str,
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
         let kept = (Kind::Fxfs, Some(url), keeping.clone());
-        let of = BranchOf::Named(branch);
+        let of = CellOf::Named(cell);
         let opened = host_cell::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
         opened.made().map_err(Error::new)?;
         Self::new(path, opened, Opening { keeping, ..Opening::here()? })
     }
 
-    /// cladefs: a new store at `path`, as [`OpenCell::create`] makes, of a new branch, kept in
+    /// cladefs: a new store at `path`, as [`OpenCell::create`] makes, of a new cell, kept in
     /// the bucket at `url`: in tests, a memory bucket, which this process's stores naming it share.
     #[cfg(test)]
     pub(crate) fn create_kept_in(
@@ -626,7 +626,7 @@ impl OpenCell {
         url: &str,
     ) -> Result<Self, Error> {
         let (path, opening) = (path.as_ref(), Opening::here()?);
-        let (of, keeping) = (BranchOf::New(0), opening.keeping.clone());
+        let (of, keeping) = (CellOf::New(0), opening.keeping.clone());
         let opened = host_cell::create_unmade(path, capacity, of, Kind::Fxfs, Some(url), keeping)?;
         opened.made().map_err(Error::new)?;
         Self::new(path, opened, opening)
@@ -639,13 +639,13 @@ impl OpenCell {
     }
 
     /// cladefs: the store at `path`, as of its last commit, opened as `opening` says: its uploader
-    /// takes its branch's head, with the token its placement names or `opening`'s, and recovers
+    /// takes its cell's head, with the token its placement names or `opening`'s, and recovers
     /// it, the store's write-ahead log put after its end (TASK-165.9); a log another writer's
     /// commits moved past refuses (`ESTALE`) until `cladefsctl take` drops it. A tenant's (TASK-43):
-    /// the pages of its own extents, and of those it inherited from other branches but public ones
+    /// the pages of its own extents, and of those it inherited from other cells but public ones
     /// ([`OpenCell::make_public`]), are of `opening`'s arena of physical memory, which it holds,
     /// and what reads into the extent cache for it, until they are gone (TASK-79.36); or of the
-    /// default arena, without one. Those of public branches' extents, which every tenant's forks of
+    /// default arena, without one. Those of public cells' extents, which every tenant's forks of
     /// them share, are of the default arena.
     ///
     /// cladefs: in a span of its own, `store.open` (`bucket_cell::trace`, TASK-258).
@@ -656,7 +656,7 @@ impl OpenCell {
         span.run(|| {
             let opened = host_cell::open(path, opening.keeping.clone())?;
             let store = Self::new(path, opened, opening)?;
-            span.set_branch(store.branch());
+            span.set_cell(store.cell());
             Ok(store)
         })
     }
@@ -683,9 +683,9 @@ impl OpenCell {
         keeping: local_cell::upload::Options,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
-        let public = cell_dir::public_branches(path)?;
-        let branch = local_cell::host_branch(path).map_err(Error::new)?;
-        let arena = arena.filter(|_| !public.contains(&branch.id));
+        let public = cell_dir::public_cells(path)?;
+        let cell = local_cell::host_cell(path).map_err(Error::new)?;
+        let arena = arena.filter(|_| !public.contains(&cell.id));
         Self::open_with(path, Opening { arena, profiled: false, keeping })
     }
 
@@ -698,18 +698,18 @@ impl OpenCell {
         Self::open_with(path, Opening { profiled: false, ..Opening::here()? })
     }
 
-    /// The store `opened` at `path`, opened as `opening` says, of whose branch and those it was
-    /// forked from the branches `public` are public ([`cell_dir::public_branches`]).
+    /// The store `opened` at `path`, opened as `opening` says, of whose cell and those it was
+    /// forked from the cells `public` are public ([`cell_dir::public_cells`]).
     fn new(path: &Path, opened: host_cell::Opened, opening: Opening) -> Result<Self, Error> {
         cache::relieve_pressure();
-        let public = cell_dir::public_branches(path)?;
+        let public = cell_dir::public_cells(path)?;
         let host_cell::Opened { store, bucket, uploader } = opened;
         let Opening { arena, profiled, keeping } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let forked_from = Arc::new(cell_dir::ancestry(path)?);
         let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), keeping.cache.clone())?;
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
-        let branch = store.description().branch;
+        let cell = store.description().cell;
         Ok(Self {
             profiling: profiling.flatten(),
             arenas,
@@ -725,7 +725,7 @@ impl OpenCell {
             committed: event_listener::Event::new(),
             changes: CellMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            halt: Halt::new(path, branch),
+            halt: Halt::new(path, cell),
             fetcher,
         })
     }
@@ -753,7 +753,7 @@ impl OpenCell {
             committed: event_listener::Event::new(),
             changes: CellMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            halt: Halt::new(&self.path, self.branch()),
+            halt: Halt::new(&self.path, self.cell()),
             fetcher: self.fetcher.clone(),
         }
     }
@@ -869,7 +869,7 @@ impl OpenCell {
     /// until unpinned: what its guest holds open that the writer deletes.
     pub fn pin(&self, extent: ExtentId) -> Result<()> {
         // cladefs: nothing the writer does takes a base's extents away.
-        if self.bases.routes(extent.branch) {
+        if self.bases.routes(extent.cell) {
             return Ok(());
         }
         self.view()?.pin(extent).map_err(errno)
@@ -948,7 +948,7 @@ impl OpenCell {
         if !RECORDING.lock().unwrap().insert(path.clone()) {
             return None;
         }
-        let recorder = Arc::new(Recorder::new(path.clone(), store.description().branch.id));
+        let recorder = Arc::new(Recorder::new(path.clone(), store.description().cell.id));
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let writer = recorder.clone();
         let recorded = path.clone();
@@ -971,10 +971,10 @@ impl OpenCell {
     }
 
     /// cladefs: forks the store, as of its last commit, made uploaded first, and returns the fork's
-    /// branch: a new branch of `cell`, its ID the bucket's to give (`bucket_cell::objectid`,
+    /// cell: a new cell of `cell`, its ID the bucket's to give (`bucket_cell::objectid`,
     /// TASK-364), holding what it holds, whose store is a new directory at `path`, which
     /// [`OpenCell::open`] opens: `EEXIST` if anything is at `path`. The fork is made in the
-    /// bucket alone, by the store's uploader, which keeps its branch in the bucket its
+    /// bucket alone, by the store's uploader, which keeps its cell in the bucket its
     /// description names: a commit naming the child, whose acknowledgement gives the child its
     /// record, inheriting the store's extents rather than copies (doc-7, Forks). The child's
     /// directory is made then, its store recovering the child from the bucket as it opens, its
@@ -987,41 +987,41 @@ impl OpenCell {
     ///
     /// cladefs: in a span of its own, `store.fork` (`bucket_cell::trace`, TASK-258).
     pub fn fork(&self, path: impl AsRef<Path>, tenant: u64) -> Result<CellId, Error> {
-        let branch = self.new_child(tenant)?;
-        self.fork_to(path, branch)?;
-        Ok(branch)
+        let cell = self.new_child(tenant)?;
+        self.fork_to(path, cell)?;
+        Ok(cell)
     }
 
-    /// cladefs: a fork's child, the branch of a new cell of `tenant`'s, its ID the store's bucket's
+    /// cladefs: a fork's child, the cell of a new cell of `tenant`'s, its ID the store's bucket's
     /// to give. A follower's uploader
     /// is its writer's, which forks nothing of it (`EROFS`). A store with a writer forks to no cell
     /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_cell::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     fn new_child(&self, tenant: u64) -> Result<CellId, Error> {
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
-        host_cell::may_fork_into(self.branch(), uploader, tenant)?;
-        Ok(host_cell::new_branch(uploader.bucket(), tenant).map_err(upload_errno)?)
+        host_cell::may_fork_into(self.cell(), uploader, tenant)?;
+        Ok(host_cell::new_cell(uploader.bucket(), tenant).map_err(upload_errno)?)
     }
 
-    /// cladefs: forks the store as [`OpenCell::fork`] does, to `branch`, whatever its ID: so the
-    /// tests make a fork whose child's ID another branch took, which IDs given out by the bucket
-    /// never are, to show a fork refuses it (`EEXIST`) and harms no other branch (TASK-79.82).
-    pub(crate) fn fork_to(&self, path: impl AsRef<Path>, branch: CellId) -> Result<(), Error> {
-        self.fork_span(branch).run(|| {
+    /// cladefs: forks the store as [`OpenCell::fork`] does, to `cell`, whatever its ID: so the
+    /// tests make a fork whose child's ID another cell took, which IDs given out by the bucket
+    /// never are, to show a fork refuses it (`EEXIST`) and harms no other cell (TASK-79.82).
+    pub(crate) fn fork_to(&self, path: impl AsRef<Path>, cell: CellId) -> Result<(), Error> {
+        self.fork_span(cell).run(|| {
             self.access().may_manage()?;
             self.make_uploaded()?;
             failpoint!("fork::uploaded");
             // None comes between the look and the fork's commit.
             let opening = self.opening.write(&self.halt)?;
-            self.fork_uploaded(path.as_ref(), branch, Some(opening))
+            self.fork_uploaded(path.as_ref(), cell, Some(opening))
         })
     }
 
-    /// cladefs: the span of a fork of it to `branch`.
-    fn fork_span(&self, branch: CellId) -> trace::Span {
+    /// cladefs: the span of a fork of it to `cell`.
+    fn fork_span(&self, cell: CellId) -> trace::Span {
         let span = trace::Span::start("store.fork");
-        span.set_branch(self.branch());
-        span.set_with(trace::CHILD, || branch.to_string());
+        span.set_cell(self.cell());
+        span.set_with(trace::CHILD, || cell.to_string());
         span
     }
 
@@ -1031,44 +1031,44 @@ impl OpenCell {
     fn fork_uploaded(
         &self,
         path: &Path,
-        branch: CellId,
+        cell: CellId,
         opening: Option<CellGuard<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
     ) -> Result<(), Error> {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
         // (TASK-79.82, TASK-153.9).
-        let child = bucket_cell::layout::Child { branch, owner: rand::random() };
+        let child = bucket_cell::layout::Child { cell, owner: rand::random() };
         // cladefs: what is attached to it stays attached to the fork, a restored VM's too; and what
         // is public of it, and what it was forked from.
         let inherited = |to: &Path| -> anyhow::Result<()> {
-            Ok(cell_dir::inherit(&self.path, self.branch().id, &self.forked_from, to)?)
+            Ok(cell_dir::inherit(&self.path, self.cell().id, &self.forked_from, to)?)
         };
         // A follower's uploader is its writer's, which forks nothing of it.
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
         host_cell::fork(&self.store, uploader, path, child, inherited, opening)
     }
 
-    /// cladefs: takes `branch` into the store at `path`, of `capacity` bytes until a commit of the
-    /// branch's sets one, placed at `token`'s placement if given (doc-14, Opening a store): a new
-    /// one if nothing is at `path`, which recovers the branch as the bucket holds it; or the one
-    /// there, opened, its write-ahead log dropped if another writer's commits moved the branch
+    /// cladefs: takes `cell` into the store at `path`, of `capacity` bytes until a commit of the
+    /// cell's sets one, placed at `token`'s placement if given (doc-14, Opening a store): a new
+    /// one if nothing is at `path`, which recovers the cell as the bucket holds it; or the one
+    /// there, opened, its write-ahead log dropped if another writer's commits moved the cell
     /// past it (`ESTALE` opening it otherwise), the commits it held, never acknowledged, lost
-    /// (doc-7, Recovery on the same host; TASK-165.9). Returns once it holds the branch, closed.
+    /// (doc-7, Recovery on the same host; TASK-165.9). Returns once it holds the cell, closed.
     pub fn take(
         path: impl AsRef<Path>,
         capacity: u64,
-        branch: CellId,
+        cell: CellId,
         token: Option<u64>,
     ) -> Result<(), Error> {
-        drop(Self::take_with(path, (capacity, branch, token), Opening::here()?)?);
+        drop(Self::take_with(path, (capacity, cell, token), Opening::here()?)?);
         Ok(())
     }
 
-    /// cladefs: takes `branch` into the store at `path` as [`OpenCell::take`] does, of `capacity`
+    /// cladefs: takes `cell` into the store at `path` as [`OpenCell::take`] does, of `capacity`
     /// bytes, placed at `token`'s placement if given, and returns it, opened as `opening` says.
     pub fn take_with(
         path: impl AsRef<Path>,
-        (capacity, branch, token): (u64, CellId, Option<u64>),
+        (capacity, cell, token): (u64, CellId, Option<u64>),
         opening: Opening,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
@@ -1076,10 +1076,10 @@ impl OpenCell {
         // (TASK-449).
         let opened = if !path.exists() {
             let kept = opening.keeping.clone();
-            let of = BranchOf::Taken(branch);
+            let of = CellOf::Taken(cell);
             Self::made_placed(path, (capacity, of, token), Kind::Fxfs, kept)?
-        } else if local_cell::host_branch(path).map_err(Error::new)? != branch {
-            let refused = format!("{} holds another branch than {branch}", path.display());
+        } else if local_cell::host_cell(path).map_err(Error::new)? != cell {
+            let refused = format!("{} holds another cell than {cell}", path.display());
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
         } else {
             if let Some(token) = token {
@@ -1090,29 +1090,29 @@ impl OpenCell {
         Self::new(path, opened, opening)
     }
 
-    /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the branch
+    /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the cell
     /// `of` says, a cell of `kind` (TASK-364), its uploader as `keeping`
-    /// says, placed at `token`'s placement if given, closes it, and returns its branch: what
-    /// [`OpenCell::take_with`] takes a branch into, and the daemon's `CreateCell` makes. Its
+    /// says, placed at `token`'s placement if given, closes it, and returns its cell: what
+    /// [`OpenCell::take_with`] takes a cell into, and the daemon's `CreateCell` makes. Its
     /// cell, and so its head, is taken as it is made with the token of the placement it is given,
     /// not `keeping`'s, this host's: a new copy placed later
-    /// took no branch from an earlier placement (`ESTALE`), the head taken before the placement
+    /// took no cell from an earlier placement (`ESTALE`), the head taken before the placement
     /// was recorded (TASK-149.20, TASK-266).
     pub fn create_placed(
         path: impl AsRef<Path>,
-        (capacity, of, token): (u64, BranchOf, Option<u64>),
+        (capacity, of, token): (u64, CellOf, Option<u64>),
         kind: Kind,
         keeping: local_cell::upload::Options,
     ) -> Result<CellId, Error> {
         let opened = Self::made_placed(path.as_ref(), (capacity, of, token), kind, keeping)?;
-        Ok(opened.store.description().branch)
+        Ok(opened.store.description().cell)
     }
 
     /// cladefs: makes a new store at `path` as [`OpenCell::create_placed`] does, and returns it
     /// opened, as made: what [`OpenCell::take_with`] opens.
     fn made_placed(
         path: &Path,
-        (capacity, of, token): (u64, BranchOf, Option<u64>),
+        (capacity, of, token): (u64, CellOf, Option<u64>),
         kind: Kind,
         keeping: local_cell::upload::Options,
     ) -> Result<host_cell::Opened, Error> {
@@ -1120,7 +1120,7 @@ impl OpenCell {
             local_cell::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
         let opened = Self::creating(path, |span| {
             let opened = host_cell::create(path, capacity, of, kind, keeping)?;
-            span.set_branch(opened.store.description().branch);
+            span.set_cell(opened.store.description().cell);
             Ok(opened)
         })?;
         if let Some(token) = token {
@@ -1130,19 +1130,19 @@ impl OpenCell {
     }
 
     /// cladefs: places the store at `path` at the placement
-    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its branch's
-    /// cell with that token from then on, and its writer the branch's head with that taking's
-    /// epoch; a later placement's token exceeds it, so a placement cut off takes no branch back
+    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its cell's
+    /// cell with that token from then on, and its writer the cell's head with that taking's
+    /// epoch; a later placement's token exceeds it, so a placement cut off takes no cell back
     /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
         local_cell::place_host(path.as_ref(), token).map_err(Error::new)
     }
 
-    /// cladefs: deletes the store at `path`, which nothing has open: with `bucket`, its branch
-    /// there first, its forks' branches living on, which the collector keeps what they inherited
-    /// for; then its directory, which holds its branch alone (TASK-165.7). A deletion that stopped
+    /// cladefs: deletes the store at `path`, which nothing has open: with `bucket`, its cell
+    /// there first, its forks' cells living on, which the collector keeps what they inherited
+    /// for; then its directory, which holds its cell alone (TASK-165.7). A deletion that stopped
     /// partway is finished by deleting again. Fails with `ENOENT` if there is none at `path`, and
-    /// with `ESTALE` if a later placement holds its branch in `bucket`.
+    /// with `ESTALE` if a later placement holds its cell in `bucket`.
     pub fn delete(
         path: impl AsRef<Path>,
         bucket: Option<&bucket_cell::object_bucket::ObjectBucket>,
@@ -1150,8 +1150,8 @@ impl OpenCell {
         host_cell::delete(path.as_ref(), bucket, crate::bucket::host_token)
     }
 
-    /// cladefs: the bucket the description of the store at `path` names, which its branch is kept
-    /// in, if its description is there: what deleting it deletes its branch in. A store of another
+    /// cladefs: the bucket the description of the store at `path` names, which its cell is kept
+    /// in, if its description is there: what deleting it deletes its cell in. A store of another
     /// format is refused (`local_cell::Format`).
     pub fn bucket_at(
         path: impl AsRef<Path>,
@@ -1159,7 +1159,7 @@ impl OpenCell {
         host_cell::bucket_at(path.as_ref()).map_err(Error::new)
     }
 
-    /// cladefs: the bucket the store's description names, which its branch is kept in: what its
+    /// cladefs: the bucket the store's description names, which its cell is kept in: what its
     /// daemon attaches it to (TASK-165.6).
     pub fn bucket(&self) -> &Arc<bucket_cell::object_bucket::ObjectBucket> {
         &self.bucket
@@ -1171,7 +1171,7 @@ impl OpenCell {
         self.uploader.as_ref()
     }
 
-    /// cladefs: whether its store's map of the extents the bucket holds of its branch is `other`'s,
+    /// cladefs: whether its store's map of the extents the bucket holds of its cell is `other`'s,
     /// one map shared (`local_cell::LocalCell::shares_extents_with`, TASK-453).
     #[cfg(test)]
     pub(crate) fn shares_extents_with(&self, other: &Self) -> bool {
@@ -1196,12 +1196,12 @@ impl OpenCell {
         self.read_cached(extent, offset, data)
     }
 
-    /// The branch whose extents the guest mints, by its ID, in its cell.
-    pub fn branch(&self) -> CellId {
-        self.store.description().branch
+    /// The cell whose extents the guest mints, by its ID, in its cell.
+    pub fn cell(&self) -> CellId {
+        self.store.description().cell
     }
 
-    /// cladefs: the bytes the branch's files take of the host's disk: what is not acknowledged in
+    /// cladefs: the bytes the cell's files take of the host's disk: what is not acknowledged in
     /// the bucket yet, and the open segment (TASK-165.8).
     pub fn disk_bytes(&self) -> Result<u64> {
         Ok(self.store.usage().map_err(errno)?.disk_bytes)
@@ -1221,8 +1221,8 @@ impl OpenCell {
         })
     }
 
-    /// cladefs: what its branch holds, the bytes (TASK-49) and the number of its extents (TASK-454),
-    /// and whose: its branch's own, or inherited. Kept on as they change, not counted now: as cheap
+    /// cladefs: what its cell holds, the bytes (TASK-49) and the number of its extents (TASK-454),
+    /// and whose: its cell's own, or inherited. Kept on as they change, not counted now: as cheap
     /// as [`OpenCell::info`], however many extents it holds.
     pub fn holding(&self) -> Result<CellHolding> {
         let info = self.store.info().map_err(errno)?;
@@ -1378,7 +1378,7 @@ impl OpenCell {
     }
 
     /// Writes the bytes of `buffers`, in order, at `offset` in `extent`, which must be the store's
-    /// branch's, and open (`WRITE`).
+    /// cell's, and open (`WRITE`).
     pub fn write(&self, extent: ExtentId, offset: u64, buffers: &[VolatileSlice]) -> Result<()> {
         self.access().may_write()?;
         let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
@@ -1455,7 +1455,7 @@ impl OpenCell {
     }
 
     /// cladefs: `Ok` unless the store's uploader stopped, failed: the store's commits are its
-    /// branch's no more, as once a later placement took its cell (`EROFS`, TASK-364), so a commit
+    /// cell's no more, as once a later placement took its cell (`EROFS`, TASK-364), so a commit
     /// local alone fails rather than be taken for one a bucket will hold, as
     /// a kept image's does (`storage::kept`).
     fn uploading(&self) -> Result<()> {
@@ -1540,7 +1540,7 @@ impl OpenCell {
     /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
     fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let span = trace::Span::start("store.commit");
-        span.set_branch(self.branch());
+        span.set_cell(self.cell());
         span.set(trace::LEVEL, commit.level());
         span.run(|| {
             // cladefs: nothing a panic went through is committed (`crate::halt`).
@@ -1884,20 +1884,20 @@ impl OpenCell {
     /// seal it under its writer: `EBUSY` otherwise. So a running VM's store forks,
     /// its guest's filesystem frozen (TASK-39.3), as a snapshot of the VM does (TASK-39.1).
     pub fn fork_quiescent(&self, path: impl AsRef<Path>, tenant: u64) -> Result<CellId, Error> {
-        let branch = self.new_child(tenant)?;
-        self.fork_at_rest(path.as_ref(), branch)?;
-        Ok(branch)
+        let cell = self.new_child(tenant)?;
+        self.fork_at_rest(path.as_ref(), cell)?;
+        Ok(cell)
     }
 
-    /// cladefs: forks the store as [`OpenCell::fork_quiescent`] does, to `branch`, whatever its
+    /// cladefs: forks the store as [`OpenCell::fork_quiescent`] does, to `cell`, whatever its
     /// ID, as [`OpenCell::fork_to`] forks it.
     #[cfg(test)]
     pub(crate) fn fork_quiescent_to(
         &self,
         path: impl AsRef<Path>,
-        branch: CellId,
+        cell: CellId,
     ) -> Result<(), Error> {
-        self.fork_at_rest(path.as_ref(), branch)
+        self.fork_at_rest(path.as_ref(), cell)
     }
 
     /// cladefs: makes a version of the store's cell (doc-18, doc-20): a name for its state as of its
@@ -2029,16 +2029,16 @@ impl OpenCell {
     /// rebinds them first; one it couldn't, as a writeback that found no memory leaves (TASK-207)
     /// or a rebind refused, it says it left. Checked before the fork's lock, which no write of the
     /// window's private pages takes: with its VM paused, as a snapshot has it, none comes after.
-    fn fork_at_rest(&self, path: &Path, branch: CellId) -> Result<(), Error> {
-        self.fork_span(branch).run(|| self.fork_at_rest_now(path, branch))
+    fn fork_at_rest(&self, path: &Path, cell: CellId) -> Result<(), Error> {
+        self.fork_span(cell).run(|| self.fork_at_rest_now(path, cell))
     }
 
     /// cladefs: forks the store, as [`OpenCell::fork_at_rest`] says, in its span.
-    fn fork_at_rest_now(&self, path: &Path, branch: CellId) -> Result<(), Error> {
+    fn fork_at_rest_now(&self, path: &Path, cell: CellId) -> Result<(), Error> {
         self.at_rest(|| {
             self.make_uploaded()?;
             failpoint!("fork::uploaded");
-            self.fork_uploaded(path, branch, None)
+            self.fork_uploaded(path, cell, None)
         })
     }
 
@@ -2094,7 +2094,7 @@ impl OpenCell {
         matches!(held, Ok(Some((_, false)))).then_some(PublicReach(extent))
     }
 
-    /// cladefs: makes the store's branch public, and those it inherited from (TASK-43): a base,
+    /// cladefs: makes the store's cell public, and those it inherited from (TASK-43): a base,
     /// which every tenant forks, whose extents' pages, and its ancestors', are of the default
     /// arena of physical memory, which every tenant's VM processes hold read-only.
     /// Stores opened since take it so; a tenant opens no public store itself, only forks of it.
@@ -2103,49 +2103,49 @@ impl OpenCell {
         self.mark_public(&self.ancestry())
     }
 
-    /// cladefs: makes the store's branch public, but not those it inherited from: a fork pinning a
+    /// cladefs: makes the store's cell public, but not those it inherited from: a fork pinning a
     /// state of a store that goes on being written, which attaches to tenants' stores rather than
     /// being forked by them (backlog doc-10). Its pages are of the default arena through it
     /// ([`OpenCell::open_base`]).
     pub fn make_public_attach_only(&self) -> Result<()> {
         self.access().may_manage()?;
-        self.mark_public(&[self.branch().id])
+        self.mark_public(&[self.cell().id])
     }
 
-    fn mark_public(&self, branches: &[u64]) -> Result<()> {
-        cell_dir::mark_public(self.store.dir().path(), branches)
+    fn mark_public(&self, cells: &[u64]) -> Result<()> {
+        cell_dir::mark_public(self.store.dir().path(), cells)
     }
 
-    /// cladefs: the store's branch, and those it inherited from, nearest first.
+    /// cladefs: the store's cell, and those it inherited from, nearest first.
     pub fn ancestry(&self) -> Vec<u64> {
-        let inherited = self.forked_from.iter().map(|(branch, _)| *branch);
-        std::iter::once(self.branch().id).chain(inherited).collect()
+        let inherited = self.forked_from.iter().map(|(cell, _)| *cell);
+        std::iter::once(self.cell().id).chain(inherited).collect()
     }
 
     /// cladefs: attaches the store at `base`, a fork pinning what it holds, to this one, which
-    /// `branches` of ([`OpenCell::ancestry`]), recorded in its directory: `READ` and `MAP` of
+    /// `cells` of ([`OpenCell::ancestry`]), recorded in its directory: `READ` and `MAP` of
     /// its extents read through to it from now on, and in forks of this store, which a VM restored
     /// is. Attached already, it does nothing. The guest has no part in this (backlog doc-10).
-    pub fn attach_base(&self, base: &Path, branches: &[u64]) -> Result<()> {
+    pub fn attach_base(&self, base: &Path, cells: &[u64]) -> Result<()> {
         self.access().may_manage()?;
-        cell_dir::attach(&self.path, base, branches)?;
-        self.bases.add(self.routed(branches), base);
+        cell_dir::attach(&self.path, base, cells)?;
+        self.bases.add(self.routed(cells), base);
         Ok(())
     }
 
-    /// cladefs: of `branches`, those of a base's that its reads are routed by: not the store's own
+    /// cladefs: of `cells`, those of a base's that its reads are routed by: not the store's own
     /// and those it inherited, whose extents it holds, or freed.
-    fn routed(&self, branches: &[u64]) -> Vec<u64> {
+    fn routed(&self, cells: &[u64]) -> Vec<u64> {
         let own = self.ancestry();
-        branches.iter().copied().filter(|branch| !own.contains(branch)).collect()
+        cells.iter().copied().filter(|cell| !own.contains(cell)).collect()
     }
 
     /// cladefs: routes reads to what is attached to the store, as recorded, each opened by `open`
     /// when first read: however many are attached, they cost it nothing until then.
     pub fn open_bases(&self, open: OpenBase) -> Result<()> {
         let _ = self.bases.open.set(open);
-        for (branches, base) in cell_dir::attached(&self.path)? {
-            self.bases.add(self.routed(&branches), &base);
+        for (cells, base) in cell_dir::attached(&self.path)? {
+            self.bases.add(self.routed(&cells), &base);
         }
         Ok(())
     }
@@ -2158,7 +2158,7 @@ impl OpenCell {
 
     /// cladefs: the base attached that holds `extent`, with its length, if one does.
     fn base_holding(&self, extent: ExtentId) -> Result<Option<(Arc<OpenCell>, u64)>> {
-        let Some(bases) = self.bases.of(extent.branch) else { return Ok(None) };
+        let Some(bases) = self.bases.of(extent.cell) else { return Ok(None) };
         for base in bases {
             let store = base.store(self)?;
             if let Some((len, false)) = store.store.extent(extent).map_err(errno)? {
@@ -2168,9 +2168,9 @@ impl OpenCell {
         Ok(None)
     }
 
-    /// cladefs: whether the store's branch is public ([`OpenCell::make_public`]).
+    /// cladefs: whether the store's cell is public ([`OpenCell::make_public`]).
     pub fn is_public(&self) -> bool {
-        self.arenas.public.contains(&self.branch().id)
+        self.arenas.public.contains(&self.cell().id)
     }
 
     /// cladefs: the arena of physical memory its own extents' pages are of
@@ -2200,7 +2200,7 @@ struct Arenas {
     /// The store's, its tenant's, held for as long as the store and what reads into the extent
     /// cache for it, which clone these, allocate in it (TASK-79.36); or none, the default.
     own: Option<Arc<Arena>>,
-    /// The public branches of its own and those it was forked from, as its directory marks them,
+    /// The public cells of its own and those it was forked from, as its directory marks them,
     /// whose extents' pages are of the default arena.
     public: Arc<std::collections::BTreeSet<u64>>,
 }
@@ -2213,7 +2213,7 @@ impl Arenas {
 
     /// The arena `extent`'s pages are of.
     fn of(&self, extent: ExtentId) -> ArenaId {
-        if self.public.contains(&extent.branch) { ArenaId::DEFAULT } else { self.own() }
+        if self.public.contains(&extent.cell) { ArenaId::DEFAULT } else { self.own() }
     }
 }
 
@@ -2253,51 +2253,51 @@ impl Base {
     }
 }
 
-/// cladefs: what is attached to a store: by the branches of the extents each holds, so that finding
-/// what reads an extent takes the same time however many are attached. A branch has more than one
+/// cladefs: what is attached to a store: by the cells of the extents each holds, so that finding
+/// what reads an extent takes the same time however many are attached. A cell has more than one
 /// only for generations of one store, attached at once, the newest last.
 #[derive(Default)]
 struct Bases {
     open: OnceLock<OpenBase>,
     /// Shared by a store and its followers; unlike their locks, not halted
     /// ([`crate::halt`]): nothing that may panic is called holding it.
-    by_branch: std::sync::RwLock<HashMap<u64, Vec<Arc<Base>>>>,
+    by_cell: std::sync::RwLock<HashMap<u64, Vec<Arc<Base>>>>,
 }
 
 impl Bases {
-    /// Routes `branches` to the store at `path`, if they aren't.
-    fn add(&self, branches: Vec<u64>, path: &Path) {
-        let mut by_branch = self.by_branch.write().unwrap();
-        let attached = branches
+    /// Routes `cells` to the store at `path`, if they aren't.
+    fn add(&self, cells: Vec<u64>, path: &Path) {
+        let mut by_cell = self.by_cell.write().unwrap();
+        let attached = cells
             .iter()
-            .filter_map(|branch| by_branch.get(branch))
+            .filter_map(|cell| by_cell.get(cell))
             .flatten()
             .find(|base| base.path == path)
             .cloned();
         let base = attached.unwrap_or_else(|| Arc::new(Base::new(path)));
-        for branch in branches {
-            let routed = by_branch.entry(branch).or_default();
+        for cell in cells {
+            let routed = by_cell.entry(cell).or_default();
             if !routed.iter().any(|routed| Arc::ptr_eq(routed, &base)) {
                 routed.push(base.clone());
             }
         }
     }
 
-    /// Whether extents of `branch` are read through to what is attached.
-    fn routes(&self, branch: u64) -> bool {
-        self.by_branch.read().unwrap().contains_key(&branch)
+    /// Whether extents of `cell` are read through to what is attached.
+    fn routes(&self, cell: u64) -> bool {
+        self.by_cell.read().unwrap().contains_key(&cell)
     }
 
-    /// What is attached that may hold extents of `branch`, newest first.
-    fn of(&self, branch: u64) -> Option<Vec<Arc<Base>>> {
-        let by_branch = self.by_branch.read().unwrap();
-        by_branch.get(&branch).map(|bases| bases.iter().rev().cloned().collect())
+    /// What is attached that may hold extents of `cell`, newest first.
+    fn of(&self, cell: u64) -> Option<Vec<Arc<Base>>> {
+        let by_cell = self.by_cell.read().unwrap();
+        by_cell.get(&cell).map(|bases| bases.iter().rev().cloned().collect())
     }
 
     /// How many of those attached are open.
     #[cfg(test)]
     fn opened(&self, halt: &Halt) -> usize {
-        let mut opened: Vec<_> = (self.by_branch.read().unwrap().values().flatten())
+        let mut opened: Vec<_> = (self.by_cell.read().unwrap().values().flatten())
             .filter(|base| base.store.lock(halt).unwrap().is_some())
             .map(Arc::as_ptr)
             .collect();
@@ -2366,14 +2366,14 @@ mod tests {
     /// context or not; any other is EIO (TASK-160.12).
     #[test]
     fn each_store_error_has_its_errno() {
-        let extent = ExtentId { branch: 1, sequence: 2 };
+        let extent = ExtentId { cell: 1, sequence: 2 };
         let cases: [(anyhow::Error, Errno); 13] = [
             (local_cell::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
             (SealedExtent(extent).into(), Errno::EPERM),
             (SpentExtent(extent).into(), Errno::EPERM),
-            (OtherBranch(extent).into(), Errno::EPERM),
+            (OtherCell(extent).into(), Errno::EPERM),
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),
             (Unaligned { offset: 1, len: 2 }.into(), Errno::EINVAL),
@@ -2388,7 +2388,7 @@ mod tests {
         }
     }
 
-    /// Each of the uploader's failures has its errno, as doc-4 and doc-7 have them: a branch this
+    /// Each of the uploader's failures has its errno, as doc-4 and doc-7 have them: a cell this
     /// writer lost is EROFS, not EIO (TASK-160.12).
     #[test]
     fn each_uploader_failure_has_its_errno() {
@@ -2399,12 +2399,12 @@ mod tests {
             (Failure::Bucket(Error::Deleted), Errno::EROFS),
             (Failure::Bucket(Error::Stale), Errno::ESTALE),
             (Failure::Bucket(Error::Diverged), Errno::ESTALE),
-            (Failure::Bucket(Error::NoBranch), Errno::ENOENT),
+            (Failure::Bucket(Error::NoCell), Errno::ENOENT),
             (Failure::VersionDropped, Errno::ENOENT),
-            (Failure::Bucket(Error::IdTaken(bucket_cell::layout::test_branch(3))), Errno::EEXIST),
+            (Failure::Bucket(Error::IdTaken(bucket_cell::layout::test_cell(3))), Errno::EEXIST),
             (
                 Failure::Bucket(Error::Format {
-                    branch: bucket_cell::layout::test_branch(3),
+                    cell: bucket_cell::layout::test_cell(3),
                     format: 99,
                 }),
                 Errno::ENOTSUP,
@@ -2476,9 +2476,9 @@ mod tests {
             ..Default::default()
         };
         let url = format!("memory:///{named}");
-        let branch = host_cell::new_alone();
+        let cell = host_cell::new_alone();
         let held =
-            OpenCell::create_kept_with(dir.path().join("store"), capacity, branch, &url, keeping);
+            OpenCell::create_kept_with(dir.path().join("store"), capacity, cell, &url, keeping);
         (held.unwrap(), dir)
     }
 
@@ -2489,7 +2489,7 @@ mod tests {
     }
 
     fn id(store: &OpenCell, sequence: u64) -> ExtentId {
-        ExtentId { branch: store.branch().id, sequence }
+        ExtentId { cell: store.cell().id, sequence }
     }
 
     /// `len` bytes of `byte` plus their offset modulo 251.
@@ -2515,7 +2515,7 @@ mod tests {
     }
 
     /// What [`holding_follows_the_extents`] does to a store: writes `blocks` blocks at block `block`
-    /// of its branch's extent `sequence`, frees the extent `Free` picks of those it holds, its own or
+    /// of its cell's extent `sequence`, frees the extent `Free` picks of those it holds, its own or
     /// inherited, commits, opens it again, or forks it and goes on with the fork.
     #[derive(Clone, Debug)]
     enum CellChange {
@@ -2542,9 +2542,9 @@ mod tests {
     /// extents come and go, is what its extents, all walked, hold: how many, own and inherited, and
     /// their bytes (TASK-454).
     fn holding_is_recounted(store: &OpenCell, after: &[CellChange]) {
-        let branch = store.branch().id;
+        let cell = store.cell().id;
         let held = store.store.extents().unwrap();
-        let own: Vec<_> = held.iter().filter(|(extent, _)| extent.branch == branch).collect();
+        let own: Vec<_> = held.iter().filter(|(extent, _)| extent.cell == cell).collect();
         let bytes = |held: &mut dyn Iterator<Item = &(ExtentId, u64)>| -> u64 {
             held.map(|(_, len)| len).sum()
         };
@@ -2593,7 +2593,7 @@ mod tests {
                     CellChange::Fork => {
                         store.commit(None).unwrap();
                         let fork = dir.path().join(format!("fork-{done}"));
-                        store.fork_to(&fork, crate::host_cell::fork_child(store.branch())).unwrap();
+                        store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
                         drop(store);
                         (path, store) = (fork.clone(), OpenCell::open(&fork).unwrap());
                     }
@@ -2615,11 +2615,11 @@ mod tests {
         write(&store, id(&store, 3), 0, &pattern(3, BLOCK)).unwrap();
         store.free(b).unwrap();
 
-        // As doc-4 has them: an extent not held, a sealed one, another branch's, unaligned I/O, and
+        // As doc-4 has them: an extent not held, a sealed one, another cell's, unaligned I/O, and
         // too much.
         assert_eq!(read(&store, b, 0, BLOCK), Err(Errno::ENOENT));
         assert_eq!(write(&store, a, 2 * BLOCK as u64, &[0; BLOCK]), Err(Errno::EPERM));
-        let other = ExtentId { branch: store.branch().id + 1, sequence: 1 };
+        let other = ExtentId { cell: store.cell().id + 1, sequence: 1 };
         assert_eq!(write(&store, other, 0, &[0; BLOCK]), Err(Errno::EPERM));
         assert_eq!(write(&store, id(&store, 4), 1, &[0; BLOCK]), Err(Errno::EINVAL));
         assert_eq!(write(&store, id(&store, 4), 0, &vec![0; 1 << 20]), Err(Errno::ENOSPC));
@@ -2627,17 +2627,17 @@ mod tests {
         assert_eq!((info.used, info.next_sequence), (3 * BLOCK as u64, 4));
 
         // What wasn't committed is gone once the store is opened again.
-        let branch = store.branch();
+        let cell = store.cell();
         drop(store);
         let store = OpenCell::open(dir.path().join("store")).unwrap();
-        assert_eq!(store.branch(), branch);
+        assert_eq!(store.cell(), cell);
         assert_eq!(store.root(), Ok(b"root".to_vec()));
         assert_eq!(read(&store, b, BLOCK as u64, BLOCK), Ok(pattern(2, BLOCK)));
         assert_eq!(read(&store, id(&store, 3), 0, BLOCK), Err(Errno::ENOENT));
     }
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here as
-    /// the test's process's): its cell made encrypted, its branch given a DEK, and no byte of what
+    /// the test's process's): its cell made encrypted, its cell given a DEK, and no byte of what
     /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
     /// inherits. TASK-411.28: a tenant with no KEK there gets no store, refused as destroyed
@@ -2680,21 +2680,21 @@ mod tests {
             }
         }
         assert!(objects > 3, "{objects} objects");
-        let child = host_cell::fork_child(store.branch());
+        let child = host_cell::fork_child(store.cell());
         store.fork_to(dir.path().join("fork"), child).unwrap();
         let fork = OpenCell::open(dir.path().join("fork")).unwrap();
         assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
         let record =
-            local_cell::upload::block_on(bucket_cell::branch::record(&**fork.bucket(), child));
+            local_cell::upload::block_on(bucket_cell::lifecycle::record(&**fork.bucket(), child));
         let record = record.unwrap().unwrap().unwrap();
-        let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
-        assert_eq!((record.deks.len(), inherited), (1, vec![store.branch()]));
+        let inherited: Vec<_> = record.inherited.iter().map(|had| had.cell).collect();
+        assert_eq!((record.deks.len(), inherited), (1, vec![store.cell()]));
         drop(fork);
         drop(follower);
-        let branch = store.branch();
+        let cell = store.cell();
         drop(Arc::into_inner(store).unwrap());
         let store = OpenCell::open(&path).unwrap();
-        assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
+        assert_eq!((store.cell(), store.root()), (cell, Ok(b"root".to_vec())));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
 
         // A store of a tenant with no KEK there: none, its cell refused, as destroyed.
@@ -2715,13 +2715,13 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(!dir.path().join("into-none").exists());
         let found =
-            local_cell::upload::block_on(bucket_cell::branch::record(&**common.bucket(), into));
+            local_cell::upload::block_on(bucket_cell::lifecycle::record(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
     }
 
     /// TASK-411.18: a store of a tenant whose KEK is a key in Google Cloud KMS, `CLADEFS_KMS` naming
     /// it as a host is configured (`gcp-kms://...`): its cell made encrypted, its KEK wrapped by the
-    /// tenant's key, which unwraps it to the KEK its branch's DEK is wrapped under; written, read
+    /// tenant's key, which unwraps it to the KEK its cell's DEK is wrapped under; written, read
     /// back, opened again and forked into an encrypted cell. Skipped, saying why, without an access
     /// token (`extent_keys::testing::gcp`).
     #[test]
@@ -2743,18 +2743,18 @@ mod tests {
         store.commit(Some(b"root")).unwrap();
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
 
-        let branch = store.branch();
+        let cell = store.cell();
         let bucket = store.bucket().clone();
-        let cell = local_cell::upload::block_on(bucket_cell::cell::read(&*bucket, branch));
-        let cell = cell.unwrap().unwrap().unwrap();
-        let [kek] = &cell.keks[..] else { panic!("{:?}", cell.keks) };
+        let object = local_cell::upload::block_on(bucket_cell::cell::read(&*bucket, cell));
+        let object = object.unwrap().unwrap().unwrap();
+        let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
         assert!(kek.wrapped.0.starts_with(b"fxkr\x01\x07gcp-kms"), "{:?}", kek.wrapped);
         let kms = extent_keys::kms::from_url(&url).unwrap();
         let unwrapped = local_cell::upload::block_on(kms.unwrap_dyn(5, &kek.wrapped)).unwrap();
         let unwrapped = unwrapped.unwrap();
-        let record = local_cell::upload::block_on(bucket_cell::branch::record(&*bucket, branch));
+        let record = local_cell::upload::block_on(bucket_cell::lifecycle::record(&*bucket, cell));
         let record = record.unwrap().unwrap().unwrap();
-        let wrapped_dek = bucket_cell::keys::unwrap_dek(&unwrapped, branch, &record.deks[0]);
+        let wrapped_dek = bucket_cell::keys::unwrap_dek(&unwrapped, cell, &record.deks[0]);
         assert_eq!(wrapped_dek.unwrap().expose(), &dek);
         let other = local_cell::upload::block_on(kms.unwrap_dyn(6, &kek.wrapped)).unwrap();
         assert_eq!(
@@ -2764,9 +2764,9 @@ mod tests {
 
         drop(store);
         let store = OpenCell::open(&path).unwrap();
-        assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
+        assert_eq!((store.cell(), store.root()), (cell, Ok(b"root".to_vec())));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
-        let child = host_cell::fork_child(store.branch());
+        let child = host_cell::fork_child(store.cell());
         store.fork_to(dir.path().join("fork"), child).unwrap();
         let fork = OpenCell::open(dir.path().join("fork")).unwrap();
         assert!(!fork.store.keys().is_empty());
@@ -2793,7 +2793,7 @@ mod tests {
         assert_eq!((first.read_stored_bytes, first.page_ins), (0, 1));
 
         let path = dir.path().join("fork");
-        store.fork_to(&path, crate::host_cell::fork_child(store.branch())).unwrap();
+        store.fork_to(&path, crate::host_cell::fork_child(store.cell())).unwrap();
         let fork = OpenCell::open(&path).unwrap();
         let before = stats::stats();
         assert_eq!(read(&fork, extent, 0, 2 * BLOCK), Ok(pattern(1, 2 * BLOCK)));
@@ -2858,13 +2858,11 @@ mod tests {
         let follower = store.follow();
         store.free(a).unwrap();
         store.commit(None).unwrap();
-        let segments = dir
-            .path()
-            .join("store/segments")
-            .join(base32_id::Padded(store.branch().id).to_string());
+        let segments =
+            dir.path().join("store/segments").join(base32_id::Padded(store.cell().id).to_string());
         assert_eq!(std::fs::read_dir(&segments).unwrap().count(), 0, "segments left in the store");
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
-        // Commits, each of a segment, until the uploader checkpoints the branch, which then holds
+        // Commits, each of a segment, until the uploader checkpoints the cell, which then holds
         // the history the collector goes by: an extent written, and freed by the next; the
         // checkpoint in the bucket before the collector lists it (TASK-339).
         crate::test_checkpoints::after(&store, store.bucket(), || {
@@ -3276,7 +3274,7 @@ mod tests {
         let fork = dir.path().join("fork");
         let made = fail::FailGuard::new("fork::made", "return").unwrap();
         let failed = store
-            .fork_to(&fork, crate::host_cell::fork_child(store.branch()))
+            .fork_to(&fork, crate::host_cell::fork_child(store.cell()))
             .expect_err("the fork was made");
         drop(made);
         assert_eq!(failed.errno(), None, "{failed:#}");
@@ -3320,7 +3318,7 @@ mod tests {
         );
 
         let path = dir.path().join("fork");
-        store.fork_to(&path, crate::host_cell::fork_child(store.branch())).unwrap();
+        store.fork_to(&path, crate::host_cell::fork_child(store.cell())).unwrap();
         let fork = OpenCell::open(&path).unwrap();
         let fork_window = fork.create_dax_window(8 * ps, None).unwrap();
         for mapping in &mappings {
@@ -3434,7 +3432,7 @@ mod tests {
             // A byte of its third part, as stored: itself if raw, else the middle of the part's.
             let path = dir.path().join(format!(
                 "store/extents/{}/{}",
-                base32_id::Padded(extent.branch),
+                base32_id::Padded(extent.cell),
                 base32_id::Padded(extent.sequence)
             ));
             let mut bytes = std::fs::read(&path).unwrap();
@@ -3506,9 +3504,9 @@ mod tests {
         write(&base, extent, 0, &pattern(5, len)).unwrap();
         base.commit(None).unwrap();
         let (first, second) = (dir.path().join("first"), dir.path().join("second"));
-        base.fork_to(&first, crate::host_cell::fork_child(base.branch())).unwrap();
-        base.fork_to(&second, crate::host_cell::fork_child(base.branch())).unwrap();
-        let profile = profile::path(&dir.path().join("store"), base.branch().id);
+        base.fork_to(&first, crate::host_cell::fork_child(base.cell())).unwrap();
+        base.fork_to(&second, crate::host_cell::fork_child(base.cell())).unwrap();
+        let profile = profile::path(&dir.path().join("store"), base.cell().id);
         drop(base);
 
         // The first fork reads two of the extent's parts, from its end.
@@ -3583,7 +3581,7 @@ mod tests {
         let window = base.create_dax_window(len, None).unwrap();
         base.commit(None).unwrap();
         let forked = dir.path().join("fork");
-        base.fork_to(&forked, crate::host_cell::fork_child(base.branch())).unwrap();
+        base.fork_to(&forked, crate::host_cell::fork_child(base.cell())).unwrap();
         base.map(extent, 0, len, 0).unwrap();
         // Each part paged in by a fault of its own, at once, as a guest's threads fault.
         std::thread::scope(|scope| {
@@ -3682,10 +3680,7 @@ mod tests {
                             store
                                 .fork_to(
                                     path,
-                                    crate::CellId {
-                                        id: store.branch().id + fork,
-                                        ..store.branch()
-                                    },
+                                    crate::CellId { id: store.cell().id + fork, ..store.cell() },
                                 )
                                 .map_err(|_| Errno::EIO)
                         }
@@ -3711,8 +3706,8 @@ mod tests {
         fn unmap(&self, _: u64, _: u64) {}
     }
 
-    /// cladefs: a store of a branch kept in object storage, opened where its data is not, maps the
-    /// branch's extents: their pages are fetched as the window's faults page them in.
+    /// cladefs: a store of a cell kept in object storage, opened where its data is not, maps the
+    /// cell's extents: their pages are fetched as the window's faults page them in.
     #[test]
     fn maps_extents_whose_data_is_in_object_storage() {
         let dir = tempfile::tempdir().unwrap();
@@ -3723,14 +3718,14 @@ mod tests {
         let extent = id(&first, 1);
         write(&first, extent, 0, &pattern(7, len)).unwrap();
         first.commit(None).unwrap();
-        let branch = first.branch();
+        let cell = first.cell();
         drop(first);
 
         let opening = Opening::here().unwrap();
         let store = OpenCell::create_kept_with(
             dir.path().join("second"),
             1 << 20,
-            branch,
+            cell,
             &url,
             opening.keeping,
         );
@@ -3872,7 +3867,7 @@ mod tests {
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
         store.commit(None).unwrap();
         let copy_path = dir.path().join("copy");
-        store.fork_to(&copy_path, crate::host_cell::fork_child(store.branch())).unwrap();
+        store.fork_to(&copy_path, crate::host_cell::fork_child(store.cell())).unwrap();
         let copy = OpenCell::open(&copy_path).unwrap();
         let (window, copy_window) =
             (store.create_dax_window(ps, None).unwrap(), copy.create_dax_window(ps, None).unwrap());
@@ -3922,7 +3917,7 @@ mod tests {
         write(&store, extent, 0, &pattern(6, ps as usize)).unwrap();
         store.commit(None).unwrap();
         let fork_path = dir.path().join("fork");
-        store.fork_to(&fork_path, crate::host_cell::fork_child(store.branch())).unwrap();
+        store.fork_to(&fork_path, crate::host_cell::fork_child(store.cell())).unwrap();
         let fork = OpenCell::open(&fork_path).unwrap();
         assert_eq!(read(&fork, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
 
@@ -3948,7 +3943,7 @@ mod tests {
         let forks: Vec<OpenCell> = (1..=2)
             .map(|fork| {
                 let path = dir.path().join(format!("fork-{fork}"));
-                base.fork_to(&path, crate::host_cell::fork_child(base.branch())).unwrap();
+                base.fork_to(&path, crate::host_cell::fork_child(base.cell())).unwrap();
                 OpenCell::open(&path).unwrap()
             })
             .collect();
@@ -4132,7 +4127,7 @@ mod tests {
         });
         let extent = Arc::new(CachedExtent::new(
             ArenaId::DEFAULT,
-            ExtentId { branch: u64::MAX, sequence: u64::MAX },
+            ExtentId { cell: u64::MAX, sequence: u64::MAX },
             Box::new(HeldSource(held.clone())),
             readers as u64 * READ_AHEAD,
         ));
@@ -4200,7 +4195,7 @@ mod tests {
         log::set_max_level(log::LevelFilter::Error);
         let extent = Arc::new(CachedExtent::new(
             ArenaId::DEFAULT,
-            ExtentId { branch: 7, sequence: 9 },
+            ExtentId { cell: 7, sequence: 9 },
             Box::new(FailingSource("no such object at segments/7/1")),
             READ_AHEAD,
         ));
@@ -4222,8 +4217,8 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, data).unwrap();
         publisher.commit(None).unwrap();
-        // A cell of its own, as a cell has one branch (doc-20).
-        publisher.fork_to(path, crate::host_cell::fork_child(publisher.branch())).unwrap();
+        // A cell of its own, as a cell has one cell (doc-20).
+        publisher.fork_to(path, crate::host_cell::fork_child(publisher.cell())).unwrap();
         let ancestry = OpenCell::open(path).unwrap().ancestry();
         (extent, ancestry)
     }
@@ -4329,7 +4324,7 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
         publisher.commit(None).unwrap();
-        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.branch())).unwrap();
+        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         drop(publisher);
         OpenCell::open(&base).unwrap().make_public_attach_only().unwrap();
         let tenant = Arena::new();
@@ -4383,7 +4378,7 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &data).unwrap();
         publisher.commit(None).unwrap();
-        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.branch())).unwrap();
+        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         drop(publisher);
         let tenant = Arena::new();
         let publisher = OpenCell::open_in(&publisher_path, Some(tenant.clone())).unwrap();
@@ -4423,7 +4418,7 @@ mod tests {
         let extent = id(&publisher, 1);
         write(&publisher, extent, 0, &pattern(5, BLOCK)).unwrap();
         publisher.commit(None).unwrap();
-        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.branch())).unwrap();
+        publisher.fork_to(&base, crate::host_cell::fork_child(publisher.cell())).unwrap();
         publisher.free(extent).unwrap();
         publisher.commit(None).unwrap();
         assert_eq!(read(&publisher, extent, 0, BLOCK), Err(Errno::ENOENT));
@@ -4448,7 +4443,7 @@ mod tests {
         store.commit(None).unwrap();
 
         let fork = dir.path().join("fork");
-        store.fork_to(&fork, crate::host_cell::fork_child(store.branch())).unwrap();
+        store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
         let forked = OpenCell::open(&fork).unwrap();
         forked.open_bases(open.clone()).unwrap();
         assert_eq!(read(&forked, extent, 0, BLOCK), Ok(pattern(6, BLOCK)));
@@ -4465,7 +4460,7 @@ mod tests {
     }
 
     /// doc-10: hundreds attached cost nothing until read: what reads one opens that one alone, and
-    /// finding it takes a lookup of its branch.
+    /// finding it takes a lookup of its cell.
     #[test]
     fn bases_attached_open_when_read() {
         const ATTACHED: usize = 300;
@@ -4479,7 +4474,7 @@ mod tests {
             })
             .collect();
         assert_eq!(store.bases_opened(), 0);
-        assert_eq!(store.bases.by_branch.read().unwrap().len(), 2 * ATTACHED);
+        assert_eq!(store.bases.by_cell.read().unwrap().len(), 2 * ATTACHED);
 
         let (extent, ..) = &bases[ATTACHED / 2];
         assert_eq!(read(&store, *extent, 0, BLOCK), Ok(pattern((ATTACHED / 2) as u8, BLOCK)));
@@ -4511,13 +4506,13 @@ mod tests {
         write(&store, inherited, 0, &pattern(9, BLOCK)).unwrap();
         store.commit(None).unwrap();
         let (fork, base) = (dir.path().join("fork"), dir.path().join("base"));
-        store.fork_to(&fork, crate::host_cell::fork_child(store.branch())).unwrap();
-        let base_branch = crate::host_cell::fork_child(store.branch());
-        store.fork_to(&base, base_branch).unwrap();
+        store.fork_to(&fork, crate::host_cell::fork_child(store.cell())).unwrap();
+        let base_cell = crate::host_cell::fork_child(store.cell());
+        store.fork_to(&base, base_cell).unwrap();
         let forked = OpenCell::open(&fork).unwrap();
         forked.attach_base(&base, &OpenCell::open(&base).unwrap().ancestry()).unwrap();
-        assert!(!forked.bases.routes(inherited.branch));
-        assert!(forked.bases.routes(base_branch.id));
+        assert!(!forked.bases.routes(inherited.cell));
+        assert!(forked.bases.routes(base_cell.id));
         forked.free(inherited).unwrap();
         forked.commit(None).unwrap();
         assert_eq!(read(&forked, inherited, 0, BLOCK), Err(Errno::ENOENT));
@@ -4533,13 +4528,13 @@ mod tests {
         base.make_public().unwrap();
         drop(base);
         let path = dir.path().join("store");
-        fail::cfg("extents::public_branches", "return").unwrap();
+        fail::cfg("extents::public_cells", "return").unwrap();
         let opened = [
             OpenCell::open(&path).map(|store| store.is_public()),
             OpenCell::open_base(&path, None).map(|store| store.is_public()),
             OpenCell::open_without_profile(&path).map(|store| store.is_public()),
         ];
-        fail::remove("extents::public_branches");
+        fail::remove("extents::public_cells");
         for opened in opened {
             assert_eq!(opened.map_err(|err| err.errno()), Err(Some(Errno::EIO)));
         }
@@ -4605,10 +4600,8 @@ mod tests {
         let refused = store.make_version(None).unwrap_err();
         assert_eq!(refused.errno(), Some(Errno::EBUSY));
         assert!(format!("{refused:#}").contains("holds 1 private pages"), "{refused:#}");
-        let forked = store.fork_quiescent_to(
-            dir.path().join("fork"),
-            crate::host_cell::fork_child(store.branch()),
-        );
+        let forked = store
+            .fork_quiescent_to(dir.path().join("fork"), crate::host_cell::fork_child(store.cell()));
         assert_eq!(forked.err().and_then(|error| error.errno()), Some(Errno::EBUSY));
         assert_eq!(store.window_mappings(), Err(Errno::EBUSY));
 

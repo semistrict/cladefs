@@ -51,24 +51,24 @@ receiver with the `http` protocol and version `OTEL_EXPORTER_OTLP_ENDPOINT` at t
 
 ## Spans
 
-Every attribute is prefixed `cladefs.`. Branches are written in base 32 (`base32_id`), as store paths name them.
+Every attribute is prefixed `cladefs.`. Cells are written in base 32 (`base32_id`), as store paths name them.
 Counts are integers. A failed operation has an error status carrying its message. A failed
 request also has `cladefs.errno`.
 
 | Span | Made by | Parent | Attributes |
 |---|---|---|---|
-| `cladefsd.<kind>` (`cladefsd.map`, `cladefsd.write`, `cladefsd.commit`, `cladefsd.read`, `cladefsd.free`, `cladefsd.fault`, `cladefsd.open`, ...) | each request a VM process sends, from its dispatch to its reply | root | `request.kind`, `branch`, `bytes` (read, write, map, unmap, private), `extents` (free, free_many, map, map_many), `durable` (commit), `store` (open, fork), `request_id` (see below), `errno` |
-| `store.commit` | every commit of a writer's store | the request, or whatever commits | `branch`, `durable` |
+| `cladefsd.<kind>` (`cladefsd.map`, `cladefsd.write`, `cladefsd.commit`, `cladefsd.read`, `cladefsd.free`, `cladefsd.fault`, `cladefsd.open`, ...) | each request a VM process sends, from its dispatch to its reply | root | `request.kind`, `cell`, `bytes` (read, write, map, unmap, private), `extents` (free, free_many, map, map_many), `durable` (commit), `store` (open, fork), `request_id` (see below), `errno` |
+| `store.commit` | every commit of a writer's store | the request, or whatever commits | `cell`, `durable` |
 | `commit.seal` | sealing the extents written since the last commit | `store.commit` | `extents`, `bytes` copied |
 | `commit.write` | recording the commit in the open segment and queuing its flush | `store.commit` | `epoch` |
-| `store.flush` | making ordered commits local: syncs and log appends | `store.commit` if the commit waits for local or uploaded; root for the daemon's 50 ms flushes | `branch`, `commits` |
+| `store.flush` | making ordered commits local: syncs and log appends | `store.commit` if the commit waits for local or uploaded; root for the daemon's 50 ms flushes | `cell`, `commits` |
 | `commit.upload_wait` | a commit waiting for the bucket (uploaded: until uploaded; otherwise: within its lag) | `store.commit` | `epoch` |
-| `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `branch` |
-| `store.fork` | a fork or version of a store | the request or control call | `branch`, `child`, `version` |
-| `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `branch`, `extent`, `arena`, `bytes` |
+| `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `cell` |
+| `store.fork` | a fork or version of a store | the request or control call | `cell`, `child`, `version` |
+| `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `cell`, `extent`, `arena`, `bytes` |
 | `cache.relief` | an eviction pass freeing memory for an arena under pressure | root | `arena`, `bytes` evicted, `extents` evicted |
-| `upload.segment` | uploading a segment, its large extents first | root, on the uploader | `branch`, `segment`, `extents`, `bytes` |
-| `upload.checkpoint` | writing a branch checkpoint | root, on the uploader | `branch`, `segment`, `extents` |
+| `upload.segment` | uploading a segment, its large extents first | root, on the uploader | `cell`, `segment`, `extents`, `bytes` |
+| `upload.checkpoint` | writing a cell checkpoint | root, on the uploader | `cell`, `segment`, `extents` |
 | `bucket.get`, `bucket.get_range`, `bucket.head`, `bucket.list`, `bucket.list_delimited`, `bucket.create`, `bucket.update`, `bucket.overwrite`, `bucket.delete`, `bucket.delete_batch` | each object-store request (a batch of deletes: one request where the store deletes in batches, as S3's DeleteObjects) | the upload, checkpoint, page-in, open or collector pass that made it | `object_key`, `bytes`, `objects` (listings, batches of deletes), `prefixes` (listings by delimiter) |
 
 Uploads run behind commits, so an upload is a trace of its own rather than a child of the commit

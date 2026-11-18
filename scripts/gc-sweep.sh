@@ -6,15 +6,15 @@
 # Measure cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5): how long a sweep
 # takes, and the most memory it holds, by how many passes it runs at once. It builds cladefs-gc and
 # cladefs-gc-fill (release, bucket_cell alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
-# tenants (100) of CLADEFS_GC_CELLS cells (100) of a branch of CLADEFS_GC_SEGMENTS segments (95), the
+# tenants (100) of CLADEFS_GC_CELLS cells (100) of a cell of CLADEFS_GC_SEGMENTS segments (95), the
 # largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
 # files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
 # (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2): the first deleting and
-# compacting half of every branch, the second deleting what the first compacted, and little else,
+# compacting half of every cell, the second deleting what the first compacted, and little else,
 # those after skipping every cell unchanged since.
 #
 # CLADEFS_GC_FILL is what else the filling is told, the cells' kind (cladefs-gc-fill: `--deleted`,
-# cells whose branches are all deleted; `--clones EXTENTS`, sandboxes made and deleted, clones of a
+# cells whose cells are all deleted; `--clones EXTENTS`, sandboxes made and deleted, clones of a
 # version of their tenant's base, the tenant's first cell; TASK-443.4). With CLADEFS_GC_CELL, a cell
 # as cladefs-gc names it (`1/1`, a base's), each bucket swept is then passed over at that cell
 # alone, twice, each pass a process of its own: with the sweeps' options, which skips the cell if

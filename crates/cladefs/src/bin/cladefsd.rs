@@ -24,7 +24,7 @@
 //! connects to the socket its configuration names (cladefs's Firecracker's `cladefsd_socket`).
 //!
 //! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its
-//! stores' branches are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
+//! stores' cells are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
 //! the system's control plane gives it, and which fences earlier placements' writes and deletes;
 //! without them, it refuses to start (`cladefs::bucket::Host`, TASK-45). Tests and development use
 //! an in-memory bucket (`memory:///NAME`).
@@ -73,7 +73,7 @@
 //! TASK-47).
 //!
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
-//! `az://container/prefix`) each store it opens keeps its branch in (backlog doc-7), with
+//! `az://container/prefix`) each store it opens keeps its cell in (backlog doc-7), with
 //! credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded behind them, within a second. With
 //! `CLADEFSD_PART_CACHE` naming a directory too, what stores read from the bucket is kept there,
 //! sparse, leaving 4 GiB of its filesystem free, and kept across the daemon's restarts: one daemon

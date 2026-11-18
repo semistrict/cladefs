@@ -66,11 +66,11 @@ impl Storage {
     pub const BLOCK_SIZE: u32 = host_cell::BLOCK_SIZE;
 
     /// The image at `path`: a directory holding an extent store (see `image`), a fork's or not,
-    /// its branch kept in the bucket its description names (see `kept`).
+    /// its cell kept in the bucket its description names (see `kept`).
     ///
     /// Its I/O bypasses the host's page cache where the host filesystem allows, as the in-process
     /// kernel caches files' pages already, and runs on threads of its own (io_uring on Linux).
-    /// It fails for an image made by older code, which kept its branch in no bucket, and which
+    /// It fails for an image made by older code, which kept its cell in no bucket, and which
     /// nothing converts.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let dir = path.as_ref().to_owned();
@@ -80,7 +80,7 @@ impl Storage {
     }
 
     /// A new image at `path`, which must not exist, holding at most `size` bytes. It holds nothing
-    /// until the filesystem writes to it, and must be formatted before it is mounted. Its branch
+    /// until the filesystem writes to it, and must be formatted before it is mounted. Its cell
     /// is kept in a file bucket of its own, beside its directory (`<image>.bucket`), which its
     /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFSD_BUCKET`).
@@ -88,23 +88,23 @@ impl Storage {
         Self::make(path.as_ref(), (size, host_cell::DEFAULT_TENANT), true, Self::keeping()?)
     }
 
-    /// cladefs: the image at `path` of the branch `of` says, kept in the bucket at `bucket`
+    /// cladefs: the image at `path` of the cell `of` says, kept in the bucket at `bucket`
     /// (TASK-302), an Fxfs cell named as its directory is (TASK-364). If no
     /// image is at `path`, or what an image's making left unmade, a new one of `capacity` bytes:
-    /// of a branch the bucket has, holding what it holds there, its head taken, as `cladefsctl
-    /// take` takes a branch; or of a new branch of a cell, its ID the bucket's to give, which holds
+    /// of a cell the bucket has, holding what it holds there, its head taken, as `cladefsctl
+    /// take` takes a cell; or of a new cell, its ID the bucket's to give, which holds
     /// nothing: a filesystem must be formatted on it. Its cell is held with `token`'s placement,
     /// which it is placed at, if given, as `Storage::open` takes heads otherwise. If an image is at
-    /// `path`, it is opened as [`Storage::open`] opens it, and must be of the branch taken:
-    /// `EEXIST` otherwise, and for a new branch.
+    /// `path`, it is opened as [`Storage::open`] opens it, and must be of the cell taken:
+    /// `EEXIST` otherwise, and for a new cell.
     pub fn take(
         path: impl AsRef<Path>,
-        (of, capacity): (host_cell::BranchOf, u64),
+        (of, capacity): (host_cell::CellOf, u64),
         bucket: &str,
         token: Option<u64>,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
-        // What a making that died part way left is no store: its directory goes, not the branch,
+        // What a making that died part way left is no store: its directory goes, not the cell,
         // which may be another's, as the extent daemon's `CreateCell` has it (TASK-196).
         if host_cell::unmade(path) {
             std::fs::remove_dir_all(path)
@@ -124,14 +124,14 @@ impl Storage {
                 local_cell::place_host(path, token).map_err(Error::new)?;
             }
         } else {
-            let found = local_cell::host_branch(path).map_err(Error::new)?;
+            let found = local_cell::host_cell(path).map_err(Error::new)?;
             let not = match of {
-                host_cell::BranchOf::Taken(branch) if found == branch => None,
-                host_cell::BranchOf::Taken(branch) => Some(format!("{branch}")),
-                _ => Some("a new branch".to_owned()),
+                host_cell::CellOf::Taken(cell) if found == cell => None,
+                host_cell::CellOf::Taken(cell) => Some(format!("{cell}")),
+                _ => Some("a new cell".to_owned()),
             };
             if let Some(not) = not {
-                let error = anyhow::anyhow!("{} holds branch {found}, not {not}", path.display());
+                let error = anyhow::anyhow!("{} holds cell {found}, not {not}", path.display());
                 return Err(Error::new(error.context(crate::Errno::EEXIST)));
             }
         }
@@ -146,7 +146,7 @@ impl Storage {
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one cell of a
-    /// new cell of `tenant`'s (TASK-364), its branch kept as `keeping` says: as the extent daemon's
+    /// new cell of `tenant`'s (TASK-364), its cell kept as `keeping` says: as the extent daemon's
     /// stores keep theirs, with the host's cache of the bucket's objects, for an import the daemon
     /// makes (TASK-237).
     pub(crate) fn create_unmade_keeping(
@@ -157,7 +157,7 @@ impl Storage {
         Self::make(path.as_ref(), (size, tenant), false, keeping)
     }
 
-    /// How an image this process makes, where no host's daemon serves it, keeps its branch
+    /// How an image this process makes, where no host's daemon serves it, keeps its cell
     /// ([`host_cell::keeping`]): with no cache of the bucket's objects.
     fn keeping() -> Result<local_cell::upload::Options, Error> {
         host_cell::keeping().map_err(Error::new)
@@ -175,7 +175,7 @@ impl Storage {
     }
 
     /// A new image at `path`, as [`Storage::create`] makes it, a new cell of
-    /// `tenant`'s, whole if `whole`, its branch kept as `keeping` says.
+    /// `tenant`'s, whole if `whole`, its cell kept as `keeping` says.
     fn make(
         path: &Path,
         (size, tenant): (u64, u64),
@@ -186,7 +186,7 @@ impl Storage {
             return Err(Error::msg("the image is smaller than a block"));
         }
         let writes = Arc::new(WriteGate::default());
-        let made = (size, host_cell::BranchOf::New(tenant), whole);
+        let made = (size, host_cell::CellOf::New(tenant), whole);
         let device =
             ImageDevice::create(path, made, keeping, writes.clone()).map_err(Error::new)?;
         Ok(Self::image(path.to_owned(), writes, device))
@@ -219,8 +219,8 @@ impl Storage {
     }
 
     /// Forks the image to a new image at `path`, which must not exist, and returns its storage.
-    /// The fork's branch is a fork of the image's in its bucket, which the fork keeps its own
-    /// branch in: it takes the same space whatever the image holds, inheriting the image's
+    /// The fork's cell is a fork of the image's in its bucket, which the fork keeps its own
+    /// cell in: it takes the same space whatever the image holds, inheriting the image's
     /// extents rather than copies, read from the bucket (TASK-165.7). `path` is the fork's own
     /// directory. Memory cannot be forked.
     ///
@@ -234,8 +234,8 @@ impl Storage {
     }
 
     /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its
-    /// branch in its bucket, whose collector reclaims what no other branch inherited from it, and
-    /// its directory. Its forks live on: their branches are the bucket's, which an image's own
+    /// cell in its bucket, whose collector reclaims what no other cell inherited from it, and
+    /// its directory. Its forks live on: their cells are the bucket's, which an image's own
     /// keeps beside its directory, not in it (TASK-165.7). Fails with `ENOENT` if there is none
     /// at `path`.
     pub fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
@@ -309,8 +309,8 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// Forks `image` to a new image at `path`, a fork of its store, and of its branch in its bucket,
-/// with a branch of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the
+/// Forks `image` to a new image at `path`, a fork of its store, and of its cell in its bucket,
+/// with a cell of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the
 /// store durably and waits for the fork's upload. The fork pauses `writes`, the device's writes
 /// and frees, until the fork's commit is made, so that it is the image as it was at one time.
 pub(crate) async fn fork_image(

@@ -7,9 +7,9 @@
 //! cladefs: it collects a cell at a time (doc-7, Garbage collection; TASK-395): a pass over a cell
 //! takes the cell's collector lease, lists the cell's prefix, and reads, compacts and deletes what
 //! is there alone, beside passes over other cells, which it neither fences nor waits for.
-//! Everything it decides by is under the cell's prefix: its branches' objects, their moves, its
-//! lease, and the references of forks of its branches in other cells ([`layout::reference`]). What
-//! its branches inherited from other cells it reads there, and never deletes: those cells keep it,
+//! Everything it decides by is under the cell's prefix: its cells' objects, their moves, its
+//! lease, and the references of forks of its cells in other cells ([`layout::reference`]). What
+//! its cells inherited from other cells it reads there, and never deletes: those cells keep it,
 //! by the references of the forks that inherited it. A sweep over every cell is a pass over each:
 //! one after another ([`Collector::collect`]), or many at once, by processes any number of them
 //! ([`crate::sweep`]); the cells are found by delimiter listings, a page at a time, listing none
@@ -24,27 +24,27 @@
 //! still works on fences it as before, and the one fenced deletes nothing.
 //!
 //! A pass takes its cell's lease, lists every object of the cell, and only then reads what
-//! branches need. An object written after the listing is no candidate, which is what makes reading
-//! the branches' states after it safe: what a state names was either listed, and is seen as
+//! cells need. An object written after the listing is no candidate, which is what makes reading
+//! the cells' states after it safe: what a state names was either listed, and is seen as
 //! needed, or not, and is left.
 //!
-//! The live branches are those whose records are not deleted, and the children of forks in live
-//! branches' states, of the cell, which get their records only once their forks are acknowledged.
+//! The live cells are those whose records are not deleted, and the children of forks in live
+//! cells' states, of the cell, which get their records only once their forks are acknowledged.
 //! What they need is what recovering them reads, the objects holding the extents their states
 //! name, the moves the way to those goes through, and each one's segments past its end, which may
 //! be uploaded and not yet in it. Segments go only once a checkpoint covers them, so that a reader
-//! that finds one missing knows, from the checkpoints, whether it is the branch's end.
+//! that finds one missing knows, from the checkpoints, whether it is the cell's end.
 //!
-//! cladefs: a fork of a branch of the cell to a child in another cell is kept by the origin: the
+//! cladefs: a fork of the cell to a child in another cell is kept by the origin: the
 //! parent's whole state at the end of the segment it was forked at, the objects and moves holding
 //! the extents it names along their ways from where they were sealed, and what recovering it reads
 //! (TASK-395.4). It is kept while a reference names it, whatever the child frees of it since: the
 //! collector is conservative, reclaiming late rather than reading other cells to find what their
-//! branches still hold. An origin shared by many references, a version cloned many times, is
+//! cells still hold. An origin shared by many references, a version cloned many times, is
 //! recovered once. The references are listed after the states, by their origins' prefixes
 //! ([`referenced`]). Forks in the live
-//! branches' states to other cells keep their origins too, as a fork's child may lack its
-//! reference yet. A cell with no live branch and no reference is reclaimed whole, but its records
+//! cells' states to other cells keep their origins too, as a fork's child may lack its
+//! reference yet. A cell with no live cell and no reference is reclaimed whole, but its records
 //! and its object; and its pass retires the references of its deleted children under their
 //! parents' cells, computing them from the records' origins, never listing them: the one delete a
 //! pass makes outside its cell. cladefs: its records and object go too, with its heads and lease,
@@ -54,14 +54,14 @@
 //!
 //! A fork of a version is its child's record alone (doc-20): its child names what the version
 //! names, and a pass that read the version dropped lists the records after that, and so finds
-//! every child whose fork can succeed ([`branch::fork_version`]). A child still being made of a
+//! every child whose fork can succeed ([`lifecycle::fork_version`]). A child still being made of a
 //! version dropped the pass gives up on, first ([`abandon`]): nothing relies on it, and it may name
 //! what is gone, which would stop this pass and every other.
 //!
 //! A state read names no fork deleted before it, a writer's checkpoint dropping those, and the
 //! fork's record and its children's may have come after the pass listed the records. So it lists
 //! them again after it read the states, and recovers what it finds, again while a state it read
-//! may have dropped a fork: while it recovers a branch with a checkpoint of its own. A record made
+//! may have dropped a fork: while it recovers a cell with a checkpoint of its own. A record made
 //! after that names what the pass kept, or what it never listed: what a fork after a state read
 //! inherited, that state holds, or a later object; and a fork before it that state names.
 //!
@@ -73,7 +73,7 @@
 //! cladefs: marking reads metadata alone, which is authenticated, not encrypted, holding no key;
 //! compacting copies extents out of objects' data, encrypted there, so a pass compacting one unwraps
 //! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
-//! branches' DEKs from their records; and encrypts each one's moves under the key it was encrypted under,
+//! cells' DEKs from their records; and encrypts each one's moves under the key it was encrypted under,
 //! with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting nothing
 //! encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
 //! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, and leaves
@@ -83,16 +83,16 @@
 //! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
 //! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
 //!
-//! A branch's writer names its extents where the checkpoint it recovered from, or its own since,
+//! A cell's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
-//! writer made, landing after the writer recovered the branch (one it took the branch from, which
-//! knew nothing of it), or the state of the parent a branch inherited them from, which its writer
+//! writer made, landing after the writer recovered the cell (one it took the cell from, which
+//! knew nothing of it), or the state of the parent a cell inherited them from, which its writer
 //! read as it was then. So a state's way to an extent starts where the extent was sealed, its
-//! moves all kept, unless the state's checkpoint is that of the writer holding the branch's head,
-//! read after the checkpoint was listed: a writer taking the branch after that recovers from that
+//! moves all kept, unless the state's checkpoint is that of the writer holding the cell's head,
+//! read after the checkpoint was listed: a writer taking the cell after that recovers from that
 //! checkpoint or a later one, and the writer that made it took its moves first (TASK-175).
 //!
-//! A pass reads records, recovers branches, reads moves and compacts objects many at once, and
+//! A pass reads records, recovers cells, reads moves and compacts objects many at once, and
 //! deletes objects in batches where the store deletes so (TASK-395.5); what forks inherited
 //! together, their parent's state where they were forked, it reads once and takes once for them
 //! all; and a pass reads a record again only once it changed ([`Collector`], TASK-92.7).
@@ -110,7 +110,7 @@
 //! delete to a marks object of the cell's (`<C>gc/marks/<epoch>`, [`layout::Marks`]), which every
 //! reader of the cell warns of reaching ([`crate::marks`]), and which the next such pass compares
 //! what it finds doomed with: an object doomed before and kept now, the same object still, is a
-//! bug, as no correct fork or recovery reaches what no live branch reached. Nothing marked goes, so
+//! bug, as no correct fork or recovery reaches what no live cell reached. Nothing marked goes, so
 //! the bucket grows by what it would have reclaimed, the compacted objects and their moves both,
 //! nor does it retire references. A dry run ([`Collector::dry_run_cell`]) writes nothing at all,
 //! the lease neither: it says what a pass would delete, less what a pass would delete only for
@@ -123,7 +123,7 @@ use crate::moves::{Moved, MovesMaps};
 use crate::passed::{self, CollectorLease, Decided, Deferred, LeaseTaking, Listed, Passed, Usage};
 use crate::record::{self, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
-use crate::{Error, branch, rules};
+use crate::{Error, lifecycle, rules};
 use extent_frame::Keys as _;
 use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
@@ -132,13 +132,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use storage_device::ExtentId;
 
-/// How many branches' records a pass reads at once.
+/// How many cells' records a pass reads at once.
 const RECORDS_AT_ONCE: usize = 32;
 
 /// How many objects' trailers a pass reads at once, to learn their data's lengths.
 const TRAILERS_AT_ONCE: usize = 32;
 
-/// How many branches a pass recovers at once, and how many origins' states.
+/// How many cells a pass recovers at once, and how many origins' states.
 const RECOVERIES_AT_ONCE: usize = 16;
 
 /// How many of the checkpoints a pass read whole it keeps for the recoveries after: those of forks
@@ -194,7 +194,7 @@ pub struct Report {
     pub skipped: usize,
     /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had: the
     /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
-    /// having no KMS (TASK-411.6). Each still marked and deleted what no live branch needs, warning of the cell and why. And those that skipped a cell a
+    /// having no KMS (TASK-411.6). Each still marked and deleted what no live cell needs, warning of the cell and why. And those that skipped a cell a
     /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
     /// cladefs: the objects encrypted that those passes would have compacted, or the pass before a
@@ -511,7 +511,7 @@ impl Collector {
             return Ok((report, None));
         }
         // Many at once, in batches where the store deletes so, in any order: none of it is what a
-        // live branch needs, whatever else goes (TASK-395.5).
+        // live cell needs, whatever else goes (TASK-395.5).
         let keys: Vec<&str> = doomed.iter().map(|meta| meta.key.as_str()).collect();
         bucket::delete_all(bucket, &keys).await;
         report.deleted += keys.len();
@@ -525,7 +525,7 @@ impl Collector {
             retired.iter().map(|(key, _)| key.clone()).collect()
         };
         let (marked, unmarked) = (keys(&marked), keys(&unmarked));
-        branch::retire(bucket, &marked.iter().map(String::as_str).collect::<Vec<_>>()).await;
+        lifecycle::retire(bucket, &marked.iter().map(String::as_str).collect::<Vec<_>>()).await;
         bucket::delete_all(bucket, &unmarked.iter().map(String::as_str).collect::<Vec<_>>()).await;
         let stale: Vec<&str> = pass.recording.stale.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &stale).await;
@@ -686,7 +686,7 @@ impl Collector {
     /// keys, and no two passes' marks share a key. A pass that deletes, which it then fences,
     /// deletes nothing, and the next deletes what it would have: a pass fenced is late, never
     /// wrong. And it stops, as a pass that deletes does (TASK-180), where it finds lost what a live
-    /// branch needs once a pass that deletes took the lease from it, deleting since what it read
+    /// cell needs once a pass that deletes took the lease from it, deleting since what it read
     /// live; a pass not holding the lease could not tell that from a bug. Fenced, it writes no
     /// marks, as a pass fenced deletes nothing: what it read may be older than what a later pass
     /// did. Compacting, which writes only create-only moves that other passes' stand beside, needs
@@ -789,9 +789,9 @@ enum PassEnd {
 
 impl Remembered {
     /// What a pass over `cell` of the cell's collector lease's `epoch` finds: every object of the
-    /// cell `listed` before it read anything else ([`first_listing`]), and what the live branches
+    /// cell `listed` before it read anything else ([`first_listing`]), and what the live cells
     /// and the origins referred to need of them; none if a later pass took the lease from it as
-    /// it found what a live branch needs lost (TASK-180). It writes what giving up on forks needs,
+    /// it found what a live cell needs lost (TASK-180). It writes what giving up on forks needs,
     /// if `writes` says so.
     async fn survey(
         &mut self,
@@ -809,7 +809,7 @@ impl Remembered {
             false => Some(referenced(bucket, cell).await),
         };
         // What the listing of the cell holds serves the first listing of the records, and of each
-        // branch's checkpoints, that the pass makes (TASK-395.16).
+        // cell's checkpoints, that the pass makes (TASK-395.16).
         let objects = listed.as_ref().map(|listed| &listed.objects);
         let checkpoints = Checkpoints::new(bucket, CHECKPOINTS_KEPT).listed(objects);
         let mut records = self.records(bucket, cell, objects, &BTreeMap::new()).await?;
@@ -831,7 +831,7 @@ impl Remembered {
         let referenced = match read {
             Ok(referenced) => referenced,
             // Fenced, it read what the pass that fenced it, deleting since, may have found no live
-            // branch needs: a version deleted, read live before, and its fork being made, read after
+            // cell needs: a version deleted, read live before, and its fork being made, read after
             // (TASK-180). It stops, as it would before deleting.
             Err(Error::Lost(_))
                 if rules().passes_fenced_stop && fenced(bucket, cell, epoch).await? =>
@@ -842,7 +842,7 @@ impl Remembered {
         };
         drop(checkpoints);
         // What a pass listing the cell as it did decides as it did, unless it went by more than the
-        // cell: a version of another cell's record, or a version's branch's head, read for a clone
+        // cell: a version of another cell's record, or a version's cell's head, read for a clone
         // being made.
         let forking_elsewhere = (records.iter()).any(|(_, record)| {
             !record.deleted && forked_from(record).is_some_and(|from| from != cell)
@@ -859,10 +859,10 @@ impl Remembered {
         Ok(Some(Pass::new(bucket, (cell, epoch), found).await?))
     }
 
-    /// Reads the states of `cell`'s live branches into `live`, and of the origins of their forks
+    /// Reads the states of `cell`'s live cells into `live`, and of the origins of their forks
     /// to other cells, then lists `records` again, going on with the new ones, while a state it
     /// read is from a checkpoint, until no new one appears. A pass fenced as it found what a live
-    /// branch needs lost stops, where its caller sees it.
+    /// cell needs lost stops, where its caller sees it.
     async fn read(
         &mut self,
         bucket: &impl Bucket,
@@ -877,13 +877,13 @@ impl Remembered {
                 abandon(bucket, records, writes).await?;
             }
             let (checkpointed, origins) =
-                recover_live(bucket, cell, checkpoints, records, live, writes).await?;
+                recover_live(bucket, checkpoints, records, live, writes).await?;
             keep_origins(bucket, checkpoints, live, &origins, KeptBy::Forked).await?;
             if !checkpointed || !rules().records_relisted {
                 return Ok(());
             }
             let again = self.records(bucket, cell, None, records).await?;
-            let found = again.keys().any(|branch| !records.contains_key(branch));
+            let found = again.keys().any(|cell| !records.contains_key(cell));
             records.extend(again);
             if !found {
                 return Ok(());
@@ -891,9 +891,9 @@ impl Remembered {
         }
     }
 
-    /// The records of `cell`'s branches, read many at once, but those read before at the versions
-    /// listed: listed until a listing finds none of a branch not in `before`, the records the pass
-    /// read before, nor any not read by the listings before it. A deleted branch's children got
+    /// The records of `cell`'s cells, read many at once, but those read before at the versions
+    /// listed: listed until a listing finds none of a cell not in `before`, the records the pass
+    /// read before, nor any not read by the listings before it. A deleted cell's children got
     /// theirs before it was marked deleted, so listing them again after reading them finds those of
     /// any it read deleted. cladefs: the first listing is `listed`, the pass's listing of the whole
     /// cell, if it has one, taken before it read anything (TASK-395.16): a LIST less, as the model's
@@ -914,31 +914,31 @@ impl Remembered {
                 None => bucket::list(bucket, &layout::record(cell)).await,
             };
             let listed = (listing.into_iter()).filter_map(|meta| match layout::kind(&meta.key) {
-                Kind::Record { branch } if !records.contains_key(&branch) => Some((branch, meta)),
+                Kind::Record { cell } if !records.contains_key(&cell) => Some((cell, meta)),
                 _ => None,
             });
             let known = &self.records;
             let reads = futures::stream::iter(listed)
-                .map(|(branch, meta)| async move {
-                    (branch, read_record(bucket, known, branch, &meta).await, meta.key)
+                .map(|(cell, meta)| async move {
+                    (cell, read_record(bucket, known, cell, &meta).await, meta.key)
                 })
                 .buffered(RECORDS_AT_ONCE)
                 .collect::<Vec<_>>()
                 .await;
             let mut new = false;
-            for (branch, read, key) in reads {
+            for (cell, read, key) in reads {
                 let Some((version, record)) = read? else { continue };
                 match version {
                     Some(version) => self.records.insert(key, (version, record.clone())),
                     None => self.records.remove(&key),
                 };
-                records.insert(branch, record);
-                new |= !before.contains_key(&branch);
+                records.insert(cell, record);
+                new |= !before.contains_key(&cell);
             }
             if !new {
                 // Those gone, which the collector deleted, it forgets.
                 self.records.retain(|key, _| match layout::kind(key) {
-                    Kind::Record { branch } => records.contains_key(&branch),
+                    Kind::Record { cell } => records.contains_key(&cell),
                     _ => false,
                 });
                 return Ok(records);
@@ -950,7 +950,7 @@ impl Remembered {
 /// cladefs: whether a pass over `cell` has anything to go by, checked before it takes the cell's
 /// lease, which would be the cell's one object otherwise: the format of the cell's object, a GET,
 /// which a pass of another format refuses ([`Error::Format`]) before writing anything. A cell with
-/// none, its branches made without one, its first record's format; and, holding no record, whether
+/// none, its cells made without one, its first record's format; and, holding no record, whether
 /// it holds anything (a reference, what a dead cell left).
 async fn passable(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
     if crate::cell::read(bucket, cell).await?.is_some() {
@@ -958,9 +958,9 @@ async fn passable(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
     }
     let listed = bucket::list(bucket, &layout::record(cell)).await;
     for meta in &listed {
-        let Kind::Record { branch } = layout::kind(&meta.key) else { continue };
+        let Kind::Record { cell } = layout::kind(&meta.key) else { continue };
         if let Some(object) = bucket::get(bucket, &meta.key).await {
-            Record::decode(branch, &object.bytes)?;
+            Record::decode(cell, &object.bytes)?;
             return Ok(true);
         }
     }
@@ -988,8 +988,8 @@ enum Writes {
 
 /// cladefs: the objects the newest marks of `cell` before those of `epoch` named, that `objects`,
 /// listed by the mark-only pass of `epoch`, holds still, the same objects, and that `doomed`, what
-/// it found no live branch needs, does not: each warned of, loudly. No correct fork or recovery
-/// reaches what no live branch reached, so each is a bug in the collector, which a pass deleting
+/// it found no live cell needs, does not: each warned of, loudly. No correct fork or recovery
+/// reaches what no live cell reached, so each is a bug in the collector, which a pass deleting
 /// would have lost. Marks of a shorter grace period than `options`' are compared with none: what a
 /// compacted object needs to go, its moves aged, takes longer by a longer one. Marks it can't read,
 /// it warns of.
@@ -1032,7 +1032,7 @@ async fn resurrected(
         let (kind, before) = (layout::kind(key), marks.epoch);
         log::warn!(
             key, kind:?, marks = before, epoch;
-            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before} found no live branch needs \
+            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before} found no live cell needs \
              it, and the pass {epoch} finds one does: a bug in the collector, which deleting \
              would have lost it to", before = base32_id::Short(before), epoch = base32_id::Short(epoch)
         );
@@ -1047,8 +1047,8 @@ async fn fenced(bucket: &impl Bucket, cell: CellId, epoch: u64) -> Result<bool, 
     Ok(passed::epoch(bucket, cell).await? != epoch)
 }
 
-/// Gives up on the forks being made of versions that are gone, as their branches' heads say, which
-/// it says are deleted then, or made, if that came first ([`branch::abandon`]); without `writes`,
+/// Gives up on the forks being made of versions that are gone, as their cells' heads say, which
+/// it says are deleted then, or made, if that came first ([`lifecycle::abandon`]); without `writes`,
 /// takes them as deleted, writing nothing (TASK-476).
 async fn abandon(
     bucket: &impl Bucket,
@@ -1064,7 +1064,7 @@ async fn abandon(
             continue;
         }
         let record = match writes {
-            Writes::Some => branch::abandon(bucket, child).await?,
+            Writes::Some => lifecycle::abandon(bucket, child).await?,
             Writes::None => Record { deleted: true, ..records[&child].clone() },
         };
         records.insert(child, record);
@@ -1072,28 +1072,28 @@ async fn abandon(
     Ok(())
 }
 
-/// cladefs: whether the version `id` of the branch `origin` names, at the segment it names, is gone:
-/// that branch's head names it no more, dropped by its writer or ended by a deletion (TASK-476).
+/// cladefs: whether the version `id` of the cell `origin` names, at the segment it names, is gone:
+/// that cell's head names it no more, dropped by its writer or ended by a deletion (TASK-476).
 async fn version_gone(bucket: &impl Bucket, origin: Origin, id: u64) -> Result<bool, Error> {
     let head = crate::head::get(bucket, origin.parent).await?;
     let named = head.as_ref().and_then(|head| head.version(id));
     Ok(named.is_none_or(|version| version.at != origin.at))
 }
 
-/// cladefs: the branch whose head a fork being made reads as it is made, `record`'s: its version's.
+/// cladefs: the cell whose head a fork being made reads as it is made, `record`'s: its version's.
 fn forked_from(record: &Record) -> Option<CellId> {
     record.forking()?;
     Some(record.origin()?.parent)
 }
 
-/// The record of `branch` at the key of `meta`, which a listing gave, if there is one, and the
+/// The record of `cell` at the key of `meta`, which a listing gave, if there is one, and the
 /// version read: as `known` has it, if it read it at the version listed; or read now, unless it is
-/// of another format ([`Error::Format`]), which stops the pass: what that branch needs, it can't
+/// of another format ([`Error::Format`]), which stops the pass: what that cell needs, it can't
 /// read.
 async fn read_record(
     bucket: &impl Bucket,
     known: &BTreeMap<String, (String, Record)>,
-    branch: CellId,
+    cell: CellId,
     meta: &Meta,
 ) -> Result<Option<(Option<String>, Record)>, Error> {
     if let Some(listed) = &meta.version.e_tag
@@ -1103,7 +1103,7 @@ async fn read_record(
         return Ok(Some((Some(version.clone()), record.clone())));
     }
     let Some(object) = bucket::get(bucket, &meta.key).await else { return Ok(None) };
-    Ok(Some((object.meta.version.e_tag, Record::decode(branch, &object.bytes)?)))
+    Ok(Some((object.meta.version.e_tag, Record::decode(cell, &object.bytes)?)))
 }
 
 /// cladefs: the origins the references under `cell` name, by a delimiter listing: its origins,
@@ -1121,7 +1121,7 @@ async fn referenced(bucket: &impl Bucket, cell: CellId) -> BTreeSet<Origin> {
 /// cladefs: what keeps an origin a pass keeps ([`keep_origins`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KeptBy {
-    /// A fork of a live branch's state to a child in another cell, which may have no reference
+    /// A fork of a live cell's state to a child in another cell, which may have no reference
     /// yet: its state lost is what the fork's child needs lost, which stops the pass.
     Forked,
     /// A reference: its state lost stops the pass if a child named under it lives, its record, read
@@ -1133,7 +1133,7 @@ enum KeptBy {
 /// cladefs: keeps in `live` the states of the origins `origins` it keeps none of yet, each
 /// recovered once, however many forks name it, several at once ([`Live::keep_origin`]): the
 /// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
-/// other cells are read there. A branch's are recovered in one walk where they share a checkpoint,
+/// other cells are read there. A cell's are recovered in one walk where they share a checkpoint,
 /// each footer read once for them all (`recovery::recover_ats`, TASK-476): a cell's versions are
 /// up to 256 states of one history. A walk finding one lost, each is recovered alone, to tell
 /// which.
@@ -1189,7 +1189,7 @@ async fn keep_referred(
             };
             // Recovered again, after the child's record was read: its fork checkpointed the
             // state at its version before it wrote its reference and the record
-            // (`branch::record_fork`), so this finds it, listing anew. What the first found
+            // (`lifecycle::record_fork`), so this finds it, listing anew. What the first found
             // lost may be another fork at the same segment number, a writer's that a
             // takeover's dropped, the takeover's writer forking the child there since, after
             // the first read the head (TASK-462): references name an origin by its segment
@@ -1214,7 +1214,7 @@ async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<CellId>,
     let listed = bucket::list(bucket, &layout::origin(origin.parent, origin.at)).await;
     for meta in listed {
         let Kind::Reference { child, .. } = layout::kind(&meta.key) else { continue };
-        let Some(record) = branch::record(bucket, child).await? else { continue };
+        let Some(record) = lifecycle::record(bucket, child).await? else { continue };
         let lives = match record.kind {
             record::Kind::Fork(from) | record::Kind::Clone(from) => from == origin,
             _ => false,
@@ -1226,18 +1226,18 @@ async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<CellId>,
     Ok(None)
 }
 
-/// Recovers the live branches of `cell` `live` has not yet, several at once, folding them into it:
+/// Recovers the live cells of `cell` `live` has not yet, several at once, folding them into it:
 /// those whose records are not deleted, and the children of forks in their states that have no
 /// records yet, of the cell. Returns whether one has a checkpoint of its own, which a fork deleted
 /// may have gone from; and the origins of the forks in their states to children of other cells,
-/// whose states the pass keeps, as those children may have no references yet. Forks of a branch at
+/// whose states the pass keeps, as those children may have no references yet. Forks of a cell at
 /// one segment are recovered together, those without checkpoints of their own starting from the
-/// branch's state there, read once for them ([`Checkpoints`]); and the states are folded into what
+/// cell's state there, read once for them ([`Checkpoints`]); and the states are folded into what
 /// the pass needs of them as they are recovered, what forks inherited together once for them all,
 /// rather than each fork's copy of it ([`Layers`]).
 ///
-/// A branch is recovered once by each origin it is named by: a child its parent's state names, that
-/// fork refused, has its record from another branch whose fork to its ID came first, a restore's,
+/// A cell is recovered once by each origin it is named by: a child its parent's state names, that
+/// fork refused, has its record from another cell whose fork to its ID came first, a restore's,
 /// which listing the records again may find only after the child was recovered by the state; what
 /// the record's origin needs is what the child does (TASK-173).
 ///
@@ -1247,7 +1247,6 @@ async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<CellId>,
 /// older than what recovering it read.
 async fn recover_live(
     bucket: &impl Bucket,
-    cell: CellId,
     checkpoints: &Checkpoints<'_, impl Bucket>,
     records: &BTreeMap<CellId, Record>,
     live: &mut Live,
@@ -1259,25 +1258,25 @@ async fn recover_live(
     let mut queue: BTreeSet<(Option<Origin>, CellId)> = records
         .iter()
         .filter(|(_, record)| !record.deleted)
-        .map(|(&branch, record)| (record.origin(), branch))
-        .filter(|&(origin, branch)| !live.recovered(branch, origin))
+        .map(|(&cell, record)| (record.origin(), cell))
+        .filter(|&(origin, cell)| !live.recovered(cell, origin))
         .collect();
     while !queue.is_empty() {
         // Each once by each origin, queued by its record, or by its parent's state, or both.
         let round: Vec<_> = std::iter::from_fn(|| queue.pop_first())
-            .filter(|&(origin, branch)| live.take(branch, origin))
+            .filter(|&(origin, cell)| live.take(cell, origin))
             .take(RECOVERIES_AT_ONCE)
             .collect();
-        let recoveries = round.into_iter().map(|(origin, branch)| async move {
+        let recoveries = round.into_iter().map(|(origin, cell)| async move {
             // Recovered from its head, read after the listing: what its writer may name
             // ([`behind`]), and what it may yet name ([`Ended::ahead`]).
-            (branch, recovery::recover_layers(checkpoints, branch, origin).await)
+            (cell, recovery::recover_layers(checkpoints, cell, origin).await)
         });
         let mut inherited = InheritedStates::default();
-        for (branch, recovered) in futures::future::join_all(recoveries).await {
+        for (cell, recovered) in futures::future::join_all(recoveries).await {
             let recovered = match recovered {
                 Ok(recovered) => recovered,
-                Err(Error::Lost(lost)) => match lost_is_ok(bucket, branch, writes).await? {
+                Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, writes).await? {
                     // Decided by what it read again, a version's record in another cell among it.
                     true => {
                         live.unsettled = true;
@@ -1287,12 +1286,12 @@ async fn recover_live(
                 },
                 Err(error) => return Err(error),
             };
-            // A child with a record is queued by it, as it says: one whose ID another branch took
+            // A child with a record is queued by it, as it says: one whose ID another cell took
             // as the fork was made has another origin than its parent's state says (TASK-79.82).
             // cladefs: one of another cell's, its origin kept, which its reference, if it has one
             // yet, keeps too: the child's cell's pass recovers it (TASK-395.4).
             for fork in &recovered.state.forks {
-                let origin = Origin { parent: branch, at: fork.at };
+                let origin = Origin { parent: cell, at: fork.at };
                 if !rules().forks_from_states {
                     continue;
                 }
@@ -1306,12 +1305,12 @@ async fn recover_live(
                 queue.insert((Some(origin), fork.child));
             }
             // cladefs: its versions' states, kept as origins' are (rule `versions_kept`,
-            // TASK-476): each the branch's state at the segment its head names it at.
+            // TASK-476): each the cell's state at the segment its head names it at.
             if rules().versions_kept
                 && let Some(head) = &recovered.head
             {
                 origins.extend(
-                    head.versions.iter().map(|version| Origin { parent: branch, at: version.at }),
+                    head.versions.iter().map(|version| Origin { parent: cell, at: version.at }),
                 );
             }
             checkpointed |= recovered.checkpoint().is_some();
@@ -1322,20 +1321,20 @@ async fn recover_live(
     Ok((checkpointed, origins))
 }
 
-/// Whether recovering `branch` finding what it needs lost lost nothing, as its record, read again,
+/// Whether recovering `cell` finding what it needs lost lost nothing, as its record, read again,
 /// says: deleted since it was read, what it needed may be gone; a failed fork's claim no writer
 /// has, which nothing ever read, given up on; cladefs: a fork of a version still being made, its version
 /// deleted, given up on (TASK-395.4), unless it was made first, as [`abandon`] would have: the rule
 /// `collector_abandons` both. Gives up on them, writing their
 /// records so, if `writes` says so.
-async fn lost_is_ok(bucket: &impl Bucket, branch: CellId, writes: Writes) -> Result<bool, Error> {
-    let Some(record) = branch::record(bucket, branch).await? else { return Ok(true) };
+async fn lost_is_ok(bucket: &impl Bucket, cell: CellId, writes: Writes) -> Result<bool, Error> {
+    let Some(record) = lifecycle::record(bucket, cell).await? else { return Ok(true) };
     if record.deleted {
         return Ok(true);
     }
-    if branch::lost_is_ok(bucket, branch, &record).await? {
+    if lifecycle::lost_is_ok(bucket, cell, &record).await? {
         if writes == Writes::Some {
-            branch::abandon_claim(bucket, branch).await?;
+            lifecycle::abandon_claim(bucket, cell).await?;
         }
         return Ok(true);
     }
@@ -1345,20 +1344,20 @@ async fn lost_is_ok(bucket: &impl Bucket, branch: CellId, writes: Writes) -> Res
     let Some(origin) = record.origin() else { return Ok(false) };
     let gone = version_gone(bucket, origin, id).await?;
     // cladefs: a restore of a version into another cell, being made, recovers through its version's
-    // branch's checkpoint at the version, by its key, which the restore writes after its reference,
-    // before it makes the restore (`branch::fork_version`): none there yet, it holds nothing, nothing
-    // relies on it, and its reference keeps what it would inherit in that branch's cell. Lost
+    // cell's checkpoint at the version, by its key, which the restore writes after its reference,
+    // before it makes the restore (`lifecycle::fork_version`): none there yet, it holds nothing, nothing
+    // relies on it, and its reference keeps what it would inherit in that cell. Lost
     // nothing; decided again by the next pass (TASK-476).
     if !gone {
         return Ok(true);
     }
     match writes {
-        Writes::Some => Ok(branch::abandon(bucket, branch).await?.deleted),
+        Writes::Some => Ok(lifecycle::abandon(bucket, cell).await?.deleted),
         Writes::None => Ok(true),
     }
 }
 
-/// Whether the writer of the branch `recovered` is of may name the extents it holds anywhere on
+/// Whether the writer of the cell `recovered` is of may name the extents it holds anywhere on
 /// their ways from where they were sealed, before the moves its state followed: unless its state
 /// is from a checkpoint its head names of the writer holding the head. The extents it inherited,
 /// its writer may name so whatever this says ([`Live::inherit`]).
@@ -1367,13 +1366,13 @@ fn behind(recovered: &Recovered<Layers>) -> bool {
     rules().ways_from_seals && recovered.checkpoint().is_none_or(|(_, by)| by != epoch)
 }
 
-/// What a pass needs of the live branches' states, folded in as they are recovered.
+/// What a pass needs of the live cells' states, folded in as they are recovered.
 #[derive(Default)]
 struct Live {
     /// Those recovered, or being, by the origins they were recovered from: each once by each.
     taken: BTreeSet<(CellId, Option<Origin>)>,
     /// Where each recovery of each ended.
-    branches: BTreeMap<CellId, Vec<Ended>>,
+    cells: BTreeMap<CellId, Vec<Ended>>,
     /// What recovering them read.
     touched: BTreeSet<String>,
     /// Where the extents they name are: each place once, however many of them name it there.
@@ -1383,7 +1382,7 @@ struct Live {
     behind: BTreeSet<String>,
     /// cladefs: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
     /// key parsed once, not once an extent in it (TASK-395.12). Parsing them took most of a pass
-    /// over a cell whose branch was forked at many versions, each a state of every extent of it.
+    /// over a cell whose cell was forked at many versions, each a state of every extent of it.
     moves: rustc_hash::FxHashMap<String, bool>,
     /// cladefs: the origins whose states it keeps, each once ([`Live::keep_origin`]).
     origins: BTreeSet<Origin>,
@@ -1393,7 +1392,7 @@ struct Live {
     unsettled: bool,
 }
 
-/// What deciding what goes needs of a live branch's state, its extents but: its head, as its
+/// What deciding what goes needs of a live cell's state, its extents but: its head, as its
 /// recovery read it after the listing (TASK-407).
 struct Ended {
     /// The number of segments it names.
@@ -1432,22 +1431,22 @@ struct InheritedStates {
 }
 
 impl Live {
-    /// Whether `branch` was recovered, or is being, from `origin`: or from any, without the rule
-    /// that a branch is recovered by each origin it is named by (TASK-173).
-    fn recovered(&self, branch: CellId, origin: Option<Origin>) -> bool {
+    /// Whether `cell` was recovered, or is being, from `origin`: or from any, without the rule
+    /// that a cell is recovered by each origin it is named by (TASK-173).
+    fn recovered(&self, cell: CellId, origin: Option<Origin>) -> bool {
         match rules().recoveries_by_origins {
-            true => self.taken.contains(&(branch, origin)),
-            false => self.taken.range((branch, None)..).next().is_some_and(|&(b, _)| b == branch),
+            true => self.taken.contains(&(cell, origin)),
+            false => self.taken.range((cell, None)..).next().is_some_and(|&(b, _)| b == cell),
         }
     }
 
-    /// Takes the recovery of `branch` from `origin`, unless it was taken: returns whether it was
+    /// Takes the recovery of `cell` from `origin`, unless it was taken: returns whether it was
     /// not.
-    fn take(&mut self, branch: CellId, origin: Option<Origin>) -> bool {
-        !self.recovered(branch, origin) && self.taken.insert((branch, origin))
+    fn take(&mut self, cell: CellId, origin: Option<Origin>) -> bool {
+        !self.recovered(cell, origin) && self.taken.insert((cell, origin))
     }
 
-    /// Folds in `recovered`, a live branch's: its own layer, and what it inherited into
+    /// Folds in `recovered`, a live cell's: its own layer, and what it inherited into
     /// `inherited`, its round's, which [`Live::inherit`] folds in once for all its forks.
     fn add(&mut self, recovered: Recovered<Layers>, inherited: &mut InheritedStates) {
         let behind = behind(&recovered);
@@ -1457,7 +1456,7 @@ impl Live {
             checkpoint: recovered.checkpoint(),
         };
         let Recovered { state, touched, .. } = recovered;
-        let State { branch, extents, .. } = state;
+        let State { cell, extents, .. } = state;
         let Layered { inherited: from, own, shadowed } = extents;
         self.touched.extend(touched);
         for (extent, location) in own {
@@ -1472,7 +1471,7 @@ impl Live {
                 None => inherited.states.push((from, shadowed)),
             }
         }
-        self.branches.entry(branch).or_default().push(ended);
+        self.cells.entry(cell).or_default().push(ended);
     }
 
     /// Folds in what forks inherited, `inherited`: each state once, but the extents of it none of
@@ -1507,7 +1506,7 @@ impl Live {
         self.keep_places(&state.extents);
     }
 
-    /// cladefs: keeps the origins' states `walked`, a branch's, as [`Live::keep_origin`] keeps
+    /// cladefs: keeps the origins' states `walked`, a cell's, as [`Live::keep_origin`] keeps
     /// one: each whole, and the places at which those after each name what changed since.
     fn keep_walked(&mut self, walked: recovery::Walked, touched: BTreeSet<String>) {
         self.keep_read(touched);
@@ -1639,7 +1638,7 @@ struct Compactable<'a> {
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
 /// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
 /// size, if it did: those there first, if the pass created them before. cladefs: it reads the object
-/// under `ring`'s keys of its branch, and encrypts its moves under the key the object was encrypted
+/// under `ring`'s keys of its cell, and encrypts its moves under the key the object was encrypted
 /// under, the DEK of the same generation, with a salt of their own (TASK-411.6): every reader
 /// following the moves read the object under that key, where a store opened before a newer
 /// generation was added holds none of it.
@@ -1720,7 +1719,7 @@ impl Fate {
     }
 }
 
-/// What a pass over a cell found: every object of the cell listed, and what the live branches and
+/// What a pass over a cell found: every object of the cell listed, and what the live cells and
 /// the origins it keeps need of them.
 struct Pass {
     cell: CellId,
@@ -1729,11 +1728,11 @@ struct Pass {
     epoch: u64,
     objects: BTreeMap<String, Meta>,
     records: BTreeMap<CellId, Record>,
-    /// Where each recovery of each live branch ended.
-    branches: BTreeMap<CellId, Vec<Ended>>,
-    /// What recovering the live branches and the origins read.
+    /// Where each recovery of each live cell ended.
+    cells: BTreeMap<CellId, Vec<Ended>>,
+    /// What recovering the live cells and the origins read.
     touched: BTreeSet<String>,
-    /// The objects holding the extents the live branches and the origins name, and those
+    /// The objects holding the extents the live cells and the origins name, and those
     /// extents in them.
     named: BTreeMap<String, BTreeMap<ExtentId, Location>>,
     /// The moves the way to those extents goes through, whose maps are needed even once their
@@ -1744,7 +1743,7 @@ struct Pass {
     referenced: BTreeSet<Origin>,
     /// cladefs: what it records of its listing (TASK-395.6, TASK-395.8).
     recording: Recording,
-    /// cladefs: the branches of its deleted roots' and clones' records whose IDs an allocator gave
+    /// cladefs: the cells of its deleted roots' and clones' records whose IDs an allocator gave
     /// ([`crate::objectid::given`], TASK-455).
     given: BTreeSet<CellId>,
 }
@@ -1764,7 +1763,7 @@ struct Recording {
 
 impl Pass {
     /// The pass over `cell` of `epoch`, which listed `objects`, and found `records`, what the live
-    /// branches and the origins need (`live`), the origins `referenced`, and what it
+    /// cells and the origins need (`live`), the origins `referenced`, and what it
     /// records as it ends: its ways to the extents they name worked out.
     async fn new(
         bucket: &impl Bucket,
@@ -1778,14 +1777,14 @@ impl Pass {
         ),
     ) -> Result<Self, Error> {
         let (objects, records, live, referenced, recording) = found;
-        let Live { branches, touched, located, behind, .. } = live;
+        let Live { cells, touched, located, behind, .. } = live;
         // Whose IDs an allocator gave, of those a removal or an unmarked retirement asks of: a GET
         // each, once.
         let mut given = BTreeSet::new();
-        for (&branch, record) in &records {
+        for (&cell, record) in &records {
             let asked = matches!(record.kind, record::Kind::Root | record::Kind::Clone(_));
-            if record.deleted && asked && crate::objectid::given(bucket, branch.id).await {
-                given.insert(branch);
+            if record.deleted && asked && crate::objectid::given(bucket, cell.id).await {
+                given.insert(cell);
             }
         }
         let mut named: BTreeMap<String, BTreeMap<ExtentId, Location>> = BTreeMap::new();
@@ -1801,7 +1800,7 @@ impl Pass {
                 key = from;
             }
         }
-        // Each place once, however many branches name it, followed along its moves a hop at a
+        // Each place once, however many cells name it, followed along its moves a hop at a
         // time: the moves the ways reach at a hop read at once, as the listing says which there
         // are (TASK-395.5). cladefs: a place in another cell, and its moves, are no candidates of
         // this one's, which its listing doesn't hold (TASK-395.4).
@@ -1838,7 +1837,7 @@ impl Pass {
             epoch,
             objects,
             records,
-            branches,
+            cells,
             touched,
             named,
             hops,
@@ -1848,17 +1847,17 @@ impl Pass {
         })
     }
 
-    /// cladefs: whether the object of `kind`, which no live state names, a live branch's head may yet
-    /// name, by what its key declares ([`Ended::ahead`], TASK-407): by any of the branch's
+    /// cladefs: whether the object of `kind`, which no live state names, a live cell's head may yet
+    /// name, by what its key declares ([`Ended::ahead`], TASK-407): by any of the cell's
     /// recoveries, of several origins (TASK-173).
     fn ahead(&self, kind: Kind<'_>) -> bool {
-        let branch = match kind {
-            Kind::Segment { branch, .. }
-            | Kind::Extent { branch, .. }
-            | Kind::Checkpoint { branch, .. } => branch,
+        let cell = match kind {
+            Kind::Segment { cell, .. }
+            | Kind::Extent { cell, .. }
+            | Kind::Checkpoint { cell, .. } => cell,
             _ => return false,
         };
-        self.branches.get(&branch).into_iter().flatten().any(|ended| ended.ahead(kind))
+        self.cells.get(&cell).into_iter().flatten().any(|ended| ended.ahead(kind))
     }
 
     /// The objects mostly freed, as the lengths of their data in their trailers say
@@ -1897,7 +1896,7 @@ impl Pass {
     /// is compacted only where no moves of it were listed, and moves only where they were, never
     /// both of one way. They all end before the pass works out what goes, as one at a time: what
     /// goes is of the listing before, which none of their moves is in. The moves' keys and sizes.
-    /// cladefs: those encrypted under their branches' DEKs, unwrapped under the cell's KEK through
+    /// cladefs: those encrypted under their cells' DEKs, unwrapped under the cell's KEK through
     /// `kms` once for the pass, and only if one is to be compacted ([`Pass::compacting`],
     /// TASK-411.6).
     async fn compact(
@@ -1929,7 +1928,7 @@ impl Pass {
     }
 
     /// cladefs: the keys `compactable`'s objects, all encrypted (TASK-411.28), are compacted under
-    /// ([`keys::compacting`], TASK-411.6): their branches' DEKs, as the pass's records of them
+    /// ([`keys::compacting`], TASK-411.6): their cells' DEKs, as the pass's records of them
     /// keep them, unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`, each
     /// generation of the KEK once: the pass's one call of the KMS, however many objects it
     /// compacts. Nothing to compact, it asks nothing. The KEK not to be had, `kms` refusing it (a
@@ -1945,11 +1944,11 @@ impl Pass {
         if compactable.is_empty() {
             return Ok(Ring::keyless());
         }
-        let branches: BTreeSet<u64> =
-            compactable.iter().filter_map(|object| keys::branch_of(&object.meta.key)).collect();
+        let cells: BTreeSet<u64> =
+            compactable.iter().filter_map(|object| keys::cell_of(&object.meta.key)).collect();
         let records: Vec<(CellId, &Record)> = (self.records.iter())
-            .filter(|(branch, _)| branches.contains(&branch.id))
-            .map(|(&branch, record)| (branch, record))
+            .filter(|(cell, _)| cells.contains(&cell.id))
+            .map(|(&cell, record)| (cell, record))
             .collect();
         let cell = self.cell;
         let ring = match kms {
@@ -1979,7 +1978,7 @@ impl Pass {
         }
     }
 
-    /// What goes: everything listed that the live branches and the origins kept do not need, in
+    /// What goes: everything listed that the live cells and the origins kept do not need, in
     /// the order of its keys ([`Pass::fates`]).
     /// cladefs: the cell's removal too, if it goes whole ([`Pass::removal`], TASK-455).
     async fn doomed(&self, bucket: &impl Bucket, options: &Options) -> Result<Vec<&Meta>, Error> {
@@ -1993,7 +1992,7 @@ impl Pass {
 
     /// What goes, as [`Pass::doomed`] says; and what would but that it was written too recently,
     /// or what it was compacted to was, with when it may go (TASK-395.6), in the order of its keys.
-    /// cladefs: a cell with no live branch and no reference, all of it but its records and its object,
+    /// cladefs: a cell with no live cell and no reference, all of it but its records and its object,
     /// and the collector's own, goes.
     async fn fates(
         &self,
@@ -2041,18 +2040,16 @@ impl Pass {
                         Fate::GoesAt(due(meta))
                     }
                 }
-                // A record stays, a deleted branch's too (TASK-174), and every head: a deleted
-                // branch's, final, fences its writers, which no swap of theirs passes. cladefs: but
+                // A record stays, a deleted cell's too (TASK-174), and every head: a deleted
+                // cell's, final, fences its writers, which no swap of theirs passes. cladefs: but
                 // with a dead cell that goes whole ([`Pass::removal`], TASK-455).
                 Kind::Record { .. } => Fate::Stays,
-                // cladefs: but one of a branch of no record listed that is no fence ([`fence`]): a
-                // writer's that took a branch by a read of its record from before its deletion, its
+                // cladefs: but one of a cell of no record listed that is no fence ([`fence`]): a
+                // writer's that took a cell by a read of its record from before its deletion, its
                 // cell removed since (TASK-455). Without the rule, as a test shows it needed, any
                 // in a cell of no record, a deletion's fence among them.
-                Kind::Head { branch } => match rules().fences_kept {
-                    true => {
-                        goes(!self.records.contains_key(&branch) && !fence(bucket, branch).await?)
-                    }
+                Kind::Head { cell } => match rules().fences_kept {
+                    true => goes(!self.records.contains_key(&cell) && !fence(bucket, cell).await?),
                     false => goes(self.records.is_empty()),
                 },
                 // The collector's own: its lease, and its marks, which a mark-only pass never
@@ -2082,7 +2079,7 @@ impl Pass {
     }
 
     /// cladefs: the references the pass retires, under other cells (doc-7, References; TASK-395.4):
-    /// once its cell holds no live branch and no reference of its own, those of its deleted
+    /// once its cell holds no live cell and no reference of its own, those of its deleted
     /// children of origins in other cells, each at the key its record's origin gives, never listed.
     /// Nothing anywhere then inherits from them: a fork of one of them in the cell would have a
     /// record there, and one in another cell a reference there. Without the rule that the cell's
@@ -2103,10 +2100,10 @@ impl Pass {
             .collect()
     }
 
-    /// cladefs: whether its cell holds no live branch and no reference of its own.
+    /// cladefs: whether its cell holds no live cell and no reference of its own.
     fn dead(&self) -> bool {
         self.records.values().all(|record| record.deleted)
-            && self.branches.is_empty()
+            && self.cells.is_empty()
             && self.referenced.is_empty()
     }
 
@@ -2118,7 +2115,7 @@ impl Pass {
     /// cladefs: what removes the cell whole, if it goes (TASK-455): dead, deferring nothing, its
     /// listed references all stale, and every object it listed that `doomed` leaves one of a cell
     /// nothing will need again: its records, each [`Record::removable`] (a root's or a clone's
-    /// made, deleted, of an ID an allocator gave), its branches' heads, its object, and its
+    /// made, deleted, of an ID an allocator gave), its cells' heads, its object, and its
     /// lease. A mark under it (of a reference retired, which a writer may write again; or a
     /// mark-only pass's, an operator's to remove), what it defers, a fence ([`fence`]), and
     /// anything else keep it.
@@ -2136,16 +2133,16 @@ impl Pass {
                 continue;
             }
             match layout::kind(key) {
-                Kind::Record { branch } => {
-                    let given = self.given.contains(&branch);
-                    self.records.get(&branch).filter(|record| record.removable(given))?;
+                Kind::Record { cell } => {
+                    let given = self.given.contains(&cell);
+                    self.records.get(&cell).filter(|record| record.removable(given))?;
                     removal.records.push(meta);
                 }
-                // A head of a branch of no record listed that `doomed` leaves is a fence
+                // A head of a cell of no record listed that `doomed` leaves is a fence
                 // ([`fence`]), which keeps it; without the rule, it goes with the rest.
-                Kind::Head { branch }
+                Kind::Head { cell }
                     if !self.records.is_empty()
-                        && (self.records.contains_key(&branch) || !rules().fences_kept) =>
+                        && (self.records.contains_key(&cell) || !rules().fences_kept) =>
                 {
                     removal.rest.push(meta);
                 }
@@ -2187,17 +2184,17 @@ impl Pass {
     }
 }
 
-/// cladefs: whether `branch`'s head, its record not listed by the pass, is to stay (rule
+/// cladefs: whether `cell`'s head, its record not listed by the pass, is to stay (rule
 /// `fences_kept`, TASK-455's review): final, a deletion's fence, of a fork's child whose record is
 /// yet to come, the deletion's own or its parent's slow writer's (TASK-79.78), which a writer
-/// taking the branch once it is recorded must find; or the branch has a record after all, listed
+/// taking the cell once it is recorded must find; or the cell has a record after all, listed
 /// after the cell, a listing of many pages having missed it. Any other is a stale taker's, of a
-/// branch removed with its cell, whose record never comes again (rule `ids_given`): garbage. Two
+/// cell removed with its cell, whose record never comes again (rule `ids_given`): garbage. Two
 /// GETs at most, of a head no record was listed with, which only those leave. Gone since, it is
 /// not to stay.
-async fn fence(bucket: &impl Bucket, branch: CellId) -> Result<bool, Error> {
-    let Some(head) = crate::head::get(bucket, branch).await? else { return Ok(false) };
-    Ok(head.epoch == layout::Head::FINAL || branch::record(bucket, branch).await?.is_some())
+async fn fence(bucket: &impl Bucket, cell: CellId) -> Result<bool, Error> {
+    let Some(head) = crate::head::get(bucket, cell).await? else { return Ok(false) };
+    Ok(head.epoch == layout::Head::FINAL || lifecycle::record(bucket, cell).await?.is_some())
 }
 
 /// cladefs: what a pass removing its cell whole deletes ([`Pass::removal`], TASK-455).
@@ -2247,7 +2244,7 @@ mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::bucket::{ByteRange, Created, Error as BucketError, Object, PutMode, Version};
-    use crate::layout::test_branch;
+    use crate::layout::test_cell;
     use crate::layout::{Child, child};
     use crate::object_bucket::{ObjectBucket, Request};
     use crate::testing::{Direct, SimBucket};
@@ -2294,8 +2291,8 @@ mod tests {
     fn extents_minted_and_freed_go_and_those_ahead_of_their_segments_stay() {
         block_on(async {
             let bucket = store();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (freed, kept) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let own = vec![(freed.sequence, b"freed".to_vec()), (kept.sequence, b"kept".to_vec())];
@@ -2308,7 +2305,7 @@ mod tests {
             let bytes = layout::with_footer(
                 b"ahead",
                 &(),
-                crate::testing::encrypting(layout::test_branch(1)),
+                crate::testing::encrypting(layout::test_cell(1)),
             );
             assert!(matches!(bucket::create(&*bucket, &ahead, bytes).await, Created::Created(_)));
 
@@ -2317,42 +2314,42 @@ mod tests {
             assert_eq!(report, Report { deleted: 1, compacted: 0, retired: 0, ..report });
             let left: Vec<_> = before.into_iter().filter(|key| *key != gone).collect();
             assert_eq!(keys(&*bucket).await, left);
-            assert!(left.contains(&ahead) && left.contains(&layout::record(test_branch(1))));
+            assert!(left.contains(&ahead) && left.contains(&layout::record(test_cell(1))));
         });
     }
 
-    /// TASK-141.2: a pass finding a branch of a newer format stops, deleting nothing, though what
-    /// the other branches freed would go: what that branch needs, it can't read.
+    /// TASK-141.2: a pass finding a cell of a newer format stops, deleting nothing, though what
+    /// the other cells freed would go: what that cell needs, it can't read.
     #[test]
-    fn passes_stop_at_branches_of_newer_formats() {
+    fn passes_stop_at_cells_of_newer_formats() {
         block_on(async {
             let bucket = store();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let freed = ExtentId::new(1, writer.chain().next_sequence());
             let own = vec![(freed.sequence, b"freed".to_vec())];
             commit(&writer, Commit { tag: 1, own, ..Commit::default() }).await;
             commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
             let mut newer = (layout::FORMAT + 1).to_le_bytes().to_vec();
             newer.extend_from_slice(b"what a later format holds");
-            let created = bucket::create(&*bucket, &layout::record(test_branch(2)), newer).await;
+            let created = bucket::create(&*bucket, &layout::record(test_cell(2)), newer).await;
             assert!(matches!(created, Created::Created(_)));
 
             let before = keys(&*bucket).await;
             let refused = collect(&*bucket, 1, &KEEP).await;
             assert_eq!(
                 refused,
-                Err(Error::Format { branch: test_branch(2), format: layout::FORMAT + 1 })
+                Err(Error::Format { cell: test_cell(2), format: layout::FORMAT + 1 })
             );
             assert_eq!(keys(&*bucket).await, before);
         });
     }
 
     /// An extent stored on its own, uploaded ahead of the segment that names it, stays, though
-    /// the branch's segments landed say its next sequence number is past it: as when the guest
+    /// the cell's segments landed say its next sequence number is past it: as when the guest
     /// commits extents out of the order it minted them, or a store closes a segment between
     /// commits while extents are open (TASK-79.3): of the head's epoch, its segment at or past the
-    /// head's end, the head may yet name it (TASK-407). Its segment acknowledged, the branch reads
+    /// head's end, the head may yet name it (TASK-407). Its segment acknowledged, the cell reads
     /// it.
     #[test]
     fn extents_ahead_of_their_segments_stay_past_the_next_sequence_number() {
@@ -2363,8 +2360,8 @@ mod tests {
     /// committed after one past it in sequence, once a pass ran and then the segment landed.
     async fn extent_ahead_of_its_segment_read() -> Result<Vec<u8>, Error> {
         let bucket = store();
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let first = writer.chain().next_sequence();
         let (late, early) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
         let extents = vec![(early, b"early".to_vec())];
@@ -2383,19 +2380,19 @@ mod tests {
         let segment = writer.add_segment(objects).unwrap();
         writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
-        let recovered = recovery::recover(&*bucket, test_branch(1), None).await.unwrap();
+        let recovered = recovery::recover(&*bucket, test_cell(1), None).await.unwrap();
         let location = &recovered.state.extents[&late];
         crate::testing::read(&bucket, late, location).await
     }
 
     /// An object compacted is compacted once: its moves stand while it waits out the grace
-    /// period. A live branch's record stays.
+    /// period. A live cell's record stays.
     #[test]
     fn objects_are_compacted_once() {
         block_on(async {
             let bucket = store();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
@@ -2410,7 +2407,7 @@ mod tests {
             assert_eq!(report.compacted, 1);
             let after = keys(&*bucket).await;
             assert!(after.contains(&segment) && moves_in(&after, &segment).is_some());
-            assert!(after.contains(&layout::record(test_branch(1))));
+            assert!(after.contains(&layout::record(test_cell(1))));
             let report = collect(&*bucket, 2, &compacting).await.unwrap();
             assert_eq!(report, Report::default());
             assert_eq!(keys(&*bucket).await, after);
@@ -2427,8 +2424,8 @@ mod tests {
     fn compressed_objects_are_compacted_by_their_data() {
         block_on(async {
             let bucket = store();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (kept, freed) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let extents = vec![(kept, vec![b'k'; 4096]), (freed, vec![b'f'; 8192])];
@@ -2461,8 +2458,8 @@ mod tests {
         for compressible in [true, false] {
             block_on(async {
                 let bucket = store();
-                branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+                lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
                 let first = writer.chain().next_sequence();
                 let (kept, freed) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
                 // The kept extent's bytes compress, or not; the freed one's don't, from a xorshift
@@ -2539,8 +2536,8 @@ mod tests {
     /// moves then compacted in turn, and passes run until they delete nothing more.
     async fn read_past_a_late_checkpoint() -> Result<Vec<u8>, Error> {
         let bucket = store();
-        let (parent, fork) = (test_branch(1), test_branch(2));
-        branch::create(&*bucket, parent, 0).await.unwrap();
+        let (parent, fork) = (test_cell(1), test_cell(2));
+        lifecycle::create(&*bucket, parent, 0).await.unwrap();
         let before = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
         let first = before.chain().next_sequence();
         let [kept, moved, freed] = [0, 1, 2].map(|i| ExtentId::new(1, first + i));
@@ -2610,8 +2607,8 @@ mod tests {
     async fn read_as_a_checkpoint_lands() -> Result<Vec<u8>, Error> {
         let direct = Arc::new(Direct(SimBucket::new()));
         let bucket = Arc::new(Hooked::new(direct.clone(), Hook::Swapped));
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Arc::new(Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap());
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let writer = Arc::new(Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap());
         let Compacted { kept, moved, .. } = compacted(&*bucket, &writer).await;
         commit(&writer, Commit { tag: 3, frees: vec![moved], ..Commit::default() }).await;
         let named = Arc::new(Mutex::new(None));
@@ -2683,42 +2680,39 @@ mod tests {
         use crate::writer::Objects;
         let direct = Arc::new(Direct(SimBucket::new()));
         let bucket =
-            Arc::new(Hooked::new(direct.clone(), Hook::Getting(layout::record(test_branch(1)), 1)));
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            Arc::new(Hooked::new(direct.clone(), Hook::Getting(layout::record(test_cell(1)), 1)));
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let parent = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let extent = ExtentId::new(1, parent.chain().next_sequence());
         let extents = vec![(extent, b"held".to_vec())];
         commit(&parent, Commit { tag: 1, extents, ..Commit::default() }).await;
         let footer = parent
             .chain()
-            .close(Contents { forks: vec![child(test_branch(2))], ..Contents::default() });
+            .close(Contents { forks: vec![child(test_cell(2))], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(parent.keys().encrypting())
             .into();
         let at = parent.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         parent.upload(at).await.unwrap();
         parent.acknowledge().await.unwrap();
-        branch::delete(&*bucket, test_branch(1), 11, u64::MAX, &crate::keys::testing::host_kms())
+        lifecycle::delete(&*bucket, test_cell(1), 11, u64::MAX, &crate::keys::testing::host_kms())
             .await
             .unwrap();
-        let forked = Arc::new(Writer::open(bucket.clone(), test_branch(2), 12, 0).await.unwrap());
+        let forked = Arc::new(Writer::open(bucket.clone(), test_cell(2), 12, 0).await.unwrap());
         let passing = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             forked.checkpoint().now_or_never().unwrap().unwrap();
             collect(&*passing, 1, &KEEP).now_or_never().unwrap().unwrap();
         }));
-        let recovered = recovery::recover(
-            &*bucket,
-            test_branch(2),
-            Some(Origin { parent: test_branch(1), at }),
-        )
-        .await?;
+        let recovered =
+            recovery::recover(&*bucket, test_cell(2), Some(Origin { parent: test_cell(1), at }))
+                .await?;
         Ok(recovered.state.extents.keys().copied().collect())
     }
 
-    /// TASK-178: a deletion that finds a branch live, as a placement cut off does once the latest
+    /// TASK-178: a deletion that finds a cell live, as a placement cut off does once the latest
     /// placement's deletion ended the head, recovers it to give its forks' children their records;
-    /// that other deletion finishing meanwhile, and a pass reclaiming what recovering the branch
+    /// that other deletion finishing meanwhile, and a pass reclaiming what recovering the cell
     /// needed, a fork's, its parent's segments up to the fork among it, the deletion is done, as
     /// the other gave the children their records. Found by the simulation, seed 3953 of its
     /// `stale_placements` at SIM_SOAK=100, on main too.
@@ -2733,14 +2727,14 @@ mod tests {
         use crate::layout::{Contents, Segment};
         use crate::writer::Objects;
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(1), 0).await.unwrap();
-        let parent = Writer::open(direct.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
+        let parent = Writer::open(direct.clone(), test_cell(1), 10, 0).await.unwrap();
         let extent = ExtentId::new(1, parent.chain().next_sequence());
         let extents = vec![(extent, b"held".to_vec())];
         commit(&parent, Commit { tag: 1, extents, ..Commit::default() }).await;
         let footer = parent
             .chain()
-            .close(Contents { forks: vec![child(test_branch(2))], ..Contents::default() });
+            .close(Contents { forks: vec![child(test_cell(2))], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(parent.keys().encrypting())
             .into();
@@ -2749,7 +2743,7 @@ mod tests {
         parent.acknowledge().await.unwrap();
         commit(&parent, Commit { tag: 2, frees: vec![extent], ..Commit::default() }).await;
         parent.checkpoint().await.unwrap();
-        Writer::open(direct.clone(), test_branch(2), 11, 0)
+        Writer::open(direct.clone(), test_cell(2), 11, 0)
             .await
             .unwrap()
             .checkpoint()
@@ -2758,11 +2752,11 @@ mod tests {
         let passing = direct.clone();
         let bucket = Meanwhile {
             bucket: direct,
-            branch: test_branch(2),
+            cell: test_cell(2),
             meanwhile: std::sync::Mutex::new(Some(move || {
-                branch::delete(
+                lifecycle::delete(
                     &*passing,
-                    test_branch(2),
+                    test_cell(2),
                     13,
                     u64::MAX,
                     &crate::keys::testing::host_kms(),
@@ -2773,13 +2767,13 @@ mod tests {
                 collect(&*passing, 1, &KEEP).now_or_never().unwrap().unwrap();
             })),
         };
-        branch::delete(&bucket, test_branch(2), 12, u64::MAX, &crate::keys::testing::host_kms())
+        lifecycle::delete(&bucket, test_cell(2), 12, u64::MAX, &crate::keys::testing::host_kms())
             .await
     }
 
     /// TASK-407: a writer taken over, whose head another taking swapped since, acknowledges
     /// nothing: its swap fails, though its segment landed and its successor committed and
-    /// checkpointed. The branch holds the successor's commit; the writer's segment, which no head
+    /// checkpointed. The cell holds the successor's commit; the writer's segment, which no head
     /// names, nor ever will, a pass deletes.
     #[test]
     fn writers_taken_over_acknowledge_nothing() {
@@ -2788,7 +2782,7 @@ mod tests {
     }
 
     /// The head written whatever is there: the writer taken over writes it over its successor's,
-    /// and the branch holds its commit, not the successor's, acknowledged (specs/bucket's
+    /// and the cell holds its commit, not the successor's, acknowledged (specs/bucket's
     /// NoHeadSwap).
     #[test]
     fn writers_taken_over_acknowledging_nothing_need_head_swap() {
@@ -2799,25 +2793,25 @@ mod tests {
     }
 
     /// What a writer taken over gets of the acknowledgement of its commit 1, its segment uploaded
-    /// before its successor took the branch, committed 2 and checkpointed; the branch's last
+    /// before its successor took the cell, committed 2 and checkpointed; the cell's last
     /// commit, after a pass; and whether the pass kept the writer's segment.
     async fn acknowledge_once_taken_over() -> (Result<Option<u64>, Error>, Option<u64>, bool) {
         let bucket = store();
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let taken = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let taken = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut taken.chain())
             .frame(taken.keys().encrypting());
         let segment = taken.add_segment(objects).unwrap();
         taken.upload(segment).await.unwrap();
-        let successor = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
+        let successor = Writer::open(bucket.clone(), test_cell(1), 11, 0).await.unwrap();
         commit(&successor, Commit { tag: 2, ..Commit::default() }).await;
         successor.checkpoint().await.unwrap();
         let acknowledged = taken.acknowledge().await;
         collect(&*bucket, 1, &KEEP).await.unwrap();
-        let key = layout::segment(test_branch(1), segment, taken.epoch());
+        let key = layout::segment(test_cell(1), segment, taken.epoch());
         let kept = keys(&*bucket).await.contains(&key);
-        let recovered = recovery::recover(&*bucket, test_branch(1), None).await;
+        let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
         (acknowledged, recovered.ok().and_then(|recovered| recovered.state.last_commit), kept)
     }
 
@@ -2829,7 +2823,7 @@ mod tests {
     }
 
     /// The collector deleting what no head names yet: the writer's swap names a segment gone, and
-    /// the branch is lost (specs/bucket's NoCollectorEpochs).
+    /// the cell is lost (specs/bucket's NoCollectorEpochs).
     #[test]
     fn segments_kept_until_acknowledged_need_collector_epochs() {
         crate::set_rules(crate::Rules { collector_epochs: false, ..crate::Rules::ALL });
@@ -2838,12 +2832,12 @@ mod tests {
         assert_eq!(last, None);
     }
 
-    /// The last commit of branch 1, whose writer acknowledged its commit 1 after a pass ran
-    /// between its upload and its acknowledgement: none if the branch is lost.
+    /// The last commit of cell 1, whose writer acknowledged its commit 1 after a pass ran
+    /// between its upload and its acknowledgement: none if the cell is lost.
     async fn acknowledge_past_a_pass() -> Option<u64> {
         let bucket = store();
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut writer.chain())
             .frame(writer.keys().encrypting());
@@ -2851,7 +2845,7 @@ mod tests {
         writer.upload(segment).await.unwrap();
         collect(&*bucket, 1, &KEEP).await.unwrap();
         writer.acknowledge().await.unwrap();
-        let recovered = recovery::recover(&*bucket, test_branch(1), None).await;
+        let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
         recovered.ok().and_then(|recovered| recovered.state.last_commit)
     }
 
@@ -2870,39 +2864,39 @@ mod tests {
         crate::set_rules(crate::Rules { epoch_keys: false, ..crate::Rules::ALL });
         let (uploaded, last) = block_on(upload_where_a_writer_taken_over_did());
         // Their one key, of no epoch.
-        let key = layout::segment(test_branch(1), 0, 2);
+        let key = layout::segment(test_cell(1), 0, 2);
         crate::set_rules(crate::Rules::ALL);
         let corrupt = Error::Corrupt(format!("{key} holds another segment"));
         assert_eq!((uploaded, last), (Err(corrupt), None));
     }
 
     /// What the successor of a writer taken over gets of the upload of its commit 2 at segment 0,
-    /// where the writer taken over uploaded its commit 1, never acknowledged; and the branch's last
+    /// where the writer taken over uploaded its commit 1, never acknowledged; and the cell's last
     /// commit, once it acknowledged what it could.
     async fn upload_where_a_writer_taken_over_did() -> (Result<(), Error>, Option<u64>) {
         let bucket = store();
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let taken = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let taken = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut taken.chain())
             .frame(taken.keys().encrypting());
         let segment = taken.add_segment(objects).unwrap();
         taken.upload(segment).await.unwrap();
-        let successor = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
+        let successor = Writer::open(bucket.clone(), test_cell(1), 11, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() })
             .close(&mut successor.chain())
             .frame(successor.keys().encrypting());
         let segment = successor.add_segment(objects).unwrap();
         let uploaded = successor.upload(segment).await;
         let _ = successor.acknowledge().await;
-        let recovered = recovery::recover(&*bucket, test_branch(1), None).await;
+        let recovered = recovery::recover(&*bucket, test_cell(1), None).await;
         (uploaded, recovered.ok().and_then(|recovered| recovered.state.last_commit))
     }
 
     /// TASK-180: a pass that read a version live, its records listed again finding a fork being
     /// made of it after another pass took the collector's lease, the version dropped and what it
     /// named reclaimed meanwhile, finds what the fork names lost: fenced, it stops, deleting nothing,
-    /// as it would before deleting. TASK-395.4: it reads the version's branch's head again then,
+    /// as it would before deleting. TASK-395.4: it reads the version's cell's head again then,
     /// finds it dropped, and gives the fork up, as the pass that fenced it would have, rather than
     /// failing: fenced, it deletes nothing all the same.
     #[test]
@@ -2936,7 +2930,7 @@ mod tests {
         crate::set_rules(crate::Rules { passes_fenced_stop: false, ..crate::Rules::ALL });
         let passed = block_on(pass_fenced_as_a_version_goes(Raced::Claim));
         crate::set_rules(crate::Rules::ALL);
-        let lost = Error::Lost("branch 1/1/4: what its recovery starts from keeps going".into());
+        let lost = Error::Lost("cell 1/1/4: what its recovery starts from keeps going".into());
         assert_eq!(passed, Err(lost));
     }
 
@@ -2949,15 +2943,15 @@ mod tests {
         Claim,
     }
 
-    /// What a pass gives, a version of branch 1 dropped, a later pass reclaiming what it named,
-    /// and a fork of the version being made to branch 4, or a claim of 4 landing, as the pass lists
-    /// the records a second time, having read branch 1's head before.
+    /// What a pass gives, a version of cell 1 dropped, a later pass reclaiming what it named,
+    /// and a fork of the version being made to cell 4, or a claim of 4 landing, as the pass lists
+    /// the records a second time, having read cell 1's head before.
     async fn pass_fenced_as_a_version_goes(raced: Raced) -> Result<Report, Error> {
         use crate::layout::Origin;
         use crate::testing::{VERSION, fork_version, versioned_by};
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(direct.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
+        let writer = Writer::open(direct.clone(), test_cell(1), 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let extents = vec![(extent, b"held".to_vec())];
         commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
@@ -2969,35 +2963,35 @@ mod tests {
         let raced_on = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             let direct = raced_on;
-            let origin = Origin { parent: test_branch(1), at };
+            let origin = Origin { parent: test_cell(1), at };
             let dropped = BTreeSet::from([VERSION]);
             writer.drop_versions(&dropped).now_or_never().unwrap().unwrap();
             collect(&*direct, 2, &KEEP).now_or_never().unwrap().unwrap();
             let left = keys(&*direct).now_or_never().unwrap();
             assert!(
-                !left.contains(&layout::segment(test_branch(1), at, 1)),
+                !left.contains(&layout::segment(test_cell(1), at, 1)),
                 "the version's state stayed"
             );
             match raced {
                 Raced::Fork => {
-                    let forked = fork_version(&*direct, test_branch(4), VERSION, origin, 0x44)
+                    let forked = fork_version(&*direct, test_cell(4), VERSION, origin, 0x44)
                         .now_or_never()
                         .unwrap();
                     assert_eq!(forked, Err(Error::Deleted));
                 }
                 Raced::Claim => {
                     let claim = crate::record::Kind::Claim(origin).of(0x44);
-                    let key = layout::record(test_branch(4));
+                    let key = layout::record(test_cell(4));
                     let created = bucket::create(&*direct, &key, layout::encode(&claim));
                     assert!(matches!(created.now_or_never().unwrap(), Created::Created(_)));
-                    let taking = crate::head::take(&*direct, test_branch(4), 12, 0);
+                    let taking = crate::head::take(&*direct, test_cell(4), 12, 0);
                     taking.now_or_never().unwrap().unwrap();
                 }
             }
         }));
         let passed = collect(&bucket, 1, &KEEP).await;
         if let (Raced::Fork, Ok(_)) = (raced, &passed) {
-            let record = branch::record(&*direct, test_branch(4)).await.unwrap().unwrap();
+            let record = lifecycle::record(&*direct, test_cell(4)).await.unwrap().unwrap();
             assert!(record.deleted && record.forking().is_some(), "{record:?}: given up");
         }
         passed
@@ -3017,7 +3011,7 @@ mod tests {
         assert_eq!(counts, Ok((1, 0, 0)));
     }
 
-    /// A pass recovering each branch once, by its parent's state: it deletes what the restore's
+    /// A pass recovering each cell once, by its parent's state: it deletes what the restore's
     /// child needs, which fails every pass after, unless the restore's reference keeps it.
     #[test]
     fn children_restored_from_versions_keeping_their_origins_need_recoveries_by_origins() {
@@ -3028,11 +3022,11 @@ mod tests {
         crate::set_rules(rules);
         let passed = block_on(pass_as_a_child_is_restored());
         crate::set_rules(crate::Rules::ALL);
-        let lost = Error::Lost("branch 1/1/3: what its recovery starts from keeps going".into());
+        let lost = Error::Lost("cell 1/1/3: what its recovery starts from keeps going".into());
         assert_eq!(passed, Err(lost));
     }
 
-    /// What a pass gives after one that, having listed the records, recovers branch 1 as its writer
+    /// What a pass gives after one that, having listed the records, recovers cell 1 as its writer
     /// makes a version, a restore of the version takes child 3, and the writer forks to 3, refused,
     /// then drops the version and checkpoints.
     async fn pass_as_a_child_is_restored() -> Result<Report, Error> {
@@ -3042,7 +3036,7 @@ mod tests {
         const PARENT: u64 = 1;
         const CHILD: u64 = 3;
         const EARLIER: u64 = 4;
-        /// Forks `writer`'s branch to `child`: at the segment it returns, acknowledged.
+        /// Forks `writer`'s cell to `child`: at the segment it returns, acknowledged.
         async fn fork(writer: &Writer<Direct>, child: Child) -> u64 {
             let footer =
                 writer.chain().close(Contents { forks: vec![child], ..Contents::default() });
@@ -3056,22 +3050,22 @@ mod tests {
             segment
         }
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(PARENT), 0).await.unwrap();
-        let writer = Writer::open(direct.clone(), test_branch(PARENT), 10, 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(PARENT), 0).await.unwrap();
+        let writer = Writer::open(direct.clone(), test_cell(PARENT), 10, 0).await.unwrap();
         // A fork, recorded before the pass lists the records, whose recovery reads the parent's
         // checkpoints first, as the cell's listing shows them: the restore's child's, after,
         // lists them anew (TASK-395.16), as the spec reads them. Then a commit: what the restore's
         // child needs that a pass may delete.
-        fork(&writer, Child { branch: test_branch(EARLIER), owner: 0x44 }).await;
+        fork(&writer, Child { cell: test_cell(EARLIER), owner: 0x44 }).await;
         commit(&writer, Commit { tag: 1, ..Commit::default() }).await;
         let restoring = direct.clone();
         let meanwhile = move || {
             let work = async {
                 let at = versioned_by(&writer, Vec::new(), VERSION).await;
-                let origin = Origin { parent: test_branch(PARENT), at };
-                fork_version(&*restoring, test_branch(CHILD), VERSION, origin, 0x33).await.unwrap();
-                fork(&writer, Child { branch: test_branch(CHILD), owner: 0x34 }).await;
-                assert!(writer.refused(test_branch(CHILD)));
+                let origin = Origin { parent: test_cell(PARENT), at };
+                fork_version(&*restoring, test_cell(CHILD), VERSION, origin, 0x33).await.unwrap();
+                fork(&writer, Child { cell: test_cell(CHILD), owner: 0x34 }).await;
+                assert!(writer.refused(test_cell(CHILD)));
                 writer.drop_versions(&BTreeSet::from([VERSION])).await.unwrap();
                 writer.checkpoint().await.unwrap();
             };
@@ -3079,7 +3073,7 @@ mod tests {
         };
         let during = Meanwhile {
             bucket: direct.clone(),
-            branch: test_branch(PARENT),
+            cell: test_cell(PARENT),
             meanwhile: Mutex::new(Some(meanwhile)),
         };
         let now = Options { compact_below: 0.0, grace: 0 };
@@ -3109,15 +3103,15 @@ mod tests {
         crate::set_rules(crate::Rules { records_kept: false, ..crate::Rules::ALL });
         let (record, passed) = block_on(record_a_fork_to_a_deleted_root());
         crate::set_rules(crate::Rules::ALL);
-        let made = crate::record::Kind::Fork(Origin { parent: test_branch(1), at: 0 }).of(0x22);
+        let made = crate::record::Kind::Fork(Origin { parent: test_cell(1), at: 0 }).of(0x22);
         assert_eq!(
             (record, passed),
-            (Some(made), Err(Error::Lost(format!("segment 0 of {}", test_branch(1)))))
+            (Some(made), Err(Error::Lost(format!("segment 0 of {}", test_cell(1)))))
         );
     }
 
     /// TASK-455: a dead cell a pass does not remove, of an ID no allocator gave, its segments
-    /// compacted before its branch's deletion: the first pass in full deletes the segments, and
+    /// compacted before its cell's deletion: the first pass in full deletes the segments, and
     /// their moves, whose objects it listed, the next, which goes in full for that, as the first
     /// recorded its listing, not what its deletes left (the simulation found the moves kept for
     /// good when it did); then passes skip it, and nothing is left but its record, head and lease.
@@ -3134,7 +3128,7 @@ mod tests {
                 keys.iter().filter(|key| matches!(layout::kind(key), Kind::Moves { .. })).count()
             };
             assert_eq!(moves(&moved), SEGMENTS as usize);
-            branch::delete(&*bucket, test_branch(1), 11, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, test_cell(1), 11, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             let first = collect(&*bucket, 2, &compacting).await.unwrap();
@@ -3144,7 +3138,7 @@ mod tests {
             let third = collect(&*bucket, 4, &compacting).await.unwrap();
             assert_eq!(third, Report { skipped: 1, ..Report::default() });
             let left = keys(&*bucket).await;
-            let expected = vec![layout::record(test_branch(1)), layout::head(test_branch(1))];
+            let expected = vec![layout::record(test_cell(1)), layout::head(test_cell(1))];
             let mut left = left;
             left.retain(|key| !matches!(layout::kind(key), Kind::Cell { .. }));
             assert_eq!(left, expected);
@@ -3176,7 +3170,7 @@ mod tests {
         use crate::testing::{VERSION, fork_version, versioned_by};
         let bucket = Arc::new(Direct(SimBucket::new()));
         let base = celled(1, 1);
-        branch::create(&*bucket, base, 0).await.unwrap();
+        lifecycle::create(&*bucket, base, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), base, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let at = versioned_by(&writer, vec![(extent, vec![1; 64])], VERSION).await;
@@ -3187,7 +3181,7 @@ mod tests {
         for n in 0..clones {
             let clone = CellId { tenant: 1, id: ids.next(&*bucket).await };
             fork_version(&*bucket, clone, VERSION, origin, 0x40 + n).await.unwrap();
-            branch::delete(&*bucket, clone, 20, u64::MAX, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, clone, 20, u64::MAX, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             cells.push(clone);
@@ -3210,31 +3204,30 @@ mod tests {
         crate::set_rules(crate::Rules { ids_given: false, ..crate::Rules::ALL });
         let (record, passed) = block_on(record_a_fork_to_a_deleted_root());
         crate::set_rules(crate::Rules::ALL);
-        let made = crate::record::Kind::Fork(Origin { parent: test_branch(1), at: 0 }).of(0x22);
+        let made = crate::record::Kind::Fork(Origin { parent: test_cell(1), at: 0 }).of(0x22);
         assert_eq!(
             (record, passed),
-            (Some(made), Err(Error::Lost(format!("segment 0 of {}", test_branch(1)))))
+            (Some(made), Err(Error::Lost(format!("segment 0 of {}", test_cell(1)))))
         );
     }
 
-    /// Child 2's record, and what a pass gives, once the writer of branch 1 forked to 2, which a
-    /// root took and was deleted, and recorded the fork after branch 1's deletion and a pass.
+    /// Child 2's record, and what a pass gives, once the writer of cell 1 forked to 2, which a
+    /// root took and was deleted, and recorded the fork after cell 1's deletion and a pass.
     async fn record_a_fork_to_a_deleted_root() -> (Option<Record>, Result<Report, Error>) {
         use crate::layout::{Contents, Segment};
         use crate::writer::Objects;
         const PARENT: u64 = 1;
         const CHILD: u64 = 2;
         let direct = Arc::new(Direct(SimBucket::new()));
-        let (slow, open) =
-            Gated::new(direct.clone(), Gate::Put(layout::record(test_branch(CHILD))));
+        let (slow, open) = Gated::new(direct.clone(), Gate::Put(layout::record(test_cell(CHILD))));
         let slow = Arc::new(slow);
-        branch::create(&*direct, test_branch(PARENT), 0).await.unwrap();
-        let writer = Writer::open(slow, test_branch(PARENT), 10, 0).await.unwrap();
-        branch::create(&*direct, test_branch(CHILD), 0x21).await.unwrap();
-        branch::delete(&*direct, test_branch(CHILD), 11, 0, &crate::keys::testing::host_kms())
+        lifecycle::create(&*direct, test_cell(PARENT), 0).await.unwrap();
+        let writer = Writer::open(slow, test_cell(PARENT), 10, 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(CHILD), 0x21).await.unwrap();
+        lifecycle::delete(&*direct, test_cell(CHILD), 11, 0, &crate::keys::testing::host_kms())
             .await
             .unwrap();
-        let forked = Child { branch: test_branch(CHILD), owner: 0x22 };
+        let forked = Child { cell: test_cell(CHILD), owner: 0x22 };
         let footer = writer.chain().close(Contents { forks: vec![forked], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(writer.keys().encrypting())
@@ -3244,14 +3237,14 @@ mod tests {
         // The head read, the fork's child's record waits.
         let mut acknowledging = Box::pin(writer.acknowledge());
         assert!((&mut acknowledging).now_or_never().is_none());
-        branch::delete(&*direct, test_branch(PARENT), 12, 0, &crate::keys::testing::host_kms())
+        lifecycle::delete(&*direct, test_cell(PARENT), 12, 0, &crate::keys::testing::host_kms())
             .await
             .unwrap();
         let now = Options { compact_below: 0.0, grace: 0 };
         collect(&*direct, 1, &now).await.unwrap();
         open.send(()).unwrap();
         assert_eq!((&mut acknowledging).now_or_never(), Some(Ok(Some(at))));
-        let record = branch::record(&*direct, test_branch(CHILD)).await.unwrap();
+        let record = lifecycle::record(&*direct, test_cell(CHILD)).await.unwrap();
         (record, collect(&*direct, 2, &now).await)
     }
 
@@ -3277,7 +3270,7 @@ mod tests {
     }
 
     /// The epoch of the head of child 2, in a cell of its own, after a pass, and what a writer's
-    /// taking of it gives once recorded: branch 1's writer forked to it, and stalls recording it,
+    /// taking of it gives once recorded: cell 1's writer forked to it, and stalls recording it,
     /// as its deletion ends its head and stops before its record (the TASK-79.78 race).
     async fn take_a_child_whose_deletion_stopped_before_its_record() -> (u64, Result<(), Error>) {
         use crate::layout::{Contents, Segment};
@@ -3285,9 +3278,9 @@ mod tests {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (parent, child) = (celled(1, 1), celled(2, 2));
         let (slow, open) = Gated::new(direct.clone(), Gate::Put(layout::record(child)));
-        branch::create(&*direct, parent, 0).await.unwrap();
+        lifecycle::create(&*direct, parent, 0).await.unwrap();
         let writer = Writer::open(Arc::new(slow), parent, 10, 0).await.unwrap();
-        let forked = Child { branch: child, owner: 0x22 };
+        let forked = Child { cell: child, owner: 0x22 };
         let footer = writer.chain().close(Contents { forks: vec![forked], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(writer.keys().encrypting())
@@ -3298,17 +3291,17 @@ mod tests {
         let mut acknowledging = Box::pin(writer.acknowledge());
         assert!((&mut acknowledging).now_or_never().is_none());
         let scenario = fail::FailScenario::setup();
-        fail::cfg("branch::head_ended", "return").unwrap();
+        fail::cfg("lifecycle::head_ended", "return").unwrap();
         let deleting =
-            branch::delete(&*direct, child, 20, 0, &crate::keys::testing::host_kms()).await;
+            lifecycle::delete(&*direct, child, 20, 0, &crate::keys::testing::host_kms()).await;
         scenario.teardown();
-        assert_eq!(deleting, Err(Error::Read("failpoint branch::head_ended".to_string())));
+        assert_eq!(deleting, Err(Error::Read("failpoint lifecycle::head_ended".to_string())));
         let now = Options { compact_below: 0.0, grace: 0 };
         collect(&*direct, 1, &now).await.unwrap();
         let head = crate::head::epoch(&*direct, child).await.unwrap();
         open.send(()).unwrap();
         assert_eq!((&mut acknowledging).now_or_never(), Some(Ok(Some(at))));
-        let recorded = branch::record(&*direct, child).await.unwrap();
+        let recorded = lifecycle::record(&*direct, child).await.unwrap();
         assert_eq!(recorded, Some(crate::record::Kind::Fork(Origin { parent, at }).of(0x22)));
         (head, Writer::open(direct.clone(), child, 30, 0).await.map(drop))
     }
@@ -3319,7 +3312,7 @@ mod tests {
     #[test]
     fn late_references_of_resumed_clones_go() {
         let (left, late, marks, _) = block_on(left_by_a_late_host_of_a_resumed_clone());
-        assert_eq!((left, late, marks), (Vec::new(), Err(Error::NoBranch), 1));
+        assert_eq!((left, late, marks), (Vec::new(), Err(Error::NoCell), 1));
     }
 
     /// Without the rule, the clone resumed retires its reference unmarked, as one its host made
@@ -3332,16 +3325,16 @@ mod tests {
         crate::set_rules(crate::Rules::ALL);
         assert_eq!(
             (left, late, marks),
-            (vec![format!("garbage left: {reference}")], Err(Error::NoBranch), 0)
+            (vec![format!("garbage left: {reference}")], Err(Error::NoCell), 0)
         );
     }
 
-    /// A version of branch 1's state at its segment `at` (its writer's), in a cell of its own: the
+    /// A version of cell 1's state at its segment `at` (its writer's), in a cell of its own: the
     /// writer, which sealed `extent` in a commit before the version's, and the version's origin.
     async fn versioned_base<B: Bucket + 'static>(bucket: Arc<B>) -> (Writer<B>, ExtentId, Origin) {
-        let origin_branch = celled(1, 1);
-        branch::create(&*bucket, origin_branch, 0).await.unwrap();
-        let writer = Writer::open(bucket, origin_branch, 10, 0).await.unwrap();
+        let origin_cell = celled(1, 1);
+        lifecycle::create(&*bucket, origin_cell, 0).await.unwrap();
+        let writer = Writer::open(bucket, origin_cell, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         commit(
             &writer,
@@ -3349,7 +3342,7 @@ mod tests {
         )
         .await;
         let at = crate::testing::versioned_by(&writer, Vec::new(), crate::testing::VERSION).await;
-        (writer, extent, Origin { parent: origin_branch, at })
+        (writer, extent, Origin { parent: origin_cell, at })
     }
 
     /// What [`crate::testing::uncollected`] finds, what the host's fork gave and how many marks
@@ -3362,7 +3355,7 @@ mod tests {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (_writer, _, origin) = versioned_base(direct.clone()).await;
         let id = crate::objectid::Allocator::new().next(&*direct).await;
-        let clone = CellId { tenant: 1, id: id };
+        let clone = CellId { tenant: 1, id };
         let reference = layout::reference(origin.parent, origin.at, clone);
         let (slow, open) = Gated::new(direct.clone(), Gate::Put(reference.clone()));
         let version = crate::testing::VERSION;
@@ -3370,8 +3363,10 @@ mod tests {
             Box::pin(crate::testing::fork_version(&slow, clone, version, origin, 0x33));
         assert!((&mut forking).now_or_never().is_none());
         let kms = crate::keys::testing::host_kms();
-        branch::resume_version_fork(&*direct, clone, keys::Parents::Kms(&kms, None)).await.unwrap();
-        branch::delete(&*direct, clone, 20, u64::MAX, &kms).await.unwrap();
+        lifecycle::resume_version_fork(&*direct, clone, keys::Parents::Kms(&kms, None))
+            .await
+            .unwrap();
+        lifecycle::delete(&*direct, clone, 20, u64::MAX, &kms).await.unwrap();
         let options = Options { compact_below: 0.0, grace: 0 };
         crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
         assert_eq!(bucket::list(&*direct, &clone.prefix()).await, Vec::new());
@@ -3423,7 +3418,9 @@ mod tests {
         drop(forking);
         drop(never);
         let kms = crate::keys::testing::host_kms();
-        branch::resume_version_fork(&*direct, clone, keys::Parents::Kms(&kms, None)).await.unwrap();
+        lifecycle::resume_version_fork(&*direct, clone, keys::Parents::Kms(&kms, None))
+            .await
+            .unwrap();
         let referred = bucket::get(&*direct, &reference).await.is_some();
         // The version dropped, the base's checkpoint after keeps its state no more.
         writer.drop_versions(&BTreeSet::from([version])).await.unwrap();
@@ -3445,21 +3442,21 @@ mod tests {
         (referred, held)
     }
 
-    /// TASK-183: two deletions of a branch at once, a fork's segment of its writer's in flight,
+    /// TASK-183: two deletions of a cell at once, a fork's segment of its writer's in flight,
     /// never acknowledged. The segment lands, at its own key, which no head names: both deletions
-    /// recover the branch from the head the first ended, which nothing swaps after, and find no
+    /// recover the cell from the head the first ended, which nothing swaps after, and find no
     /// fork: a pass after lets go of nothing a child needs, as no fork's child has a record. Found
     /// by specs/bucket's TLA+ (TASK-165.2), the model BucketForks once a deletion recovered in two
     /// steps; the head (TASK-407) made the deletions' fences needless.
     #[test]
     fn deletions_at_once_find_no_forks_landing_between_them() {
-        // The first pass, after both deletions, deleted all of the branch, its cell dead, its
+        // The first pass, after both deletions, deleted all of the cell, its cell dead, its
         // root's ID named: the second skips it (TASK-455).
         let landed = (Ok(()), None, Ok(Report { skipped: 1, ..Report::default() }));
         assert_eq!(block_on(delete_twice_as_a_fork_lands()), landed);
     }
 
-    /// What the upload of branch 1's fork to child 2 gives, landing between two deletions'
+    /// What the upload of cell 1's fork to child 2 gives, landing between two deletions'
     /// recoveries of 1: the first's, which then waits to mark 1 deleted, and the second's, which
     /// then waits to record the forks it found; the first marks 1 deleted, a pass runs, and the
     /// second goes on. The child's record, and what a pass after gives.
@@ -3470,34 +3467,40 @@ mod tests {
         const PARENT: u64 = 1;
         const CHILD: u64 = 2;
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(PARENT), 0).await.unwrap();
-        let writer = Writer::open(direct.clone(), test_branch(PARENT), 10, 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(PARENT), 0).await.unwrap();
+        let writer = Writer::open(direct.clone(), test_cell(PARENT), 10, 0).await.unwrap();
         commit(&writer, Commit { tag: 1, ..Commit::default() }).await;
         let footer = writer
             .chain()
-            .close(Contents { forks: vec![child(test_branch(CHILD))], ..Contents::default() });
+            .close(Contents { forks: vec![child(test_cell(CHILD))], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(writer.keys().encrypting())
             .into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
-        // The first deletion, recovered, waits to mark the branch deleted.
+        // The first deletion, recovered, waits to mark the cell deleted.
         let (marking, mark) =
-            Gated::new(direct.clone(), Gate::Put(layout::record(test_branch(PARENT))));
+            Gated::new(direct.clone(), Gate::Put(layout::record(test_cell(PARENT))));
         let marking = Arc::new(marking);
         let mut first = Box::pin(async move {
-            branch::delete(&*marking, test_branch(PARENT), 11, 0, &crate::keys::testing::host_kms())
-                .await
+            lifecycle::delete(
+                &*marking,
+                test_cell(PARENT),
+                11,
+                0,
+                &crate::keys::testing::host_kms(),
+            )
+            .await
         });
         assert!((&mut first).now_or_never().is_none());
         let landed = writer.upload(at).await;
         // The second, recovered, waits to record the fork's child, if it found the fork.
         let (recording, record) =
-            Gated::new(direct.clone(), Gate::Put(layout::record(test_branch(CHILD))));
+            Gated::new(direct.clone(), Gate::Put(layout::record(test_cell(CHILD))));
         let recording = Arc::new(recording);
         let mut second = Box::pin(async move {
-            branch::delete(
+            lifecycle::delete(
                 &*recording,
-                test_branch(PARENT),
+                test_cell(PARENT),
                 12,
                 0,
                 &crate::keys::testing::host_kms(),
@@ -3516,15 +3519,15 @@ mod tests {
             None => second.await,
         };
         assert_eq!(deleted, Ok(()));
-        let record = branch::record(&*direct, test_branch(CHILD)).await.unwrap();
+        let record = lifecycle::record(&*direct, test_cell(CHILD)).await.unwrap();
         (landed, record, collect(&*direct, 2, &now).await)
     }
 
-    /// TASK-380, under the head (TASK-407): two deletions of a branch at once, its writer's
+    /// TASK-380, under the head (TASK-407): two deletions of a cell at once, its writer's
     /// segment forking to a child in flight, the extent of its own the segment's commit sealed
-    /// uploaded ahead of it, and the branch's segments to an earlier fork kept by that fork's
-    /// child. The first deletion ends the head and marks the branch deleted; a pass deletes the
-    /// extent, which no live branch needs; the segment lands, at its own key, which no head names,
+    /// uploaded ahead of it, and the cell's segments to an earlier fork kept by that fork's
+    /// child. The first deletion ends the head and marks the cell deleted; a pass deletes the
+    /// extent, which no live cell needs; the segment lands, at its own key, which no head names,
     /// and the second deletion, which read the head live before the first ended it, finds it ended
     /// as it ends it, and recovers from it: it records no child.
     #[test]
@@ -3532,9 +3535,9 @@ mod tests {
         assert_eq!(block_on(delete_twice_as_a_fork_lands_past_a_pass()), (Ok(()), None, vec![]));
     }
 
-    /// What the second of two deletions of branch 1 gives, its writer's segment forking to child
+    /// What the second of two deletions of cell 1 gives, its writer's segment forking to child
     /// 3, with an extent of its own, landing after a pass deleted what the first left, child 2 of
-    /// an earlier fork keeping the branch's segments to that fork; child 3's record, and the keys
+    /// an earlier fork keeping the cell's segments to that fork; child 3's record, and the keys
     /// of the extents its state names that are gone.
     async fn delete_twice_as_a_fork_lands_past_a_pass()
     -> (Result<(), Error>, Option<Record>, Vec<String>) {
@@ -3544,15 +3547,15 @@ mod tests {
         const KEPT: u64 = 2;
         const CHILD: u64 = 3;
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(PARENT), 0).await.unwrap();
+        lifecycle::create(&*direct, test_cell(PARENT), 0).await.unwrap();
         // The writer, whose create of its segment 1 waits.
         let at = 1;
         let (writing, landing) =
-            Gated::new(direct.clone(), Gate::Put(layout::segment(test_branch(PARENT), at, 1)));
-        let writer = Writer::open(Arc::new(writing), test_branch(PARENT), 10, 0).await.unwrap();
+            Gated::new(direct.clone(), Gate::Put(layout::segment(test_cell(PARENT), at, 1)));
+        let writer = Writer::open(Arc::new(writing), test_cell(PARENT), 10, 0).await.unwrap();
         let footer = writer
             .chain()
-            .close(Contents { forks: vec![child(test_branch(KEPT))], ..Contents::default() });
+            .close(Contents { forks: vec![child(test_cell(KEPT))], ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() }
             .encode(writer.keys().encrypting())
             .into();
@@ -3562,21 +3565,20 @@ mod tests {
         // A commit sealing an extent on its own, then a fork to the child, in one segment.
         let own = vec![(writer.chain().next_sequence(), b"own".to_vec())];
         let forking = SegmentBuilder::from(Commit { tag: 1, own, ..Commit::default() })
-            .fork(child(test_branch(CHILD)), &mut writer.chain())
+            .fork(child(test_cell(CHILD)), &mut writer.chain())
             .frame(writer.keys().encrypting());
         assert_eq!(writer.add_segment(forking).unwrap(), at);
         let mut uploading = Box::pin(writer.upload(at));
         assert!((&mut uploading).now_or_never().is_none());
         // The second deletion, the head read live, waits to end it.
-        let (gated, open) =
-            Gated::new(direct.clone(), Gate::Put(layout::head(test_branch(PARENT))));
+        let (gated, open) = Gated::new(direct.clone(), Gate::Put(layout::head(test_cell(PARENT))));
         let gated = Arc::new(gated);
         let mut second = Box::pin(async move {
-            branch::delete(&*gated, test_branch(PARENT), 12, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*gated, test_cell(PARENT), 12, 0, &crate::keys::testing::host_kms())
                 .await
         });
         assert!((&mut second).now_or_never().is_none());
-        branch::delete(&*direct, test_branch(PARENT), 11, 0, &crate::keys::testing::host_kms())
+        lifecycle::delete(&*direct, test_cell(PARENT), 11, 0, &crate::keys::testing::host_kms())
             .await
             .unwrap();
         let now = Options { compact_below: 0.0, grace: 0 };
@@ -3585,13 +3587,11 @@ mod tests {
         assert_eq!((&mut uploading).now_or_never(), Some(Ok(())));
         open.send(()).unwrap();
         let deleted = second.await;
-        let record = branch::record(&*direct, test_branch(CHILD)).await.unwrap();
+        let record = lifecycle::record(&*direct, test_cell(CHILD)).await.unwrap();
         let mut gone = Vec::new();
         if let Some(record) = &record {
-            let state = recovery::recover(&*direct, test_branch(CHILD), record.origin())
-                .await
-                .unwrap()
-                .state;
+            let state =
+                recovery::recover(&*direct, test_cell(CHILD), record.origin()).await.unwrap().state;
             for location in state.extents.values() {
                 if bucket::get(&*direct, &location.key).await.is_none() {
                     gone.push(location.key.clone());
@@ -3877,8 +3877,8 @@ mod tests {
     /// their moves of it; and every moves key those passes wrote.
     async fn moves_created_late() -> (String, BTreeSet<String>) {
         let direct = Arc::new(Direct(SimBucket::new()));
-        branch::create(&*direct, test_branch(1), 0).await.unwrap();
-        let writer = Arc::new(Writer::open(direct.clone(), test_branch(1), 10, 0).await.unwrap());
+        lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
+        let writer = Arc::new(Writer::open(direct.clone(), test_cell(1), 10, 0).await.unwrap());
         let first = writer.chain().next_sequence();
         let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
         let extents = vec![(small, b"small".to_vec()), (large, vec![7; 20_000])];
@@ -3934,8 +3934,8 @@ mod tests {
     fn moves_outlive_what_they_are_of() {
         block_on(async {
             let bucket = store();
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let extents = vec![(small, b"small".to_vec()), (large, vec![7; 20_000])];
@@ -3957,7 +3957,7 @@ mod tests {
     }
 
     /// What a pass asked, round by round, as [`SimBucket::served_in_rounds`] serves it: the reads
-    /// of branches' records, the reads of checkpoints whole, and the deletes, how many in each
+    /// of cells' records, the reads of checkpoints whole, and the deletes, how many in each
     /// round that asked for any.
     fn asked(rounds: &[Vec<String>]) -> [Vec<usize>; 3] {
         let counted = |asking: &dyn Fn(&str) -> bool| -> Vec<usize> {
@@ -3969,28 +3969,28 @@ mod tests {
             asked.strip_prefix("get ").is_some_and(|key| key.contains(&format!("/{kind}/")))
         };
         [
-            counted(&|asked| at(asked, "branches")),
+            counted(&|asked| at(asked, "cells")),
             counted(&|asked| at(asked, "checkpoints") && whole(asked)),
             counted(&|asked| asked.starts_with("delete ")),
         ]
     }
 
-    /// A base, branch 1: a segment of extents, some stored on their own, which the next frees,
+    /// A base, cell 1: a segment of extents, some stored on their own, which the next frees,
     /// then a segment forking it to `forks` children, and a checkpoint at it, the children's
     /// recoveries' start; the last `deleted` children deleted. Its requests served by `bucket`.
     fn forked_base(bucket: &Arc<SimBucket>, forks: u64, deleted: u64) {
         use crate::layout::{Chain, Contents, Segment};
         use crate::writer::Objects;
         let (writer, _) = bucket.served(async {
-            branch::create(&**bucket, test_branch(1), 0).await.unwrap();
-            Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
+            lifecycle::create(&**bucket, test_cell(1), 0).await.unwrap();
+            Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap()
         });
         let first = writer.chain().next_sequence();
         let keys = writer.keys().clone();
         let extents = (0..20).map(|n| (ExtentId::new(1, first + n), vec![n as u8; 8])).collect();
         let own: Vec<_> = (20..23).map(|n| (first + n, vec![n as u8; 16])).collect();
         let frees = own.iter().map(|(sequence, _)| ExtentId::new(1, *sequence)).collect();
-        let children = (2..2 + forks + deleted).map(|id| child(test_branch(id))).collect();
+        let children = (2..2 + forks + deleted).map(|id| child(test_cell(id))).collect();
         let segments: [Box<dyn FnOnce(&mut Chain) -> Objects>; 3] = [
             Box::new(|chain| {
                 let commit = Commit { tag: 1, extents, own, ..Commit::default() };
@@ -4019,9 +4019,9 @@ mod tests {
         bucket.served(writer.checkpoint()).0.unwrap();
         for child in 2 + forks..2 + forks + deleted {
             bucket
-                .served(branch::delete(
+                .served(lifecycle::delete(
                     &**bucket,
-                    test_branch(child),
+                    test_cell(child),
                     20,
                     0,
                     &crate::keys::testing::host_kms(),
@@ -4031,7 +4031,7 @@ mod tests {
         }
     }
 
-    /// TASK-92.7: a pass of the collector over a base and its forks reads the branches' records
+    /// TASK-92.7: a pass of the collector over a base and its forks reads the cells' records
     /// many at once, the checkpoint the base's recovery and its forks' start from once, and
     /// deletes what goes many at once. TASK-395.4: a second pass of the same collector reads every
     /// record again, as the first: a collector keeps nothing of a cell from one pass to the next,
@@ -4039,7 +4039,7 @@ mod tests {
     /// reads the cell's object first, its format, before taking the cell's lease (cladefs: every
     /// writer's cell has one, keeping its KEK, TASK-411.28; one with none has a record read
     /// instead); the passes after find the lease (TASK-395.6), which a pass of this format took. None skips the cell, each finding
-    /// it changed by the one before: deleting, or a branch deleted.
+    /// it changed by the one before: deleting, or a cell deleted.
     #[test]
     fn passes_read_records_and_checkpoints_once_and_delete_at_once() {
         let bucket = SimBucket::new();
@@ -4052,7 +4052,7 @@ mod tests {
             passes.push(asked(&rounds));
         }
         // Its record, its children's, the deleted ones' too; its checkpoint; the segments the
-        // checkpoint covers that hold no extent its branches hold, and its extents freed. Heads
+        // checkpoint covers that hold no extent its cells hold, and its extents freed. Heads
         // stay, the deleted children's too, and a deletion writes no segment (TASK-407).
         let first = [vec![9], vec![1], vec![5]];
         assert_eq!(passes, [first, [vec![9], vec![1], vec![]]]);
@@ -4060,9 +4060,9 @@ mod tests {
         // The fork deleted: nothing of it goes that its parent's state needs not, and it held
         // nothing of its own.
         bucket
-            .served(branch::delete(
+            .served(lifecycle::delete(
                 &*bucket,
-                test_branch(2),
+                test_cell(2),
                 20,
                 0,
                 &crate::keys::testing::host_kms(),
@@ -4081,8 +4081,8 @@ mod tests {
     /// it freed after, and a checkpoint past them: what a pass compacts, a moves each, and the
     /// next, the moves aged, deletes. The segments' keys.
     async fn mostly_freed<B: Bucket>(bucket: Arc<B>) -> Vec<String> {
-        branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         let (mut segments, mut frees) = (Vec::new(), Vec::new());
         for n in 0..SEGMENTS {
             let first = writer.chain().next_sequence();
@@ -4187,15 +4187,15 @@ mod tests {
         let bucket = store();
         let children = 2..2 + RECOVERIES_AT_ONCE as u64 + 1;
         let (extents, held_in) = block_on(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let base = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let base = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let sequence = base.chain().next_sequence();
             let extents: Vec<_> = (0..3).map(|n| ExtentId::new(1, sequence + n)).collect();
             let own = extents.iter().map(|extent| (extent.sequence, b"held".to_vec())).collect();
             let held_in = base.chain().next_segment();
             commit(&base, Commit { tag: 1, own, ..Commit::default() }).await;
             let forks = Contents {
-                forks: children.clone().map(|id| child(test_branch(id))).collect(),
+                forks: children.clone().map(|id| child(test_cell(id))).collect(),
                 ..Contents::default()
             };
             let footer = base.chain().close(forks);
@@ -4211,7 +4211,7 @@ mod tests {
             base.checkpoint().await.unwrap();
             for child in children.clone() {
                 let writer =
-                    Writer::open(bucket.clone(), test_branch(child), 10 + child, 0).await.unwrap();
+                    Writer::open(bucket.clone(), test_cell(child), 10 + child, 0).await.unwrap();
                 let held = match child {
                     _ if child == children.start => Some(extents[1]),
                     _ if child == children.end - 1 => Some(extents[2]),
@@ -4237,22 +4237,22 @@ mod tests {
     }
 
     /// TASK-79.85: a fork no host holds any more, as one whose host left neither its handle nor
-    /// its deletion, is a live branch to the collector, which keeps what it inherited for it. An
-    /// operator finds it among the live branches, and deletes it, whatever placement last took
+    /// its deletion, is a live cell to the collector, which keeps what it inherited for it. An
+    /// operator finds it among the live cells, and deletes it, whatever placement last took
     /// it: the next pass frees what only it held.
     #[test]
-    fn branches_no_host_holds_keep_what_they_inherited_until_deleted() {
+    fn cells_no_host_holds_keep_what_they_inherited_until_deleted() {
         use crate::layout::{Contents, Segment};
         use crate::writer::Objects;
         let bucket = store();
         let (extent, held_in) = block_on(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let base = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let base = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let extent = ExtentId::new(1, base.chain().next_sequence());
             let held_in = base.chain().next_segment();
             let own = vec![(extent.sequence, b"held".to_vec())];
             commit(&base, Commit { tag: 1, own, ..Commit::default() }).await;
-            let forks = Contents { forks: vec![child(test_branch(2))], ..Contents::default() };
+            let forks = Contents { forks: vec![child(test_cell(2))], ..Contents::default() };
             let footer = base.chain().close(forks);
             let framed = Segment { data: Vec::new(), footer: footer.clone() }
                 .encode(base.keys().encrypting())
@@ -4265,7 +4265,7 @@ mod tests {
             commit(&base, Commit { tag: 2, frees: vec![extent], ..Commit::default() }).await;
             base.checkpoint().await.unwrap();
             // Its host took it, at a placement later than any since, and went.
-            crate::head::take(&*bucket, test_branch(2), 11, 7).await.unwrap();
+            crate::head::take(&*bucket, test_cell(2), 11, 7).await.unwrap();
             (extent, held_in)
         });
         let kept = || {
@@ -4279,11 +4279,11 @@ mod tests {
         block_on(collect(&*bucket, 1, &KEEP)).unwrap();
         assert!(kept(), "what the fork inherited went while it is live");
 
-        let live = block_on(branch::live(&*bucket, layout::TEST_CELL)).unwrap();
-        assert_eq!(live.keys().copied().collect::<Vec<_>>(), [test_branch(1), test_branch(2)]);
-        block_on(branch::delete(
+        let live = block_on(lifecycle::live(&*bucket, layout::TEST_CELL)).unwrap();
+        assert_eq!(live.keys().copied().collect::<Vec<_>>(), [test_cell(1), test_cell(2)]);
+        block_on(lifecycle::delete(
             &*bucket,
-            test_branch(2),
+            test_cell(2),
             12,
             u64::MAX,
             &crate::keys::testing::host_kms(),
@@ -4291,13 +4291,13 @@ mod tests {
         .unwrap();
         block_on(collect(&*bucket, 2, &KEEP)).unwrap();
         assert!(!kept(), "what the fork inherited stayed once it was deleted");
-        let live = block_on(branch::live(&*bucket, layout::TEST_CELL)).unwrap();
-        assert_eq!(live.keys().copied().collect::<Vec<_>>(), [test_branch(1)]);
+        let live = block_on(lifecycle::live(&*bucket, layout::TEST_CELL)).unwrap();
+        assert_eq!(live.keys().copied().collect::<Vec<_>>(), [test_cell(1)]);
     }
 
     /// TASK-79.82: a fork's child recovers from the origin its record names, not from a parent
     /// whose state names it too, a fork to its ID refused: what it inherited is kept, though the
-    /// parent it was forked from frees it. A round of recoveries past the first, with more branches
+    /// parent it was forked from frees it. A round of recoveries past the first, with more cells
     /// than one takes, takes the lowest origin first, here the refused fork's.
     #[test]
     fn forks_keep_what_their_records_origin_holds_whoever_else_forked_to_their_id() {
@@ -4306,9 +4306,9 @@ mod tests {
         const REFUSED: u64 = 1;
         const PARENT: u64 = 2;
         const CHILD: u64 = 3;
-        /// Forks `writer`'s branch to `CHILD`, of `owner`: at the segment it returns.
+        /// Forks `writer`'s cell to `CHILD`, of `owner`: at the segment it returns.
         async fn fork(writer: &Writer<ObjectBucket>, owner: u64) -> u64 {
-            let forked = Child { branch: test_branch(CHILD), owner };
+            let forked = Child { cell: test_cell(CHILD), owner };
             let forks = Contents { forks: vec![forked], ..Contents::default() };
             let footer = writer.chain().close(forks);
             let framed = Segment { data: Vec::new(), footer: footer.clone() }
@@ -4322,10 +4322,10 @@ mod tests {
         }
         let bucket = store();
         let (extent, held_in) = block_on(async {
-            for branch in [REFUSED, PARENT].into_iter().chain(10..30) {
-                branch::create(&*bucket, test_branch(branch), 0).await.unwrap();
+            for cell in [REFUSED, PARENT].into_iter().chain(10..30) {
+                lifecycle::create(&*bucket, test_cell(cell), 0).await.unwrap();
             }
-            let parent = Writer::open(bucket.clone(), test_branch(PARENT), 10, 0).await.unwrap();
+            let parent = Writer::open(bucket.clone(), test_cell(PARENT), 10, 0).await.unwrap();
             let extent = ExtentId::new(PARENT, parent.chain().next_sequence());
             let held_in = parent.chain().next_segment();
             let own = vec![(extent.sequence, b"held".to_vec())];
@@ -4334,12 +4334,12 @@ mod tests {
             parent.checkpoint().await.unwrap();
             commit(&parent, Commit { tag: 2, frees: vec![extent], ..Commit::default() }).await;
             parent.checkpoint().await.unwrap();
-            let refused = Writer::open(bucket.clone(), test_branch(REFUSED), 11, 0).await.unwrap();
+            let refused = Writer::open(bucket.clone(), test_cell(REFUSED), 11, 0).await.unwrap();
             fork(&refused, 0x31).await;
-            assert!(refused.refused(test_branch(CHILD)));
+            assert!(refused.refused(test_cell(CHILD)));
             refused.checkpoint().await.unwrap();
-            let record = branch::record(&*bucket, test_branch(CHILD)).await.unwrap().unwrap();
-            assert_eq!(record.origin(), Some(Origin { parent: test_branch(PARENT), at }));
+            let record = lifecycle::record(&*bucket, test_cell(CHILD)).await.unwrap().unwrap();
+            assert_eq!(record.origin(), Some(Origin { parent: test_cell(PARENT), at }));
             (extent, held_in)
         });
         block_on(collect(&*bucket, 1, &KEEP)).unwrap();
@@ -4360,8 +4360,8 @@ mod tests {
         const FORKS: u64 = 100;
         let bucket = Arc::new(Direct(SimBucket::new()));
         block_on(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let extents =
                 (0..EXTENTS).map(|n| (ExtentId::new(1, first + n), n.to_le_bytes().to_vec()));
@@ -4373,7 +4373,7 @@ mod tests {
             writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
             let footer = writer.chain().close(Contents {
-                forks: (2..2 + FORKS).map(|id| child(test_branch(id))).collect(),
+                forks: (2..2 + FORKS).map(|id| child(test_cell(id))).collect(),
                 ..Contents::default()
             });
             let segment = Segment { data: Vec::new(), footer: footer.clone() };
@@ -4403,7 +4403,7 @@ mod tests {
         );
     }
 
-    /// A bucket that marks branch `child`'s record deleted just before the first read of `key`.
+    /// A bucket that marks cell `child`'s record deleted just before the first read of `key`.
     struct DeletedAt {
         bucket: Direct,
         key: String,
@@ -4470,18 +4470,18 @@ mod tests {
         }
     }
 
-    /// A bucket that runs `meanwhile` once, as a pass first reads the head of `branch`: having
-    /// listed the records, as it starts to read that branch's state.
+    /// A bucket that runs `meanwhile` once, as a pass first reads the head of `cell`: having
+    /// listed the records, as it starts to read that cell's state.
     struct Meanwhile<F> {
         bucket: Arc<Direct>,
-        branch: CellId,
+        cell: CellId,
         meanwhile: std::sync::Mutex<Option<F>>,
     }
 
     impl<F: FnOnce() + Send + 'static> Bucket for Meanwhile<F> {
-        /// Of the branch's head, read by its recovery: `meanwhile` first, the first time.
+        /// Of the cell's head, read by its recovery: `meanwhile` first, the first time.
         fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
-            if key == layout::head(self.branch)
+            if key == layout::head(self.cell)
                 && let Some(meanwhile) = self.meanwhile.lock().unwrap().take()
             {
                 meanwhile();
@@ -4535,10 +4535,10 @@ mod tests {
         }
     }
 
-    /// TASK-158: everything between a pass's listing the records and its reading a branch's state:
+    /// TASK-158: everything between a pass's listing the records and its reading a cell's state:
     /// a version of it, a restore of that, the version dropped, what it held freed, and a
     /// checkpoint. The state the pass reads names none of it, and it
-    /// listed neither record: only listing them again finds the restored branch, which keeps what
+    /// listed neither record: only listing them again finds the restored cell, which keeps what
     /// it inherited. Found by the simulation, seed 5310 of its `restores`.
     #[test]
     fn forks_of_versions_made_and_gone_within_a_pass_keep_what_they_hold() {
@@ -4549,7 +4549,7 @@ mod tests {
     }
 
     /// The pass not listing the records again after it read the states: it never finds the
-    /// restored branch, and reclaims what it inherited. The simulation's
+    /// restored cell, and reclaims what it inherited. The simulation's
     /// `collection_needs_records_listed_after_states` searches seeds for the same, which a change
     /// of the trajectories moves (TASK-175's moved it from seed 5310 to 64216 of `restores`).
     /// TASK-395.1: since every clone writes a reference, listed after the states, which finds it as
@@ -4566,15 +4566,15 @@ mod tests {
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// What the restored branch of [`forks_of_versions_made_and_gone_within_a_pass_keep_what_they_hold`]
+    /// What the restored cell of [`forks_of_versions_made_and_gone_within_a_pass_keep_what_they_hold`]
     /// reads of the extent it inherited, once the pass is done.
     fn read_what_a_fork_of_a_version_made_and_gone_within_a_pass_holds() -> Result<Vec<u8>, Error> {
         let sim = SimBucket::new();
         let direct = Arc::new(Direct(sim.clone()));
         const RESTORED: u64 = 3;
         let writer = block_on(async {
-            branch::create(&*direct, test_branch(1), 0).await.unwrap();
-            Arc::new(Writer::open(direct.clone(), test_branch(1), 10, 0).await.unwrap())
+            lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
+            Arc::new(Writer::open(direct.clone(), test_cell(1), 10, 0).await.unwrap())
         });
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let extents = vec![(extent, b"held".to_vec())];
@@ -4593,16 +4593,10 @@ mod tests {
                 let work = async {
                     let version = crate::testing::VERSION;
                     let segment = crate::testing::versioned_by(&writer, Vec::new(), version).await;
-                    let origin = Origin { parent: test_branch(1), at: segment };
-                    crate::testing::fork_version(
-                        &*direct,
-                        test_branch(RESTORED),
-                        version,
-                        origin,
-                        0,
-                    )
-                    .await
-                    .unwrap();
+                    let origin = Origin { parent: test_cell(1), at: segment };
+                    crate::testing::fork_version(&*direct, test_cell(RESTORED), version, origin, 0)
+                        .await
+                        .unwrap();
                     writer.drop_versions(&BTreeSet::from([version])).await.unwrap();
                     let frees = vec![extent];
                     let batch = SegmentBuilder::from(Commit { tag: 3, frees, ..Commit::default() });
@@ -4620,16 +4614,15 @@ mod tests {
         };
         let during = Meanwhile {
             bucket: direct.clone(),
-            branch: test_branch(1),
+            cell: test_cell(1),
             meanwhile: std::sync::Mutex::new(Some(meanwhile)),
         };
         let now = Options { compact_below: 0.0, grace: 0 };
         block_on(collect(&during, 1, &now)).unwrap();
         block_on(async {
-            let record = branch::record(&*direct, test_branch(RESTORED)).await.unwrap();
+            let record = lifecycle::record(&*direct, test_cell(RESTORED)).await.unwrap();
             let recovered =
-                recovery::recover(&*direct, test_branch(RESTORED), record.unwrap().origin())
-                    .await?;
+                recovery::recover(&*direct, test_cell(RESTORED), record.unwrap().origin()).await?;
             crate::testing::read(&direct, extent, &recovered.state.extents[&extent]).await
         })
     }
@@ -4640,8 +4633,8 @@ mod tests {
     /// is compacted, its live extent copied to its moves, encrypted under that key.
     #[test]
     fn objects_encrypted_are_not_compacted_without_their_keys() {
-        let (dek, id) = crate::testing::encrypting(test_branch(1));
-        let key = layout::segment(test_branch(1), 0, 1);
+        let (dek, id) = crate::testing::encrypting(test_cell(1));
+        let key = layout::segment(test_cell(1), 0, 1);
         let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
         let live = ExtentId::new(1, 2);
         let extents =
@@ -4656,7 +4649,7 @@ mod tests {
             assert_eq!(compacted, Err(Error::NoKey(id)));
             assert_eq!(held(&bucket).await, before);
 
-            let ring = crate::testing::ring([test_branch(1)]);
+            let ring = crate::testing::ring([test_cell(1)]);
             let compacted = compact_object(&bucket, &key, &extents, (&ring, 1)).await;
             let moves = layout::moves(&key, 1).unwrap();
             let bytes = bucket::get(&bucket, &moves).await.unwrap().bytes;
@@ -4668,27 +4661,27 @@ mod tests {
         });
     }
 
-    /// A live branch whose recovery finds what it needs gone, here its parent's segment, which no
+    /// A live cell whose recovery finds what it needs gone, here its parent's segment, which no
     /// head names, fails the pass, which deletes nothing; one deleted meanwhile is live no longer,
     /// and the pass goes on.
     #[test]
-    fn branches_lost_fail_the_pass_unless_deleted() {
-        // CellId 2, forked from 1, which has no record; and a segment of no branch.
-        let origin = Origin { parent: test_branch(1), at: 0 };
-        let stray = layout::segment(test_branch(3), 0, 1);
+    fn cells_lost_fail_the_pass_unless_deleted() {
+        // CellId 2, forked from 1, which has no record; and a segment of no cell.
+        let origin = Origin { parent: test_cell(1), at: 0 };
+        let stray = layout::segment(test_cell(3), 0, 1);
         let sim = SimBucket::new();
         let direct = Direct(sim.clone());
         block_on(async {
-            branch::record_fork(
+            lifecycle::record_fork(
                 &direct,
-                child(test_branch(2)),
+                child(test_cell(2)),
                 origin,
                 crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
             )
             .await
             .unwrap();
             let bytes =
-                layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_branch(1)));
+                layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_cell(1)));
             assert!(matches!(bucket::create(&direct, &stray, bytes).await, Created::Created(_)));
         });
         let before = block_on(keys(&direct));
@@ -4698,8 +4691,8 @@ mod tests {
 
         let deleting = DeletedAt {
             bucket: Direct(sim),
-            key: layout::head(test_branch(1)),
-            child: test_branch(2),
+            key: layout::head(test_cell(1)),
+            child: test_cell(2),
             done: AtomicBool::new(false),
         };
         let report = block_on(collect(&deleting, 2, &KEEP)).unwrap();
@@ -4718,13 +4711,13 @@ mod tests {
         held
     }
 
-    /// TASK-264: branch 1, of a pass already, so that the collector's lease is there, then of
+    /// TASK-264: cell 1, of a pass already, so that the collector's lease is there, then of
     /// garbage: its fence, a segment of a small extent and a large, a segment freeing the large,
     /// all covered by a checkpoint, and an extent stored on its own, freed. The segment of the
     /// small extent is mostly freed: a pass compacting below half compacts it.
     async fn garbage(bucket: &Arc<ObjectBucket>) {
-        branch::create(&**bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+        lifecycle::create(&**bucket, test_cell(1), 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
         collect(&**bucket, 1, &KEEP).await.unwrap();
         let first = writer.chain().next_sequence();
         let (small, large, own) =
@@ -4747,7 +4740,7 @@ mod tests {
             0,
             ExtentId::new(1, (1 << crate::EPOCH_SHIFT) + 2),
         );
-        vec![own, layout::segment(test_branch(1), 1, 1)]
+        vec![own, layout::segment(test_cell(1), 1, 1)]
     }
 
     /// TASK-264: a dry run writes nothing, not even the collector's lease, and compacts nothing; it
@@ -4770,7 +4763,7 @@ mod tests {
             assert_eq!(doomed, garbage_doomed());
             let compactable: Vec<String> =
                 dry.compactable.into_iter().map(|meta| meta.key).collect();
-            assert_eq!(compactable, [layout::segment(test_branch(1), 0, 1)]);
+            assert_eq!(compactable, [layout::segment(test_cell(1), 0, 1)]);
             assert!(!dry.fenced);
 
             let keys_before = keys(&*bucket).await;
@@ -4790,7 +4783,7 @@ mod tests {
     fn dry_runs_a_pass_ran_during_say_so() {
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
-            branch::create(&*direct, test_branch(1), 0).await.unwrap();
+            lifecycle::create(&*direct, test_cell(1), 0).await.unwrap();
             // As the dry run reads the lease again, at its end.
             let during = Hooked::new(
                 direct.clone(),
@@ -4856,7 +4849,7 @@ mod tests {
             };
             let mut more: Vec<String> = after.iter().map(|(meta, _)| meta.key.clone()).collect();
             more.retain(|key| !listed.contains_key(key));
-            let moved = layout::moves(&layout::segment(test_branch(1), 0, 1), 2).unwrap();
+            let moved = layout::moves(&layout::segment(test_cell(1), 0, 1), 2).unwrap();
             // And the word that the bucket is marked, which readers go by (TASK-395.4's review).
             let marking = layout::MARKING.to_owned();
             assert_eq!(more, [marking, layout::marks(layout::TEST_CELL, 2), moved]);
@@ -4872,7 +4865,7 @@ mod tests {
             let marked: Vec<String> =
                 next.marks.unwrap().marked.into_iter().map(|marked| marked.key).collect();
             let mut expected = garbage_doomed();
-            expected.push(layout::segment(test_branch(1), 0, 1));
+            expected.push(layout::segment(test_cell(1), 0, 1));
             expected.sort();
             assert_eq!(marked, expected);
 
@@ -4899,8 +4892,8 @@ mod tests {
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let (late, key) = block_on(async {
-            branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
+            lifecycle::create(&*bucket, test_cell(1), 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), test_cell(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (late, early) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let extents = vec![(early, b"early".to_vec())];
@@ -4938,13 +4931,13 @@ mod tests {
 
         let reader = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let read = block_on(async {
-            let recovered = recovery::recover(&*reader, test_branch(1), None).await.unwrap();
+            let recovered = recovery::recover(&*reader, test_cell(1), None).await.unwrap();
             crate::testing::read(&reader, late, &recovered.state.extents[&late]).await
         });
         assert_eq!(read, Ok(b"late".to_vec()));
         let kind = layout::kind(&key);
         let saying = "a reader reached what the collector's newest mark-only pass found no live \
-                      branch needs, and would have deleted";
+                      cell needs, and would have deleted";
         let marks = layout::marks(layout::TEST_CELL, 1);
         let reached = |request: &str| {
             format!(
@@ -4965,7 +4958,7 @@ mod tests {
         assert_eq!(next.resurrected, [key.as_str()]);
         assert_eq!(next.marks.unwrap().marked, Vec::<Marked>::new());
         let resurrected = format!(
-            "WARN cladefs-gc: RESURRECTED {key}: the mark-only pass 1 found no live branch needs it, \
+            "WARN cladefs-gc: RESURRECTED {key}: the mark-only pass 1 found no live cell needs it, \
              and the pass 2 finds one does: a bug in the collector, which deleting would have lost \
              it to key={key} kind={kind:?} marks=1 epoch=2"
         );
@@ -4975,7 +4968,7 @@ mod tests {
 
     // cladefs: the collector per cell, and fork references (TASK-395.2, .3, .4).
 
-    /// CellId `id` of tenant 1's cell `cell`: each of these tests' branches a cell of its own, as
+    /// CellId `id` of tenant 1's cell `cell`: each of these tests' cells a cell of its own, as
     /// hosts make them.
     /// TASK-407.1: the key of the latest pass's moves of the object at `key` among `keys`, if any.
     fn moves_in(keys: &[String], key: &str) -> Option<String> {
@@ -4992,9 +4985,9 @@ mod tests {
         CellId { tenant: 1, id }
     }
 
-    /// The child of a writable fork to `branch`, its owner its ID.
-    fn forked(branch: CellId) -> Child {
-        Child { branch, owner: 0x100 | branch.id }
+    /// The child of a writable fork to `cell`, its owner its ID.
+    fn forked(cell: CellId) -> Child {
+        Child { cell, owner: 0x100 | cell.id }
     }
 
     /// Has `writer` commit `extents` in a segment, then fork to `child` in the next, uploaded and
@@ -5033,7 +5026,7 @@ mod tests {
         let bucket = SimBucket::new();
         let (parent, other, own) = (celled(1, 1), celled(2, 2), celled(1, 3));
         let (writer, _) = bucket.served(async {
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             Writer::open(bucket.clone(), parent, 10, 0).await.unwrap()
         });
         let extent = ExtentId::new(1, writer.chain().next_sequence());
@@ -5060,7 +5053,7 @@ mod tests {
 
         // The parent's deletion records the forks of its state again: recorded, their references
         // stand.
-        let (deleted, asked) = bucket.served(branch::delete(
+        let (deleted, asked) = bucket.served(lifecycle::delete(
             &*bucket,
             parent,
             20,
@@ -5092,14 +5085,14 @@ mod tests {
     }
 
     /// The order of a clone's first requests: its record's create, its reference's, the read of
-    /// its version's branch's head; the same for a clone in another cell than its origin's and in
+    /// its version's cell's head; the same for a clone in another cell than its origin's and in
     /// that one.
     fn clones_requests() -> Vec<&'static str> {
         use crate::layout::{Head, Origin, Version};
         use crate::testing::{VERSION, fork_version};
         let bucket = SimBucket::new();
         let origin = Origin { parent: celled(1, 1), at: 3 };
-        // The head naming the version, of a branch no bucket here has otherwise: what the clones
+        // The head naming the version, of a cell no bucket here has otherwise: what the clones
         // read of it. A clone into another cell finds its checkpoint missing, and gives up.
         let version = Version { id: VERSION, at: origin.at, shared: false };
         let head = Head {
@@ -5131,21 +5124,21 @@ mod tests {
         orders.swap_remove(0)
     }
 
-    /// What reading `extent` gives `branch`, recovered from its record's origin.
+    /// What reading `extent` gives `cell`, recovered from its record's origin.
     async fn read_inherited<B: Bucket>(
         bucket: &Arc<B>,
-        branch: CellId,
+        cell: CellId,
         extent: ExtentId,
     ) -> Result<Vec<u8>, Error> {
-        let record = branch::record(&**bucket, branch).await?.ok_or(Error::NoBranch)?;
-        let recovered = recovery::recover(&**bucket, branch, record.origin()).await?;
+        let record = lifecycle::record(&**bucket, cell).await?.ok_or(Error::NoCell)?;
+        let recovered = recovery::recover(&**bucket, cell, record.origin()).await?;
         let location = recovered.state.extents.get(&extent).cloned();
-        let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
+        let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {cell}")))?;
         crate::testing::read(bucket, extent, &location).await
     }
 
     /// Sweeps over every cell, deleting what is free at once, until two in a row delete nothing:
-    /// failing as a pass finds what a live branch needs lost.
+    /// failing as a pass finds what a live cell needs lost.
     async fn sweep(bucket: &impl Bucket) -> Result<(), Error> {
         let now = Options { compact_below: 0.0, grace: 0 };
         crate::testing::collect_until_quiet(bucket, &now).await.map(drop)
@@ -5183,7 +5176,7 @@ mod tests {
 
     /// TASK-462: a pass finds an origin's state lost, the head it read naming no segment there:
     /// a fork's reference at that segment number, the fork dropped, its writer taken over. Then,
-    /// before it lists the version's references, the branch's writer forks a child there, in another
+    /// before it lists the version's references, the cell's writer forks a child there, in another
     /// cell: the pass finds the child living on the version, and recovering the state again, after
     /// the child's record was read, finds it, the fork having checkpointed it before it referred;
     /// so the pass keeps it, rather than stopping as though the child's state were lost.
@@ -5193,7 +5186,7 @@ mod tests {
         let direct = Arc::new(Direct(sim.clone()));
         let (parent, dropped, child) = (celled(1, 1), celled(3, 3), celled(2, 2));
         let writer = block_on(async {
-            branch::create(&*direct, parent, 0).await.unwrap();
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
             let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(parent.id, writer.chain().next_sequence());
             let extents = vec![(extent, b"held".to_vec())];
@@ -5226,7 +5219,7 @@ mod tests {
         assert!(passed.is_ok(), "{passed:?}");
     }
 
-    /// TASK-476: a version keeps its branch's state at it, which its branch freed since and
+    /// TASK-476: a version keeps its cell's state at it, which its cell freed since and
     /// checkpointed past, the checkpoint covering the segments recovering the version reads; once
     /// its writer drops it, the next sweep reclaims it.
     #[test]
@@ -5236,7 +5229,7 @@ mod tests {
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// Without the rule `versions_kept`, a pass keeps the branch's state alone, and reclaims what
+    /// Without the rule `versions_kept`, a pass keeps the cell's state alone, and reclaims what
     /// its version names.
     #[test]
     fn versions_keeping_what_they_name_need_versions_kept() {
@@ -5252,15 +5245,15 @@ mod tests {
         Yes,
     }
 
-    /// What a version of a branch reads of an extent the branch sealed before it and freed after,
-    /// the branch checkpointed past it, sweeps having run until they did nothing more, the version
+    /// What a version of a cell reads of an extent the cell sealed before it and freed after,
+    /// the cell checkpointed past it, sweeps having run until they did nothing more, the version
     /// dropped first if `dropped` says so: read by a reader of another host's.
     async fn read_a_version(dropped: Dropped) -> Result<Vec<u8>, Error> {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
-        let branch = celled(1, 1);
-        branch::create(&*bucket, branch, 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let cell = celled(1, 1);
+        lifecycle::create(&*bucket, cell, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         commit(
             &writer,
@@ -5282,9 +5275,9 @@ mod tests {
         sweep(&*bucket).await?;
         let reader = Arc::new(ObjectBucket::new(objects, ""));
         let checkpoints = Checkpoints::new(&*reader, 0);
-        let (state, _) = recovery::recover_at(&checkpoints, branch, at).await?;
+        let (state, _) = recovery::recover_at(&checkpoints, cell, at).await?;
         let location = state.extents.get(&extent).cloned();
-        let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
+        let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {cell}")))?;
         crate::testing::read(&reader, extent, &location).await
     }
 
@@ -5306,11 +5299,11 @@ mod tests {
     /// pass made.
     async fn pass_over_versions(versions: u64) -> (u64, u64, u64) {
         let bucket = store();
-        let branch = test_branch(1);
-        branch::create(&*bucket, branch, 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let cell = test_cell(1);
+        lifecycle::create(&*bucket, cell, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
         let first = writer.chain().next_sequence();
-        let extent = |n| ExtentId::new(branch.id, first + n);
+        let extent = |n| ExtentId::new(cell.id, first + n);
         commit(
             &writer,
             Commit { tag: 1, extents: vec![(extent(0), vec![1])], ..Commit::default() },
@@ -5331,14 +5324,14 @@ mod tests {
         assert_eq!(writer.versions().await.len() as u64, versions);
         let segments = writer.chain().next_segment();
         let before = bucket.stats().requests;
-        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, branch).await.unwrap();
+        let dry = Collector::new(KEEP).dry_run_cell(&*bucket, cell).await.unwrap();
         assert!(!dry.fenced);
         let after = bucket.stats().requests;
         let made = |request: Request| after[request as usize] - before[request as usize];
         (segments, made(Request::GetRange), made(Request::Get))
     }
 
-    /// TASK-476: of a branch's versions, walked to at once, a later one keeps what the branch
+    /// TASK-476: of a cell's versions, walked to at once, a later one keeps what the cell
     /// sealed after the first and freed after it, as the first keeps what it names: what a walk
     /// takes of the states after its first is what changed since (`recovery::Walked`).
     #[test]
@@ -5346,15 +5339,15 @@ mod tests {
         assert_eq!(block_on(read_the_second_version()), Ok(b"later".to_vec()));
     }
 
-    /// What the second of two versions of a branch reads of an extent the branch sealed on its own
-    /// between them and freed after both, the branch checkpointed past them, sweeps having run until they
+    /// What the second of two versions of a cell reads of an extent the cell sealed on its own
+    /// between them and freed after both, the cell checkpointed past them, sweeps having run until they
     /// did nothing more: read by a reader of another host's.
     async fn read_the_second_version() -> Result<Vec<u8>, Error> {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
-        let branch = celled(1, 1);
-        branch::create(&*bucket, branch, 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let cell = celled(1, 1);
+        lifecycle::create(&*bucket, cell, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
         let first = writer.chain().next_sequence();
         let (held, later) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
         let cut = async |tag, id| {
@@ -5378,14 +5371,14 @@ mod tests {
         sweep(&*bucket).await?;
         let reader = Arc::new(ObjectBucket::new(objects, ""));
         let checkpoints = Checkpoints::new(&*reader, 0);
-        let (state, _) = recovery::recover_at(&checkpoints, branch, at).await?;
+        let (state, _) = recovery::recover_at(&checkpoints, cell, at).await?;
         let location = state.extents.get(&later).cloned();
-        let location = location.ok_or_else(|| Error::Lost(format!("{later:?} of {branch}")))?;
+        let location = location.ok_or_else(|| Error::Lost(format!("{later:?} of {cell}")))?;
         crate::testing::read(&reader, later, &location).await
     }
 
     /// TASK-476: a pass gives up on a restore of a version being made, its host dead, once the
-    /// version's branch's head names it no more: its record deleted, it keeps nothing, and the
+    /// version's cell's head names it no more: its record deleted, it keeps nothing, and the
     /// pass, recovering it, fails not.
     #[test]
     fn restores_being_made_of_versions_dropped_are_given_up_on() {
@@ -5395,7 +5388,7 @@ mod tests {
     }
 
     /// Without the rule `collector_abandons`, the pass recovers that restore, through what a pass
-    /// before reclaimed of the version's branch, and fails.
+    /// before reclaimed of the version's cell, and fails.
     #[test]
     fn restores_being_made_of_versions_dropped_given_up_on_need_collector_abandons() {
         crate::set_rules(crate::Rules { collector_abandons: false, ..crate::Rules::ALL });
@@ -5406,13 +5399,13 @@ mod tests {
     }
 
     /// A restore of a version left being made, its host dead before its reference, the version then
-    /// dropped and its branch checkpointed past it, swept: what the sweeps reported, and the
+    /// dropped and its cell checkpointed past it, swept: what the sweeps reported, and the
     /// restore's record after.
     async fn sweep_past_a_restore_of_a_dropped_version() -> (Result<(), Error>, Record) {
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let (branch, clone) = (celled(1, 1), celled(2, 2));
-        branch::create(&*bucket, branch, 0).await.unwrap();
-        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let (cell, clone) = (celled(1, 1), celled(2, 2));
+        lifecycle::create(&*bucket, cell, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
         let cut = layout::NewVersion { id: 0xa, keep_last: None };
         let cutting = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
         let at = writer
@@ -5420,7 +5413,7 @@ mod tests {
             .unwrap();
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
-        let origin = Origin { parent: branch, at };
+        let origin = Origin { parent: cell, at };
         let forking = record::Kind::Forking { origin, version: 0xa }.of(0x33);
         let key = layout::record(clone);
         bucket::create(&*bucket, &key, layout::encode(&forking)).await;
@@ -5428,7 +5421,7 @@ mod tests {
         commit(&writer, Commit { tag: 2, ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         let swept = sweep(&*bucket).await;
-        let record = branch::record(&*bucket, clone).await.unwrap().unwrap();
+        let record = lifecycle::record(&*bucket, clone).await.unwrap().unwrap();
         (swept, record)
     }
 
@@ -5439,14 +5432,16 @@ mod tests {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
         let (parent, child) = (celled(1, 1), celled(2, 2));
-        branch::create(&*bucket, parent, 0).await.unwrap();
+        lifecycle::create(&*bucket, parent, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         commit_and_fork(&writer, vec![(extent, b"held".to_vec())], forked(child)).await;
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         drop(writer);
-        branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
+        lifecycle::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         sweep(&*bucket).await?;
         read_inherited(&Arc::new(ObjectBucket::new(objects, "")), child, extent).await
     }
@@ -5466,7 +5461,7 @@ mod tests {
         assert_eq!(read, Ok(b"held".to_vec()));
         block_on(async {
             let grandchild = celled(3, 3);
-            branch::delete(&*bucket, grandchild, 22, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, grandchild, 22, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             sweep(&*bucket).await.unwrap();
@@ -5509,14 +5504,14 @@ mod tests {
     async fn read_through_a_deleted_child() -> (Result<Vec<u8>, Error>, Arc<ObjectBucket>) {
         let bucket = store();
         let (root, child, grandchild) = (celled(1, 1), celled(2, 2), celled(3, 3));
-        branch::create(&*bucket, root, 0).await.unwrap();
+        lifecycle::create(&*bucket, root, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), root, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         commit_and_fork(&writer, vec![(extent, b"held".to_vec())], forked(child)).await;
         let forking = Writer::open(bucket.clone(), child, 11, 0).await.unwrap();
         commit_and_fork(&forking, Vec::new(), forked(grandchild)).await;
         drop(forking);
-        branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms()).await.unwrap();
+        lifecycle::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms()).await.unwrap();
         sweep(&*bucket).await.unwrap();
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
@@ -5551,7 +5546,7 @@ mod tests {
     async fn read_as_a_deletion_refers() -> Result<Vec<u8>, Error> {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (parent, child) = (celled(1, 1), celled(2, 2));
-        branch::create(&*direct, parent, 0).await.unwrap();
+        lifecycle::create(&*direct, parent, 0).await.unwrap();
         // Its writer's write of the fork's reference waits, for ever: it dies there.
         let at = 1;
         let (dying, _never) =
@@ -5583,14 +5578,14 @@ mod tests {
             let pass = collect_cell(&*sweeping, parent, 1, &now);
             pass.now_or_never().unwrap().unwrap();
         }));
-        branch::delete(&bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
+        lifecycle::delete(&bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
         assert!(bucket.then.lock().unwrap().is_none(), "the pass ran");
         sweep(&*direct).await?;
         read_inherited(&direct, child, extent).await
     }
 
-    /// TASK-395.3: a clone writes its reference before it reads its version's branch's head: a
-    /// clone that read the version live, its branch deleted and swept away as it finishes, keeps
+    /// TASK-395.3: a clone writes its reference before it reads its version's cell's head: a
+    /// clone that read the version live, its cell deleted and swept away as it finishes, keeps
     /// what it inherited, by its reference.
     #[test]
     fn clones_keep_what_they_inherit_as_their_versions_go() {
@@ -5607,31 +5602,37 @@ mod tests {
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
     }
 
-    /// What a clone in cell 3 of a version of a branch in cell 1 reads of what it inherited, the
-    /// branch deleted, and a pass run over its cell, as the clone makes its record made, having
+    /// What a clone in cell 3 of a version of a cell in cell 1 reads of what it inherited, the
+    /// cell deleted, and a pass run over its cell, as the clone makes its record made, having
     /// read the version live. Not the clone's: its pass would give the clone up, its version gone,
     /// which loses nothing.
     async fn read_as_a_version_goes_under_a_clone() -> Result<Vec<u8>, Error> {
         use crate::layout::Origin;
         let direct = Arc::new(Direct(SimBucket::new()));
         use crate::testing::{VERSION, fork_version, versioned_by};
-        let (origin_branch, clone) = (celled(1, 1), celled(3, 3));
-        branch::create(&*direct, origin_branch, 0).await.unwrap();
-        let writer = Writer::open(direct.clone(), origin_branch, 10, 0).await.unwrap();
+        let (origin_cell, clone) = (celled(1, 1), celled(3, 3));
+        lifecycle::create(&*direct, origin_cell, 0).await.unwrap();
+        let writer = Writer::open(direct.clone(), origin_cell, 10, 0).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let at = versioned_by(&writer, vec![(extent, b"held".to_vec())], VERSION).await;
         drop(writer);
-        let origin = Origin { parent: origin_branch, at };
+        let origin = Origin { parent: origin_cell, at };
         // Before the update that makes the fork, its record's second put.
         let bucket = Hooked::new(direct.clone(), Hook::Putting(layout::record(clone), 2));
         let sweeping = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             let now = Options { compact_below: 0.0, grace: 0 };
             let deleted = async {
-                branch::delete(&*sweeping, origin_branch, 21, 0, &crate::keys::testing::host_kms())
-                    .await
-                    .unwrap();
-                collect_cell(&*sweeping, origin_branch, 1, &now).await.unwrap();
+                lifecycle::delete(
+                    &*sweeping,
+                    origin_cell,
+                    21,
+                    0,
+                    &crate::keys::testing::host_kms(),
+                )
+                .await
+                .unwrap();
+                collect_cell(&*sweeping, origin_cell, 1, &now).await.unwrap();
             };
             deleted.now_or_never().unwrap();
         }));
@@ -5641,14 +5642,14 @@ mod tests {
         read_inherited(&direct, clone, extent).await
     }
 
-    /// Cells numbered from 0x100, `count` of them, each a branch of its own, `garbage` freed in it
+    /// Cells numbered from 0x100, `count` of them, each a cell of its own, `garbage` freed in it
     /// and checkpointed past: what a pass over each deletes.
     async fn garbage_cells(bucket: &Arc<SimBucket>, count: u64) {
         for cell in 0x100..0x100 + count {
-            let branch = celled(cell, cell);
-            branch::create(&**bucket, branch, 0).await.unwrap();
-            let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
-            let extent = ExtentId::new(cell, writer.chain().next_sequence());
+            let cell = celled(cell, cell);
+            lifecycle::create(&**bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let extent = ExtentId::new(cell.id, writer.chain().next_sequence());
             let extents = vec![(extent, b"garbage".to_vec())];
             commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
             commit(&writer, Commit { tag: 2, frees: vec![extent], ..Commit::default() }).await;
@@ -5656,7 +5657,7 @@ mod tests {
         }
     }
 
-    /// TASK-395.4: a pass over a cell, its one branch a fork of a branch in another cell, deleted,
+    /// TASK-395.4: a pass over a cell, its one cell a fork of a cell in another cell, deleted,
     /// in a bucket of `others` cells more: the requests it makes, and the objects it deleted.
     fn pass_over_a_dead_fork(others: u64) -> (Vec<String>, Report, CellId, CellId, u64) {
         let bucket = SimBucket::new();
@@ -5664,7 +5665,7 @@ mod tests {
         let at = bucket
             .served(async {
                 garbage_cells(&bucket, others).await;
-                branch::create(&*bucket, parent, 0).await.unwrap();
+                lifecycle::create(&*bucket, parent, 0).await.unwrap();
                 let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
                 let extent = ExtentId::new(1, writer.chain().next_sequence());
                 let at = commit_and_fork(&writer, vec![(extent, vec![1; 64])], forked(child)).await;
@@ -5677,7 +5678,7 @@ mod tests {
                 .await;
                 forking.checkpoint().await.unwrap();
                 drop(forking);
-                branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+                lifecycle::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
                     .await
                     .unwrap();
                 at
@@ -5727,8 +5728,8 @@ mod tests {
     /// over a cell, The LISTs a pass makes): the cell once, whose listing serves the first of the
     /// records; the records once more after reading them (until none new); the records after the
     /// states (`records_relisted`); the references by delimiter last (`references_relisted`). A
-    /// branch's recovery lists nothing: its head names its checkpoint and its segments (TASK-407).
-    /// Before: 7 LISTs a branch, the records listed twice more and each branch's checkpoints once
+    /// cell's recovery lists nothing: its head names its checkpoint and its segments (TASK-407).
+    /// Before: 7 LISTs a cell, the records listed twice more and each cell's checkpoints once
     /// more. The passes counted are the second over each cell, in full as the first deleted,
     /// holding its lease, so that what the first asks before taking the lease, finding none
     /// (`passable`), is no part of them.
@@ -5739,9 +5740,9 @@ mod tests {
         bucket.served(async {
             garbage_cells(&bucket, 1).await;
             for id in 0x201..=0x203 {
-                let branch = celled(0x200, id);
-                branch::create(&*bucket, branch, 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+                let cell = celled(0x200, id);
+                lifecycle::create(&*bucket, cell, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
                 let extent = ExtentId::new(id, writer.chain().next_sequence());
                 let extents = vec![(extent, b"garbage".to_vec())];
                 commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
@@ -5766,7 +5767,7 @@ mod tests {
             ]
         };
         assert_eq!(lists(one), listed(one));
-        // However many branches: their recoveries list nothing.
+        // However many cells: their recoveries list nothing.
         assert_eq!(lists(three), listed(three));
     }
 
@@ -5779,17 +5780,17 @@ mod tests {
         let asked = |clones: u64| {
             let bucket = SimBucket::new();
             use crate::testing::{VERSION, fork_version, versioned_by};
-            let origin_branch = celled(1, 1);
+            let origin_cell = celled(1, 1);
             let at = bucket
                 .served(async {
-                    branch::create(&*bucket, origin_branch, 0).await.unwrap();
-                    let writer = Writer::open(bucket.clone(), origin_branch, 10, 0).await.unwrap();
+                    lifecycle::create(&*bucket, origin_cell, 0).await.unwrap();
+                    let writer = Writer::open(bucket.clone(), origin_cell, 10, 0).await.unwrap();
                     let extent = ExtentId::new(1, writer.chain().next_sequence());
                     let at = versioned_by(&writer, vec![(extent, vec![1; 64])], VERSION).await;
                     commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() })
                         .await;
                     writer.checkpoint().await.unwrap();
-                    let origin = Origin { parent: origin_branch, at };
+                    let origin = Origin { parent: origin_cell, at };
                     for clone in 0..clones {
                         let clone = celled(0x10 + clone, 0x10 + clone);
                         fork_version(&*bucket, clone, VERSION, origin, clone.id).await.unwrap();
@@ -5798,10 +5799,10 @@ mod tests {
                 })
                 .0;
             let options = Options { compact_below: 0.0, grace: 0 };
-            let (report, asked) = bucket.served(collect_cell(&*bucket, origin_branch, 7, &options));
+            let (report, asked) = bucket.served(collect_cell(&*bucket, origin_cell, 7, &options));
             report.unwrap();
             // The origin's state, the checkpoint at it the first clone into another cell wrote.
-            let version = format!("get {}", layout::checkpoint(origin_branch, at, 1));
+            let version = format!("get {}", layout::checkpoint(origin_cell, at, 1));
             let read = asked.iter().filter(|asked| **asked == version).count();
             (asked.len(), read)
         };
@@ -5810,19 +5811,19 @@ mod tests {
         assert_eq!(asked(8), (one, read));
     }
 
-    /// TASK-395.12: a pass over a cell whose branch was forked at many versions to other cells, a
-    /// VM snapshotted many times, lists none of the branch's checkpoints: its recovery reads what
+    /// TASK-395.12: a pass over a cell whose cell was forked at many versions to other cells, a
+    /// VM snapshotted many times, lists none of the cell's checkpoints: its recovery reads what
     /// its head names (TASK-407), and the listing of the cell serves each origin's; and it reads
     /// each origin's checkpoint, which the restore into another cell wrote, once. Before, it listed them
-    /// once after the branch's segments (`newest_checkpoint`), and before that once more a fork
+    /// once after the cell's segments (`newest_checkpoint`), and before that once more a fork
     /// version.
     #[test]
-    fn passes_list_a_branchs_checkpoints_once_however_many_versions_it_was_forked_at() {
+    fn passes_list_a_cells_checkpoints_once_however_many_versions_it_was_forked_at() {
         let parent = celled(1, 1);
         let asked = |versions: u64| {
             let bucket = SimBucket::new();
             let (ats, _) = bucket.served(async {
-                branch::create(&*bucket, parent, 0).await.unwrap();
+                lifecycle::create(&*bucket, parent, 0).await.unwrap();
                 let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
                 let mut ats = Vec::new();
                 for n in 0..versions {
@@ -5865,7 +5866,7 @@ mod tests {
         let bucket = store();
         let (parent, child) = (celled(1, 1), celled(2, 2));
         let at = block_on(async {
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             let first = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, first.chain().next_sequence());
             let at = commit_and_fork(&first, vec![(extent, vec![1; 64])], forked(child)).await;
@@ -5893,10 +5894,10 @@ mod tests {
         let bucket = store();
         let (parent, child) = (celled(1, 1), celled(2, 2));
         let at = block_on(async {
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let at = commit_and_fork(&writer, Vec::new(), forked(child)).await;
-            branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             at
@@ -5914,7 +5915,7 @@ mod tests {
     }
 
     /// TASK-395.4's AC #1, a live fork's cell (TASK-395.4's review): a pass over the cell of a
-    /// fork of a branch in another cell, the fork live with no checkpoint of its own, lists nothing
+    /// fork of a cell in another cell, the fork live with no checkpoint of its own, lists nothing
     /// outside its cell, reading its parent's state by the checkpoint at the origin alone,
     /// which recording the fork wrote; whether the parent had a checkpoint before the fork, or
     /// none. The fork reads what it inherited.
@@ -5925,7 +5926,7 @@ mod tests {
             let (parent, child) = (celled(1, 1), celled(2, 2));
             let (extent, at) = bucket
                 .served(async {
-                    branch::create(&*bucket, parent, 0).await.unwrap();
+                    lifecycle::create(&*bucket, parent, 0).await.unwrap();
                     let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
                     let extent = ExtentId::new(1, writer.chain().next_sequence());
                     if checkpointed {
@@ -6009,18 +6010,17 @@ mod tests {
             (layout::CellId { tenant: 1, id: 7 }, layout::CellId { tenant: 1, id: 8 });
         let options = Options { compact_below: 0.0, grace: 0 };
         assert_eq!(block_on(collect_cell(&bucket, empty, 1, &options)), Ok(Report::default()));
-        let branch = CellId { tenant: older.tenant, id: 9 };
+        let cell = CellId { tenant: older.tenant, id: 9 };
         let mut format8 = 8u32.to_le_bytes().to_vec();
         format8.extend_from_slice(b"what format 8 held");
-        block_on(bucket::create(&bucket, &layout::record(branch), format8));
+        block_on(bucket::create(&bucket, &layout::record(cell), format8));
         let refused = block_on(collect_cell(&bucket, older, 1, &options));
-        assert_eq!(refused, Err(Error::Format { branch, format: 8 }));
+        assert_eq!(refused, Err(Error::Format { cell, format: 8 }));
         // A cell's object of format 8, whatever its records', refused as such.
         let celled = layout::CellId { tenant: 1, id: 9 };
         block_on(bucket::create(&bucket, &layout::cell(celled), 8u32.to_le_bytes().to_vec()));
         let refused = block_on(collect_cell(&bucket, celled, 1, &options));
-        let branch = CellId { tenant: celled.tenant, id: 0 };
-        assert_eq!(refused, Err(Error::Format { branch, format: 8 }));
+        assert_eq!(refused, Err(Error::Format { cell: celled, format: 8 }));
         let leases: Vec<String> = (bucket.0.keys().into_iter())
             .filter(|key| matches!(layout::kind(key), Kind::CollectorLease { .. }))
             .collect();
@@ -6038,7 +6038,7 @@ mod tests {
         block_on(async {
             let bucket = store();
             let (parent, child) = (celled(1, 1), celled(2, 2));
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let at =
@@ -6051,7 +6051,7 @@ mod tests {
             assert!(left.contains(&layout::checkpoint(parent, at, 1)), "the origin kept");
             let origin = crate::layout::Origin { parent, at };
             assert_eq!(
-                branch::record_fork(
+                lifecycle::record_fork(
                     &*bucket,
                     forked(child),
                     origin,
@@ -6065,7 +6065,7 @@ mod tests {
             let version = layout::checkpoint(parent, at, 1);
             bucket::delete_all(&*bucket, &[version.as_str()]).await;
             assert_eq!(
-                branch::record_fork(
+                lifecycle::record_fork(
                     &*bucket,
                     forked(child),
                     origin,
@@ -6076,7 +6076,7 @@ mod tests {
             );
             drop(writer);
             assert_eq!(
-                branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+                lifecycle::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
                 Ok(())
             );
         });
@@ -6089,13 +6089,13 @@ mod tests {
         block_on(async {
             let bucket = store();
             let (parent, child, failed) = (celled(1, 1), celled(2, 2), celled(2, 3));
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let at =
                 commit_and_fork(&writer, vec![(extent, b"held".to_vec())], forked(child)).await;
             commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
-            branch::delete(&*bucket, child, 30, u64::MAX, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, child, 30, u64::MAX, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             writer.checkpoint().await.unwrap();
@@ -6107,13 +6107,13 @@ mod tests {
             let owner = forked(failed).owner;
             let kms = crate::keys::testing::host_kms();
             let forked = crate::record::Kind::Fork(origin);
-            let deleted = branch::delete_fork(&*bucket, failed, forked, owner, (30, 0), &kms);
+            let deleted = lifecycle::delete_fork(&*bucket, failed, forked, owner, (30, 0), &kms);
             assert_eq!(deleted.await, Ok(true));
-            let recorded = branch::record(&*bucket, failed).await.unwrap().unwrap();
+            let recorded = lifecycle::record(&*bucket, failed).await.unwrap().unwrap();
             assert_eq!((recorded.deleted, recorded.origin()), (true, Some(origin)));
             drop(writer);
             assert_eq!(
-                branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+                lifecycle::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
                 Ok(())
             );
         });
@@ -6133,7 +6133,7 @@ mod tests {
             let direct = Arc::new(Direct(SimBucket::new()));
             let (parent, child) = (celled(1, 1), celled(2, 2));
             let bucket = Arc::new(Hooked::new(direct.clone(), Hook::Got(layout::record(child))));
-            branch::create(&*direct, parent, 0).await.unwrap();
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let extents = vec![(extent, b"held".to_vec())];
@@ -6151,7 +6151,7 @@ mod tests {
             *bucket.then.lock().unwrap() = Some(Box::new(move || {
                 let went = std::thread::spawn(move || {
                     block_on(async {
-                        branch::delete(
+                        lifecycle::delete(
                             &*going,
                             child,
                             30,
@@ -6175,12 +6175,12 @@ mod tests {
             assert!(!left.contains(&layout::segment(parent, at, 1)), "the origin let go of");
             assert!(!left.contains(&layout::checkpoint(parent, at, 1)), "{left:#?}");
             assert!(!left.contains(&layout::reference(parent, at, child)), "{left:#?}");
-            let record = branch::record(&*direct, child).await.unwrap().unwrap();
+            let record = lifecycle::record(&*direct, child).await.unwrap().unwrap();
             assert_eq!((record.deleted, record.origin()), (true, None));
         });
     }
 
-    /// TASK-395.10: a writable fork across cells whose child's ID another branch takes between the
+    /// TASK-395.10: a writable fork across cells whose child's ID another cell takes between the
     /// read of the child's record and its create, its reference written, takes the reference back;
     /// and one left by a writer dying between its create refused and that, the parent's deletion
     /// takes back, recording the fork again. No pass would retire either: no record names it.
@@ -6198,19 +6198,19 @@ mod tests {
         assert_eq!(left, [true, true]);
     }
 
-    /// Whether references are left of two forks of a branch to other cells whose children's IDs
-    /// other branches took: one taken as its writer writes the reference, one whose writer died
-    /// before it recorded it, a reference left, then the branch deleted; and the passes after.
+    /// Whether references are left of two forks of a cell to other cells whose children's IDs
+    /// other cells took: one taken as its writer writes the reference, one whose writer died
+    /// before it recorded it, a reference left, then the cell deleted; and the passes after.
     async fn references_left_by_taken_ids() -> [bool; 2] {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (parent, child, late) = (celled(1, 1), celled(2, 2), celled(3, 3));
-        branch::create(&*direct, parent, 0).await.unwrap();
+        lifecycle::create(&*direct, parent, 0).await.unwrap();
         let hook = Hook::Putting(layout::references(parent), 1);
         let bucket = Arc::new(Hooked::new(direct.clone(), hook));
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
         let taking = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
-            branch::create(&*taking, child, 0x99).now_or_never().unwrap().unwrap();
+            lifecycle::create(&*taking, child, 0x99).now_or_never().unwrap().unwrap();
         }));
         let at = commit_and_fork(&writer, Vec::new(), forked(child)).await;
         assert!(bucket.then.lock().unwrap().is_none(), "the ID taken");
@@ -6233,12 +6233,12 @@ mod tests {
         assert!((&mut acknowledging).now_or_never().is_none(), "its writer dies recording");
         drop(acknowledging);
         drop(writer);
-        branch::create(&*direct, late, 0x98).await.unwrap();
+        lifecycle::create(&*direct, late, 0x98).await.unwrap();
         let reference = layout::reference(parent, late_at, late);
         let bytes = layout::encode(&layout::Reference::of(forked(late).owner));
         bucket::create(&*direct, &reference, bytes).await;
         assert_eq!(
-            branch::delete(&*direct, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+            lifecycle::delete(&*direct, parent, 20, 0, &crate::keys::testing::host_kms()).await,
             Ok(())
         );
         sweep(&*direct).await.unwrap();
@@ -6257,7 +6257,7 @@ mod tests {
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
             let (parent, child) = (celled(1, 1), celled(2, 2));
-            branch::create(&*direct, parent, 0).await.unwrap();
+            lifecycle::create(&*direct, parent, 0).await.unwrap();
             let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
             let at = commit_and_fork(&writer, Vec::new(), forked(child)).await;
             let reference = layout::reference(parent, at, child);
@@ -6267,7 +6267,7 @@ mod tests {
             *bucket.then.lock().unwrap() = Some(Box::new(move || {
                 let went = std::thread::spawn(move || {
                     block_on(async {
-                        branch::delete(
+                        lifecycle::delete(
                             &*going,
                             child,
                             30,
@@ -6287,7 +6287,7 @@ mod tests {
             }));
             let origin = layout::Origin { parent, at };
             assert_eq!(
-                branch::record_fork(
+                lifecycle::record_fork(
                     &bucket,
                     forked(child),
                     origin,
@@ -6314,7 +6314,7 @@ mod tests {
     async fn left_by_a_stale_recorder(taken: bool) -> (bool, Vec<String>) {
         let direct = Arc::new(Direct(SimBucket::new()));
         let (parent, child) = (celled(1, 1), celled(2, 2));
-        branch::create(&*direct, parent, 0).await.unwrap();
+        lifecycle::create(&*direct, parent, 0).await.unwrap();
         let hook = Hook::Gotten(layout::record(child), 2);
         let bucket = Arc::new(Hooked::new(direct.clone(), hook));
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
@@ -6336,8 +6336,8 @@ mod tests {
                 crate::set_rules(rules);
                 block_on(async {
                     if taken {
-                        branch::create(&*other, child, 0x99).await.unwrap();
-                        let refused = branch::record_fork(
+                        lifecycle::create(&*other, child, 0x99).await.unwrap();
+                        let refused = lifecycle::record_fork(
                             &*other,
                             forked(child),
                             origin,
@@ -6347,7 +6347,7 @@ mod tests {
                         assert_eq!(refused, Err(Error::IdTaken(child)));
                         return;
                     }
-                    branch::record_fork(
+                    lifecycle::record_fork(
                         &*other,
                         forked(child),
                         origin,
@@ -6355,9 +6355,15 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    branch::delete(&*other, child, 30, u64::MAX, &crate::keys::testing::host_kms())
-                        .await
-                        .unwrap();
+                    lifecycle::delete(
+                        &*other,
+                        child,
+                        30,
+                        u64::MAX,
+                        &crate::keys::testing::host_kms(),
+                    )
+                    .await
+                    .unwrap();
                     // Until the child's cell settles, its passes skipping it.
                     sweep(&*other).await.unwrap();
                     let reference = layout::reference(parent, at, child);
@@ -6424,25 +6430,25 @@ mod tests {
 
     /// What [`crate::testing::uncollected`] finds left, and how many references, of a clone of a
     /// version whose host died before the `nth` request of its `step` (its record's put, its
-    /// reference's, the read of its version's branch's head), that branch then deleted and passes
+    /// reference's, the read of its version's cell's head), that cell then deleted and passes
     /// run.
     fn left_by_a_clone_dying_before(step: &str, nth: usize) -> (Vec<String>, usize) {
         use crate::layout::Origin;
         let bucket = SimBucket::new();
         use crate::testing::{VERSION, fork_version, versioned_by};
-        let (origin_branch, clone) = (celled(1, 1), celled(3, 3));
+        let (origin_cell, clone) = (celled(1, 1), celled(3, 3));
         let origin = bucket
             .served(async {
-                branch::create(&*bucket, origin_branch, 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), origin_branch, 10, 0).await.unwrap();
+                lifecycle::create(&*bucket, origin_cell, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), origin_cell, 10, 0).await.unwrap();
                 let extent = ExtentId::new(1, writer.chain().next_sequence());
                 let at = versioned_by(&writer, vec![(extent, b"held".to_vec())], VERSION).await;
-                Origin { parent: origin_branch, at }
+                Origin { parent: origin_cell, at }
             })
             .0;
         let request = match step {
             "reference" => format!("put {}", layout::reference(origin.parent, origin.at, clone)),
-            "read" => format!("get {}", layout::head(origin_branch)),
+            "read" => format!("get {}", layout::head(origin_cell)),
             _ => format!("put {}", layout::record(clone)),
         };
         let forking = fork_version(&*bucket, clone, VERSION, origin, 0x33);
@@ -6450,7 +6456,7 @@ mod tests {
         assert!(died, "{step} {nth}: {asked:#?}");
         let direct = Direct(bucket.clone());
         block_on(async {
-            branch::delete(&direct, origin_branch, 21, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&direct, origin_cell, 21, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             sweep(&direct).await.unwrap();
@@ -6462,7 +6468,7 @@ mod tests {
     }
 
     /// TASK-395.7: a clone of a shared version into another tenant's cell writes its reference
-    /// under the cell of the version's branch, its tenant's, as any clone does; that branch deleted,
+    /// under the cell of the version's cell, its tenant's, as any clone does; that cell deleted,
     /// passes keep what the clones inherited, which they read; once the clones go, their references
     /// are retired, and nothing of any is left but records.
     #[test]
@@ -6471,23 +6477,23 @@ mod tests {
         use crate::testing::{VERSION, fork_version, versioned_by};
         block_on(async {
             let direct = Arc::new(Direct(SimBucket::new()));
-            let origin_branch = celled(1, 1);
-            let theirs = |id| CellId { tenant: 2, id: id };
-            branch::create(&*direct, origin_branch, 0).await.unwrap();
-            let writer = Writer::open(direct.clone(), origin_branch, 10, 0).await.unwrap();
+            let origin_cell = celled(1, 1);
+            let theirs = |id| CellId { tenant: 2, id };
+            lifecycle::create(&*direct, origin_cell, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), origin_cell, 10, 0).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let at = versioned_by(&writer, vec![(extent, b"held".to_vec())], VERSION).await;
             writer.share_version(VERSION, true).await.unwrap();
             drop(writer);
-            let origin = Origin { parent: origin_branch, at };
+            let origin = Origin { parent: origin_cell, at };
             let clones = [theirs(3), theirs(4)];
             for clone in clones {
                 fork_version(&*direct, clone, VERSION, origin, clone.id).await.unwrap();
-                let reference = layout::reference(origin_branch, at, clone);
-                assert!(reference.starts_with(&origin_branch.prefix()), "{reference}");
+                let reference = layout::reference(origin_cell, at, clone);
+                assert!(reference.starts_with(&origin_cell.prefix()), "{reference}");
                 assert!(keys(&*direct).await.contains(&reference), "{reference}");
             }
-            branch::delete(&*direct, origin_branch, 21, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*direct, origin_cell, 21, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             for _ in 0..2 {
@@ -6498,7 +6504,7 @@ mod tests {
                 }
             }
             for clone in clones {
-                branch::delete(&*direct, clone, 30, u64::MAX, &crate::keys::testing::host_kms())
+                lifecycle::delete(&*direct, clone, 30, u64::MAX, &crate::keys::testing::host_kms())
                     .await
                     .unwrap();
             }
@@ -6534,7 +6540,7 @@ mod tests {
 
     /// TASK-395.6's AC #1 and #3: a sweep over cells unchanged since their last passes asks of each
     /// its lease and one listing, nothing more; a write to any of them, a segment, a reference, a
-    /// record, a head a writer takes over (an object written again at its key), a branch deleted,
+    /// record, a head a writer takes over (an object written again at its key), a cell deleted,
     /// makes the next pass over it go over it in full, recovering it, and the one after skip it
     /// again once it changes it no more, the other cells skipped all along.
     #[test]
@@ -6544,7 +6550,7 @@ mod tests {
         let writer = bucket
             .served(async {
                 garbage_cells(&bucket, 4).await;
-                branch::create(&*bucket, parent, 0).await.unwrap();
+                lifecycle::create(&*bucket, parent, 0).await.unwrap();
                 let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
                 let extent = ExtentId::new(1, writer.chain().next_sequence());
                 commit_and_fork(&writer, vec![(extent, vec![1; 64])], forked(child)).await;
@@ -6571,13 +6577,11 @@ mod tests {
         // Each write, the cell it is in, and what the pass over it in full asks that a pass skipping
         // it never does.
         let garbage = |cell: u64| celled(cell, cell);
-        // At the garbage branch's checkpoint, its state there whole: an origin found lost would
+        // At the garbage cell's checkpoint, its state there whole: an origin found lost would
         // have its pass read its children's records, in other cells, and skip it never.
         let at = (bucket.keys().iter())
             .find_map(|key| match layout::kind(key) {
-                Kind::Checkpoint { branch, segment, .. } if branch == garbage(0x100) => {
-                    Some(segment)
-                }
+                Kind::Checkpoint { cell, segment, .. } if cell == garbage(0x100) => Some(segment),
                 _ => None,
             })
             .unwrap();
@@ -6606,15 +6610,15 @@ mod tests {
                     bucket.served(bucket::create(&*bucket, &reference, bytes));
                 }
                 "record" => {
-                    bucket.served(branch::create(&*bucket, made, 0)).0.unwrap();
+                    bucket.served(lifecycle::create(&*bucket, made, 0)).0.unwrap();
                 }
-                // A writer's first step taking the branch over: its head, of the epoch after.
+                // A writer's first step taking the cell over: its head, of the epoch after.
                 "takeover" => {
                     bucket.served(crate::head::take(&*bucket, taken, 0x77, 0)).0.unwrap();
                 }
                 _ => {
                     bucket
-                        .served(branch::delete(
+                        .served(lifecycle::delete(
                             &*bucket,
                             garbage(0x102),
                             20,
@@ -6654,7 +6658,7 @@ mod tests {
     fn passes_skipping_delete_what_was_deferred_once_due() {
         let bucket = SimBucket::new();
         let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
-        let cell = test_branch(1);
+        let cell = test_cell(1);
         let options = Options { compact_below: 0.5, grace: 1000 };
         let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
         let mut holder = 0;
@@ -6708,19 +6712,19 @@ mod tests {
         use crate::layout::Origin;
         let bucket = SimBucket::new();
         use crate::testing::{VERSION, versioned_by};
-        let (origin_branch, clone) = (celled(1, 1), celled(3, 3));
+        let (origin_cell, clone) = (celled(1, 1), celled(3, 3));
         let (at, writer) = bucket
             .served(async {
-                branch::create(&*bucket, origin_branch, 0).await.unwrap();
-                let writer = Writer::open(bucket.clone(), origin_branch, 10, 0).await.unwrap();
+                lifecycle::create(&*bucket, origin_cell, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), origin_cell, 10, 0).await.unwrap();
                 let extent = ExtentId::new(1, writer.chain().next_sequence());
                 (versioned_by(&writer, vec![(extent, vec![1; 64])], VERSION).await, writer)
             })
             .0;
-        let origin = Origin { parent: origin_branch, at };
+        let origin = Origin { parent: origin_cell, at };
         // The clone's record, being made: its host died before it was.
         let forking = crate::record::Kind::Forking { origin, version: VERSION }.of(0x33);
-        let reference = layout::reference(origin_branch, at, clone);
+        let reference = layout::reference(origin_cell, at, clone);
         bucket.served(async {
             let bytes = layout::encode(&layout::Reference::of(0x33));
             bucket::create(&*bucket, &reference, bytes).await;
@@ -6734,19 +6738,19 @@ mod tests {
         };
         for holder in 1..=2 {
             let (_, asked) = pass(&mut collector, holder);
-            let read = format!("get {}", layout::head(origin_branch));
+            let read = format!("get {}", layout::head(origin_cell));
             assert!(asked.contains(&read), "{holder}: {asked:#?}");
         }
         bucket.served(writer.drop_versions(&BTreeSet::from([VERSION]))).0.unwrap();
         pass(&mut collector, 3);
-        let record = bucket.served(branch::record(&*bucket, clone)).0.unwrap().unwrap();
+        let record = bucket.served(lifecycle::record(&*bucket, clone)).0.unwrap().unwrap();
         assert!(record.deleted, "{record:?}");
 
         // Settled: the clone given up on, the cell dead, a pass in full retires the clone's
         // reference, marked; the passes after skip the cell, asking nothing more of it.
         let (report, _) = pass(&mut collector, 4);
         assert_eq!(report.retired, 1);
-        let mark = layout::retired(origin_branch, at, clone);
+        let mark = layout::retired(origin_cell, at, clone);
         assert!(!bucket.keys().contains(&reference));
         assert!(bucket.keys().contains(&mark));
         let skipped = Report { skipped: 1, ..Report::default() };
@@ -6761,7 +6765,7 @@ mod tests {
         let (report, asked) = pass(&mut collector, 6);
         assert_eq!((report, asked), (skipped, idle(clone)));
         assert!(bucket.keys().contains(&reference));
-        let (report, _) = bucket.served(collector.collect_cell(&*bucket, origin_branch, 9));
+        let (report, _) = bucket.served(collector.collect_cell(&*bucket, origin_cell, 9));
         assert_eq!(report.unwrap().retired, 1);
         assert!(!bucket.keys().contains(&reference));
         assert!(bucket.keys().contains(&mark));
@@ -6792,7 +6796,7 @@ mod tests {
 
     /// TASK-395.8's AC #1 and #3: each cell's pass records the cell's objects and bytes, by kind,
     /// with when it listed them, which match a listing of the cell after it: after writes, after
-    /// compacting and deleting what was compacted, and after a branch's deletion, its cell
+    /// compacting and deleting what was compacted, and after a cell's deletion, its cell
     /// reclaimed and the reference it held of its parent's cell retired.
     #[test]
     fn passes_record_what_their_cells_take() {
@@ -6800,9 +6804,9 @@ mod tests {
         block_on(async {
             let bucket = Arc::new(Direct(sim.clone()));
             let segments = mostly_freed(bucket.clone()).await;
-            let compacting = test_branch(1);
+            let compacting = test_cell(1);
             let (parent, child) = (celled(5, 7), celled(2, 2));
-            branch::create(&*bucket, parent, 0).await.unwrap();
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let extent = ExtentId::new(7, writer.chain().next_sequence());
             commit_and_fork(&writer, vec![(extent, vec![1; 64])], forked(child)).await;
@@ -6845,7 +6849,7 @@ mod tests {
             // The bucket's clock past every measurement before.
             sim.advance(1);
             let before = bucket.now();
-            branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+            lifecycle::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
                 .await
                 .unwrap();
             // Retired by the pass over the dead cell in full; not by the ones after, which skip it
@@ -6861,7 +6865,7 @@ mod tests {
     }
 
     /// TASK-411.6: what the tests of compacting encrypted cells share: a bucket; a KMS holding the
-    /// KEK of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of branch 1 of the
+    /// KEK of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of cell 1 of the
     /// cell, encrypted, its record's DEK wrapped under the cell's KEK, holding the ring its store
     /// holds.
     struct Encrypted {
@@ -6871,7 +6875,7 @@ mod tests {
         writer: Writer<ObjectBucket>,
         ring: Arc<Ring>,
         /// The cell's keys, as its maker holds them.
-        cell: CellKeys,
+        keys: CellKeys,
         _dir: tempfile::TempDir,
     }
 
@@ -6879,7 +6883,7 @@ mod tests {
     const ENCRYPTED_SEGMENTS: u64 = 3;
 
     impl Encrypted {
-        /// The cell made by a host with a KEK it wrapped, its branch 1 given a DEK by its writer,
+        /// The cell made by a host with a KEK it wrapped, its cell 1 given a DEK by its writer,
         /// as `local_cell` makes them; the KMS's calls since counted from none.
         async fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
@@ -6896,16 +6900,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(object.keks.len(), 1);
-            let cell = keys::held(&host, layout::TEST_CELL, object, Some(kek));
-            let branch = test_branch(1);
-            branch::create(&*bucket, branch, 0).await.unwrap();
-            let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
-            let record = keys::with_dek(&*bucket, &cell, branch, record).await.unwrap();
-            let ring = keys::ring(&*bucket, &cell, branch, &record, true).await.unwrap();
+            let held = keys::held(&host, layout::TEST_CELL, object, Some(kek));
+            let cell = layout::TEST_CELL;
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let record = lifecycle::record(&*bucket, cell).await.unwrap().unwrap();
+            let record = keys::with_dek(&*bucket, &held, cell, record).await.unwrap();
+            let ring = keys::ring(&*bucket, &held, cell, &record, true).await.unwrap();
             let writer =
-                Writer::open_keyed(bucket.clone(), branch, (10, 0), ring.clone()).await.unwrap();
+                Writer::open_keyed(bucket.clone(), cell, (10, 0), ring.clone()).await.unwrap();
             counted.reset();
-            Self { bucket, counted, kms, writer, ring, cell, _dir: dir }
+            Self { bucket, counted, kms, writer, ring, keys: held, _dir: dir }
         }
 
         /// The KMS's wraps and unwraps, since [`Encrypted::new`] or the last reset.
@@ -6918,7 +6922,7 @@ mod tests {
             Collector::new(options).kms(Some(self.kms.clone()))
         }
 
-        /// `commit`, in a segment of its own encrypted under the branch's DEK, uploaded and
+        /// `commit`, in a segment of its own encrypted under the cell's DEK, uploaded and
         /// acknowledged.
         async fn commit(&self, commit: Commit) {
             let objects = SegmentBuilder::from(commit).close(&mut self.writer.chain());
@@ -6971,7 +6975,7 @@ mod tests {
     }
 
     /// `extent`'s data at `location`, read by a host's fetcher holding `ring`, as a host serving
-    /// the branch's store holds its keys; none, if `ring` is clear.
+    /// the cell's store holds its keys; none, if `ring` is clear.
     async fn read_holding(
         bucket: &Arc<ObjectBucket>,
         ring: &Arc<Ring>,
@@ -6995,7 +6999,7 @@ mod tests {
     /// TASK-411.6, AC #1, #2: a pass compacting an encrypted cell's objects mostly freed unwraps
     /// the cell's KEK through the KMS once for them all, and encrypts each one's moves under the
     /// DEK its segment was encrypted under, of the same generation, with a salt of their own,
-    /// holding none of their data in the clear. A reader holding the branch's keys reads the
+    /// holding none of their data in the clear. A reader holding the cell's keys reads the
     /// extents moved, from where their writer named them, their segments gone, and from the moves
     /// its next checkpoint names; one holding none reads none of them. Passes that compact nothing
     /// (none below their fraction, or nothing left to compact) and dry runs ask the KMS nothing.
@@ -7004,7 +7008,7 @@ mod tests {
         block_on(async {
             let encrypted = Encrypted::new().await;
             let kept_at = encrypted.mostly_freed().await;
-            let dek = KeyId { branch: 1, generation: keys::FIRST };
+            let dek = KeyId { cell: 1, generation: keys::FIRST };
             let compacting = Options { compact_below: 0.5, grace: 0 };
 
             // Marking alone, compacting nothing, and a dry run: no call.
@@ -7081,9 +7085,9 @@ mod tests {
         block_on(async {
             let encrypted = Encrypted::new().await;
             let kept_at = encrypted.mostly_freed().await;
-            let branch = test_branch(1);
+            let cell = test_cell(1);
             let added =
-                keys::add_generation(&*encrypted.bucket, &encrypted.cell, branch).await.unwrap();
+                keys::add_generation(&*encrypted.bucket, &encrypted.keys, cell).await.unwrap();
             assert_eq!(added, keys::FIRST + 1);
             assert_eq!(encrypted.ring.generations(1), [keys::FIRST]);
             let mut collector = encrypted.collector(Options { compact_below: 0.5, grace: 0 });
@@ -7093,7 +7097,7 @@ mod tests {
             for (n, (extent, segment)) in kept_at.iter().enumerate() {
                 let moves = moves_at(&*encrypted.bucket, segment).await.unwrap();
                 let encryption = encryption_at(&*encrypted.bucket, &moves).await;
-                let first = KeyId { branch: 1, generation: keys::FIRST };
+                let first = KeyId { cell: 1, generation: keys::FIRST };
                 assert!(
                     matches!(encryption, Encryption::Encrypted { key, .. } if key == first),
                     "{encryption:?}"
@@ -7106,7 +7110,7 @@ mod tests {
     }
 
     /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
-    /// what no live branch needs, but compacts none of what is encrypted, saying so in its report,
+    /// what no live cell needs, but compacts none of what is encrypted, saying so in its report,
     /// as one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records
     /// its listing's digest and what it left, so that a pass after it, the cell unchanged, skips
     /// it, asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still
@@ -7225,13 +7229,13 @@ mod tests {
     }
 
     /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's moves
-    /// of its branch, are refused there, by readers holding the branch's keys and by those holding
+    /// of its cell, are refused there, by readers holding the cell's keys and by those holding
     /// none: their footer, which its MAC covers, names the object they are the moves of
     /// (TASK-411.3). Their footer made to name the other, framed anew under a key not the
-    /// branch's, is refused by readers holding the keys, by its MAC (none can be framed in the
+    /// cell's, is refused by readers holding the keys, by its MAC (none can be framed in the
     /// clear, TASK-411.28).
     #[test]
-    fn encrypted_moves_copied_to_another_key_of_their_branch_are_refused() {
+    fn encrypted_moves_copied_to_another_key_of_their_cell_are_refused() {
         block_on(async {
             let encrypted = Encrypted::new().await;
             let kept_at = encrypted.mostly_freed().await;

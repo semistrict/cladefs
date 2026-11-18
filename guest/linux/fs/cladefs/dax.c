@@ -253,7 +253,7 @@ static void cladefs_dax_delay(void)
 struct cladefs_dax_region {
 	/* In the filesystem's regions, by extent. */
 	struct hlist_node node;
-	u64 branch;
+	u64 cell;
 	u64 sequence;
 	u64 window_offset;
 	/* Its space in the window, in pages: as far as the extent reaches. */
@@ -798,7 +798,7 @@ static long cladefs_dax_map_all(struct cladefs_dax *dax, struct cladefs_dax_rang
 			int one = i && cladefs_dax_inject(&cladefs_dax_fail_fallbacks) ? -EIO :
 				  map->zeros ?
 				  cladefs_device_map_zeros(dax->dev, map->window_offset, map->len) :
-				  cladefs_device_map(dax->dev, map->branch, map->sequence, map->offset,
+				  cladefs_device_map(dax->dev, map->cell, map->sequence, map->offset,
 						  map->len, map->window_offset, map->prefault);
 
 			if (one == -ENOENT && !map->zeros && dax->read_only)
@@ -899,7 +899,7 @@ static size_t cladefs_dax_maps_of(struct cladefs_dax *dax, struct cladefs_dax_ra
 		at = start + ((u64)from << PAGE_SHIFT);
 		if (to > from && e->access == CLADEFS_DAX_SEALED)
 			maps[n++] = (struct cladefs_device_map) {
-				.branch = e->branch, .sequence = e->sequence,
+				.cell = e->cell, .sequence = e->sequence,
 				.offset = e->extent_offset + (at - e->offset),
 				.len = (u64)(to - from) << PAGE_SHIFT,
 				.window_offset = cladefs_dax_page_offset(range, from),
@@ -1152,21 +1152,21 @@ static struct cladefs_dax_range *cladefs_dax_new_range(u64 window_offset, unsign
 	return range;
 }
 
-static u64 cladefs_dax_region_key(u64 branch, u64 sequence)
+static u64 cladefs_dax_region_key(u64 cell, u64 sequence)
 {
-	return sequence ^ (branch * GOLDEN_RATIO_64);
+	return sequence ^ (cell * GOLDEN_RATIO_64);
 }
 
-/* The region mapping the extent {branch, sequence}, if there is one. With the regions lock held. */
-static struct cladefs_dax_region *cladefs_dax_find_region(struct cladefs_dax *dax, u64 branch,
+/* The region mapping the extent {cell, sequence}, if there is one. With the regions lock held. */
+static struct cladefs_dax_region *cladefs_dax_find_region(struct cladefs_dax *dax, u64 cell,
 						    u64 sequence)
 {
 	struct cladefs_dax_region *region;
 
 	lockdep_assert_held(&dax->regions_lock);
 
-	hash_for_each_possible(dax->regions, region, node, cladefs_dax_region_key(branch, sequence)) {
-		if (region->branch == branch && region->sequence == sequence)
+	hash_for_each_possible(dax->regions, region, node, cladefs_dax_region_key(cell, sequence)) {
+		if (region->cell == cell && region->sequence == sequence)
 			return region;
 	}
 	return NULL;
@@ -1496,7 +1496,7 @@ static struct cladefs_dax_region *cladefs_dax_get_region(struct cladefs_dax *dax
 	long window_offset;
 
 	spin_lock(&dax->regions_lock);
-	region = cladefs_dax_find_region(dax, e->branch, e->sequence);
+	region = cladefs_dax_find_region(dax, e->cell, e->sequence);
 	if (region)
 		region->refs++;
 	spin_unlock(&dax->regions_lock);
@@ -1515,7 +1515,7 @@ static struct cladefs_dax_region *cladefs_dax_get_region(struct cladefs_dax *dax
 		kfree(new);
 		return ERR_PTR(window_offset);
 	}
-	new->branch = e->branch;
+	new->cell = e->cell;
 	new->sequence = e->sequence;
 	new->window_offset = window_offset;
 	new->pages = pages;
@@ -1523,11 +1523,11 @@ static struct cladefs_dax_region *cladefs_dax_get_region(struct cladefs_dax *dax
 	mutex_init(&new->lock);
 	spin_lock(&dax->regions_lock);
 	/* Another may have made it meanwhile. */
-	region = cladefs_dax_find_region(dax, e->branch, e->sequence);
+	region = cladefs_dax_find_region(dax, e->cell, e->sequence);
 	if (region)
 		region->refs++;
 	else
-		hash_add(dax->regions, &new->node, cladefs_dax_region_key(e->branch, e->sequence));
+		hash_add(dax->regions, &new->node, cladefs_dax_region_key(e->cell, e->sequence));
 	spin_unlock(&dax->regions_lock);
 	if (!region) {
 		atomic_long_inc(&dax->region_count);
@@ -1562,7 +1562,7 @@ static int cladefs_dax_region_map(struct cladefs_dax *dax, struct cladefs_dax_re
 		trace_cladefs_dax_map(CLADEFS_TRACE_MAP_REACH, 0,
 				   region->window_offset + ((u64)from << PAGE_SHIFT),
 				   (u64)(to - from) << PAGE_SHIFT, 1);
-		err = cladefs_device_map(dax->dev, region->branch, region->sequence,
+		err = cladefs_device_map(dax->dev, region->cell, region->sequence,
 				      (u64)from << PAGE_SHIFT, (u64)(to - from) << PAGE_SHIFT,
 				      region->window_offset + ((u64)from << PAGE_SHIFT), true);
 		cladefs_dax_delay();
@@ -1584,7 +1584,7 @@ static int cladefs_dax_region_map(struct cladefs_dax *dax, struct cladefs_dax_re
 		atomic64_inc(&dax->open_maps);
 	else if (err != -ENOENT)
 		pr_warn("cladefs: mapping pages %lu to %lu of extent %llx:%llu, of %lu pages, at %llu of the DAX window failed: %d\n",
-			from, to, region->branch, region->sequence, region->pages,
+			from, to, region->cell, region->sequence, region->pages,
 			region->window_offset, err);
 out:
 	mutex_unlock(&region->lock);

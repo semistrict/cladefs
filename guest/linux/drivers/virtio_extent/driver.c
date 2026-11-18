@@ -299,7 +299,7 @@ static int vext_map_data(struct sg_table *sgt, void *buf, size_t len)
 
 static struct virtio_extent_id vext_wire_id(struct vext_id id)
 {
-	return (struct virtio_extent_id) { cpu_to_le64(id.branch), cpu_to_le64(id.sequence) };
+	return (struct virtio_extent_id) { cpu_to_le64(id.cell), cpu_to_le64(id.sequence) };
 }
 
 /*
@@ -968,7 +968,7 @@ static void vext_read_config(struct virtio_extent *vext)
 	virtio_cread_le(vdev, struct virtio_extent_config, max_transfer, &config->max_transfer);
 	virtio_cread_le(vdev, struct virtio_extent_config, max_segments, &config->max_segments);
 	virtio_cread_le(vdev, struct virtio_extent_config, max_root, &config->max_root);
-	virtio_cread_le(vdev, struct virtio_extent_config, branch, &config->branch);
+	virtio_cread_le(vdev, struct virtio_extent_config, cell, &config->cell);
 	virtio_cread_le(vdev, struct virtio_extent_config, max_extent, &config->max_extent);
 	/* cladefs: set as the device opens, and never changed (doc-13). */
 	config->private_max = 0;
@@ -1210,8 +1210,8 @@ static int vext_probe(struct virtio_device *vdev)
 	mutex_lock(&devices_lock);
 	list_add(&vext->node, &devices);
 	mutex_unlock(&devices_lock);
-	dev_info(&vdev->dev, "extent store \"%s\", branch %llx, %u request queue%s%s%s\n",
-		 vext->config.tag, vext->config.branch, vext->nr_queues,
+	dev_info(&vdev->dev, "extent store \"%s\", cell %llx, %u request queue%s%s%s\n",
+		 vext->config.tag, vext->config.cell, vext->nr_queues,
 		 vext->nr_queues == 1 ? "" : "s",
 		 vext->window.dax ? ", with a DAX window copying on write" : "",
 		 virtio_extent_read_only(vext) ? ", following its writer read-only" : "");
@@ -1433,7 +1433,7 @@ int virtio_extent_open(struct virtio_extent *vext)
 		err = virtio_device_reset_prepare(vdev) ?: -EBUSY;
 		goto out;
 	}
-	virtio_cread_le(vdev, struct virtio_extent_config, branch, &vext->config.branch);
+	virtio_cread_le(vdev, struct virtio_extent_config, cell, &vext->config.cell);
 	vext->closed = false;
 out:
 	mutex_unlock(&vext->open_lock);

@@ -15,10 +15,10 @@ use local_cell::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
+use storage_device::{ExtentId, NoExtent, OtherCell, SealedExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: bucket_cell::layout::CellId = bucket_cell::layout::test_branch(7);
+const CELL: bucket_cell::layout::CellId = bucket_cell::layout::test_cell(7);
 /// The most bytes an extent holds: doc-4's `max_extent`, the store's default.
 const MAX_EXTENT: u64 = 64 << 20;
 
@@ -34,17 +34,17 @@ const OPTIONS: Options = Options {
     held_most: 256 << 10,
 };
 
-/// The chain of a writer of the branch in object storage, whose segments the store closes: that of
-/// a store opened where the bucket holds nothing of its branch (`Opening::new`).
-const WRITER: Chain = Chain::new(BRANCH, 0, 0, 0);
+/// The chain of a writer of the cell in object storage, whose segments the store closes: that of
+/// a store opened where the bucket holds nothing of its cell (`Opening::new`).
+const WRITER: Chain = Chain::new(CELL, 0, 0, 0);
 
 fn extent(sequence: u64) -> ExtentId {
-    ExtentId::new(BRANCH.id, sequence)
+    ExtentId::new(CELL.id, sequence)
 }
 
-/// The branch's directory of `kind` (`segments`, `extents`, `index`).
-fn of(kind: &str, branch: u64) -> String {
-    format!("{kind}/{}", Padded(branch))
+/// The cell's directory of `kind` (`segments`, `extents`, `index`).
+fn of(kind: &str, cell: u64) -> String {
+    format!("{kind}/{}", Padded(cell))
 }
 
 /// Bytes each their offset modulo 251, from `offset`, plus `seed`.
@@ -53,16 +53,16 @@ fn pattern(seed: u8, offset: usize, len: usize) -> Vec<u8> {
 }
 
 fn create<D: Dir>(dir: D, capacity: u64) -> LocalCell<D> {
-    let description = Description { block_size: BLOCK as u32, capacity, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity, cell: CELL };
     LocalCell::create(dir, description, OPTIONS).unwrap()
 }
 
-/// cladefs: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
+/// cladefs: the store in `dir`, opened where the bucket holds `state` of its cell, its writer's
 /// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
 fn opened_on(dir: MemDir, state: bucket_cell::State, chain: Chain) -> LocalCell<MemDir> {
     let head = bucket_cell::layout::Head::default().holding(chain.epoch(), chain.next_segment());
-    let taken = bucket_cell::TakenBranch::of(head, &state, chain);
-    let keys = bucket_cell::testing::ring([BRANCH]);
+    let taken = bucket_cell::TakenCell::of(head, &state, chain);
+    let keys = bucket_cell::testing::ring([CELL]);
     let opening = Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
     LocalCell::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
@@ -74,7 +74,7 @@ fn created_on(
     state: bucket_cell::State,
     chain: Chain,
 ) -> LocalCell<MemDir> {
-    let description = Description { block_size: BLOCK as u32, capacity, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity, cell: CELL };
     LocalCell::make(&dir, description, None, None).unwrap();
     let store = opened_on(dir, state, chain);
     store.made().unwrap();
@@ -157,7 +157,7 @@ fn reads_what_was_written_on_the_host() {
     reads_what_was_written(HostDir::new(&path).unwrap(), |dir| HostDir::new(dir.path()).unwrap());
 }
 
-/// Extents are written once: commits seal them. A store writes only its branch's extents.
+/// Extents are written once: commits seal them. A store writes only its cell's extents.
 #[test]
 fn writes_once() {
     let store = create(MemDir::new(), 1 << 20);
@@ -169,8 +169,8 @@ fn writes_once() {
     assert!(!store.has_open().unwrap());
     error_is(store.write(extent(1), 2 * BLOCK as u64, &[3; BLOCK]), SealedExtent(extent(1)));
     error_is(
-        store.write(ExtentId::new(BRANCH.id + 1, 1), 0, &[3; BLOCK]),
-        OtherBranch(ExtentId::new(BRANCH.id + 1, 1)),
+        store.write(ExtentId::new(CELL.id + 1, 1), 0, &[3; BLOCK]),
+        OtherCell(ExtentId::new(CELL.id + 1, 1)),
     );
     assert!(store.write(extent(2), 1, &[3; BLOCK]).is_err(), "unaligned");
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), [[1; BLOCK], [2; BLOCK]].concat());
@@ -180,7 +180,7 @@ fn writes_once() {
 /// no longer, nor once it opens again, from its deltas or its checkpoint: forks, views and caches
 /// that hold it by its ID would take another's data for it (TASK-79.6). One freed while open,
 /// which nothing but its writer saw, may be written again; and one never written, though below
-/// the branch's next sequence number, as Fxfs's journal writes the tail it minted ahead in an
+/// the cell's next sequence number, as Fxfs's journal writes the tail it minted ahead in an
 /// earlier mount.
 #[test]
 fn freed_extents_are_written_no_more() {
@@ -257,8 +257,8 @@ fn frees_remove_files() {
         (count("segments"), count("open-segments"))
     };
     assert_eq!(segments(), (1, 1));
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), vec!["000000000000g"]);
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), vec!["000000000000g"]);
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 
     for sequence in 0..=16 {
         store.free(extent(sequence)).unwrap();
@@ -266,16 +266,16 @@ fn frees_remove_files() {
     // cladefs: not until the frees are committed, and the segment is acknowledged in the bucket,
     // the write-ahead log keeping it until then (TASK-165.9).
     assert_eq!(segments(), (1, 1));
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
     store.commit(None).unwrap();
     assert_eq!(segments(), (1, 1));
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
     error_is(store.read(extent(16), 0, &mut [0; BLOCK]), NoExtent(extent(16)));
     let closed = closed_one(&store);
     store.acknowledged(closed.number).unwrap();
     store.commit(None).unwrap();
     assert_eq!(segments(), (0, 1));
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
 /// cladefs: a commit that fills the open segment closes it, and leaves its framing to a thread of
@@ -310,7 +310,7 @@ fn segments_close_framed_by_the_commits_flush() {
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
     let data = extent_frame::data(
         &segment.bytes().unwrap(),
-        &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+        &bucket_cell::testing::ring([CELL]).of(CELL.id),
     )
     .unwrap();
     assert_eq!(&data[..BLOCK], &pattern(0, 0, BLOCK)[..]);
@@ -351,7 +351,7 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     let blocks: Vec<_> = (1..=16).map(|sequence| (extent(sequence), BLOCK as u64)).collect();
     assert_eq!(written, blocks);
     let own = Location {
-        key: extent_key(BRANCH, WRITER.epoch(), writing.footer.segment, extent(17)),
+        key: extent_key(CELL, WRITER.epoch(), writing.footer.segment, extent(17)),
         offset: 0,
         len: 32 << 10,
     };
@@ -371,18 +371,18 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     error_is(store.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
     let [(_, own_bytes)] = &writing.own_bytes().unwrap()[..] else { panic!("no extent's own") };
     assert_eq!(
-        extent_frame::data(own_bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id)).unwrap(),
+        extent_frame::data(own_bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap(),
         pattern(17, 0, 32 << 10)
     );
     let data = extent_frame::data(
         &writing.bytes().unwrap(),
-        &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+        &bucket_cell::testing::ring([CELL]).of(CELL.id),
     )
     .unwrap();
     assert_eq!(&data[2 * BLOCK..3 * BLOCK], &pattern(3, 0, BLOCK)[..]);
     store.commit(None).unwrap();
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
-    let segments = dir.list(&of("segments", BRANCH.id)).unwrap().len();
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap().len(), 1);
+    let segments = dir.list(&of("segments", CELL.id)).unwrap().len();
 
     // Acknowledged, they go.
     for closed in [writing, freeing] {
@@ -390,8 +390,8 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     }
     assert_eq!(store.wal_bytes().unwrap(), 0);
     store.commit(None).unwrap();
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), Vec::<String>::new());
-    assert!(dir.list(&of("segments", BRANCH.id)).unwrap().len() < segments);
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
+    assert!(dir.list(&of("segments", CELL.id)).unwrap().len() < segments);
 }
 
 /// cladefs: where in the bucket an extent of `len` bytes is: at `offset` in the object at `key`.
@@ -399,7 +399,7 @@ fn bucket_location(key: &str, offset: u64, len: u64) -> Location {
     Location { key: key.to_owned(), offset, len }
 }
 
-/// cladefs: a store holds the extents the bucket holds of its branch as of its opening: recovered
+/// cladefs: a store holds the extents the bucket holds of its cell as of its opening: recovered
 /// there, read there, at their locations there, which a read's error names, and freed like others
 /// (TASK-165.8, TASK-165.9).
 #[test]
@@ -407,9 +407,9 @@ fn extents_the_bucket_holds_are_held_without_their_data() {
     let dir = MemDir::new();
     let location = bucket_location("segments/0000000000007/0000000000003", 8192, 3 * BLOCK as u64);
     let other = bucket_location("extents/0000000000008/1.2.9", 0, BLOCK as u64);
-    let mut state = bucket_cell::State::new(BRANCH);
+    let mut state = bucket_cell::State::new(CELL);
     state.extents.insert(extent(5), location.clone());
-    state.extents.insert(ExtentId::new(BRANCH.id + 1, 9), other);
+    state.extents.insert(ExtentId::new(CELL.id + 1, 9), other);
     state.next_sequence = 6;
     let check = |store: &LocalCell<MemDir>| {
         assert_eq!(store.extent(extent(5)).unwrap(), Some((3 * BLOCK as u64, false)));
@@ -468,7 +468,7 @@ fn commits_reopen_from_their_logs() {
     // (TASK-384): a segment opened takes the one prepared, else a spare. The closed segments' logs
     // went together once settled, their framed files durable at last: two kept.
     let logs = |store: &LocalCell<MemDir>| {
-        let names = dir.list(&of("logs", BRANCH.id)).unwrap();
+        let names = dir.list(&of("logs", CELL.id)).unwrap();
         let spares = names.iter().filter(|name| name.starts_with("spare-")).count();
         (segment_files(store, &dir, "logs").len(), store.placed().is_some(), spares)
     };
@@ -568,8 +568,8 @@ fn sealed_extents_are_one_run_each() {
 
     let places = store.places().unwrap();
     for (extent, len, place) in &places[..3] {
-        let Place::Run { branch, offset, .. } = place else { panic!("{extent:?} is {place:?}") };
-        assert_eq!((*branch, offset % BLOCK as u64), (BRANCH.id, 0), "{extent:?} at {offset}");
+        let Place::Run { cell, offset, .. } = place else { panic!("{extent:?} is {place:?}") };
+        assert_eq!((*cell, offset % BLOCK as u64), (CELL.id, 0), "{extent:?} at {offset}");
         assert!(*len > 0);
     }
     assert_eq!(places[3], (extent(4), (32 << 10) + BLOCK as u64, Place::Own));
@@ -591,15 +591,15 @@ fn sealed_extents_are_one_run_each() {
 }
 
 /// Segments close when full, when old, when asked to, and at a fork, their footers after their
-/// data; and the branch's state is the replay of its write-ahead log's footers, which the store
+/// data; and the cell's state is the replay of its write-ahead log's footers, which the store
 /// opened again holds (TASK-165.9), and which its audit checks at each closing.
 #[test]
-fn closed_segments_hold_the_branchs_history() {
+fn closed_segments_hold_the_cells_history() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 64 << 20);
     // Closed, and open; cladefs: not the next segment's, placed ahead of it (TASK-384).
     let segments = |store: &LocalCell<MemDir>| {
-        dir.list(&of("segments", BRANCH.id)).unwrap().len()
+        dir.list(&of("segments", CELL.id)).unwrap().len()
             + segment_files(store, &dir, "open-segments").len()
     };
     store.write(extent(0), 0, &pattern(0, 0, BLOCK)).unwrap();
@@ -628,12 +628,10 @@ fn closed_segments_hold_the_branchs_history() {
     // A run's data is in its segment, framed, where its footer says.
     let (_, _, place) = state.3.iter().find(|(id, ..)| *id == extent(40)).unwrap();
     let Place::Run { number, offset, .. } = *place else { panic!("{place:?}") };
-    let file =
-        dir.open(&format!("{}/{}", of("segments", BRANCH.id), Padded(number)), true).unwrap();
+    let file = dir.open(&format!("{}/{}", of("segments", CELL.id), Padded(number)), true).unwrap();
     let mut bytes = vec![0; local_cell::File::size(&file).unwrap() as usize];
     local_cell::File::read_at(&file, &mut bytes, 0).unwrap();
-    let data =
-        extent_frame::data(&bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id)).unwrap();
+    let data = extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap();
     assert_eq!(data[offset as usize..][..BLOCK], pattern(40, 0, BLOCK));
 
     // Old.
@@ -649,14 +647,14 @@ fn closed_segments_hold_the_branchs_history() {
     // At a fork.
     store.write(extent(51), 0, &pattern(51, 0, BLOCK)).unwrap();
     store
-        .commit_fork(Child { branch: bucket_cell::layout::test_branch(BRANCH.id + 1), owner: 0 })
+        .commit_fork(Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 })
         .unwrap();
     let places = store.places().unwrap();
     let (reopened, _) = reopened_state(store, &dir);
     assert_eq!(reopened.3, places);
 }
 
-/// A branch with closed segments, and one not, reopens in a directory of the host's, whose
+/// A cell with closed segments, and one not, reopens in a directory of the host's, whose
 /// extents' files bypass its page cache where its file system allows: their trailers' and
 /// footers' reads are aligned as such reads must be (`O_DIRECT` on Linux).
 #[test]
@@ -685,7 +683,7 @@ fn closed_segments_reopen_on_the_host() {
 fn closed_segments_and_sealed_extents_are_compressed() {
     let dir = MemDir::new();
     let options = Options { segment_size: 4 << 20, large_extent: 8 << 20, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     let mib = 1 << 20;
     // In segments, compressible and not, across parts; and on their own, compressible and not.
@@ -749,7 +747,7 @@ fn compressible_data_takes_less_disk() {
 }
 
 /// cladefs: a segment a commit closes is that commit's record once framed, its framing having made
-/// its framed file, which holds the commit's data, durable: a crash after leaves the branch as of
+/// its framed file, which holds the commit's data, durable: a crash after leaves the cell as of
 /// that commit, though no flush made it durable, the framed file read, its raw file gone once
 /// opened (TASK-165.9). Before, a crash closes it again from its log (`wal`'s tests). The next
 /// segment's raw file and log, made as it closed, are durable with the next flush, which syncs
@@ -770,7 +768,7 @@ fn segments_closed_by_commits_are_their_records_once_framed() {
         // The opening's open segment is past every one the crash kept a file of: segment 1's,
         // opened, and cladefs: segment 2's, placed ahead of it (TASK-384).
         let kept = ["segments", "open-segments", "logs"].iter().flat_map(|kind| {
-            let names = crashed.list(&of(kind, BRANCH.id)).unwrap();
+            let names = crashed.list(&of(kind, CELL.id)).unwrap();
             names.into_iter().filter_map(|name| base32_id::parse_padded(&name))
         });
         let open = Padded(kept.max().unwrap() + 1).to_string();
@@ -778,12 +776,12 @@ fn segments_closed_by_commits_are_their_records_once_framed() {
         assert_eq!(store.root().unwrap(), b"two", "seed {seed}");
         assert_eq!(read(&store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
         assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
-        assert_eq!(crashed.list(&of("open-segments", BRANCH.id)).unwrap(), [open], "seed {seed}");
+        assert_eq!(crashed.list(&of("open-segments", CELL.id)).unwrap(), [open], "seed {seed}");
     }
 }
 
 /// cladefs: a segment closed between commits, the last of whose commits is not durable, is closed
-/// again with no footer by the branch's next opening: which, crashing as it does, leaves its data
+/// again with no footer by the cell's next opening: which, crashing as it does, leaves its data
 /// whole, for the opening after (TASK-79.33).
 #[test]
 fn segments_closed_between_commits_survive_crashes_closing_them_again() {
@@ -816,7 +814,7 @@ fn segments_closed_between_commits_survive_crashes_closing_them_again() {
 }
 
 /// cladefs: a segment closed between commits, the commits its footer names durable, whose framing a
-/// crash stopped before its framed file was synced, is framed again by the branch's next opening,
+/// crash stopped before its framed file was synced, is framed again by the cell's next opening,
 /// from its raw file: its framed file may be whole in its trailer and footer, and torn in its data
 /// (TASK-79.33).
 #[test]
@@ -842,7 +840,7 @@ fn segments_closed_between_commits_survive_crashes_framing_them() {
     }
 }
 
-/// cladefs: so too if the branch is opened again in the same process, its store failed as the
+/// cladefs: so too if the cell is opened again in the same process, its store failed as the
 /// framed file's sync did: the opening makes the framed file durable before its raw file goes,
 /// whatever a crash after it then keeps (TASK-79.33).
 #[test]
@@ -869,12 +867,12 @@ fn segments_closed_between_commits_survive_failures_framing_them() {
 
 /// cladefs: a segment closed between commits keeps its raw file and log until a commit after it is
 /// durable, with the commits its footer names, though its framed file, durable once framed, holds
-/// them (TASK-92.16, TASK-165.9): a crash then leaves the branch as of its last commit, its
+/// them (TASK-92.16, TASK-165.9): a crash then leaves the cell as of its last commit, its
 /// framed file read, whose footer names it.
 #[test]
 fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_durable() {
     use extent_frame::segment::{Footer, tag};
-    let path = |kind| format!("{}/{}", of(kind, BRANCH.id), Padded(0));
+    let path = |kind| format!("{}/{}", of(kind, CELL.id), Padded(0));
     for seed in 0..16 {
         let dir = MemDir::serial();
         let store = create(dir.clone(), 1 << 20);
@@ -906,7 +904,7 @@ fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_
 #[test]
 fn locating_parts_stored_compressed() {
     let options = Options { segment_size: 4 << 20, large_extent: 8 << 20, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, options).unwrap();
     store.write(extent(1), 0, &pattern(1, 0, 16 * BLOCK)).unwrap();
     store.write(extent(2), 0, &noise(2, 16 * BLOCK)).unwrap();
@@ -944,7 +942,7 @@ fn locating_parts_stored_compressed() {
 }
 
 /// cladefs: a resize is a commit of its own, which seals nothing, a segment's footer saying it, as
-/// object storage keeps the branch's capacity: the last resize of its commits', or none if none
+/// object storage keeps the cell's capacity: the last resize of its commits', or none if none
 /// resized it (TASK-165.3, TASK-165.9). The extents open stay open.
 #[test]
 fn resizes_are_commits_of_their_own() {
@@ -975,21 +973,20 @@ fn resizes_are_commits_of_their_own() {
 /// keeps them: numbered on from where the writer's chain is, each following the one before, its
 /// commits tagged with the writer's epoch, its extents of their own at the writer's keys; and
 /// keeps each, once its commits are durable, for the uploader, until it is uploaded. Opened as
-/// another branch's, it refuses.
+/// another cell's, it refuses.
 #[test]
 fn segments_close_for_the_writer_of_their_chain() {
     use extent_frame::segment::{Footer, Location, extent_key, tag};
     let dir = MemDir::new();
-    let state = bucket_cell::State::new(BRANCH);
-    let store = created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
+    let state = bucket_cell::State::new(CELL);
+    let store = created_on(dir.clone(), 1 << 20, state, Chain::new(CELL, 3, 5, 100));
     drop(store);
-    let other = bucket_cell::State::new(bucket_cell::layout::test_branch(BRANCH.id + 1));
-    let opening = Opening::new(bucket_cell::layout::test_branch(BRANCH.id + 1));
+    let other = bucket_cell::State::new(bucket_cell::layout::test_cell(CELL.id + 1));
+    let opening = Opening::new(bucket_cell::layout::test_cell(CELL.id + 1));
     let refused =
         LocalCell::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
-    assert_eq!(refused.err().unwrap().to_string(), "branch 1/1/7 opened as 1/1/8");
-    let store =
-        opened_on(dir.clone(), bucket_cell::State::new(BRANCH), Chain::new(BRANCH, 3, 5, 100));
+    assert_eq!(refused.err().unwrap().to_string(), "cell 1/1/7 opened as 1/1/8");
+    let store = opened_on(dir.clone(), bucket_cell::State::new(CELL), Chain::new(CELL, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
 
@@ -1002,11 +999,11 @@ fn segments_close_for_the_writer_of_their_chain() {
     store.flush().unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [first] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    let own = Location { key: extent_key(BRANCH, 3, 5, extent(2)), offset: 0, len: 32 << 10 };
+    let own = Location { key: extent_key(CELL, 3, 5, extent(2)), offset: 0, len: 32 << 10 };
     assert_eq!(
         first.footer,
         Footer {
-            branch: BRANCH,
+            cell: CELL,
             segment: 5,
             epoch: 3,
             contents: Contents {
@@ -1031,7 +1028,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         Footer::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
     assert_eq!(footer, first.footer);
     assert_eq!(
-        extent_frame::data(&bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id)).unwrap()
+        extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap()
             [..BLOCK],
         pattern(1, 0, BLOCK)
     );
@@ -1039,8 +1036,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     assert_eq!(
         (
             key,
-            extent_frame::data(own_bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id))
-                .unwrap()
+            extent_frame::data(own_bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap()
         ),
         (&own.key, pattern(2, 0, 32 << 10))
     );
@@ -1048,7 +1044,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     // The next follows it; a fork's names the fork.
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
     store
-        .commit_fork(Child { branch: bucket_cell::layout::test_branch(BRANCH.id + 1), owner: 0 })
+        .commit_fork(Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 })
         .unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
@@ -1057,7 +1053,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         (second.footer.contents.commits.clone(), second.footer.contents.forks.clone()),
         (
             vec![tag(3, 2)],
-            vec![Child { branch: bucket_cell::layout::test_branch(BRANCH.id + 1), owner: 0 }]
+            vec![Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 }]
         )
     );
 
@@ -1165,7 +1161,7 @@ fn capacity_resizes() {
 fn framings_write_back_as_they_go() {
     let dir = MemDir::new();
     let options = Options { segment_size: 32 << 20, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     // Half noise, half zeros: a copy of about half the data.
     let len = 16 << 10;
@@ -1185,7 +1181,7 @@ fn framings_write_back_as_they_go() {
     store.commit(None).unwrap();
     store.wait_framed().unwrap();
     assert_eq!(local_cell::segments_framed_in_place(), in_place, "framed in a copy");
-    let framed = dir.open(&format!("{}/{}", of("segments", BRANCH.id), Padded(0)), true).unwrap();
+    let framed = dir.open(&format!("{}/{}", of("segments", CELL.id), Padded(0)), true).unwrap();
     let size = framed.size().unwrap();
     assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
     // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
@@ -1210,7 +1206,7 @@ fn writes_are_written_back_as_they_go() {
         local_cell::pages::Options { background: big, hard: big, most: big, ..Default::default() };
     let dir = MemDir::with_cache(pages);
     let options = Options { segment_size: 64 << 20, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     let len = 16 << 10;
     for sequence in 1..=2048 {
@@ -1282,7 +1278,7 @@ fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     let (go, guard) = framing_held(&store);
     store.flush().unwrap();
     let name = Padded(0).to_string();
-    let held = |kind: &str| dir.list(&of(kind, BRANCH.id)).unwrap().contains(&name);
+    let held = |kind: &str| dir.list(&of(kind, CELL.id)).unwrap().contains(&name);
     assert!(held("open-segments") && held("logs"), "segment 0's raw file or log went, unframed");
     go.send(()).unwrap();
     drop(guard);
@@ -1307,12 +1303,12 @@ fn own_written_since(before: local_cell::Written) -> usize {
     (local_cell::written().own - before.own) as usize
 }
 
-/// cladefs: the names in the branch's directory of `kind`.
+/// cladefs: the names in the cell's directory of `kind`.
 fn names(dir: &MemDir, kind: &str) -> Vec<String> {
-    dir.list(&of(kind, BRANCH.id)).unwrap()
+    dir.list(&of(kind, CELL.id)).unwrap()
 }
 
-/// cladefs: the names of the branch's files of `kind` in `dir`, `store`'s, but for spare logs
+/// cladefs: the names of the cell's files of `kind` in `dir`, `store`'s, but for spare logs
 /// (TASK-301) and the next segment's raw file and log, placed ahead of it (`LocalCell::placed`,
 /// TASK-384), once the preparation of them ended.
 fn segment_files(store: &LocalCell<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
@@ -1338,7 +1334,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.commit(None).unwrap();
     // cladefs: its footer names it (TASK-411.3).
     let footer = bucket_cell::layout::encode(&extent(1));
-    let framed = extent_frame::framed(&data, &footer, bucket_cell::testing::encrypting(BRANCH));
+    let framed = extent_frame::framed(&data, &footer, bucket_cell::testing::encrypting(CELL));
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = Padded(1).to_string();
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1367,7 +1363,7 @@ fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
     let dir = MemDir::new();
     // Segments full once they hold a segment's size and an extent's most, as small here.
     let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     store.write(extent(1), 0, &noise(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -1417,7 +1413,7 @@ fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
 #[test]
 fn segments_compressing_little_are_framed_in_place() {
     let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     for (every, in_place) in [(16, true), (1, false)] {
         let every = every as u64;
         let dir = MemDir::new();
@@ -1463,7 +1459,7 @@ fn segments_of_noise_then_holes_are_framed_compressed() {
         large_extent: 8 * MIB as u64,
         ..OPTIONS
     };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let dir = MemDir::new();
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     for sequence in 1..=3 {
@@ -1521,11 +1517,10 @@ fn segments_framed_in_copies_take_their_parts_held() {
     };
     let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { BLOCK });
     let framed = |evicted: bool, dir: MemDir| {
-        let description =
-            Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+        let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
         LocalCell::make(&dir, description, None, None).unwrap();
         let held = HeldParts::new();
-        let opening = Opening { held: Some(held.clone()), ..Opening::new(BRANCH) };
+        let opening = Opening { held: Some(held.clone()), ..Opening::new(CELL) };
         let store = LocalCell::recover_unmade(dir.clone()).unwrap().open(options, opening).unwrap();
         store.made().unwrap();
         assert!(Arc::ptr_eq(store.held_parts(), &held));
@@ -1556,7 +1551,7 @@ fn segments_framed_in_copies_take_their_parts_held() {
         }
         let segments = names(&dir, "segments");
         assert_eq!(segments.len(), 1, "{segments:?}");
-        let path = format!("{}/{}", of("segments", BRANCH.id), segments[0]);
+        let path = format!("{}/{}", of("segments", CELL.id), segments[0]);
         let bytes = local_cell::read_whole(&dir.open(&path, true).unwrap()).unwrap();
         assert!(bytes.len() < 4 * MIB, "a copy, compressed: {} bytes", bytes.len());
         drop(store);
@@ -1581,8 +1576,8 @@ fn segments_framed_in_copies_take_their_parts_held() {
     assert_eq!((evicted_after.evicted_parts, evicted_after.taken), (6, 0));
     // Each framing encrypted under a salt of its own (TASK-411.28): alike once opened.
     let opened = |bytes: &[u8]| {
-        let keys = bucket_cell::testing::ring([BRANCH]);
-        let keys = keys.of(BRANCH.id);
+        let keys = bucket_cell::testing::ring([CELL]);
+        let keys = keys.of(CELL.id);
         let parts = extent_frame::Parts::of(bytes, &keys).unwrap();
         let stored: Vec<_> = parts.stored.iter().map(|part| (part.encoding, part.len)).collect();
         (stored, extent_frame::data(bytes, &keys).unwrap())
@@ -1607,7 +1602,7 @@ fn segments_framed_in_copies_take_their_parts_held() {
 fn copies_past_the_open_segments_room_go_on_in_the_next() {
     let dir = MemDir::new();
     let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     // Two extents at a time, a block of each in turn: each in pieces, other writes between.
     let (extents, blocks) = (8 * OPTIONS.segment_size as usize / (2 * BLOCK), 2);
@@ -1654,7 +1649,7 @@ fn compressible_large_extents_are_framed_in_copies() {
         let before = local_cell::written();
         store.commit(None).unwrap();
         let footer = bucket_cell::layout::encode(&extent(sequence));
-        let framed = extent_frame::framed(data, &footer, bucket_cell::testing::encrypting(BRANCH));
+        let framed = extent_frame::framed(data, &footer, bucket_cell::testing::encrypting(CELL));
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -1668,7 +1663,7 @@ fn compressible_large_extents_are_framed_in_copies() {
 }
 
 /// cladefs: a commit framing a large extent in place, its raw file renamed from one directory to
-/// another (TASK-310), stopped after each of its operations, as by a crash: the branch opens, the
+/// another (TASK-310), stopped after each of its operations, as by a crash: the cell opens, the
 /// extent a commit before framed in place reading as written, and the commit's extent reading as
 /// written exactly if the commit is durable.
 #[test]
@@ -1709,7 +1704,7 @@ fn extents_framed_in_place_survive_crashes_framing_them() {
 /// cladefs: a commit closing segments filled since the commit before, sealing in them what is one
 /// run there, each framed in place, none of its parts compressing, its raw file linked as its
 /// framed file (TASK-310, TASK-92.41), stopped after each of its operations, as by a crash: the
-/// branch opens, what the commit before made reading as written, and what the commit made reading
+/// cell opens, what the commit before made reading as written, and what the commit made reading
 /// as written exactly if the commit is durable.
 #[test]
 fn segments_framed_in_place_survive_crashes_framing_them() {
@@ -1718,8 +1713,7 @@ fn segments_framed_in_place_survive_crashes_framing_them() {
     let first = noise(1, BLOCK);
     for operations in 0.. {
         let dir = MemDir::serial();
-        let description =
-            Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+        let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
         let store = LocalCell::create(dir.clone(), description, options).unwrap();
         store.write(extent(1), 0, &first).unwrap();
         store.commit(None).unwrap();
@@ -1758,7 +1752,7 @@ fn segments_framed_in_place_survive_crashes_framing_them() {
 /// framed files synced, then their directory, once
 /// (`segments::make_durable`, TASK-310), stopped after each of the commit's operations, as by a
 /// crash, which may keep any of the framed files whole and any torn, a later one's whole and an
-/// earlier one's not: the branch opens, what the commit before made reading as written, and what
+/// earlier one's not: the cell opens, what the commit before made reading as written, and what
 /// the commit made reading as written exactly if it is durable: an opening taking the last's
 /// footer, whole, the commit's record, though a crash lost the first's, which it closed again
 /// without the commit, whose record its log lacked, read the commit with its runs there lost; and
@@ -1778,8 +1772,7 @@ fn segments_made_durable_together_survive_crashes_making_them_durable() {
     let first = noise(1, BLOCK);
     for operations in 0.. {
         let dir = MemDir::serial();
-        let description =
-            Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
+        let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, cell: CELL };
         let store = LocalCell::create(dir.clone(), description, options).unwrap();
         store.write(extent(1), 0, &first).unwrap();
         store.commit(None).unwrap();
@@ -1862,7 +1855,7 @@ fn framings_wait_for_no_other_framings_syncs() {
     assert_eq!(store.framing(), [0, 1], "framed, neither durable yet");
     let raw = |number: u64| {
         let name = Padded(number).to_string();
-        let held = |kind: &str| dir.list(&of(kind, BRANCH.id)).unwrap().contains(&name);
+        let held = |kind: &str| dir.list(&of(kind, CELL.id)).unwrap().contains(&name);
         held("open-segments") && held("logs")
     };
     assert!(raw(0) && raw(1), "a raw file or log went before its framed file was durable");
@@ -2001,7 +1994,7 @@ fn preparations_overtaken_go_on_as_the_next_segments() {
 fn stores_that_only_read_prepare_no_log() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 64 << 20);
-    let logs = || dir.list(&of("logs", BRANCH.id)).unwrap().len();
+    let logs = || dir.list(&of("logs", CELL.id)).unwrap().len();
     // Its open segment's log alone, flushed, nothing durable.
     store.flush().unwrap();
     store.prepared().unwrap();
@@ -2025,7 +2018,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let store = created_on(dir.clone(), 1 << 20, bucket_cell::State::new(BRANCH), WRITER);
+    let store = created_on(dir.clone(), 1 << 20, bucket_cell::State::new(CELL), WRITER);
     store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
     store.write(extent(2), 0, &pattern(2, 0, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -2046,7 +2039,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     assert_eq!(store.framing(), [0], "taken for the upload, its framed file not durable");
     let framed = Padded(segment.number).to_string();
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
-    let mut landed = bucket_cell::State::new(BRANCH);
+    let mut landed = bucket_cell::State::new(CELL);
     landed.apply(&segment.footer);
     let chain = WRITER.admit(&segment.footer).unwrap();
     // What a store opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
@@ -2067,7 +2060,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     };
     for seed in 0..16 {
         // Uploaded, not landed.
-        check(seed, &bucket_cell::State::new(BRANCH), WRITER);
+        check(seed, &bucket_cell::State::new(CELL), WRITER);
         // Landed, its acknowledgement not heard.
         check(seed, &landed, chain);
     }
@@ -2242,12 +2235,12 @@ fn durable_commits_keep_the_open_segments_pages_cached() {
     assert_eq!(dir.drops(), BTreeMap::from([("segments".to_owned(), 1)]));
 }
 
-/// cladefs: a branch opening again reads of the segments of its write-ahead log their tails alone:
+/// cladefs: a cell opening again reads of the segments of its write-ahead log their tails alone:
 /// each's trailer and footer, which the replay of its footers needs, and its trailer and table,
 /// which say how much data it holds, three blocks; none of their data, their raw files gone, their
 /// commits durable (TASK-92.16, TASK-165.9).
 #[test]
-fn branches_open_reading_the_tails_of_their_logs_segments() {
+fn cells_open_reading_the_tails_of_their_logs_segments() {
     let dir = Counting::new();
     let store = create(dir.clone(), 1 << 20);
     for sequence in 0..16 {
@@ -2307,7 +2300,7 @@ fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
     }
     // Written back, so that the files hold what was written, written around the host's cache.
     local_cell::pages::shared().write_back_all().unwrap();
-    let path = |kind| temp.path().join(of(kind, BRANCH.id)).join(Padded(0).to_string());
+    let path = |kind| temp.path().join(of(kind, CELL.id)).join(Padded(0).to_string());
     assert_eq!(cached_pages(&path("open-segments")), 0, "the open segment's pages cached");
     assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");
     store.close_segment().unwrap();
@@ -2329,23 +2322,22 @@ fn dead_bytes(store: &LocalCell<MemDir>) -> u64 {
     usage.segment_bytes - usage.live_bytes + usage.kept_bytes - usage.kept_for_views
 }
 
-/// The bytes of data of each of the branch's segments in `dir`, `store`'s: open ones' raw files,
+/// The bytes of data of each of the cell's segments in `dir`, `store`'s: open ones' raw files,
 /// closed ones' framed data. Not the framed file of a segment being framed behind what closed it,
 /// which may not be written yet, and whose raw file holds its data until its framing ends
 /// (TASK-189): named its own until it is durable (`framing-`, TASK-310).
 fn segment_data(dir: &MemDir) -> Vec<u64> {
     let mut lens = Vec::new();
     for kind in ["open-segments", "segments"] {
-        for name in dir.list(&of(kind, BRANCH.id)).unwrap() {
+        for name in dir.list(&of(kind, CELL.id)).unwrap() {
             if name.starts_with("framing-") {
                 continue;
             }
-            let file = dir.open(&format!("{}/{name}", of(kind, BRANCH.id)), true).unwrap();
+            let file = dir.open(&format!("{}/{name}", of(kind, CELL.id)), true).unwrap();
             let mut bytes = vec![0; file.size().unwrap() as usize];
             file.read_at(&mut bytes, 0).unwrap();
             let data = if kind == "segments" {
-                extent_frame::data(&bytes, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id))
-                    .unwrap()
+                extent_frame::data(&bytes, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap()
             } else {
                 bytes
             };
@@ -2355,7 +2347,7 @@ fn segment_data(dir: &MemDir) -> Vec<u64> {
     lens
 }
 
-/// TASK-189: reading the branch's segments beside the store between writes, as [`segment_data`]
+/// TASK-189: reading the cell's segments beside the store between writes, as [`segment_data`]
 /// does, reads no framed file a framing has created and not yet written: a commit closed the
 /// segments writes filled, and framed them behind, on a thread of its own (TASK-92.41).
 /// Each framing waits at the failpoint between its file's creation and its write while the helper
@@ -2366,7 +2358,7 @@ fn segments_read_beside_the_store_skip_framed_files_being_written() {
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
     store.write(extent(96), 0, &block(96)).unwrap();
@@ -2417,7 +2409,7 @@ fn segments_read_beside_the_store_skip_framed_files_being_written() {
 #[test]
 fn segments_filled_go_to_the_uploader_with_no_commit_after() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
     store.write(extent(0), 0, &block(0)).unwrap();
@@ -2448,7 +2440,7 @@ fn segments_filled_go_to_the_uploader_with_no_commit_after() {
 #[test]
 fn interval_closings_leave_segments_being_filled() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir, description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
     store.write(extent(0), 0, &block(0)).unwrap();
@@ -2482,7 +2474,7 @@ fn interval_closings_leave_segments_being_filled() {
 #[test]
 fn segments_hold_a_segment_and_an_extent_at_most() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     let block = |sequence: u64| pattern(sequence as u8, 0, BLOCK);
     let check = |store: &LocalCell<MemDir>, sequences: std::ops::Range<u64>| {
@@ -2501,7 +2493,7 @@ fn segments_hold_a_segment_and_an_extent_at_most() {
     check(&store, 0..48);
     let lens = segment_data(&dir);
     assert!(lens.iter().all(|len| *len <= SEGMENT_LIMIT), "segments of {lens:?}");
-    let own = dir.list(&of("extents", BRANCH.id)).unwrap();
+    let own = dir.list(&of("extents", CELL.id)).unwrap();
     assert_eq!(own, Vec::<String>::new(), "extents sealed in files of their own");
 
     // A commit's data in the open segment, then another 192 KiB of blocks: the segment holding it
@@ -2524,18 +2516,18 @@ fn segments_hold_a_segment_and_an_extent_at_most() {
 }
 
 /// The segment the newest checkpoint names, whose footer would follow it, set aside full with no
-/// commit's data, and so no footer: the branch is still its newest checkpoint and the footers of
+/// commit's data, and so no footer: the cell is still its newest checkpoint and the footers of
 /// its closed segments after it (TASK-79.2).
 #[test]
-fn segments_set_aside_leave_the_branch_its_footers() {
+fn segments_set_aside_leave_the_cell_its_footers() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
-    // 192 KiB of blocks after the checkpoint the branch opened with, which names segment 0.
+    // 192 KiB of blocks after the checkpoint the cell opened with, which names segment 0.
     for sequence in 0..48 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
     }
-    assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("segments", CELL.id)).unwrap(), Vec::<String>::new());
     let state = closed_state(&store);
     assert_eq!(state.0, 1);
     assert_eq!(reopened_state(store, &dir).0, state);
@@ -2548,7 +2540,7 @@ fn segments_set_aside_leave_the_branch_its_footers() {
 #[test]
 fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     for seed in 0..64 {
         store.write(extent(1), 0, &pattern(seed, 0, 2 * BLOCK)).unwrap();
@@ -2559,15 +2551,15 @@ fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     store.commit(None).unwrap();
     settled(&store);
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(63, 0, 2 * BLOCK));
-    let place = Place::Run { branch: BRANCH.id, number: 4, offset: 0 };
+    let place = Place::Run { cell: CELL.id, number: 4, offset: 0 };
     assert_eq!(store.place(extent(1)).unwrap(), Some(place));
     let segments: Vec<String> = (0..4).map(|number| Padded(number).to_string()).collect();
     assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000004"]);
-    assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), segments);
+    assert_eq!(dir.list(&of("segments", CELL.id)).unwrap(), segments);
     for closed in store.closed(usize::MAX).unwrap() {
         let data = extent_frame::data(
             &closed.bytes().unwrap(),
-            &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id),
+            &bucket_cell::testing::ring([CELL]).of(CELL.id),
         )
         .unwrap();
         assert_eq!(data.len(), 0, "segment {}, no extent's data in it, framed", closed.number);
@@ -2651,9 +2643,9 @@ fn churn(store: &LocalCell<MemDir>, first: u64) {
     store.commit(None).unwrap();
 }
 
-/// What the branch's segments hold that no extent is in, freed, is dead space until its segments
-/// leave the store, acknowledged in the bucket, which takes none of the branch's room, past the
-/// capacity's worth too: the bucket's collector's to take back, which the branch's writer can't
+/// What the cell's segments hold that no extent is in, freed, is dead space until its segments
+/// leave the store, acknowledged in the bucket, which takes none of the cell's room, past the
+/// capacity's worth too: the bucket's collector's to take back, which the cell's writer can't
 /// make room for (TASK-79.2, TASK-165.8).
 #[test]
 fn freed_space_is_dead_space_taking_no_room() {
@@ -2676,8 +2668,8 @@ fn freed_space_is_dead_space_taking_no_room() {
     assert_eq!(store.info().unwrap().available, capacity - 5 * BLOCK as u64);
 }
 
-/// cladefs: what the branch's segments hold that no extent is in, freed, takes none of the room the
-/// branch's writes need, however much it is: it leaves the store with its segments, acknowledged
+/// cladefs: what the cell's segments hold that no extent is in, freed, takes none of the room the
+/// cell's writes need, however much it is: it leaves the store with its segments, acknowledged
 /// in the bucket, whose collector takes it back (TASK-165.8). Here it gathers commit by commit,
 /// past twice the capacity (TASK-79.2).
 #[test]
@@ -2703,7 +2695,7 @@ fn dead_space_takes_none_of_the_room_writes_need() {
 }
 
 /// cladefs: an uploader keeps the frees of a guest writing and freeing files until it has uploaded
-/// the segments holding them, and lets go of them at once, the branch's dead space past twice its
+/// the segments holding them, and lets go of them at once, the cell's dead space past twice its
 /// capacity of a sudden. Counted as used past the capacity's worth, the dead space found the
 /// guest's next write, a journal write of Fxfs's, refused (`ENOSPC`), the store a tenth used: the
 /// guest's filesystem failed (TASK-79.2). The segments, acknowledged, leave the store, what is
@@ -2738,7 +2730,7 @@ fn dead_space_the_uploader_lets_go_takes_none_of_the_room() {
     assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
 
-/// cladefs: the bytes the branch's files of extents' data take of the host's disk: its segments',
+/// cladefs: the bytes the cell's files of extents' data take of the host's disk: its segments',
 /// open and closed, and its extents' own files and raw files (TASK-79.89), in `dir`, `store`'s.
 /// Once the store is idle (TASK-463): a framing made durable behind a commit renamed its segment's
 /// framed file its own between this listing it and opening it, which failed `NotFound` (CI run
@@ -2747,8 +2739,8 @@ fn data_files(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
     store.wait_idle().unwrap();
     let mut bytes = 0;
     for kind in ["segments", "open-segments", "extents", "open-extents"] {
-        for name in dir.list(&of(kind, BRANCH.id)).unwrap() {
-            let file = dir.open(&format!("{}/{name}", of(kind, BRANCH.id)), true).unwrap();
+        for name in dir.list(&of(kind, CELL.id)).unwrap() {
+            let file = dir.open(&format!("{}/{name}", of(kind, CELL.id)), true).unwrap();
             bytes += file.size().unwrap();
         }
     }
@@ -2760,7 +2752,7 @@ fn data_files(store: &LocalCell<MemDir>, dir: &MemDir) -> u64 {
 /// twenty-one commits later; its uploader acknowledging each segment the store closes, and
 /// releasing each commit, as it goes. Each segment acknowledged leaves the store, its extents read
 /// in the bucket from then on: what the pins hold, and what the frees left, is the bucket's, whose
-/// collector takes it back (TASK-165.8). Once the uploader has caught up, the branch's files are
+/// collector takes it back (TASK-165.8). Once the uploader has caught up, the cell's files are
 /// none but its open segment's, which the commit that closed the last left empty. Before, they
 /// took what cleaning behind the commits had yet to take back, which writes were refused past
 /// three times the capacity for (TASK-79.89).
@@ -2809,7 +2801,7 @@ fn acknowledged_segments_leave_a_churning_guests_files() {
 /// it freed by the next, its extents holding a third of its capacity at most. The uploader keeps
 /// what the frees let go of until it releases their commits, and the segments until they are
 /// acknowledged in the bucket, if they are as they close (`acknowledges`): returns what the
-/// branch's files take then, which the upload lag bound bounds, making commits wait (cladefs's
+/// cell's files take then, which the upload lag bound bounds, making commits wait (cladefs's
 /// `max_lag_bytes`). Once the uploader catches up, the next commit lets it all go, the bucket
 /// holding what it kept (TASK-165.8).
 fn uploader_lagging(acknowledges: bool) -> u64 {
@@ -2843,7 +2835,7 @@ fn uploader_lagging(acknowledges: bool) -> u64 {
 }
 
 /// cladefs: `uploader_lagging`, its uploader acknowledging nothing, nor releasing anything: the
-/// branch's files take ten times the capacity, which no bound of the store's refuses writes for
+/// cell's files take ten times the capacity, which no bound of the store's refuses writes for
 /// (TASK-79.89).
 #[test]
 fn what_an_uploader_keeps_stays_until_acknowledged() {
@@ -2852,20 +2844,20 @@ fn what_an_uploader_keeps_stays_until_acknowledged() {
 }
 
 /// cladefs: `uploader_lagging`, its uploader acknowledging the segments as the store closes them,
-/// and releasing nothing: the frees it keeps, in the bucket, hold no file of the branch's
+/// and releasing nothing: the frees it keeps, in the bucket, hold no file of the cell's
 /// (TASK-165.8).
 #[test]
 fn frees_kept_in_segments_acknowledged_hold_no_file() {
     assert_eq!(uploader_lagging(true), 0);
 }
 
-/// cladefs: a branch opened again in the same process lets go of the segments its last store set
+/// cladefs: a cell opened again in the same process lets go of the segments its last store set
 /// aside, full, or left open, holding only what writes after its last commit wrote: they go, as
 /// opening the store would remove them (TASK-79.2).
 #[test]
-fn segments_no_branch_holds_go_as_branches_open() {
+fn segments_no_cell_holds_go_as_cells_open() {
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, SMALL_SEGMENTS).unwrap();
     store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -2876,7 +2868,7 @@ fn segments_no_branch_holds_go_as_branches_open() {
     drop(store);
     let store = LocalCell::open(dir.clone(), SMALL_SEGMENTS).unwrap();
     assert_eq!(store.extents().unwrap(), [(extent(1), BLOCK as u64)]);
-    let segments = dir.list(&of("segments", BRANCH.id)).unwrap();
+    let segments = dir.list(&of("segments", CELL.id)).unwrap();
     assert_eq!(segments, ["0000000000000"]);
     assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(1, 0, BLOCK));
 }
@@ -2951,8 +2943,8 @@ fn writes_finishing_after_their_extents_free_are_dropped() {
     store.commit(None).unwrap();
     let store = reopened(store, &dir);
     assert_eq!(store.extents().unwrap(), []);
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
-    assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
 /// Extents freed while open, and written anew, are held by the commit that seals them: the footer
@@ -3000,7 +2992,7 @@ fn abandoned_writes_leave_no_raw_files() {
     let store = create(dir.clone(), 1 << 20);
     drop(store.begin_write(extent(1), 0, 40 << 10).unwrap());
     store.commit(None).unwrap();
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
     store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).unwrap();
     store.commit(None).unwrap();
     assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
@@ -3015,7 +3007,7 @@ fn abandoned_writes_leave_no_raw_files_to_writes_before_the_flush() {
     let store = create(dir.clone(), 1 << 20);
     drop(store.begin_write(extent(1), 0, 40 << 10).unwrap());
     store.commit_ordered(None).unwrap();
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
     store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).unwrap();
     store.commit(None).unwrap();
     assert!(read(&store, extent(1), 0, 40 << 10) == pattern(1, 0, 40 << 10), "other data");
@@ -3038,7 +3030,7 @@ fn large_extents_freed_open_are_written_anew_at_once() {
     assert_eq!(store.place(extent(1)).unwrap(), Some(Place::Own));
     let store = reopened(store, &dir);
     assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
 /// A write in flight to a large extent freed meanwhile, which the extent's next write placed in a
@@ -3060,10 +3052,10 @@ fn writes_finishing_after_their_large_extents_free_and_rewrite_are_dropped() {
     assert!(read(&store, extent(1), 0, 40 << 10) == pattern(2, 0, 40 << 10), "other data");
 }
 
-/// A branch whose store failed, opened again in the same process, takes writes to the extents the
+/// A cell whose store failed, opened again in the same process, takes writes to the extents the
 /// failed store had open, whose raw files go as it opens (TASK-79.5).
 #[test]
-fn branches_opened_again_after_a_failure_leave_no_raw_files() {
+fn cells_opened_again_after_a_failure_leave_no_raw_files() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 1 << 20);
     store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).unwrap();
@@ -3072,17 +3064,17 @@ fn branches_opened_again_after_a_failure_leave_no_raw_files() {
     dir.fail_after(None);
     drop(store);
     let store = LocalCell::open(dir.clone(), OPTIONS).unwrap();
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
     store.write(extent(1), 0, &pattern(2, 0, 40 << 10)).unwrap();
     store.commit(None).unwrap();
     assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(2, 0, 40 << 10));
 }
 
-/// A branch whose flush failed, opened again in the same process as of its last durable commit,
+/// A cell whose flush failed, opened again in the same process as of its last durable commit,
 /// keeps the files that commit's state holds, which the commit not durable let go: they go not as
-/// the branch commits again (TASK-79.5).
+/// the cell commits again (TASK-79.5).
 #[test]
-fn branches_opened_again_after_a_failed_flush_keep_what_they_hold() {
+fn cells_opened_again_after_a_failed_flush_keep_what_they_hold() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 1 << 20);
     store.write(extent(1), 0, &pattern(1, 0, 40 << 10)).unwrap();
@@ -3104,7 +3096,7 @@ fn branches_opened_again_after_a_failed_flush_keep_what_they_hold() {
 fn eight_segments(open_files: usize) -> (MemDir, LocalCell<MemDir>) {
     let dir = MemDir::new();
     let options = Options { open_files, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     for sequence in 0..8 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
@@ -3130,7 +3122,7 @@ fn opened_reading(dir: &MemDir, store: &LocalCell<MemDir>) -> (u64, u64) {
     (after.opened - before.opened, after.read - before.read)
 }
 
-/// cladefs: a branch reading what it holds in more closed segments than it keeps the files of open
+/// cladefs: a cell reading what it holds in more closed segments than it keeps the files of open
 /// opens each of them once: as one more opens, the least lately read closes,
 /// not all of them, which reads would open again; and opening one reads its table and trailer,
 /// not its footer, a block, as each part's first read does (TASK-92.2).
@@ -3208,7 +3200,7 @@ fn places_of_extents() {
     store.write(extent(6), BLOCK as u64, &[6; BLOCK]).unwrap();
     assert_eq!(
         store.place(extent(1)).unwrap(),
-        Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
+        Some(Place::Run { cell: CELL.id, number: 0, offset: 0 })
     );
     assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Pieces));
     // Not from its start.
@@ -3217,7 +3209,7 @@ fn places_of_extents() {
     assert_eq!(store.place(extent(5)).unwrap(), None);
     assert_eq!(
         store.place(extent(6)).unwrap(),
-        Some(Place::Run { branch: BRANCH.id, number: 0, offset: 5 * BLOCK as u64 })
+        Some(Place::Run { cell: CELL.id, number: 0, offset: 5 * BLOCK as u64 })
     );
 }
 
@@ -3290,7 +3282,7 @@ fn files_freed_between_commits_go_across_closings() {
     // Nothing committed since: nothing to close.
     assert!(!store.close_now().unwrap());
     store.commit(None).unwrap();
-    assert_eq!(dir.list(&of("open-extents", BRANCH.id)).unwrap(), Vec::<String>::new());
+    assert_eq!(dir.list(&of("open-extents", CELL.id)).unwrap(), Vec::<String>::new());
 }
 
 /// A commit lists an extent it wrote in two writes once, at its length: its segment's footer names
@@ -3316,15 +3308,15 @@ fn forks_give_their_commits_epoch() {
     let store = create(MemDir::new(), 1 << 20);
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
-    let forked = Child { branch: bucket_cell::layout::test_branch(BRANCH.id + 1), owner: 0 };
+    let forked = Child { cell: bucket_cell::layout::test_cell(CELL.id + 1), owner: 0 };
     assert_eq!(store.commit_fork(forked).unwrap(), 2);
     assert_eq!(store.last_commit().unwrap(), 2);
     let forking = closed_one(&store);
     assert_eq!((forking.last(), forking.footer.contents.forks.clone()), (2, vec![forked]));
 }
 
-/// cladefs: a fork's child in another cell takes no ID of a branch its parent holds extents of, its
-/// parent's own among them: an extent's ID names its branch by the ID alone (TASK-364). It is
+/// cladefs: a fork's child in another cell takes no ID of a cell its parent holds extents of, its
+/// parent's own among them: an extent's ID names its cell by the ID alone (TASK-364). It is
 /// refused before anything is committed.
 #[test]
 fn forks_take_no_id_of_their_lineage() {
@@ -3332,13 +3324,12 @@ fn forks_take_no_id_of_their_lineage() {
     store.write(extent(1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
     let elsewhere = bucket_cell::layout::CellId { tenant: 9, id: 9 };
-    let child = bucket_cell::layout::CellId { tenant: elsewhere.tenant, id: BRANCH.id };
-    let forked = Child { branch: child, owner: 0 };
+    let child = bucket_cell::layout::CellId { tenant: elsewhere.tenant, id: CELL.id };
+    let forked = Child { cell: child, owner: 0 };
     let refused = store.commit_fork(forked).unwrap_err();
     assert_eq!(refused.downcast_ref(), Some(&local_cell::InheritedId(child)));
     assert_eq!(store.last_commit().unwrap(), 1);
-    let other =
-        Child { branch: bucket_cell::layout::CellId { id: BRANCH.id + 1, ..child }, ..forked };
+    let other = Child { cell: bucket_cell::layout::CellId { id: CELL.id + 1, ..child }, ..forked };
     assert_eq!(store.commit_fork(other).unwrap(), 2);
 }
 
@@ -3347,7 +3338,7 @@ fn forks_take_no_id_of_their_lineage() {
 #[test]
 fn empty_segments_close_not() {
     let options = Options { segment_age: std::time::Duration::ZERO, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, options).unwrap();
     store.commit(None).unwrap();
     store.commit(None).unwrap();
@@ -3379,7 +3370,7 @@ fn extents_written_in_runs_seal_where_they_are() {
     const MAX_IO: usize = 1008 << 10;
     let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
     let dir = MemDir::new();
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(dir.clone(), description, options).unwrap();
     let data = |sequence| pattern(sequence as u8, 0, MIB);
     store.write(extent(1), 0, &data(1)[..MAX_IO]).unwrap();
@@ -3397,7 +3388,7 @@ fn extents_written_in_runs_seal_where_they_are() {
     let sealed = dir.io();
     assert_eq!((sealed.read - before.read, sealed.written - before.written), (0, 0));
     let runs = [(1, 0), (2, MIB as u64)].map(|(sequence, offset)| {
-        (extent(sequence), MIB as u64, Place::Run { branch: BRANCH.id, number: 0, offset })
+        (extent(sequence), MIB as u64, Place::Run { cell: CELL.id, number: 0, offset })
     });
     assert_eq!(store.places().unwrap(), runs);
     store.flush().unwrap();
@@ -3419,7 +3410,7 @@ fn close_waits_for_a_look_ahead_reading() {
     use std::sync::{Mutex, atomic::AtomicBool, atomic::Ordering};
     const MIB: usize = 1 << 20;
     let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = Arc::new(LocalCell::create(MemDir::new(), description, options).unwrap());
     let (reading, looking) = channel();
     let (go, gone) = channel::<()>();
@@ -3459,13 +3450,11 @@ fn extents_larger_than_a_framing_chunk_seal_whole() {
     store.commit(None).unwrap();
     assert_eq!(store.usage().unwrap().own_bytes, data.len() as u64);
     // Its file frames its data, no more.
-    let file = dir.open(&format!("{}/{}", of("extents", BRANCH.id), Padded(1)), true).unwrap();
+    let file = dir.open(&format!("{}/{}", of("extents", CELL.id), Padded(1)), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
     file.read_at(&mut framed, 0).unwrap();
     assert_eq!(
-        extent_frame::data(&framed, &bucket_cell::testing::ring([BRANCH]).of(BRANCH.id))
-            .unwrap()
-            .len(),
+        extent_frame::data(&framed, &bucket_cell::testing::ring([CELL]).of(CELL.id)).unwrap().len(),
         data.len()
     );
     drop(store);
@@ -3509,7 +3498,7 @@ fn io_ends_within_the_most_an_extent_holds() {
 /// extent, in a file of its own, takes it.
 #[test]
 fn writes_to_segments_are_whole_sectors() {
-    let description = Description { block_size: 512, capacity: 1 << 30, branch: BRANCH };
+    let description = Description { block_size: 512, capacity: 1 << 30, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
     let refused = |offset: u64, len: usize| {
         let error = store.write(extent(1), offset, &vec![1; len]).expect_err("succeeded");
@@ -3530,7 +3519,7 @@ fn writes_to_segments_are_whole_sectors() {
     store.commit(None).unwrap();
     assert_eq!(
         store.place(extent(1)).unwrap(),
-        Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
+        Some(Place::Run { cell: CELL.id, number: 0, offset: 0 })
     );
     // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, encrypted, takes
     // them alone (TASK-411.5).
@@ -3572,8 +3561,7 @@ fn reads_past_an_extents_end_are_zeros() {
 fn commits_failing_part_way_fail_the_store() {
     let created = || {
         let dir = MemDir::new();
-        let description =
-            Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+        let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
         let store = LocalCell::create(dir.clone(), description, OPTIONS).unwrap();
         (dir, store)
     };
@@ -3637,7 +3625,7 @@ fn logs_failing_in_their_flushes_fail_the_store() {
 /// Parts stored compressed are unpacked once while they are kept unpacked, the 32 read last.
 #[test]
 fn parts_read_again_are_unpacked_once() {
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
     let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
     const PART: usize = 1 << 20;
     store.write(extent(1), 0, &pattern(1, 0, 34 * PART)).unwrap();
@@ -3664,15 +3652,15 @@ fn parts_read_again_are_unpacked_once() {
     assert_eq!(unpacks() - before, 35);
 }
 
-/// cladefs: a store's bytes, and its extents, are its branch's own, of the extents it wrote, or
-/// inherited from the branches it was forked from, which it holds in the bucket (TASK-165.7), as
+/// cladefs: a store's bytes, and its extents, are its cell's own, of the extents it wrote, or
+/// inherited from the cells it was forked from, which it holds in the bucket (TASK-165.7), as
 /// they write, grow and free, and opened again (TASK-49); the extents counted as they come and go
 /// (TASK-454).
 #[test]
 fn stores_tell_their_own_bytes_from_those_inherited() {
-    let parent = BRANCH.id + 1;
+    let parent = CELL.id + 1;
     let dir = MemDir::new();
-    let mut state = bucket_cell::State::new(BRANCH);
+    let mut state = bucket_cell::State::new(CELL);
     for (sequence, blocks) in [(1, 2), (2, 3)] {
         let key = "segments/0000000000008/0000000000001";
         let location = bucket_location(key, sequence * 8 * BLOCK as u64, blocks * BLOCK as u64);
@@ -3704,7 +3692,7 @@ fn stores_tell_their_own_bytes_from_those_inherited() {
 }
 
 /// TASK-295: a write-ahead log dropped, as `cladefsctl take` drops one another writer's commits
-/// moved the branch on from, stays dropped whatever a crash after it keeps: the store's branch is
+/// moved the cell on from, stays dropped whatever a crash after it keeps: the store's cell is
 /// what it committed since, and none of the log's.
 #[test]
 fn a_dropped_log_stays_dropped_through_a_crash() {
@@ -3721,7 +3709,7 @@ fn a_dropped_log_stays_dropped_through_a_crash() {
         recovering.drop_wal().unwrap();
         // Its commit in its open segment: no segment framed since, whose directory's sync would
         // make the drop's removals durable too.
-        let store = recovering.open(OPTIONS, Opening::new(BRANCH)).unwrap();
+        let store = recovering.open(OPTIONS, Opening::new(CELL)).unwrap();
         store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
         store.commit(None).unwrap();
         let crashed = dir.crash(seed);
@@ -3746,9 +3734,9 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     let cache = Arc::new(bucket_cell::cache::Cache::open(cached.path(), 1 << 20, 0).unwrap());
     let cache_dir = cache.dir().to_owned();
     let dir = HostDir::new(temp.path()).unwrap();
-    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, cell: CELL };
     LocalCell::make(&dir, description, None, None).unwrap();
-    let opening = Opening { cache: Some(cache), ..Opening::new(BRANCH) };
+    let opening = Opening { cache: Some(cache), ..Opening::new(CELL) };
     let refused = LocalCell::recover_unmade(dir).unwrap().open(OPTIONS, opening).err().unwrap();
     assert_eq!(
         refused.to_string(),

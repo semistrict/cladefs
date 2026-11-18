@@ -14,7 +14,7 @@
 use super::server::Server;
 use crate::cladefsd::control::{channel, errno, saying};
 use crate::error::{Errno, Error};
-use crate::{BranchOf, CellId, Filesystem, SetAttr, Storage};
+use crate::{CellId, CellOf, Filesystem, SetAttr, Storage};
 use base32_id::Padded;
 use bucket_cell::cell::{self, Kind};
 use bucket_cell::keys;
@@ -119,16 +119,16 @@ fn reserve(
     Ok(())
 }
 
-/// Takes a cell's filesystem, the branch `of` says, into a store at `path` in the bucket at `url`,
-/// of `capacity` bytes until its branch says its own, placed at `token` if given, and mounts it:
+/// Takes a cell's filesystem, the cell `of` says, into a store at `path` in the bucket at `url`,
+/// of `capacity` bytes until its cell says its own, placed at `token` if given, and mounts it:
 /// made empty if new, its root the mounting user's, as the mount is.
 fn mount_cell(
     path: &Path,
     url: &str,
-    (of, capacity): (BranchOf, u64),
+    (of, capacity): (CellOf, u64),
     token: Option<u64>,
 ) -> Result<Filesystem, Error> {
-    let new = matches!(of, BranchOf::New(_) | BranchOf::Cell(_));
+    let new = matches!(of, CellOf::New(_) | CellOf::Named(_));
     // Its tenant's directory, made once for all its cells.
     if let Some(tenant) = path.parent() {
         std::fs::create_dir_all(tenant)
@@ -150,7 +150,7 @@ fn mount_cell(
         .map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
-/// The capacity a store taking a cell's filesystem is made with, until its branch says its own,
+/// The capacity a store taking a cell's filesystem is made with, until its cell says its own,
 /// which every filesystem made here does as it is made: a block.
 const TAKEN_CAPACITY: u64 = Storage::BLOCK_SIZE as u64;
 
@@ -162,26 +162,25 @@ impl Control {
 
     /// Attaches `cell`'s filesystem at its path, as [`mount_cell`] takes and mounts it, placed at
     /// `token` if given: a new one of `capacity` bytes if `new`, else the one `object` names, if
-    /// an Fxfs one. Returns its branch, or 0 if it shows none.
+    /// an Fxfs one. Returns whether it shows it.
     async fn attach_cell(
         &self,
         cell: CellId,
         object: &cell::Object,
         (new, capacity): (bool, u64),
         token: Option<u64>,
-    ) -> Result<u64, Error> {
+    ) -> Result<bool, Error> {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
         };
         let of = match (new, object.kind) {
-            (true, _) => (BranchOf::Cell(cell), capacity),
-            (false, Some(Kind::Fxfs)) => (BranchOf::Taken(cell), TAKEN_CAPACITY),
-            (false, _) => return Ok(0),
+            (true, _) => (CellOf::Named(cell), capacity),
+            (false, Some(Kind::Fxfs)) => (CellOf::Taken(cell), TAKEN_CAPACITY),
+            (false, _) => return Ok(false),
         };
         let shown = cell_path(cell);
         let path = self.stores.dir.join(&shown);
         let (url, holds, held) = (self.stores.bucket.clone(), self.holds.clone(), path.clone());
-        let opened = path.clone();
         let open = async move {
             let opened = tokio::task::spawn_blocking(move || {
                 held_open(&holds, &path, || mount_cell(&path, &url, of, token))
@@ -192,8 +191,7 @@ impl Control {
             self.holds.lock().unwrap().remove(&held);
             return Err(err);
         }
-        // Its branch's ID, the bucket's to give if new (TASK-364), as its description says.
-        Ok(local_cell::host_branch(&opened).map_err(Error::new)?.id)
+        Ok(true)
     }
 }
 
@@ -210,12 +208,12 @@ impl proto::mount_server::Mount for Control {
         if make && capacity == 0 {
             return Err(failed(Errno::EINVAL.into()));
         }
-        // A new cell's ID is the bucket's to give, its branch's too (TASK-364).
+        // A new cell's ID is the bucket's to give, its cell's too (TASK-364).
         let cell = match cell {
             0 => {
                 let url = self.stores.bucket.clone();
                 let made = tokio::task::spawn_blocking(move || {
-                    crate::host_cell::new_cell(&url, tenant).map_err(Error::new)
+                    crate::host_cell::new_cell_at(&url, tenant).map_err(Error::new)
                 });
                 made.await.map_err(|err| failed(Error::new(err)))?.map_err(failed)?
             }
@@ -282,8 +280,8 @@ impl proto::mount_server::Mount for Control {
             };
             attached
         });
-        let branch = attached.await?;
-        Ok(Response::new(AttachResponse { cell: cell.id, branch }))
+        let shown = attached.await?;
+        Ok(Response::new(AttachResponse { cell: cell.id, shown }))
     }
 
     async fn detach(
@@ -332,28 +330,20 @@ impl proto::mount_server::Mount for Control {
             .filter(|(_, attaching)| !matches!(attaching, Attaching::Busy))
             .map(|(cell, _)| *cell)
             .collect();
-        let (shown, dir) = (self.server()?.attached(), self.stores.dir.clone());
-        let listed = tokio::task::spawn_blocking(move || {
-            (attached.into_iter())
-                .map(|cell| {
-                    let path = cell_path(cell);
-                    let shown = shown.iter().find(|attached| attached.name == path);
-                    let branch = shown.map_or(0, |attached| {
-                        let store = dir.join(&attached.name);
-                        match local_cell::host_branch(&store) {
-                            Ok(branch) => branch.id,
-                            Err(err) => {
-                                log::error!("fuse: the branch of {}: {err:#}", store.display());
-                                0
-                            }
-                        }
-                    });
-                    let detaching = shown.is_some_and(|attached| attached.detaching);
-                    AttachedCell { tenant: cell.tenant, cell: cell.id, branch, detaching }
-                })
-                .collect()
-        });
-        let cells = listed.await.map_err(|err| failed(Error::new(err)))?;
+        let shown = self.server()?.attached();
+        let cells = (attached.into_iter())
+            .map(|cell| {
+                let path = cell_path(cell);
+                let shown = shown.iter().find(|attached| attached.name == path);
+                let detaching = shown.is_some_and(|attached| attached.detaching);
+                AttachedCell {
+                    tenant: cell.tenant,
+                    cell: cell.id,
+                    shown: shown.is_some(),
+                    detaching,
+                }
+            })
+            .collect();
         Ok(Response::new(ListResponse { cells }))
     }
 }
@@ -413,18 +403,13 @@ impl Client {
 
     /// Attaches `cell`, or a new cell of its tenant if its ID is 0, its filesystem a new Fxfs one
     /// of `capacity` bytes, its lease taken at `token`'s placement if given, and returns it and the
-    /// branch of its filesystem shown, 0 if none (`Attach`).
-    pub fn attach(
-        &self,
-        cell: CellId,
-        capacity: u64,
-        token: Option<u64>,
-    ) -> Result<(CellId, u64), Error> {
+    /// (`Attach`).
+    pub fn attach(&self, cell: CellId, capacity: u64, token: Option<u64>) -> Result<CellId, Error> {
         let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
         let response = self.call(format!("attaching cell {cell}"), |mut client| async move {
             client.attach(request).await
         })?;
-        Ok((CellId { id: response.cell, ..cell }, response.branch))
+        Ok(CellId { id: response.cell, ..cell })
     }
 
     /// Detaches `cell`, at once if `force` (`Detach`).

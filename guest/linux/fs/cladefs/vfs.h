@@ -195,7 +195,7 @@ static inline struct cladefs *cladefs_vfs_fs(struct super_block *sb)
 
 /*
  * cladefs: whether any filesystem follows its writer: a static key, so that a writer's mounts, with
- * no follower mounted, take no branch for the follower's paths.
+ * no follower mounted, take no cell for the follower's paths.
  */
 DECLARE_STATIC_KEY_FALSE(cladefs_vfs_followers);
 

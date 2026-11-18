@@ -41,9 +41,9 @@ pub const FORK_STEPS: [&str; 20] = [
     "writer::uploaded",
     "writer::acknowledge",
     "writer::acknowledged",
-    "branch::record_fork",
-    "branch::referred",
-    "branch::recorded_fork",
+    "lifecycle::record_fork",
+    "lifecycle::referred",
+    "lifecycle::recorded_fork",
     "upload::acknowledged",
     "upload::released",
     "writer::checkpoint",
@@ -78,10 +78,10 @@ pub const DAEMON_STEPS: [&str; 3] =
 /// The steps of a failed fork's cleanup, its child deleted in the bucket as the fork's alone, in
 /// order: the first two, or the next two, by whether the child has a record.
 pub const CLEANUP_STEPS: [&str; 4] = [
-    "branch::claimed",
-    "branch::claim_head_ended",
-    "branch::head_ended",
-    "branch::children_recorded",
+    "lifecycle::claimed",
+    "lifecycle::claim_head_ended",
+    "lifecycle::head_ended",
+    "lifecycle::children_recorded",
 ];
 
 /// One in how many steps a seed fails.

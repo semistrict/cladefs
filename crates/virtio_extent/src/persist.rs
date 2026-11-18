@@ -12,7 +12,7 @@
 //! ([`Device::take_snapshot`](crate::Device::take_snapshot)). A VM restored from the snapshot opens
 //! a store of its own, forked from that version if it doesn't exist (each restore its own, given
 //! its path as it loads), and maps the window as it was, where it was in guest memory
-//! ([`Device::restore`](crate::Device::restore)); its guest learns its store's branch as its
+//! ([`Device::restore`](crate::Device::restore)); its guest learns its store's cell as its
 //! filesystem thaws.
 //!
 //! [`VIRTIO_EXTENT_VERSION`]: crate::protocol::VIRTIO_EXTENT_VERSION
@@ -104,7 +104,7 @@ pub struct MappingState {
 /// What a mapping of the window maps ([`cladefs::MappingContents`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MappingContentsState {
-    Extent { branch: u64, sequence: u64, offset: u64 },
+    Extent { cell: u64, sequence: u64, offset: u64 },
     Zeros,
 }
 
@@ -116,7 +116,7 @@ impl From<&cladefs::WindowMapping> for MappingState {
             contents: match mapping.contents {
                 cladefs::MappingContents::Extent { extent, offset } => {
                     MappingContentsState::Extent {
-                        branch: extent.branch,
+                        cell: extent.cell,
                         sequence: extent.sequence,
                         offset,
                     }
@@ -133,9 +133,9 @@ impl From<&MappingState> for cladefs::WindowMapping {
             window_offset: mapping.window_offset,
             len: mapping.len,
             contents: match mapping.contents {
-                MappingContentsState::Extent { branch, sequence, offset } => {
+                MappingContentsState::Extent { cell, sequence, offset } => {
                     cladefs::MappingContents::Extent {
-                        extent: cladefs::ExtentId { branch, sequence },
+                        extent: cladefs::ExtentId { cell, sequence },
                         offset,
                     }
                 }
@@ -191,7 +191,7 @@ mod tests {
                 window_offset: 4096,
                 len: 8192,
                 contents: cladefs::MappingContents::Extent {
-                    extent: cladefs::ExtentId { branch: 3, sequence: 9 },
+                    extent: cladefs::ExtentId { cell: 3, sequence: 9 },
                     offset: 12288,
                 },
             },
@@ -204,7 +204,7 @@ mod tests {
         let saved: Vec<MappingState> = mappings.iter().map(MappingState::from).collect();
         assert_eq!(
             saved[0].contents,
-            MappingContentsState::Extent { branch: 3, sequence: 9, offset: 12288 }
+            MappingContentsState::Extent { cell: 3, sequence: 9, offset: 12288 }
         );
         let restored: Vec<cladefs::WindowMapping> =
             saved.iter().map(cladefs::WindowMapping::from).collect();

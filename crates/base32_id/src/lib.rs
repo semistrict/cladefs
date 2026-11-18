@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs's own: how an ID is written as text (TASK-504). Every `u64` that names something (a
-//! tenant, a cell, a branch, an extent's sequence number, a segment's number, an epoch, a
+//! tenant, a cell, a cell, an extent's sequence number, a segment's number, an epoch, a
 //! version) is written in base 32, in Crockford's digits, lower case: `0`–`9`, then the letters
 //! but `i`, `l`, `o` and `u`, which read as other digits or spell words. The digits are in ASCII
 //! order, so text of one width sorts as the numbers it holds do.

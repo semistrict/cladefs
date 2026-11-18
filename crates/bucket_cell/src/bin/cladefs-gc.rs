@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's collector (backlog doc-7, Garbage collection): reclaims what no live branch in a bucket
-//! can reach, and compacts what is mostly freed. Only it deletes; it coordinates with branches'
+//! cladefs's collector (backlog doc-7, Garbage collection): reclaims what no live cell in a bucket
+//! can reach, and compacts what is mostly freed. Only it deletes; it coordinates with cells'
 //! writers, and with other collectors, through the bucket alone.
 //!
 //! ```sh
 //! cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] [--grace SECONDS]
 //!     [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] [--metrics FILE]
 //! cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] [--compact-below FRACTION]
-//! cladefs-gc URL --branches [--cell TENANT/CELL] [--held FILE]
-//! cladefs-gc URL --delete-branch TENANT/CELL/ID
+//! cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE]
+//! cladefs-gc URL --delete-cell TENANT/CELL/ID
 //! cladefs-gc URL --usage [--tenant TENANT]
 //! cladefs-gc URL --rotate-master-key
 //! ```
@@ -36,8 +36,8 @@
 //! (`bucket_cell::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
 //! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket, TASK-411.27),
 //! and only by a pass compacting something. With neither variable giving a KMS, or one that can't
-//! be had, cladefs-gc refuses to start collecting or deleting a branch, saying so; a dry run,
-//! `--branches`, `--usage` and `--rotate-master-key` read no data, and need none. With its tenant's
+//! be had, cladefs-gc refuses to start collecting or deleting a cell, saying so; a dry run,
+//! `--cells`, `--usage` and `--rotate-master-key` read no data, and need none. With its tenant's
 //! KEK revoked or destroyed, a pass marks and deletes as ever but leaves what it would compact
 //! uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
 //! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
@@ -71,16 +71,16 @@
 //! error, a line for each cell a mark-only pass ran over, a line for all the cells a pass that
 //! deletes ran over, and logs there what warns.
 //!
-//! The collector keeps what every live branch inherited, whether or not a host holds the branch,
-//! which only hosts know. `--branches` lists the live branches, of every cell or of the one
+//! The collector keeps what every live cell inherited, whether or not a host holds the cell,
+//! which only hosts know. `--cells` lists the live cells, of every cell or of the one
 //! `--cell` names, one a line, a fork's after the
-//! branch and the segment it forked at, each branch as TENANT/CELL/ID, all in base 32, but
+//! cell and the segment it forked at, each cell as TENANT/CELL/ID, all in base 32, but
 //! those FILE names, as `cladefsctl stat` calls them, separated by white space: with FILE naming
-//! every branch every host holds, those left are no host's, or newer than FILE. `--delete-branch`
+//! every cell every host holds, those left are no host's, or newer than FILE. `--delete-cell`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
-//! frees what only it held (TASK-79.85). A branch's deletion that records a fork of it into another
+//! frees what only it held (TASK-79.85). A cell's deletion that records a fork of it into another
 //! cell, whose child has no record yet, authenticates its checkpoint at the origin under the
-//! branch's DEK, through the host's KMS (TASK-411.14).
+//! cell's DEK, through the host's KMS (TASK-411.14).
 //!
 //! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as
 //! the collector's last pass over each cell to end found it, writing nothing (TASK-394,
@@ -93,9 +93,9 @@
 //! and all four null for a cell no pass ran over to its end yet. A tenant's: `{"scope":"tenant",
 //! "tenant":"1","cells":...,"measured_cells":...,"oldest_measured_unix_ms":...,
 //! "newest_measured_unix_ms":...,"objects":...,"bytes":...,"kinds":{...}}`, the sum of its cells
-//! measured. A cell's objects are those under its prefix, of each kind: its branches', what the
+//! measured. A cell's objects are those under its prefix, of each kind: its cells', what the
 //! collector compacted of them, its collector's lease and marks, and the references of forks of its
-//! branches; the garbage the collector has yet to reclaim among them; bytes as stored. A pass that
+//! cells; the garbage the collector has yet to reclaim among them; bytes as stored. A pass that
 //! skips a cell unchanged since the last measures it not again: its usage is as of the last pass
 //! that went over it in full, which nothing under its prefix changed since.
 //!
@@ -118,7 +118,7 @@ use bucket_cell::object_bucket::{ObjectBucket, Request, probe};
 use bucket_cell::passed::{self, Sum, Usage};
 use bucket_cell::record::Record;
 use bucket_cell::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
-use bucket_cell::{branch, cell};
+use bucket_cell::{cell, lifecycle};
 use futures::{Stream, StreamExt as _};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -131,8 +131,8 @@ fn usage() -> String {
      [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] [--metrics FILE] | \
      cladefs-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] \
      [--compact-below FRACTION] | \
-     cladefs-gc URL --branches [--cell TENANT/CELL] [--held FILE] | \
-     cladefs-gc URL --delete-branch TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] | \
+     cladefs-gc URL --cells [--cell TENANT/CELL] [--held FILE] | \
+     cladefs-gc URL --delete-cell TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] | \
      cladefs-gc URL --rotate-master-key (every cell, or the one --cell names; --mark-only deletes nothing, writing each cell's \
      gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds less than a pass deletes)"
         .into()
@@ -156,10 +156,10 @@ enum Command {
         cell: Option<CellId>,
         run: Run,
     },
-    /// Lists the live branches, of every cell or one, but those a file names.
-    Branches { held: Option<PathBuf>, cell: Option<CellId> },
-    /// Deletes a branch.
-    DeleteBranch(layout::CellId),
+    /// Lists the live cells, of every cell or one, but those a file names.
+    Cells { held: Option<PathBuf>, cell: Option<CellId> },
+    /// Deletes a cell.
+    DeleteCell(layout::CellId),
     /// Says what each cell takes, and each tenant, every tenant's or one's, as recorded (TASK-394,
     /// TASK-395.8).
     Usage { tenant: Option<u64> },
@@ -187,7 +187,7 @@ impl Default for Run {
 /// How many of a sweep's slowest passes it says.
 const SLOWEST: usize = 5;
 
-/// What a pass does with what no live branch needs (TASK-264).
+/// What a pass does with what no live cell needs (TASK-264).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Delete,
@@ -203,8 +203,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let args: Vec<String> = args.collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let command = match args.as_slice() {
-        ["--branches", rest @ ..] => parse_branches(rest)?,
-        ["--delete-branch", branch] => Command::DeleteBranch(branch.parse().map_err(|_| usage())?),
+        ["--cells", rest @ ..] => parse_cells(rest)?,
+        ["--delete-cell", cell] => Command::DeleteCell(cell.parse().map_err(|_| usage())?),
         ["--usage"] => Command::Usage { tenant: None },
         ["--rotate-master-key"] => Command::RotateMasterKey,
         ["--usage", "--tenant", tenant] => {
@@ -215,8 +215,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(Args { url, command })
 }
 
-/// `--branches`' `flags`, after it: a cell, a file of those held, each at most once.
-fn parse_branches(flags: &[&str]) -> Result<Command, String> {
+/// `--cells`' `flags`, after it: a cell, a file of those held, each at most once.
+fn parse_cells(flags: &[&str]) -> Result<Command, String> {
     let (mut held, mut cell) = (None, None);
     let mut flags = flags.iter();
     while let Some(&flag) = flags.next() {
@@ -227,7 +227,7 @@ fn parse_branches(flags: &[&str]) -> Result<Command, String> {
             _ => return Err(usage()),
         }
     }
-    Ok(Command::Branches { held, cell })
+    Ok(Command::Cells { held, cell })
 }
 
 /// A pass's `flags`: a dry run's run once.
@@ -279,19 +279,19 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
     Ok(Command::Collect { every, options, mode, cell, run })
 }
 
-/// The branches `text` names, in base 32, separated by white space.
-fn held_branches(text: &str) -> Result<BTreeSet<layout::CellId>, String> {
-    let branch = |word: &str| word.parse();
-    text.split_whitespace().map(branch).collect()
+/// The cells `text` names, in base 32, separated by white space.
+fn held_cells(text: &str) -> Result<BTreeSet<layout::CellId>, String> {
+    let cell = |word: &str| word.parse();
+    text.split_whitespace().map(cell).collect()
 }
 
-/// What `--branches` prints of `live`, but those `held`.
+/// What `--cells` prints of `live`, but those `held`.
 fn listed(live: &BTreeMap<layout::CellId, Record>, held: &BTreeSet<layout::CellId>) -> String {
-    let listed = live.iter().filter(|(branch, _)| !held.contains(branch));
+    let listed = live.iter().filter(|(cell, _)| !held.contains(cell));
     listed
-        .map(|(branch, record)| match record.origin() {
-            Some(origin) => format!("{branch} {} {}\n", origin.parent, Short(origin.at)),
-            None => format!("{branch}\n"),
+        .map(|(cell, record)| match record.origin() {
+            Some(origin) => format!("{cell} {} {}\n", origin.parent, Short(origin.at)),
+            None => format!("{cell}\n"),
         })
         .collect()
 }
@@ -499,22 +499,22 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
     }
 }
 
-/// Deletes `branch` of `bucket`, whichever placement took it last, as an operator does, under
-/// `kms`, the host's (TASK-411.14): a branch's forks into other cells that it records, their
+/// Deletes `cell` of `bucket`, whichever placement took it last, as an operator does, under
+/// `kms`, the host's (TASK-411.14): a cell's forks into other cells that it records, their
 /// children having no record yet (their writer died between the fork's acknowledgement and
 /// recording it), get its checkpoint at their origins authenticated under its DEK, its cell's
 /// KEK unwrapped by the KMS, as their children refuse one under another key. The KMS refusing it,
-/// such a deletion fails, naming the tenant, the branch left as a deletion stopped partway, its
+/// such a deletion fails, naming the tenant, the cell left as a deletion stopped partway, its
 /// lease ended: running it again once the KMS answers finishes it.
-async fn delete_branch(
+async fn delete_cell(
     bucket: &ObjectBucket,
-    branch: layout::CellId,
+    cell: layout::CellId,
     kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
     let keys = bucket_cell::keys::CachingKms::new(kms);
     // Whichever placement took it last: u64::MAX is no lower than any's token.
-    let deleted = branch::delete(bucket, branch, rand::random(), u64::MAX, &keys);
-    deleted.await.map_err(|err| format!("deleting branch {branch}: {err}"))
+    let deleted = lifecycle::delete(bucket, cell, rand::random(), u64::MAX, &keys);
+    deleted.await.map_err(|err| format!("deleting cell {cell}: {err}"))
 }
 
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, printed, a cell at a
@@ -944,23 +944,23 @@ fn main() -> Result<(), String> {
             Command::Collect { every, options, mode, cell, run } => {
                 collect(&bucket, every, options, mode, cell, run).await
             }
-            Command::Branches { held, cell } => {
+            Command::Cells { held, cell } => {
                 let held = match held {
                     Some(file) => std::fs::read_to_string(&file)
                         .map_err(|err| format!("{}: {err}", file.display()))?,
                     None => String::new(),
                 };
-                let held = held_branches(&held)?;
+                let held = held_cells(&held)?;
                 let mut live = BTreeMap::new();
                 let mut cells = std::pin::pin!(cells(&bucket, cell));
                 while let Some(cell) = cells.next().await {
-                    let found = branch::live(&*bucket, cell).await;
+                    let found = lifecycle::live(&*bucket, cell).await;
                     live.extend(found.map_err(|err| format!("cell {cell}: {err}"))?);
                 }
                 print!("{}", listed(&live, &held));
                 Ok(())
             }
-            Command::DeleteBranch(id) => delete_branch(&bucket, id, kms(&bucket)?).await,
+            Command::DeleteCell(id) => delete_cell(&bucket, id, kms(&bucket)?).await,
             Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&bucket, tenant, &mut std::io::stdout().lock()).await
@@ -1059,12 +1059,12 @@ mod tests {
     fn dry_runs_list_what_goes_and_say_it_is_less() {
         let meta = |key: String, size| Meta { key, version: Version::default(), size, modified: 0 };
         let doomed = vec![
-            meta(layout::segment(branch(1), 2, 1), 100),
-            meta(layout::checkpoint(branch(3), 1, 1), 20),
+            meta(layout::segment(cell(1), 2, 1), 100),
+            meta(layout::checkpoint(cell(3), 1, 1), 20),
         ];
-        let compactable = vec![meta(layout::segment(branch(1), 4, 1), 7)];
+        let compactable = vec![meta(layout::segment(cell(1), 4, 1), 7)];
         let parent = layout::CellId { tenant: 1, id: 4 };
-        let retired = vec![layout::reference(parent, 5, branch(6))];
+        let retired = vec![layout::reference(parent, 5, cell(6))];
         let (listed, summary) = dry_run(&DryRun { doomed, compactable, retired, fenced: false });
         let at = "tenants/0000000000001/cells/0000000000002/";
         let parents = "tenants/0000000000001/cells/0000000000009/";
@@ -1107,7 +1107,7 @@ mod tests {
             marks: Some(marks),
             resurrected: vec!["c".into()],
         };
-        let cell = branch(1);
+        let cell = cell(1);
         assert_eq!(
             marked_line(cell, &marking),
             "cladefs-gc: cell 1/2: marked 2 (11 bytes) in \
@@ -1123,35 +1123,35 @@ mod tests {
     }
 
     /// The cell `id` of tenant 1.
-    fn branch(id: u64) -> layout::CellId {
+    fn cell(id: u64) -> layout::CellId {
         layout::CellId { tenant: 1, id }
     }
 
-    /// TASK-79.85: an operator lists what no host holds, and deletes a branch, by IDs as
+    /// TASK-79.85: an operator lists what no host holds, and deletes a cell, by IDs as
     /// `cladefsctl stat` says them: TENANT/CELL/ID, in base 32.
     #[test]
-    fn branches_are_listed_and_deleted_by_their_base_32_ids() {
+    fn cells_are_listed_and_deleted_by_their_base_32_ids() {
         let url = "u".to_owned();
-        let command = Command::Branches { held: None, cell: None };
-        assert_eq!(parsed(&["u", "--branches"]), Ok(Args { url: url.clone(), command }));
-        let command = Command::Branches { held: Some("hosts".into()), cell: None };
-        let args = parsed(&["u", "--branches", "--held", "hosts"]);
+        let command = Command::Cells { held: None, cell: None };
+        assert_eq!(parsed(&["u", "--cells"]), Ok(Args { url: url.clone(), command }));
+        let command = Command::Cells { held: Some("hosts".into()), cell: None };
+        let args = parsed(&["u", "--cells", "--held", "hosts"]);
         assert_eq!(args, Ok(Args { url: url.clone(), command }));
-        let args = parsed(&["u", "--delete-branch", "1/2/7z"]);
-        assert_eq!(args, Ok(Args { url, command: Command::DeleteBranch(branch(0xff)) }));
+        let args = parsed(&["u", "--delete-cell", "1/2/7z"]);
+        assert_eq!(args, Ok(Args { url, command: Command::DeleteCell(cell(0xff)) }));
     }
 
-    /// TASK-79.85: a list names the live branches but those held, a fork's with where it forked.
+    /// TASK-79.85: a list names the live cells but those held, a fork's with where it forked.
     #[test]
     fn lists_leave_out_what_is_held() {
         let base = Kind::Root.of(0);
-        let fork = Kind::Fork(Origin { parent: branch(0xa), at: 0x10 }).of(0);
+        let fork = Kind::Fork(Origin { parent: cell(0xa), at: 0x10 }).of(0);
         let live =
-            BTreeMap::from([(branch(0xa), base), (branch(0xb), fork.clone()), (branch(0xc), fork)]);
-        let held = held_branches("1/2/c\n").unwrap();
+            BTreeMap::from([(cell(0xa), base), (cell(0xb), fork.clone()), (cell(0xc), fork)]);
+        let held = held_cells("1/2/c\n").unwrap();
         assert_eq!(listed(&live, &held), "1/2/a\n1/2/b 1/2/a g\n");
-        let refused = "no branch, TENANT/CELL/ID in base 32: 1/2/C".to_owned();
-        assert_eq!(held_branches("1/2/c 1/2/C"), Err(refused));
+        let refused = "no cell, TENANT/CELL/ID in base 32: 1/2/C".to_owned();
+        assert_eq!(held_cells("1/2/c 1/2/C"), Err(refused));
     }
 
     /// TASK-394, TASK-395.8: `--usage` takes no other flag but `--tenant`, in base 32.
@@ -1272,7 +1272,7 @@ mod tests {
         );
     }
 
-    /// TASK-395.4: a pass of any mode, and a list of the live branches, go over every cell, or the
+    /// TASK-395.4: a pass of any mode, and a list of the live cells, go over every cell, or the
     /// one `--cell` names, TENANT/CELL in base 32, anywhere among their flags.
     #[test]
     fn passes_and_lists_go_over_a_cell_or_all() {
@@ -1301,11 +1301,11 @@ mod tests {
             Command::Collect { every, options, mode: Mode::MarkOnly, cell, run: Run::default() };
         let args = parsed(&["u", "--every", "5", "--cell", "a/1f", "--mark-only"]);
         assert_eq!(args, Ok(Args { url: url.clone(), command }));
-        let command = Command::Branches { held: Some("hosts".into()), cell };
-        let args = parsed(&["u", "--branches", "--cell", "a/1f", "--held", "hosts"]);
+        let command = Command::Cells { held: Some("hosts".into()), cell };
+        let args = parsed(&["u", "--cells", "--cell", "a/1f", "--held", "hosts"]);
         assert_eq!(args, Ok(Args { url: url.clone(), command }));
-        let command = Command::Branches { held: None, cell };
-        assert_eq!(parsed(&["u", "--branches", "--cell", "a/1f"]), Ok(Args { url, command }));
+        let command = Command::Cells { held: None, cell };
+        assert_eq!(parsed(&["u", "--cells", "--cell", "a/1f"]), Ok(Args { url, command }));
     }
 
     /// TASK-395.4, TASK-395.5: a sweep says what its passes did together, the objects and bytes,
@@ -1540,9 +1540,9 @@ cladefs_gc_peak_resident_bytes 67108864
             &["u", "--every"],
             &["u", "--every", "soon"],
             &["u", "--fast", "1"],
-            &["u", "--delete-branch", "branch"],
-            &["u", "--delete-branch", "ff"],
-            &["u", "--branches", "--held"],
+            &["u", "--delete-cell", "cell"],
+            &["u", "--delete-cell", "ff"],
+            &["u", "--cells", "--held"],
             &["u", "--mark-only", "--dry-run"],
             &["u", "--mark-only", "--mark-only"],
             &["u", "--dry-run", "--every", "30"],
@@ -1554,8 +1554,8 @@ cladefs_gc_peak_resident_bytes 67108864
             &["u", "--cell", "1"],
             &["u", "--cell", "1/2/3"],
             &["u", "--cell", "1/2", "--cell", "1/3"],
-            &["u", "--branches", "--cell", "X/2"],
-            &["u", "--branches", "--cell", "1/2", "--cell", "1/2"],
+            &["u", "--cells", "--cell", "X/2"],
+            &["u", "--cells", "--cell", "1/2", "--cell", "1/2"],
             &["u", "--usage", "--cell", "1/2"],
             &["u", "--usage", "--tenant"],
             &["u", "--usage", "--tenant", "X"],

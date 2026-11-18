@@ -38,7 +38,7 @@ struct Daemon {
     stats: PathBuf,
 }
 
-/// A daemon serving in `dir`, keeping its stores' branches in the file bucket at `bucket`, and its
+/// A daemon serving in `dir`, keeping its stores' cells in the file bucket at `bucket`, and its
 /// part cache in `dir`; serving its peers at `peers`' first address, and asking them all, if given.
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let (vms, control, stats) =
@@ -131,9 +131,9 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
 
     let base = hosts[0].join("base");
     let store = CellClient::connect(&first.vms, &base, CAPACITY).unwrap();
-    let branch = store.branch();
+    let cell = store.cell();
     for sequence in 1..=EXTENTS {
-        let extent = ExtentId { branch, sequence };
+        let extent = ExtentId { cell, sequence };
         store.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]).unwrap();
     }
     store.commit(None).unwrap();
@@ -149,7 +149,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let store = CellClient::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
-        let extent = ExtentId { branch, sequence };
+        let extent = ExtentId { cell, sequence };
         store.read(extent, 0, &mut [VolatileSliceMut::from(&mut read[..])]).unwrap();
         assert!(read == data(sequence), "extent {sequence} read otherwise");
     }
