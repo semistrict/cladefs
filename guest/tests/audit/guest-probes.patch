@@ -128,35 +128,32 @@
  	atomic64_add(written, &dax->written);
  	/*
  	 * As the page cache's writeback: what an I/O error stopped is clean, the error the file's
-@@ -2553,11 +2593,25 @@
+@@ -2552,12 +2592,23 @@
+ 	struct cladefs_dax_file *file;
  	size_t nr = 0, most = 0;
  	unsigned long ino;
- 
 +	bool observe;
-+
+ 
  	*files = NULL;
  	mutex_lock(&dax->files_lock);
+ 	/* files_lock fixes membership, but a clean file can become busy under it. */
 -	cladefs_dax_for_each_file(dax, volume, ino, file)
--		most += atomic_long_read(&file->dirty_pages) ||
 +	observe = READ_ONCE(audit_old_ino) &&
 +		test_bit(CLADEFS_DAX_STEP_BUSY_COUNTED, &cladefs_dax_pause_steps) &&
 +		(READ_ONCE(audit_scan_tid) == current->pid ||
 +		 (!READ_ONCE(audit_scan_tid) && (current->flags & PF_WQ_WORKER)));
-+
 +	cladefs_dax_for_each_file(dax, volume, ino, file) {
-+		bool busy = atomic_long_read(&file->dirty_pages) ||
- 			atomic_long_read(&file->private_pages);
-+
-+		most += busy;
+ 		most++;
 +		if (observe && file->ino == READ_ONCE(audit_old_ino))
-+			WRITE_ONCE(audit_old_counted, busy);
++			WRITE_ONCE(audit_old_counted, atomic_long_read(&file->dirty_pages) ||
++				   atomic_long_read(&file->private_pages));
 +	}
 +	if (observe)
 +		cladefs_dax_pause_file(CLADEFS_DAX_STEP_BUSY_COUNTED, READ_ONCE(audit_old_ino));
  	if (most)
  		*files = cladefs_nofs(kvmalloc_array(most, sizeof(**files), GFP_KERNEL));
  	if (*files) {
-@@ -2568,6 +2622,15 @@
+@@ -2568,6 +2619,15 @@
  				(*files)[nr++] = file;
  			}
  		}
