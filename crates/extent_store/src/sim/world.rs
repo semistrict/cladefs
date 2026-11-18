@@ -1712,7 +1712,7 @@ impl World {
             Ok(before) => before,
             Err(err) => return self.store_failed(host, branch, store, err),
         };
-        let cut = layout::VersionCut { id, cell_cut: None, keep_last: None };
+        let cut = layout::NewVersion { id, keep_last: None };
         if let Err(err) = store.commit_version(cut) {
             return self.store_failed(host, branch, store, err);
         }

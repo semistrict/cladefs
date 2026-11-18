@@ -434,11 +434,11 @@ fn cladefsctl_mount(socket: &str, args: &[&str]) -> String {
 }
 
 /// One mount of many stores (TASK-302), of tenants' cells (TASK-364), cladefsd's (TASK-475.2): a cell
-/// attached through its control socket shows each Fxfs vdisk of it at TENANT/CELL/VDISK, a filesystem of its own
-/// (nothing renamed between them, nothing made in the mount's directories of its own); its cell's
-/// objects in the bucket under its tenant's prefix. A cell detached goes, written back, so that it
-/// attaches again from its stores, or, those gone, from the bucket; a vdisk with a file open is
-/// detached once the file is closed.
+/// is one filesystem (doc-20), made or attached through its control socket and shown at
+/// TENANT/CELL (nothing renamed between cells, nothing made in the mount's directories of its
+/// own); its cell's objects in the bucket under its tenant's prefix. A cell detached goes, written
+/// back, so that it attaches again from its store, or, that gone, from the bucket; a cell with a
+/// file open is detached once the file is closed.
 #[test]
 fn one_mount_attaches_and_detaches_many_stores() {
     let dir = tempfile::tempdir().unwrap();
@@ -447,94 +447,92 @@ fn one_mount_attaches_and_detaches_many_stores() {
     assert_eq!(names(&m), Vec::<String>::new());
     let capacity = STORE_SIZE.to_string();
     let (one, two) = ("0000000000001", "0000000000002");
-    // A new cell of each tenant's, of no vdisks: nothing shown.
-    let attach = |tenant: &str, cell: &str| {
-        cladefsctl_mount(socket, &["attach", tenant, cell]).lines().map(str::to_owned).collect()
+    let lines = |args: &[&str]| -> Vec<String> {
+        cladefsctl_mount(socket, args).lines().map(str::to_owned).collect()
     };
-    let new: Vec<String> = attach("1", "0");
-    let a = new[0].clone();
-    let new: Vec<String> = attach("2", "0");
-    let b = new[0].clone();
-    assert_eq!(names(&m), Vec::<String>::new());
-    let vdisk = |tenant: &str, cell: &str, name: &str| {
-        cladefsctl_mount(socket, &["create-vdisk", tenant, cell, name, &capacity]).trim().to_owned()
+    // Three new cells, two of tenant 1's, one of tenant 2's: each its cell and its branch.
+    let create = |tenant: &str| match &lines(&["create", tenant, &capacity])[..] {
+        [cell, branch] => (cell.clone(), branch.clone()),
+        printed => panic!("created {printed:?}"),
     };
-    let (root, data, other) =
-        (vdisk("1", &a, "root"), vdisk("1", &a, "data"), vdisk("2", &b, "root"));
+    let ((a, root), (c, data), (b, other)) = (create("1"), create("1"), create("2"));
     assert_eq!(names(&m), [one, two]);
-    assert_eq!(names(&m.join(one)), [a.as_str()]);
-    assert_eq!(names(&m.join(one).join(&a)), ["data", "root"]);
-    assert_eq!(names(&m.join(two).join(&b)), ["root"]);
-    let (at_a, at_b) = (m.join(one).join(&a), m.join(two).join(&b));
-    std::fs::write(at_a.join("root/file"), "in root").unwrap();
-    std::fs::write(at_a.join("data/file"), "in data").unwrap();
-    std::fs::write(at_b.join("root/file"), "in b").unwrap();
-    assert_eq!(std::fs::read_to_string(at_a.join("root/file")).unwrap(), "in root");
-    assert_eq!(std::fs::read_to_string(at_b.join("root/file")).unwrap(), "in b");
-    for (from, to) in [
-        (at_a.join("root/file"), at_a.join("data/moved")),
-        (at_a.join("root/file"), at_b.join("root/moved")),
-    ] {
+    let mut cells = vec![a.clone(), c.clone()];
+    cells.sort();
+    assert_eq!(names(&m.join(one)), cells);
+    let (at_a, at_c, at_b) = (m.join(one).join(&a), m.join(one).join(&c), m.join(two).join(&b));
+    std::fs::write(at_a.join("file"), "in a").unwrap();
+    std::fs::write(at_c.join("file"), "in c").unwrap();
+    std::fs::write(at_b.join("file"), "in b").unwrap();
+    assert_eq!(std::fs::read_to_string(at_a.join("file")).unwrap(), "in a");
+    assert_eq!(std::fs::read_to_string(at_b.join("file")).unwrap(), "in b");
+    for (from, to) in
+        [(at_a.join("file"), at_c.join("moved")), (at_a.join("file"), at_b.join("moved"))]
+    {
         assert_eq!(std::fs::rename(&from, &to).unwrap_err().raw_os_error(), Some(libc::EXDEV));
     }
-    for made in [m.join("c"), m.join(one).join("c"), at_a.join("c")] {
+    for made in [m.join("c"), m.join(one).join("c")] {
         let refused = std::fs::create_dir(&made).unwrap_err();
         assert_eq!(refused.raw_os_error(), Some(libc::EPERM), "{}", made.display());
     }
     assert_ne!(
-        std::fs::metadata(at_a.join("root/file")).unwrap().ino(),
-        std::fs::metadata(at_a.join("data/file")).unwrap().ino()
+        std::fs::metadata(at_a.join("file")).unwrap().ino(),
+        std::fs::metadata(at_c.join("file")).unwrap().ino()
     );
-    let listed = format!("{one} {a}\n  data {data}\n  root {root}\n{two} {b}\n  root {other}\n");
-    assert_eq!(cladefsctl_mount(socket, &["list"]), listed);
-    // The cells' objects are under their tenants' prefixes: their cells' objects, and their
-    // vdisks' branches.
+    let mut listed = vec![format!("{one} {a} {root}"), format!("{one} {c} {data}")];
+    listed.sort();
+    listed.push(format!("{two} {b} {other}"));
+    assert_eq!(cladefsctl_mount(socket, &["list"]), listed.join("\n") + "\n");
+    // The cells' objects are under their tenants' prefixes: each cell's object and its branch.
     let bucket = dir.path().join("bucket");
     let cell_a = bucket.join(format!("tenants/{one}/cells/{a}"));
     assert!(cell_a.join("cell").exists(), "no cell object at {}", cell_a.display());
-    let mut branches = vec![data.clone(), root.clone()];
-    branches.sort();
-    assert_eq!(names(&cell_a.join("branches")), branches);
+    assert_eq!(names(&cell_a.join("branches")), [root.clone()]);
     assert!(bucket.join(format!("tenants/{two}/cells/{b}/branches/{other}")).exists());
 
-    // Detached, and attached again from its stores; the other cell detached, its stores gone,
-    // then attached again from the bucket.
+    // Detached, and attached again from its store; another cell detached, its store gone, then
+    // attached again from the bucket.
     cladefsctl_mount(socket, &["detach", "1", &a]);
-    assert_eq!(names(&m), [two]);
-    let again: Vec<String> = attach("1", &a);
-    assert_eq!(again, [a.clone(), format!("data {data}"), format!("root {root}")]);
-    assert_eq!(std::fs::read_to_string(at_a.join("data/file")).unwrap(), "in data");
-    assert_eq!(std::fs::read_to_string(at_a.join("root/file")).unwrap(), "in root");
+    assert_eq!(names(&m.join(one)), [c.as_str()]);
+    assert_eq!(lines(&["attach", "1", &a]), [a.clone(), root.clone()]);
+    assert_eq!(std::fs::read_to_string(at_a.join("file")).unwrap(), "in a");
     cladefsctl_mount(socket, &["detach", "2", &b]);
     std::fs::remove_dir_all(dir.path().join("stores").join(two)).unwrap();
-    let again: Vec<String> = attach("2", &b);
-    assert_eq!(again, [b.clone(), format!("root {other}")]);
-    assert_eq!(std::fs::read_to_string(at_b.join("root/file")).unwrap(), "in b");
+    assert_eq!(lines(&["attach", "2", &b]), [b.clone(), other.clone()]);
+    assert_eq!(std::fs::read_to_string(at_b.join("file")).unwrap(), "in b");
 
-    // A file open holds its vdisk, and its cell's detach, until it is closed.
-    let open = std::fs::File::open(at_a.join("data/file")).unwrap();
+    // A file open holds its cell's detach until it is closed.
+    let open = std::fs::File::open(at_c.join("file")).unwrap();
     let mut detach = KillOnDrop(
-        cladefsctl_mount_command(socket, &["detach", "1", &a])
+        cladefsctl_mount_command(socket, &["detach", "1", &c])
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
-    let detaching = format!("{one} {a}\n  data {data} detaching\n{two} {b}\n  root {other}\n");
-    while cladefsctl_mount(socket, &["list"]) != detaching {}
-    assert_eq!(names(&m), [two]);
+    let detaching =
+        |listed: &[String]| -> String { listed.iter().map(|line| line.clone() + "\n").collect() };
+    let mut with_c = listed.clone();
+    for line in &mut with_c {
+        if line.starts_with(&format!("{one} {c} ")) {
+            line.push_str(" detaching");
+        }
+    }
+    while cladefsctl_mount(socket, &["list"]) != detaching(&with_c) {}
     assert!(detach.0.try_wait().unwrap().is_none(), "detached with a file open");
     drop(open);
     assert!(detach.0.wait().unwrap().success());
-    assert_eq!(cladefsctl_mount(socket, &["list"]), format!("{two} {b}\n  root {other}\n"));
+    let without_c: Vec<String> =
+        listed.iter().filter(|line| !line.starts_with(&format!("{one} {c} "))).cloned().collect();
+    assert_eq!(cladefsctl_mount(socket, &["list"]), detaching(&without_c));
 
     terminate(child, &m);
     // Each store is whole, and holds what was written.
     block_on(async {
         let stores = dir.path().join("stores");
         for (store, file) in [
-            (stores.join(one).join(&a).join("root"), "in root"),
-            (stores.join(one).join(&a).join("data"), "in data"),
-            (stores.join(two).join(&b).join("root"), "in b"),
+            (stores.join(one).join(&a), "in a"),
+            (stores.join(one).join(&c), "in c"),
+            (stores.join(two).join(&b), "in b"),
         ] {
             let storage = Storage::open(&store).unwrap().check().await.unwrap();
             let fs = Filesystem::mount(storage).await.unwrap();
@@ -546,7 +544,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
 
 /// SIGTERM drains cladefsd's VMs' stores and its mount of cells alike, within one bound
 /// (TASK-475.2): a VM process's store closed, its last commit durable; the mount gone, its
-/// vdisk's write written back and uploaded, so that a later placement's daemon, with none of the
+/// cell's write written back and uploaded, so that a later placement's daemon, with none of the
 /// stores, attaches the cell from the bucket and reads it; the daemon exits 0.
 #[test]
 fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
@@ -556,11 +554,11 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     std::fs::create_dir(&first).unwrap();
     let (child, socket, m) = cladefsd_mounting(&first, &bucket, 1);
     let socket = socket.to_str().unwrap();
-    let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
     let capacity = STORE_SIZE.to_string();
-    cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &capacity]);
-    let vdisk = m.join("0000000000001").join(&cell).join("root");
-    std::fs::write(vdisk.join("file"), "drained").unwrap();
+    let created = cladefsctl_mount(socket, &["create", "1", &capacity]);
+    let cell = created.lines().next().unwrap().to_owned();
+    let shown = m.join("0000000000001").join(&cell);
+    std::fs::write(shown.join("file"), "drained").unwrap();
 
     let vm = cladefs::DaemonExtentStore::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
     let vm = vm.unwrap();
@@ -577,8 +575,8 @@ fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
     let (child, socket, m) = cladefsd_mounting(&second, &bucket, 2);
     let socket = socket.to_str().unwrap();
     assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]).lines().count(), 2);
-    let vdisk = m.join("0000000000001").join(&cell).join("root");
-    assert_eq!(std::fs::read_to_string(vdisk.join("file")).unwrap(), "drained");
+    let shown = m.join("0000000000001").join(&cell);
+    assert_eq!(std::fs::read_to_string(shown.join("file")).unwrap(), "drained");
     terminate(child, &m);
 }
 
@@ -601,17 +599,17 @@ fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
     );
 }
 
-/// A vdisk cladefsd's mount has attached is the mount's alone (TASK-475.3): a VM process opening
+/// A cell cladefsd's mount has attached is the mount's alone (TASK-475.3): a VM process opening
 /// its store, and the control API forking it, each fail with `EBUSY` at once, not after waiting
 /// for it to be let go; detached, its store forks.
 #[test]
-fn a_vdisk_mounted_is_the_mounts_alone() {
+fn a_cell_mounted_is_the_mounts_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
     let socket = socket.to_str().unwrap();
-    let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
-    cladefsctl_mount(socket, &["create-vdisk", "1", &cell, "root", &STORE_SIZE.to_string()]);
-    let store = dir.path().join("stores").join("0000000000001").join(&cell).join("root");
+    let created = cladefsctl_mount(socket, &["create", "1", &STORE_SIZE.to_string()]);
+    let cell = created.lines().next().unwrap().to_owned();
+    let store = dir.path().join("stores").join("0000000000001").join(&cell);
 
     let started = std::time::Instant::now();
     let vm = cladefs::DaemonExtentStore::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);

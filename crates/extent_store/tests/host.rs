@@ -28,13 +28,7 @@ const OPTIONS: Options = Options {
 fn create(path: &Path) -> extent_store::Store<HostDir> {
     std::fs::create_dir(path).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
-    create_host(
-        path,
-        description,
-        "memory:///host",
-        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
-    )
-    .unwrap();
+    create_host(path, description, "memory:///host", extent_bucket::cell::Kind::Fxfs).unwrap();
     let store = Store::recover_unmade(HostDir::new(path).unwrap()).unwrap();
     let store = store.open(OPTIONS, Opening::new(BRANCH)).unwrap();
     store.made().unwrap();
@@ -89,13 +83,7 @@ fn stores_unmade_refuse_to_open() {
     let path = dir.path().join("store");
     std::fs::create_dir(&path).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
-    create_host(
-        &path,
-        description,
-        "memory:///host",
-        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
-    )
-    .unwrap();
+    create_host(&path, description, "memory:///host", extent_bucket::cell::Kind::Fxfs).unwrap();
     let making = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
     let store = making.open(OPTIONS, Opening::new(BRANCH)).unwrap();
     store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; BLOCK]).unwrap();
@@ -123,13 +111,8 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
     let scenario = fail::FailScenario::setup();
     fail::cfg("direct::bypass", "return").unwrap();
-    let err = create_host(
-        &path,
-        description,
-        "memory:///host",
-        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
-    )
-    .unwrap_err();
+    let err = create_host(&path, description, "memory:///host", extent_bucket::cell::Kind::Fxfs)
+        .unwrap_err();
     scenario.teardown();
     let refused = format!(
         "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE): {}",

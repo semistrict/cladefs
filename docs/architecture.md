@@ -131,8 +131,7 @@ imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
 `<ID in base 32>.sock`, for the VM manager to bind-mount into the tenant's jails; a
 connection's tenant is the socket it came in on, and it names stores in the
-tenant's directory alone. The stores in its directory are vdisks of its own
-cells, and its VM processes open no store of another tenant's cell, but fork
+tenant's directory alone. The stores in its directory are its own cells, and its VM processes open no store of another tenant's cell, but fork
 the points of others' its VM manager gives it. Revoked, a tenant's socket
 goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's, ID 0, which is granted

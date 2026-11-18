@@ -34,7 +34,7 @@ An immutable piece of data, written while open and never again once sealed.
 _Avoid_: blob, object (an object is the bucket's)
 
 **Extent ID**:
-The name of an extent: the cell that wrote it and the sequence number it gave it. The code says `branch` for the first half until the rename (doc-20).
+The name of an extent: the cell that wrote it and the sequence number it gave it.
 _Avoid_: key, ref (a ref names blocks of an extent)
 
 **Sequence number**:
@@ -191,8 +191,8 @@ The object storage holding every cell's durable copy.
 _Avoid_: remote, object store, S3
 
 **Cell**:
-One filesystem with one writer at a time: its log, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole. Of a kind: Fxfs, SQLite (a file set) or a VM's memory image (doc-20).
-_Avoid_: branch, vdisk (both retired: a cell is one filesystem), volume, disk, store (a store holds a cell)
+One filesystem, of a kind (Fxfs, SQLite, or a VM's memory image), a root and a capacity, with one writer at a time: its log, its head, its key and its versions. A tenant's unit of concurrency, placement, fencing, encryption and collection; a host holds it whole.
+_Avoid_: volume, disk, store (a store holds a cell)
 
 **Store**:
 A host directory holding one cell: its open segment, its write-ahead log and its own extents.
@@ -208,10 +208,10 @@ _Avoid_: volume
 
 **Version**:
 A read-only state of a cell in its past, kept inside the cell. Only the cell's writer makes or drops one. Making one is local: one commit in the cell's local log that closes its segment, nothing touching the bucket; uploading it and naming it in the head come later, in the background.
-_Avoid_: cut, point (retired), snapshot (VMs' and Fxfs's), checkpoint (recovery's)
+_Avoid_: checkpoint (recovery's)
 
 **Shared version**:
-A version other tenants' cells may fork. The code says shared point until versions replace points (doc-20).
+A version other tenants' cells may fork.
 _Avoid_: public (public is a base's)
 
 **Fork**:
@@ -221,13 +221,8 @@ _Avoid_: clone (git's alone), restore (a VM snapshot's alone), copy
 **Parent** / **Child**:
 The cell a fork came from, and the cell it made. Dropping a version that has children keeps its data until they go.
 
-**Fork point**:
-The commit of the parent a child was forked at: a version's.
-_Avoid_: point alone
-
 **VM snapshot**:
 A VM's saved state: a version of each of the VM's cells (its disk and its memory) plus the record naming them. Host-local: it pauses the VM, makes a version in each cell, and writes the record last; no bucket round trip, no cross-host coordination.
-_Avoid_: snapshot for a cell's version
 
 **Base**:
 A store VMs boot forks of, such as an imported container image.
@@ -356,7 +351,6 @@ A task in a follower's guest reading its files.
 
 **View**:
 A store as of one commit, which keeps what later commits free until let go.
-_Avoid_: snapshot
 
 **Advance**:
 Moving a follower's view to the writer's latest commit.
@@ -495,11 +489,8 @@ code does not have yet are said so.
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
 - **volume**: Fxfs's alone. Named files on an extent device, with no filesystem, are a
   **file set** (`extent_files::FileSet`).
-- **cell**: one filesystem (doc-20). **branch**, **vdisk**, **point**, **slot** and **namespace** are
-  retired: say **cell**, **version**, **shared version**. The code keeps `Branch`, `branch` (the extent
-  ID's first half too), points and the `vdisk` names of its API until doc-20's later stages.
 - **snapshot**: VMs' (Firecracker's) and Fxfs's alone. A cell's named state is a **version**; the daemon's counters are **stats** (no `GetSnapshot`).
-- **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**. **cut** is retired, in code too (`NewVersion`, no `cell_cut`).
+- **version**: a cell's past state alone; a format's is its **format**, a tool's a **pinned version**.
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
   StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).

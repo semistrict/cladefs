@@ -5336,7 +5336,7 @@ mod tests {
             Commit { tag: 1, extents: vec![(extent, b"held".to_vec())], ..Commit::default() },
         )
         .await;
-        let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
+        let cut = layout::NewVersion { id: 0xa, keep_last: None };
         let cutting = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
         let at = writer
             .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
@@ -5390,7 +5390,7 @@ mod tests {
             let frees = vec![extent(version)];
             let extents = vec![(written, vec![1])];
             commit(&writer, Commit { tag, extents, frees, ..Commit::default() }).await;
-            let cut = layout::VersionCut { id: 1 + version, cell_cut: None, keep_last: None };
+            let cut = layout::NewVersion { id: 1 + version, keep_last: None };
             let cutting = SegmentBuilder::from(Commit { tag: tag + 1, ..Commit::default() });
             let objects = cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting());
             let at = writer.add_segment(objects).unwrap();
@@ -5427,7 +5427,7 @@ mod tests {
         let first = writer.chain().next_sequence();
         let (held, later) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
         let cut = async |tag, id| {
-            let cut = layout::VersionCut { id, cell_cut: None, keep_last: None };
+            let cut = layout::NewVersion { id, keep_last: None };
             let cutting = SegmentBuilder::from(Commit { tag, ..Commit::default() });
             let objects = cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting());
             let at = writer.add_segment(objects).unwrap();
@@ -5482,7 +5482,7 @@ mod tests {
         let (branch, clone) = (celled(1, 1), celled(2, 2));
         branch::create(&*bucket, branch, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
-        let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
+        let cut = layout::NewVersion { id: 0xa, keep_last: None };
         let cutting = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
         let at = writer
             .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
@@ -6967,9 +6967,9 @@ mod tests {
             let bucket = store();
             let kek = keys::new_cell_kek(&host, layout::TEST_CELL.tenant).await.unwrap();
             let making = Some(&kek.1);
-            let vdisk = crate::cell::Vdisk { branch: 1, kind: crate::cell::Kind::Fxfs };
+            let filesystem = crate::cell::Filesystem { branch: 1, kind: crate::cell::Kind::Fxfs };
             let (_, object) =
-                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(("a", vdisk)))
+                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(filesystem))
                     .await
                     .unwrap();
             assert_eq!(object.keks.len(), 1);

@@ -1177,7 +1177,7 @@ mod tests {
     #[test]
     fn restores_of_versions_need_them_named() {
         use crate::batch::{Commit, SegmentBuilder};
-        use crate::layout::VersionCut;
+        use crate::layout::NewVersion;
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
         let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
@@ -1186,7 +1186,7 @@ mod tests {
             create(&*bucket, branch, 0).await.unwrap();
             Writer::open(bucket.clone(), branch, 10, 0).await.unwrap()
         });
-        let cut = VersionCut { id: 0xa, cell_cut: None, keep_last: None };
+        let cut = NewVersion { id: 0xa, keep_last: None };
         let batch = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
         let at = writer
             .add_segment(batch.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))

@@ -18,7 +18,7 @@
 
 use extent_bucket::collector::{Collector, Options};
 use extent_bucket::keys::CachingKms;
-use extent_bucket::layout::{Branch, Cell, VersionCut};
+use extent_bucket::layout::{Branch, Cell, NewVersion};
 use extent_bucket::object_bucket::{ObjectBucket, Request, Stats};
 use extent_bucket::{Commit, SegmentBuilder, Writer, branch};
 use futures::executor::block_on;
@@ -97,7 +97,7 @@ async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
         (0..EXTENTS).map(|n| ExtentId::new(vdisk.id, first + n)).collect();
     let extents = live.iter().map(|&extent| (extent, data.clone())).collect();
     let mut segments = 0;
-    let mut add = async |segment: SegmentBuilder, cut: Option<VersionCut>| {
+    let mut add = async |segment: SegmentBuilder, cut: Option<NewVersion>| {
         let mut chain = writer.chain();
         let unframed = match cut {
             Some(cut) => segment.cut(cut, &mut chain),
@@ -124,7 +124,7 @@ async fn fill(bucket: &Arc<ObjectBucket>, versions: usize) -> u64 {
         let tag = 2 + 2 * version;
         let commit = Commit { tag, extents, frees, ..Commit::default() };
         add(SegmentBuilder::from(commit), None).await;
-        let cut = VersionCut { id: 1 + version, cell_cut: None, keep_last: None };
+        let cut = NewVersion { id: 1 + version, keep_last: None };
         add(SegmentBuilder::from(Commit { tag: tag + 1, ..Commit::default() }), Some(cut)).await;
     }
     assert_eq!(writer.versions().await.len(), versions);

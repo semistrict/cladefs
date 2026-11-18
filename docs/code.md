@@ -117,12 +117,12 @@ of these stands in with the items the code copied from Fuchsia uses:
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
   number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
-  attach`, `create-vdisk`, `detach`, `list`), takes a tenant's cell of the
-  bucket (TASK-364), taking its vdisks' heads with it, each Fxfs vdisk into
-  `DIR/TENANT/CELL/VDISK` and shown at `MOUNTPOINT/TENANT/CELL/VDISK`, and
+  attach`, `create`, `detach`, `list`), takes a tenant's cell of the bucket
+  (TASK-364), its head with it, a cell being one filesystem (doc-20), an Fxfs
+  one into `DIR/TENANT/CELL` and shown at `MOUNTPOINT/TENANT/CELL`, and
   detaches the cell once the kernel lets go of it, written back; the daemon's
-  drain closes the mount. A cell's vdisks are so held by one process, whether
-  VMs or the mount serve them. macOS has no open-source FUSE, so no mounts
+  drain closes the mount. A cell is so held by one process, whether VMs or the
+  mount serve it. macOS has no open-source FUSE, so no mounts
   there.
 - `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory cladefs only
   copies into and out of, as a guest may change it concurrently.

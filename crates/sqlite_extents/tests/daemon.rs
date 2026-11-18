@@ -231,8 +231,8 @@ fn a_database_is_fenced_with_its_cell() {
     let objects = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours.cell)).unwrap().unwrap();
-    let named = cell::Vdisk { branch: ours.id, kind: cell::Kind::Sqlite };
-    assert_eq!(held.vdisks, std::collections::BTreeMap::from([("store".to_owned(), named)]));
+    let filesystem = cell::Filesystem { branch: ours.id, kind: cell::Kind::Sqlite };
+    assert_eq!(held.filesystem, Some(filesystem));
     assert_eq!((held.epoch, held.token), (1, 1));
 
     // Another host's, placed later.

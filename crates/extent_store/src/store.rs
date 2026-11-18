@@ -13,7 +13,7 @@ use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, KINDS, LOGS, OPEN_EXTENTS,
-    OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Vdisk, add_piece, branch_dir,
+    OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, add_piece, branch_dir,
     create_branch_dirs, extent_path, files_of, list_numbers, log_path, numbered_path,
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
@@ -38,12 +38,13 @@ use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use base32_id::Short;
 use extent_bucket::cache::Cache;
+use extent_bucket::cell::Kind;
 use extent_bucket::keys::Ring;
 use extent_bucket::recovery::{Places, Seal};
 use extent_bucket::trace;
 use extent_bucket::wal::{Rebased, Wal};
 use extent_frame::segment::{
-    Branch, Chain, Child, Contents, Footer, Location, VersionCut, epoch_of,
+    Branch, Chain, Child, Contents, Footer, Location, NewVersion, epoch_of,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -232,14 +233,14 @@ pub struct Store<D: Dir> {
     /// fork's child takes one, as an extent's ID names its branch by its ID alone, and branches
     /// are unique by theirs only within their cells (TASK-364).
     lineage: BTreeSet<u64>,
-    /// cladefs: the vdisk of its branch's cell it is, if its description names one (TASK-364).
-    vdisk: Option<Vdisk>,
+    /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
+    kind: Option<Kind>,
     /// cladefs: the version of its branch it is a copy of, if it is one (TASK-476).
     version: Option<u64>,
     /// cladefs: the versions its commits cut that its branch's head may not name yet, by the
     /// numbers of the commits cutting them: those of its write-ahead log, and those cut since it
     /// opened, until it learns their commits uploaded ([`Store::local_versions`], TASK-476).
-    cuts: Mutex<BTreeMap<u64, VersionCut>>,
+    cuts: Mutex<BTreeMap<u64, NewVersion>>,
     /// cladefs: the URL of the bucket its branch is kept in, if its description names one.
     bucket: Option<String>,
     /// Its directory, taken for this process ([`Dir::take`]), and claimed for its opening
@@ -821,9 +822,9 @@ impl<D: Dir> Recovering<D> {
         self.file.token
     }
 
-    /// cladefs: the vdisk of its branch's cell it is, if its description names one (TASK-364).
-    pub fn vdisk(&self) -> Option<&Vdisk> {
-        self.file.vdisk.as_ref()
+    /// cladefs: its cell's kind, if its description names one (TASK-364, doc-20).
+    pub fn kind(&self) -> Option<Kind> {
+        self.file.kind
     }
 
     /// cladefs: the version of its branch it is a copy of, if its description names one: its
@@ -909,7 +910,7 @@ impl<D: Dir> Recovering<D> {
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
-        let StoreFile { block_size, branch, bucket, capacity, vdisk, version, .. } = file;
+        let StoreFile { block_size, branch, bucket, capacity, kind, version, .. } = file;
         let Opening { state, layer, taken: found, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // cladefs: the segments its recovery closed again framed, first, under its keys, as nothing
@@ -1037,7 +1038,7 @@ impl<D: Dir> Recovering<D> {
         }
         // cladefs: the versions its log's segments cut, which its branch's head names once their
         // segments are acknowledged (TASK-476).
-        let cuts: BTreeMap<u64, VersionCut> = (wal.segments())
+        let cuts: BTreeMap<u64, NewVersion> = (wal.segments())
             .filter_map(|(footer, _)| {
                 let last = footer.contents.commits.last()?;
                 Some(footer.contents.versions.iter().map(move |cut| (epoch_of(*last), *cut)))
@@ -1068,7 +1069,7 @@ impl<D: Dir> Recovering<D> {
             branch,
             lineage,
             bucket,
-            vdisk,
+            kind,
             version,
             cuts: Mutex::new(cuts),
             opened: SharedLock::new("store opening", Mutex::new(Some((claim, taken)))),
@@ -1181,17 +1182,17 @@ fn leave<D: Dir>(dir: &D, cache: Option<&Cache>, leaving: Vec<(String, Option<St
 impl<D: Dir> Store<D> {
     /// cladefs: makes a new store's directory in `dir`, which holds no store, as `description`
     /// describes, its description naming `bucket`, the URL of the bucket its branch is kept in,
-    /// if given ([`Store::bucket`]), and `vdisk`, the vdisk of its branch's cell it is, if given
-    /// ([`Store::vdisk`], TASK-364); unmade until its maker says it is whole ([`Store::made`]).
+    /// if given ([`Store::bucket`]), and `kind`, its cell's kind, if given ([`Store::kind`],
+    /// TASK-364); unmade until its maker says it is whole ([`Store::made`]).
     /// The description is made last: until it is durable, the directory is no store either. Its
     /// branch is the bucket's, which opening it takes ([`Store::recover`]).
     pub fn make(
         dir: &D,
         description: Description,
         bucket: Option<&str>,
-        vdisk: Option<Vdisk>,
+        kind: Option<Kind>,
     ) -> Result<(), Error> {
-        Self::make_copy(dir, description, bucket, vdisk, None)
+        Self::make_copy(dir, description, bucket, kind, None)
     }
 
     /// cladefs: makes a new store's directory in `dir`, as [`Store::make`] does, a copy of the
@@ -1201,7 +1202,7 @@ impl<D: Dir> Store<D> {
         dir: &D,
         description: Description,
         bucket: Option<&str>,
-        vdisk: Option<Vdisk>,
+        kind: Option<Kind>,
         version: Option<u64>,
     ) -> Result<(), Error> {
         let Description { block_size, capacity, branch } = description;
@@ -1220,7 +1221,7 @@ impl<D: Dir> Store<D> {
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
             let described =
-                StoreFile { block_size, branch, bucket, capacity, token: None, vdisk, version };
+                StoreFile { block_size, branch, bucket, capacity, token: None, kind, version };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
             file.sync()?;
@@ -1326,9 +1327,9 @@ impl<D: Dir> Store<D> {
         self.bucket.as_deref()
     }
 
-    /// cladefs: the vdisk of its branch's cell it is, as its description names it (TASK-364).
-    pub fn vdisk(&self) -> Option<&Vdisk> {
-        self.vdisk.as_ref()
+    /// cladefs: its cell's kind, as its description names it (TASK-364, doc-20).
+    pub fn kind(&self) -> Option<Kind> {
+        self.kind
     }
 
     /// cladefs: its keys, its branch's and its ancestors' DEKs, which it encrypts and reads under
@@ -1376,7 +1377,7 @@ impl<D: Dir> Store<D> {
     /// ([`Store::has_open`]), so that the version holds what its guest committed and nothing more:
     /// refused otherwise ([`NotQuiescent`]). Returns the commit's number: the version is
     /// local until the bucket acknowledges it ([`Store::local_versions`]).
-    pub fn commit_version(&self, cut: VersionCut) -> Result<u64, Error> {
+    pub fn commit_version(&self, cut: NewVersion) -> Result<u64, Error> {
         let committing = self.committing.with(Mutex::lock);
         if self.has_open()? {
             bail!(NotQuiescent);
@@ -1393,7 +1394,7 @@ impl<D: Dir> Store<D> {
     /// cladefs: the versions its commits cut whose commits are later than `uploaded`, the number of
     /// the last commit the bucket acknowledged, each by its commit's number: local, its branch's
     /// head naming them not yet (TASK-476). Those uploaded it forgets.
-    pub fn local_versions(&self, uploaded: u64) -> Vec<(u64, VersionCut)> {
+    pub fn local_versions(&self, uploaded: u64) -> Vec<(u64, NewVersion)> {
         let mut cuts = self.cuts.lock().unwrap();
         cuts.retain(|&commit, _| commit > uploaded);
         cuts.iter().map(|(&commit, &cut)| (commit, cut)).collect()

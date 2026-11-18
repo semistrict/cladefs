@@ -11,7 +11,7 @@
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
 //! as they upload ([`objects`]).
 
-use crate::layout::{self, Branch, Chain, Child, Contents, Footer, Segment, VersionCut};
+use crate::layout::{self, Branch, Chain, Child, Contents, Footer, NewVersion, Segment};
 use crate::writer::{Body, Objects};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -166,7 +166,7 @@ impl Plan {
         self,
         chain: &mut Chain,
         forks: Vec<Child>,
-        versions: Vec<VersionCut>,
+        versions: Vec<NewVersion>,
     ) -> Footer {
         chain.close(Contents { forks, versions, ..self.contents(chain.branch()) })
     }
@@ -263,7 +263,7 @@ impl SegmentBuilder {
     /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its end:
     /// a name for the branch's state there, which the acknowledgement naming the segment names in
     /// the branch's head (doc-18, TASK-476).
-    pub fn cut(self, cut: VersionCut, chain: &mut Chain) -> Unframed {
+    pub fn cut(self, cut: NewVersion, chain: &mut Chain) -> Unframed {
         self.close_ending(chain, Vec::new(), vec![cut])
     }
 
@@ -271,7 +271,7 @@ impl SegmentBuilder {
         self,
         chain: &mut Chain,
         forks: Vec<Child>,
-        versions: Vec<VersionCut>,
+        versions: Vec<NewVersion>,
     ) -> Unframed {
         let footer = self.plan.close_ending(chain, forks, versions);
         Unframed { footer, data: Data { segment: self.data, own: self.own } }

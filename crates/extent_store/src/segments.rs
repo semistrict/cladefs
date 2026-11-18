@@ -26,7 +26,7 @@ use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_bucket::keys::Ring;
 use extent_frame::PART;
-use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, VersionCut, epoch_of};
+use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, NewVersion, epoch_of};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -229,7 +229,7 @@ pub(crate) struct Segments<F> {
     forking: Vec<Child>,
     /// cladefs: the versions the next commit cuts at its end, which close the open segment
     /// (TASK-476).
-    cutting: Vec<VersionCut>,
+    cutting: Vec<NewVersion>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
     /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
@@ -589,7 +589,7 @@ impl<F: File> Segments<F> {
 
     /// cladefs: has the next commit cut the version `cut` at its end, which its contents name, and
     /// close the open segment, whose footer names the version (doc-18, TASK-476).
-    pub fn close_for_version(&mut self, cut: VersionCut) {
+    pub fn close_for_version(&mut self, cut: NewVersion) {
         self.close_wanted = true;
         self.cutting.push(cut);
     }
@@ -1770,7 +1770,7 @@ struct Window {
     capacity: Option<u64>,
     forks: Vec<Child>,
     /// cladefs: the versions cut at their ends (TASK-476).
-    versions: Vec<VersionCut>,
+    versions: Vec<NewVersion>,
     /// cladefs: the runs of the commit its segment's footer goes on with, which the segments after
     /// it end, if any: the last thing it folds (TASK-92.41).
     continued: Option<Continued>,

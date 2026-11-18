@@ -3,21 +3,19 @@ id: doc-20
 title: A cell is one filesystem
 type: specification
 created_date: '2026-11-18 00:08'
-updated_date: '2026-11-18 00:09'
+updated_date: '2026-11-18 00:24'
 ---
 # A cell is one filesystem
 
-Design, 2026-11-17. The user's decision, 2026-11-17: there are no vdisks. A cell is one
-filesystem, and what a vdisk was is a cell. Supersedes doc-19 (one log per cell, several vdisks as
-slots of it) and doc-18's whole-cell section; replaces TASK-364's cell of several vdisks. The
-branch t3/one-log-per-cell, which built doc-19, is kept unmerged, as a reference.
+Design, 2026-11-17 (TASK-508). The user's decision, 2026-11-17: a cell is one filesystem.
+Supersedes doc-19 and doc-18's whole-cell section.
 
 ## The model
 
-- **A cell** is one filesystem (Fxfs, a SQLite file set, or a VM's memory image: its **kind**),
-  with one writer at a time, its log (open segment, write-ahead log, segments, checkpoints), its
-  head, its key (KEK, DEKs), and its versions. It is the unit of concurrency, placement, fencing,
-  encryption and collection. A host holds it whole.
+- **A cell** is one filesystem, of a kind (Fxfs, a SQLite file set, or a VM's memory image), a
+  root and a capacity, with one writer at a time, its log (open segment, write-ahead log, segments,
+  checkpoints), its head, its key (KEK, DEK), and its versions. It is the unit of concurrency,
+  placement, fencing, encryption and collection. A host holds it whole.
 - **A version** is a read-only state of a cell in its past, kept inside the cell. Only the cell's
   writer makes or drops one. Nothing else writes it.
 - **Making a version is local:** one commit in the cell's local log that closes its segment.
@@ -34,39 +32,27 @@ branch t3/one-log-per-cell, which built doc-19, is kept unmerged, as a reference
   writes the record naming them, last. The VM is paused, so the versions agree with no
   coordination; one cut short writes no record, and its versions are dropped. No bucket round trip
   and no cross-host coordination.
+- **An extent ID** names the cell that wrote the extent and the sequence number it gave it: an
+  Fxfs volume over a read-only base reads extents of another cell, which only the first half tells
+  apart (doc-10).
 
 ## Why
 
-A cell of several vdisks needed either one log per vdisk, so that a version of the whole cell took
-N pauses, N commits, N uploads, N head swaps and an object naming them (doc-18, cell cuts), or one
-log for all of them (doc-19), which moved the "several vdisks" into the store's core: per-vdisk
-uncommitted changes, space and roots, slots, a rule for closing segments other vdisks write in,
-vdisk handles to keep vdisks apart, and slots packed into extent IDs. The branch that built doc-19
-grew the code by about 3,700 lines. A paused VM needs none of it: a VM snapshot's versions agree
-because nothing writes while they are made.
-
-## Words
-
-Retired, in code, docs and the glossary, by the end of this work:
-
-| Retired | Say |
-|---|---|
-| vdisk | cell |
-| branch | cell (the extent ID's first half, too: the cell that wrote it) |
-| point | version (a shared point is a shared version) |
-| slot, namespace | none: a cell has one filesystem |
-| cut | make a version |
-
-Kept: the extent ID's first u64, which names the cell that wrote the extent: attached bases, Fxfs
-volumes over a read-only base of another cell, need it (doc-10).
+A cell holding several filesystems needed either a log for each, so that a version of the whole
+cell took N pauses, N commits, N uploads, N head swaps and an object naming them (doc-18), or one log
+for all of them (doc-19), which moved the several filesystems into the store's core: per-filesystem
+uncommitted changes, space and roots, numbers packed into extent IDs, a rule for closing segments
+others still write in, and handles to keep them apart. The branch that built doc-19 grew the code by
+about 3,700 lines. A paused VM needs none of it: a VM snapshot's versions agree because nothing
+writes while they are made.
 
 ## Order of work
 
 1. Docs, tasks and glossary (this doc).
-2. A cell has one filesystem: the cell object's vdisk map, add/remove vdisk, `cell_cut` and whole-
-   cell cuts go; a cell has a kind. A VM's disk and memory are cells of their own; the daemon, its
-   API, the FUSE mount and the Go bindings follow.
-3. Versions replace points: forks only from versions; a shared point is a shared version.
-4. The cell object and the head merge, and the types `Cell` and `Branch` become one.
-5. The rename: branch, vdisk and point leave the code (types, fields, protos, the extent ID's
-   `branch`, Fxfs's uses of it, the guest kernel's `vext_id`).
+2. A cell has one filesystem: the cell object names its one log and kind, `cell_cut` goes, and
+   the daemon, its API, the FUSE mount and the Go bindings make and open cells (TASK-508.1).
+3. Versions are the only named past states: forks only from versions (TASK-508.2).
+4. One concept, one type: the cell object and the head merge, and the types that name a cell today
+   (`Cell`, `Branch`, `cell::Filesystem`) become one, `Cell`: one filesystem with a kind, root and
+   capacity, on one log (TASK-508.3).
+5. The code, its protos and docs say the glossary's words throughout (TASK-508.4).

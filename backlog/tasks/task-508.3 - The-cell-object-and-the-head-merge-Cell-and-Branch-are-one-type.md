@@ -1,9 +1,10 @@
 ---
 id: TASK-508.3
-title: The cell object and the head merge; Cell and Branch are one type
+title: 'One concept, one type: a cell'
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:10'
+updated_date: '2026-11-18 00:24'
 labels:
   - bucket
 dependencies: []
@@ -16,7 +17,7 @@ ordinal: 900000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-With one filesystem per cell, a cell has exactly one head, so its object (holder, epoch, token, KEKs, shredded) and its head are two swapped objects for one thing, and Cell and Branch are two types for one name (doc-20).
+Today three types name what is one thing, a cell: one filesystem with a kind, a root and a capacity, on one log (doc-20). Cell (the cell object: holder, epoch, token, KEKs, shredded), Branch (its log, whose head is a second swapped object) and cell::Filesystem (its kind and log) fold into one, Cell, with one swapped object.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -37,8 +37,7 @@ socket.
 To show tenants' cells on the host as files, start `cladefsd` with `CLADEFSD_MOUNT` naming a mount
 point and `CLADEFSD_MOUNT_STORES` a directory for their stores: it mounts them with FUSE and serves
 the Mount service (`proto/cladefs/mount/v1/mount.proto`, Go `go/mount/v1`) on the same control
-socket. One daemon then holds every cell of the host, whether VMs or the mount serve its vdisks
-(TASK-475.2).
+socket. One daemon then holds every cell of the host, whether VMs or the mount serve it (TASK-475.2).
 
 ## Upgrading the daemon
 

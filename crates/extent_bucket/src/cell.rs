@@ -2,28 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: cells (TASK-364). A tenant's cell is its unit of placement: a host at a time holds it,
-//! and with it every one of its vdisks, each a branch of its own, kept under the cell's prefix
+//! cladefs: cells (TASK-364, doc-20). A tenant's cell is one filesystem, and its unit of placement:
+//! a host at a time holds it, and with it the branch that is its log, kept under the cell's prefix
 //! ([`Cell::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
-//! which placement's fencing token, and what vdisks it has.
+//! which placement's fencing token, and which branch, of what kind, its filesystem is.
 //!
 //! Taking a cell is one compare-and-swap of its object, to the next epoch, refused to a placement
 //! of a lower token than the one holding it ([`Error::Stale`]), as a branch's head is. The taker
-//! then takes each vdisk's branch's head with the cell's epoch as its token: a later taking of
-//! the cell, of a higher epoch, takes them from it, and its vdisks' writers learn of it as any
-//! writer taken over does, at their next upload; it can take none back, its epoch lower. So a cell
-//! moves whole, fenced by the branches' own heads, which nothing about cells changes.
+//! then takes its branch's head with the cell's epoch as its token: a later taking of the cell, of
+//! a higher epoch, takes it from it, and its writer learns of it as any writer taken over does, at
+//! its next upload; it can't take it back, its epoch lower. So a cell moves whole, fenced by its
+//! branch's own head, which nothing about cells changes.
 //!
-//! The vdisks a cell has change only by its holder, each change conditional on the object being
-//! as its holder last took or changed it: another's taking since fails it ([`Error::Fenced`]).
+//! A cell is made with no filesystem, and is given one by the first store of it its holder makes
+//! ([`hold`]): one, never another ([`Error::CellHasBranch`]).
 //!
 //! cladefs: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
 //! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`],
 //! [`make`]): every cell is made with one, none in the clear (TASK-411.28; [`crate::keys`]).
 //!
 //! cladefs: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
-//! ([`shred`], doc-16, Shredding; TASK-411.7): its branches' DEKs unwrap no more, and no one takes
-//! the cell again, nor writes a branch of it in the clear. Only as strong as the bucket keeps no
+//! ([`shred`], doc-16, Shredding; TASK-411.7): its branch's DEK unwraps no more, and no one takes
+//! the cell again, nor writes its branch in the clear. Only as strong as the bucket keeps no
 //! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
 
 use crate::branch::{Start, Step, transition, transition_leaving};
@@ -33,9 +33,8 @@ use crate::layout::{self, Branch, Cell, FORMAT};
 use crate::{Error, bucket, rules};
 use futures::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
-/// What a vdisk of a cell is: what its branch holds, which says what opens it.
+/// What a cell's filesystem is, which says what opens it (doc-20).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     /// An Fxfs filesystem.
@@ -62,20 +61,9 @@ impl Kind {
     }
 }
 
-/// The longest name a vdisk has.
-pub const MAX_NAME: usize = 64;
-
-/// Whether `name` may name a vdisk: 1 to [`MAX_NAME`] bytes of ASCII letters, digits, `.`, `_`
-/// and `-`, not starting with `.`: a name a host's directories and mounts show as it is.
-pub fn valid_name(name: &str) -> bool {
-    (1..=MAX_NAME).contains(&name.len())
-        && !name.starts_with('.')
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-}
-
-/// A vdisk of a cell: its branch, of the cell's, and what it holds.
+/// cladefs: a cell's filesystem (doc-20): the branch that is its log, and its kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Vdisk {
+pub struct Filesystem {
     pub branch: u64,
     pub kind: Kind,
 }
@@ -86,14 +74,14 @@ pub struct Object {
     /// The format of the cell's objects, its branches' among them ([`FORMAT`]), first, so that a
     /// reader of any format reads it before the rest.
     pub format: u32,
-    /// The epoch of its holder's taking, the token its vdisks' heads are taken with.
+    /// The epoch of its holder's taking, the token its branch's head is taken with.
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
     /// The fencing token of the placement that took it, which no lower one takes it from.
     pub token: u64,
-    /// Its vdisks, by their names.
-    pub vdisks: BTreeMap<String, Vdisk>,
+    /// Its filesystem, once its first store is made.
+    pub filesystem: Option<Filesystem>,
     /// Whether it was deleted: then no one takes it again.
     pub deleted: bool,
     /// cladefs: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first
@@ -106,14 +94,14 @@ pub struct Object {
 
 impl Object {
     /// cladefs: a cell's object as its maker makes it, held by `holder` of the placement of `token`
-    /// at epoch 1, of no volumes, its KEK `kek`.
+    /// at epoch 1, of no filesystem yet, its KEK `kek`.
     fn made(holder: u64, token: u64, kek: Kek) -> Self {
         Self {
             format: FORMAT,
             epoch: 1,
             holder,
             token,
-            vdisks: BTreeMap::new(),
+            filesystem: None,
             deleted: false,
             keks: vec![kek],
             shredded: false,
@@ -129,17 +117,17 @@ impl Object {
         layout::decode(bytes)
     }
 
-    /// The branch of its vdisk `name`, if it has one.
-    pub fn branch(&self, cell: Cell, name: &str) -> Option<Branch> {
-        self.vdisks.get(name).map(|vdisk| Branch { cell, id: vdisk.branch })
+    /// The branch of its filesystem, if it has one.
+    pub fn branch(&self, cell: Cell) -> Option<Branch> {
+        self.filesystem.map(|filesystem| Branch { cell, id: filesystem.branch })
     }
 }
 
-/// A taking of a cell: what changing it, and taking its vdisks' heads, goes by.
+/// A taking of a cell: what changing it, and taking its branch's head, goes by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
     pub cell: Cell,
-    /// The epoch of the taking: the token its vdisks' heads are taken with.
+    /// The epoch of the taking: the token its branch's head is taken with.
     pub epoch: u64,
     pub holder: u64,
 }
@@ -155,7 +143,7 @@ async fn change<R>(
     transition(bucket, &layout::cell(cell), start, decode, step).await
 }
 
-/// Creates `cell`, of no volumes, held by `holder` of the placement of `token` at epoch 1: a
+/// Creates `cell`, of no filesystem yet, held by `holder` of the placement of `token` at epoch 1: a
 /// create of another's finds its object there. cladefs: its KEK `kek` (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
@@ -173,7 +161,7 @@ pub async fn create(
     Ok(Held { cell, epoch: 1, holder })
 }
 
-/// cladefs: makes `cell`, of no vdisks, its KEK `kek`, as `holder` makes it, held by no placement
+/// cladefs: makes `cell`, of no filesystem yet, its KEK `kek`, as `holder` makes it, held by no placement
 /// (token 0), so that any placement takes it (TASK-411.4): what a fork into a new cell makes as it
 /// gives its child its keys, before the child's store opens, wherever it does. Returns the cell's
 /// object, and whether this made it: one there already, another's, is left as it is.
@@ -265,20 +253,19 @@ async fn change_held<R>(
 
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
 /// takes it as [`take`] does, a shredded one refused; or, if it has no object and `making` gives
-/// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given `vdisk`, has
-/// it hold that vdisk, under that name, unless it names the vdisk's branch already, under whatever
-/// name it gave it: refused, as [`add_vdisk`] refuses, if another branch has the name, or the name
-/// names no vdisk. A vdisk's name is its branch's from its first: a store of the branch taken into
-/// a directory of another name names it no other way.
-/// Returns the taking, and the object as it left it.
+/// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given
+/// `filesystem`, has it be that filesystem, unless it is already: refused if it is another branch's
+/// ([`Error::CellHasBranch`]), as a cell is one filesystem (doc-20). Returns the taking, and the
+/// object as it left it.
 pub async fn hold(
     bucket: &impl Bucket,
     cell: Cell,
     holding: (u64, u64),
     making: Option<&Kek>,
-    vdisk: Option<(&str, Vdisk)>,
+    filesystem: Option<Filesystem>,
 ) -> Result<(Held, Object), Error> {
-    let (held, object, _) = hold_from(bucket, cell, Start::Read, holding, making, vdisk).await?;
+    let (held, object, _) =
+        hold_from(bucket, cell, Start::Read, holding, making, filesystem).await?;
     Ok((held, object))
 }
 
@@ -293,13 +280,8 @@ pub async fn hold_from(
     start: Start,
     (holder, token): (u64, u64),
     making: Option<&Kek>,
-    vdisk: Option<(&str, Vdisk)>,
+    filesystem: Option<Filesystem>,
 ) -> Result<(Held, Object, Option<crate::bucket::Object>), Error> {
-    if let Some((name, _)) = vdisk
-        && !valid_name(name)
-    {
-        return Err(Error::VdiskName(name.into()));
-    }
     let decode = |bytes: &[u8]| Object::decode(cell, bytes);
     let ((held, object), left) =
         transition_leaving(bucket, &layout::cell(cell), start, decode, |found| {
@@ -314,14 +296,15 @@ pub async fn hold_from(
                 Some(found) if found.holder == holder => (found, false),
                 Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
             };
-            if let Some((name, vdisk)) = vdisk
-                && !object.vdisks.values().any(|had| had.branch == vdisk.branch)
-            {
-                if object.vdisks.contains_key(name) {
-                    return Err(Error::VdiskExists(name.into()));
+            match (object.filesystem, filesystem) {
+                (Some(had), Some(given)) if had.branch != given.branch => {
+                    return Err(Error::CellHasBranch(had.branch));
                 }
-                object.vdisks.insert(name.into(), vdisk);
-                changed = true;
+                (None, Some(given)) => {
+                    object.filesystem = Some(given);
+                    changed = true;
+                }
+                _ => {}
             }
             let held = Held { cell, epoch: object.epoch, holder };
             Ok(match changed {
@@ -331,39 +314,6 @@ pub async fn hold_from(
         })
         .await?;
     Ok((held, object, left))
-}
-
-/// Adds to the cell `held` holds the vdisk `name`, `vdisk`: [`Error::VdiskExists`] if it has
-/// one of that name, of another branch; [`Error::VdiskName`] if `name` names no vdisk
-/// ([`valid_name`]).
-pub async fn add_vdisk(
-    bucket: &impl Bucket,
-    held: Held,
-    name: &str,
-    vdisk: Vdisk,
-) -> Result<(), Error> {
-    if !valid_name(name) {
-        return Err(Error::VdiskName(name.into()));
-    }
-    change_held(bucket, held, |mut found| match found.vdisks.get(name) {
-        Some(&had) if had == vdisk => Ok(Step::Stop(())),
-        Some(_) => Err(Error::VdiskExists(name.into())),
-        None => {
-            found.vdisks.insert(name.into(), vdisk);
-            Ok(Step::Write(found, ()))
-        }
-    })
-    .await
-}
-
-/// Removes from the cell `held` holds its vdisk `name`, returning it: [`Error::NoVdisk`] if it
-/// has none of that name. Its branch stays, to be deleted.
-pub async fn remove_vdisk(bucket: &impl Bucket, held: Held, name: &str) -> Result<Vdisk, Error> {
-    change_held(bucket, held, |mut found| match found.vdisks.remove(name) {
-        Some(vdisk) => Ok(Step::Write(found, vdisk)),
-        None => Err(Error::NoVdisk(name.into())),
-    })
-    .await
 }
 
 /// cladefs: adds `kek`, a new generation of its KEK, to the cell `held` holds, if `held` holds it
@@ -388,7 +338,7 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
 /// cladefs: shreds `cell` (doc-16, Shredding; TASK-411.7): takes every generation of its KEK out of
 /// its object and marks it shredded, by one conditional update, whoever holds it: its branches'
 /// DEKs, wrapped by those KEKs, unwrap no more, and no one takes it again ([`take`], [`hold`]).
-/// Its holder, if any, goes on changing its vdisks until told (the mark stays, as every change
+/// Its holder, if any, goes on until told (the mark stays, as every change
 /// keeps the rest of the object); a host that unwrapped its KEK before keeps it until told too
 /// (`crate::keys::CachingKms::forget`). Shredded already, nothing changes. Returns how many
 /// generations of its KEK it took out: [`Error::NoCell`] if it has no object.
@@ -414,26 +364,25 @@ pub fn shredded(cell: Cell) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
 
-/// Takes out of `cell` the vdisk naming `branch`, deleted, if it names it: what any placement
-/// deleting the branch does, whoever holds the cell, as a deleted branch's name holds nothing, and
-/// changing the cell's vdisks so changes nothing of who holds it, nor its epoch.
+/// Takes `branch`, deleted, out of `cell`, if it is the cell's filesystem: what any placement
+/// deleting the branch does, whoever holds the cell, which changes nothing of who holds it, nor
+/// its epoch.
 pub async fn forget(bucket: &impl Bucket, cell: Cell, branch: u64) -> Result<(), Error> {
     change(bucket, cell, Start::Read, |found| match found {
-        Some(mut found) if found.vdisks.values().any(|vdisk| vdisk.branch == branch) => {
-            found.vdisks.retain(|_, vdisk| vdisk.branch != branch);
-            Ok(Step::Write(found, ()))
+        Some(found) if found.filesystem.is_some_and(|had| had.branch == branch) => {
+            Ok(Step::Write(Object { filesystem: None, ..found }, ()))
         }
         _ => Ok(Step::Stop(())),
     })
     .await
 }
 
-/// Marks the cell `held` holds deleted, so that no one takes it again, returning its vdisks, whose
-/// branches stay, to be deleted.
-pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<BTreeMap<String, Vdisk>, Error> {
+/// Marks the cell `held` holds deleted, so that no one takes it again, returning its filesystem,
+/// whose branch stays, to be deleted.
+pub async fn delete(bucket: &impl Bucket, held: Held) -> Result<Option<Filesystem>, Error> {
     change_held(bucket, held, |found| {
-        let vdisks = found.vdisks.clone();
-        Ok(Step::Write(Object { deleted: true, ..found }, vdisks))
+        let filesystem = found.filesystem;
+        Ok(Step::Write(Object { deleted: true, ..found }, filesystem))
     })
     .await
 }
@@ -479,15 +428,15 @@ mod tests {
     use crate::testing::{Direct, SimBucket};
     use futures::executor::block_on;
 
-    const FXFS: Vdisk = Vdisk { branch: 7, kind: Kind::Fxfs };
-    const SQLITE: Vdisk = Vdisk { branch: 8, kind: Kind::Sqlite };
+    const FXFS: Filesystem = Filesystem { branch: 7, kind: Kind::Fxfs };
+    const SQLITE: Filesystem = Filesystem { branch: 8, kind: Kind::Sqlite };
 
     /// A cell's KEK, wrapped, as its object keeps it: none of these tests unwraps it.
     fn kek() -> Kek {
         Kek { generation: crate::keys::FIRST, wrapped: extent_keys::Wrapped(vec![7; 40]) }
     }
 
-    /// A cell made is held by its maker at epoch 1, of no volumes; made again by its maker, whose
+    /// A cell made is held by its maker at epoch 1, of no filesystem yet; made again by its maker, whose
     /// answer was lost, it stands; by another, it exists. One that was never made has no object,
     /// and no one takes it.
     #[test]
@@ -504,7 +453,7 @@ mod tests {
             epoch: 1,
             holder: 0x11,
             token: 5,
-            vdisks: BTreeMap::new(),
+            filesystem: None,
             deleted: false,
             keks: vec![kek()],
             shredded: false,
@@ -594,19 +543,17 @@ mod tests {
     }
 
     /// A cell taken goes to the next epoch, its taker's; a placement of a lower token than the one
-    /// holding it takes it not. Its holder before holds it no more, and changes none of its vdisks.
+    /// holding it takes it not. Its holder before holds it no more, and changes nothing of it.
     #[test]
     fn takings_fence_the_holder_before() {
         let bucket = Direct(SimBucket::new());
         let first = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
-        block_on(add_vdisk(&bucket, first, "root", FXFS)).unwrap();
+        block_on(hold(&bucket, TEST_CELL, (0x11, 5), None, Some(FXFS))).unwrap();
         let second = block_on(take(&bucket, TEST_CELL, 0x12, 5)).unwrap();
         assert_eq!(second, Held { cell: TEST_CELL, epoch: 2, holder: 0x12 });
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x13, 4)), Err(Error::Stale));
         assert_eq!(block_on(holds(&bucket, first)), Ok(false));
         assert_eq!(block_on(holds(&bucket, second)), Ok(true));
-        assert_eq!(block_on(add_vdisk(&bucket, first, "db", SQLITE)), Err(Error::Fenced));
-        assert_eq!(block_on(remove_vdisk(&bucket, first, "root")), Err(Error::Fenced));
         assert_eq!(block_on(delete(&bucket, first)), Err(Error::Fenced));
         // Taken again by its taker, whose answer was lost, it stays at its epoch.
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 5)), Ok(second));
@@ -615,33 +562,35 @@ mod tests {
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x15, 5)), Err(Error::Stale));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.token), (3, 0x14, 6));
-        assert_eq!(object.vdisks, BTreeMap::from([("root".to_owned(), FXFS)]));
+        assert_eq!(object.filesystem, Some(FXFS));
     }
 
-    /// Its holder adds vdisks by name, each once: a name taken by another branch is refused; and
-    /// removes them, a name it has none of refused. A cell deleted keeps its vdisks' names, which
-    /// its deletion returns, and no one takes it or changes it again.
+    /// A cell is one filesystem (doc-20): held with it, it is that filesystem, held again with it
+    /// it stays so, and held with another branch's it refuses it, writing nothing. Deleted, it
+    /// returns its filesystem, whose branch stays to be deleted, and no one takes it again; a branch
+    /// deleted is forgotten by its cell.
     #[test]
-    fn holders_add_and_remove_vdisks() {
+    fn cells_are_one_filesystem() {
         let bucket = Direct(SimBucket::new());
-        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
-        block_on(add_vdisk(&bucket, held, "root", FXFS)).unwrap();
-        block_on(add_vdisk(&bucket, held, "db", SQLITE)).unwrap();
-        assert_eq!(block_on(add_vdisk(&bucket, held, "db", SQLITE)), Ok(()));
-        let taken = block_on(add_vdisk(&bucket, held, "db", FXFS));
-        assert_eq!(taken, Err(Error::VdiskExists("db".into())));
+        let (held, object) =
+            block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(FXFS))).unwrap();
+        assert_eq!((held.epoch, object.filesystem), (1, Some(FXFS)));
+        assert_eq!(object.branch(TEST_CELL), Some(Branch { cell: TEST_CELL, id: 7 }));
+        let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), None, Some(FXFS))).unwrap();
+        assert_eq!(again, held);
+        let refused = block_on(hold(&bucket, TEST_CELL, (6, 6), None, Some(SQLITE)));
+        assert_eq!(refused.map(|(held, _)| held), Err(Error::CellHasBranch(7)));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!(object.branch(TEST_CELL, "db"), Some(Branch { cell: TEST_CELL, id: 8 }));
-        assert_eq!(object.branch(TEST_CELL, "logs"), None);
-        assert_eq!(block_on(remove_vdisk(&bucket, held, "db")), Ok(SQLITE));
-        let none = block_on(remove_vdisk(&bucket, held, "db"));
-        assert_eq!(none, Err(Error::NoVdisk("db".into())));
-        let vdisks = block_on(delete(&bucket, held)).unwrap();
-        assert_eq!(vdisks, BTreeMap::from([("root".to_owned(), FXFS)]));
+        assert_eq!((object.epoch, object.holder, object.filesystem), (1, 5, Some(FXFS)));
+        block_on(forget(&bucket, TEST_CELL, 8)).unwrap();
+        assert_eq!(block_on(read(&bucket, TEST_CELL)).unwrap().unwrap().filesystem, Some(FXFS));
+        assert_eq!(block_on(delete(&bucket, held)), Ok(Some(FXFS)));
         assert_eq!(block_on(holds(&bucket, held)), Ok(false));
         assert_eq!(block_on(take(&bucket, TEST_CELL, 0x12, 9)), Err(Error::Deleted));
-        let added = block_on(add_vdisk(&bucket, held, "db", SQLITE));
-        assert_eq!(added, Err(Error::Deleted));
+        let other = Cell { tenant: 1, id: 9 };
+        block_on(hold(&bucket, other, (5, 5), Some(&kek()), Some(SQLITE))).unwrap();
+        block_on(forget(&bucket, other, 8)).unwrap();
+        assert_eq!(block_on(read(&bucket, other)).unwrap().unwrap().filesystem, None);
     }
 
     /// Holding a cell takes it, or makes it if it has no object and its holder may: a holder
@@ -659,53 +608,16 @@ mod tests {
         assert_eq!((made.epoch, object.epoch, object.holder), (1, 1, 5));
         let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), None)).unwrap();
         assert_eq!(again, made);
-        block_on(add_vdisk(&bucket, made, "root", FXFS)).unwrap();
+        block_on(hold(&bucket, TEST_CELL, (5, 5), None, Some(FXFS))).unwrap();
         let (taken, object) =
             block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), None)).unwrap();
         assert_eq!((taken.epoch, object.holder), (2, 6));
-        assert_eq!(object.vdisks, BTreeMap::from([("root".to_owned(), FXFS)]));
+        assert_eq!(object.filesystem, Some(FXFS));
     }
 
-    /// Holding a cell with a vdisk makes it hold the vdisk, in the one write of its taking, or
-    /// none; a vdisk whose branch the cell names already, under whatever name, is left as named:
-    /// its name is its branch's. A name another branch has is refused, writing nothing.
+    /// Kinds go by their names.
     #[test]
-    fn holding_with_a_vdisk_names_its_branch_once() {
-        let bucket = Direct(SimBucket::new());
-        let made = block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(("root", FXFS))));
-        let (made, object) = made.unwrap();
-        assert_eq!((made.epoch, object.vdisks.len()), (1, 1));
-        let again =
-            block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(("elsewhere", FXFS))));
-        let (_, object) = again.unwrap();
-        assert_eq!(object.vdisks, BTreeMap::from([("root".to_owned(), FXFS)]));
-        let taken = block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), Some(("db", SQLITE))));
-        let (taken, object) = taken.unwrap();
-        let both = BTreeMap::from([("db".to_owned(), SQLITE), ("root".to_owned(), FXFS)]);
-        assert_eq!((taken.epoch, &object.vdisks), (2, &both));
-        let other = Vdisk { branch: 9, kind: Kind::Fxfs };
-        let refused = block_on(hold(&bucket, TEST_CELL, (7, 7), Some(&kek()), Some(("db", other))));
-        assert_eq!(refused.map(|(held, _)| held), Err(Error::VdiskExists("db".into())));
-        let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
-        assert_eq!((object.epoch, object.holder, object.vdisks), (2, 6, both));
-        let bad = block_on(hold(&bucket, TEST_CELL, (7, 7), Some(&kek()), Some(("a/b", other))));
-        assert_eq!(bad.map(|(held, _)| held), Err(Error::VdiskName("a/b".into())));
-    }
-
-    /// Vdisks are named as a host's directories show them: letters, digits, `.`, `_` and `-`, up
-    /// to 64 of them, not starting with `.`; any other name is refused. Kinds go by their names.
-    #[test]
-    fn vdisks_are_named_plainly() {
-        for name in ["root", "db.sqlite", "a-b_c", "0", &"x".repeat(MAX_NAME)] {
-            assert!(valid_name(name), "{name}");
-        }
-        for name in ["", ".hidden", "a/b", "a b", "é", &"x".repeat(MAX_NAME + 1)] {
-            assert!(!valid_name(name), "{name}");
-        }
-        let bucket = Direct(SimBucket::new());
-        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
-        let refused = block_on(add_vdisk(&bucket, held, "a/b", FXFS));
-        assert_eq!(refused, Err(Error::VdiskName("a/b".into())));
+    fn kinds_are_named() {
         for kind in [Kind::Fxfs, Kind::Sqlite, Kind::Memory] {
             assert_eq!(Kind::named(kind.name()), Some(kind));
         }
@@ -724,7 +636,7 @@ mod tests {
                 epoch: 1,
                 holder: 0x11,
                 token: 5,
-                vdisks: BTreeMap::new(),
+                filesystem: None,
                 deleted: false,
                 keks: Vec::new(),
                 shredded: false,

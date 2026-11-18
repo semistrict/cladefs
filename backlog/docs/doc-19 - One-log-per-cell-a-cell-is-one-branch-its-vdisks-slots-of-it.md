@@ -3,9 +3,9 @@ id: doc-19
 title: 'One log per cell: a cell is one branch, its vdisks slots of it'
 type: specification
 created_date: '2026-11-17 02:45'
-updated_date: '2026-11-18 00:09'
+updated_date: '2026-11-18 00:24'
 ---
-> **Superseded** (2026-11-17) by doc-20, "A cell is one filesystem": there are no vdisks; a cell is one filesystem. Built on branch t3/one-log-per-cell, kept unmerged as a reference.
+> **Superseded** (2026-11-17) by doc-20, "A cell is one filesystem". Built on branch t3/one-log-per-cell, kept unmerged as a reference.
 
 # One log per cell: a cell is one branch, its vdisks slots of it
 

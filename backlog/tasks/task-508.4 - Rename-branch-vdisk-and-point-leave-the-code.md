@@ -1,9 +1,10 @@
 ---
 id: TASK-508.4
-title: 'Rename: branch, vdisk and point leave the code'
+title: The code says the glossary's words
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:11'
+updated_date: '2026-11-18 00:24'
 labels:
   - bucket
   - host
@@ -18,13 +19,13 @@ ordinal: 901000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-20 retires branch, vdisk, point, slot, namespace and cut. Once the structure is one filesystem per cell, the remaining names (types, fields, protos, the extent ID's branch, Fxfs's uses of it, the guest kernel's vext_id, docs) follow.
+Once one type names a cell (TASK-508.3), the identifiers, fields, protos, the extent ID's first half, Fxfs's uses of it, the guest kernel's vext_id and the docs still name the concepts the glossary no longer has. They follow the glossary (CONTEXT.md, doc-20).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 rg -i for vdisk, branch, point, slot, namespace and cut finds only the exceptions doc-20 lists
-- [ ] #2 Every test suite passes, on macOS and on ubu1
+- [ ] #1 Every test suite passes, on macOS and on ubu1
+- [ ] #2 Every identifier, proto name and doc names cells, versions and forks as CONTEXT.md does
 <!-- AC:END -->
 
 ## Definition of Done

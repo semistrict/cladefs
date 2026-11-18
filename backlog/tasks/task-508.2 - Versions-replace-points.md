@@ -1,9 +1,10 @@
 ---
 id: TASK-508.2
-title: Versions replace points
+title: Versions are the only named past states
 status: To Do
 assignee: []
 created_date: '2026-11-18 00:10'
+updated_date: '2026-11-18 00:24'
 labels:
   - bucket
   - host
@@ -17,14 +18,14 @@ ordinal: 899000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-A point is a frozen branch of its own that hosts fork; a version is a cell's past state kept inside it (doc-18). With forks only from versions (doc-20), points are a second way to name a past state. Making a version must stay local: one commit closing the segment, no bucket round trip.
+Two mechanisms name a past state today: a version, kept inside its cell (doc-18), and a frozen log of its own that hosts fork (the code's points: Record::point, ForkStore's point flag, SharePoint). doc-20 has forks made only from versions, so the second goes. Making a version must stay local: one commit closing the segment, no bucket round trip.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Forks are made only from versions, on the version's host locally or elsewhere once it is uploaded
-- [ ] #2 A shared point is a shared version; no point code is left
-- [ ] #3 Dropping a version with children keeps its data until they go
+- [ ] #2 Dropping a version with children keeps its data until they go
+- [ ] #3 Shared versions replace the code's shared points; nothing of the second mechanism is left
 <!-- AC:END -->
 
 ## Definition of Done

@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 //! The control API of a FUSE mount of many stores (TASK-302): gRPC, whose calls and errors are
-//! `proto/cladefs/mount/v1/mount.proto`'s, served on cladefsd's control socket (TASK-475.2). It attaches tenants' cells of the mount's
-//! bucket (TASK-364), each Fxfs vdisk of a cell taken into a store in the mount's directory of
-//! stores, at `TENANT/CELL/VDISK`, and shown at that path in the mount; and detaches them.
+//! `proto/cladefs/mount/v1/mount.proto`'s, served on cladefsd's control socket (TASK-475.2). It
+//! attaches tenants' cells of the mount's bucket (TASK-364), each one filesystem (doc-20), an Fxfs
+//! one taken into a store in the mount's directory of stores, at `TENANT/CELL`, and shown at that
+//! path in the mount; and detaches them.
 //!
 //! An attach or detach runs in a task of its own, which a caller giving up on it doesn't stop:
 //! a cell is attached or detached whole, or not at all.
@@ -51,17 +52,11 @@ pub(crate) fn service(
     MountServer::new(Control { server, stores, cells: Arc::default(), holds: Arc::default() })
 }
 
-/// The path a vdisk of `cell` named `name` has in the mount, and in its directory of stores:
-/// `TENANT/CELL/NAME`, the tenant and the cell in base 32, padded, as the bucket's keys have them
+/// The path `cell`'s filesystem has in the mount, and in its directory of stores: `TENANT/CELL`,
+/// the tenant and the cell in base 32, padded, as the bucket's keys have them
 /// (`base32_id::Padded`).
-pub fn vdisk_path(cell: Cell, name: &str) -> String {
-    format!("{}{name}", cell_dir(cell))
-}
-
-/// The directory of `cell`'s vdisks in the mount, and in its directory of stores, `TENANT/CELL/`
-/// ([`vdisk_path`]).
-fn cell_dir(cell: Cell) -> String {
-    format!("{}/{}/", Padded(cell.tenant), Padded(cell.id))
+pub fn cell_path(cell: Cell) -> String {
+    format!("{}/{}", Padded(cell.tenant), Padded(cell.id))
 }
 
 /// The cells attached, or being attached or detached, and the fencing token each was taken at.
@@ -74,7 +69,7 @@ enum Attaching {
     Busy,
     /// Attached, taken at the placement of this token, if one was given.
     Attached(Option<u64>),
-    /// Being detached: listed, its vdisks as they go.
+    /// Being detached: listed, its filesystem as it goes.
     Detaching,
 }
 
@@ -95,7 +90,7 @@ struct Control {
 /// detached, written back and closed, or failed to attach.
 type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::cladefsd::stores::MountHold>>>;
 
-/// Opens the store at `path` as [`mount_vdisk`] does, held for the mount first ([`Holds`]): `open`
+/// Opens the store at `path` as [`mount_cell`] does, held for the mount first ([`Holds`]): `open`
 /// opens it, given the hold, and keeps the hold in `holds` if it opens.
 fn held_open(
     holds: &Holds,
@@ -124,20 +119,20 @@ fn reserve(
     Ok(())
 }
 
-/// Takes `branch`, a vdisk of its cell, into a store at `path` in the bucket at `url`, of
-/// `capacity` bytes until its branch says its own, placed at `token` if given, and mounts its
-/// filesystem: made empty if `new`, its root the mounting user's, as the mount is.
-fn mount_vdisk(
+/// Takes a cell's filesystem, the branch `of` says, into a store at `path` in the bucket at `url`,
+/// of `capacity` bytes until its branch says its own, placed at `token` if given, and mounts it:
+/// made empty if new, its root the mounting user's, as the mount is.
+fn mount_cell(
     path: &Path,
     url: &str,
     (of, capacity): (BranchOf, u64),
     token: Option<u64>,
 ) -> Result<Filesystem, Error> {
     let new = matches!(of, BranchOf::New(_));
-    // Its tenant's and its cell's directories, made once for all their vdisks.
-    if let Some(cell) = path.parent() {
-        std::fs::create_dir_all(cell)
-            .map_err(|err| Error::new(err).context(format!("making {}", cell.display())))?;
+    // Its tenant's directory, made once for all its cells.
+    if let Some(tenant) = path.parent() {
+        std::fs::create_dir_all(tenant)
+            .map_err(|err| Error::new(err).context(format!("making {}", tenant.display())))?;
     }
     let storage = Storage::take(path, (of, capacity), url, token)?;
     let mounting = async {
@@ -155,8 +150,8 @@ fn mount_vdisk(
         .map_err(|err| err.context(format!("mounting {}", path.display())))
 }
 
-/// The capacity a store taking a vdisk of a cell is made with, until the vdisk's branch says
-/// its own, which every vdisk made here does as its filesystem is made: a block.
+/// The capacity a store taking a cell's filesystem is made with, until its branch says its own,
+/// which every filesystem made here does as it is made: a block.
 const TAKEN_CAPACITY: u64 = Storage::BLOCK_SIZE as u64;
 
 impl Control {
@@ -165,52 +160,42 @@ impl Control {
         self.server.upgrade().ok_or_else(|| Status::unavailable("the mount of cells is closed"))
     }
 
-    /// Attaches the Fxfs vdisks of `cell`'s `object` at their paths, as [`mount_vdisk`] takes
-    /// and mounts them, placed at `token` if given; on a failure, detaches those it attached, at
-    /// once, and fails. Returns them, by name.
-    async fn attach_vdisks(
+    /// Attaches `cell`'s filesystem at its path, as [`mount_cell`] takes and mounts it, placed at
+    /// `token` if given: a new one of `capacity` bytes if `new`, else the one `object` names, if
+    /// an Fxfs one. Returns its branch, or 0 if it shows none.
+    async fn attach_cell(
         &self,
         cell: Cell,
         object: &cell::Object,
+        (new, capacity): (bool, u64),
         token: Option<u64>,
-    ) -> Result<Vec<proto::Vdisk>, Error> {
+    ) -> Result<u64, Error> {
         let Some(server) = self.server.upgrade() else {
             return Err(Errno::ENOTCONN.into());
         };
-        let mut attached = Vec::new();
-        for (name, vdisk) in &object.vdisks {
-            if vdisk.kind != Kind::Fxfs {
-                continue;
+        let of = match (new, object.filesystem) {
+            (true, _) => (BranchOf::New(cell), capacity),
+            (false, Some(filesystem)) if filesystem.kind == Kind::Fxfs => {
+                (BranchOf::Taken(Branch { cell, id: filesystem.branch }), TAKEN_CAPACITY)
             }
-            let shown = vdisk_path(cell, name);
-            let path = self.stores.dir.join(&shown);
-            let url = self.stores.bucket.clone();
-            let branch = Branch { cell, id: vdisk.branch };
-            let (holds, held) = (self.holds.clone(), path.clone());
-            let open = async move {
-                let opened = tokio::task::spawn_blocking(move || {
-                    held_open(&holds, &path, || {
-                        mount_vdisk(&path, &url, (BranchOf::Taken(branch), TAKEN_CAPACITY), token)
-                    })
-                });
-                opened.await.map_err(Error::new)?
-            };
-            if let Err(err) = server.attach(&shown, open).await {
-                self.holds.lock().unwrap().remove(&held);
-                for name in attached.iter().map(|vdisk: &proto::Vdisk| &vdisk.name) {
-                    let shown = vdisk_path(cell, name);
-                    let detached = server.detach(&shown, true).await;
-                    if let Err(why) = detached {
-                        log::error!("fuse: detaching {name} of a cell attached part way: {why}");
-                    }
-                    self.holds.lock().unwrap().remove(&self.stores.dir.join(&shown));
-                }
-                return Err(err);
-            }
-            let named = proto::Vdisk { name: name.clone(), branch: vdisk.branch, detaching: false };
-            attached.push(named);
+            (false, _) => return Ok(0),
+        };
+        let shown = cell_path(cell);
+        let path = self.stores.dir.join(&shown);
+        let (url, holds, held) = (self.stores.bucket.clone(), self.holds.clone(), path.clone());
+        let opened = path.clone();
+        let open = async move {
+            let opened = tokio::task::spawn_blocking(move || {
+                held_open(&holds, &path, || mount_cell(&path, &url, of, token))
+            });
+            opened.await.map_err(Error::new)?
+        };
+        if let Err(err) = server.attach(&shown, open).await {
+            self.holds.lock().unwrap().remove(&held);
+            return Err(err);
         }
-        Ok(attached)
+        // Its branch's ID, the bucket's to give if new (TASK-364), as its description says.
+        Ok(extent_store::host_branch(&opened).map_err(Error::new)?.id)
     }
 }
 
@@ -220,9 +205,13 @@ impl proto::mount_server::Mount for Control {
         &self,
         request: Request<AttachRequest>,
     ) -> Result<Response<AttachResponse>, Status> {
-        let AttachRequest { tenant, cell, token } = request.into_inner();
-        // A cell of 0 is a new one, made as it is held; any other is the bucket's, or none.
+        let AttachRequest { tenant, cell, token, capacity } = request.into_inner();
+        // A cell of 0 is a new one, made as it is held, its filesystem with it; any other is the
+        // bucket's, or none.
         let make = cell == 0;
+        if make && capacity == 0 {
+            return Err(failed(Errno::EINVAL.into()));
+        }
         let cell = match cell {
             0 => crate::host_store::new_cell(tenant),
             id => Cell { tenant, id },
@@ -278,7 +267,7 @@ impl proto::mount_server::Mount for Control {
                     Ok::<_, Error>(object)
                 });
                 let object = held.await.map_err(Error::new)??;
-                control.attach_vdisks(cell, &object, token).await
+                control.attach_cell(cell, &object, (make, capacity), token).await
             }
             .await;
             let mut cells = control.cells.lock().unwrap();
@@ -288,53 +277,8 @@ impl proto::mount_server::Mount for Control {
             };
             attached
         });
-        let vdisks = attached.await?;
-        Ok(Response::new(AttachResponse { cell: cell.id, vdisks }))
-    }
-
-    async fn create_vdisk(
-        &self,
-        request: Request<CreateVdiskRequest>,
-    ) -> Result<Response<CreateVdiskResponse>, Status> {
-        let CreateVdiskRequest { tenant, cell, name, capacity } = request.into_inner();
-        let cell = Cell { tenant, id: cell };
-        if !cell::valid_name(&name) {
-            return Err(failed(Errno::EINVAL.into()));
-        }
-        let token = match self.cells.lock().unwrap().get(&cell) {
-            Some(Attaching::Attached(token)) => *token,
-            Some(Attaching::Busy | Attaching::Detaching) => {
-                return Err(failed(Errno::EBUSY.into()));
-            }
-            None => return Err(failed(Errno::ENOENT.into())),
-        };
-        let shown = vdisk_path(cell, &name);
-        let path = self.stores.dir.join(&shown);
-        if path.exists() {
-            return Err(failed(Errno::EEXIST.into()));
-        }
-        let (server, url) = (self.server()?, self.stores.bucket.clone());
-        let holds = self.holds.clone();
-        let made = whole(async move {
-            let made = path.clone();
-            let theirs = holds.clone();
-            let open = async move {
-                let opened = tokio::task::spawn_blocking(move || {
-                    held_open(&theirs, &path, || {
-                        mount_vdisk(&path, &url, (BranchOf::New(cell), capacity), token)
-                    })
-                });
-                opened.await.map_err(Error::new)?
-            };
-            if let Err(err) = server.attach(&shown, open).await {
-                holds.lock().unwrap().remove(&made);
-                return Err(err);
-            }
-            // Its branch's ID, the bucket's to give (TASK-364), as its description says.
-            extent_store::host_branch(&made).map_err(Error::new)
-        });
-        let branch = made.await?;
-        Ok(Response::new(CreateVdiskResponse { branch: branch.id }))
+        let branch = attached.await?;
+        Ok(Response::new(AttachResponse { cell: cell.id, branch }))
     }
 
     async fn detach(
@@ -351,11 +295,11 @@ impl proto::mount_server::Mount for Control {
         .map_err(|errno| failed(errno.into()))?;
         let (server, cells, holds) = (self.server()?, self.cells.clone(), self.holds.clone());
         let dir = self.stores.dir.clone();
-        let prefix = cell_dir(cell);
+        let path = cell_path(cell);
         let detached = whole(async move {
             let shown: Vec<String> = (server.attached().into_iter())
                 .map(|attached| attached.name)
-                .filter(|name| name.starts_with(&prefix))
+                .filter(|name| *name == path)
                 .collect();
             let detaching = shown.iter().map(|name| server.detach(name, force));
             let detached = futures::future::join_all(detaching).await;
@@ -367,7 +311,7 @@ impl proto::mount_server::Mount for Control {
             drop(held);
             // A store that failed to unmount is gone from the mount all the same
             // (`Server::detach`): the cell is no longer attached, and attaching it again opens its
-            // stores anew.
+            // store anew.
             cells.lock().unwrap().remove(&cell);
             match detached.into_iter().find_map(Result::err) {
                 Some(err) => Err(err),
@@ -387,25 +331,20 @@ impl proto::mount_server::Mount for Control {
         let listed = tokio::task::spawn_blocking(move || {
             (attached.into_iter())
                 .map(|cell| {
-                    let prefix = cell_dir(cell);
-                    let mut vdisks: Vec<proto::Vdisk> = (shown.iter())
-                        .filter_map(|attached| {
-                            let name = attached.name.strip_prefix(&prefix)?;
-                            let store = dir.join(&attached.name);
-                            let branch = match extent_store::host_branch(&store) {
-                                Ok(branch) => branch.id,
-                                Err(err) => {
-                                    log::error!("fuse: the branch of {}: {err:#}", store.display());
-                                    0
-                                }
-                            };
-                            let detaching = attached.detaching;
-                            Some(proto::Vdisk { name: name.to_owned(), branch, detaching })
-                        })
-                        .collect();
-                    // By name, as the API has them.
-                    vdisks.sort_by(|one, other| one.name.cmp(&other.name));
-                    AttachedCell { tenant: cell.tenant, cell: cell.id, vdisks }
+                    let path = cell_path(cell);
+                    let shown = shown.iter().find(|attached| attached.name == path);
+                    let branch = shown.map_or(0, |attached| {
+                        let store = dir.join(&attached.name);
+                        match extent_store::host_branch(&store) {
+                            Ok(branch) => branch.id,
+                            Err(err) => {
+                                log::error!("fuse: the branch of {}: {err:#}", store.display());
+                                0
+                            }
+                        }
+                    });
+                    let detaching = shown.is_some_and(|attached| attached.detaching);
+                    AttachedCell { tenant: cell.tenant, cell: cell.id, branch, detaching }
                 })
                 .collect()
         });
@@ -467,29 +406,20 @@ impl Client {
         Ok(Self { runtime, client: MountClient::new(channel) })
     }
 
-    /// Attaches `cell`, or a new cell of its tenant if its ID is 0, its lease taken at `token`'s
-    /// placement if given, and returns it and its vdisks shown (`Attach`).
+    /// Attaches `cell`, or a new cell of its tenant if its ID is 0, its filesystem a new Fxfs one
+    /// of `capacity` bytes, its lease taken at `token`'s placement if given, and returns it and the
+    /// branch of its filesystem shown, 0 if none (`Attach`).
     pub fn attach(
         &self,
         cell: Cell,
+        capacity: u64,
         token: Option<u64>,
-    ) -> Result<(Cell, Vec<proto::Vdisk>), Error> {
-        let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token };
+    ) -> Result<(Cell, u64), Error> {
+        let request = AttachRequest { tenant: cell.tenant, cell: cell.id, token, capacity };
         let response = self.call(format!("attaching cell {cell}"), |mut client| async move {
             client.attach(request).await
         })?;
-        Ok((Cell { id: response.cell, ..cell }, response.vdisks))
-    }
-
-    /// Makes a new Fxfs vdisk `name` of `capacity` bytes of `cell`, attached, and returns its
-    /// branch (`CreateVdisk`).
-    pub fn create_vdisk(&self, cell: Cell, name: &str, capacity: u64) -> Result<Branch, Error> {
-        let (tenant, id, name) = (cell.tenant, cell.id, name.to_owned());
-        let request = CreateVdiskRequest { tenant, cell: id, name: name.clone(), capacity };
-        let response = self.call(format!("making vdisk {name}"), |mut client| async move {
-            client.create_vdisk(request).await
-        })?;
-        Ok(Branch { cell, id: response.branch })
+        Ok((Cell { id: response.cell, ..cell }, response.branch))
     }
 
     /// Detaches `cell`, at once if `force` (`Detach`).
@@ -501,7 +431,7 @@ impl Client {
         Ok(())
     }
 
-    /// The cells attached, and their vdisks shown (`List`).
+    /// The cells attached (`List`).
     pub fn list(&self) -> Result<Vec<proto::AttachedCell>, Error> {
         let response = self.call("listing the cells".to_owned(), |mut client| async move {
             client.list(ListRequest {}).await

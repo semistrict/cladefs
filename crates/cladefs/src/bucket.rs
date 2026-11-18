@@ -89,10 +89,11 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     match failure {
         Failure::Bucket(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
-        Failure::Bucket(Error::NoBranch | Error::NoCell | Error::NoVdisk(_))
-        | Failure::PointDeleted => Some(Errno::ENOENT),
-        Failure::Bucket(Error::IdTaken(_) | Error::VdiskExists(_)) => Some(Errno::EEXIST),
-        Failure::Bucket(Error::VdiskName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
+        Failure::Bucket(Error::NoBranch | Error::NoCell) | Failure::PointDeleted => {
+            Some(Errno::ENOENT)
+        }
+        Failure::Bucket(Error::IdTaken(_) | Error::CellHasBranch(_)) => Some(Errno::EEXIST),
+        Failure::Bucket(Error::NotPoint(_)) => Some(Errno::EINVAL),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
@@ -2942,9 +2943,8 @@ mod tests {
         std::fs::create_dir(path).unwrap();
         let description =
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
-        let vdisk =
-            extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs };
-        extent_store::create_host(path, description, &url_of(bucket), vdisk).unwrap();
+        let kind = extent_bucket::cell::Kind::Fxfs;
+        extent_store::create_host(path, description, &url_of(bucket), kind).unwrap();
         extent_store::made_host(path).unwrap();
     }
 

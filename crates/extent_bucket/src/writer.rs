@@ -793,7 +793,7 @@ mod tests {
     use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_branch;
-    use crate::layout::{Contents, Segment, VersionCut, child};
+    use crate::layout::{Contents, NewVersion, Segment, child};
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
 
@@ -829,7 +829,7 @@ mod tests {
 
     /// Adds a segment of an empty commit tagged `tag` to `writer`, closed on its chain, the version
     /// `cut` cut at its end: returns its number.
-    fn cut(writer: &Writer<ObjectBucket>, tag: u64, cut: VersionCut) -> Result<u64, Error> {
+    fn cut(writer: &Writer<ObjectBucket>, tag: u64, cut: NewVersion) -> Result<u64, Error> {
         let commit = Commit { tag, ..Commit::default() };
         writer.add_segment(
             SegmentBuilder::from(commit)
@@ -838,8 +838,8 @@ mod tests {
         )
     }
 
-    fn version(id: u64, keep_last: Option<u32>) -> VersionCut {
-        VersionCut { id, cell_cut: None, keep_last }
+    fn version(id: u64, keep_last: Option<u32>) -> NewVersion {
+        NewVersion { id, keep_last }
     }
 
     /// The versions `head` names, by their IDs and the segments they are at.

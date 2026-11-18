@@ -184,6 +184,7 @@ pub use written::{Written, written};
 
 pub use cached::{CachedDir, CachedFile};
 pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
+pub use extent_bucket::cell::Kind;
 /// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::{Branch, Cell};
 pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
@@ -191,7 +192,7 @@ pub use host::{
     create_host, delete_host, host_branch, host_bucket, host_token, made_host, place_host,
     unmade_host,
 };
-pub use layout::{Description, Format, Place, Vdisk};
+pub use layout::{Description, Format, Place};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};

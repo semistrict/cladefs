@@ -697,15 +697,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
     // Another host, placed later, holds the clone's cell, through a bucket handle of its own.
     let elsewhere = ObjectBucket::new(objects, "");
     let later = host_store::keeping().unwrap().token + 1;
-    let vdisk =
-        extent_bucket::cell::Vdisk { branch: 1 << 40, kind: extent_bucket::cell::Kind::Fxfs };
-    let holding = extent_bucket::cell::hold(
-        &elsewhere,
-        clone.cell,
-        (later, later),
-        None,
-        Some(("another", vdisk)),
-    );
+    let holding = extent_bucket::cell::hold(&elsewhere, clone.cell, (later, later), None, None);
     extent_store::upload::block_on(holding).unwrap().unwrap();
     let opened = super::tests::reopened(made.at("vm"), super::tests::idle());
     assert_eq!(opened.err().and_then(|err| err.errno()), Some(crate::Errno::ESTALE));

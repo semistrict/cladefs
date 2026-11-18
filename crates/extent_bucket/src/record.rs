@@ -371,9 +371,10 @@ mod tests {
         // and 11's, whose clones made say they are forks a recorder may record (TASK-455); and
         // 12's, whose forks of points say nothing of being resumed (TASK-455's review); and 13's,
         // whose heads name no versions, nor footers the versions cut at their ends (TASK-476); and
-        // 14's, whose keys' numbers are in hexadecimal (TASK-504).
-        assert_eq!(FORMAT, 15);
-        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14] {
+        // 14's, whose keys' numbers are in hexadecimal (TASK-504); and 15's, whose cells name maps
+        // of vdisks (TASK-508.1).
+        assert_eq!(FORMAT, 16);
+        for format in [1u32, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(

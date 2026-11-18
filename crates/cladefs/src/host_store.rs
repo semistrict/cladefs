@@ -28,7 +28,7 @@ use extent_bucket::layout::{Branch, Cell, Child};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::{branch, cell};
 use extent_store::upload::{self, Failure, Uploader};
-use extent_store::{Description, HostDir, Options, Recovering, Store, Vdisk};
+use extent_store::{Description, HostDir, Options, Recovering, Store};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -112,16 +112,6 @@ pub enum BranchOf {
     /// branch they name.
     #[cfg(test)]
     Named(Branch),
-}
-
-/// The vdisk of its cell the store at `path` is, of `kind`: named as its directory is, which must
-/// be a name a vdisk may have (`extent_bucket::cell::valid_name`), else `EINVAL`.
-pub(crate) fn vdisk_at(path: &Path, kind: cell::Kind) -> Result<Vdisk, Failure> {
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    match cell::valid_name(name) {
-        true => Ok(Vdisk { name: name.to_owned(), kind }),
-        false => Err(extent_bucket::Error::VdiskName(name.to_owned()).into()),
-    }
 }
 
 /// What the name of the directory beside a store's that is its own file bucket ends with, where no
@@ -267,8 +257,8 @@ pub(crate) fn options() -> Options {
 }
 
 /// Makes a new store at `path`, which must not exist, holding at most `capacity` bytes, of the
-/// branch `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), a
-/// vdisk of `kind` of its branch's cell named as its directory is ([`vdisk_at`]), and opens it,
+/// branch `of` says, kept in this host's bucket, or a file bucket of its own ([`bucket_for`]), its
+/// cell's filesystem, of `kind` (doc-20), and opens it,
 /// its uploader as `keeping` says ([`open`]): whole, as made. Its directory entry is as durable as
 /// it is. A store that is not made whole is removed; what is at `path` already is left as it is.
 pub(crate) fn create(
@@ -295,7 +285,6 @@ pub(crate) fn create_unmade(
     bucket: Option<&str>,
     keeping: upload::Options,
 ) -> Result<Opened, Failure> {
-    let vdisk = vdisk_at(path, kind)?;
     std::fs::create_dir(path)
         .map_err(|err| Failure::local(err, format!("creating {}", path.display())))?;
     let made = || -> Result<Opened, Failure> {
@@ -318,7 +307,7 @@ pub(crate) fn create_unmade(
             BranchOf::Named(branch) => branch,
         };
         let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-        extent_store::create_host(path, description, &url, vdisk)?;
+        extent_store::create_host(path, description, &url, kind)?;
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
         let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
             .and_then(|parent| parent.sync_all());
@@ -516,8 +505,8 @@ fn taken(branch: Branch) -> anyhow::Error {
 
 /// Makes the store of `branch`, a fork of `parent`'s branch the bucket has the record of, in the
 /// directory at `path`, made empty: `prepare` writes into it first; then the store's directory, of
-/// the parent's capacity, naming the parent's bucket, the vdisk of its cell the parent is of its
-/// own, whole (TASK-364). It holds nothing of its own: opening it recovers the child from the
+/// the parent's capacity, naming the parent's bucket, of the parent's kind, its own cell's
+/// filesystem, whole (TASK-364, doc-20). It holds nothing of its own: opening it recovers the child from the
 /// bucket, as any store's opening does (TASK-165.9), and holds its cell, making it.
 fn make_child(
     parent: &Store<HostDir>,
@@ -529,11 +518,11 @@ fn make_child(
     let capacity = parent.description().capacity;
     let named = || anyhow::anyhow!("{} names no bucket", parent.dir().path().display());
     let url = parent.bucket().map(str::to_owned).ok_or_else(named)?;
-    let vdisk = parent.vdisk().cloned().ok_or_else(|| {
-        anyhow::anyhow!("{} is no vdisk of a cell", parent.dir().path().display())
+    let kind = parent.kind().ok_or_else(|| {
+        anyhow::anyhow!("{} is no cell's filesystem", parent.dir().path().display())
     })?;
     let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-    extent_store::create_host(path, description, &url, vdisk)?;
+    extent_store::create_host(path, description, &url, kind)?;
     extent_store::made_host(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
     std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
