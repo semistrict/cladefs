@@ -23,6 +23,10 @@ storage_ptr_slice.workspace = true
 thiserror.workspace = true
 zx.workspace = true
 
+# cladefs: a host's buffers, anonymous memory (buffer_allocator.rs).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 # cladefs: what the fuzz targets (crates/fxfs/fuzz) make extents of.
 [target.'cfg(fuzz)'.dependencies]
 arbitrary.workspace = true

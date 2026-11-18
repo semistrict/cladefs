@@ -28,23 +28,26 @@ unsafe impl Send for CopyingWindow {}
 unsafe impl Sync for CopyingWindow {}
 
 impl CopyingWindow {
-    /// Four regions of 16 MiB, with the default options.
-    pub const SIZE: u64 = 64 << 20;
-
-    /// A window of [`Self::SIZE`] bytes, aligned to `block_size`.
-    pub fn new(block_size: u32) -> Self {
-        let layout = Layout::from_size_align(Self::SIZE as usize, block_size as usize);
+    /// A window of `size` bytes, aligned to `block_size`: no more than a test's file set maps, as
+    /// each is filled when made, and a test may make one each time it opens its file set.
+    pub fn new(size: u64, block_size: u32) -> Self {
+        let layout = Layout::from_size_align(size as usize, block_size as usize);
         let layout = layout.expect("a layout");
+        assert!(layout.size() > 0, "a window of no bytes");
         // SAFETY: a layout of some bytes.
         let memory = NonNull::new(unsafe { std::alloc::alloc(layout) }).expect("memory");
-        // SAFETY: the memory allocated, `SIZE` bytes.
-        unsafe { memory.as_ptr().write_bytes(UNMAPPED, Self::SIZE as usize) };
+        // SAFETY: the memory allocated, `size` bytes.
+        unsafe { memory.as_ptr().write_bytes(UNMAPPED, layout.size()) };
         Self { memory, layout }
+    }
+
+    fn size(&self) -> u64 {
+        self.layout.size() as u64
     }
 
     #[allow(clippy::mut_from_ref)]
     fn bytes(&self, at: u64, len: u64) -> &mut [u8] {
-        assert!(at + len <= Self::SIZE);
+        assert!(at + len <= self.size());
         // SAFETY: within the memory, which the file set changes under its lock alone.
         unsafe {
             std::slice::from_raw_parts_mut(self.memory.as_ptr().add(at as usize), len as usize)
@@ -61,7 +64,7 @@ impl Drop for CopyingWindow {
 
 impl FileSetWindow for CopyingWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
-        (self.memory, Self::SIZE)
+        (self.memory, self.size())
     }
 
     fn map(&self, device: &dyn Device, runs: &[Run]) -> anyhow::Result<()> {
