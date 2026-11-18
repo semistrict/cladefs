@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-18T15:52:00Z'
+updated_date: '2026-11-18T16:19:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -46,13 +46,13 @@ tail and drop it as the head acknowledges it.
 | **PacificA / chain replication with a master** | a configuration master | f+1 | all replicas in the configuration | the master removes a failed replica; a new primary is any member of the configuration | Fewest copies, but one slow peer stalls every commit until the master removes it, and every removal is a bucket write on the commit's path. The user chose a majority quorum. |
 | **Kafka ISR** | controller (ZooKeeper/KRaft) | f+1 in sync | all of the ISR | the leader is elected from the ISR; the ISR shrinks by a controller write | Same trade as PacificA, with a shrinking set: a bucket write each time a peer is slow. |
 | **Apache BookKeeper** ledgers | ZooKeeper metadata: ensemble, ledger state OPEN / IN_RECOVERY / CLOSED | ensemble E, write quorum Qw, ack quorum Qa | Qa of Qw | a reader *fences* the ledger on enough bookies that no ack quorum is left, reads the last entry, re-replicates it, closes the ledger in ZK | Close to what we need: ZK becomes the bucket, a ledger becomes a configuration. Its ensemble changes in the middle of a ledger are recorded in the metadata, as our replica replacement would be. |
-| **Delos VirtualLog / loglets** (Meta) | a metastore holds the chain of loglets | per loglet | per loglet | *seal* the active loglet, append a new loglet to the chain in the metastore | The same shape: each configuration is a write-once log, sealed when superseded, chained by the authority. Our chain needs only its last element, as the bucket holds everything before it. |
+| **Delos VirtualLog / loglets** (Meta) | a metastore holds the chain of loglets | per loglet | per loglet | *seal* the active loglet, append a new loglet to the chain in the metastore | The same shape: each configuration is a write-once log, fenced when superseded, chained by the authority. Our chain needs only its last element, as the bucket holds everything before it. |
 | **Vertical Paxos II** (Lamport, Malkhi, Zhou) | an external master | 2f+1 per configuration | majority of the configuration | the new configuration gets the state from the old one, and the master *activates* it before the old one is forgotten | The theory behind the two above: why an activation write is needed, and when the old configuration can be dropped. |
 | **Amazon Aurora** storage | storage-node epochs, volume membership in its control plane | 6 copies across 3 AZs | 4 of 6 | quorum read of 3 of 6 at recovery, epoch bump fences old writers on the storage nodes | Quorum writes with epoch fencing kept on the replicas themselves, quorum reads only at recovery. That is our steady state and our recovery. |
 | **Neon safekeepers** | the safekeepers, by a Paxos-like term election | 3 | majority | the new compute's proposer runs phase 1 on the safekeepers, picks the most advanced WAL, truncates the rest | Postgres WAL → a majority of safekeepers → S3: our pipeline. Its own election is what the bucket replaces for us. |
 | **Cloudflare Durable Objects (SQLite storage)** | Cloudflare's placement | 5 followers | 3 of 5 | from the followers; the WAL also goes to object storage in batches | The product TASK-96 takes as its model: a majority of nearby followers on the commit path, and object storage behind it. |
 
-**Chosen: quorum-acked primary-backup, reconfigured only by the bucket's CAS.** This is not Paxos run among the members. No member votes, and there are no ballots per entry and no elections. One writer appends to each configuration, and every change of writer or members is a conditional write of the head. Vertical Paxos is the published form of this pattern (an external master reconfigures; the replicas only accept), and BookKeeper and Delos build it. Bucket CAS cannot do three things, and they are all the protocol adds: sealing the old members on a take (members don't read the bucket on every append, so CAS alone does not stop a zombie writer from gathering acks), reading f+1 members at recovery (which the majority quorum requires), and activating the new configuration with a second CAS before serving (so that a take which crashes halfway leaves the old configuration authoritative). The spec's mutations `NoSeal`, `ReadOneMember` and `NoActivation` show each of the three is needed. A cell's replication runs through a sequence of *configurations*. Each is a set of 2f+1 members (the writer and 2f peers) that holds a write-once log of the commits since the bucket's end. The bucket's head names the active configuration. A configuration is never changed: a take, or a replacement of a peer, makes a new one, copies into it what recovery found, and activates it with a conditional write of the head. A superseded configuration is sealed, then dropped.
+**Chosen: quorum-acked primary-backup, reconfigured only by the bucket's CAS.** This is not Paxos run among the members. No member votes, and there are no ballots per entry and no elections. One writer appends to each configuration, and every change of writer or members is a conditional write of the head. Vertical Paxos is the published form of this pattern (an external master reconfigures; the replicas only accept), and BookKeeper and Delos build it. Bucket CAS cannot do three things, and they are all the protocol adds: fencing the old members on a take (members don't read the bucket on every append, so CAS alone does not stop a zombie writer from gathering acks), reading f+1 members at recovery (which the majority quorum requires), and activating the new configuration with a second CAS before serving (so that a take which crashes halfway leaves the old configuration authoritative). The spec's mutations `NoFence`, `ReadOneMember` and `NoActivation` show each of the three is needed. A cell's replication runs through a sequence of *configurations*. Each is a set of 2f+1 members (the writer and 2f peers) that holds a write-once log of the commits since the bucket's end. The bucket's head names the active configuration. A configuration is never changed: a take, or a replacement of a peer, makes a new one, copies into it what recovery found, and activates it with a conditional write of the head. A superseded configuration is sealed, then dropped.
 
 Within one configuration there is one writer and one sequence, so every member's log is a prefix of the writer's. Recovery picks the longest of the logs it read: no terms per entry, no truncation of conflicting suffixes. That is the simplification over Raft that the bucket's authority pays for.
 ## The protocol
@@ -100,7 +100,7 @@ replicas/<tenant>/<cell>/<config>/logs/<n>      the writer's log n: its header, 
 replicas/<tenant>/<cell>/promise                the greatest epoch it promised (synced, small)
 ```
 
-**Incarnations** (found by TLC, TASK-537.2): a member's promises live on its disk, so a host that lost its disk lost them. A zombie writer could then fill the empty host's log again and gather its quorum, and a host that lost its disk could retake the cell and count its own copy, now empty, as the old writer's. So each daemon's `replicas/` directory has an incarnation, a random 64-bit number made when the directory is created, and kept in it. A configuration names its members as (address, incarnation). A member refuses an `Open`, `Append` or `Seal` that names another incarnation, and a taker counts a member's read only in the incarnation the head names, its own included. This is BookKeeper's cookies. The spec's `NoIncarnation` mutation loses an acknowledged commit without it.
+**Incarnations** (found by TLC, TASK-537.2): a member's promises live on its disk, so a host that lost its disk lost them. A zombie writer could then fill the empty host's log again and gather its quorum, and a host that lost its disk could retake the cell and count its own copy, now empty, as the old writer's. So each daemon's `replicas/` directory has an incarnation, a random 64-bit number made when the directory is created, and kept in it. A configuration names its members as (address, incarnation). A member refuses an `Open`, `Append` or `Fence` that names another incarnation, and a taker counts a member's read only in the incarnation the head names, its own included. This is BookKeeper's cookies. The spec's `NoIncarnation` mutation loses an acknowledged commit without it.
 
 A member therefore holds what the bucket holds and no more: data in ciphertext, and commit metadata
 (`Contents`: extent IDs, offsets, the root) in the clear but MACed, as framed footers are in the bucket
@@ -113,7 +113,7 @@ than take them.
 | RPC | What |
 |---|---|
 | `Append(stream AppendRequest) → stream AppendResponse` | One stream from a writer to a member for each (cell, configuration). `Open{cell, config, epoch, members, incarnation}` first, then `Log{n, header}`, `Records{n, bytes}`, and `Acknowledged{through_n}` (the bucket's end, below). The member answers `End{tag}` after each sync. It refuses everything if `epoch < promise` (`FAILED_PRECONDITION`, with its promise). |
-| `Seal{cell, config, epoch} → {logs: [(n, len)], end}` | Raises the promise to `epoch`, synced, before it answers. Appends of any older epoch are refused afterwards. It returns what it holds of that configuration. |
+| `Fence{cell, config, epoch} → {logs: [(n, len)], end}` | Raises the promise to `epoch`, synced, before it answers. Appends of any older epoch are refused afterwards. It returns what it holds of that configuration. |
 | `ReadLog{cell, config, n, from} → stream bytes` | A log's bytes, for recovery. |
 | `Drop{cell, below_config}` | Removes the logs of configurations older than this one. |
 
@@ -147,21 +147,21 @@ The new writer `W'`, at the VM manager's take, on any host:
 
 1. **Take the head**, epoch `e' = e+1` (`head::take`, as today). The head still names the active
    configuration `c`, members `M`.
-2. **Seal.** Send `Seal{cell, c, e'}` to every member of `M`, and wait for **f+1 answers from
+2. **Fence.** Send `Fence{cell, c, e'}` to every member of `M`, and wait for **f+1 answers from
    members other than the old writer**. The old writer's own copy counts only when `W'` is that host
    and holds that WAL itself (a reopen on the same host). The arithmetic:
-   - The old writer `W` cannot be sealed. It may be alive (a zombie, cut off from the bucket but not
-     from its peers), and it counts its own copy. If `W'` sealed only f+1 of all members, `W` plus
-     f unsealed peers would still make f+1, and `W` could tell the guest a commit was Replicated that
+   - The old writer `W` cannot be fenced. It may be alive (a zombie, cut off from the bucket but not
+     from its peers), and it counts its own copy. If `W'` fenced only f+1 of all members, `W` plus
+     f unfenced peers would still make f+1, and `W` could tell the guest a commit was Replicated that
      `W'` never reads.
-   - With f+1 of the 2f peers sealed, at most f−1 peers are unsealed. `W` plus those is f < f+1, so
-     no new commit reaches Replicated after the seals.
+   - With f+1 of the 2f peers fenced, at most f−1 peers are unfenced. `W` plus those is f < f+1, so
+     no new commit reaches Replicated after the fences.
    - Every commit that did reach Replicated is on f peers besides `W`. f + (f+1) > 2f, so at least
-     one sealed peer holds it.
-3. **Read.** Take the log with the greatest end among the sealed members' answers (members drop
+     one fenced peer holds it.
+3. **Read.** Take the log with the greatest end among the fenced members' answers (members drop
    acknowledged segments at different times, so the greatest end, not the most bytes). All of them are prefixes of
    `W`'s one sequence in configuration `c`, so the longest contains each of the others: there are no
-   conflicts to resolve, no per-entry terms, no truncation. Fetch it (`ReadLog`, from any sealed
+   conflicts to resolve, no per-entry terms, no truncation. Fetch it (`ReadLog`, from any fenced
    members that hold each log), verify its MACs, and write it as the local logs of `W'`.
 4. **Rebase** with the existing code (`Wal::rebase`, `bucket_cell/src/wal.rs:148`): the records
    through the head's `last_commit` are the bucket's already, and the rest is restamped onto
@@ -173,12 +173,12 @@ The new writer `W'`, at the VM manager's take, on any host:
 6. **Activate:** a conditional swap of the head to `replicas = c+1`. Only then does `W'` serve.
    Then `Drop{cell, c+1}` to `M`, best effort (stale logs are also swept, below).
 
-A crash anywhere in 1–6 leaves the head naming `c`, whose sealed logs nothing changed. The next take
-seals `c` again, at a greater epoch, and finds the same commits or more. Configuration `c+1`'s logs
+A crash anywhere in 1–6 leaves the head naming `c`, whose fenced logs nothing changed. The next take
+fences `c` again, at a greater epoch, and finds the same commits or more. Configuration `c+1`'s logs
 are separate files, even on a host that is a member of both, so a half-done install touches nothing
 that recovery reads. This activation, a second head write on each take, is what Vertical Paxos says a
 new configuration needs before the old one may be forgotten. Without it, a take that crashed after
-sealing would leave the next take reading an incomplete configuration.
+fencing would leave the next take reading an incomplete configuration.
 
 A cell whose head names no `replicas` takes as today. So does a take that finds `f = 0`.
 
@@ -196,7 +196,7 @@ mode:
    `c+1`**: a taker may find either in the head. After the swap lands, only `c+1` counts. This is
    Raft's joint consensus, for one write.
 
-`W` needs no seal of `c`, as no one else appends to it, and `W` itself stops counting it once the
+`W` needs no fence of `c`, as no one else appends to it, and `W` itself stops counting it once the
 swap lands.
 
 ### Degraded
@@ -251,7 +251,7 @@ minutes at 11M states and more.
 
 | Model | What it covers | Distinct states | Time on ubu1 |
 |---|---|---|---|
-| `Replication` | takes: zombies, seals, recovery, activation; 1 commit, 3 takes | 182,512 | 6 s |
+| `Replication` | takes: zombies, fences, recovery, activation; 1 commit, 3 takes | 182,512 | 6 s |
 | `ReplicationCommits` | 3 commits, 2 takes: recovery takes the longest prefix | 136,441 | 5 s |
 | `ReplicationUploads` | uploads and drops, 2 commits, 2 takes | 2,326,920 | 101 s |
 | `ReplicationReplaces` | a replacement, its swap landing and learned, under takes | 3,793,205 | 190 s |
@@ -282,9 +282,9 @@ configuration other than the old writer are up (TASK-537.3 tests them on daemons
 
 | Mutation | Breaks |
 |---|---|
-| `NoSeal`: read without sealing | a zombie's ack lost |
-| `SealCountsWriter`: f+1 seals counting the old writer's member | a zombie's ack lost |
-| `ReadOneMember`: recover from one sealed member, not the longest of f+1 | an ack lost |
+| `NoFence`: read without fencing | a zombie's ack lost |
+| `FenceCountsWriter`: f+1 fences counting the old writer's member | a zombie's ack lost |
+| `ReadOneMember`: recover from one fenced member, not the longest of f+1 | an ack lost |
 | `ActivateBeforeInstall`: swap the head before f+1 members of `c+1` hold the tail | an ack lost after a second take |
 | `NoActivation`: serve from `c+1` with the head still naming `c` | a crash-retake loses `c+1`'s acks |
 | `NoJointRule`: count only `c+1` while its swap is in flight | an ack lost |
@@ -357,7 +357,7 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
   always. "Degraded" only names the state for the stats, the eager uploads and the replacement.
 - **No authentication for now** (the user's word, 2026-11-18). Integrity still holds, since recovery
   checks the records' MACs. A hostile host on the network could still deny service: refuse,
-  seal, or drop appends, which degrades the cell to Uploaded.
+  fence, or drop appends, which degrades the cell to Uploaded.
 - **The option is per cell**, set by `CreateCell` and `PlaceCell` (`f`, `fsync`), kept in the
   `store` file's `CellFile`. `f` goes into the head too, as part of each configuration.
 
@@ -366,10 +366,10 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 1. The head's `replicas` (bucket format 20), the per-cell options through the proto (`CreateCell`
    fields 9 and 10, `PlaceCell`), and the `CellFile` keys.
 2. The member's side: the peer RPCs, its logs and promise, written O_DIRECT through
-   `local_cell::pages`, then `Seal`, `ReadLog`, `Drop` and the sweep.
+   `local_cell::pages`, then `Fence`, `ReadLog`, `Drop` and the sweep.
 3. The writer's side: Held records from each flush to the streams, the members' ends, the
    Replicated waiter, and the commit levels in `OpenCell::commit_and_wait` (`open_cell.rs:1557`).
-4. Take: seal, read, rebase of a tail after `last_commit`, install, activate, in `upload::start`
+4. Take: fence, read, rebase of a tail after `last_commit`, install, activate, in `upload::start`
    (`upload.rs:1012`) before `Recovering::open`.
 5. Replacement and degraded mode, with metrics.
 6. Tests: unit tests of each side with fake links; `bucket_cell`'s simulation with members (a

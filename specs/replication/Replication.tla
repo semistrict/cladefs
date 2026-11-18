@@ -25,14 +25,14 @@
 (*   when they will: delays, loss (never taken) and a zombie writer are    *)
 (*   all behaviours of it.                                                 *)
 (* - A member's log of each configuration (`mlog`), how much of it it      *)
-(*   dropped (`drop`), and its promise: the greatest epoch that sealed it. *)
+(*   dropped (`drop`), and its promise: the greatest epoch that fenced it. *)
 (*   Its writer's own copy, on its own host, is a member too, but takes    *)
 (*   no notice of promises (it is the writer's local WAL).                 *)
 (* - A host's incarnation (`inc`), new each time its disk is lost: a       *)
 (*   member is a host in an incarnation, and a host whose disk was lost,   *)
 (*   its promises with it, is no longer that member (BookKeeper's          *)
 (*   cookies).                                                             *)
-(* - Writers: a take (seal, recover, install, activate), commits,          *)
+(* - Writers: a take (fence, recover, install, activate), commits,          *)
 (*   Replicated acknowledgements, uploads in two steps (land, then the     *)
 (*   head's swap), replacements of members (or a drop to f = 0) by a CAS   *)
 (*   that lands, then is learned. A writer never learns it was fenced but  *)
@@ -48,11 +48,11 @@
 (* The protocol's rules, each a member of Rules; specs/replication/        *)
 (* mutations removes one each, and must find the violation it prevents:    *)
 (*                                                                         *)
-(* - seal: a take raises the promise of the members it reads, so that the *)
-(*   old writer's appends are refused after (NoSeal).                      *)
-(* - sealOthers: a take reads f+1 members other than the old writer, whose *)
-(*   own copy no seal stops, unless the taker is that host                 *)
-(*   (SealCountsWriter).                                                   *)
+(* - fence: a take raises the promise of the members it reads, so that the *)
+(*   old writer's appends are refused after (NoFence).                      *)
+(* - fenceOthers: a take reads f+1 members other than the old writer, whose *)
+(*   own copy no fence stops, unless the taker is that host                 *)
+(*   (FenceCountsWriter).                                                   *)
 (* - longest: a take recovers from the longest log it read (ReadOneMember).*)
 (* - installFirst: a configuration is activated (or replaces another) only *)
 (*   once f+1 of its members hold what its writer has told                 *)
@@ -85,7 +85,7 @@ CONSTANTS
     Can,            \* the kinds of step the model takes, of AllCan
     Rules           \* the protocol's rules in force (all, but in a mutation)
 
-AllRules == {"seal", "sealOthers", "longest", "installFirst", "activate", "joint",
+AllRules == {"fence", "fenceOthers", "longest", "installFirst", "activate", "joint",
              "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum"}
 
 ASSUME Rules \subseteq AllRules
@@ -94,7 +94,7 @@ ASSUME NoHost \notin Hosts
 \* The kinds of step a model may leave out, so that each model checks the rules its steps reach
 \* in minutes: uploads (land, acknowledge), members' drops of what the head acknowledged, sweeps
 \* of configurations the head no longer names, and replacements dropping to f = 0 (with "zero",
-\* every replacement is such a drop: replacements keeping f are checked by the models without it). Takes, seals,
+\* every replacement is such a drop: replacements keeping f are checked by the models without it). Takes, fences,
 \* commits, deliveries, Replicated acknowledgements, replacements, crashes and losses are always
 \* in (bounded by their Max constants).
 AllCan == {"upload", "drop", "sweep", "zero"}
@@ -115,7 +115,7 @@ Later(k, j) == k[1] > j[1] \/ (k[1] = j[1] /\ k[2] > j[2])
 
 NoCfg == [key |-> <<0, 0>>, f |-> 0, w |-> NoHost, members |-> {}]
 NoReply == [log |-> <<>>, drop |-> 0]
-NoSes == [st |-> "none", ep |-> 0, old |-> NoCfg, sealed |-> {},
+NoSes == [st |-> "none", ep |-> 0, old |-> NoCfg, fenced |-> {},
           replies |-> [h \in Hosts |-> NoReply], cfg |-> NoCfg, pend |-> NoCfg, issued |-> FALSE,
           landed |-> 0, replaces |-> 0]
 
@@ -125,7 +125,7 @@ VARIABLES
     cfgs,       \* cfgs[k]: configuration k, as its writer made it
     mlog,       \* mlog[h][k]: host h's log of configuration k
     drop,       \* drop[h][k]: how much of it h dropped
-    promise,    \* promise[h]: the greatest epoch that sealed h
+    promise,    \* promise[h]: the greatest epoch that fenced h
     inc,        \* inc[h]: h's incarnation
     ses,        \* ses[h]: the writer session on h, or NoSes
     told,       \* the commits told Replicated or Uploaded
@@ -153,7 +153,7 @@ ToldLen(log) == LET ks == {k \in 0..Len(log) : Range(SubSeq(log, 1, k)) \subsete
 
 TypeOK ==
     /\ head.epoch \in 0..MaxTakes
-    /\ \A h \in Hosts : ses[h].st \in {"none", "sealing", "installing", "serving"}
+    /\ \A h \in Hosts : ses[h].st \in {"none", "fencing", "installing", "serving"}
     /\ told \subseteq Ids
 
 Init ==
@@ -207,12 +207,12 @@ Drop(h, k) ==
 (* A take                                                                  *)
 (***************************************************************************)
 
-\* h seals member m of configuration c at epoch e (without the rule seal, reads it only).
-SealOf(m, c, e) ==
-    [promise EXCEPT ![m] = IF R("seal") THEN Max(@, e) ELSE @]
+\* h fences member m of configuration c at epoch e (without the rule fence, reads it only).
+FenceOf(m, c, e) ==
+    [promise EXCEPT ![m] = IF R("fence") THEN Max(@, e) ELSE @]
 
 \* The VM manager takes the cell on h: the head's epoch raised by a CAS. A taker that was a member
-\* of the active configuration seals and reads its own copy at once.
+\* of the active configuration fences and reads its own copy at once.
 Take(h) ==
     LET e == head.epoch + 1
         c == head.cfg
@@ -221,34 +221,34 @@ Take(h) ==
     /\ ses[h].st = "none"
     /\ e <= MaxTakes
     /\ head' = [head EXCEPT !.epoch = e]
-    /\ promise' = IF self THEN SealOf(h, c, e) ELSE promise
-    /\ ses' = [ses EXCEPT ![h] = [NoSes EXCEPT !.st = "sealing", !.ep = e, !.old = c,
-                  !.sealed = IF self THEN {h} ELSE {},
+    /\ promise' = IF self THEN FenceOf(h, c, e) ELSE promise
+    /\ ses' = [ses EXCEPT ![h] = [NoSes EXCEPT !.st = "fencing", !.ep = e, !.old = c,
+                  !.fenced = IF self THEN {h} ELSE {},
                   !.replies = [m \in Hosts |-> IF self /\ m = h
                                    THEN [log |-> mlog[h][c.key], drop |-> drop[h][c.key]]
                                    ELSE NoReply]]]
     /\ UNCHANGED <<sent, cfgs, mlog, drop, inc, told, next, losses, crashes>>
 
-\* h's take seals member m of the configuration it found, and reads its log: if m has promised no
+\* h's take fences member m of the configuration it found, and reads its log: if m has promised no
 \* greater epoch.
-Seal(h, m) ==
+Fence(h, m) ==
     LET s == ses[h]
         c == s.old
     IN
-    /\ s.st = "sealing"
-    /\ m \notin s.sealed
+    /\ s.st = "fencing"
+    /\ m \notin s.fenced
     /\ Member(m, c)
     /\ promise[m] <= s.ep
-    /\ promise' = SealOf(m, c, s.ep)
-    /\ ses' = [ses EXCEPT ![h].sealed = @ \cup {m},
+    /\ promise' = FenceOf(m, c, s.ep)
+    /\ ses' = [ses EXCEPT ![h].fenced = @ \cup {m},
                           ![h].replies[m] = [log |-> mlog[m][c.key], drop |-> drop[m][c.key]]]
     /\ UNCHANGED <<head, sent, cfgs, mlog, drop, inc, told, next, losses, crashes>>
 
 \* The members whose reads count: f+1 of them must be other than the old writer, whose own copy no
-\* seal stops, unless h is the old writer's host (sealOthers).
+\* fence stops, unless h is the old writer's host (fenceOthers).
 Counted(h) ==
     LET s == ses[h] IN
-    IF R("sealOthers") THEN {m \in s.sealed : m # s.old.w \/ m = h} ELSE s.sealed
+    IF R("fenceOthers") THEN {m \in s.fenced : m # s.old.w \/ m = h} ELSE s.fenced
 
 \* What h's take recovers: the head's uploaded prefix, extended by the longest log it read (or by
 \* any one it read, without the rule longest) that dropped nothing the head has not.
@@ -261,13 +261,13 @@ Readable(h) ==
     LET s == ses[h] IN
     {r \in Counted(h) : s.replies[r].drop <= Len(head.up)}
 
-\* h's take, sealed enough, recovers and installs its configuration: h and 2f others.
+\* h's take, fenced enough, recovers and installs its configuration: h and 2f others.
 Recover(h) ==
     LET s == ses[h]
         c == s.old
         k == <<s.ep, 0>>
     IN
-    /\ s.st = "sealing"
+    /\ s.st = "fencing"
     /\ c = NoCfg \/ c.f = 0 \/ Cardinality(Counted(h)) >= c.f + 1
     /\ \E rec \in IF c = NoCfg \/ c.f = 0 THEN {head.up}
                   ELSE IF R("longest")
@@ -282,7 +282,7 @@ Recover(h) ==
                 /\ sent' = [sent EXCEPT ![k] = rec]
                 \* What the take read is spent: kept, it would only tell states apart.
                 /\ ses' = [ses EXCEPT ![h].st = "installing", ![h].cfg = new, ![h].old = NoCfg,
-                                      ![h].sealed = {}, ![h].replies = NoSes.replies]
+                                      ![h].fenced = {}, ![h].replies = NoSes.replies]
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 \* h activates its configuration by a CAS of the head, once f+1 of its members hold what it
@@ -429,7 +429,7 @@ LoseDisk(h) ==
 Next ==
     \E h \in Hosts :
         \/ Take(h) \/ Recover(h) \/ Activate(h)
-        \/ \E m \in Hosts : Seal(h, m)
+        \/ \E m \in Hosts : Fence(h, m)
         \/ Commit(h) \/ AckReplicated(h) \/ Land(h) \/ Acknowledge(h)
         \/ Replace(h) \/ Issue(h) \/ Lands(h) \/ Learn(h)
         \/ \E k \in Keys : Deliver(h, k) \/ Drop(h, k)
