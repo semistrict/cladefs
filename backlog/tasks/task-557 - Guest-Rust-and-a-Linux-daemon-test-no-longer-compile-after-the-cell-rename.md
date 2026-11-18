@@ -4,6 +4,7 @@ title: Guest Rust and a Linux daemon test no longer compile after the cell renam
 status: To Do
 assignee: []
 created_date: '2026-11-18 15:25'
+updated_date: '2026-11-18 17:07'
 labels: []
 dependencies: []
 priority: high
@@ -37,3 +38,9 @@ Commit f3cf366ce ('TASK-508.3: branch is cell everywhere') renamed several ident
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Merged origin/main (6046b0f78): the rename is done in code. a1167a56a and 8111fb784 moved guest/rust/cladefs-linux to set_cell, OtherCell, ExtentId::cell and fn cell, and 24c6081a6 fixed cladefsd tests.rs. rg finds none of the old names. Nothing has been compiled yet: AC #1 and #2 need a guest kernel build and a Linux nextest run on the test host. AC #3, the blind spot that let this through, is still open: .github/workflows/ci.yml still never type-checks guest/rust on push or pull_request.
+<!-- SECTION:NOTES:END -->
