@@ -1,0 +1,94 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s11-cmd { position: absolute; left: 156px; top: 318px; padding: 2px 16px; border: 4px solid var(--ink); border-radius: 18px; background: var(--face); font-family: var(--font-mono); font-weight: 500; font-size: 28px; }
+    #s11-keeper-note { left: 140px; top: 600px; }
+    #s11-vol { position: absolute; left: 560px; top: 330px; width: 520px; height: 420px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s11-tab { position: absolute; left: 560px; top: 300px; width: 180px; height: 44px; border: 5px solid var(--ink); border-bottom: none; border-radius: 18px 18px 0 0; background: var(--butter); }
+    #s11-vol-name { position: absolute; left: 24px; top: 16px; font-weight: 900; font-size: 32px; }
+    .s11-row { position: absolute; left: 24px; width: 300px; height: 44px; border: 4px solid var(--ink); border-radius: 12px; background: #f6f2ff; font-family: var(--font-mono); font-weight: 500; font-size: 28px; padding: 0 0 0 14px; }
+    .s11-gen { position: absolute; left: 370px; top: 70px; padding: 2px 14px; border: 4px solid var(--ink); border-radius: 16px; background: var(--butter); font-weight: 900; font-size: 30px; }
+    #s11-ro { position: absolute; left: 330px; top: 352px; white-space: nowrap; padding: 2px 14px; border: 4px solid var(--ink); border-radius: 16px; background: var(--face); font-weight: 800; font-size: 28px; }
+    .s11-own { position: absolute; width: 150px; height: 18px; border: 3px solid var(--ink); border-radius: 8px; }
+    #s11-note { left: 1250px; top: 800px; }
+  </style>
+  <div id="root" data-composition-id="s11" data-width="1920" data-height="1080">
+    <div id="s11-l1" class="line"><span class="w">Share</span><span class="w">a</span><span class="w">git</span><span class="w">checkout</span></div>
+    <div id="s11-l2" class="line"><span class="w">One</span><span class="w">sandbox</span><span class="w">keeps</span><span class="w">it</span><span class="w">current</span></div>
+    <div id="s11-l3" class="line"><span class="w">Others</span><span class="w">attach</span><span class="w">it</span><span class="w">and</span><span class="w">write</span><span class="w">their</span><span class="w">own</span></div>
+    <svg id="s11-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s11-tab"></div>
+    <div id="s11-vol" data-layout-allow-overflow>
+      <div id="s11-vol-name">the repo, checked out</div>
+      <div class="s11-row" style="top:80px">src/</div>
+      <div class="s11-row" style="top:136px">tests/</div>
+      <div class="s11-row" id="s11-new1" style="top:192px">README.md</div>
+      <div class="s11-row" style="top:248px">Cargo.toml</div>
+      <div class="s11-row" id="s11-new2" style="top:304px">docs/</div>
+      <div class="s11-gen" id="s11-gen1">gen 1</div>
+      <div class="s11-gen" id="s11-gen2">gen 2</div>
+      <div id="s11-ro">read-only</div>
+    </div>
+    <div id="s11-keeper"></div>
+    <div id="s11-cmd">git fetch</div>
+    <div id="s11-keeper-note" class="note">runs git, as usual</div>
+    <div id="s11-others"></div>
+    <div id="s11-note" class="note">each with a writable layer of its own</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s11-svg");
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff"];
+      const keeper = C.vm(document.getElementById("s11-keeper"), { x: 140, y: 400, w: 240, h: 176 });
+      // Publishing: keeper → the checkout.
+      const pub = C.el("path", { d: "M386 488 C450 488 500 488 552 488", fill: "none", stroke: "#2e2440", "stroke-width": 6, "stroke-linecap": "round", pathLength: 100 }, svg);
+      const head = C.el("path", { d: "M536 474 L556 488 L536 502", fill: "none", stroke: "#2e2440", "stroke-width": 6, "stroke-linecap": "round", "stroke-linejoin": "round" }, svg);
+      // Others attach it: six sandboxes, each with a thin layer of its own on top.
+      const host = document.getElementById("s11-others");
+      const others = [], links = [], owns = [];
+      [[1340, 330], [1580, 330], [1340, 490], [1580, 490], [1340, 650], [1580, 650]].forEach(([x, y], i) => {
+        others.push(C.vm(host, { x, y, w: 150, h: 110 }));
+        const o = C.div("s11-own", host, { left: x + "px", top: y - 26 + "px", background: colors[i] });
+        owns.push(o);
+        links.push(C.el("path", { d: `M1088 540 C1200 540 ${x - 110} ${y + 55} ${x - 6} ${y + 55}`, fill: "none", stroke: "#e2177e", "stroke-width": 5, "stroke-linecap": "round", pathLength: 100 }, svg));
+      });
+
+      const tl = gsap.timeline({ paused: true });
+      const pop = (t, at, st) => tl.fromTo(t, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: st || 0 }, at);
+      const fade = (t, at) => tl.fromTo(t, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, at);
+      // The checkout.
+      C.words(tl, "#s11-l1", 0.2);
+      pop(["#s11-tab", "#s11-vol"], 0.3);
+      tl.fromTo("#s11-vol .s11-row", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.3, ease: "back.out(2)", stagger: 0.08 }, 0.6);
+      pop("#s11-gen1", 1.0);
+      tl.fromTo("#s11-gen2", { scale: 0 }, { scale: 0, duration: 0.01 }, 0);
+      pop("#s11-ro", 1.2);
+      C.wordsOut(tl, "#s11-l1", 2.4);
+      // One sandbox keeps it current.
+      pop(keeper.root, 1.5);
+      tl.fromTo([pub, head], { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.4, ease: "power2.out" }, 1.9);
+      C.words(tl, "#s11-l2", 2.6);
+      pop("#s11-cmd", 2.9);
+      tl.fromTo(keeper.mouth, { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)" }, 3.0);
+      tl.fromTo(["#s11-new1", "#s11-new2"], { backgroundColor: "#f6f2ff", y: 0 }, { backgroundColor: "#8fddc2", y: -8, duration: 0.2, ease: "power2.out", stagger: 0.12 }, 3.5);
+      tl.to(["#s11-new1", "#s11-new2"], { y: 0, duration: 0.4, ease: "bounce.out", stagger: 0.12 }, 3.7);
+      tl.to("#s11-gen1", { scale: 0, duration: 0.15, ease: "back.in(2)" }, 3.7);
+      tl.fromTo("#s11-gen2", { scale: 0 }, { scale: 1, duration: 0.4, ease: "back.out(3)", immediateRender: false }, 3.85);
+      fade("#s11-keeper-note", 3.9);
+      C.wordsOut(tl, "#s11-l2", 5.0);
+      // Others attach it, each writing over it privately.
+      C.words(tl, "#s11-l3", 5.2);
+      pop(others.map((o) => o.root), 5.3, 0.1);
+      tl.fromTo(links, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.45, ease: "power2.out", stagger: 0.1 }, 5.7);
+      tl.fromTo(owns, { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.35, ease: "back.out(2.4)", stagger: 0.12 }, 6.7);
+      fade("#s11-note", 7.2);
+      tl.fromTo(others.map((o) => o.mouth), { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", stagger: 0.08 }, 8.4);
+      others.forEach((o, i) => C.blink(tl, o.eyes, 9.0 + i * 0.13));
+      // Exit.
+      C.wordsOut(tl, "#s11-l3", 10.3);
+      tl.to(["#s11-vol", "#s11-tab", "#s11-keeper", "#s11-cmd", "#s11-keeper-note", "#s11-others", "#s11-note", svg], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.02 }, 10.4);
+      window.__timelines["s11"] = tl;
+    })();
+  </script>
+</template>

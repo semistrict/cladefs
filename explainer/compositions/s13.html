@@ -1,0 +1,94 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s13-kms { position: absolute; left: 1280px; top: 290px; width: 500px; height: 250px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s13-kms-name { position: absolute; left: 24px; top: 12px; font-weight: 900; font-size: 34px; }
+    #s13-kms-cap { position: absolute; left: 24px; top: 186px; font-weight: 800; font-size: 28px; color: var(--soft); }
+    #s13-tenant { left: 260px; top: 270px; font-size: 34px; font-weight: 900; color: var(--soft); }
+    #s13-n1 { left: 120px; top: 900px; }
+    #s13-n2 { left: 120px; top: 900px; }
+  </style>
+  <div id="root" data-composition-id="s13" data-width="1920" data-height="1080">
+    <div id="s13-l1" class="line"><span class="w">Every</span><span class="w">cell</span><span class="w">is</span><span class="w">encrypted,</span><span class="w">always</span></div>
+    <div id="s13-l2" class="line"><span class="w">Each</span><span class="w">tenant</span><span class="w">has</span><span class="w">its</span><span class="w">own</span><span class="w">key</span></div>
+    <div id="s13-l3" class="line"><span class="w">Destroy</span><span class="w">it,</span><span class="w">and</span><span class="w">its</span><span class="w">data</span><span class="w">is</span><span class="w">unreadable</span></div>
+    <div id="s13-tenant" class="label">tenant 42's cells</div>
+    <div id="s13-kms"><div id="s13-kms-name">KMS</div><div id="s13-kms-cap">tenant 42's key</div></div>
+    <svg id="s13-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s13-lines"></g>
+      <g id="s13-ghosts"></g>
+      <g id="s13-cells"></g>
+      <g id="s13-poofs"></g>
+      <g id="s13-big"></g>
+    </svg>
+    <div id="s13-n1" class="note">encrypted in the bucket and on each host's disk</div>
+    <div id="s13-n2" class="note">shredded: unreadable in the bucket and on every host</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff", "#ff9ec0", "#8fddc2"];
+      const key = (parent, x, y, s) => {
+        const g = C.el("g", {}, parent);
+        gsap.set(g, { x, y, scale: s });
+        const ring = C.el("g", {}, g);
+        C.el("circle", { cx: 0, cy: 0, r: 22, fill: "#ffd86e", stroke: "#2e2440", "stroke-width": 6 }, ring);
+        C.el("circle", { cx: 0, cy: 0, r: 8, fill: "#efeaf8", stroke: "#2e2440", "stroke-width": 4 }, ring);
+        const shaft = C.el("path", { d: "M22 0 H84 M62 0 V18 M78 0 V14", fill: "none", stroke: "#2e2440", "stroke-width": 8, "stroke-linecap": "round" }, g);
+        return { g, ring, shaft };
+      };
+      const seats = [[300, 520], [460, 520], [620, 520], [780, 520], [380, 700], [540, 700], [700, 700], [860, 700]];
+      const cells = [], ghosts = [], keys = [], lines = [], poofs = [];
+      const tk = key(document.getElementById("s13-big"), 1470, 420, 1.6);
+      seats.forEach(([x, y], i) => {
+        ghosts.push(C.critter(document.getElementById("s13-ghosts"), { x, y, r: 44, ghost: true, seed: 700 + i }));
+        cells.push(C.critter(document.getElementById("s13-cells"), { x, y, r: 44, color: colors[i], seed: 710 + i, look: [0.6, -0.3] }));
+        keys.push(key(document.getElementById("s13-cells"), x + 34, y + 36, 0.45));
+        lines.push(C.el("path", { d: `M1430 420 C1200 420 ${x + 160} ${y - 120} ${x + 44} ${y + 30}`, fill: "none", stroke: "#c89a1c", "stroke-width": 4, "stroke-dasharray": "2 12", "stroke-linecap": "round" }, document.getElementById("s13-lines")));
+        const pg = C.el("g", {}, document.getElementById("s13-poofs"));
+        gsap.set(pg, { x, y });
+        const puffs = [[-30, -10, 22], [0, -30, 26], [30, -8, 22], [-14, 18, 20], [18, 20, 20]].map(([px, py, r]) => C.el("circle", { cx: px, cy: py, r, fill: "#ffffff", stroke: "#9a93ad", "stroke-width": 3 }, pg));
+        poofs.push({ pg, puffs });
+      });
+
+      const tl = gsap.timeline({ paused: true });
+      const pop = (t, at, st) => tl.fromTo(t, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: st || 0 }, at);
+      // Ghosts and poofs wait, hidden.
+      tl.fromTo(ghosts.map((g) => g.pop), { scale: 0 }, { scale: 0, duration: 0.01 }, 0);
+      tl.fromTo(poofs.map((p) => p.pg), { opacity: 0 }, { opacity: 0, duration: 0.01 }, 0);
+      // A tenant's cells, each with a key of its own, all encrypted.
+      C.words(tl, "#s13-l1", 0.2);
+      tl.fromTo("#s13-tenant", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.3);
+      pop(cells.map((c) => c.pop), 0.3, 0.07);
+      cells.forEach((c, i) => C.life(tl, c, 0.9, 5.9, 900 + i));
+      tl.fromTo(keys.map((k) => k.g), { scale: 0 }, { scale: 0.45, duration: 0.3, ease: "back.out(3)", stagger: 0.06 }, 0.9);
+      tl.fromTo("#s13-n1", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 1.4);
+      C.wordsOut(tl, "#s13-l1", 2.6);
+      // The tenant's key, in the KMS, wraps every cell's key.
+      C.words(tl, "#s13-l2", 2.8);
+      pop("#s13-kms", 2.9);
+      tl.fromTo(tk.g, { scale: 0 }, { scale: 1.6, duration: 0.4, ease: "back.out(3)" }, 3.2);
+      tl.fromTo(lines, { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.06 }, 3.5);
+      C.wordsOut(tl, "#s13-l2", 4.8);
+      // Shred: the key breaks, every cell goes poof.
+      C.words(tl, "#s13-l3", 5.0);
+      tl.fromTo(tk.g, { rotation: 0 }, { rotation: 8, duration: 0.07, yoyo: true, repeat: 5, transformOrigin: "50% 50%", immediateRender: false }, 5.1);
+      tl.to(tk.ring, { x: -40, y: 160, rotation: -70, opacity: 0, duration: 0.6, ease: "power2.in" }, 5.6);
+      tl.to(tk.shaft, { x: 50, y: 170, rotation: 80, opacity: 0, duration: 0.6, ease: "power2.in" }, 5.6);
+      tl.to(lines, { opacity: 0, duration: 0.2 }, 5.7);
+      tl.to(keys.map((k) => k.g), { scale: 0, duration: 0.2, ease: "back.in(2)", stagger: 0.04 }, 5.8);
+      cells.forEach((c, i) => {
+        const at = 6.0 + i * 0.08;
+        tl.to(c.pop, { scale: 0, duration: 0.15, ease: "power2.in" }, at);
+        tl.fromTo(poofs[i].pg, { opacity: 1, scale: 0.4, transformOrigin: "50% 50%" }, { opacity: 0, scale: 1.4, duration: 0.5, ease: "power2.out", immediateRender: false }, at + 0.05);
+        tl.fromTo(ghosts[i].pop, { scale: 0, opacity: 0.5 }, { scale: 1, opacity: 0.5, duration: 0.35, ease: "back.out(2)", immediateRender: false }, at + 0.25);
+      });
+      tl.to("#s13-n1", { opacity: 0, duration: 0.2 }, 6.2);
+      tl.fromTo("#s13-n2", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 6.4);
+      // Exit.
+      C.wordsOut(tl, "#s13-l3", 8.9);
+      tl.to(["#s13-kms", "#s13-tenant", "#s13-n2", "#s13-svg"], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.02 }, 9.0);
+      window.__timelines["s13"] = tl;
+    })();
+  </script>
+</template>

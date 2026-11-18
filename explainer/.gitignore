@@ -1,0 +1,16 @@
+# Audio and video are not committed: the music and sound effects come from a licensed catalog
+# (README.md says how to get them), and renders are built from these sources.
+assets/audio/
+renders/
+*.mp4
+*.mov
+*.webm
+*.wav
+*.mp3
+# HyperFrames' caches and scratch.
+.hyperframes/
+.media/
+.thumbnails/
+.waveform-cache/
+.trash/
+node_modules/

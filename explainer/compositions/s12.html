@@ -1,0 +1,98 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .s12-host { position: absolute; top: 280px; width: 680px; height: 430px; border: 4px dashed var(--grey); border-radius: 40px; }
+    .s12-host-name { position: absolute; left: 26px; top: 10px; font-weight: 900; font-size: 32px; color: var(--soft); }
+    .s12-tag { position: absolute; padding: 2px 14px; border: 4px solid var(--ink); border-radius: 16px; background: var(--butter); font-weight: 900; font-size: 30px; white-space: nowrap; }
+    #s12-tokA { left: 392px; top: 616px; }
+    #s12-tokB { left: 1392px; top: 616px; }
+    #s12-off { left: 290px; top: 286px; background: var(--face); font-size: 28px; font-weight: 800; }
+    .s12-z { position: absolute; font-weight: 900; font-size: 44px; color: var(--soft); opacity: 0; }
+    #s12-write { position: absolute; left: 0; top: 0; width: 80px; height: 52px; border: 4px solid var(--ink); border-radius: 14px; background: var(--butter); opacity: 0; }
+    #s12-refused { left: 140px; top: 740px; }
+    #s12-bucket-name { left: 1090px; top: 880px; }
+  </style>
+  <div id="root" data-composition-id="s12" data-width="1920" data-height="1080">
+    <div id="s12-l1" class="line"><span class="w">Any</span><span class="w">host</span><span class="w">can</span><span class="w">go</span><span class="w">away</span></div>
+    <div id="s12-l2" class="line"><span class="w">Another</span><span class="w">takes</span><span class="w">the</span><span class="w">cell</span><span class="w">from</span><span class="w">the</span><span class="w">bucket</span></div>
+    <div id="s12-l3" class="line"><span class="w">A</span><span class="w">newer</span><span class="w">token</span><span class="w">fences</span><span class="w">the</span><span class="w">old</span><span class="w">host</span><span class="w">out</span></div>
+    <div class="s12-host" id="s12-hA" style="left:120px"><div class="s12-host-name">host A</div></div>
+    <div class="s12-host" id="s12-hB" style="left:1120px"><div class="s12-host-name">host B</div></div>
+    <svg id="s12-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s12-fence"></g>
+      <g id="s12-cells"></g>
+    </svg>
+    <div class="s12-tag" id="s12-off">cut off</div>
+    <div class="s12-z" id="s12-z1" style="left:600px; top:330px">z</div>
+    <div class="s12-z" id="s12-z2" style="left:640px; top:300px">z</div>
+    <div class="s12-z" id="s12-z3" style="left:684px; top:268px">z</div>
+    <div class="s12-tag" id="s12-tokA">token 7</div>
+    <div class="s12-tag" id="s12-tokB">token 8</div>
+    <div id="s12-write"></div>
+    <div id="s12-refused" class="note">token 7 is older than 8: refused</div>
+    <div id="s12-bucket-name" class="label">bucket (S3)</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s12-svg");
+      const cells = document.getElementById("s12-cells");
+      const pail = C.bucket(svg, { x: 960, y: 860, w: 220, h: 180, id: "s12-pail" });
+      // A little picket fence beside the bucket.
+      const fence = document.getElementById("s12-fence");
+      for (let i = 0; i < 4; i++) {
+        const x = 790 + i * 30;
+        C.el("path", { d: `M${x} 900 V820 L${x + 11} 806 L${x + 22} 820 V900 Z`, fill: "#ffffff", stroke: "#2e2440", "stroke-width": 4, "stroke-linejoin": "round" }, fence);
+      }
+      C.el("path", { d: "M780 840 H910 M780 880 H910", stroke: "#2e2440", "stroke-width": 5, "stroke-linecap": "round" }, fence);
+      const a = C.critter(cells, { x: 460, y: 520, r: 70, color: "#ffb088", seed: 909, look: [0, 0.3] });
+      const b = C.critter(cells, { x: 960, y: 800, r: 70, color: "#ffb088", seed: 909, look: [-0.5, 0] });
+
+      const tl = gsap.timeline({ paused: true });
+      const pop = (t, at, st) => tl.fromTo(t, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: st || 0 }, at);
+      // Cell 9 on host A, under token 7.
+      C.words(tl, "#s12-l1", 0.2);
+      tl.fromTo(["#s12-hA", "#s12-hB"], { opacity: 0, scale: 0.95 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", stagger: 0.12 }, 0.1);
+      pop(pail, 0.3);
+      tl.fromTo("#s12-bucket-name", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.5);
+      pop(a.pop, 0.35);
+      C.life(tl, a, 0.8, 1.4, 31);
+      pop("#s12-tokA", 0.7);
+      // Host A goes to sleep.
+      tl.to(["#s12-hA", "#s12-tokA"], { opacity: 0.4, duration: 0.4 }, 1.4);
+      tl.to(a.pos, { opacity: 0.35, duration: 0.4 }, 1.4);
+      tl.to(a.eyes, { scaleY: 0.12, duration: 0.25, ease: "power2.in", transformOrigin: "50% 50%" }, 1.45);
+      pop("#s12-off", 1.6);
+      ["#s12-z1", "#s12-z2", "#s12-z3"].forEach((z, i) => {
+        tl.fromTo(z, { opacity: 0, y: 10 }, { opacity: 1, y: -10, duration: 0.5, ease: "sine.out" }, 1.7 + i * 0.3);
+        tl.to(z, { opacity: 0, y: -40, duration: 0.6, ease: "sine.in" }, 2.3 + i * 0.3);
+      });
+      C.wordsOut(tl, "#s12-l1", 2.6);
+      // Host B takes the cell from the bucket, under token 8.
+      C.words(tl, "#s12-l2", 2.8);
+      pop(b.pop, 3.1);
+      C.hop(tl, b, 1460, 520, 3.5, 0.8, 200);
+      C.life(tl, b, 5.0, 9.0, 32);
+      pop("#s12-tokB", 4.5);
+      C.wordsOut(tl, "#s12-l2", 5.6);
+      // Host A wakes and tries to write: the fence turns it away.
+      C.words(tl, "#s12-l3", 5.8);
+      pop("#s12-fence", 5.9);
+      tl.to(["#s12-hA", "#s12-tokA"], { opacity: 0.8, duration: 0.3 }, 6.1);
+      tl.to(a.pos, { opacity: 0.8, duration: 0.3 }, 6.1);
+      tl.to(a.eyes, { scaleY: 1, duration: 0.2 }, 6.15);
+      tl.to("#s12-off", { opacity: 0, duration: 0.2 }, 6.15);
+      tl.fromTo("#s12-write", { opacity: 0, x: 500, y: 560, rotation: 0 }, { opacity: 1, duration: 0.1 }, 6.4);
+      tl.to("#s12-write", { x: 712, y: 790, duration: 0.45, ease: "power1.in" }, 6.4);
+      tl.to("#s12-write", { x: 560, y: 700, rotation: -200, duration: 0.5, ease: "power2.out" }, 6.85);
+      tl.to("#s12-write", { opacity: 0, duration: 0.2 }, 7.25);
+      tl.fromTo("#s12-fence", { rotation: 0 }, { rotation: -4, duration: 0.08, yoyo: true, repeat: 3, transformOrigin: "50% 100%", immediateRender: false }, 6.85);
+      tl.fromTo("#s12-refused", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 7.0);
+      tl.fromTo(a.smile, { rotation: 0 }, { rotation: 180, duration: 0.3, ease: "back.out(2)", transformOrigin: "50% 50%" }, 7.1);
+      // Exit.
+      C.wordsOut(tl, "#s12-l3", 8.9);
+      tl.to(["#s12-hA", "#s12-hB", "#s12-tokA", "#s12-tokB", "#s12-refused", "#s12-bucket-name", svg], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.02 }, 9.0);
+      window.__timelines["s12"] = tl;
+    })();
+  </script>
+</template>

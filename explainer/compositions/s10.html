@@ -1,0 +1,115 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s10-grid { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+    #s10-mem-label { left: 124px; top: 636px; }
+    #s10-mem { position: absolute; left: 124px; top: 686px; width: 1672px; height: 84px; border: 5px solid var(--ink); border-radius: 22px; background: var(--face); }
+    .s10-copy { position: absolute; top: 12px; width: 12px; height: 50px; border-radius: 5px; background: var(--butter); border: 2px solid #c89a1c; }
+    #s10-one { position: absolute; left: 736px; top: 12px; width: 190px; height: 50px; border: 4px solid var(--ink); border-radius: 12px; background: var(--accent); }
+    .s10-own { position: absolute; top: 12px; width: 14px; height: 50px; border: 3px solid var(--ink); border-radius: 6px; }
+    #s10-count { position: absolute; left: 124px; top: 812px; font-weight: 900; font-size: 80px; }
+    #s10-c100 { left: 300px; top: 836px; font-size: 40px; font-weight: 800; }
+    #s10-c1 { left: 190px; top: 836px; font-size: 40px; font-weight: 800; }
+    #s10-where { left: 124px; top: 922px; font-size: 32px; }
+    #s10-drop { position: absolute; left: 1800px; top: 640px; width: 26px; height: 36px; background: var(--sky); border: 4px solid var(--ink); border-radius: 50% 50% 50% 50% / 62% 62% 38% 38%; }
+    .s10-heart { position: absolute; width: 30px; height: 30px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s10" data-width="1920" data-height="1080">
+    <div id="s10-l1" class="line"><span class="w">Remember</span><span class="w">the</span><span class="w">hundred</span><span class="w">copies?</span></div>
+    <div id="s10-l2" class="line"><span class="w">Now</span><span class="w">there</span><span class="w">is</span><span class="w">one</span></div>
+    <div id="s10-l3" class="line"><span class="w">What</span><span class="w">they</span><span class="w">share</span><span class="w">is</span><span class="w">kept</span><span class="w">once</span></div>
+    <svg id="s10-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s10-grid"></div>
+    <div id="s10-mem-label" class="label">host memory</div>
+    <div id="s10-mem"><div id="s10-one"></div></div>
+    <div id="s10-drop"></div>
+    <div id="s10-count">100</div>
+    <div id="s10-c100" class="label">copies of the repo's files in memory</div>
+    <div id="s10-c1" class="label">copy of the repo's files, plus each sandbox's own writes</div>
+    <div id="s10-where" class="note">once in the bucket, once on each host's disk, once in its memory</div>
+    <div id="s10-hearts"></div>
+    <svg id="s10-cell-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s10-svg");
+      const grid = document.getElementById("s10-grid");
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff"];
+      // The opening problem again: a hundred sandboxes, a hundred copies, all frowning.
+      const vms = [], links = [];
+      for (let i = 0; i < 100; i++) {
+        const c = i % 20, r = Math.floor(i / 20);
+        const x = 124 + c * 84, y = 250 + r * 66;
+        vms.push(C.vm(grid, { x, y, w: 76, h: 56 }));
+        const lx = x + 38, ly = y + 56;
+        links.push(C.el("path", { d: `M${lx} ${ly} C${lx} 650 960 620 960 700`, fill: "none", stroke: "#e2177e", "stroke-width": 1.8, "stroke-opacity": 0.6, pathLength: 100 }, svg));
+      }
+      const mouths = vms.map((v) => v.mouth);
+      gsap.set(mouths, { rotation: 180, y: 6 });
+      const mem = document.getElementById("s10-mem");
+      const copies = [];
+      for (let i = 0; i < 100; i++) copies.push(C.div("s10-copy", mem, { left: 14 + i * 16.4 + "px" }));
+      const own = [150, 300, 452, 560, 1050, 1180, 1290, 1420, 1530].map((x, i) => C.div("s10-own", mem, { left: x + "px", background: colors[i % colors.length] }));
+      const hearts = [3, 27, 46, 58, 71, 95].map((i) => {
+        const h = C.el("svg", { class: "s10-heart", viewBox: "-16 -16 32 32" }, document.getElementById("s10-hearts"));
+        C.el("path", { d: "M0 12 C-14 2 -14 -10 -6 -10 C-2 -10 0 -6 0 -4 C0 -6 2 -10 6 -10 C14 -10 14 2 0 12Z", fill: "#ff7aa8", stroke: "#2e2440", "stroke-width": 3 }, h);
+        const c = i % 20, r = Math.floor(i / 20);
+        h.style.left = 124 + c * 84 + 23 + "px";
+        h.style.top = 250 + r * 66 - 20 + "px";
+        return h;
+      });
+      // Cell 9, our cell, still wearing its v1 flag.
+      const cell = C.critter(document.getElementById("s10-cell-svg"), { x: 2080, y: 900, r: 62, color: "#ffb088", seed: 909, look: [-0.7, -0.2] });
+      const flag = C.el("g", {}, cell.body);
+      C.el("path", { d: "M14 -64 V-124", stroke: "#2e2440", "stroke-width": 5, "stroke-linecap": "round" }, flag);
+      C.el("path", { d: "M14 -124 L62 -112 L14 -98 Z", fill: "#e2177e", stroke: "#2e2440", "stroke-width": 4, "stroke-linejoin": "round" }, flag);
+
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo(vms.map((v) => v.root), { scale: 0 }, { scale: 1, duration: 0.4, ease: "back.out(2.4)", stagger: { amount: 0.7, grid: [5, 20], from: "center" } }, 0.0);
+      tl.fromTo(["#s10-mem-label", "#s10-mem"], { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)", stagger: 0.06 }, 0.3);
+      tl.fromTo(copies, { scaleY: 0, transformOrigin: "50% 100%" }, { scaleY: 1, duration: 0.2, ease: "back.out(2.5)", stagger: 0.005 }, 0.4);
+      tl.fromTo(["#s10-count", "#s10-c100"], { opacity: 0 }, { opacity: 1, duration: 0.25, stagger: 0.06 }, 0.6);
+      tl.fromTo("#s10-drop", { opacity: 0, y: 0 }, { opacity: 1, y: 10, duration: 0.3, ease: "back.out(2)" }, 0.9);
+      tl.fromTo("#s10-mem", { scaleY: 1 }, { scaleY: 1.08, duration: 0.18, ease: "sine.inOut", yoyo: true, repeat: 5, immediateRender: false }, 1.2);
+      C.words(tl, "#s10-l1", 1.2);
+      C.wordsOut(tl, "#s10-l1", 3.3);
+      // The hundred copies squeeze together into one.
+      const order = copies.map((c, i) => i).sort((a, b) => Math.abs(b - 49.5) - Math.abs(a - 49.5));
+      order.forEach((i, k) => {
+        const dx = 736 + 95 - (14 + i * 16.4 + 6);
+        tl.to(copies[i], { x: dx, scaleY: 0.6, opacity: 0, duration: 0.45, ease: "power2.in" }, 3.4 + k * 0.009);
+      });
+      tl.to("#s10-drop", { opacity: 0, y: 40, duration: 0.3, ease: "power2.in" }, 3.5);
+      C.count(tl, document.getElementById("s10-count"), 100, 1, 3.4, 1.2);
+      tl.fromTo("#s10-one", { scale: 0 }, { scale: 1, duration: 0.5, ease: "back.out(3)" }, 4.55);
+      tl.fromTo("#s10-count", { color: "#2e2440" }, { color: "#e2177e", duration: 0.2 }, 4.6);
+      tl.to("#s10-c100", { opacity: 0, duration: 0.2 }, 4.5);
+      tl.fromTo("#s10-c1", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 4.7);
+      tl.fromTo(links, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.5, ease: "power2.out", stagger: { amount: 0.5, from: "center" } }, 4.7);
+      C.words(tl, "#s10-l2", 4.8);
+      // Frowns flip to smiles.
+      tl.fromTo(mouths, { rotation: 180, y: 6 }, { rotation: 0, y: 0, duration: 0.3, ease: "back.out(2.5)", stagger: { amount: 0.6, grid: [5, 20], from: "center" } }, 5.0);
+      tl.fromTo(own, { scaleY: 0 }, { scaleY: 1, duration: 0.25, ease: "back.out(3)", stagger: 0.07 }, 5.7);
+      hearts.forEach((h, k) => {
+        const at = 5.8 + k * 0.25;
+        tl.fromTo(h, { opacity: 0, y: 0, scale: 0.4 }, { opacity: 1, y: -40, scale: 1, duration: 0.4, ease: "back.out(2)" }, at);
+        tl.to(h, { opacity: 0, y: -90, duration: 0.5, ease: "power1.in" }, at + 0.7);
+      });
+      C.wordsOut(tl, "#s10-l2", 7.2);
+      // The one idea, held to the end.
+      C.words(tl, "#s10-l3", 7.4);
+      tl.fromTo("#s10-where", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(2)" }, 8.2);
+      // Cell 9 hops in and lands on the last chord; the sandboxes blink back.
+      C.life(tl, cell, 0, 9.0, 99);
+      C.hop(tl, cell, 1690, 900, 9.05, 0.8, 140);
+      vms.forEach((v, i) => {
+        const c = i % 20, r = Math.floor(i / 20);
+        C.blink(tl, v.eyes, 10.0 + Math.hypot(c - 9.5, (r - 2) * 1.6) * 0.035);
+      });
+      tl.fromTo("#s10-one", { scaleY: 1 }, { scaleY: 1.25, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 10.0);
+      C.life(tl, cell, 10.5, 12, 98);
+      window.__timelines["s10"] = tl;
+    })();
+  </script>
+</template>
