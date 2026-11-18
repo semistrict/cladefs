@@ -20,7 +20,7 @@ mod common;
 use cladefs::cladefsd::disk::{DiskConfig, start};
 use cladefs::cladefsd::governor::{DiskHeadroom, INTERVAL};
 use cladefs::{CellClient, Errno, ExtentId, VolatileSlice};
-use common::daemon::{CAPACITY, Daemon};
+use common::daemon::Daemon;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,8 @@ const MIB: u64 = 1 << 20;
 const SIZE: u64 = 1536 * MIB;
 /// What the governor leaves free of it.
 const HEADROOM: u64 = 256 * MIB;
+/// The VMs' stores' capacities: more than the filesystem, which it is that fills.
+const CAPACITY: u64 = 4 << 30;
 
 /// An ext4 of [`SIZE`] over a loop device on tmpfs, mounted at a directory of its own: unmounted
 /// and gone with it.
@@ -73,7 +75,9 @@ impl Disk {
 
 impl Drop for Disk {
     fn drop(&mut self) {
-        let _ = Command::new("umount").arg(self.mount.path()).status();
+        // Lazily: the daemon's threads hold its stores open until the process ends, the loop
+        // device let go then.
+        let _ = Command::new("umount").arg("-l").arg(self.mount.path()).status();
         let _ = std::fs::remove_file(&self.image);
     }
 }
