@@ -187,3 +187,254 @@ fn what_a_member_holds_recovers_on_another_host() {
     assert_eq!(host.contents(&taken), expected);
     drop(uploader);
 }
+
+/// Hosts' replica directories in memory, by address: what each host's [`Peers`] reaches.
+type Directories = BTreeMap<String, Arc<local_cell::replica::Replicas<MemDir>>>;
+
+/// A host's peers, as its daemon's members are (`local_cell::upload::Members`), reaching the
+/// replica directories in memory directly.
+struct Peers {
+    me: String,
+    all: Directories,
+}
+
+fn key(configuration: &bucket_cell::layout::Configuration) -> local_cell::replica::Key {
+    local_cell::replica::Key { number: configuration.number, epoch: configuration.epoch }
+}
+
+/// A writer's link to a member in memory.
+struct Link {
+    replicas: Arc<local_cell::replica::Replicas<MemDir>>,
+    of: (bucket_cell::layout::CellId, local_cell::replica::Key, u64),
+}
+
+fn link_error(err: local_cell::replica::Error) -> LinkError {
+    use local_cell::replica::{Error, Refused};
+    match err {
+        Error::Refused(Refused::Fenced { promise }) => LinkError::Fenced(format!("at {promise}")),
+        Error::Refused(refused) => LinkError::Refused(refused.to_string()),
+        Error::Io(err) => LinkError::Down(format!("{err:#}")),
+    }
+}
+
+impl MemberLink for Link {
+    fn append(&self, log: u64, offset: u64, bytes: &[u8]) -> Result<u64, LinkError> {
+        self.replicas.append(self.of, log, offset, bytes).map_err(link_error)
+    }
+
+    fn drop_through(&self, through: u64) -> Result<(), LinkError> {
+        self.replicas.drop_logs(self.of, Some(through)).map_err(link_error)
+    }
+}
+
+impl local_cell::upload::Members for Peers {
+    fn me(&self) -> Result<bucket_cell::layout::Member, String> {
+        Ok(bucket_cell::layout::Member {
+            address: self.me.clone(),
+            incarnation: self.all[&self.me].incarnation(),
+        })
+    }
+
+    fn pick(
+        &self,
+        _: bucket_cell::layout::CellId,
+        _: u64,
+        f: u8,
+    ) -> Result<Vec<bucket_cell::layout::Member>, String> {
+        let others = self.all.iter().filter(|(address, _)| **address != self.me);
+        let picked: Vec<_> = others
+            .take(2 * usize::from(f))
+            .map(|(address, replicas)| bucket_cell::layout::Member {
+                address: address.clone(),
+                incarnation: replicas.incarnation(),
+            })
+            .collect();
+        match picked.len() == 2 * usize::from(f) {
+            true => Ok(picked),
+            false => Err(format!("{} peers", picked.len())),
+        }
+    }
+
+    fn link(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Arc<dyn MemberLink> {
+        let replicas = self.all[&member.address].clone();
+        Arc::new(Link { replicas, of: (cell, key(configuration), member.incarnation) })
+    }
+
+    fn fence(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> Result<Vec<(u64, u64)>, String> {
+        let replicas = self.all.get(&member.address).ok_or("lost")?;
+        let of = (cell, key(configuration), member.incarnation);
+        replicas.fence(of, epoch).map_err(|err| err.to_string())
+    }
+
+    fn read(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        log: u64,
+    ) -> Result<Vec<u8>, String> {
+        let replicas = self.all.get(&member.address).ok_or("lost")?;
+        let of = (cell, key(configuration), member.incarnation);
+        replicas.read(of, log, 0, u64::MAX).map_err(|err| err.to_string())
+    }
+
+    fn drop_before(
+        &self,
+        cell: bucket_cell::layout::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Result<(), String> {
+        let replicas = self.all.get(&member.address).ok_or("lost")?;
+        let of = (cell, key(configuration), member.incarnation);
+        replicas.drop_logs(of, None).map_err(|err| err.to_string())
+    }
+}
+
+impl Host {
+    /// Opens the store `recovering` recovered as `holder`, a replicated cell's, asking for
+    /// `replication` if any, its members `peers`.
+    fn open_replicated(
+        &self,
+        recovering: Recovering<MemDir>,
+        holder: u64,
+        replication: Option<bucket_cell::layout::Wish>,
+        peers: Peers,
+    ) -> Result<(Arc<LocalCell<MemDir>>, Uploader<MemDir>), upload::Failure> {
+        let runtime = Runtime {
+            handle: self.runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: bucket_cell::keys::testing::host(),
+        };
+        let options = upload::Options {
+            interval: Duration::from_secs(3600),
+            replication,
+            members: Some(upload::MembersOf(Arc::new(peers))),
+            ..upload::Options::default()
+        };
+        upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)
+    }
+}
+
+/// TASK-537.3.4 (doc-21): a replicated cell's writer's host lost, its disk with it, another host
+/// takes the cell from its members and the bucket alone: it fences them, reads the longest copy
+/// of each log, recovers every commit its guest was told replicated, gives them to its own
+/// configuration's members, and activates that, the head naming it.
+#[test]
+fn takes_recover_what_a_lost_writers_members_hold() {
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+    let host = Host {
+        runtime: runtime.unwrap(),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+    };
+    let cell = DESCRIPTION.cell;
+    host.runtime.block_on(bucket_cell::lifecycle::create(&*host.bucket, cell, 1)).unwrap();
+    let directories = |names: &[&str]| -> Directories {
+        let replicas =
+            |_| Arc::new(local_cell::replica::Replicas::open(MemDir::new(), 1 << 30).unwrap());
+        names.iter().map(|name| (name.to_string(), replicas(name))).collect()
+    };
+    let all = directories(&["a", "b", "c", "d"]);
+    let peers = |me: &str, all: &Directories| Peers { me: me.into(), all: all.clone() };
+
+    // Host a takes the cell, replicated with f = 1: b and c its members.
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let (store, uploader) = host
+        .open_replicated(LocalCell::recover_unmade(dir).unwrap(), 1, wish, peers("a", &all))
+        .unwrap();
+    let replicator = store.replicator().expect("replicating");
+    // What it made opening, uploaded, its segment closed and uploaded too, the uploader left with
+    // nothing to close: the commits after are on the members alone.
+    store.made().unwrap();
+    store.close_segment().unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
+    let mut sequence = store.info().unwrap().next_sequence;
+    for round in 0..9u64 {
+        let len = if round % 3 == 0 { 40 << 10 } else { BLOCK * (1 + round as usize % 4) };
+        store.write(ExtentId { cell: cell.id, sequence }, 0, &common::noise(round, len)).unwrap();
+        sequence += 1;
+        store.commit_ordered(Some(format!("root {round}").as_bytes())).unwrap();
+    }
+    store.flush().unwrap();
+    let last = store.last_commit().unwrap();
+    uploader.wait_replicated(last).unwrap();
+    let expected = host.contents(&store);
+    // The bucket holds not all of them: the take must recover the rest from the members.
+    let bucket = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell, None)).unwrap();
+    let uploaded = bucket.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
+    assert!(uploaded < last, "the bucket holds commit {uploaded}, of {last}: nothing to recover");
+
+    // Host a is lost, its disk and replica directory with it; d takes the cell from b and c.
+    drop((uploader, store, replicator));
+    let mut left = all.clone();
+    left.remove("a");
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let (taken, uploader) = host.open_replicated(recovering, 2, None, peers("d", &left)).unwrap();
+    taken.made().unwrap();
+    assert!(taken.last_commit().unwrap() >= last);
+    assert_eq!(host.contents(&taken), expected);
+
+    // The head names d's configuration, of b and c, which hold what a's held.
+    let head = host.runtime.block_on(bucket_cell::head::get(&*host.bucket, cell)).unwrap().unwrap();
+    let configuration = head.replication.unwrap().configuration.unwrap();
+    let addresses: Vec<&str> = configuration.members.iter().map(|m| m.address.as_str()).collect();
+    assert_eq!((configuration.number, addresses), (2, vec!["d", "b", "c"]));
+    // d activated it only once b or c held the seed; b holds it still, or dropped it as the head
+    // named what d uploaded of it since.
+    let held =
+        left["b"].fence((cell, key(&configuration), left["b"].incarnation()), head.epoch).unwrap();
+    let now = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell, None)).unwrap();
+    let uploaded = now.state.last_commit.map_or(0, extent_frame::segment::epoch_of);
+    assert!(!held.is_empty() || uploaded >= last, "b holds the seed, or the bucket does");
+    drop(uploader);
+}
+
+/// TASK-537.3.4: a take finding fewer than f+1 members of the configuration before, besides its
+/// writer, to fence is refused: what only the others held may be commits told replicated.
+#[test]
+fn takes_without_enough_members_to_fence_are_refused() {
+    let runtime =
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+    let host = Host {
+        runtime: runtime.unwrap(),
+        bucket: Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "")),
+    };
+    let cell = DESCRIPTION.cell;
+    host.runtime.block_on(bucket_cell::lifecycle::create(&*host.bucket, cell, 1)).unwrap();
+    let make = |_| Arc::new(local_cell::replica::Replicas::open(MemDir::new(), 1 << 30).unwrap());
+    let all: Directories = ["a", "b", "c", "d"].iter().map(|n| (n.to_string(), make(n))).collect();
+    let dir = MemDir::new();
+    LocalCell::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
+    let wish = bucket_cell::layout::Wish::new(1, bucket_cell::layout::Fsync::Replicated);
+    let a = Peers { me: "a".into(), all: all.clone() };
+    let (store, uploader) =
+        host.open_replicated(LocalCell::recover_unmade(dir).unwrap(), 1, wish, a).unwrap();
+    store.made().unwrap();
+    drop((uploader, store));
+    // a and c lost: b alone answers, of the two a take must fence.
+    let mut left = all.clone();
+    left.remove("a");
+    left.remove("c");
+    let elsewhere = MemDir::new();
+    LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
+    let recovering = LocalCell::recover_unmade(elsewhere).unwrap();
+    let d = Peers { me: "d".into(), all: left };
+    let refused = host.open_replicated(recovering, 2, None, d).map(drop);
+    let err = refused.expect_err("taken with one member fenced");
+    assert!(err.to_string().contains("of the 2 members"), "{err}");
+}
