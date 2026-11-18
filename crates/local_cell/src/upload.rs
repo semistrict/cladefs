@@ -57,7 +57,7 @@ use event_listener::{Event, Listener as _};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -246,6 +246,10 @@ impl From<anyhow::Error> for Failure {
     }
 }
 
+/// cladefs: how long a take waits for the members of its new configuration to hold what the one
+/// before held, before it fails (doc-21, TASK-537.3.4).
+const SEEDING: Duration = Duration::from_secs(60);
+
 /// How an uploader uploads.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -304,6 +308,30 @@ pub trait Members: Send + Sync + 'static {
         configuration: &bucket_cell::layout::Configuration,
         member: &bucket_cell::layout::Member,
     ) -> Arc<dyn crate::replicate::MemberLink>;
+    /// Fences `cell` at `epoch` on `member` of `configuration`: the ends of the logs it holds of
+    /// it, by their numbers, synced, once its promise is (TASK-537.3.4). Blocks.
+    fn fence(
+        &self,
+        cell: CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> Result<Vec<(u64, u64)>, String>;
+    /// Log `log` that `member` holds of `configuration`, from its start. Blocks.
+    fn read(
+        &self,
+        cell: CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+        log: u64,
+    ) -> Result<Vec<u8>, String>;
+    /// Has `member` drop what it holds of `cell`'s configurations before `configuration`. Blocks.
+    fn drop_before(
+        &self,
+        cell: CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> Result<(), String>;
 }
 
 /// cladefs: a host's [`Members`], as [`Options`] holds it.
@@ -1207,6 +1235,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             replication: self.options.replication,
         };
         let (held, cell_keys) = keys::taking(&**bucket, kms, cell, read, taking).await?;
+        // cladefs: a replicated cell whose head names a configuration of f >= 1: its members
+        // fenced at this taking's epoch, once it is taken, before anything of theirs is read
+        // (doc-21, TASK-537.3.4): no writer of an earlier epoch has a commit replicated after.
+        let old = (held.head.replication.as_ref())
+            .and_then(|replication| replication.configuration.clone())
+            .filter(|configuration| configuration.f >= 1);
+        let fenced = match &old {
+            Some(old) => Some(self.fence(cell, old, held.head.epoch, recovering.has_wal()).await?),
+            None => None,
+        };
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
         // its stores into new cells take, filled off this path (TASK-411.4).
         kms.refill(cell.tenant);
@@ -1214,6 +1252,22 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
+        // cladefs: what the fenced members hold, the longest copy of each log, after the head's
+        // last commit: the store's write-ahead log, if it holds none, and what the new
+        // configuration's members are given before it is active (TASK-537.3.4).
+        let (seed, recovering) = match (&old, fenced) {
+            (Some(old), Some(fenced)) => {
+                let logs = self.read_longest(cell, old, &fenced).await?;
+                let last = writer.taken().last_commit;
+                let seed = crate::replicate::trimmed(cell, &logs, last)?;
+                let recovering = match recovering.has_wal() {
+                    true => recovering,
+                    false => blocking(|| recovering.restored(&seed, last))?,
+                };
+                (seed, recovering)
+            }
+            _ => (Vec::new(), recovering),
+        };
         let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
         let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let store = blocking(|| recovering.open(options, opening))?;
@@ -1225,45 +1279,34 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if let Some(replication) = writer.taken().head.replication.clone()
             && replication.wish.f >= 1
         {
-            self.replicate(&writer, replication).await?;
+            self.replicate(&writer, replication, old, seed).await?;
         }
         Ok(Some(writer))
     }
 
     /// cladefs: `writer`, having taken a replicated cell asking for `replication`, has its commits
-    /// replicated from now on (doc-21, TASK-537.3.3): a configuration of this host and 2f members
-    /// picked from its peers, activated by a swap of the head before the store serves, and the
-    /// store's replicator started, of the commits after those it opened with, on no member. A
-    /// cell whose head names a configuration already is refused: its take must fence that one's
-    /// members and recover what they hold, which TASK-537.3.4 builds; until then, a take would lose
-    /// its commits told replicated.
+    /// replicated from now on (doc-21, TASK-537.3.3, TASK-537.3.4): a configuration of this host
+    /// and 2f members picked from its peers, given `seed`, what the configuration `old` before held
+    /// after the head's last commit, and activated by a swap of the head once f of them hold it, so
+    /// that what `old` held replicated stays so; then the store's replicator started, of the
+    /// commits after those it opened with, on no member of the new configuration but the seed's.
+    /// The configuration before's members drop what they held of it, if they answer.
     async fn replicate(
         &self,
         writer: &Arc<Writer<B>>,
         replication: bucket_cell::layout::Replication,
+        old: Option<bucket_cell::layout::Configuration>,
+        seed: Vec<(u64, Vec<u8>)>,
     ) -> Result<(), Failure> {
         let bucket_cell::layout::Replication { wish, configuration } = replication;
-        let members = self.options.members.clone().ok_or_else(|| {
-            Failure::msg(
-                "a replicated cell needs the daemon's peers and replica directory \
-                 (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS)",
-            )
-        })?;
-        if configuration.as_ref().is_some_and(|configuration| configuration.f >= 1) {
-            return Err(Failure::msg(
-                "taking a replicated cell whose head names a configuration: recovering what its \
-                 members hold is TASK-537.3.4's; refused rather than losing it",
-            ));
-        }
+        let members = self.members()?;
         let store = self.store().clone();
         let cell = store.description().cell;
         let number = configuration.map_or(1, |configuration| configuration.number + 1);
-        let picking = members.0.clone();
+        let picking = members.clone();
         let picked = blocking(move || -> Result<_, Failure> {
-            Ok((
-                picking.me().map_err(Failure::msg)?,
-                picking.pick(cell, number, wish.f).map_err(Failure::msg)?,
-            ))
+            let me = picking.me().map_err(Failure::msg)?;
+            Ok((me, picking.pick(cell, number, wish.f).map_err(Failure::msg)?))
         })?;
         let (me, others) = picked;
         let mut all = vec![me];
@@ -1274,9 +1317,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             f: wish.f,
             members: all,
         };
-        writer.configure(configuration.clone()).await?;
         let links =
-            others.iter().map(|member| members.0.link(cell, &configuration, member)).collect();
+            others.iter().map(|member| members.link(cell, &configuration, member)).collect();
         let base = store.last_commit()?;
         let changed = self.changed.clone();
         let waker = move || {
@@ -1285,6 +1327,23 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let spool = blocking(|| store.spool())?;
         let replicator =
             crate::replicate::Replicator::start(usize::from(wish.f), base, spool, links, waker);
+        if !seed.is_empty() {
+            let appends = seed.into_iter().map(|(log, bytes)| (log, 0, bytes)).collect();
+            let flushed = crate::replicate::Flushed { epoch: base, appends };
+            replicator.flushed(flushed).map_err(|err| Failure::local(err, "spooling the seed"))?;
+            let started = std::time::Instant::now();
+            while replicator.replicated() < base {
+                if replicator.fenced().is_some() || started.elapsed() > SEEDING {
+                    return Err(Failure::msg(format!(
+                        "the new configuration's members took not what the one before held \
+                         within {SEEDING:?}: {:?}",
+                        replicator.down()
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        writer.configure(configuration.clone()).await?;
         store.replicate_to(replicator);
         let mut progress = self.progress.lock().unwrap();
         if let Some(Taking { replication: Some(replicated), .. }) = progress.taking.as_mut() {
@@ -1295,7 +1354,108 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             "cladefs: {cell:?} replicated in configuration {number} with {:?}",
             configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>()
         );
+        if let Some(old) = old {
+            let dropping = members.clone();
+            let gone = configuration.clone();
+            blocking(move || {
+                for member in old.members.iter().skip(1) {
+                    if let Err(err) = dropping.drop_before(cell, &gone, member) {
+                        log::info!(
+                            "cladefs: {} keeps {cell:?}'s logs for now: {err}",
+                            member.address
+                        );
+                    }
+                }
+            });
+        }
         Ok(())
+    }
+
+    /// cladefs: the host's members, which a replicated cell needs.
+    fn members(&self) -> Result<Arc<dyn Members>, Failure> {
+        let members = self.options.members.clone().ok_or_else(|| {
+            Failure::msg(
+                "a replicated cell needs the daemon's peers and replica directory \
+                 (CLADEFSD_PEER_ADDRESS, CLADEFSD_PEERS, CLADEFSD_REPLICAS)",
+            )
+        })?;
+        Ok(members.0)
+    }
+
+    /// cladefs: fences `cell` at `epoch` on the members of `old`, the configuration its head named
+    /// as it was taken (doc-21, TASK-537.3.4): f+1 members other than its writer must answer, so
+    /// that no ack quorum of `old` is left unfenced, the writer's own copy, which nothing fences,
+    /// counting only if this host is the writer and holds it (`own`, its write-ahead log). Each
+    /// that answered, with the ends of the logs it holds.
+    async fn fence(
+        &self,
+        cell: CellId,
+        old: &bucket_cell::layout::Configuration,
+        epoch: u64,
+        own: bool,
+    ) -> Result<Vec<(bucket_cell::layout::Member, Vec<(u64, u64)>)>, Failure> {
+        let members = self.members()?;
+        let old = old.clone();
+        blocking(move || {
+            let me = members.me().map_err(Failure::msg)?;
+            let mine = own && old.members.first() == Some(&me);
+            let needed = usize::from(old.f) + 1 - usize::from(mine);
+            let mut fenced = Vec::new();
+            let mut refused = Vec::new();
+            for member in old.members.iter().skip(1) {
+                match members.fence(cell, &old, member, epoch) {
+                    Ok(ends) => fenced.push((member.clone(), ends)),
+                    Err(err) => refused.push(format!("{}: {err}", member.address)),
+                }
+            }
+            if fenced.len() < needed {
+                return Err(Failure::msg(format!(
+                    "{} of the {needed} members of configuration {} a take must fence answered: {}",
+                    fenced.len(),
+                    old.number,
+                    refused.join("; ")
+                )));
+            }
+            Ok(fenced)
+        })
+    }
+
+    /// cladefs: of each log the members `fenced` hold of `old`, the longest copy, read from the
+    /// member holding it: every commit a guest was told replicated is on one of them, and each
+    /// member's logs are prefixes of the writer's (doc-21, TASK-537.3.4).
+    async fn read_longest(
+        &self,
+        cell: CellId,
+        old: &bucket_cell::layout::Configuration,
+        fenced: &[(bucket_cell::layout::Member, Vec<(u64, u64)>)],
+    ) -> Result<Vec<(u64, Vec<u8>)>, Failure> {
+        let mut longest: BTreeMap<u64, (u64, &bucket_cell::layout::Member)> = BTreeMap::new();
+        for (member, ends) in fenced {
+            for &(log, end) in ends {
+                if longest.get(&log).is_none_or(|(had, _)| end > *had) {
+                    longest.insert(log, (end, member));
+                }
+            }
+        }
+        let members = self.members()?;
+        let wanted: Vec<(u64, u64, bucket_cell::layout::Member)> =
+            longest.into_iter().map(|(log, (end, member))| (log, end, member.clone())).collect();
+        let old = old.clone();
+        blocking(move || {
+            let mut logs = Vec::with_capacity(wanted.len());
+            for (log, end, member) in wanted {
+                let bytes = members.read(cell, &old, &member, log).map_err(Failure::msg)?;
+                if (bytes.len() as u64) < end {
+                    return Err(Failure::msg(format!(
+                        "{} gave {} bytes of log {log}, fenced at {end}",
+                        member.address,
+                        bytes.len()
+                    )));
+                }
+                logs.push((log, bytes));
+            }
+            Ok(logs)
+        })
     }
 
     /// `writer` took the cell, with the fencing token `token`: the store names what it reads in

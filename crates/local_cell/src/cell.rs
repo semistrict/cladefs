@@ -868,6 +868,23 @@ impl<D: Dir> Recovering<D> {
         self.file.cell
     }
 
+    /// cladefs: whether it recovered a write-ahead log: segments not yet in its cell's bucket.
+    pub fn has_wal(&self) -> bool {
+        !self.wal.segments.is_empty() || !self.wal.closing.is_empty()
+    }
+
+    /// cladefs: the store recovered again once what members of its replicated cell's
+    /// configuration hold, `logs`, is written as its write-ahead log after `last`, the last commit
+    /// its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a store
+    /// holding none.
+    pub fn restored(self, logs: &[(u64, Vec<u8>)], last: Option<u64>) -> Result<Self, Error> {
+        ensure!(!self.has_wal(), "restoring members' logs into a store holding a write-ahead log");
+        crate::replicate::restore(&*self.dir, self.file.cell, logs, last)?;
+        let Recovering { dir, taken, claim, file, .. } = self;
+        let wal = crate::wal::recover(&*dir, file.cell)?;
+        Ok(Recovering { dir, taken, claim, file, wal })
+    }
+
     /// The URL of the bucket its cell is kept in, if its description names one.
     pub fn bucket(&self) -> Option<&str> {
         self.file.bucket.as_deref()
@@ -2943,7 +2960,7 @@ impl<D: Dir> LocalCell<D> {
         let durable = match batch {
             None => self.durability.with(Mutex::lock).local(),
             Some(Due { last, mut commits }) => {
-                let records = match self.make_durable(logs, &mut commits, timed) {
+                let records = match self.make_durable(logs, &mut commits, timed, last) {
                     Ok(records) => records,
                     Err(error) => {
                         let error = error.context("committing the extent store");
@@ -2952,14 +2969,7 @@ impl<D: Dir> LocalCell<D> {
                     }
                 };
                 self.durability.with(Mutex::lock).finish(last);
-                // cladefs: and sent to the members of a replicated cell's configuration (doc-21,
-                // TASK-537.3.3), local now. A failure to read what it sends fails the store, as a
-                // flush's failure does: its members would otherwise hold a log with a hole.
-                if let Err(error) = self.replicate(logs, &commits, records, last) {
-                    let error = error.context("replicating the extent store's commits");
-                    self.lock().fail(&error);
-                    return Err(error);
-                }
+                drop(records);
                 // cladefs: the entries of the segments opened its syncs made durable: no making of
                 // them durable syncs them again (TASK-369).
                 let entries =
@@ -3003,15 +3013,20 @@ impl<D: Dir> LocalCell<D> {
         &self,
         logs: &mut Logs<D::File>,
         commits: &[Pending<D::File>],
-        records: Vec<(SegmentId, LogRecord)>,
+        records: &[(SegmentId, LogRecord)],
         last: u64,
     ) -> Result<(), Error> {
         let Some(replicator) = self.replicator.lock().unwrap().clone() else { return Ok(()) };
         // Held whole, as a replica's records are: the flush's own, if it held them; else read back.
-        let held = match records.iter().all(|(_, record)| matches!(record.runs, Runs::Held(_))) {
-            true => records,
-            false => self.records(commits, Runs::Held(Default::default()))?,
-        };
+        let read_back;
+        let held: &[(SegmentId, LogRecord)] =
+            match records.iter().all(|(_, record)| matches!(record.runs, Runs::Held(_))) {
+                true => records,
+                false => {
+                    read_back = self.records(commits, Runs::Held(Default::default()))?;
+                    &read_back
+                }
+            };
         let mut flushed = Flushed { epoch: last, appends: Vec::new() };
         let mut at = 0;
         while at < held.len() {
@@ -3025,8 +3040,7 @@ impl<D: Dir> LocalCell<D> {
             }
             let mut started = Vec::new();
             if !logs.replica.contains_key(&segment) {
-                let log = (logs.by_segment.get(&segment))
-                    .ok_or_else(|| anyhow!("{segment:?} has no log to replicate"))?;
+                let log = self.segment_log(logs, segment)?;
                 let header = log.header().context("reading a log's header")?;
                 let (bytes, replica) = ReplicaLog::new(&header, segment, log.encryption().clone())?;
                 started = bytes;
@@ -3053,8 +3067,45 @@ impl<D: Dir> LocalCell<D> {
                 *own_end += own.len() as u64;
             }
         }
-        replicator.flushed(flushed).context("spooling what it sends its members")?;
+        // A spool failing breaks the replicator, which says so (Replicator::flushed).
+        let _ = replicator.flushed(flushed);
         Ok(())
+    }
+
+    /// cladefs: the log of `segment` a flush appends to: kept while the segment has one, made at
+    /// its first records.
+    fn segment_log<'a>(
+        &self,
+        logs: &'a mut Logs<D::File>,
+        segment: SegmentId,
+    ) -> Result<&'a mut SegmentLog<D::File>, Error> {
+        Ok(match logs.by_segment.entry(segment) {
+            std::collections::btree_map::Entry::Occupied(log) => log.into_mut(),
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                let log = self.lock().segments.log_file(&*self.dir, segment)?;
+                vacant.insert(SegmentLog::new(log.file, log.salt, log.encryption))
+            }
+        })
+    }
+
+    /// cladefs: sends a flush's `records`, as it appends them, before its syncs, to the members of
+    /// a replicated cell's configuration ([`LocalCell::replicate`]): their round trips overlap its
+    /// own sync (doc-21), and no waiter is told a commit replicated before its own copy is local,
+    /// as every waiter flushes first. A failure to read what it sends breaks the replicator, whose
+    /// commits then wait for the bucket, and fails nothing else: the flush is the store's own
+    /// (Codex's review of TASK-537.3.3).
+    fn send(
+        &self,
+        logs: &mut Logs<D::File>,
+        commits: &[Pending<D::File>],
+        records: &[(SegmentId, LogRecord)],
+        last: u64,
+    ) {
+        if let Err(err) = self.replicate(logs, commits, records, last)
+            && let Some(replicator) = self.replicator()
+        {
+            replicator.break_with(format!("{err:#}"));
+        }
     }
 
     /// cladefs: has `replicator` send the commits of every flush from now on to the members of the
@@ -3150,6 +3201,7 @@ impl<D: Dir> LocalCell<D> {
         logs: &mut Logs<D::File>,
         commits: &mut [Pending<D::File>],
         timed: &mut Flush,
+        last: u64,
     ) -> Result<Vec<(SegmentId, LogRecord)>, Error> {
         let started = Instant::now();
         timed.commits = commits.len();
@@ -3164,6 +3216,7 @@ impl<D: Dir> LocalCell<D> {
             syncs.sync_dirs(&*self.dir)?;
             let synced = timed.phases.took(flush::DIRS, synced);
             let records = self.records(commits, Runs::Synced)?;
+            self.send(logs, commits, &records, last);
             self.append_records(logs, &records)?;
             self.dir.barrier()?;
             timed.phases.took(flush::LOGS, synced);
@@ -3181,6 +3234,7 @@ impl<D: Dir> LocalCell<D> {
                 if hold { Runs::Held(Default::default()) } else { Runs::Checked(Vec::new()) };
             let records =
                 self.records(commits, runs).context("reading back the runs commits sealed")?;
+            self.send(logs, commits, &records, last);
             let recorded = timed.phases.took(flush::DATA, started);
             // What is synced beside the records: the directories alone, if they hold the runs.
             let sync_data = || -> Result<FileSyncs, Error> {
@@ -3279,14 +3333,7 @@ impl<D: Dir> LocalCell<D> {
         while at < records.len() {
             let segment = records[at].0;
             let run = records[at..].iter().take_while(|(of, _)| *of == segment).count();
-            let log = match logs.by_segment.entry(segment) {
-                std::collections::btree_map::Entry::Occupied(log) => log.into_mut(),
-                // Its first records: a flush keeps a segment's log while it has one.
-                std::collections::btree_map::Entry::Vacant(vacant) => {
-                    let log = self.lock().segments.log_file(&*self.dir, segment)?;
-                    vacant.insert(SegmentLog::new(log.file, log.salt, log.encryption))
-                }
-            };
+            let log = self.segment_log(logs, segment)?;
             // Salted as its log's (`wal::LOG_MAGIC`); cladefs: MACed (TASK-411.5).
             let appended = records[at..at + run].iter().map(|(_, record)| record);
             log.append(appended).context("appending commits' records")?;

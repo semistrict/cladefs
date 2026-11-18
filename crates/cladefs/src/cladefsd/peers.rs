@@ -567,7 +567,83 @@ impl local_cell::upload::Members for ReplicaMembers {
         configuration: &bucket_cell::layout::Configuration,
         member: &bucket_cell::layout::Member,
     ) -> Arc<dyn local_cell::replicate::MemberLink> {
-        let of = ReplicaOf {
+        let of = self.of(cell, configuration, member);
+        let client = member_client(&self.runtime, &member.address);
+        Arc::new(GrpcMember { runtime: self.runtime.clone(), client, of, stream: Mutex::default() })
+    }
+
+    fn fence(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        whom: &bucket_cell::layout::Member,
+        epoch: u64,
+    ) -> Result<Vec<(u64, u64)>, String> {
+        let request = FenceRequest { of: Some(self.of(cell, configuration, whom)), epoch };
+        let mut client = member(&self.runtime, &whom.address)?;
+        let fencing = async move { tokio::time::timeout(DEADLINE, client.fence(request)).await };
+        match self.runtime.block_on(fencing) {
+            Ok(Ok(answer)) => {
+                Ok(answer.into_inner().logs.into_iter().map(|log| (log.log, log.end)).collect())
+            }
+            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+            Err(_) => Err(format!("no answer within {DEADLINE:?}")),
+        }
+    }
+
+    fn read(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        whom: &bucket_cell::layout::Member,
+        log: u64,
+    ) -> Result<Vec<u8>, String> {
+        let request =
+            ReadLogRequest { of: Some(self.of(cell, configuration, whom)), log, offset: 0 };
+        let mut client = member(&self.runtime, &whom.address)?;
+        let reading = async move {
+            let mut pieces = client.read_log(request).await?.into_inner();
+            let mut bytes = Vec::new();
+            while let Some(piece) = pieces.message().await? {
+                bytes.extend(piece.bytes);
+            }
+            Ok::<_, Status>(bytes)
+        };
+        self.runtime
+            .block_on(reading)
+            .map_err(|status| format!("{:?}: {}", status.code(), status.message()))
+    }
+
+    fn drop_before(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        whom: &bucket_cell::layout::Member,
+    ) -> Result<(), String> {
+        // Named in the configuration the drop keeps, of the member's own incarnation.
+        let mut of = self.of(cell, configuration, whom);
+        of.incarnation = whom.incarnation;
+        let request = DropLogsRequest { of: Some(of), through: None };
+        let mut client = member(&self.runtime, &whom.address)?;
+        let dropping =
+            async move { tokio::time::timeout(DEADLINE, client.drop_logs(request)).await };
+        match self.runtime.block_on(dropping) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(status)) => Err(format!("{:?}: {}", status.code(), status.message())),
+            Err(_) => Err(format!("no answer within {DEADLINE:?}")),
+        }
+    }
+}
+
+impl ReplicaMembers {
+    /// What a call to `member` of `cell`'s `configuration` is of.
+    fn of(
+        &self,
+        cell: crate::CellId,
+        configuration: &bucket_cell::layout::Configuration,
+        member: &bucket_cell::layout::Member,
+    ) -> ReplicaOf {
+        ReplicaOf {
             bucket: self.bucket.clone(),
             tenant: cell.tenant,
             cell: cell.id,
@@ -576,9 +652,7 @@ impl local_cell::upload::Members for ReplicaMembers {
                 epoch: configuration.epoch,
             }),
             incarnation: member.incarnation,
-        };
-        let client = member_client(&self.runtime, &member.address);
-        Arc::new(GrpcMember { runtime: self.runtime.clone(), client, of, stream: Mutex::default() })
+        }
     }
 }
 

@@ -74,26 +74,18 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
     frames
 }
 
-/// Writes what a member holds of a replicated cell's writer's logs, `logs` by their numbers in its
-/// directory, into `dir`, a store's directory of `cell`, made and holding no write-ahead log, as
-/// its write-ahead log after the commit `last`, the last the cell's head names (TASK-537.3.4's
-/// take): each segment's replica log as the segment's log beside an empty raw file, each extent
-/// stored on its own as its file, and the log's start, `last`; an opening then recovers the
-/// segments as it recovers its own, their records restoring their runs.
-///
-/// A member drops what the head names after the head names it, so that its logs may begin with
-/// segments the bucket holds already: those, to the one whose commits end at `last`, are left out,
-/// their commits the bucket's. If its logs begin after `last`, they are all kept, the first of
-/// them going on from it. Refused if they neither reach `last` nor begin right after it: what is
-/// between, on no member, may be commits a guest was told are replicated.
-pub fn restore<D: crate::Dir>(
-    dir: &D,
+/// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
+/// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): those segments,
+/// whole, after the one whose commits end at `last`, a member dropping what the head names after
+/// the head names it; all of them if they begin after `last`. Refused if they neither reach `last`
+/// nor begin right after it: what is between, on no member, may be commits a guest was told are
+/// replicated.
+pub fn trimmed(
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
     last: Option<u64>,
-) -> Result<(), anyhow::Error> {
-    use crate::layout::{SegmentId, extent_path, log_path, open_segment_path};
-    use anyhow::Context as _;
+) -> Result<Vec<(u64, Vec<u8>)>, anyhow::Error> {
+    use crate::layout::SegmentId;
     use extent_frame::segment::epoch_of;
     let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
     // Each segment's commits, in order, and the last commit as of the end of each.
@@ -133,6 +125,26 @@ pub fn restore<D: crate::Dir>(
             }
         }
     };
+    Ok(logs.iter().filter(|(log, _)| kept.contains(&(log >> 1))).cloned().collect())
+}
+
+/// Writes what a member holds of a replicated cell's writer's logs, `logs` by their numbers in its
+/// directory, into `dir`, a store's directory of `cell`, made and holding no write-ahead log, as
+/// its write-ahead log after the commit `last`, the last the cell's head names (TASK-537.3.4's
+/// take): what of them goes on from it ([`trimmed`]), each segment's replica log as the segment's
+/// log beside an empty raw file, each extent stored on its own as its file, and the log's start,
+/// `last`; an opening then recovers the segments as it recovers its own, their records restoring
+/// their runs.
+pub fn restore<D: crate::Dir>(
+    dir: &D,
+    cell: extent_frame::segment::CellId,
+    logs: &[(u64, Vec<u8>)],
+    last: Option<u64>,
+) -> Result<(), anyhow::Error> {
+    use crate::layout::{SegmentId, extent_path, log_path, open_segment_path};
+    use anyhow::Context as _;
+    let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
+    let kept = trimmed(cell, logs, last)?;
     let write = |path: &str, bytes: &[u8], data: bool| -> Result<(), anyhow::Error> {
         let file = dir.create(path, data).with_context(|| format!("making {path}"))?;
         if !bytes.is_empty() {
@@ -140,7 +152,7 @@ pub fn restore<D: crate::Dir>(
         }
         crate::File::sync(&file).with_context(|| format!("syncing {path}"))
     };
-    for (log, bytes) in logs.iter().filter(|(log, _)| kept.contains(&(log >> 1))) {
+    for (log, bytes) in &kept {
         match log & 1 {
             0 => {
                 write(&log_path(segment(*log)), bytes, false)?;
@@ -483,6 +495,14 @@ impl Replicator {
         state.fenced.is_some() || state.broken.is_some() || up < self.shared.f
     }
 
+    /// Breaks it, for `why`: nothing more is sent, its commits waiting for the bucket.
+    pub fn break_with(&self, why: String) {
+        log::error!("cladefs: replicating: {why}");
+        self.shared.state.lock().unwrap().broken.get_or_insert(why);
+        self.shared.changed.notify_all();
+        (self.shared.notify)();
+    }
+
     /// Why its spool failed, if it did.
     pub fn broken(&self) -> Option<String> {
         self.shared.state.lock().unwrap().broken.clone()
@@ -525,6 +545,17 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
             Sending::Append { log, offset, len } => match shared.spool.read(*log, *offset, *len) {
                 Ok(bytes) if bytes.len() as u64 == *len => {
                     link.append(*log, *offset, &bytes).map(Some)
+                }
+                // Dropped since it was chosen, the head naming its segment (Codex's review of
+                // TASK-537.3.3): nothing to send, nothing broken.
+                _ if shared
+                    .state
+                    .lock()
+                    .unwrap()
+                    .dropped
+                    .is_some_and(|dropped| *log <= dropped) =>
+                {
+                    continue;
                 }
                 read => {
                     let why = match read {
