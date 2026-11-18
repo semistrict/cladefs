@@ -3,11 +3,11 @@ id: TASK-647
 title: >-
   sandboxes (short) on main's CI: both pgbench VMs stop after their load,
   exiting 0 without OK sandbox pgbench
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-18 23:09'
+updated_date: '2026-11-18 23:59'
 labels:
   - testing
   - ci
@@ -26,15 +26,23 @@ CI runs 44353952388 (8111fb784) and 44380042393 (ca72b5814) on main, 2026-11-18:
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Why the pgbench role ends after its load without its runs or OK sandbox pgbench is found and recorded here, from the guest's console and the role's code.
-- [ ] #2 sandboxes.sh short passes on main's CI and on ubu1, and a pgbench role that stops early still fails its check.
+- [x] #2 sandboxes.sh short passes on main's CI and on ubu1, and a pgbench role that stops early still fails its check.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce on ubu1 with the run's results kept; read the pgbench VM's console.
+2. Fix the cause; sweep the rename commits for other words of other systems it reached.
+3. sandboxes.sh short on ubu1 and on main's CI.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -46,4 +54,12 @@ A sweep of the rename commits' 362 files (f3cf366ce, 8e9f18a42, ddbe40889; a fin
 ubu1 2026-11-18 22:24, tree 65568da06 (the fix and main), prebuilt, fxjob --bench --mem 16G: scripts/sandboxes.sh short exit 0, stores 1.22x what the guests wrote. A run just before failed in a host-wide stall beside others' swapping jobs (fsyncs of 500 s), the writes 1.26x: not this bug. The check that caught this (finish(), each role's OK sandbox line) is what fails a pgbench role that stops early.
 
 Main's CI at a06c690a6 failed both jobs for other reasons: sandboxes built no Firecracker, vendor/firecracker.lock behind 97f0dead8's storage_device libc (regenerated, 2ff7ca286); scripts' test_nightly test_a_night_that_measured_nothing_is_measured_again: nights of one head within a second named their results alike, mkdir File exists (nightly-host.sh now counts the name on, -2, -3; a test takes every name of the next two minutes and fails without it as CI did).
+
+Main's CI run 44419894015 (9f8ae8dbb, the fixes in): sandboxes (short) success, test (clippy scripts) success. Workspace: macOS 2641/2641 and Linux 2962/2962 on this branch's tree before the string fixes, which touch only guest cases' SQL and git arguments, prose and comments, and scripts/nightly-host.sh (its tests 16 OK). upstream-changes.py --check passes (the merge.rs comments restored are upstream's words again).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The sandboxes' pgbench VMs stopped after their load because f3cf366ce's branch -> cell rename renamed pgbench's own table pgbench_branches to pgbench_cells: check_data's query failed, the guest panicked and rebooted, and Firecracker exited 0. Restored, and 35 more of other systems' words the rename reached (git commands in the shared-volumes and git-fetch guest cases, which git refused; Firecracker's and this repo's git branches in docs; upstream Fxfs's merge_into comments; AGENTS.md's rule on branches). On the way to a green CI: vendor/firecracker.lock regenerated for 97f0dead8's storage_device libc, and nightly-host.sh's same-second result names counted on (with a test that fails without it). sandboxes.sh short passes on ubu1 (1.22x) and main's CI (run 44419894015), as does the scripts job.
+<!-- SECTION:FINAL_SUMMARY:END -->
