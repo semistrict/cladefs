@@ -4,7 +4,7 @@ title: A cell is one filesystem
 status: In Progress
 assignee: []
 created_date: '2026-11-18 00:10'
-updated_date: '2026-11-18 00:24'
+updated_date: '2026-11-18 00:44'
 labels:
   - bucket
   - host
@@ -36,3 +36,9 @@ The user (2026-11-17) decided a cell is one filesystem with one writer, its log,
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-17 run: TASK-508.1 done in code (069c56a1e), DoD's whole-workspace nextest not run. Not started: TASK-508.2 (the code's points: about 1,700 references in 119 files), TASK-508.3 (Cell, Branch and cell::Filesystem into one type; the cell object and head into one swapped object), TASK-508.4 (identifiers, protos such as VdiskKind, MemoryVdisk, the extent ID's first half, Fxfs, the guest kernel's vext_id, doc-18 and other docs; about 150 vdisk mentions remain outside backlog and Go).
+<!-- SECTION:NOTES:END -->
