@@ -2555,15 +2555,15 @@ static ssize_t cladefs_dax_busy_files(struct cladefs_dax *dax, struct cladefs_da
 
 	*files = NULL;
 	mutex_lock(&dax->files_lock);
+	/* files_lock fixes membership, but a clean file can become busy under it. */
 	cladefs_dax_for_each_file(dax, volume, ino, file)
-		most += atomic_long_read(&file->dirty_pages) ||
-			atomic_long_read(&file->private_pages);
+		most++;
 	if (most)
 		*files = cladefs_nofs(kvmalloc_array(most, sizeof(**files), GFP_KERNEL));
 	if (*files) {
 		cladefs_dax_for_each_file(dax, volume, ino, file) {
-			if (nr < most && (atomic_long_read(&file->dirty_pages) ||
-					  atomic_long_read(&file->private_pages))) {
+			if (atomic_long_read(&file->dirty_pages) ||
+			    atomic_long_read(&file->private_pages)) {
 				refcount_inc(&file->refs);
 				(*files)[nr++] = file;
 			}
