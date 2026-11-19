@@ -3,9 +3,11 @@ id: TASK-644
 title: >-
   cladefsd tests open a store while a dropped connection's close of it is still
   running: EBUSY (three tests fail on main's CI)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 20:37'
+updated_date: '2026-11-19 22:30'
 labels:
   - testing
 dependencies: []

@@ -3,9 +3,11 @@ id: TASK-645
 title: >-
   object-stores CI job: the RustFS tests fail EACCES since the bucket KMS needs
   CLADEFSD_BUCKET, which the job doesn't set
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 20:37'
+updated_date: '2026-11-19 22:30'
 labels:
   - testing
   - ci

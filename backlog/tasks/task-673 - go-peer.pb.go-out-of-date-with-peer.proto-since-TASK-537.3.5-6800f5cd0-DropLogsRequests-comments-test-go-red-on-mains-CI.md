@@ -3,9 +3,11 @@ id: TASK-673
 title: >-
   go/: peer.pb.go out of date with peer.proto since TASK-537.3.5 (6800f5cd0):
   DropLogsRequest's comments; test (go) red on main's CI
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:27'
+updated_date: '2026-11-19 22:30'
 labels:
   - ci
   - bug

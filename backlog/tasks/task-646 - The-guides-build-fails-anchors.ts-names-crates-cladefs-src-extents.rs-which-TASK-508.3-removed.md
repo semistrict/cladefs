@@ -3,9 +3,11 @@ id: TASK-646
 title: >-
   The guide's build fails: anchors.ts names crates/cladefs/src/extents.rs, which
   TASK-508.3 removed
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 20:37'
+updated_date: '2026-11-19 22:30'
 labels:
   - docs
   - ci

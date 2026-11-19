@@ -5,9 +5,11 @@ title: >-
   crash::crashes_recover_prefixes_of_their_commits_concurrently aborts: 'the
   process's store state lock, shared beyond one store, is poisoned'
   (shared.rs:104), since TASK-633.8
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:27'
+updated_date: '2026-11-19 22:30'
 labels:
   - ci
   - bug

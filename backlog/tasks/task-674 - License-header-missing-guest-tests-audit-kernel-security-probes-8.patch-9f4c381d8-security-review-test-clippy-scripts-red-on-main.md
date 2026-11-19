@@ -3,9 +3,11 @@ id: TASK-674
 title: >-
   License header missing: guest/tests/audit/kernel-security-probes-8.patch
   (9f4c381d8, security review); test (clippy scripts) red on main
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:27'
+updated_date: '2026-11-19 22:30'
 labels:
   - ci
   - bug
