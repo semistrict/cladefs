@@ -2452,10 +2452,13 @@ mod tests {
             })
         };
         let uploader = store.uploader().unwrap();
-        while uploader.stalls() == 0 || bucket.stats().failures(Request::Create) == creates_failed {
+        // Until it stalls, or finishes, which it must not: past the bound, it waits.
+        while (uploader.stalls() == 0 || bucket.stats().failures(Request::Create) == creates_failed)
+            && !third.is_finished()
+        {
             std::thread::yield_now();
         }
-        assert!(!third.is_finished());
+        assert!(!third.is_finished(), "a commit past the lag bound went on");
         assert_eq!(uploader.failed(), None, "the uploader stopped");
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(third.join().unwrap(), Ok(()));

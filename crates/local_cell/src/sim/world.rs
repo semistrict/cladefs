@@ -353,10 +353,12 @@ enum Event {
         child: u64,
         made: [(Restore, Result<(), Error>); 2],
     },
-    /// cladefs: what a writer's dropping of a version gave.
+    /// cladefs: what a writer's dropping of a version gave, its session's, on `host`.
     VersionDropped {
         id: u64,
         result: Result<(), Error>,
+        host: usize,
+        session: u64,
     },
 }
 
@@ -655,12 +657,18 @@ impl World {
                     child = Short(child)
                 ));
             }
-            Event::VersionDropped { id, result } => {
+            Event::VersionDropped { id, result, host, session } => {
+                trace!("version {id} dropped: {result:?}", id = Short(id));
                 let cut = self.versions.get_mut(&id).unwrap();
                 cut.dropping = false;
                 let cell = cut.cell;
+                // cladefs: told by a session still alive: a crashed host tells nobody, and its
+                // writes in flight, an acknowledgement naming the version among them, may land
+                // after it died, as doc-18 accepts of a drop and a crash.
+                let alive =
+                    (self.hosts[host].sessions.get(&cell)).is_some_and(|alive| alive.id == session);
                 match result {
-                    Ok(()) => cut.dropped = true,
+                    Ok(()) if alive => cut.dropped = true,
                     Err(Error::Lost(_) | Error::Corrupt(_)) => {
                         self.violation(format!(
                             "dropping version {id}: {result:?}",
@@ -670,13 +678,19 @@ impl World {
                     // Its writer taken over, or its cell deleted: dropped as its swap of the head
                     // landed or not, which a write that took effect, answered unavailable, then
                     // found changed by the taking over, can't tell its writer (TASK-499): as the
-                    // head says, the writer writing it no more.
-                    Err(_) => {
+                    // head says, the writer writing it no more. cladefs: and as its host crashed.
+                    Ok(()) | Err(_) => {
                         let direct = Direct(self.bucket.clone());
                         let head = block_on(bucket_cell::head::get(&direct, sim_cell(cell)));
                         let named =
                             head.ok().flatten().is_some_and(|head| head.version(id).is_some());
-                        self.versions.get_mut(&id).unwrap().dropped = !named;
+                        let cut = self.versions.get_mut(&id).unwrap();
+                        cut.dropped = !named;
+                        // Its crashed host's writes in flight may name it yet: no writer
+                        // dropped it, told so (TASK-569).
+                        if !alive {
+                            cut.dropped_by = 0;
+                        }
                     }
                 }
             }
@@ -1440,14 +1454,22 @@ impl World {
         let id = ids[self.rng.random_range(0..ids.len())];
         let session = &self.hosts[host].sessions[&cell];
         let (writer, events) = (session.uploader.writer().unwrap(), self.events.clone());
+        let session_id = session.id;
         // Gone from the head as soon as its swap lands, which its writer may be told of later.
         let cut = self.versions.get_mut(&id).unwrap();
         (cut.dropping, cut.dropped_by) = (true, writer.epoch());
+        trace!(
+            "host {host}: {cell} drops version {id} at writer epoch {epoch}",
+            cell = Short(cell),
+            id = Short(id),
+            epoch = writer.epoch()
+        );
         let ids = BTreeSet::from([id]);
         session.store.as_ref().unwrap().forget_versions(&ids);
         self.spawn(async move {
             let result = writer.drop_versions(&ids).await;
-            events.borrow_mut().push(Event::VersionDropped { id, result });
+            let event = Event::VersionDropped { id, result, host, session: session_id };
+            events.borrow_mut().push(event);
         });
     }
 
