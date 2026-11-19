@@ -72,6 +72,11 @@
 (*   told Replicated while a drop to it is in flight (NoZeroQuorum).       *)
 (* - abandonUnissued: a writer gives a replacement up (`abandon`) only     *)
 (*   before it sends its CAS (AbandonIssued, TASK-537.3.5).                *)
+(* - aloneSwitch: a take that could give what it recovered no members of   *)
+(*   its own serves alone (f = 0) while the head names the configuration   *)
+(*   before; the acknowledgement that first covers what it recovered names *)
+(*   its own configuration in the same CAS, and none before it acknowledges*)
+(*   past it (AloneNoSwitch, TASK-537.3.6).                                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -89,7 +94,7 @@ CONSTANTS
 
 AllRules == {"fence", "fenceOthers", "longest", "installFirst", "activate", "joint",
              "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum",
-             "abandonUnissued"}
+             "abandonUnissued", "aloneSwitch"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME F \in Nat /\ Cardinality(Hosts) >= 2 * F + 1
@@ -100,8 +105,10 @@ ASSUME NoHost \notin Hosts
 \* every replacement is such a drop: replacements keeping f are checked by the models without it). Takes, fences,
 \* commits, deliveries, Replicated acknowledgements, replacements, crashes and losses are always
 \* in (bounded by their Max constants).
-\* And replacements given up, their members not taking the tail in time ("abandon", TASK-537.3.5).
-AllCan == {"upload", "drop", "sweep", "zero", "abandon"}
+\* And replacements given up, their members not taking the tail in time ("abandon", TASK-537.3.5);
+\* and takes serving alone, no members to be had for their own configuration ("alone",
+\* TASK-537.3.6).
+AllCan == {"upload", "drop", "sweep", "zero", "abandon", "alone"}
 ASSUME Can \subseteq AllCan
 
 R(rule) == rule \in Rules
@@ -121,7 +128,7 @@ NoCfg == [key |-> <<0, 0>>, f |-> 0, w |-> NoHost, members |-> {}]
 NoReply == [log |-> <<>>, drop |-> 0]
 NoSes == [st |-> "none", ep |-> 0, old |-> NoCfg, fenced |-> {},
           replies |-> [h \in Hosts |-> NoReply], cfg |-> NoCfg, pend |-> NoCfg, issued |-> FALSE,
-          cas |-> NoCfg, landed |-> 0, replaces |-> 0]
+          cas |-> NoCfg, landed |-> 0, replaces |-> 0, alone |-> FALSE, need |-> 0]
 
 VARIABLES
     head,       \* the bucket's head: [epoch, cfg, up]
@@ -289,6 +296,27 @@ Recover(h) ==
                                       ![h].fenced = {}, ![h].replies = NoSes.replies]
     /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
 
+\* h's take, fenced enough, recovers as Recover does, but has no members for a configuration of
+\* its own (TASK-537.3.6): it serves alone, at f = 0, the head naming the configuration before,
+\* until an acknowledgement covers what it recovered (`need`), which names its own (aloneSwitch).
+RecoverAlone(h) ==
+    LET s == ses[h]
+        c == s.old
+        k == <<s.ep, 0>>
+    IN
+    /\ "alone" \in Can
+    /\ s.st = "fencing"
+    /\ c # NoCfg /\ c.f >= 1 /\ Cardinality(Counted(h)) >= c.f + 1
+    /\ \E rec \in {Recovered(h, r) : r \in {r \in Counted(h) :
+                   \A q \in Counted(h) : Len(Recovered(h, q)) <= Len(Recovered(h, r))}} :
+          LET new == [key |-> k, f |-> 0, w |-> h, members |-> {[h |-> h, inc |-> inc[h]]}]
+          IN /\ cfgs' = [cfgs EXCEPT ![k] = new]
+             /\ sent' = [sent EXCEPT ![k] = rec]
+             /\ ses' = [ses EXCEPT ![h].st = "serving", ![h].cfg = new, ![h].old = NoCfg,
+                                   ![h].fenced = {}, ![h].replies = NoSes.replies,
+                                   ![h].alone = TRUE, ![h].need = Len(rec)]
+    /\ UNCHANGED <<head, mlog, drop, promise, inc, told, next, losses, crashes>>
+
 \* h activates its configuration by a CAS of the head, once f+1 of its members hold what it
 \* recovered (installFirst), and serves. Without the rule activate, it may serve without.
 Activate(h) ==
@@ -350,9 +378,14 @@ Acknowledge(h) ==
     /\ s.st = "serving"
     /\ head.epoch = s.ep
     /\ s.landed > Len(head.up)
-    /\ head' = [head EXCEPT !.up = SubSeq(Log(h), 1, s.landed)]
+    \* Alone, the acknowledgement covering what it recovered names its own configuration too
+    \* (aloneSwitch); without the rule, a replacement's swap later.
+    /\ LET switch == s.alone /\ s.landed >= s.need /\ R("aloneSwitch")
+       IN /\ head' = [head EXCEPT !.up = SubSeq(Log(h), 1, s.landed),
+                                  !.cfg = IF switch THEN s.cfg ELSE @]
+          /\ ses' = IF switch THEN [ses EXCEPT ![h].alone = FALSE] ELSE ses
     /\ told' = told \cup Range(SubSeq(Log(h), 1, s.landed))
-    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, ses, next, losses, crashes>>
+    /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, next, losses, crashes>>
 
 \* h replaces members of its configuration, or drops to f = 0 (itself alone): the new one's
 \* stream starts with h's whole log, and takes its commits from now on.
@@ -362,6 +395,7 @@ Replace(h) ==
     IN
     /\ s.st = "serving"
     /\ s.pend = NoCfg
+    /\ ~s.alone \/ ~R("aloneSwitch")
     /\ s.replaces < MaxReplaces
     /\ \E others \in SUBSET (Hosts \ {h}), f \in IF "zero" \in Can THEN {0} ELSE {F} :
           /\ Cardinality(others) = 2 * f
@@ -394,7 +428,7 @@ Lands(h) ==
     /\ s.st = "serving"
     /\ s.cas # NoCfg
     /\ head.epoch = s.ep
-    /\ head.cfg = s.cfg
+    /\ head.cfg = s.cfg \/ s.alone
     /\ head' = [head EXCEPT !.cfg = s.cas]
     /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, ses, told, next, losses, crashes>>
 
@@ -405,7 +439,7 @@ Learn(h) ==
     /\ s.issued
     /\ head.cfg = s.pend
     /\ ses' = [ses EXCEPT ![h].cfg = s.pend, ![h].pend = NoCfg, ![h].issued = FALSE,
-                          ![h].cas = NoCfg]
+                          ![h].cas = NoCfg, ![h].alone = FALSE]
     /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 \* h gives its replacement up, its CAS not sent (abandonUnissued), as its members took not the tail
@@ -446,7 +480,7 @@ LoseDisk(h) ==
 
 Next ==
     \E h \in Hosts :
-        \/ Take(h) \/ Recover(h) \/ Activate(h)
+        \/ Take(h) \/ Recover(h) \/ RecoverAlone(h) \/ Activate(h)
         \/ \E m \in Hosts : Fence(h, m)
         \/ Commit(h) \/ AckReplicated(h) \/ Land(h) \/ Acknowledge(h)
         \/ Replace(h) \/ Issue(h) \/ Lands(h) \/ Learn(h) \/ Abandon(h)
@@ -454,6 +488,11 @@ Next ==
         \/ CrashDaemon(h) \/ LoseDisk(h)
 
 Spec == Init /\ [][Next]_vars
+
+\* A constraint for the mutation AloneNoSwitch alone, which needs three takes and three commits:
+\* a writer's stream delivered to its own copy only, so that its peers hold nothing a take reads,
+\* the old writer's own copy, on its host, the only log longer than what a take recovered.
+OwnCopiesOnly == \A h \in Hosts, k \in Keys : mlog[h][k] # <<>> => cfgs[k].w = h
 
 Symmetry == Permutations(Hosts)
 
