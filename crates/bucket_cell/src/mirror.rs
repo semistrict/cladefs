@@ -15,31 +15,36 @@
 //!    One mirror of a version holds it at a time, its bytes its own: another's standing, the
 //!    mirror is under way, and this one does nothing ([`Mirrored::UnderWay`]). A pin unrefreshed
 //!    for [`PIN_STALE`] is its mirror's no longer, its host dead: the next mirror takes it over.
-//! 2. The parent's **head read in A**, naming the version, or the mirror is given up, its pin
-//!    dropped (`mirrorChecks`). A marker already in B goes straight to step 5
+//! 2. In A, its **hold** ([`layout::hold`]), a reference of its own under the parent's prefix
+//!    there (`mirrorHolds`), before it reads the head: it keeps the version whole in A, and the
+//!    parent's cell from being removed with what the version inherits from other cells, which the
+//!    mirror does not copy, while the copy stands. B's collector deletes it as the copy goes.
+//! 3. The parent's **head read in A**, naming the version, or the mirror is given up, its hold and
+//!    pin dropped (`mirrorChecks`). A marker already in B goes straight to step 6
 //!    (`mirrorResumesMarked`): read again, the head may have dropped the version since, its
 //!    children left referring in A.
-//! 3. **Every object of the version under the parent's prefix copied** into B, create-only: the
-//!    checkpoint at the version, the segments and extents' objects it names, and their moves
-//!    objects, read where the router sends them. An object gone from A gives the mirror up. Objects
-//!    of other cells the version inherited are not copied: they are read where they are. Its pin
-//!    refreshed as it goes, the mirror given up if it is no longer its own.
-//! 4. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
+//! 4. **Every object of the version under the parent's prefix copied** into B, create-only: the
+//!    checkpoint at the version, the objects its extents are in, along their moves, and the moves
+//!    objects, read where the router sends them. An object needed gone from A gives the mirror
+//!    up. Its pin refreshed as it goes, the mirror given up if it is no longer its own.
+//! 5. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
 //!    (`markerAfterCopy`), its pin refreshed right before, naming the epoch of the checkpoint it
 //!    copied: from then on, reads of the version in B are served there
 //!    ([`crate::object_bucket::ObjectBucket`]).
-//! 5. **The children of B referring in A listed**, after the marker (`mirrorListsAfterMark`), and
+//! 6. **The children of B referring in A listed**, after the marker (`mirrorListsAfterMark`), and
 //!    their references written in B, then retired in A.
-//! 6. The pin dropped, if still its own.
+//! 7. The pin dropped, if still its own.
 //!
 //! Every step is create-only, idempotent, or a deletion: a mirror stopped anywhere is begun again
 //! from the start, its pin taken over once stale, what it wrote kept. B's collector begins it
-//! again, finding its pin stale; the next fork of the version into B does too.
+//! again, finding its pin stale; the next fork of the version into B, and the next opening of a
+//! child of it in B, do too.
 //!
 //! A fork into B refers in B once the marker is there ([`Here`], [`crate::lifecycle`]).
 
 use crate::bucket::{self, Bucket, Created, Meta, Updated, Version};
 use crate::layout::{self, CellId, Kind, Mirror, Reference};
+use crate::moves::{Moved, MovesMaps};
 use crate::recovery::{self, Checkpoints};
 use crate::{Error, head, lifecycle};
 use futures::future::BoxFuture;
@@ -140,9 +145,10 @@ impl Pin {
         }
     }
 
-    /// Deletes it, if it is still this mirror's.
-    async fn drop(self, own: &impl Bucket) {
-        if bucket::get(own, &self.key).await.is_some_and(|found| found.bytes == self.bytes) {
+    /// Deletes it, if it is still this mirror's: written again first, conditionally, so that a
+    /// mirror that took it over since keeps it.
+    async fn release(mut self, own: &impl Bucket) {
+        if self.refresh(own, true).await {
             bucket::delete(own, &self.key).await;
         }
     }
@@ -165,90 +171,135 @@ pub async fn mirror(
         return Ok(Mirrored::UnderWay);
     };
     failpoint!("mirror::pinned");
+    // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
+    let hold = layout::hold(parent, at, number);
+    bucket::create(bucket, &hold, layout::encode(&Reference::of(0))).await;
+    failpoint!("mirror::held");
     let marker = layout::mirror(parent, at);
     let copied = match bucket::get(own, &marker).await {
         // Marked already, by a mirror begun before: its copy whole.
         Some(_) => 0,
-        None => match copy(bucket, own, &mut pin, parent, at).await? {
-            Ok((copied, epoch)) if pin.refresh(own, true).await => {
+        None => match copy(bucket, own, &mut pin, parent, at).await {
+            Ok(Copied::Whole { count, epoch }) if pin.refresh(own, true).await => {
                 bucket::create(own, &marker, layout::encode(&Mirror::of(epoch))).await;
                 failpoint!("mirror::marked");
-                copied
+                count
             }
-            Ok(_) => return Ok(Mirrored::GaveUp(TAKEN.to_owned())),
-            Err(why) => {
-                pin.drop(own).await;
+            // Its pin another's now, and its hold that mirror's too.
+            Ok(Copied::Whole { .. } | Copied::Taken) => {
+                return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
+            }
+            Ok(Copied::Short(why)) => {
+                let_go(bucket, own, pin, &hold).await;
                 return Ok(Mirrored::GaveUp(why));
+            }
+            Err(error) => {
+                let_go(bucket, own, pin, &hold).await;
+                return Err(error);
             }
         },
     };
     let moved = refer_here(bucket, own, number, parent, at).await;
     failpoint!("mirror::referred");
-    pin.drop(own).await;
+    pin.release(own).await;
     Ok(Mirrored::Done { copied, moved })
+}
+
+/// Gives a mirror up: its hold deleted in the parent's bucket, then its pin let go.
+async fn let_go(bucket: &impl Bucket, own: &impl Bucket, pin: Pin, hold: &str) {
+    bucket::delete(bucket, hold).await;
+    pin.release(own).await;
 }
 
 /// Why a mirror whose pin is no longer its own gives up.
 const TAKEN: &str = "its pin, stale, taken over";
 
+/// What a mirror's copy came to.
+enum Copied {
+    /// Every object copied, this many, of the version whose checkpoint is of `epoch`.
+    Whole { count: usize, epoch: u64 },
+    /// Its pin taken over, as it refreshed it.
+    Taken,
+    /// Short of an object, or of the version, as it says.
+    Short(String),
+}
+
 /// Copies every object of `parent`'s version at `at` under its prefix into `own`, after reading
-/// its head (`mirrorChecks`), refreshing `pin` as it goes: how many, and the epoch of the
-/// checkpoint at the version; or why the mirror is given up.
+/// its head (`mirrorChecks`), refreshing `pin` as it goes.
+///
+/// What it must copy: the checkpoint at the version and what recovering it read, and each extent's
+/// object where its moves lead, with every moves object on the way. What it copies if it is there:
+/// where the extent was before its moves, which the parent's bucket's collector keeps for the
+/// version (doc-7, A pass over a cell) unless it compacted it away before the version was cut,
+/// its state naming the extent where it was sealed still; readers follow its moves, copied too.
 async fn copy(
     bucket: &impl Bucket,
     own: &impl Bucket,
     pin: &mut Pin,
     parent: CellId,
     at: u64,
-) -> Result<Result<(usize, u64), String>, Error> {
+) -> Result<Copied, Error> {
     let head = head::get(bucket, parent).await?;
     let named = head.as_ref().filter(|head| !head.deleted()).and_then(|head| {
         head.versions.iter().any(|version| version.at == at).then(|| head.epoch_of(at)).flatten()
     });
     let Some(epoch) = named else {
-        return Ok(Err(format!("{parent}'s head names no version at {at:x}")));
+        return Ok(Copied::Short(format!("{parent}'s head names no version at {at:x}")));
     };
     failpoint!("mirror::checked");
     let checkpoints = Checkpoints::new(bucket, 1);
     let (state, touched) = match recovery::recover_at(&checkpoints, parent, at).await {
         Ok(recovered) => recovered,
-        Err(Error::Lost(lost)) => return Ok(Err(format!("{lost}: gone from its bucket"))),
+        Err(Error::Lost(lost)) => {
+            return Ok(Copied::Short(format!("{lost}: gone from its bucket")));
+        }
         Err(error) => return Err(error),
     };
-    // The checkpoint, the objects the state names and those its recovery read, of the parent's own.
-    let mut keys: BTreeSet<String> = touched;
-    keys.insert(layout::checkpoint(parent, at, epoch));
-    keys.extend(state.extents.values().map(|location| location.key.clone()));
-    keys.retain(|key| layout::owner(key) == Some(parent));
-    // And their moves, and the moves of those.
-    let mut moves = Vec::new();
-    for key in &keys {
-        if matches!(layout::kind(key), Kind::Moves { .. }) {
-            continue;
+    let ours = |key: &String| layout::owner(key) == Some(parent);
+    let mut needed: BTreeSet<String> = touched.into_iter().filter(ours).collect();
+    needed.insert(layout::checkpoint(parent, at, epoch));
+    let mut before = BTreeSet::new();
+    let mut maps = MovesMaps::default();
+    for (&extent, location) in state.extents.iter().filter(|(_, location)| ours(&location.key)) {
+        let mut along = location.clone();
+        while let Moved::To(to) = maps.moved(bucket, extent, &along.key).await? {
+            before.insert(std::mem::replace(&mut along, to).key);
         }
+        needed.insert(along.key);
+    }
+    let mut moves = Vec::new();
+    for key in needed.iter().chain(&before) {
         let prefix = layout::moves_of(key)?;
         moves.extend(bucket::list(bucket, &prefix).await.into_iter().map(|meta| meta.key));
     }
-    keys.extend(moves);
-    let keys: Vec<String> = keys.into_iter().collect();
+    needed.extend(moves);
+    before.retain(|key| !needed.contains(key));
+    let keys: Vec<(String, bool)> = (needed.into_iter().map(|key| (key, true)))
+        .chain(before.into_iter().map(|key| (key, false)))
+        .collect();
     use futures::StreamExt as _;
+    let mut count = 0;
     for chunk in keys.chunks(COPIES_AT_ONCE * 4) {
         if !pin.refresh(own, false).await {
-            return Ok(Err(TAKEN.to_owned()));
+            return Ok(Copied::Taken);
         }
-        let copies: Vec<_> = chunk.iter().map(|key| copy_one(bucket, own, key)).collect();
+        let copies: Vec<_> = chunk.iter().map(|(key, _)| copy_one(bucket, own, key)).collect();
         let copied: Vec<bool> =
             futures::stream::iter(copies).buffer_unordered(COPIES_AT_ONCE).collect().await;
-        if let Some(gone) = chunk.iter().zip(&copied).find(|(_, copied)| !**copied) {
-            return Ok(Err(format!("{}: gone from its bucket", gone.0)));
+        let short = chunk.iter().zip(&copied).find(|((_, needed), copied)| *needed && !**copied);
+        if let Some(((gone, _), _)) = short {
+            return Ok(Copied::Short(format!("{gone}: gone from its bucket")));
         }
+        count += copied.iter().filter(|copied| **copied).count();
     }
     failpoint!("mirror::copied");
-    Ok(Ok((keys.len(), epoch)))
+    Ok(Copied::Whole { count, epoch })
 }
 
 /// Copies the object at `key` into `own`, unless it is there: false if it is gone from where
-/// `bucket` reads it.
+/// `bucket` reads it. One there already, from an earlier copy, B's collector keeps while the
+/// parent's cell lives ([`crate::collector::Collector::collect_copy`]): no version of it this
+/// mirror copies outlives it.
 async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> bool {
     if bucket::get(own, key).await.is_some() {
         return true;

@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-19 09:34'
+updated_date: '2026-11-19 10:49'
 labels:
   - bucket
   - multi-region
@@ -67,4 +67,16 @@ Pins (beyond the spec, which models one mirror): the pin's bytes are its mirror'
 Simplifications (doc-23): GET+PUT copies only; only P's own prefix copied; a cell's whole copy kept while any version needs it.
 
 Tests: forks_refer_where_their_versions_are_mirrored, mirrors_hold_their_pins_alone (bucket_cell), versions_forked_on_a_host_of_another_bucket_make_children_there (cladefs, the fork starting the mirror). Hand mutants, each failing a test: no recheck, no retirement in A, never referring in B, shared pins, refresh unchecked, stale pins keeping, never stale, the fork starting no mirror.
+
+Step 6 (aa0e3e279): a fresh host learns a mirrored version's epoch from its marker (mirror::Here::learn) before reading the parent's head; tests children_of_a_mirrored_version_live_with_its_bucket_out_of_reach and mirrors_dying_at_each_step_leave_nothing_needed_gone (AC #4).
+
+Review round 1 (4 dimensions + verifiers, 2026-11-19). Confirmed and fixed:
+- B's collector kept a copy only for a named and marked version; versions are added after its head read (outside the spec), so a mirror could skip objects a pass then deleted. Now the copy is kept while the parent's cell lives, a pin stands, or a reference here stands (copiesKeptWhileAlive).
+- Children's references moved to B left nothing in A keeping what the version inherits from other cells: the parent removed, its origin reference retired. Now the mirror writes a hold in A, <P>refs/<at>/mirror.<B>, after its pin and before its head read; B's collector deletes it as the copy goes (mirrorHolds). Test holds_keep_what_mirrored_versions_inherit_from_other_cells (fails without the hold: the child's read of the inherited extent).
+- A fork that rechecked the marker wrote its B reference after its head read: it now reads the head again before retiring its A reference (forksRereadBeforeLeaving).
+- copy() required the extent's original object; one compacted away before the version was cut is gone. Now it copies along the moves, the earlier objects if there. Test versions_cut_after_compactions_are_mirrored_with_their_moves.
+- Retired marks in B now deleted with the copy; pin released only after a conditional refresh; errors let the hold and pin go; per-version turn map cleaned on drop; a fork's mirror takes its turn as it is asked for (the cladefs test no longer races it); a child's store opening starts its version's mirror (mirror_for).
+- Tests: misleading collector test rewritten; exact counts; duplicated setup now Two; sweeps_pass_over_copies_as_copies covers collect_with_own and Sweep::run_with_own; deletion order asserted (hold, marker, objects, marks).
+Not fixed, documented: a fork retried by the same host can't tell it resumes (identical head bytes), so a reference it left in A stays until the child's deletion; the hold keeps as much. lists_here_too returns B's moves alone when A's listing fails (B holds the version whole).
+Spec update (holds, version additions, split fork check) delegated; TLC on the Mac.
 <!-- SECTION:NOTES:END -->

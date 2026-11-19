@@ -421,17 +421,18 @@ impl Collector {
     /// bucket that refer here. `bucket`, routed, reads `cell`'s head in its own bucket and the
     /// children's heads here.
     ///
-    /// It reads `cell`'s head first, then lists the copy (rules `copiesKeptWhileNamed`,
-    /// `copyRelists`), so that a mirror or fork it races either shows in the listing or reads the
-    /// head this read, and gives up as the copy goes. A reference whose child is gone, deleted, or
-    /// of another origin, is retired here (its child's own passes retire in `cell`'s bucket). The
-    /// copy is kept whole while a mirror is under way (a pin), a child refers here, or the head
-    /// names a version mirrored here (a marker); else its markers go first (`markerGoesFirst`),
-    /// so that no read is sent here for a version whose objects go, then its objects. Nothing is
-    /// compacted (a copy has no head, no writer, no KEK of `cell`'s here) and no digest recorded:
-    /// what it keeps turns on `cell`'s head, in another bucket. A head not to be read deletes
-    /// nothing. The whole copy, rather than each version's alone, is kept while any of it is
-    /// needed: copies of a cell's versions share their objects, and what one needs is never lost.
+    /// It reads `cell`'s head first, then lists the copy (`copyRelists`), so that a mirror or fork
+    /// it races either shows in the listing or reads the head this read. A reference whose child is
+    /// gone, deleted, or of another origin, is retired here (its child's own passes retire in
+    /// `cell`'s bucket). The copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a
+    /// mirror is under way (a pin), or a child refers here: a live cell cuts versions after this
+    /// read, whose mirrors take the objects they share with the copy as copied, and once the cell
+    /// is deleted it cuts none. Else its mirrors' holds in `cell`'s bucket go first, then its
+    /// markers (`markerGoesFirst`), so that no read is sent here for a version whose objects go,
+    /// then its objects, then the marks of references retired here: the cell's prefix here left
+    /// empty. Nothing is compacted (a copy has no head, no writer, no KEK of `cell`'s here) and no
+    /// digest recorded: what it keeps turns on `cell`'s head, in another bucket. A head not to be
+    /// read deletes nothing.
     ///
     /// A pin unrefreshed for [`crate::mirror::PIN_STALE`], its mirror's host dead, keeps nothing:
     /// its mirror is begun again here, taking it over, and the copy kept this pass whatever that
@@ -444,11 +445,7 @@ impl Collector {
         cell: CellId,
     ) -> Result<Report, Error> {
         let mut report = Report::default();
-        let head = crate::head::get(bucket, cell).await?;
-        let named: BTreeSet<u64> = (head.iter())
-            .filter(|head| !head.deleted())
-            .flat_map(|head| head.versions.iter().map(|version| version.at))
-            .collect();
+        let alive = crate::head::get(bucket, cell).await?.is_some_and(|head| !head.deleted());
         let listed = bucket::list(own, &cell.prefix()).await;
         let (mut markers, mut pinned, mut referring) = (Vec::new(), false, Vec::new());
         let mut stale = Vec::new();
@@ -486,11 +483,15 @@ impl Collector {
             let resumed = crate::mirror::mirror(bucket, own, number, cell, *at).await?;
             log::info!("collector: {cell}'s mirror at {at:x}, its pin stale, again: {resumed:?}");
         }
-        let named_marked = markers.iter().any(|(at, _)| named.contains(at));
-        if pinned || !stale.is_empty() || standing || named_marked {
+        if alive || pinned || !stale.is_empty() || standing {
             return Ok(report);
         }
-        // Nothing of it needed: its markers first, then what they named.
+        // Nothing of it needed: its holds there first, which keep there what it inherits, then its
+        // markers here, then what they named, then the marks.
+        let holds: Vec<String> =
+            markers.iter().map(|&(at, _)| layout::hold(cell, at, number)).collect();
+        let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
+        bucket::delete_all(bucket, &holds).await;
         let markers: Vec<&str> = markers.iter().map(|(_, key)| *key).collect();
         bucket::delete_all(own, &markers).await;
         let copied: Vec<&Meta> = (listed.iter())
@@ -508,6 +509,10 @@ impl Collector {
         bucket::delete_all(own, &keys).await;
         report.deleted += copied.len();
         report.deleted_bytes += copied.iter().map(|meta| meta.size).sum::<u64>();
+        let written: Vec<String> = gone.iter().filter_map(|key| layout::retired_of(key)).collect();
+        let marks: BTreeSet<&str> =
+            marks.into_iter().chain(written.iter().map(String::as_str)).collect();
+        bucket::delete_all(own, &marks.into_iter().collect::<Vec<_>>()).await;
         Ok(report)
     }
 
@@ -2060,8 +2065,10 @@ impl Pass {
                 | Kind::Reference { .. }
                 | Kind::Retired { .. }
                 // cladefs: a mirror's pin and marker, under another bucket's cell's prefix, which a
-                // pass over that cell's copy decides ([`Collector::collect_copy`], TASK-633.8).
+                // pass over that cell's copy decides ([`Collector::collect_copy`], TASK-633.8); and
+                // its hold, under the cell's here, which that pass deletes.
                 | Kind::Pin { .. }
+                | Kind::Hold { .. }
                 | Kind::Mirror { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity

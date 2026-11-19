@@ -157,19 +157,40 @@ struct Referred {
     here: bool,
 }
 
-/// cladefs: a fork that referred in its parent's bucket, its version's mirror marked in the child's
-/// bucket since, read again after the parent's head (`forksRecheck`): its reference written there
-/// too, then its own in the parent's bucket retired (`forksLeaveA`), which no mirror's listing
-/// may have found, and which would keep the version there as long as the child lives (doc-23,
-/// Forks; TASK-633.8).
-async fn refer_here_too(bucket: &impl Bucket, origin: Origin, child: CellId, owner: u64) {
-    let Some(here) = bucket.mirrors() else { return };
+/// cladefs: what a fork that `referred` does, once it read its version named in the parent's head,
+/// to leave the parent's bucket (doc-23, Forks; TASK-633.8): referring there, the version's mirror
+/// marked in the child's bucket since, read again (`forksRecheck`), its reference written here
+/// too; then, the head read again naming the version still (`forksRereadBeforeLeaving`), its own
+/// there retired (`forksLeaveA`), which no mirror's listing may have found, and which would keep
+/// the version there as long as the child lives. Read again, the head says that the mirror's
+/// bucket's collector, which reads it before it lists the references here, keeps the copy, or
+/// finds the reference here: a version dropped by then, the reference there stays.
+///
+/// A fork made again after one of its makings referred there and stopped, referring here this
+/// time, leaves that reference there: a making begun again writes its head's bytes as the first
+/// did, and can't tell it from its own write whose answer was lost. The mirror's hold keeps the
+/// version there as long, and the child's deletion retires it.
+async fn leave_parents(
+    bucket: &impl Bucket,
+    origin: Origin,
+    version: u64,
+    child: CellId,
+    referred: Referred,
+) -> Result<(), Error> {
+    let Referred { owner, here: false } = referred else { return Ok(()) };
+    let Some(here) = bucket.mirrors() else { return Ok(()) };
     if !here.marked(origin.parent, origin.at).await {
-        return;
+        return Ok(());
     }
     let key = layout::reference(origin.parent, origin.at, child);
     here.create(&key, layout::encode(&layout::Reference::of(owner))).await;
-    retire_one(bucket, &key).await;
+    failpoint!("version::rechecked");
+    let head = head::get(bucket, origin.parent).await?;
+    let named = head.as_ref().filter(|head| !head.deleted()).and_then(|head| head.version(version));
+    if named.is_some_and(|named| named.at == origin.at) {
+        retire_one(bucket, &key).await;
+    }
+    Ok(())
 }
 
 /// cladefs: retires the references at `keys` ([`layout::reference`]), garbage for good, under any
@@ -357,9 +378,8 @@ pub async fn resume_version_fork(
 /// child of another cell, the cell's checkpoint at the version made, sealed under `keys`
 /// (TASK-476). Returns the child's head as it left it, if it made the fork.
 ///
-/// cladefs: having `referred` in the parent's bucket, the version's mirror marked in the child's
-/// since, the reference there too, after the head's read, then its own in the parent's retired
-/// ([`refer_here_too`]).
+/// cladefs: having `referred`, what leaves the parent's bucket, after the head's read
+/// ([`leave_parents`]).
 async fn finish_fork(
     bucket: &impl Bucket,
     child: CellId,
@@ -383,8 +403,8 @@ async fn finish_fork(
             return Err(Error::NotShared(cell));
         }
     }
-    if let Some(Referred { owner, here: false }) = referred {
-        refer_here_too(bucket, origin, child, owner).await;
+    if let Some(referred) = referred {
+        leave_parents(bucket, origin, version, child, referred).await?;
     }
     if cell != child {
         recovery::checkpoint_at(bucket, cell, origin.at, keys).await?;

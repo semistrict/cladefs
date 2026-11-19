@@ -248,8 +248,10 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: CellId) -> Listed {
             usage.add(&meta.key, meta.size);
         }
         match layout::kind(&meta.key) {
-            // cladefs: a mirror's pin is a reference of its own (TASK-633.8).
-            layout::Kind::Reference { .. } | layout::Kind::Pin { .. } => references.push(meta.key),
+            // cladefs: a mirror's pin, and its hold, are references of its own (TASK-633.8).
+            layout::Kind::Reference { .. }
+            | layout::Kind::Pin { .. }
+            | layout::Kind::Hold { .. } => references.push(meta.key),
             _ => drop(objects.insert(meta.key.clone(), meta)),
         }
     }

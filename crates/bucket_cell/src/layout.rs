@@ -316,6 +316,17 @@ pub fn pin(parent: CellId, at: u64) -> String {
     format!("{}{PIN}", origin(parent, at))
 }
 
+/// cladefs: the hold of the mirror of `parent`'s version at the end of its segment `at` in the
+/// bucket numbered `bucket`, in the parent's bucket (doc-23, Mirrors; TASK-633.8): a reference of
+/// the mirror's own, among those of the version's children there, which keeps the version's state
+/// there whole, and the parent's cell from being removed, with what the version inherits from
+/// other cells, while the copy stands: its children, referring in the mirror's bucket, read there
+/// what the mirror copied, and in their cells what it did not. The mirror writes it before it reads
+/// the parent's head; the mirror's bucket's collector deletes it, the copy going.
+pub fn hold(parent: CellId, at: u64, bucket: u16) -> String {
+    format!("{}{PIN}.{bucket:04x}", origin(parent, at))
+}
+
 /// cladefs: the marker of the mirror of `parent`'s version at the end of its segment `at` in
 /// another bucket (doc-23, Mirrors; TASK-633.8): created once every object of the version is
 /// copied there, never before; the switch of the version's reads, and of its children's
@@ -452,6 +463,14 @@ pub enum Kind<'a> {
         parent: CellId,
         at: u64,
     },
+    /// cladefs: the hold of the mirror of `parent`'s version at `at` in the bucket numbered
+    /// `bucket`, in the parent's bucket ([`hold`]): a reference of the mirror's own, never a
+    /// candidate.
+    Hold {
+        parent: CellId,
+        at: u64,
+        bucket: u16,
+    },
     /// cladefs: the marker of the mirror of `cell`'s version at `at` in another bucket
     /// ([`mirror`]).
     Mirror {
@@ -480,6 +499,7 @@ impl Kind<'_> {
             Self::Reference { .. } => "reference",
             Self::Retired { .. } => "retired",
             Self::Pin { .. } => "pin",
+            Self::Hold { .. } => "hold",
             Self::Mirror { .. } => "mirror",
             Self::Unknown => "unknown",
         }
@@ -498,6 +518,7 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Reference { parent: cell, .. }
         | Kind::Retired { parent: cell, .. }
         | Kind::Pin { parent: cell, .. }
+        | Kind::Hold { parent: cell, .. }
         | Kind::Mirror { cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
@@ -556,6 +577,12 @@ pub fn kind(key: &str) -> Kind<'_> {
         if let Some(rest) = rest.strip_prefix(REFS) {
             if let Some(at) = rest.strip_suffix(PIN).and_then(|at| at.strip_suffix('/')) {
                 return Some(Kind::Pin { parent: cell, at: number(at)? });
+            }
+            if let Some((at, held)) = rest.split_once('/')
+                && let Some(bucket) = held.strip_prefix(PIN).and_then(|held| held.strip_prefix('.'))
+            {
+                let bucket = u16::from_str_radix(bucket, 16).ok()?;
+                return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
             }
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Reference { parent, at, child });
@@ -1239,6 +1266,8 @@ mod tests {
         assert!(!retired(cell, 7, child).starts_with(&references(cell)));
         // cladefs: a mirror's pin, among its version's references, and its marker (TASK-633.8).
         assert_eq!(kind(&pin(cell, 7)), Kind::Pin { parent: cell, at: 7 });
+        assert_eq!(kind(&hold(cell, 7, 3)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
+        assert_eq!(owner(&hold(cell, 7, 3)), Some(cell));
         assert!(pin(cell, 7).starts_with(&origin(cell, 7)));
         assert_eq!(retired_of(&pin(cell, 7)), None);
         assert_eq!(kind(&mirror(cell, 7)), Kind::Mirror { cell, at: 7 });
