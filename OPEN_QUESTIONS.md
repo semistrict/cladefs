@@ -21,6 +21,16 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Explainer films: storylines picked without asking, in-progress parts shown marked (TASK-658, 2026-11-19)
+
+Five feature films (encryption, replication, regions, shared volumes, images) in the overview's look,
+45-75 s each. Each film's builder wrote three storylines (`explainer/<film>/STORYLINES.md`) and took its
+own recommendation rather than wait for a pick. Where a film touches work still in progress (cells
+across buckets' forks and mirrors, `git fetch` onto a newer base, the KMS backends' open tasks), it
+shows it with an "in progress" mark on screen rather than leave it out. Each film had one independent
+fact check against the code. Undoing: pick another storyline from a film's STORYLINES.md and rebuild
+that film, or cut the marked scenes.
+
 ## Replicated cells: a take with no members to be had serves alone (TASK-537.3.6, 2026-11-19)
 
 Decided without you:
