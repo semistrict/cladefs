@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: 2026-10-31 22:17
-updated_date: '2026-11-19T13:55:00Z'
+updated_date: '2026-11-19T16:04:00Z'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -97,7 +97,7 @@ as above. With f = 1 (three members):
 | Failure | fsync (Replicated) acknowledged | sync acknowledged | Tested by |
 |---|---|---|---|
 | Guest crash, VMM killed | kept | kept | the rows above |
-| cladefsd killed, or the host rebooted, disk kept | kept: the reopen is a take, which recovers from the members and its own write-ahead log, whichever goes further | kept | local_cell's `members_go_past_own_logs_by_writer_then_commit` (the choice alone); **no test kills a replicated cell's daemon and reopens it on the same disk** |
+| cladefsd killed, or the host rebooted, disk kept | kept: the reopen is a take, which recovers from the members and its own write-ahead log, whichever goes further | kept | cladefs's `replicated_commits_survive_their_daemon_killed_and_reopened` (the writer's daemon killed mid-workload with the bucket out of reach, started again on its directory, the store opened again); local_cell's `members_go_past_own_logs_by_writer_then_commit` (the choice alone) |
 | Writer's host lost, its disk with it | kept: a take on another host fences the two members and recovers from them | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` (three daemons, the writer's killed and its directory removed, the bucket out of reach meanwhile); local_cell's `takes_recover_what_a_lost_writers_members_hold` |
 | Writer's host lost, the other two left | kept, as above; the taker has no configuration of its own to be had, so it serves degraded (f = 0), the head naming the configuration before until the acknowledgement naming what it recovered names its own (doc-21), and is replicated again as a third host answers | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` |
 | Writer's host and a member lost | Replicated commits not yet uploaded may go: more than f failures. A take is refused until f+1 of the members other than the old writer answer | as fsync | local_cell's `takes_without_enough_members_to_fence_are_refused` |

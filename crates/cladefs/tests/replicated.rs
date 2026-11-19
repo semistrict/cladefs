@@ -11,6 +11,8 @@
 //! - The writer's daemon killed and its directory, disk and replica directory, gone, every commit
 //!   its guest was told durable (`COMMIT_UPLOADED`, which a replicated cell's waits for Replicated)
 //!   while the bucket was out of reach is there after a take on another host.
+//! - The writer's daemon killed and started again on the same directory, every such commit is
+//!   there after its VM opens the store again.
 //! - A member's daemon killed, its writer replaces it, the head naming a configuration of the
 //!   survivor and the spare, and its commits are replicated again with the bucket out of reach;
 //!   both its members killed, it is degraded, its commits released by the bucket, and it drops to
@@ -299,6 +301,72 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     assert_eq!(head(&bucket, cell).end, before, "told durable by the bucket, not the members");
     check(&client, 1..=acked);
     check(&client, 101..=106);
+}
+
+/// doc-12's row of cladefsd killed with its disk kept, for a replicated cell: its commits, told
+/// durable while the bucket was out of reach, on its writer's disk and a member; the writer's
+/// daemon killed mid-workload and started again on the same directory; the VM's opening of the
+/// store again is a take, which fences the members and recovers from them and its own write-ahead
+/// log, and holds every one of them.
+#[test]
+fn replicated_commits_survive_their_daemon_killed_and_reopened() {
+    let root = tempfile::tempdir().unwrap();
+    let bucket = root.path().join("bucket");
+    std::fs::create_dir(&bucket).unwrap();
+    let (addresses, mut daemons) = hosts(root.path(), &bucket, 3);
+    let store = daemons[0].dir.join("store");
+    let cell = create_replicated(&daemons[0], &store);
+    let client = connect(&daemons[0], &store);
+    write(&client, 1..=2);
+    let before = head(&bucket, cell).end;
+    let (first, _, _) = configuration(&bucket, cell);
+    reachable(&bucket, false);
+    let acked = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let committing = {
+        let acked = acked.clone();
+        std::thread::spawn(move || {
+            for sequence in 3.. {
+                let extent = ExtentId { cell: client.cell(), sequence };
+                let written = client.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]);
+                let root = format!("root {sequence}");
+                if written.and_then(|()| client.commit(Some(root.as_bytes()))).is_err() {
+                    return;
+                }
+                acked.store(sequence, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+    };
+    until("commits told durable", || acked.load(std::sync::atomic::Ordering::SeqCst) >= 10);
+
+    // The writer's daemon killed mid-workload, its disk kept, and started again on it.
+    daemons[0].kill();
+    let acked = acked.load(std::sync::atomic::Ordering::SeqCst);
+    committing.join().unwrap();
+    reachable(&bucket, true);
+    assert_eq!(head(&bucket, cell).end, before, "commits after 2 uploaded: nothing to recover");
+    // Its sockets gone, as a host's service manager clears its runtime directory: a daemon never
+    // binds over one (`bind_owner_only`), which may be another's serving.
+    std::fs::remove_file(&daemons[0].vms).unwrap();
+    std::fs::remove_file(&daemons[0].control_socket).unwrap();
+    daemons[0] = daemon(&daemons[0].dir.clone(), &bucket, &addresses);
+
+    let client = connect(&daemons[0], &store);
+    check(&client, 1..=acked);
+    let (number, f, members) = configuration(&bucket, cell);
+    assert!(number > first && f == 1, "the reopening took it: {number} after {first}, f {f}");
+    assert_eq!(members[0], addresses[0]);
+    // Its commits told durable once the bucket holds what it recovered, which no member of the new
+    // configuration need hold (`Replicator::base`); then replicated again, told durable with the
+    // bucket out of reach.
+    write(&client, 101..=102);
+    until("degraded no more", || !daemons[0].control.stat_cell(&store).unwrap().degraded);
+    let before = head(&bucket, cell).end;
+    reachable(&bucket, false);
+    write(&client, 103..=104);
+    reachable(&bucket, true);
+    assert_eq!(head(&bucket, cell).end, before, "told durable by the bucket, not the members");
+    check(&client, 1..=acked);
+    check(&client, 101..=104);
 }
 
 /// TASK-537.3.6's AC 2: a member's daemon killed, the writer replaces it with the spare host, and
