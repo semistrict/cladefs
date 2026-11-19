@@ -3,10 +3,10 @@ id: TASK-633.6
 title: >-
   KMS per bucket, revocation per KMS, shredding across them; an Azure Key Vault
   backend
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-19 01:13'
+updated_date: '2026-11-19 02:34'
 labels:
   - bucket
   - multi-region
@@ -54,3 +54,15 @@ Mapped 2026-11-18 (read-only survey): one KMS per process (cladefs::bucket host_
 5. extent_keys/src/kms/azure.rs (azure-kv://), as gcp.rs: KeyNames, real::wrapped, object_store's Azure credentials, tenant bound into the wrapped bytes; license check of any new crate.
 Tests: two buckets with different bucket-KMS master keys; a cell of each wrapped in its own bucket; a KMS refusing revokes that bucket's tenants alone; an unwrap across buckets is Elsewhere; shredding reaches both.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18 night (unattended):
+- 82bb2aa37 CachingKms over Kmses (per bucket number), refusals/pools keyed by (KMS, tenant); OneKms = single KMS. On main.
+- 9bbf7f7cd ByBucket: home bucket and NAMED keep the env choice; another bucket: registry kms, else CLADEFSD_BUCKET_<N>_CLADEFS_KMS/CLADEFS_KMS, else bucket KMS over that bucket with its own master keys, master_key_id checked. KMSes keyed by URL (shared refusals). DECISION: the home bucket's registry entry is not consulted (its own env is its config; avoids behaviour change for one-bucket hosts).
+- b8364158c ByBucket::shred: tombstones in every bucket-KMS bucket of the registry (copy + root); named-KMS and unreachable buckets named in an error after shredding where possible.
+- 6bd3a5581 azure-kv:// backend (no new crates; reqwest/serde_json/base64/url already deps, all MIT/Apache). Tested against an in-process fake vault + authority only: refusal codes (403 revoked, 404 KeyNotFound none, 400 unwrap unauthentic) follow Key Vault's error codes, NOT checked against the live service (no Azure credentials; GCP-only exception for live KMS tests).
+- e82da0965 fxkb format 2 binds the bucket identity; cross-bucket unwrap -> kms::Error::Elsewhere (not a revocation). doc-16 updated (format, shredding across buckets).
+Test: bucket_kms::tests::buckets_cells_are_under_their_own_buckets_kms (3 buckets: own bucket KMS, bucket KMS w/ own master key, local KMS by registry), azure tests (7), hand mutants for each step.
+<!-- SECTION:NOTES:END -->
