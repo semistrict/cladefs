@@ -4402,7 +4402,10 @@ fn guests_forks_failing_at_each_step_harm_nothing() {
         let failing = fail::FailGuard::new(step, "1*return").unwrap();
         let forked = store.fork(&child);
         drop(failing);
-        assert_eq!((forked, child.exists()), (Err(Errno::EIO), false), "{step}");
+        // Failing, but at its version's drop, past its child made, which fails it no more
+        // (TASK-609).
+        let failed = (step != "upload::drop_versions").then_some(Errno::EIO);
+        assert_eq!((forked.err(), child.exists()), (failed, failed.is_none()), "{step}");
         drop(store);
 
         let store = reopened(&socket, &path);
