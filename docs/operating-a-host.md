@@ -156,6 +156,14 @@ CLADEFSD_BUCKET_2_AWS_REGION=eu-west-1                # bucket 2's
 CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT=/etc/cladefs/gcs-3.json
 ```
 
+The cells of another bucket are under that bucket's KMS (TASK-633.6): the one its record names
+(`--kms`), else the one its variables name (`CLADEFSD_BUCKET_<N>_CLADEFS_KMS`, or `CLADEFS_KMS`),
+else, given a master key (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`, or `CLADEFS_MASTER_KEY`), the
+bucket KMS over that bucket, its tenants' KEKs kept in it. A master key's ID recorded with
+`--master-key-id` must be among those given, or the bucket's cells are refused (`EACCES`). A KMS
+refusing a tenant refuses it in the buckets under that KMS alone. The host's own bucket's cells are
+under the KMS its own environment names, as below.
+
 ## Encryption and shredding
 
 Backlog doc-16 is the design. Every store is encrypted, always:
