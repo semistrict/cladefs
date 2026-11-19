@@ -125,12 +125,12 @@ impl MemoryKms {
 
 impl Kms for MemoryKms {
     async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
-        self.kek(tenant, true, |kek| crate::kms::bucket::wrap(tenant, kek, key))
+        self.kek(tenant, true, |kek| crate::kms::bucket::wrap(tenant, 0, kek, key))
     }
 
     async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
         let unwrapped =
-            self.kek(tenant, false, |kek| crate::kms::bucket::unwrap(tenant, kek, wrapped))?;
+            self.kek(tenant, false, |kek| crate::kms::bucket::unwrap(tenant, 0, kek, wrapped))?;
         unwrapped.map_err(|source| Error::Unauthentic { tenant, source })
     }
 }
@@ -156,11 +156,11 @@ impl KnownKms {
 
 impl Kms for KnownKms {
     async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
-        Ok(crate::kms::bucket::wrap(tenant, &Self::kek(), key))
+        Ok(crate::kms::bucket::wrap(tenant, 0, &Self::kek(), key))
     }
 
     async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
-        crate::kms::bucket::unwrap(tenant, &Self::kek(), wrapped)
+        crate::kms::bucket::unwrap(tenant, 0, &Self::kek(), wrapped)
             .map_err(|source| Error::Unauthentic { tenant, source })
     }
 }

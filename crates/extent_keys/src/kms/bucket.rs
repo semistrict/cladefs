@@ -16,9 +16,11 @@
 //! tenant, or relabelled another master key, fails AES-KW's check. A tombstone, a shredded tenant's,
 //! is the header alone, kind [`TOMBSTONE`]: the tenant had a KEK, now destroyed, never made again.
 //!
-//! **A key it wraps:** [`WRAPPED_MAGIC`], [`FORMAT`], the tenant, the KEK's ID, then the key wrapped
-//! with AES-KW under a key HKDF derives from the KEK with that header as info ([`WRAPPED_LEN`] bytes
-//! in all): the header names whose KEK, and which, and is bound to the key.
+//! **A key it wraps:** [`WRAPPED_MAGIC`], [`WRAPPED_FORMAT`], the tenant, the identity of the bucket
+//! its KEK is kept in (TASK-633.6: `bucket_cell::identity`'s ID, 0 for a bucket of none), the KEK's
+//! ID, then the key wrapped with AES-KW under a key HKDF derives from the KEK with that header as
+//! info ([`WRAPPED_LEN`] bytes in all): the header names whose KEK, where, and which, and is bound
+//! to the key; so a key of another bucket's is told from one whose KEK is gone.
 
 use super::Error;
 use super::master::{MASTER_ID_LEN, MasterKey, MasterKeyId, MasterKeys};
@@ -31,8 +33,11 @@ pub const OBJECT_MAGIC: &[u8; 4] = b"fxkt";
 /// backends' `fxkr`.
 pub const WRAPPED_MAGIC: &[u8; 4] = b"fxkb";
 
-/// The format of both.
+/// The format of a KEK object.
 pub const FORMAT: u8 = 1;
+
+/// The format of a wrapped key: 2 names its bucket (TASK-633.6).
+pub const WRAPPED_FORMAT: u8 = 2;
 
 /// A KEK object's kind: a KEK.
 const KEK: u8 = 1;
@@ -52,8 +57,8 @@ const KEK_HEADER_LEN: usize = OBJECT_HEADER_LEN + KEK_ID_LEN + MASTER_ID_LEN;
 /// The bytes of a KEK object of a KEK.
 pub const KEK_OBJECT_LEN: usize = KEK_HEADER_LEN + crate::WRAPPED_LEN;
 
-/// The bytes of a wrapped key's header: magic, format, tenant, KEK ID.
-const WRAPPED_HEADER_LEN: usize = WRAPPED_MAGIC.len() + 1 + 8 + KEK_ID_LEN;
+/// The bytes of a wrapped key's header: magic, format, tenant, bucket, KEK ID.
+const WRAPPED_HEADER_LEN: usize = WRAPPED_MAGIC.len() + 1 + 8 + 8 + KEK_ID_LEN;
 
 /// The bytes of a key the bucket KMS wrapped.
 pub const WRAPPED_LEN: usize = WRAPPED_HEADER_LEN + crate::WRAPPED_LEN;
@@ -203,34 +208,44 @@ impl KekObject {
     }
 }
 
-/// `key`, wrapped by `kek`, `tenant`'s KEK.
-pub fn wrap(tenant: u64, kek: &TenantKek, key: &Secret) -> Wrapped {
-    let header = wrapped_header(tenant, kek.id);
+/// `key`, wrapped by `kek`, `tenant`'s KEK, kept in the bucket of identity `bucket`.
+pub fn wrap(tenant: u64, bucket: u64, kek: &TenantKek, key: &Secret) -> Wrapped {
+    let header = wrapped_header(tenant, bucket, kek.id);
     let wrapped = wrapping_key(&kek.key, &header).wrap(key);
     Wrapped([&header[..], &wrapped.0].concat())
 }
 
-/// Whose KEK wrapped `wrapped`, and which, as its header says: the header alone is read.
-pub fn kek_of(wrapped: &Wrapped) -> Result<(u64, KekId), Unauthentic> {
+/// Whose KEK wrapped `wrapped`, the identity of the bucket it is kept in, and which KEK, as its
+/// header says: the header alone is read.
+pub fn kek_of(wrapped: &Wrapped) -> Result<(u64, u64, KekId), Unauthentic> {
     let bytes = &wrapped.0;
     if bytes.len() != WRAPPED_LEN || !bytes.starts_with(WRAPPED_MAGIC) {
         return Err(Unauthentic("a wrapped key, by its header"));
     }
-    if bytes[WRAPPED_MAGIC.len()] != FORMAT {
+    if bytes[WRAPPED_MAGIC.len()] != WRAPPED_FORMAT {
         return Err(Unauthentic("a wrapped key, of another format"));
     }
     let at = WRAPPED_MAGIC.len() + 1;
     let tenant = u64::from_be_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
-    let id = KekId(bytes[at + 8..WRAPPED_HEADER_LEN].try_into().expect("an ID's bytes"));
-    Ok((tenant, id))
+    let bucket = u64::from_be_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes"));
+    let id = KekId(bytes[at + 16..WRAPPED_HEADER_LEN].try_into().expect("an ID's bytes"));
+    Ok((tenant, bucket, id))
 }
 
-/// The key `wrapped` holds, if `kek`, `tenant`'s, wrapped it: refused if its header names another
-/// tenant or KEK, or it fails AES-KW's check.
-pub fn unwrap(tenant: u64, kek: &TenantKek, wrapped: &Wrapped) -> Result<Secret, Unauthentic> {
-    let (of, id) = kek_of(wrapped)?;
+/// The key `wrapped` holds, if `kek`, `tenant`'s, kept in the bucket of identity `bucket`, wrapped
+/// it: refused if its header names another tenant, bucket or KEK, or it fails AES-KW's check.
+pub fn unwrap(
+    tenant: u64,
+    bucket: u64,
+    kek: &TenantKek,
+    wrapped: &Wrapped,
+) -> Result<Secret, Unauthentic> {
+    let (of, kept_in, id) = kek_of(wrapped)?;
     if of != tenant {
         return Err(Unauthentic("a wrapped key, wrapped for another tenant"));
+    }
+    if kept_in != bucket {
+        return Err(Unauthentic("a wrapped key, wrapped in another bucket"));
     }
     if id != kek.id {
         return Err(Unauthentic("a wrapped key, wrapped by another KEK of the tenant's"));
@@ -248,13 +263,14 @@ fn object_header(kind: u8, tenant: u64) -> Vec<u8> {
     header
 }
 
-fn wrapped_header(tenant: u64, id: KekId) -> [u8; WRAPPED_HEADER_LEN] {
+fn wrapped_header(tenant: u64, bucket: u64, id: KekId) -> [u8; WRAPPED_HEADER_LEN] {
     let mut header = [0; WRAPPED_HEADER_LEN];
     header[..WRAPPED_MAGIC.len()].copy_from_slice(WRAPPED_MAGIC);
-    header[WRAPPED_MAGIC.len()] = FORMAT;
+    header[WRAPPED_MAGIC.len()] = WRAPPED_FORMAT;
     let at = WRAPPED_MAGIC.len() + 1;
     header[at..at + 8].copy_from_slice(&tenant.to_be_bytes());
-    header[at + 8..].copy_from_slice(&id.0);
+    header[at + 8..at + 16].copy_from_slice(&bucket.to_be_bytes());
+    header[at + 16..].copy_from_slice(&id.0);
     header
 }
 
@@ -390,15 +406,21 @@ mod tests {
     #[test]
     fn wrapped_keys_unwrap_under_their_tenants_kek() {
         let (kek, key) = (TenantKek::random(), Secret::random());
-        let wrapped = wrap(7, &kek, &key);
+        let wrapped = wrap(7, 0xb0, &kek, &key);
         assert_eq!(wrapped.0.len(), WRAPPED_LEN);
-        assert_eq!(&wrapped.0[..13], b"fxkb\x01\0\0\0\0\0\0\0\x07");
-        assert_eq!(kek_of(&wrapped), Ok((7, kek.id)));
-        assert_eq!(unwrap(7, &kek, &wrapped).unwrap().expose(), key.expose());
+        assert_eq!(&wrapped.0[..21], b"fxkb\x02\0\0\0\0\0\0\0\x07\0\0\0\0\0\0\0\xb0");
+        assert_eq!(kek_of(&wrapped), Ok((7, 0xb0, kek.id)));
+        assert_eq!(unwrap(7, 0xb0, &kek, &wrapped).unwrap().expose(), key.expose());
         let refused = |tenant, kek: &TenantKek, wrapped: &Wrapped| {
-            unwrap(tenant, kek, wrapped).map(|_| ()).unwrap_err().0
+            unwrap(tenant, 0xb0, kek, wrapped).map(|_| ()).unwrap_err().0
         };
         assert_eq!(refused(8, &kek, &wrapped), "a wrapped key, wrapped for another tenant");
+        let elsewhere = unwrap(7, 0xb1, &kek, &wrapped).map(|_| ()).unwrap_err().0;
+        assert_eq!(elsewhere, "a wrapped key, wrapped in another bucket");
+        let mut moved = wrapped.clone();
+        moved.0[13..21].copy_from_slice(&0xb1_u64.to_be_bytes());
+        let moved = unwrap(7, 0xb1, &kek, &moved).map(|_| ()).unwrap_err().0;
+        assert_eq!(moved, "a wrapped key, by its integrity check");
         let other = TenantKek::random();
         assert_eq!(
             refused(7, &other, &wrapped),
@@ -410,10 +432,10 @@ mod tests {
         let mut tampered = wrapped.clone();
         tampered.0[WRAPPED_HEADER_LEN + 3] ^= 1;
         assert_eq!(refused(7, &kek, &tampered), "a wrapped key, by its integrity check");
-        let local = Wrapped([&b"fxkw\x01"[..], &[0; 52]].concat());
+        let local = Wrapped([&b"fxkw\x01"[..], &[0; 60]].concat());
         assert_eq!(refused(7, &kek, &local), "a wrapped key, by its header");
         let mut format = wrapped.clone();
-        format.0[4] = 2;
+        format.0[4] = 1;
         assert_eq!(refused(7, &kek, &format), "a wrapped key, of another format");
     }
 }

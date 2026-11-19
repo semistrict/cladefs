@@ -1634,7 +1634,7 @@ fn encrypted_stores_open_through_the_bucket_kms_on_two_hosts() {
     assert_eq!(kek_object.len(), extent_keys::kms::bucket::KEK_OBJECT_LEN);
     let object = world.head(CELL);
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    assert_eq!(&kek.wrapped.0[..13], b"fxkb\x01\0\0\0\0\0\0\0\x01");
+    assert_eq!(&kek.wrapped.0[..13], b"fxkb\x02\0\0\0\0\0\0\0\x01");
     let cell_kek = futures::executor::block_on(first_kms.unwrap(TENANT, &kek.wrapped)).unwrap();
     let objects = world.objects();
     let segments: Vec<_> =
