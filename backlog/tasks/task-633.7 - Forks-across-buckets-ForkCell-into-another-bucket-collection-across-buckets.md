@@ -1,9 +1,11 @@
 ---
 id: TASK-633.7
 title: 'Forks across buckets: ForkCell into another bucket, collection across buckets'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 17:03'
+updated_date: '2026-11-19 00:52'
 labels:
   - bucket
   - multi-region
@@ -40,3 +42,9 @@ With unique IDs, routing and takes that ask only their own bucket in place, a fo
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18 (unattended night, my call): a child lives in the forking host's bucket. A host opens the version through its own router (the parent's keys routed to the parent's bucket) and allocates the child's ID from its own bucket, so ForkCell needs no bucket field: a VM manager forks into a region by asking a host there. Shown by versions_forked_on_a_host_of_another_bucket_make_children_there (child ID of B, head in B, reference in A, child reads its parent's data; a mutant without routing fails it with ENOENT). cladefs-gc routes (f847bc4ab), so a child's pass retires its reference in the parent's bucket (children_in_one_bucket_read_their_parents_in_another). Left: AC #1's wording (no bucket field), AC #3 (a pass that cannot reach a bucket deletes nothing and records no digest), AC #4 (sim with two buckets, one failing).
+<!-- SECTION:NOTES:END -->

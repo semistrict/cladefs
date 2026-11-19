@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-18 23:44'
+updated_date: '2026-11-19 00:52'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -116,6 +116,8 @@ After this, a child whose parent's bucket is out of reach is taken, commits, upl
 - **Azure Key Vault** joins OpenBao, AWS KMS and Google Cloud KMS as a backend.
 
 ### A fork across buckets
+
+**A child lives in the forking host's bucket** (decided 2026-11-18, TASK-633.7): a host forks a version by opening it through its own bucket's router, which sends the parent's keys to the parent's bucket, and gives the child an ID of its own bucket. So `ForkCell` names no bucket: a VM manager forks into a region by asking a host of that region, which is where the VM runs anyway. `versions_forked_on_a_host_of_another_bucket_make_children_there` checks it.
 
 The forking host, in B's cloud region, forks version `at` of P (home A) into a new cell C (home B):
 
