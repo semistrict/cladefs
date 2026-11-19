@@ -791,9 +791,11 @@ fn restores_connect_to_the_bucket_no_more() {
 }
 
 /// TASK-633.7: a version of a cell of one bucket, forked on a host of another: its child is a cell
-/// of the host's bucket, its ID that bucket's, its head there, and its reference in the parent's
-/// bucket; it reads what it inherited from there. A host forks into its own region's bucket, as a
-/// host of that region: forks across buckets need no more than the routing (doc-23).
+/// of the host's bucket, its ID that bucket's, its head there; it reads what it inherited. A host
+/// forks into its own region's bucket, as a host of that region (doc-23).
+///
+/// TASK-633.8: the fork starts the version's mirror in the host's bucket, in the background, which
+/// marks it there and moves the child's reference there from the parent's bucket.
 #[test]
 fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     use bucket_cell::identity::Details;
@@ -844,7 +846,11 @@ fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
     let got = |url: &str, key: &str| {
         local_cell::upload::block_on(bucket_cell::bucket::get(&raw(url), key)).unwrap().is_some()
     };
-    assert_eq!((got(&url_a, &reference), got(&url_b, &reference)), (true, false));
+    let mirrored = bucket_b.mirror_wanted(cell, origin.at);
+    assert_eq!(local_cell::upload::block_on(mirrored).unwrap().unwrap(), None, "not mirrored");
+    let marker = bucket_cell::layout::mirror(cell, origin.at);
+    assert_eq!((got(&url_a, &marker), got(&url_b, &marker)), (false, true));
+    assert_eq!((got(&url_a, &reference), got(&url_b, &reference)), (false, true));
     drop(opened);
 
     let child = open(&child_path);

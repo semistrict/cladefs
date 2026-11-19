@@ -194,8 +194,33 @@ impl Sweep {
     /// own, telling `observe` of each pass as it ends: what they did together, with the requests
     /// listing the cells made.
     pub async fn run<B: Bucket>(&self, bucket: &Arc<B>, observe: impl FnMut(&Ran)) -> Swept {
+        self.run_with_own(bucket, None::<&Arc<B>>, observe).await
+    }
+
+    /// cladefs: as [`Sweep::run`], `bucket` routed, `own` its own store, unrouted, if given
+    /// (TASK-633.8): a cell listed here of another bucket, by its ID, is a copy of that cell's
+    /// mirrored versions, which a pass over the copy decides ([`Collector::collect_copy`]), not a
+    /// pass over the cell, which is its own bucket's. None: every cell listed is passed over as
+    /// this bucket's (a bucket that routes nothing, whose cells are all its own).
+    pub async fn run_with_own<B: Bucket, O: Bucket>(
+        &self,
+        bucket: &Arc<B>,
+        own: Option<&Arc<O>>,
+        observe: impl FnMut(&Ran),
+    ) -> Swept {
+        let copies = match own {
+            None => None,
+            Some(own) => match crate::identity::get(&**own).await {
+                Ok(Some(identity)) => Some((own.clone(), identity.number)),
+                Ok(None) => None,
+                Err(error) => {
+                    log::warn!("cladefs-gc: the bucket's own identity, unread: {error}");
+                    return Swept::default();
+                }
+            },
+        };
         let listing = Counted::new(bucket.clone());
-        let mut swept = self.over(bucket, crate::cell::listed(&listing), observe).await;
+        let mut swept = self.over(bucket, copies, crate::cell::listed(&listing), observe).await;
         swept.requests += listing.requests();
         swept
     }
@@ -207,13 +232,14 @@ impl Sweep {
         cell: CellId,
         observe: impl FnMut(&Ran),
     ) -> Swept {
-        self.over(bucket, futures::stream::iter([cell]), observe).await
+        self.over(bucket, None::<(Arc<B>, u16)>, futures::stream::iter([cell]), observe).await
     }
 
     /// Passes over `cells` of `bucket`, [`Sweep::at_once`] at once, telling `observe` of each.
-    async fn over<B: Bucket>(
+    async fn over<B: Bucket, O: Bucket>(
         &self,
         bucket: &Arc<B>,
+        copies: Option<(Arc<O>, u16)>,
         cells: impl futures::Stream<Item = CellId>,
         mut observe: impl FnMut(&Ran),
     ) -> Swept {
@@ -229,7 +255,8 @@ impl Sweep {
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
             let (sweep, bucket, heard) = (self.clone(), bucket.clone(), heard.clone());
-            let pass = async move { sweep.pass(&bucket, cell, since, heard).await };
+            let copies = copies.clone();
+            let pass = async move { sweep.pass(&bucket, copies, cell, since, heard).await };
             match self.spawned {
                 false => pass.boxed(),
                 true => {
@@ -255,14 +282,31 @@ impl Sweep {
 
     /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, hearing of
     /// its tenant's KEK by `heard`, the sweep's.
-    async fn pass<B: Bucket>(
+    async fn pass<B: Bucket, O: Bucket>(
         &self,
         bucket: &Arc<B>,
+        copies: Option<(Arc<O>, u16)>,
         cell: CellId,
         since: u64,
         heard: Arc<Heard>,
     ) -> Ran {
         let counted = Counted::new(bucket.clone());
+        // cladefs: a cell of another bucket here is a copy of its versions (TASK-633.8).
+        if let Some((own, number)) = copies
+            && crate::layout::routed_to(&cell.prefix()).is_some_and(|of| of != number)
+        {
+            let started = Instant::now();
+            let collector = Collector::new(self.options);
+            let outcome = match self.mode {
+                Mode::Delete => match collector.collect_copy(&counted, &*own, number, cell).await {
+                    Ok(report) => Outcome::Collected(report),
+                    Err(error) => Outcome::failed(error),
+                },
+                // A mark-only pass marks nothing of a copy, which nothing compacts.
+                Mode::MarkOnly => Outcome::Collected(Report::default()),
+            };
+            return Ran { cell, outcome, requests: counted.requests(), took: started.elapsed() };
+        }
         let holding = Holding { lease: self.lease, since: Some(since) };
         let collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
         let mut collector = collector.heard(heard);
@@ -395,6 +439,10 @@ impl<B: Bucket> Bucket for Counted<B> {
 
     fn known(&self) -> Option<&crate::known::Known> {
         self.bucket.known()
+    }
+
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        self.bucket.mirrors()
     }
 }
 

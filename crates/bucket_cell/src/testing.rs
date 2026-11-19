@@ -100,6 +100,9 @@ pub struct SimBucket {
     known: Arc<crate::known::Known>,
     /// cladefs: the bucket of the host asking through it: where keys of no cell go.
     home: u16,
+    /// cladefs: whether every request goes to `home`, whatever cell its key is of: the bucket's own
+    /// store ([`SimBucket::own`], TASK-633.8).
+    pinned: bool,
 }
 
 impl SimBucket {
@@ -109,7 +112,14 @@ impl SimBucket {
 
     /// cladefs: the same buckets, as a host whose bucket is `home`'s asks them (TASK-633.10).
     pub fn at(&self, home: u16) -> Arc<Self> {
-        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home })
+        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home, pinned: false })
+    }
+
+    /// cladefs: its host's bucket's own store, every request there whatever cell its key is of, as
+    /// `ObjectBucket::own` is (TASK-633.8).
+    pub fn own(&self) -> Arc<Self> {
+        let (inner, known) = (self.inner.clone(), self.known.clone());
+        Arc::new(Self { inner, known, home: self.home, pinned: true })
     }
 
     /// cladefs: its host's bucket's number.
@@ -132,6 +142,7 @@ impl SimBucket {
     fn region_of(&self, key: &str) -> u16 {
         match self.home {
             0 => 0,
+            home if self.pinned => home,
             home => layout::routed_to(key).unwrap_or(home),
         }
     }
@@ -556,6 +567,57 @@ impl Bucket for SimBucket {
 
     fn known(&self) -> Option<&crate::known::Known> {
         Some(&self.known)
+    }
+
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        (self.home != 0 && !self.pinned).then_some(self as &dyn crate::mirror::Here)
+    }
+}
+
+/// cladefs: the mirrors in its host's bucket, in its own store (TASK-633.8), as
+/// `ObjectBucket`'s.
+impl crate::mirror::Here for SimBucket {
+    fn marked(&self, parent: CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
+        let own = self.own();
+        let mine = self.region_of(&parent.prefix()) == self.home;
+        Box::pin(async move {
+            !mine && crate::bucket::get(&*own, &layout::mirror(parent, at)).await.is_some()
+        })
+    }
+
+    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> futures::future::BoxFuture<'a, ()> {
+        let own = self.own();
+        Box::pin(async move {
+            crate::bucket::create(&*own, key, bytes).await;
+        })
+    }
+
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, ()> {
+        let own = self.own();
+        let theirs: Vec<&str> =
+            keys.iter().copied().filter(|key| self.region_of(key) != self.home).collect();
+        Box::pin(async move {
+            if !theirs.is_empty() {
+                crate::lifecycle::retire(&*own, &theirs).await;
+            }
+        })
+    }
+
+    fn learn(&self, cell: CellId) -> futures::future::BoxFuture<'_, ()> {
+        let own = self.own();
+        let mine = self.region_of(&cell.prefix()) == self.home;
+        Box::pin(async move {
+            if mine {
+                return;
+            }
+            for meta in crate::bucket::list(&*own, &layout::mirrors(cell)).await {
+                let Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
+                let Some(found) = crate::bucket::get(&*own, &meta.key).await else { continue };
+                if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
+                    self.known.named(cell, at, marker.epoch);
+                }
+            }
+        })
     }
 }
 
@@ -1019,6 +1081,29 @@ fn cell_of_key(key: &str) -> Option<CellId> {
     }
 }
 
+/// cladefs: [`fork_version`], the child's head given its keys, as a host's fork gives them
+/// ([`crate::keys::inheriting`], TASK-411.4): its KEK, its DEK and those it inherits, so that its
+/// ring reads no head of its parent's (TASK-633.5), which may be in a bucket out of reach.
+pub async fn fork_version_given(
+    bucket: &impl Bucket,
+    child: CellId,
+    id: u64,
+    origin: layout::Origin,
+    owner: u64,
+) -> Result<(), crate::Error> {
+    let kms = crate::keys::testing::host_kms();
+    let source = ring_of(bucket, origin.parent).await?;
+    let forked = layout::Child { cell: child, owner };
+    let inheriting = crate::keys::inheriting(&kms, &source, forked).await?;
+    let (given, parents) = (Some(inheriting.given()), crate::keys::Parents::Kms(&kms, None));
+    let lifecycle =
+        crate::lifecycle::fork_version_keyed(bucket, child, id, origin, (owner, given), parents);
+    if lifecycle.await?.is_some() {
+        inheriting.made();
+    }
+    Ok(())
+}
+
 /// cladefs: the ring a reader of `cell`'s store holds, as a host opening it reads it: its head,
 /// its KEK unwrapped by the tests' KMS (`keys::testing`), which every test writer encrypts under
 /// (TASK-411.28).
@@ -1080,6 +1165,11 @@ mod tests {
                 format!("@2/{head}"),
             ]
         );
+
+        // TASK-633.8: a host's own store takes a key of another bucket's cell in its bucket.
+        let own = first.own();
+        let pin = layout::pin(theirs, 3);
+        assert_eq!(put(&own, &pin), [format!("@1 put {pin}")]);
 
         sim.down(2, true);
         let (got, asked) = first.served(first.get(&head));

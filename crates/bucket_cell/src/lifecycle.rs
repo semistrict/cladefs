@@ -133,9 +133,64 @@ pub async fn create(bucket: &impl Bucket, cell: CellId, owner: u64) -> Result<bo
 /// the parent's cell ([`layout::reference`], TASK-395.3): create-only, its bytes the fork's alone
 /// ([`layout::Reference`]), so that every writer of it, and a write landed though its answer was
 /// lost, writes the same. One there already stands, whatever its bytes: a pass keeps by its key.
-async fn refer(bucket: &impl Bucket, origin: Origin, child: CellId, owner: u64) {
+///
+/// cladefs: in the child's bucket, if the version's mirror is marked there; else in the parent's
+/// (doc-23, Forks; TASK-633.8). Where it went.
+async fn refer(bucket: &impl Bucket, origin: Origin, child: CellId, owner: u64) -> Referred {
     let key = layout::reference(origin.parent, origin.at, child);
-    bucket::create(bucket, &key, layout::encode(&layout::Reference::of(owner))).await;
+    let bytes = layout::encode(&layout::Reference::of(owner));
+    if let Some(here) = bucket.mirrors()
+        && here.marked(origin.parent, origin.at).await
+    {
+        here.create(&key, bytes).await;
+        return Referred { owner, here: true };
+    }
+    bucket::create(bucket, &key, bytes).await;
+    Referred { owner, here: false }
+}
+
+/// cladefs: where a fork's reference went ([`refer`]): `here`, in the child's bucket, its version's
+/// mirror marked there; else in the parent's.
+#[derive(Clone, Copy, Debug)]
+struct Referred {
+    owner: u64,
+    here: bool,
+}
+
+/// cladefs: what a fork that `referred` does, once it read its version named in the parent's head,
+/// to leave the parent's bucket (doc-23, Forks; TASK-633.8): referring there, the version's mirror
+/// marked in the child's bucket since, read again (`forksRecheck`), its reference written here
+/// too; then, the head read again naming the version still (`forksRereadBeforeLeaving`), its own
+/// there retired (`forksLeaveA`), which no mirror's listing may have found, and which would keep
+/// the version there as long as the child lives. Read again, the head says that the mirror's
+/// bucket's collector, which reads it before it lists the references here, keeps the copy, or
+/// finds the reference here: a version dropped by then, the reference there stays.
+///
+/// A fork made again after one of its makings referred there and stopped, referring here this
+/// time, leaves that reference there: a making begun again writes its head's bytes as the first
+/// did, and can't tell it from its own write whose answer was lost. The mirror's hold keeps the
+/// version there as long, and the child's deletion retires it.
+async fn leave_parents(
+    bucket: &impl Bucket,
+    origin: Origin,
+    version: u64,
+    child: CellId,
+    referred: Referred,
+) -> Result<(), Error> {
+    let Referred { owner, here: false } = referred else { return Ok(()) };
+    let Some(here) = bucket.mirrors() else { return Ok(()) };
+    if !here.marked(origin.parent, origin.at).await {
+        return Ok(());
+    }
+    let key = layout::reference(origin.parent, origin.at, child);
+    here.create(&key, layout::encode(&layout::Reference::of(owner))).await;
+    failpoint!("version::rechecked");
+    let head = head::get(bucket, origin.parent).await?;
+    let named = head.as_ref().filter(|head| !head.deleted()).and_then(|head| head.version(version));
+    if named.is_some_and(|named| named.at == origin.at) {
+        retire_one(bucket, &key).await;
+    }
+    Ok(())
 }
 
 /// cladefs: retires the references at `keys` ([`layout::reference`]), garbage for good, under any
@@ -221,8 +276,9 @@ pub async fn fork_version_keyed(
     let refers = rules().references && rules().clones_refer_first;
     // Without the rule, as a test shows it needed: the reference before the head.
     let refers_first = refers && !rules().clones_record_first;
+    let mut referred = None;
     if refers_first {
-        refer(bucket, origin, child, owner).await;
+        referred = Some(refer(bucket, origin, child, owner).await);
         failpoint!("version::referred");
     }
     let made = match rules().forks_pending {
@@ -263,10 +319,11 @@ pub async fn fork_version_keyed(
     if making {
         failpoint!("version::recorded");
         if refers && !refers_first {
-            refer(bucket, origin, child, owner).await;
+            referred = Some(refer(bucket, origin, child, owner).await);
             failpoint!("version::referred");
         }
-        made = finish_fork(bucket, child, version, origin, keys, Start::Found(left)).await?;
+        let start = Start::Found(left);
+        made = finish_fork(bucket, child, version, origin, keys, start, referred).await?;
     }
     // Without the rule, as a test shows it needed: once made.
     if rules().references && !rules().clones_refer_first {
@@ -305,10 +362,12 @@ pub async fn resume_version_fork(
         return Ok(left);
     };
     // Without the rule, as a test shows it needed: none written.
+    let mut referred = None;
     if rules().references && rules().clones_refer_first && rules().resumes_refer {
-        refer(bucket, origin, child, owner).await;
+        referred = Some(refer(bucket, origin, child, owner).await);
     }
-    let made = finish_fork(bucket, child, version, origin, keys, Start::Found(left)).await?;
+    let start = Start::Found(left);
+    let made = finish_fork(bucket, child, version, origin, keys, start, referred).await?;
     Ok(made)
 }
 
@@ -318,6 +377,9 @@ pub async fn resume_version_fork(
 /// or a resume since makes it read the head anew. The version's cell's head read first, and for a
 /// child of another cell, the cell's checkpoint at the version made, sealed under `keys`
 /// (TASK-476). Returns the child's head as it left it, if it made the fork.
+///
+/// cladefs: having `referred`, what leaves the parent's bucket, after the head's read
+/// ([`leave_parents`]).
 async fn finish_fork(
     bucket: &impl Bucket,
     child: CellId,
@@ -325,6 +387,7 @@ async fn finish_fork(
     origin: Origin,
     keys: Parents<'_>,
     start: Start,
+    referred: Option<Referred>,
 ) -> Result<Option<Object>, Error> {
     let cell = origin.parent;
     // Into another tenant's cell, a version of the default tenant's, or one shared.
@@ -339,6 +402,9 @@ async fn finish_fork(
         if crosses && !named.is_some_and(|named| named.shared) {
             return Err(Error::NotShared(cell));
         }
+    }
+    if let Some(referred) = referred {
+        leave_parents(bucket, origin, version, child, referred).await?;
     }
     if cell != child {
         recovery::checkpoint_at(bucket, cell, origin.at, keys).await?;

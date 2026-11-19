@@ -735,7 +735,7 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
         }
 
         fn rootfs_image(&self) -> Option<Image> {
-            Some(Image { containerfile: CONTAINERFILE, downloads: &[LUA] })
+            Some(Image { containerfile: CONTAINERFILE, downloads: &[LUA], files: &[] })
         }
 
         fn timeout_secs(&self) -> u64 {

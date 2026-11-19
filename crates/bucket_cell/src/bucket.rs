@@ -246,6 +246,13 @@ pub trait Bucket: Send + Sync + 'static {
     fn known(&self) -> Option<&crate::known::Known> {
         None
     }
+
+    /// cladefs: the mirrors in this bucket of versions of other buckets' cells, as forks into it
+    /// see them ([`crate::mirror::Here`], TASK-633.8), if it routes requests to other buckets: a
+    /// host's routed bucket does, and the simulation's of many.
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        None
+    }
 }
 
 /// The object at `key`, if any, its reads retried while they fail.

@@ -68,8 +68,10 @@ pub struct Child {
 /// its identity object ([`IDENTITY`]), which the high bits of every cell ID it gives carry
 /// ([`crate::identity`], doc-23, TASK-633.9); nothing reads 19's. 21: a cell's head says whether
 /// it is replicated, and names its active configuration ([`Head::replication`], doc-21,
-/// TASK-537.3.1); nothing reads 20's.
-pub const FORMAT: u32 = 21;
+/// TASK-537.3.1); nothing reads 20's. 22: a version forked into another bucket is mirrored there
+/// (doc-23, Mirrors; TASK-633.8): its pin, a reference of the mirror's own ([`pin`]), and its
+/// marker ([`mirror`]), under the parent's prefix in that bucket; nothing reads 21's.
+pub const FORMAT: u32 = 22;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's cells (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -84,6 +86,11 @@ const MOVES: &str = "moves/";
 const REFS: &str = "refs/";
 /// cladefs: under a cell's prefix, the marks of the references retired or taken back ([`retired`]).
 const RETIRED: &str = "retired/";
+/// cladefs: under a cell's prefix in another bucket, the markers of its versions mirrored there
+/// ([`mirror`], TASK-633.8).
+const MIRRORS: &str = "mirrors/";
+/// cladefs: the last part of a mirror's pin's key, where a reference's names its child ([`pin`]).
+const PIN: &str = "mirror";
 /// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
 /// cladefs: the bucket's identity object: its format and its number, written once by its formatting
@@ -301,6 +308,43 @@ pub fn reference(parent: CellId, at: u64, child: CellId) -> String {
     format!("{}{}", origin(parent, at), child_name(child))
 }
 
+/// cladefs: the pin of the mirror of `parent`'s version at the end of its segment `at` in another
+/// bucket (doc-23, Mirrors; TASK-633.8): a reference of the mirror's own, among those of the
+/// version's children there, which keeps the copy from that bucket's collector while it is made,
+/// as a child's reference keeps what it inherits.
+pub fn pin(parent: CellId, at: u64) -> String {
+    format!("{}{PIN}", origin(parent, at))
+}
+
+/// cladefs: the hold of the mirror of `parent`'s version at the end of its segment `at` in the
+/// bucket numbered `bucket`, in the parent's bucket (doc-23, Mirrors; TASK-633.8): a reference of
+/// the mirror's own, among those of the version's children there, which keeps the version's state
+/// there whole, and the parent's cell from being removed, with what the version inherits from
+/// other cells, while the copy stands: its children, referring in the mirror's bucket, read there
+/// what the mirror copied, and in their cells what it did not. The mirror writes it before it reads
+/// the parent's head; the mirror's bucket's collector deletes it, the copy going.
+pub fn hold(parent: CellId, at: u64, bucket: u16) -> String {
+    format!("{}{PIN}.{bucket:04x}", origin(parent, at))
+}
+
+/// cladefs: the marker of the mirror of `parent`'s version at the end of its segment `at` in
+/// another bucket (doc-23, Mirrors; TASK-633.8): created once every object of the version is
+/// copied there, never before; the switch of the version's reads, and of its children's
+/// references, to that bucket ([`Mirror`]).
+pub fn mirror(parent: CellId, at: u64) -> String {
+    format!("{}{MIRRORS}{}", parent.prefix(), Padded(at))
+}
+
+/// cladefs: the prefix of the moves of `cell`'s objects ([`moves`]).
+pub fn moves_prefix(cell: CellId) -> String {
+    format!("{}{MOVES}", cell.prefix())
+}
+
+/// cladefs: the prefix of the markers of `parent`'s versions mirrored in a bucket ([`mirror`]).
+pub fn mirrors(parent: CellId) -> String {
+    format!("{}{MIRRORS}", parent.prefix())
+}
+
 /// cladefs: `child` as the last part of a reference's key, or its mark's: `TENANT.CELL`.
 fn child_name(child: CellId) -> String {
     format!("{}.{}", Padded(child.tenant), Padded(child.id))
@@ -413,6 +457,26 @@ pub enum Kind<'a> {
         at: u64,
         child: CellId,
     },
+    /// cladefs: the pin of the mirror of `parent`'s version at `at` in another bucket ([`pin`]): a
+    /// reference of the mirror's own, never a candidate.
+    Pin {
+        parent: CellId,
+        at: u64,
+    },
+    /// cladefs: the hold of the mirror of `parent`'s version at `at` in the bucket numbered
+    /// `bucket`, in the parent's bucket ([`hold`]): a reference of the mirror's own, never a
+    /// candidate.
+    Hold {
+        parent: CellId,
+        at: u64,
+        bucket: u16,
+    },
+    /// cladefs: the marker of the mirror of `cell`'s version at `at` in another bucket
+    /// ([`mirror`]).
+    Mirror {
+        cell: CellId,
+        at: u64,
+    },
     Unknown,
 }
 
@@ -434,6 +498,9 @@ impl Kind<'_> {
             Self::Moves { .. } => "moves",
             Self::Reference { .. } => "reference",
             Self::Retired { .. } => "retired",
+            Self::Pin { .. } => "pin",
+            Self::Hold { .. } => "hold",
+            Self::Mirror { .. } => "mirror",
             Self::Unknown => "unknown",
         }
     }
@@ -449,7 +516,10 @@ pub fn owner(key: &str) -> Option<CellId> {
         | Kind::Checkpoint { cell, .. }
         | Kind::Head { cell }
         | Kind::Reference { parent: cell, .. }
-        | Kind::Retired { parent: cell, .. } => Some(cell),
+        | Kind::Retired { parent: cell, .. }
+        | Kind::Pin { parent: cell, .. }
+        | Kind::Hold { parent: cell, .. }
+        | Kind::Mirror { cell, .. } => Some(cell),
         Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. }
@@ -505,8 +575,20 @@ pub fn kind(key: &str) -> Kind<'_> {
             Some((cell, number(at)?, child))
         };
         if let Some(rest) = rest.strip_prefix(REFS) {
+            if let Some(at) = rest.strip_suffix(PIN).and_then(|at| at.strip_suffix('/')) {
+                return Some(Kind::Pin { parent: cell, at: number(at)? });
+            }
+            if let Some((at, held)) = rest.split_once('/')
+                && let Some(bucket) = held.strip_prefix(PIN).and_then(|held| held.strip_prefix('.'))
+            {
+                let bucket = u16::from_str_radix(bucket, 16).ok()?;
+                return Some(Kind::Hold { parent: cell, at: number(at)?, bucket });
+            }
             let (parent, at, child) = fork(rest)?;
             return Some(Kind::Reference { parent, at, child });
+        }
+        if let Some(at) = rest.strip_prefix(MIRRORS) {
+            return Some(Kind::Mirror { cell, at: number(at)? });
         }
         if let Some(rest) = rest.strip_prefix(RETIRED) {
             let (parent, at, child) = fork(rest)?;
@@ -860,6 +942,23 @@ impl Reference {
     }
 }
 
+/// cladefs: a mirror's marker's bytes ([`mirror`], TASK-633.8): the format of the bucket's objects,
+/// and the epoch of the writer whose checkpoint at the version it copied, as the parent's head named
+/// it, so that the version's state is found by key in the mirror's bucket, its head being in
+/// another ([`checkpoint`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mirror {
+    pub format: u32,
+    pub epoch: u64,
+}
+
+impl Mirror {
+    /// The marker of a mirror of the checkpoint of epoch `epoch`.
+    pub fn of(epoch: u64) -> Self {
+        Self { format: FORMAT, epoch }
+    }
+}
+
 /// cladefs: a reference's mark's bytes ([`retired`]): the format of the bucket's objects alone, the
 /// same whoever writes it. What a pass deletes by is its key alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1165,6 +1264,16 @@ mod tests {
         assert_eq!(retired_of(&reference(cell, 7, child)), Some(retired(cell, 7, child)));
         assert_eq!(retired_of(&retired(cell, 7, child)), None);
         assert!(!retired(cell, 7, child).starts_with(&references(cell)));
+        // cladefs: a mirror's pin, among its version's references, and its marker (TASK-633.8).
+        assert_eq!(kind(&pin(cell, 7)), Kind::Pin { parent: cell, at: 7 });
+        assert_eq!(kind(&hold(cell, 7, 3)), Kind::Hold { parent: cell, at: 7, bucket: 3 });
+        assert_eq!(owner(&hold(cell, 7, 3)), Some(cell));
+        assert!(pin(cell, 7).starts_with(&origin(cell, 7)));
+        assert_eq!(retired_of(&pin(cell, 7)), None);
+        assert_eq!(kind(&mirror(cell, 7)), Kind::Mirror { cell, at: 7 });
+        assert!(mirror(cell, 7).starts_with(&mirrors(cell)));
+        assert_eq!((owner(&pin(cell, 7)), owner(&mirror(cell, 7))), (Some(cell), Some(cell)));
+        assert_eq!(kind(&format!("{}mirrors/x", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}2", origin(cell, 7))), Kind::Unknown);
         assert_eq!(kind(&origin(cell, 7)), Kind::Unknown);
         // The layout before cells, and keys of cells' prefixes malformed, are no objects of a

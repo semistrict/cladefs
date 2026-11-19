@@ -70,7 +70,69 @@ pub struct ObjectBucket {
     /// cladefs: the other buckets its requests go to, by the bucket of their keys' cells
     /// ([`ObjectBucket::routed`], TASK-633.4): none for a bucket whose requests all stay in it.
     route: Option<Route>,
+    /// cladefs: its own store, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
+    own: std::sync::OnceLock<Arc<ObjectBucket>>,
+    /// cladefs: whether this bucket holds a mirror of a version of each cell of another bucket it
+    /// was asked of, and when it last listed that cell's markers ([`ObjectBucket::mirrored`]).
+    mirrored:
+        std::sync::Mutex<std::collections::HashMap<layout::CellId, (bool, std::time::Instant)>>,
+    /// cladefs: the versions of cells of other buckets whose mirrors here it found marked, and
+    /// those this process mirrors ([`ObjectBucket::mirror_wanted`]), each by its cell and where it
+    /// is.
+    mirrors: std::sync::Mutex<Mirrors>,
 }
+
+/// cladefs: a mirror's turn among this process's mirrors of one version, by its cell and where it
+/// is ([`ObjectBucket::mirror_wanted`]): taken as it is asked for, if free, else waited for; let go
+/// as it drops, the version's lock with it once no other turn holds it.
+struct MirrorTurn {
+    bucket: Arc<ObjectBucket>,
+    version: (layout::CellId, u64),
+    one: Option<Arc<tokio::sync::Mutex<()>>>,
+    held: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl MirrorTurn {
+    fn take(bucket: &Arc<ObjectBucket>, version: (layout::CellId, u64)) -> Self {
+        let one = bucket.mirrors.lock().unwrap().making.entry(version).or_default().clone();
+        let held = one.clone().try_lock_owned().ok();
+        Self { bucket: bucket.clone(), version, one: Some(one), held }
+    }
+
+    async fn wait(&mut self) {
+        if self.held.is_none()
+            && let Some(one) = &self.one
+        {
+            self.held = Some(one.clone().lock_owned().await);
+        }
+    }
+}
+
+impl Drop for MirrorTurn {
+    fn drop(&mut self) {
+        self.held = None;
+        let mut mirrors = self.bucket.mirrors.lock().unwrap();
+        self.one = None;
+        if mirrors.making.get(&self.version).is_some_and(|one| Arc::strong_count(one) == 1) {
+            mirrors.making.remove(&self.version);
+        }
+    }
+}
+
+/// cladefs: the versions a bucket knows mirrored here, and what has this process's mirrors of a
+/// version made one after another ([`ObjectBucket::mirrors`]).
+#[derive(Default)]
+struct Mirrors {
+    marked: std::collections::HashSet<(layout::CellId, u64)>,
+    /// Those whose mirrors found them named no more: none of them is wanted again.
+    unnamed: std::collections::HashSet<(layout::CellId, u64)>,
+    making: std::collections::HashMap<(layout::CellId, u64), Arc<tokio::sync::Mutex<()>>>,
+}
+
+/// cladefs: how long a bucket goes by what it last listed of a cell's mirror markers here before it
+/// lists them again ([`ObjectBucket::mirrored`]): a mirror marked since is read from here at most
+/// this late, its objects from the cell's own bucket meanwhile, which holds them too.
+const MIRRORED_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// cladefs: what opens the bucket numbered `number`, other than `home`, for `home`'s requests of
 /// that bucket's cells (TASK-633.4): [`Registered`] reads it in the registry of buckets.
@@ -561,8 +623,100 @@ impl ObjectBucket {
         let prefix = prefix.trim_matches('/').to_owned();
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        let route = None;
-        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids, route }
+        let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
+        let mirrors = Default::default();
+        Self {
+            store,
+            pages,
+            prefix,
+            counts,
+            honoured,
+            decoded,
+            known,
+            marks,
+            objectids,
+            route,
+            own,
+            mirrored,
+            mirrors,
+        }
+    }
+
+    /// cladefs: its own store, every request of it there whatever cell its keys are of, unrouted
+    /// (TASK-633.8): what a mirror of another bucket's cell's version writes and reads in this
+    /// bucket at that cell's keys, and what this bucket's collector keeps or deletes of it. Itself,
+    /// if it routes nothing; else the same store, made once, its requests counted apart.
+    pub fn own(self: &Arc<Self>) -> Arc<ObjectBucket> {
+        match self.route {
+            None => self.clone(),
+            Some(_) => self.twin().clone(),
+        }
+    }
+
+    /// cladefs: its own store, unrouted, made once ([`ObjectBucket::own`]).
+    fn twin(&self) -> &Arc<ObjectBucket> {
+        let own =
+            || Arc::new(ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix));
+        self.own.get_or_init(own)
+    }
+
+    /// cladefs: the mirror here of `parent`'s version at `at`, which a fork of it into this bucket
+    /// asks for (doc-23: the first fork of a version into a bucket starts its mirror there;
+    /// TASK-633.8): none if `parent` is of this bucket, this bucket routes nothing, or the mirror
+    /// is marked here. This process's mirrors of a version take turns, each taking its own as it is
+    /// asked for, before its future first runs: one asked for later waits for it, and finds it
+    /// marked. Under way from another process, or begun again, the mirror says so
+    /// ([`crate::mirror::mirror`]).
+    pub fn mirror_wanted(
+        self: &Arc<Self>,
+        parent: layout::CellId,
+        at: u64,
+    ) -> impl Future<Output = Result<Option<crate::mirror::Mirrored>, crate::Error>> + Send + 'static
+    {
+        let known = {
+            let mirrors = self.mirrors.lock().unwrap();
+            mirrors.marked.contains(&(parent, at)) || mirrors.unnamed.contains(&(parent, at))
+        };
+        let turn = (self.route.is_some() && !known).then(|| MirrorTurn::take(self, (parent, at)));
+        async move {
+            let Some(mut turn) = turn else { return Ok(None) };
+            turn.wait().await;
+            let bucket = &turn.bucket;
+            let route = bucket.route.as_ref().expect("routed");
+            let number = bucket.own_number(route).await;
+            let number =
+                number.map_err(|err| crate::Error::Read(format!("its identity: {err}")))?;
+            let Some(number) = number else { return Ok(None) };
+            if layout::routed_to(&parent.prefix()).is_none_or(|of| of == number)
+                || crate::mirror::Here::marked(&**bucket, parent, at).await
+            {
+                return Ok(None);
+            }
+            let own = bucket.twin();
+            let mirrored = crate::mirror::mirror(&**bucket, &**own, number, parent, at).await?;
+            if mirrored == crate::mirror::Mirrored::Unnamed {
+                bucket.mirrors.lock().unwrap().unnamed.insert((parent, at));
+            }
+            Ok(Some(mirrored))
+        }
+    }
+
+    /// cladefs: the mirror here of the version `cell` was forked from, if a cell's of another
+    /// bucket ([`ObjectBucket::mirror_wanted`]): what a host opening `cell`'s store asks for, the
+    /// host that forked it perhaps dead before it did (TASK-633.8). With the version, its origin.
+    pub async fn mirror_for(
+        self: Arc<Self>,
+        cell: layout::CellId,
+    ) -> Result<Option<(layout::Origin, crate::mirror::Mirrored)>, crate::Error> {
+        if self.route.is_none() {
+            return Ok(None);
+        }
+        let Some(origin) = crate::head::get(&*self, cell).await?.and_then(|head| head.origin())
+        else {
+            return Ok(None);
+        };
+        let mirrored = self.mirror_wanted(origin.parent, origin.at).await?;
+        Ok(mirrored.map(|mirrored| (origin, mirrored)))
     }
 
     /// cladefs: this bucket, its requests of the objects of cells of other buckets sent there
@@ -603,6 +757,61 @@ impl ObjectBucket {
         };
         *route.home.lock().unwrap() = Some(identity.number);
         Ok(Some(identity.number))
+    }
+
+    /// cladefs: whether this bucket holds a mirror of a version of `cell`, a cell of another bucket
+    /// (doc-23, Mirrors; TASK-633.8): any of its markers listed here, at most [`MIRRORED_FOR`]
+    /// ago. Each marker found tells the epoch of the checkpoint at its version ([`Bucket::known`]),
+    /// so that the version's state is found by key here, the cell's head in its own bucket unread.
+    /// A listing failed holds none.
+    async fn mirrored(&self, cell: layout::CellId) -> bool {
+        if let Some(&(held, listed)) = self.mirrored.lock().unwrap().get(&cell)
+            && listed.elapsed() < MIRRORED_FOR
+        {
+            return held;
+        }
+        let listed = std::time::Instant::now();
+        let markers = self.store_list(&layout::mirrors(cell)).await.unwrap_or_default();
+        let mut held = false;
+        for meta in markers {
+            let layout::Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
+            let Ok(object) = self.store_get(&meta.key).await else { continue };
+            let Ok(marker) = layout::decode::<layout::Mirror>(&object.bytes) else { continue };
+            self.known.named(cell, at, marker.epoch);
+            held = true;
+        }
+        self.mirrored.lock().unwrap().insert(cell, (held, listed));
+        held
+    }
+
+    /// cladefs: whether a read of `key`, an object written once of a cell of another bucket, is
+    /// tried here first: this bucket holding a mirror of a version of that cell, which copied it
+    /// here at its key, byte for byte, if it is one of that version's (TASK-633.8).
+    async fn read_here_first(&self, key: &str) -> bool {
+        let Some(route) = &self.route else { return false };
+        let Some(number) = layout::routed_to(key) else { return false };
+        if !crate::peer::served(key) || self.own_number(route).await.ok().flatten() == Some(number)
+        {
+            return false;
+        }
+        let Some(cell) = layout::cell_of(key) else { return false };
+        self.mirrored(cell).await
+    }
+
+    /// cladefs: whether a listing of `prefix`, under a cell of another bucket's moves, takes this
+    /// bucket's too: those of the objects a mirror copied here (TASK-633.8).
+    async fn lists_here_too(&self, prefix: &str) -> bool {
+        let Some(route) = &self.route else { return false };
+        let (Some(number), Some(cell)) = (layout::routed_to(prefix), layout::cell_of(prefix))
+        else {
+            return false;
+        };
+        if !prefix.starts_with(&layout::moves_prefix(cell))
+            || self.own_number(route).await.ok().flatten() == Some(number)
+        {
+            return false;
+        }
+        self.mirrored(cell).await
     }
 
     /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
@@ -1243,7 +1452,17 @@ impl Bucket for ObjectBucket {
         Some(&self.known)
     }
 
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        self.route.as_ref().map(|_| self as &dyn crate::mirror::Here)
+    }
+
+    /// cladefs: an object a mirror copied here read here first (TASK-633.8), else its cell's bucket.
     async fn get(&self, key: &str) -> Result<Object, Error> {
+        if self.read_here_first(key).await
+            && let Ok(object) = self.store_get(key).await
+        {
+            return Ok(object);
+        }
         match self.member(key).await? {
             Some(member) => member.store_get(key).await,
             None => self.store_get(key).await,
@@ -1251,6 +1470,11 @@ impl Bucket for ObjectBucket {
     }
 
     async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
+        if self.read_here_first(key).await
+            && let Ok(bytes) = self.store_get_range(key, range.clone()).await
+        {
+            return Ok(bytes);
+        }
         match self.member(key).await? {
             Some(member) => member.store_get_range(key, range).await,
             None => self.store_get_range(key, range).await,
@@ -1258,13 +1482,33 @@ impl Bucket for ObjectBucket {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
+        if self.read_here_first(key).await
+            && let Ok(meta) = self.store_head(key).await
+        {
+            return Ok(meta);
+        }
         match self.member(key).await? {
             Some(member) => member.store_head(key).await,
             None => self.store_head(key).await,
         }
     }
 
+    /// cladefs: the moves of a cell of another bucket a mirror copied here listed with its own
+    /// bucket's, or alone if that bucket is out of reach (TASK-633.8): moves are written once, at
+    /// keys of their own.
     async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
+        if self.lists_here_too(prefix).await {
+            let mut listed = self.store_list(prefix).await?;
+            let there = match self.member(prefix).await {
+                Ok(Some(member)) => member.store_list(prefix).await.unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let here: std::collections::BTreeSet<String> =
+                listed.iter().map(|meta| meta.key.clone()).collect();
+            listed.extend(there.into_iter().filter(|meta| !here.contains(&meta.key)));
+            listed.sort_by(|a, b| a.key.cmp(&b.key));
+            return Ok(listed);
+        }
         match self.member(prefix).await? {
             Some(member) => member.store_list(prefix).await,
             None => self.store_list(prefix).await,
@@ -1326,6 +1570,64 @@ impl Bucket for ObjectBucket {
     }
 }
 
+/// cladefs: a routed bucket's mirrors of other buckets' cells' versions, in its own store
+/// (TASK-633.8).
+impl crate::mirror::Here for ObjectBucket {
+    /// A marker found tells its version's checkpoint epoch, as [`ObjectBucket::mirrored`]'s do,
+    /// and has reads of the cell's objects tried here from then on.
+    fn marked(&self, parent: layout::CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let Some(route) = &self.route else { return false };
+            let Some(of) = layout::routed_to(&parent.prefix()) else { return false };
+            // Its own number not to be read: a cell of its own, for all it knows.
+            if self.own_number(route).await.ok().flatten().is_none_or(|number| number == of) {
+                return false;
+            }
+            let marker = layout::mirror(parent, at);
+            let Some(found) = crate::bucket::get(&**self.twin(), &marker).await else {
+                return false;
+            };
+            if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
+                self.known.named(parent, at, marker.epoch);
+            }
+            self.mirrored.lock().unwrap().insert(parent, (true, std::time::Instant::now()));
+            self.mirrors.lock().unwrap().marked.insert((parent, at));
+            true
+        })
+    }
+
+    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            crate::bucket::create(&**self.twin(), key, bytes).await;
+        })
+    }
+
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(route) = &self.route else { return };
+            // Its own number not to be read: retired by the copy's pass, its children gone.
+            let Ok(Some(number)) = self.own_number(route).await else { return };
+            let theirs: Vec<&str> = (keys.iter().copied())
+                .filter(|key| layout::routed_to(key).is_some_and(|of| of != number))
+                .collect();
+            if !theirs.is_empty() {
+                crate::lifecycle::retire(&**self.twin(), &theirs).await;
+            }
+        })
+    }
+
+    /// As [`ObjectBucket::mirrored`] lists them, at most [`MIRRORED_FOR`] ago.
+    fn learn(&self, cell: layout::CellId) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let Some(route) = &self.route else { return };
+            let Some(of) = layout::routed_to(&cell.prefix()) else { return };
+            if self.own_number(route).await.ok().flatten().is_some_and(|number| number != of) {
+                self.mirrored(cell).await;
+            }
+        })
+    }
+}
+
 /// How long a request that failed `failures` times in a row waits before it goes again: from 50 ms,
 /// doubling, to 5 s.
 fn backoff(failures: u32) -> std::time::Duration {
@@ -1365,6 +1667,929 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
+
+    /// TASK-633.8: a version of a cell of another bucket forked into this one, mirrored here: its
+    /// hold made in the parent's bucket, its objects copied, its marker made, its child's reference
+    /// moved here (retired, marked, in the parent's bucket), its pin dropped; begun again, the
+    /// mirror copies nothing more; a version the head does not name, given up, its hold and pin
+    /// dropped. The child then recovers and reads what it inherited with the parent's bucket's
+    /// objects of it gone. This bucket's collector keeps the copy while the parent's cell lives,
+    /// then while the child refers to it, and deletes it, the hold with it, once neither does.
+    #[test]
+    fn versions_forked_into_another_bucket_are_mirrored_there() {
+        use crate::collector::{Collector, Options};
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given, ring_of};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, _, extent) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            assert_eq!(two.refers(origin, child).await, (true, false, false));
+
+            let own = bucket.own();
+            let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
+            // The checkpoint at the version, and the segment holding its extent.
+            assert_eq!(mirrored, Mirrored::Done { copied: 2, referred: 1 });
+            let (hold, marker) = (layout::hold(parent, at, 1), layout::mirror(parent, at));
+            assert!(two.other.store_get(&hold).await.is_ok(), "no hold");
+            assert!(two.home.store_get(&marker).await.is_ok(), "no marker");
+            assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "the pin stands");
+            assert_eq!(two.refers(origin, child).await, (false, true, true));
+            let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
+            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0 });
+            // Its hold deleted, as B's collector deletes it with the copy, the marker read before:
+            // a mirror begun again, finding the marker, writes none (`mirrorHoldsUnmarked`).
+            two.other.store_delete(&hold).await.unwrap();
+            let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
+            assert_eq!(again, Mirrored::Done { copied: 0, referred: 0 });
+            assert!(two.other.store_get(&hold).await.is_err(), "a hold written again");
+            two.other
+                .store_put(
+                    &hold,
+                    layout::encode(&layout::Reference::of(0)).into(),
+                    PutMode::Overwrite,
+                )
+                .await
+                .unwrap();
+            let unnamed = at + 7;
+            let dropped = mirror(&*bucket, &*own, 1, parent, unnamed).await.unwrap();
+            assert_eq!(dropped, Mirrored::Unnamed);
+            assert!(two.other.store_get(&layout::hold(parent, unnamed, 1)).await.is_err());
+            assert!(two.home.store_get(&layout::pin(parent, unnamed)).await.is_err());
+            assert!(two.home.store_get(&layout::mirror(parent, unnamed)).await.is_err());
+
+            let listed = two.other.store_list(&parent.prefix()).await.unwrap();
+            for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
+                two.other.store_delete(&meta.key).await.unwrap();
+            }
+            let fresh = two.routed();
+            let inherited = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
+            let ring = ring_of(&*fresh, child).await.unwrap();
+            let read = crate::fetch::read(&fresh, &ring, extent, &inherited.extents[&extent]);
+            assert_eq!(read.await.unwrap(), b"versioned");
+
+            let (pass, fresh_own) =
+                (Collector::new(Options { compact_below: 0.5, grace: 0 }), fresh.own());
+            let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
+            assert_eq!(report.deleted, 0, "the parent's cell alive");
+            lifecycle::delete(&*fresh, parent, 1, u64::MAX).await.unwrap();
+            let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 0), "the child referring here");
+            lifecycle::delete(&*fresh, child, 1, u64::MAX).await.unwrap();
+            let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
+            assert_eq!(
+                (report.deleted, report.retired),
+                (0, 0),
+                "the child's cell not passed over"
+            );
+            // The child's own passes: its cell dead, its reference retired here.
+            for holder in [8, 9] {
+                let options = Options { compact_below: 0.5, grace: 0 };
+                crate::collector::collect_cell(&*fresh, child, holder, &options).await.unwrap();
+            }
+            let report = pass.collect_copy(&*fresh, &*fresh_own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (2, 0), "nothing needing it");
+            assert_eq!(two.home.store_list(&parent.prefix()).await.unwrap(), [], "left here");
+            assert!(two.other.store_get(&hold).await.is_err(), "the hold stands");
+        });
+    }
+
+    /// TASK-633.8: two buckets in files under `dir`: `home`, numbered 1, a host's, and `other`,
+    /// numbered 2, its parent cells', each raw.
+    struct Two {
+        home_url: String,
+        home: ObjectBucket,
+        other: ObjectBucket,
+    }
+
+    impl Two {
+        async fn new(dir: &std::path::Path) -> Self {
+            use crate::identity::{self, Details};
+            let url = |name: &str| {
+                std::fs::create_dir(dir.join(name)).unwrap();
+                format!("file://{}", dir.join(name).display())
+            };
+            let (home_url, other_url) = (url("home"), url("other"));
+            let (home, other) = (
+                ObjectBucket::from_url(&home_url).unwrap(),
+                ObjectBucket::from_url(&other_url).unwrap(),
+            );
+            identity::format(&home, &Details::default()).await.unwrap();
+            let details = Details { url: Some(other_url), ..Details::default() };
+            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            Self { home_url, home, other }
+        }
+
+        /// A host's bucket, `home`, its requests of `other`'s cells sent there.
+        fn routed(&self) -> Arc<ObjectBucket> {
+            let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
+            Arc::new(ObjectBucket::from_url(&self.home_url).unwrap().routed(resolve))
+        }
+
+        /// `parent`, a cell of `other`, made, with a version: where it is, the epoch of the
+        /// checkpoint there, and the extent it holds, `versioned`.
+        async fn versioned(
+            bucket: &Arc<ObjectBucket>,
+            parent: layout::CellId,
+        ) -> (u64, u64, ExtentId) {
+            lifecycle::create(&**bucket, parent, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+            let extent = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let extents = vec![(extent, b"versioned".to_vec())];
+            let at = crate::testing::versioned_by(&writer, extents, crate::testing::VERSION).await;
+            let head = crate::head::get(&**bucket, parent).await.unwrap().unwrap();
+            (at, head.epoch_of(at).unwrap(), extent)
+        }
+
+        /// Whether the reference of the fork of `origin` to `child` is in `other`, in `home`, and
+        /// its retirement's mark in `other`.
+        async fn refers(&self, origin: Origin, child: layout::CellId) -> (bool, bool, bool) {
+            let Origin { parent, at } = origin;
+            let reference = layout::reference(parent, at, child);
+            (
+                self.other.store_get(&reference).await.is_ok(),
+                self.home.store_get(&reference).await.is_ok(),
+                self.other.store_get(&layout::retired(parent, at, child)).await.is_ok(),
+            )
+        }
+    }
+
+    /// TASK-633.8: a bucket, `own`, its clock `ahead` of its own, a mirror's pin taken over by
+    /// another mirror as its `taken_at`th conditional write lands, if any, and the keys it deletes
+    /// noted, in order, in `deleted`.
+    struct Watched {
+        own: Arc<ObjectBucket>,
+        ahead: u64,
+        taken_at: Option<usize>,
+        updates: Arc<std::sync::atomic::AtomicUsize>,
+        deleted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Watched {
+        fn new(own: Arc<ObjectBucket>, ahead: u64, taken_at: Option<usize>) -> Self {
+            let (updates, deleted) = Default::default();
+            Self { own, ahead, taken_at, updates, deleted }
+        }
+    }
+
+    impl Bucket for Watched {
+        async fn get(&self, key: &str) -> Result<Object, Error> {
+            self.own.get(key).await
+        }
+
+        async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
+            self.own.get_range(key, range).await
+        }
+
+        async fn head(&self, key: &str) -> Result<Meta, Error> {
+            self.own.head(key).await
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
+            self.own.list(prefix).await
+        }
+
+        async fn list_delimited(&self, prefix: &str, page: Page<'_>) -> Result<Listing, Error> {
+            self.own.list_delimited(prefix, page).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: crate::Bytes,
+            mode: PutMode,
+        ) -> Result<Version, Error> {
+            let pin = matches!(layout::kind(key), layout::Kind::Pin { .. });
+            if pin && matches!(mode, PutMode::Update(_)) {
+                let updates = self.updates.fetch_add(1, Ordering::Relaxed) + 1;
+                if self.taken_at == Some(updates) {
+                    let another = layout::encode(&layout::Reference::of(u64::MAX));
+                    self.own.store_put(key, another.into(), PutMode::Overwrite).await?;
+                }
+            }
+            self.own.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), Error> {
+            self.deleted.lock().unwrap().push(key.to_owned());
+            self.own.delete(key).await
+        }
+
+        fn now(&self) -> u64 {
+            self.own.now() + self.ahead
+        }
+    }
+
+    /// TASK-633.8: a version cut after the parent's bucket's collector compacted a segment holding
+    /// one of its extents, mirrored: what its state names of it, along the extent's moves, copied
+    /// with the moves, so that the child reads the extent here, the parent's bucket's objects gone.
+    #[test]
+    fn versions_cut_after_compactions_are_mirrored_with_their_moves() {
+        use crate::batch::Commit;
+        use crate::collector::{Options, collect_cell};
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            lifecycle::create(&*bucket, parent, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+            let first = writer.chain().next_sequence();
+            let (small, large) =
+                (ExtentId::new(parent.id, first), ExtentId::new(parent.id, first + 1));
+            let large_bytes: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
+            let extents = vec![(small, b"small".to_vec()), (large, large_bytes)];
+            async fn commit(writer: &Writer<ObjectBucket>, commit: Commit) {
+                let objects = crate::batch::SegmentBuilder::from(commit).close(&mut writer.chain());
+                let segment =
+                    writer.add_segment(objects.frame(writer.keys().encrypting())).unwrap();
+                writer.upload(segment).await.unwrap();
+                writer.acknowledge().await.unwrap();
+            }
+            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+            let segment = writer.location(small).unwrap().key;
+            commit(&writer, Commit { tag: 2, frees: vec![large], ..Commit::default() }).await;
+            writer.checkpoint().await.unwrap();
+            let compacting = Options { compact_below: 0.5, grace: 0 };
+            for holder in [8, 9] {
+                collect_cell(&*bucket, parent, holder, &compacting).await.unwrap();
+            }
+            let moves = two.other.store_list(&layout::moves_of(&segment).unwrap()).await.unwrap();
+            assert_eq!(moves.len(), 1, "{segment} not compacted");
+
+            let later = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let at = versioned_by(&writer, vec![(later, b"later".to_vec())], VERSION).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
+
+            let listed = two.other.store_list(&parent.prefix()).await.unwrap();
+            for meta in listed.into_iter().filter(|meta| crate::peer::served(&meta.key)) {
+                two.other.store_delete(&meta.key).await.unwrap();
+            }
+            let fresh = two.routed();
+            let inherited = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
+            let ring = ring_of(&*fresh, child).await.unwrap();
+            for (extent, bytes) in [(small, &b"small"[..]), (later, &b"later"[..])] {
+                let read = crate::fetch::read(&fresh, &ring, extent, &inherited.extents[&extent]);
+                assert_eq!(read.await.unwrap(), bytes);
+            }
+        });
+    }
+
+    /// TASK-633.8: a mirror's hold keeps, in the parent's bucket, what the version inherits from
+    /// other cells there, which the mirror does not copy: the parent, itself a fork of a cell
+    /// there, mirrored, then both deleted and their bucket's collector passing over them, the
+    /// child here reads what the version inherited still (`mirrorHolds`).
+    #[test]
+    fn holds_keep_what_mirrored_versions_inherit_from_other_cells() {
+        use crate::collector::{Options, collect_cell};
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let grand = test_cell(2 << 48 | 1);
+            let (grand_at, _, inherited) = Two::versioned(&bucket, grand).await;
+            let parent = test_cell(2 << 48 | 3);
+            let from = Origin { parent: grand, at: grand_at };
+            fork_version_given(&*bucket, parent, VERSION, from, 5).await.unwrap();
+            let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+            let own = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            drop(writer);
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
+
+            for cell in [parent, grand] {
+                lifecycle::delete(&*bucket, cell, 1, u64::MAX).await.unwrap();
+            }
+            let options = Options { compact_below: 0.5, grace: 0 };
+            for holder in 8..12 {
+                for cell in [parent, grand] {
+                    collect_cell(&*bucket, cell, holder, &options).await.unwrap();
+                }
+            }
+            let fresh = two.routed();
+            let state = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
+            let ring = ring_of(&*fresh, child).await.unwrap();
+            for (extent, bytes) in [(inherited, &b"versioned"[..]), (own, &b"own"[..])] {
+                let read = crate::fetch::read(&fresh, &ring, extent, &state.extents[&extent]);
+                assert_eq!(read.await.unwrap(), bytes);
+            }
+        });
+    }
+
+    /// TASK-633.8 (review round 2): a child here of a mirrored version, deleted while a fork of a
+    /// version of its own lives: its reference here stands, as its parent's own does in its bucket
+    /// (`references_held`), the copy with it, and the hold; the parent deleted too and every
+    /// collector passing, the grandchild reads what it inherited from both.
+    #[test]
+    fn references_here_hold_while_their_childrens_cells_hold_references() {
+        use crate::collector::{Collector, Options, collect_cell};
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, _, inherited) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
+            let writer = Writer::open(bucket.clone(), child, 10, 0).await.unwrap();
+            let own = ExtentId::new(child.id, writer.chain().next_sequence());
+            let child_at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            drop(writer);
+            let (grandchild, forked) =
+                (test_cell(1 << 48 | 3), Origin { parent: child, at: child_at });
+            fork_version_given(&*bucket, grandchild, VERSION, forked, 9).await.unwrap();
+
+            for cell in [child, parent] {
+                lifecycle::delete(&*bucket, cell, 1, u64::MAX).await.unwrap();
+            }
+            let options = Options { compact_below: 0.5, grace: 0 };
+            let copies = Collector::new(options);
+            for holder in 8..12 {
+                for cell in [child, parent] {
+                    collect_cell(&*bucket, cell, holder, &options).await.unwrap();
+                }
+                copies.collect_copy(&*bucket, &*bucket.own(), 1, parent).await.unwrap();
+            }
+            let fresh = two.routed();
+            let state = recovery::recover(&*fresh, grandchild, Some(forked)).await.unwrap().state;
+            let ring = ring_of(&*fresh, grandchild).await.unwrap();
+            for (extent, bytes) in [(inherited, &b"versioned"[..]), (own, &b"own"[..])] {
+                let read = crate::fetch::read(&fresh, &ring, extent, &state.extents[&extent]);
+                assert_eq!(read.await.unwrap(), bytes);
+            }
+        });
+    }
+
+    /// TASK-633.8: a child's store opening here asks for its version's mirror
+    /// ([`ObjectBucket::mirror_for`]), the host that forked it perhaps dead before it did: the
+    /// version mirrored, once; none for a cell of no origin.
+    #[test]
+    fn opening_a_child_mirrors_its_version() {
+        use crate::mirror::Mirrored;
+        use crate::testing::{VERSION, fork_version_given};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            assert_eq!(bucket.clone().mirror_for(parent).await.unwrap(), None, "a root");
+            let mirrored = bucket.clone().mirror_for(child).await.unwrap();
+            let named = Some((origin, Mirrored::Done { copied: 2, referred: 1 }));
+            assert_eq!(mirrored, named, "the version it was forked from");
+            assert_eq!(bucket.clone().mirror_for(child).await.unwrap(), None, "mirrored again");
+            assert_eq!(two.refers(origin, child).await, (false, true, true));
+        });
+    }
+
+    /// TASK-633.8: a process's mirrors of one version take turns, each taking its own as it is
+    /// asked for: the second, asked for before the first runs, waits for it and finds the version
+    /// marked; the turns go once done; none is wanted of a cell of this bucket's own.
+    #[test]
+    fn mirrors_of_a_version_take_turns() {
+        use crate::mirror::Mirrored;
+        use crate::testing::{VERSION, fork_version_given};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, Origin { parent, at }, 7).await.unwrap();
+            let (first, second) =
+                (bucket.mirror_wanted(parent, at), bucket.mirror_wanted(parent, at));
+            // The second polled first: it waits for the first's turn, taken as it was asked for.
+            let (second, first) = futures::join!(second, first);
+            assert!(matches!(first.unwrap(), Some(Mirrored::Done { referred: 1, .. })));
+            assert_eq!(second.unwrap(), None, "the second's turn");
+            assert!(bucket.mirrors.lock().unwrap().making.is_empty(), "turns left");
+            assert_eq!(bucket.mirror_wanted(test_cell(1 << 48 | 9), 3).await.unwrap(), None);
+        });
+    }
+
+    /// TASK-633.8: a mirror failing, as a request does that it can't go on past, lets its hold in
+    /// the parent's bucket and its pin go; begun again, it is done.
+    #[test]
+    fn mirrors_failing_let_their_hold_and_pin_go() {
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given};
+        let scenario = fail::FailScenario::setup();
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, Origin { parent, at }, 7).await.unwrap();
+            let own = bucket.own();
+            for step in ["mirror::checked", "mirror::copied"] {
+                fail::cfg(step, "return").unwrap();
+                let failed = mirror(&*bucket, &*own, 1, parent, at).await;
+                fail::remove(step);
+                assert!(failed.is_err(), "{step}: {failed:?}");
+                assert!(two.other.store_get(&layout::hold(parent, at, 1)).await.is_err(), "{step}");
+                assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+            }
+            let mirrored = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
+        });
+        scenario.teardown();
+    }
+
+    /// TASK-633.8: a fork into a bucket refers there once its version's mirror is marked there, in
+    /// the parent's bucket before; and one that referred there, the marker made before it read the
+    /// parent's head, refers here too, then retires its reference there (`forksRecheck`,
+    /// `forksLeaveA`): no mirror's listing need find it.
+    #[test]
+    fn forks_refer_where_their_versions_are_mirrored() {
+        use crate::testing::{VERSION, fork_version};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, epoch, _) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+
+            let before = test_cell(1 << 48 | 2);
+            fork_version(&*bucket, before, VERSION, origin, 7).await.unwrap();
+            assert_eq!(two.refers(origin, before).await, (true, false, false), "unmirrored");
+
+            let (marker, marked) =
+                (layout::mirror(parent, at), layout::encode(&layout::Mirror::of(epoch)));
+            let put = PutMode::Overwrite;
+            two.home.store_put(&marker, marked.clone().into(), put.clone()).await.unwrap();
+            let after = test_cell(1 << 48 | 3);
+            fork_version(&*bucket, after, VERSION, origin, 7).await.unwrap();
+            assert_eq!(two.refers(origin, after).await, (false, true, false), "mirrored");
+
+            // The marker made as the fork referred in the parent's bucket.
+            two.home.store_delete(&marker).await.unwrap();
+            let scenario = fail::FailScenario::setup();
+            let path = dir.path().join("home").join(&marker);
+            fail::cfg_callback("version::referred", move || {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &marked).unwrap();
+            })
+            .unwrap();
+            let raced = test_cell(1 << 48 | 4);
+            fork_version(&*bucket, raced, VERSION, origin, 7).await.unwrap();
+            fail::remove("version::referred");
+            assert_eq!(two.refers(origin, raced).await, (false, true, true), "marked meanwhile");
+
+            // The version dropped after the fork read it named, before it read the head again: its
+            // reference in the parent's bucket stays (`forksRereadBeforeLeaving`).
+            let found = two.other.store_get(&layout::head(parent)).await.unwrap();
+            let mut dropped = layout::Head::decode(parent, &found.bytes).unwrap();
+            dropped.versions.clear();
+            let (bytes, path) =
+                (layout::encode(&dropped), dir.path().join("other").join(layout::head(parent)));
+            fail::cfg_callback("version::rechecked", move || {
+                std::fs::write(&path, &bytes).unwrap()
+            })
+            .unwrap();
+            two.home.store_delete(&marker).await.unwrap();
+            let path = dir.path().join("home").join(&marker);
+            let marked = layout::encode(&layout::Mirror::of(epoch));
+            fail::cfg_callback("version::referred", move || {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &marked).unwrap();
+            })
+            .unwrap();
+            let late = test_cell(1 << 48 | 5);
+            fork_version(&*bucket, late, VERSION, origin, 7).await.unwrap();
+            fail::remove("version::referred");
+            fail::remove("version::rechecked");
+            assert_eq!(two.refers(origin, late).await, (true, true, false), "dropped meanwhile");
+
+            scenario.teardown();
+        });
+    }
+
+    /// TASK-633.8: one mirror of a version holds its pin at a time: another's standing, a mirror
+    /// does nothing; one whose pin another takes over, stale, gives up unmarked, that pin left; and
+    /// a pin stale, its mirror's host dead, this bucket's collector begins the mirror again, which
+    /// takes it over and is done.
+    #[test]
+    fn mirrors_hold_their_pins_alone() {
+        use crate::collector::{Collector, Options};
+        use crate::mirror::{Mirrored, PIN_STALE, mirror};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, ..) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            crate::testing::fork_version(&*bucket, child, crate::testing::VERSION, origin, 7)
+                .await
+                .unwrap();
+            let (own, pin, marker) =
+                (bucket.own(), layout::pin(parent, at), layout::mirror(parent, at));
+            let another = layout::encode(&layout::Reference::of(u64::MAX));
+            let put = PutMode::Overwrite;
+            two.home.store_put(&pin, another.clone().into(), put).await.unwrap();
+
+            assert_eq!(mirror(&*bucket, &*own, 1, parent, at).await.unwrap(), Mirrored::UnderWay);
+            assert!(two.home.store_get(&marker).await.is_err(), "marked under another's pin");
+
+            // Its pin taken over as it refreshes it before its marker.
+            let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
+            let gave_up = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
+            assert_eq!(gave_up, Mirrored::GaveUp("its pin, stale, taken over".to_owned()));
+            assert!(two.home.store_get(&marker).await.is_err(), "marked, its pin taken over");
+            assert_eq!(two.home.store_get(&pin).await.unwrap().bytes, another, "the pin taken");
+
+            let later = Watched::new(own.clone(), PIN_STALE + 1, None);
+            let options = Options { compact_below: 0.5, grace: 0 };
+            let report = Collector::new(options).collect_copy(&*bucket, &later, 1, parent).await;
+            assert_eq!(report.unwrap().deleted, 0);
+            assert!(two.home.store_get(&marker).await.is_ok(), "not marked, begun again");
+            assert!(two.home.store_get(&pin).await.is_err(), "the pin stands");
+            assert_eq!(two.refers(origin, child).await, (false, true, true));
+
+            // Its pin taken over as it lets it go, written again first: the other's left.
+            two.home.store_put(&pin, another.clone().into(), PutMode::Overwrite).await.unwrap();
+            let taken = Watched::new(own.clone(), PIN_STALE + 1, Some(2));
+            let done = mirror(&*bucket, &taken, 1, parent, at).await.unwrap();
+            assert_eq!(done, Mirrored::Done { copied: 0, referred: 0 });
+            assert_eq!(two.home.store_get(&pin).await.unwrap().bytes, another, "the other's pin");
+        });
+    }
+
+    /// TASK-633.8: a resolver opening every other bucket as the one at `url`, empty: what a host
+    /// asks of a bucket out of reach then finds nothing there, at once, and its counts show it.
+    struct Emptied(String);
+
+    impl Resolve for Emptied {
+        fn open<'a>(
+            &'a self,
+            _: &'a ObjectBucket,
+            _: u16,
+        ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
+            Box::pin(async move { Ok(Arc::new(ObjectBucket::from_url(&self.0).unwrap())) })
+        }
+    }
+
+    /// TASK-633.8 (AC #4): a version mirrored here, its children here live with its bucket out of
+    /// reach: a host started since, which knows nothing of the version but what this bucket holds,
+    /// recovers a child and reads what it inherited, takes it, commits, and forks its own version
+    /// into another child, which reads both; it asks the version's bucket nothing but listings of
+    /// moves (a mirrored cell's are listed in both buckets, those of the other skipped when it
+    /// fails).
+    #[test]
+    fn children_of_a_mirrored_version_live_with_its_bucket_out_of_reach() {
+        use crate::mirror::{Mirrored, mirror};
+        use crate::testing::{VERSION, fork_version_given, ring_of, versioned_by};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, _, extent) = Two::versioned(&bucket, parent).await;
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            fork_version_given(&*bucket, child, VERSION, origin, 7).await.unwrap();
+            let mirrored = mirror(&*bucket, &*bucket.own(), 1, parent, at).await.unwrap();
+            assert!(matches!(mirrored, Mirrored::Done { referred: 1, .. }), "{mirrored:?}");
+
+            std::fs::create_dir(dir.path().join("emptied")).unwrap();
+            let emptied = Emptied(format!("file://{}", dir.path().join("emptied").display()));
+            let home = ObjectBucket::from_url(&two.home_url).unwrap();
+            let cut = Arc::new(home.routed(Arc::new(emptied)));
+            let inherited = recovery::recover(&*cut, child, Some(origin)).await.unwrap().state;
+            let ring = ring_of(&*cut, child).await.unwrap();
+            let read = |ring, extent, location| crate::fetch::read(&cut, ring, extent, location);
+            assert_eq!(
+                read(&ring, extent, &inherited.extents[&extent]).await.unwrap(),
+                b"versioned"
+            );
+
+            let writer = Writer::open(cut.clone(), child, 10, 0).await.unwrap();
+            let own = ExtentId::new(child.id, writer.chain().next_sequence());
+            let child_at = versioned_by(&writer, vec![(own, b"own".to_vec())], VERSION).await;
+            drop(writer);
+            let (grandchild, forked) =
+                (test_cell(1 << 48 | 3), Origin { parent: child, at: child_at });
+            fork_version_given(&*cut, grandchild, VERSION, forked, 7).await.unwrap();
+            let state = recovery::recover(&*cut, grandchild, Some(forked)).await.unwrap().state;
+            let ring = ring_of(&*cut, grandchild).await.unwrap();
+            assert_eq!(read(&ring, extent, &state.extents[&extent]).await.unwrap(), b"versioned");
+            assert_eq!(read(&ring, own, &state.extents[&own]).await.unwrap(), b"own");
+
+            let there = cut.stats_by_bucket().into_iter().find(|(number, _)| *number == 2);
+            let asked: Vec<Request> = there.map_or_else(Vec::new, |(_, stats)| {
+                (Request::ALL.into_iter())
+                    .filter(|&request| request != Request::List && stats.requests(request) > 0)
+                    .collect()
+            });
+            assert_eq!(asked, [], "asked of the version's bucket, out of reach");
+        });
+    }
+
+    /// TASK-633.8 (AC #4): a mirror's host dying at each of its steps, then the version's cell
+    /// deleted, and both buckets' collectors passing, this one's with the mirror's pin fresh, then
+    /// stale (the mirror begun again, or given up, the version gone): nothing the child needs is
+    /// gone, wherever it is read. A mirror marked before it died refers the child here, begun again
+    /// if it died before moving it, and its hold keeps the version in its cell's bucket; one
+    /// begun again after the version went leaves the child's reference there too. One that died
+    /// before its marker,
+    /// begun again, gives up, the version gone: its copy here goes, its hold with it, and the
+    /// child's reference keeps the version there.
+    #[test]
+    fn mirrors_dying_at_each_step_leave_nothing_needed_gone() {
+        use crate::collector::{Collector, Options};
+        use crate::mirror::{Mirrored, PIN_STALE, mirror};
+        use crate::testing::{VERSION, fork_version, read};
+        use futures::executor::block_on;
+        // Each step; whether the mirror was marked by then; and whether it retired the child's
+        // reference in the parent's bucket before the version went. One marked, begun again after,
+        // writes the child's reference here and leaves the one there, reading the head again
+        // (`mirrorRereadsBeforeRetiring`). None, the mirror done.
+        let steps = [
+            ("mirror::pinned", false, false),
+            ("mirror::held", false, false),
+            ("mirror::checked", false, false),
+            ("mirror::copying", false, false),
+            ("mirror::copied", false, false),
+            ("mirror::marked", true, false),
+            ("mirror::moved", true, false),
+            ("mirror::referred", true, true),
+            ("", true, true),
+        ];
+        let scenario = fail::FailScenario::setup();
+        for (step, marked, retired) in steps {
+            let dir = tempfile::tempdir().unwrap();
+            let two = block_on(Two::new(dir.path()));
+            let bucket = two.routed();
+            let parent = test_cell(2 << 48 | 1);
+            let (at, epoch, extent) = block_on(Two::versioned(&bucket, parent));
+            let origin = Origin { parent, at };
+            let child = test_cell(1 << 48 | 2);
+            block_on(fork_version(&*bucket, child, VERSION, origin, 7)).unwrap();
+
+            if !step.is_empty() {
+                fail::cfg(step, "panic").unwrap();
+            }
+            let own = bucket.own();
+            let mirroring = || block_on(mirror(&*bucket, &*own, 1, parent, at));
+            let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(mirroring));
+            if !step.is_empty() {
+                fail::remove(step);
+            }
+            match died {
+                Ok(done) => assert!(step.is_empty(), "{step}: not died, {done:?}"),
+                Err(_) => assert!(!step.is_empty(), "died, at no step"),
+            }
+
+            block_on(async {
+                lifecycle::delete(&*bucket, parent, 1, u64::MAX).await.unwrap();
+                let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
+                pass().collect_copy(&*bucket, &*own, 1, parent).await.unwrap();
+                let later = Watched::new(own.clone(), PIN_STALE + 1, None);
+                for _ in 0..2 {
+                    pass().collect_copy(&*bucket, &later, 1, parent).await.unwrap();
+                }
+                for holder in [8, 9] {
+                    pass().collect_cell(&*bucket, parent, holder).await.unwrap();
+                }
+
+                let fresh = two.routed();
+                let state = recovery::recover(&*fresh, child, Some(origin)).await.unwrap().state;
+                let location = &state.extents[&extent];
+                assert_eq!(read(&fresh, extent, location).await.unwrap(), b"versioned", "{step}");
+                let checkpoint = layout::checkpoint(parent, at, epoch);
+                let there = two.other.store_get(&checkpoint).await.is_ok();
+                let here = two.home.store_get(&checkpoint).await.is_ok();
+                assert_eq!((there, here), (true, marked), "{step}: where the version is");
+                let held = two.other.store_get(&layout::hold(parent, at, 1)).await.is_ok();
+                assert_eq!(held, marked, "{step}: the hold");
+                let reference = two.refers(origin, child).await;
+                assert_eq!((reference.0, reference.1), (!retired, marked), "{step}: references");
+                assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "{step}");
+            });
+            let again = block_on(mirror(&*bucket, &*own, 1, parent, at)).unwrap();
+            // The reference left there written here again, and left there still.
+            let expected = match marked {
+                true => Mirrored::Done { copied: 0, referred: usize::from(!retired) },
+                false => Mirrored::Unnamed,
+            };
+            assert_eq!(again, expected, "{step}: begun again");
+            let reference = block_on(two.refers(origin, child));
+            assert_eq!(reference.0, !retired, "{step}: begun again, the reference there");
+        }
+        scenario.teardown();
+    }
+
+    /// TASK-633.8: a bucket holding a mirror of a version of another bucket's cell reads that cell's
+    /// objects written once here first, the cell's own bucket for those not copied; learns the
+    /// version's checkpoint epoch from the marker; and lists that cell's moves here and there. A
+    /// bucket holding no marker of the cell reads its bucket alone.
+    #[test]
+    fn objects_of_versions_mirrored_here_are_read_here_first() {
+        use crate::layout::Mirror;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (home, other, routed) = (&two.home, &two.other, || two.routed());
+            let parent = test_cell(2 << 48 | 1);
+            let (copied, only_there) =
+                (layout::segment(parent, 1, 2), layout::segment(parent, 2, 2));
+            let moves_there = layout::moves(&only_there, 7).unwrap();
+            let moves_here = layout::moves(&copied, 6).unwrap();
+            async fn put(bucket: &ObjectBucket, key: &str, bytes: &[u8]) {
+                bucket.store_put(key, bytes.to_vec().into(), PutMode::Overwrite).await.unwrap();
+            }
+            for key in [&copied, &only_there, &moves_there] {
+                put(other, key, b"there").await;
+            }
+            put(home, &copied, b"here").await;
+            put(home, &moves_here, b"here").await;
+            let read = |bucket: Arc<ObjectBucket>, key: String| async move {
+                bucket.get(&key).await.map(|object| object.bytes).unwrap()
+            };
+            // No marker here: the cell's bucket alone.
+            assert_eq!(read(routed(), copied.clone()).await, b"there");
+            put(home, &layout::mirror(parent, 2), &layout::encode(&Mirror::of(5))).await;
+            let marked = routed();
+            assert_eq!(marked.get(&copied).await.unwrap().bytes, b"here");
+            assert_eq!(marked.get(&only_there).await.unwrap().bytes, b"there");
+            assert_eq!(marked.known.epoch(parent, 2), Some(5), "the marker's epoch, learned");
+            let moves = marked.list(&layout::moves_prefix(parent)).await.unwrap();
+            let keys: Vec<String> = moves.into_iter().map(|meta| meta.key).collect();
+            let mut expected = vec![moves_here.clone(), moves_there.clone()];
+            expected.sort();
+            assert_eq!(keys, expected);
+        });
+    }
+
+    /// TASK-633.8: a pass over the copy here of another bucket's cell's versions keeps it whole
+    /// while that cell lives, though its head names none of them, a child refers here, or a mirror
+    /// is under way (a pin); retires here the references of children gone; and, nothing needing
+    /// it, deletes its mirrors' holds in that cell's bucket, then its markers, then its objects,
+    /// then the marks of references retired here: nothing of it left here, nothing else touched
+    /// there.
+    #[test]
+    fn copies_of_other_buckets_versions_are_kept_while_needed() {
+        use crate::collector::{Collector, Options};
+        use crate::layout::{Head, Mirror, Version};
+        use crate::record::Made;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
+            let own = routed.own();
+            let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 5));
+            let origin = Origin { parent, at: 3 };
+            async fn put(bucket: &ObjectBucket, key: &str, bytes: Vec<u8>) {
+                bucket.store_put(key, bytes.into(), PutMode::Overwrite).await.unwrap();
+            }
+            async fn listed(bucket: &ObjectBucket, cell: layout::CellId) -> Vec<String> {
+                let listed = bucket.store_list(&cell.prefix()).await.unwrap();
+                listed.into_iter().map(|meta| meta.key).collect()
+            }
+            let headed = |head: Head| layout::encode(&head);
+            let version = Version { id: 9, at: 3, shared: false };
+            let named = Head { versions: vec![version], ..Head::of(Made::Root, 4) };
+            put(other, &layout::head(parent), headed(named)).await;
+            // And a version a mirror copied and never marked, its hold left.
+            let copied = [
+                layout::checkpoint(parent, 3, 1),
+                layout::checkpoint(parent, 5, 1),
+                layout::segment(parent, 1, 2),
+            ];
+            let unmarked = layout::hold(parent, 5, 1);
+            put(other, &unmarked, layout::encode(&layout::Reference::of(0))).await;
+            for key in &copied {
+                put(home, key, b"copied".to_vec()).await;
+            }
+            let (marker, hold) = (layout::mirror(parent, 3), layout::hold(parent, 3, 1));
+            put(home, &marker, layout::encode(&Mirror::of(1))).await;
+            put(other, &hold, layout::encode(&layout::Reference::of(0))).await;
+            let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
+            let all = listed(home, parent).await;
+
+            put(other, &layout::head(parent), headed(Head::of(Made::Root, 4))).await;
+            let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, listed(home, parent).await), (0, all.clone()), "alive");
+            let ended = Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) };
+            put(other, &layout::head(parent), headed(ended)).await;
+            put(home, &layout::head(child), headed(Head::of(Made::Clone(origin), 4))).await;
+            let reference = layout::reference(parent, 3, child);
+            put(home, &reference, b"ref".to_vec()).await;
+            let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 0), "referred");
+            // Deleted, its cell perhaps holding its own children's references still: the reference
+            // stands, until its own pass retires it, its cell dead (`references_held`).
+            let deleted = Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 4) };
+            put(home, &layout::head(child), headed(deleted)).await;
+            let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 0), "a deleted child's");
+            // Gone, its cell removed: retired here.
+            home.store_delete(&layout::head(child)).await.unwrap();
+            put(home, &layout::pin(parent, 3), b"pin".to_vec()).await;
+            let report = pass().collect_copy(&*routed, &*own, 1, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 1), "pinned");
+            assert!(home.store_get(&reference).await.is_err(), "a gone child's reference stands");
+
+            home.store_delete(&layout::pin(parent, 3)).await.unwrap();
+            let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let watched = Watched { deleted: log.clone(), ..Watched::new(routed.clone(), 0, None) };
+            let watched_own =
+                Watched { deleted: log.clone(), ..Watched::new(own.clone(), 0, None) };
+            let report = pass().collect_copy(&watched, &watched_own, 1, parent).await.unwrap();
+            assert_eq!(report.deleted, copied.len());
+            assert_eq!(listed(home, parent).await, Vec::<String>::new(), "left here");
+            assert_eq!(listed(other, parent).await, [layout::head(parent)], "touched there");
+            let mark = layout::retired(parent, 3, child);
+            let mut order = vec![hold, unmarked, marker];
+            order.extend(copied);
+            order.push(mark);
+            assert_eq!(*log.lock().unwrap(), order, "deleted in that order");
+        });
+    }
+
+    /// TASK-633.8: a collector's sweep of this bucket, given its own store, passes over the copy
+    /// of another bucket's cell's versions as a copy: a mark-only one marks nothing of it; one
+    /// deleting deletes it, nothing needing it, as a collector's pass over every cell does.
+    #[test]
+    fn sweeps_pass_over_copies_as_copies() {
+        use crate::collector::{Collector, Options};
+        use crate::layout::{Head, Mirror};
+        use crate::record::Made;
+        use crate::sweep::{Mode, Sweep};
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let two = Two::new(dir.path()).await;
+            let (routed, (home, other)) = (two.routed(), (&two.home, &two.other));
+            let own = routed.own();
+            let parent = test_cell(2 << 48 | 1);
+            let ended = Head { epoch: Head::FINAL, ..Head::of(Made::Root, 4) };
+            other
+                .store_put(&layout::head(parent), layout::encode(&ended).into(), PutMode::Overwrite)
+                .await
+                .unwrap();
+            let copy = || async {
+                for (key, bytes) in [
+                    (layout::checkpoint(parent, 3, 1), b"copied".to_vec()),
+                    (layout::mirror(parent, 3), layout::encode(&Mirror::of(1))),
+                ] {
+                    home.store_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
+                }
+            };
+            let left = || async { home.store_list(&parent.prefix()).await.unwrap().len() };
+            copy().await;
+            let options = Options { compact_below: 0.5, grace: 0 };
+            let sweep = |mode| Sweep {
+                options,
+                mode,
+                at_once: 1,
+                lease: 60_000,
+                slowest: 1,
+                spawned: false,
+                kms: None,
+            };
+            let marking = sweep(Mode::MarkOnly).run_with_own(&routed, Some(&own), |_| {}).await;
+            assert_eq!((marking.report.deleted, left().await), (0, 2), "marked");
+            let there = other.store_list(&parent.prefix()).await.unwrap();
+            let there: Vec<String> = there.into_iter().map(|meta| meta.key).collect();
+            assert_eq!(there, [layout::head(parent)], "marked there");
+            let swept = sweep(Mode::Delete).run_with_own(&routed, Some(&own), |_| {}).await;
+            assert_eq!((swept.report.deleted, left().await), (1, 0), "swept");
+            copy().await;
+            let collected =
+                Collector::new(options).collect_with_own(&*routed, Some(&*own), 9).await;
+            assert_eq!((collected.unwrap().deleted, left().await), (1, 0), "collected");
+        });
+    }
 
     /// TASK-633.4: a bucket routing by the registry sends the requests of a cell of another bucket
     /// there, and keeps those of its own cells, of the cells tests name, and of no cell's: reads,
@@ -1410,6 +2635,15 @@ pub(crate) mod tests {
                 listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(),
                 [layout::head(theirs)]
             );
+
+            // TASK-633.8: its own store, unrouted, takes a key of another bucket's cell here.
+            let pin = layout::pin(theirs, 3);
+            let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
+            let own = Arc::new(ObjectBucket::from_url(&home_url).unwrap().routed(resolve)).own();
+            own.put(&pin, b"pin".to_vec().into(), PutMode::Create).await.unwrap();
+            let (here, there) = (home.store_get(&pin).await, other.store_get(&pin).await);
+            assert_eq!((here.is_ok(), there.is_ok()), (true, false));
+            assert!(Arc::ptr_eq(&own, &own.own()), "an unrouted bucket's own is itself");
 
             let (theirs_key, ours_key) = (layout::head(theirs), layout::head(ours));
             routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();

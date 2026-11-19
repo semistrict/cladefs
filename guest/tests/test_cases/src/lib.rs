@@ -50,7 +50,11 @@ mod test_fxfs_guest_bucket_soak;
 use test_fxfs_guest_bucket_soak::TestFxfsGuestBucketSoak;
 // cladefs: sandboxes as LangSmith's CI runs them, two hosts and a bucket on one disk (TASK-330.1).
 mod test_fxfs_guest_sandboxes;
+// cladefs: a data-analysis sandbox timed from its fork to its answers, three hosts, one bucket
+// (TASK-665).
+mod test_fxfs_guest_python_sandbox;
 use test_fxfs_guest_bigmap::TestFxfsGuestBigmap;
+use test_fxfs_guest_python_sandbox::TestFxfsGuestPythonSandbox;
 use test_fxfs_guest_sandboxes::TestFxfsGuestSandboxes;
 // cladefs: what a VM costs its host's memory, measured when its guest asks (TASK-164.5).
 mod measure;
@@ -353,6 +357,14 @@ pub fn test_cases() -> Vec<TestCase> {
         // cladefs: sandboxes as LangSmith's CI runs them, TASK-330's qualification's, which
         // scripts/sandboxes.sh runs with the S3 server it needs (TASK-330.1).
         TestCase::new("fxfs-guest-sandboxes", &[Tag::Manual], Box::new(TestFxfsGuestSandboxes)),
+        // cladefs: a data-analysis sandbox, uv-installed and uncompiled, timed from its fork to its
+        // answers on three hosts sharing one bucket, which scripts/test-e2e-rustfs.sh starts
+        // (TASK-665).
+        TestCase::new(
+            "fxfs-guest-python-sandbox",
+            &[Tag::Manual],
+            Box::new(TestFxfsGuestPythonSandbox),
+        ),
         TestCase::new(
             "fxfs-guest-live-fork",
             &[Tag::Kernel, Tag::Nightly],

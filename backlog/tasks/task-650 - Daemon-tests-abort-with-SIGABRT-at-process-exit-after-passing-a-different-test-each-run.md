@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 21:17'
+updated_date: '2026-11-19 13:43'
 labels:
   - cladefsd
   - flaky
@@ -33,3 +34,9 @@ On ubu1 (2026-11-18), three full workspace runs each had one test process abort 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Seen again on ubu1 2026-11-19 (branch t3/mirrors at 439a7068c, TASK-633.8): cladefs::tenants tenants_hold_their_own_pages SIGABRT after 'test result: ok', stderr only the DAX window INFO lines; 3072/3073 otherwise. The run on 50933bf33 before it was clean (3069/3069).
+<!-- SECTION:NOTES:END -->

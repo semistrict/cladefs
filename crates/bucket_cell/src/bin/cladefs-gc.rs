@@ -451,7 +451,8 @@ async fn collect(
         };
         let swept = match named {
             Some(cell) => sweep.run_cell(bucket, cell, observe).await,
-            None => sweep.run(bucket, observe).await,
+            // cladefs: copies of other buckets' cells' versions here, by its own store (TASK-633.8).
+            None => sweep.run_with_own(bucket, Some(&bucket.own()), observe).await,
         };
         sweeps += 1;
         let (did, took) = swept_lines(mode, &swept);

@@ -50,6 +50,7 @@ use bucket_cell::fetch::Budget;
 use bucket_cell::keys::{self, CellKeys, Ring, RingHold};
 use bucket_cell::known::Learned;
 use bucket_cell::layout::{CellId, Chain, Child, Head, Origin, epoch_of};
+use bucket_cell::mirror::Mirrored;
 use bucket_cell::object_bucket::ObjectBucket;
 use bucket_cell::wal::TakenCell;
 use bucket_cell::{Body, Objects, Recovered, Writer, head, lifecycle};
@@ -73,6 +74,42 @@ const SEGMENT: u64 = 32 << 20;
 
 /// How many segments go between checkpoints, by default ([`Options::checkpoint_every`]).
 pub const CHECKPOINT_EVERY: u64 = 64;
+
+/// cladefs: the mirror in `bucket` of the version `origin` names, begun in the background on the
+/// bucket runtime, a fork of it into `bucket` made (doc-23: the first fork of a version into a
+/// bucket starts its mirror there; TASK-633.8): nothing for a version of a cell of `bucket`'s own,
+/// or one mirrored there already ([`ObjectBucket::mirror_wanted`]), which takes its turn before
+/// this returns. What it came to is logged.
+fn mirror_wanted(bucket: &Arc<ObjectBucket>, origin: Origin) -> Result<(), Failure> {
+    let Origin { parent, at } = origin;
+    let mirroring = bucket.mirror_wanted(parent, at);
+    bucket_runtime()?.spawn(async move { logged(mirroring.await, parent, at) });
+    Ok(())
+}
+
+/// cladefs: the mirror in `bucket` of the version `cell` was forked from, if of another bucket's
+/// cell, begun in the background on `runtime`, the store's uploader's, as `cell`'s store opens
+/// ([`ObjectBucket::mirror_for`]): the host that forked it may have died before it began it. A
+/// process that opens stores on a runtime of its own, as a VM's does, makes no other.
+fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
+    let mirroring = bucket.clone().mirror_for(cell);
+    runtime.spawn(async move {
+        match mirroring.await {
+            Ok(None) => {}
+            Ok(Some((Origin { parent, at }, mirrored))) => logged(Ok(Some(mirrored)), parent, at),
+            Err(err) => log::warn!("cladefs: mirroring the version {cell} was forked from: {err}"),
+        }
+    });
+}
+
+/// cladefs: logs what a mirror of `parent`'s version at `at` came to, if one ran.
+fn logged(mirrored: Result<Option<Mirrored>, bucket_cell::Error>, parent: CellId, at: u64) {
+    match mirrored {
+        Ok(None) => {}
+        Ok(Some(mirrored)) => log::info!("cladefs: {parent}'s version at {at:x}: {mirrored:?}"),
+        Err(err) => log::warn!("cladefs: mirroring {parent}'s version at {at:x}: {err}"),
+    }
+}
 
 /// The most bytes of objects a host's uploads hold at once: its budget's ([`Runtime::uploads`]).
 pub const UPLOAD_BYTES: u64 = 512 << 20;
@@ -392,6 +429,7 @@ pub fn open<D: Dir>(
     let (uploader, uploads) = (shared.clone(), bucket.clone());
     // What the host learned for this opening, taken as it begins (TASK-449's review).
     let learned = learned(&*bucket, &recovering);
+    let cell = recovering.cell();
     UPLOADERS.send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
@@ -421,6 +459,7 @@ pub fn open<D: Dir>(
         Err(_) => return Err(Failure::msg("the uploader stopped")),
     };
     let dir = opened.hold_dir()?;
+    mirror_for(&bucket, cell, &runtime.handle);
     let uploader = Uploader { shared, bucket, stopped: Mutex::new(Some(stopped)), _dir: dir };
     Ok((opened, uploader))
 }
@@ -798,6 +837,7 @@ impl<D: Dir> Uploader<D> {
                 known.learn(child.cell, Learned { head });
             }
         }
+        mirror_wanted(&self.bucket, at.origin)?;
         Ok(())
     }
 

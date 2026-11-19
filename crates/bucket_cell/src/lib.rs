@@ -73,6 +73,7 @@ pub mod layout;
 pub mod lifecycle;
 pub mod local;
 pub mod marks;
+pub mod mirror;
 mod moves;
 pub mod object;
 pub mod object_bucket;
