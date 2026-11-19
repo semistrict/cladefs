@@ -1228,7 +1228,7 @@ async fn recover_live(
 /// being made, its version deleted, given up on (TASK-395.4), unless it was made first, as
 /// [`abandon`] would have (rule `collector_abandons`): writing its record so, if `writes` says
 /// so. cladefs: a fork being made as the pass read it, `read`, made since: what the pass read is
-/// stale, its version checkpointed at its origin before it was made (TASK-652); decided again by
+/// stale, its version checkpointed at its origin before it was made (TASK-653); decided again by
 /// the next pass, as one still being made is. It held nothing of its own when listed.
 async fn lost_is_ok(
     bucket: &impl Bucket,
@@ -1258,7 +1258,7 @@ async fn lost_is_ok(
         return Ok(true);
     }
     match writes {
-        // cladefs: made since, its version checkpointed at its origin before (TASK-652): what this
+        // cladefs: made since, its version checkpointed at its origin before (TASK-653): what this
         // pass read of it, a fork being made, is stale; decided again by the next pass, as one still
         // being made is. It held nothing of its own when listed.
         Writes::Some => {

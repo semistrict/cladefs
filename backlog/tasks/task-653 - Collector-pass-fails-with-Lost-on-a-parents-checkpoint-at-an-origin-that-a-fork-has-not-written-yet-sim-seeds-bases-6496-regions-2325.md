@@ -1,5 +1,5 @@
 ---
-id: TASK-652
+id: TASK-653
 title: >-
   Collector pass fails with Lost on a parent's checkpoint at an origin that a
   fork has not written yet (sim seeds bases 6496, regions 2325)
