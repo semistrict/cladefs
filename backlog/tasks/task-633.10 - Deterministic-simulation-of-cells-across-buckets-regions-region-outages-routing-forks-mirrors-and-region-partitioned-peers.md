@@ -3,9 +3,10 @@ id: TASK-633.10
 title: >-
   Deterministic simulation of cells across buckets: regions, region outages,
   routing, forks, mirrors and region-partitioned peers
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 22:54'
+updated_date: '2026-11-19 03:01'
 labels:
   - bucket
   - multi-region
@@ -45,3 +46,13 @@ The user asked (2026-11-18) for FoundationDB-style simulation testing of the mul
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18 night (unattended), first slices on branch (head 3e3a32e9b, not yet on main):
+- f58fce990 SimBucket holds region buckets: one queue for all (a seed orders them all), SimBucket::at(home) views route by layout::routed_to (shared with ObjectBucket's router), SimBucket::down(region). SimBucket::new() routes nothing: old seeds/journals unchanged.
+- 16997b078 World Profile::regions (0 = as before, no RNG draws): host H in bucket 1 + H % regions; root and restored children take IDs of their maker's bucket; a region's bucket flips down/up at times (REGION_FLIPS 0.02/step, all up when quiescing); collectors and final sweeps per region; Direct (checks) lists all regions for no-cell prefixes. Profile cells_across_regions (deleted_bases + 3 regions): 200 seeds hold, seed 0 sends 421/1263 requests to non-home regions; in seeds_replay. sim 42/42.
+- First runs found two World gaps (sweeping only the home region; uncollected listing only the home region), fixed; no code bug found yet.
+Left for the ACs: registry/additions and identity in the World (#1); the root bucket unreachable and cross-region latency as longer delays (#2); peers and the part cache (#3); specs/buckets invariants + per-rule seed searches + mutants (#4); mirror/outage profiles in the nightly hunt (#5).
+<!-- SECTION:NOTES:END -->
