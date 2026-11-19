@@ -1083,8 +1083,8 @@ mod tests {
         set(KMS_VAR, Some("vault://key"));
         assert_eq!(
             kind(&chosen(None)),
-            "CLADEFS_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or \
-             gcp-kms:// (doc-16)"
+            "CLADEFS_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms://, \
+             gcp-kms:// or azure-kv:// (doc-16)"
         );
     }
 }
