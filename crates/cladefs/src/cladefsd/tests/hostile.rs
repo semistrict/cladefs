@@ -1952,8 +1952,10 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 // It has one store at most, however many of its OPENs were at once (TASK-150.5).
                 let opened = seen.opens.iter().filter(|(_, _, status)| *status == 0).count();
                 prop_assert!(opened <= 1, "a connection opened {opened} stores: {:?}", seen.opens);
-                // Its store, if it writes one, commits: unless it said what ends its connection.
-                if let Some(status) = seen.committed.filter(|_| !hostile.ends_its_connection()) {
+                // What follows, unless it said what ends its connection (TASK-581).
+                let ended = hostile.ends_its_connection();
+                // Its store, if it writes one, commits.
+                if let Some(status) = seen.committed.filter(|_| !ended) {
                     prop_assert_eq!(
                         status,
                         Some(0),
@@ -1963,7 +1965,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                     commits.fetch_add(1, Ordering::Relaxed);
                 }
                 // A flood past its credit is let go.
-                if hostile.flood {
+                if hostile.flood && !ended {
                     prop_assert_eq!(seen.flood, Some((Some(0), true)));
                     floods.fetch_add(1, Ordering::Relaxed);
                 }
