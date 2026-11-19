@@ -14,8 +14,8 @@ import { indexRepo } from "../tools/lib/symbols.ts";
 describe("code by text, from the local source", () => {
   test("rg gets the snippet quoted for a shell, quotes and all", () => {
     expect(shellQuote("Transaction<'_>")).toBe("'Transaction<'\\''_>'");
-    expect(rgCommand("crates/cladefs/src/extents.rs", "pub struct ExtentStore")).toBe(
-      "rg -n -F 'pub struct ExtentStore' crates/cladefs/src/extents.rs",
+    expect(rgCommand("crates/cladefs/src/open_cell.rs", "pub struct OpenCell")).toBe(
+      "rg -n -F 'pub struct OpenCell' crates/cladefs/src/open_cell.rs",
     );
   });
 

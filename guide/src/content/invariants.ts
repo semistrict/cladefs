@@ -17,7 +17,7 @@ export const invariants: Invariant[] = [
     why:
       "Everything above leans on this: a sealed extent can be cached once, mapped by any number " +
       "of VMs, uploaded once, and inherited by forks, with no invalidation anywhere.",
-    enforcedBy: ["store", "es_write", "es_commit"],
+    enforcedBy: ["local_cell", "es_write", "es_commit"],
     evidence: [{ kind: "doc", id: "doc-4" }, { kind: "doc", id: "doc-7" }],
     standing: "stated",
   },
@@ -26,7 +26,7 @@ export const invariants: Invariant[] = [
     layer: "driver",
     claim:
       "The host sees extents and bytes, never files. The guest's Fxfs owns all metadata; the " +
-      "device's requests name extents by (branch, sequence).",
+      "device's requests name extents by (cell, sequence).",
     why:
       "The host stays a store of immutable pieces: no filesystem semantics to get right twice, and " +
       "a guest's metadata is as private as its data.",
@@ -160,10 +160,10 @@ export const invariants: Invariant[] = [
     id: "fork-inherits",
     layer: "bucket",
     claim:
-      "An extent's ID is minted once, by its branch's writer. A fork is a new branch that " +
+      "An extent's ID is minted once, by its cell's writer. A fork is a new cell that " +
       "inherits its parent's extents as of an uploaded commit, without copying them.",
     why: "IDs never collide across writers or forks, so nothing inherited ever needs renaming or copying.",
-    enforcedBy: ["extent_id", "es_fork", "origin", "store_commit_fork"],
+    enforcedBy: ["extent_id", "es_fork", "origin", "fork_head"],
     evidence: [
       { kind: "doc", id: "doc-7" },
       { kind: "mutation", spec: "bucket", name: "NoEpochSequences" },
@@ -174,11 +174,11 @@ export const invariants: Invariant[] = [
     id: "one-writer",
     layer: "bucket",
     claim:
-      "A branch has one writer, holding its head. A commit is the branch's once the writer swaps " +
+      "A cell has one writer, holding its head. A commit is the cell's once the writer swaps " +
       "the head to name its segment, on the condition that the head is still the one it wrote; " +
       "a new writer swaps the head to the next epoch, after which the old writer's swaps fail, " +
       "and what it writes, at keys naming its own epoch, no head names.",
-    why: "A host that lost the branch but still runs can't corrupt it: its writes land at keys no reader goes by, and object storage's conditional write of the head does the fencing.",
+    why: "A host that lost the cell but still runs can't corrupt it: its writes land at keys no reader goes by, and object storage's conditional write of the head does the fencing.",
     enforcedBy: ["upload", "acknowledge", "head_swap", "bucket"],
     evidence: [
       { kind: "doc", id: "doc-7" },

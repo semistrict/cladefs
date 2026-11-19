@@ -28,8 +28,8 @@ export interface Fork {
 
 export interface Extent {
   id: string;
-  /** Whose branch minted it. */
-  branch: string;
+  /** Which cell's writer minted it. */
+  cell: string;
   state: "open" | "sealed";
   data: string;
   /** Whether its page is in the host's extent cache. */
@@ -50,7 +50,7 @@ export interface Scene {
   focus: ("a" | "b" | "cache" | "private" | "extents" | "semaphore")[];
 }
 
-const base: Extent = { id: "base·7", branch: "base", state: "sealed", data: "v1", cached: true };
+const base: Extent = { id: "base·7", cell: "base", state: "sealed", data: "v1", cached: true };
 
 const shared = (name: string): Fork => ({
   name,
@@ -117,17 +117,17 @@ export const fsyncScenes: Scene[] = [
   {
     ...afterStore,
     a: { ...dirtyA, pte: "ro", sets: ["writeback"] },
-    extents: [base, { id: "A·12", branch: "A", state: "open", data: "v2", cached: false }],
+    extents: [base, { id: "A·12", cell: "A", state: "open", data: "v2", cached: false }],
     semaphore: "shared",
     request: "WRITE",
     caption:
-      "It copies the page out of the window and WRITEs it to a new extent of A's branch, A·12, open.",
+      "It copies the page out of the window and WRITEs it to a new extent of A's cell, A·12, open.",
     focus: ["extents"],
   },
   {
     ...afterStore,
     a: { ...dirtyA, pte: "ro", sets: ["sealing"] },
-    extents: [base, { id: "A·12", branch: "A", state: "open", data: "v2", cached: false }],
+    extents: [base, { id: "A·12", cell: "A", state: "open", data: "v2", cached: false }],
     semaphore: "shared",
     caption:
       "Only after its bytes, it commits the transaction naming A·12 as page 0's block, and keeps the page until A·12 is sealed.",
@@ -136,7 +136,7 @@ export const fsyncScenes: Scene[] = [
   {
     ...afterStore,
     a: { ...dirtyA, pte: "ro", sets: [] },
-    extents: [base, { id: "A·12", branch: "A", state: "sealed", data: "v2", cached: false }],
+    extents: [base, { id: "A·12", cell: "A", state: "sealed", data: "v2", cached: false }],
     semaphore: "none",
     request: "COMMIT",
     caption:
@@ -146,7 +146,7 @@ export const fsyncScenes: Scene[] = [
   {
     ...afterStore,
     a: { name: "Fork A", page: { kind: "extent", extent: "A·12", data: "v2" }, pte: "ro", sets: [] },
-    extents: [base, { id: "A·12", branch: "A", state: "sealed", data: "v2", cached: true }],
+    extents: [base, { id: "A·12", cell: "A", state: "sealed", data: "v2", cached: true }],
     semaphore: "exclusive",
     request: "MAP",
     caption:

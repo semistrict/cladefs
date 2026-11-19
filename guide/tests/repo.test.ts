@@ -33,7 +33,7 @@ describe("where code comes from", () => {
     ["crates/storage_device/src/extent.rs", "cladefs"],
     ["crates/zx/src/lib.rs", "fuchsia"],
     ["crates/fidl/src/lib.rs", "stand-in"],
-    ["crates/cladefs/src/extents.rs", "cladefs"],
+    ["crates/cladefs/src/open_cell.rs", "cladefs"],
     ["crates/bucket_cell/src/writer.rs", "cladefs"],
     ["guest/linux/fs/cladefs/dax.c", "cladefs"],
   ])("%s is %s", (path, origin) => {
@@ -67,13 +67,13 @@ describe("the symbol index", () => {
 
   test("it finds cladefs's and Fuchsia's symbols, with their docs and anchors", async () => {
     const symbols = await indexRepo();
-    const store = symbols.find((s) => s.path === "crates/cladefs/src/extents.rs" && s.name === "ExtentStore" && s.kind === "struct");
+    const store = symbols.find((s) => s.path === "crates/cladefs/src/open_cell.rs" && s.name === "OpenCell" && s.kind === "struct");
     expect(store).toEqual({
-      path: "crates/cladefs/src/extents.rs",
+      path: "crates/cladefs/src/open_cell.rs",
       kind: "struct",
-      name: "ExtentStore",
+      name: "OpenCell",
       container: "",
-      signature: "pub struct ExtentStore",
+      signature: "pub struct OpenCell",
       unique: true,
       doc: "An extent store a guest's filesystem lives on.",
       origin: "cladefs",

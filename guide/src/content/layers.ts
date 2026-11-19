@@ -45,7 +45,7 @@ export const layers: Layer[] = [
       "KVM follows for the window, and reports the guest's faults there to the daemon through " +
       "userfaultfd.",
     dirs: ["crates/virtio_extent", "vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/cladefs/src/dax/uffd.rs"],
-    anchors: ["vmm_handle", "vmm_window", "daemon_store", "uffd_serve", "vmm_private_max"],
+    anchors: ["vmm_handle", "vmm_window", "cell_client", "uffd_serve", "vmm_private_max"],
     docs: ["doc-4"],
     provenance: "Firecracker is upstream's, at v1.16.1; the extent device is cladefs's: crates/virtio_extent, which libmachine shares, and its adapter in the fork semistrict/firecracker.",
   },
@@ -57,8 +57,8 @@ export const layers: Layer[] = [
       "One process serves the extent stores of a host's hundreds of VMs, so each sealed extent is " +
       "one copy in memory, shared by every VM that maps it. It keeps each VM's window (its page " +
       "tables, mappings and private pages) and makes commits local behind the guest.",
-    dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/extents.rs", "crates/cladefs/src/dax.rs"],
-    anchors: ["server_serve", "local_cell", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
+    dirs: ["crates/cladefs/src/cladefsd", "crates/cladefs/src/open_cell.rs", "crates/cladefs/src/dax.rs"],
+    anchors: ["server_serve", "open_cell", "es_commit_ordered", "flush_behind", "es_map", "dax_window", "dax_fault", "cow"],
     docs: ["doc-2", "doc-13"],
     provenance: "cladefs's own.",
   },
@@ -81,21 +81,21 @@ export const layers: Layer[] = [
     name: "Local store",
     what: "the bucket's write-ahead log and cache, on local disk",
     role:
-      "Each branch's extents on the host's disk: open extents written raw, sealed ones framed into " +
+      "Each cell's extents on the host's disk: open extents written raw, sealed ones framed into " +
       "zstd-compressed segments at commits. Since doc-14 it is the bucket's WAL and cache, one " +
       "storage engine: what is local here and not yet uploaded is the only state the bucket lacks.",
     dirs: ["crates/local_cell", "crates/extent_frame"],
-    anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_uploaded"],
+    anchors: ["local_cell", "local_commit", "fork_head", "es_write", "es_uploaded"],
     docs: ["doc-14", "doc-7"],
     provenance: "cladefs's own.",
   },
   {
     id: "bucket",
     name: "Object storage",
-    what: "branches in S3 or GCS",
+    what: "cells in S3 or GCS",
     role:
-      "A branch is a VM's filesystem in a bucket: segments whose footers say what each commit did, " +
-      "with checkpoints of its index. One writer holds a branch's head, which names its segments " +
+      "A cell in a bucket is segments whose footers say what each commit did, " +
+      "with checkpoints of its index. One writer holds a cell's head, which names its segments " +
       "and newest checkpoint, every key written once; forks record where they were made and " +
       "inherit without copying; the collector alone deletes.",
     dirs: ["crates/bucket_cell"],
