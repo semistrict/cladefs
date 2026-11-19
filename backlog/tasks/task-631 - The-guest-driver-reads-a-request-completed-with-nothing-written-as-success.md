@@ -33,6 +33,12 @@ When the VMM adapter hands over Popped { buffers: Err } (Firecracker's ChainErro
 - [ ] #2 A test queues a chain whose data descriptor lies outside guest memory and asserts the driver-side result is -EIO (or the response holds a non-zero status); it goes red with the fix reverted.
 <!-- AC:END -->
 
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19 security review: the first real-VM attack fixture accidentally placed its `vext_request` on the guest kernel stack, outside valid guest memory. Firecracker logged `a descriptor chain is not guest memory` for all 15 requests and completed each with used length 0. The guest initialized response status to zero, ignored the used length and returned success for every one (`unexpected request statuses: mask 0x7fff`). This directly reproduces the rejected-chain half of the bug through the real virtio/Firecracker path. The fixture was moved to heap memory and rerun to test its intended malformed fields separately.
+<!-- SECTION:NOTES:END -->
+
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)

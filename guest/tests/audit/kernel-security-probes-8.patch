@@ -1,0 +1,759 @@
+diff --git a/crates/cladefs/src/cache.rs b/crates/cladefs/src/cache.rs
+index b269955c5..a2860a29d 100644
+--- a/crates/cladefs/src/cache.rs
++++ b/crates/cladefs/src/cache.rs
+@@ -696,6 +696,12 @@ impl CachedExtent {
+         }
+     }
+ 
++    /// Security-review fixture: how many window registrations this extent holds.
++    #[cfg(test)]
++    pub(crate) fn window_count(&self) -> usize {
++        self.pages.with(Mutex::lock).windows.len()
++    }
++
+     /// Notes that it is in use now: asked for, or faulted on, as a guest keeping its mapping asks
+     /// for it only once (TASK-92.32).
+     fn used(&self) {
+diff --git a/crates/cladefs/src/cladefsd/client.rs b/crates/cladefs/src/cladefsd/client.rs
+index f0755836c..c47ccfc3a 100644
+--- a/crates/cladefs/src/cladefsd/client.rs
++++ b/crates/cladefs/src/cladefsd/client.rs
+@@ -1538,3 +1538,66 @@ impl Faults for DaemonFaults {
+         self.client.lost.happened()
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::future::Future as _;
++
++    /// Security-review fixture: a full batch of large requests must meet backpressure before each
++    /// payload is gathered into the VMM's heap, not after every one has allocated a private copy.
++    #[test]
++    fn large_writes_waiting_for_replies_do_not_gather_unbounded_payloads() {
++        const WRITES: usize = 32;
++        const LEN: usize = 8 << 20;
++        let (stream, mut daemon) = UnixStream::pair().unwrap();
++        let client = Client::start(stream).unwrap();
++        let (transfer, _area) = Transfer::make().unwrap();
++        let store = CellClient {
++            client,
++            cell: 1,
++            memories: Vec::new(),
++            faults: Mutex::new(None),
++            read_only: false,
++            transfer: Arc::new(transfer),
++            copying: Default::default(),
++            max_map_count: None,
++        };
++        // The daemon consumes every request but answers none, as a stalled connection's does.
++        let reading = std::thread::spawn(move || {
++            use std::io::Read as _;
++            let mut buf = [0; 64 << 10];
++            while let Ok(n) = daemon.read(&mut buf) {
++                if n == 0 {
++                    break;
++                }
++            }
++        });
++        let data = vec![0x5a; LEN];
++        let before = crate::heap::held();
++        let buffers = [VolatileSlice::from(&data[..])];
++        let mut writes = Vec::new();
++        for sequence in 0..WRITES as u64 {
++            let extent = ExtentId { cell: store.cell, sequence };
++            writes.push(Box::pin(store.write_with_barriers_async(
++                extent,
++                0,
++                &buffers,
++                WriteBarriers::default(),
++            )));
++        }
++        // Poll each once: every request is now in flight and none can complete.
++        futures::executor::block_on(futures::future::poll_fn(|cx| {
++            for write in &mut writes {
++                assert!(write.as_mut().poll(cx).is_pending());
++            }
++            std::task::Poll::Ready(())
++        }));
++        let held = crate::heap::held().saturating_sub(before);
++        store.client.close();
++        drop(writes);
++        drop(store);
++        reading.join().unwrap();
++        assert!(held < 32 << 20, "{held} bytes gathered for {WRITES} unanswered {LEN}-byte writes");
++    }
++}
+diff --git a/crates/cladefs/src/open_cell.rs b/crates/cladefs/src/open_cell.rs
+index ccc07e448..280f363de 100644
+--- a/crates/cladefs/src/open_cell.rs
++++ b/crates/cladefs/src/open_cell.rs
+@@ -3137,6 +3137,24 @@ mod tests {
+         assert_eq!(block_on(window.fault(2 * ps, Access::Read)), Err(Errno::ENOENT));
+     }
+ 
++    /// Security-review fixture for TASK-602: replacing an extent's only mapping with itself must
++    /// not register the same window again on every MAP.
++    #[test]
++    fn remapping_one_extent_registers_its_window_once() {
++        let (store, _dir) = store(1 << 20);
++        let ps = page_size();
++        let extent = id(&store, 1);
++        write(&store, extent, 0, &pattern(1, BLOCK)).unwrap();
++        store.commit(None).unwrap();
++        let _window = store.create_dax_window(ps, None).unwrap();
++        store.map(extent, 0, ps, 0).unwrap();
++        let cached = cache::find(ArenaId::DEFAULT, extent).expect("the mapped extent is cached");
++        for _ in 0..1000 {
++            store.map(extent, 0, ps, 0).unwrap();
++        }
++        assert_eq!(cached.window_count(), 1, "duplicate window registrations grew the daemon");
++    }
++
+     /// Races `steps` on one extent, `rounds` times, a fresh extent each: `prepare` alone first,
+     /// then each step on a thread of its own, all released at once, then a commit, after which the
+     /// extent reads `expected` (TASK-119.19). The steps are ones whose outcome is the same whichever
+diff --git a/crates/cladefs/tests/grants.rs b/crates/cladefs/tests/grants.rs
+index 02927ed94..0064cc414 100644
+--- a/crates/cladefs/tests/grants.rs
++++ b/crates/cladefs/tests/grants.rs
+@@ -13,7 +13,7 @@
+ 
+ mod common;
+ 
+-use cladefs::{CellClient, Errno, ExtentId, VolatileSliceMut};
++use cladefs::{CellClient, Errno, ExtentId, VolatileSlice, VolatileSliceMut};
+ use common::daemon::{CAPACITY, Daemon, failure, write};
+ use common::{cache, copies, pattern};
+ use std::path::{Path, PathBuf};
+@@ -487,6 +487,35 @@ fn vm_processes_make_no_version_of_another_cell() {
+     assert_eq!(restored.root().unwrap(), b"ours");
+ }
+ 
++/// Security-review fixture: an unshared restore is refused before any source I/O or host mutation,
++/// not after syncing the victim and recovering its version into the daemon's kept-store directory.
++#[test]
++fn an_unshared_restore_has_no_effect_before_its_refusal() {
++    let dir = tempfile::tempdir().unwrap();
++    let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
++    let victim = here.acme.join("victim");
++    let vm = CellClient::connect(&here.socket, &victim, CAPACITY).unwrap();
++    write(&vm, &pattern(1), b"victim");
++    let version = vm.make_version().unwrap();
++    let extent = ExtentId { cell: vm.cell(), sequence: 2 };
++    let uncommitted = vec![0x5a; 64 << 10];
++    vm.write(extent, 0, &[VolatileSlice::from(&uncommitted[..])]).unwrap();
++    let before = here.daemon.stat(&victim).unwrap().committed;
++    let kept = std::env::temp_dir()
++        .join(format!("cladefs-versions-{}", std::process::id()))
++        .join(format!("{:x}.{:x}.{:x}", version.tenant, version.cell, version.version));
++    assert!(!kept.exists(), "the probe began with a recovered version at {}", kept.display());
++
++    let globex = dir.path().join("there/globex");
++    std::fs::create_dir(&globex).unwrap();
++    let socket = there.daemon.grant(2, &globex, None).unwrap();
++    let refused = restore(&socket, &globex.join("refused"), version);
++    assert_eq!(refused.err().unwrap(), Some(Errno::EACCES));
++    let after = here.daemon.stat(&victim).unwrap().committed;
++    assert_eq!(after, before, "the refused restore synced the victim's live writer");
++    assert!(!kept.exists(), "the refused restore recovered a version at {}", kept.display());
++}
++
+ /// TASK-154: a version dropped (DropVersions) restores no more, on its host or another (ENOENT),
+ /// and what was restored from it lives on.
+ #[test]
+diff --git a/crates/cladefs/tests/seccomp.rs b/crates/cladefs/tests/seccomp.rs
+index 9b63544bb..ad194889b 100644
+--- a/crates/cladefs/tests/seccomp.rs
++++ b/crates/cladefs/tests/seccomp.rs
+@@ -63,6 +63,15 @@ const BPF_RET_K: u16 = 0x06;
+ /// Firecracker's filter of the threads `kind` names ("vmm", "vcpu"), compiled as its build compiles
+ /// it, but notifying a supervisor of what it refuses, where Firecracker's traps.
+ fn filter(kind: &str) -> Arc<[libc::sock_filter]> {
++    compile_filter(kind, true)
++}
++
++/// Firecracker's production filter, whose refused calls trap as they do in a VM process.
++fn production_filter(kind: &str) -> Arc<[libc::sock_filter]> {
++    compile_filter(kind, false)
++}
++
++fn compile_filter(kind: &str, notify: bool) -> Arc<[libc::sock_filter]> {
+     let dir = tempfile::tempdir().unwrap();
+     let json = dir.path().join("filters.json");
+     std::fs::write(&json, filters_json().to_string()).unwrap();
+@@ -82,7 +91,8 @@ fn filter(kind: &str) -> Arc<[libc::sock_filter]> {
+                 jf: insn[3],
+                 k: u32::from_ne_bytes([insn[4], insn[5], insn[6], insn[7]]),
+             };
+-            if insn.code == BPF_RET_K
++            if notify
++                && insn.code == BPF_RET_K
+                 && insn.k & libc::SECCOMP_RET_ACTION_FULL == libc::SECCOMP_RET_TRAP
+             {
+                 insn.k = libc::SECCOMP_RET_USER_NOTIF;
+@@ -91,7 +101,9 @@ fn filter(kind: &str) -> Arc<[libc::sock_filter]> {
+             insn
+         })
+         .collect();
+-    assert_ne!(traps, 0, "{kind}'s filter traps nothing: Firecracker's refuses otherwise now");
++    if notify {
++        assert_ne!(traps, 0, "{kind}'s filter traps nothing: Firecracker's refuses otherwise now");
++    }
+     program
+ }
+ 
+@@ -429,3 +441,188 @@ fn copy_on_write_windows_run_under_firecrackers_seccomp_filters() {
+     // SAFETY: Unmaps the memory, which nothing uses any more.
+     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
+ }
++
++/// Security-review fixture: an attempted escape into a host kernel interface, from a thread under
++/// Firecracker's real filter. `fd` is opened before confinement, as the jailer opens the VM's devices.
++#[derive(Clone, Copy)]
++struct KernelProbe {
++    name: &'static str,
++    thread: &'static str,
++    nr: libc::c_long,
++    args: [u64; 6],
++    fd: Option<&'static str>,
++}
++
++impl KernelProbe {
++    const fn new(name: &'static str, nr: libc::c_long) -> Self {
++        Self { name, thread: "vmm", nr, args: [0; 6], fd: None }
++    }
++
++    const fn ioctl(
++        name: &'static str,
++        thread: &'static str,
++        request: libc::c_ulong,
++        fd: &'static str,
++    ) -> Self {
++        Self {
++            name,
++            thread,
++            nr: libc::SYS_ioctl,
++            args: [0, request as u64, 0, 0, 0, 0],
++            fd: Some(fd),
++        }
++    }
++}
++
++/// Whether `probe` reached the kernel rather than dying of SIGSYS. Every potentially dangerous call
++/// is made, not inferred from the JSON. The child does no allocation after fork; an allowed call's
++/// own errno is immaterial: it lived, which is what this probe distinguishes.
++fn reached_kernel(probe: &KernelProbe) -> bool {
++    let program = production_filter(probe.thread);
++    let device = probe.fd.map(std::fs::File::open).transpose().unwrap();
++    let fd = device.as_ref().map_or(-1, AsRawFd::as_raw_fd);
++    // SAFETY: The parent built everything the child needs. The child makes only plain system calls.
++    let pid = unsafe { libc::fork() };
++    assert!(pid >= 0, "fork: {}", std::io::Error::last_os_error());
++    if pid == 0 {
++        // SAFETY: Plain system calls, and the program outlives this child.
++        unsafe {
++            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
++                libc::_exit(100);
++            }
++            let mut program = libc::sock_fprog {
++                len: u16::try_from(program.len()).unwrap(),
++                filter: program.as_ptr().cast_mut(),
++            };
++            if libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, &mut program) != 0
++            {
++                libc::_exit(101);
++            }
++            let a = probe.args;
++            libc::syscall(
++                probe.nr,
++                if probe.fd.is_some() { fd as u64 } else { a[0] },
++                a[1],
++                a[2],
++                a[3],
++                a[4],
++                a[5],
++            );
++            libc::_exit(0);
++        }
++    }
++    let mut status = 0;
++    // SAFETY: Waits for the child just forked.
++    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
++    !(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGSYS)
++}
++
++/// The kernel's `io_uring_params`, for a valid small ring rather than an invalid-argument probe.
++#[repr(C)]
++struct IoUringParams {
++    sq_entries: u32,
++    cq_entries: u32,
++    flags: u32,
++    sq_thread_cpu: u32,
++    sq_thread_idle: u32,
++    features: u32,
++    wq_fd: u32,
++    reserved: [u32; 3],
++    sq_offsets: [u32; 10],
++    cq_offsets: [u32; 10],
++}
++
++/// Whether a real two-entry ring can be created, registered and entered under the VMM filter.
++fn io_uring_is_usable() -> bool {
++    let program = production_filter("vmm");
++    // SAFETY: The child makes only plain system calls with a valid params object.
++    let pid = unsafe { libc::fork() };
++    assert!(pid >= 0);
++    if pid == 0 {
++        // SAFETY: As in reached_kernel, the program outlives the child.
++        unsafe {
++            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
++                libc::_exit(100);
++            }
++            let mut program = libc::sock_fprog {
++                len: u16::try_from(program.len()).unwrap(),
++                filter: program.as_ptr().cast_mut(),
++            };
++            if libc::syscall(libc::SYS_seccomp, libc::SECCOMP_SET_MODE_FILTER, 0, &mut program) != 0
++            {
++                libc::_exit(101);
++            }
++            let mut params: IoUringParams = std::mem::zeroed();
++            params.sq_entries = 2;
++            let ring = libc::syscall(libc::SYS_io_uring_setup, 2, &mut params);
++            if ring < 0 {
++                libc::_exit(1);
++            }
++            // Each must reach the kernel; its own EINVAL is immaterial. No real request is submitted.
++            libc::syscall(libc::SYS_io_uring_register, ring, 0, 0, 0);
++            libc::syscall(libc::SYS_io_uring_enter, ring, 0, 0, 0, 0, 0);
++            libc::close(ring as i32);
++            libc::_exit(0);
++        }
++    }
++    let mut status = 0;
++    // SAFETY: Waits for the child just forked.
++    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
++    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
++}
++
++/// A compromised VMM thread must not turn the few kernel interfaces the jail gives it into a general
++/// host syscall surface. Each child attempts one call under the production filter, with no USER_NOTIF
++/// continuation. The UFFDIO_API positive control proves that reaching the kernel is distinguishable.
++#[test]
++fn kernel_escape_attempts_are_stopped_by_firecrackers_seccomp() {
++    const KVM_CREATE_VM: libc::c_ulong = 0xae00;
++    let probes = [
++        KernelProbe::new("ptrace", libc::SYS_ptrace),
++        KernelProbe::new("process_vm_writev", libc::SYS_process_vm_writev),
++        KernelProbe::new("bpf", libc::SYS_bpf),
++        KernelProbe::new("perf_event_open", libc::SYS_perf_event_open),
++        KernelProbe::new("io_uring_setup", libc::SYS_io_uring_setup),
++        KernelProbe::new("io_uring_enter", libc::SYS_io_uring_enter),
++        KernelProbe::new("io_uring_register", libc::SYS_io_uring_register),
++        KernelProbe::new("userfaultfd", libc::SYS_userfaultfd),
++        KernelProbe::new("mount", libc::SYS_mount),
++        KernelProbe::new("setns", libc::SYS_setns),
++        KernelProbe::new("unshare", libc::SYS_unshare),
++        KernelProbe::new("kcmp", libc::SYS_kcmp),
++        KernelProbe::new("pidfd_open", libc::SYS_pidfd_open),
++        KernelProbe::new("pidfd_getfd", libc::SYS_pidfd_getfd),
++        KernelProbe::new("pidfd_send_signal", libc::SYS_pidfd_send_signal),
++        KernelProbe::new("execve", libc::SYS_execve),
++        KernelProbe::new("execveat", libc::SYS_execveat),
++        KernelProbe::new("init_module", libc::SYS_init_module),
++        KernelProbe::new("finit_module", libc::SYS_finit_module),
++        KernelProbe::new("delete_module", libc::SYS_delete_module),
++        KernelProbe::new("reboot", libc::SYS_reboot),
++        KernelProbe::new("kexec_load", libc::SYS_kexec_load),
++        KernelProbe::new("open_by_handle_at", libc::SYS_open_by_handle_at),
++        KernelProbe::new("name_to_handle_at", libc::SYS_name_to_handle_at),
++        KernelProbe::new("move_mount", libc::SYS_move_mount),
++        KernelProbe::new("fsopen", libc::SYS_fsopen),
++        KernelProbe::new("fsconfig", libc::SYS_fsconfig),
++        KernelProbe::new("fsmount", libc::SYS_fsmount),
++        KernelProbe::new("pivot_root", libc::SYS_pivot_root),
++        KernelProbe::new("swapon", libc::SYS_swapon),
++        KernelProbe::new("swapoff", libc::SYS_swapoff),
++        KernelProbe::new("quotactl", libc::SYS_quotactl),
++        KernelProbe::new("memfd_secret", libc::SYS_memfd_secret),
++        KernelProbe::new("process_madvise", libc::SYS_process_madvise),
++        KernelProbe::new("clone3", libc::SYS_clone3),
++        KernelProbe::ioctl("KVM_CREATE_VM on vmm", "vmm", KVM_CREATE_VM, "/dev/kvm"),
++        KernelProbe::ioctl("KVM_CREATE_VM on vcpu", "vcpu", KVM_CREATE_VM, "/dev/kvm"),
++    ];
++    let mut reached: Vec<&str> =
++        probes.iter().filter(|probe| reached_kernel(probe)).map(|probe| probe.name).collect();
++    if io_uring_is_usable() {
++        reached.push("a valid io_uring, io_uring_register and io_uring_enter");
++    }
++    assert!(reached.is_empty(), "these escape attempts reached the host kernel: {reached:?}");
++    const UFFDIO_API: libc::c_ulong = 0xc028aa03;
++    let api = KernelProbe::ioctl("UFFDIO_API", "vmm", UFFDIO_API, "/dev/userfaultfd");
++    assert!(reached_kernel(&api), "the positive control did not reach UFFDIO_API");
++}
+diff --git a/crates/local_cell/src/cell.rs b/crates/local_cell/src/cell.rs
+index 2ed76e8f3..8311ccc0e 100644
+--- a/crates/local_cell/src/cell.rs
++++ b/crates/local_cell/src/cell.rs
+@@ -3825,6 +3825,30 @@ mod tests {
+         assert!(!sealed_after(4, 3));
+     }
+ 
++    /// Security-review fixture: the greatest sequence must be refused before any write or counter
++    /// update, not overflow `next_sequence` after its data reaches the store.
++    #[test]
++    fn the_greatest_extent_sequence_is_refused_before_a_write() {
++        let description = Description {
++            block_size: 4096,
++            capacity: 1 << 20,
++            cell: bucket_cell::layout::test_cell(1),
++        };
++        let store =
++            LocalCell::create(crate::MemDir::new(), description, Options::default()).unwrap();
++        let extent = ExtentId::new(1, u64::MAX);
++        let written = store.write(extent, 0, &[0x5a; 4096]).is_err();
++        store.commit(None).unwrap();
++        let next = store.info().unwrap().next_sequence;
++        store.free(extent).unwrap();
++        store.commit(None).unwrap();
++        let rewritten = store.write(extent, 0, &[0xa5; 4096]).is_err();
++        assert!(
++            written && next == 0 && rewritten,
++            "first write refused: {written}, next_sequence: {next}, rewrite refused: {rewritten}"
++        );
++    }
++
+     /// cladefs: a count drifted from what it counts, as a change that missed it leaves it, is found
+     /// as the state is next let go, by any call: here the bytes its extents hold (TASK-160.16).
+     #[test]
+diff --git a/crates/virtio_extent/src/requests.rs b/crates/virtio_extent/src/requests.rs
+index 9a704558c..ed18e2a91 100644
+--- a/crates/virtio_extent/src/requests.rs
++++ b/crates/virtio_extent/src/requests.rs
+@@ -1154,6 +1154,40 @@ mod tests {
+     }
+ 
+     /// A request with no room for its response is returned with nothing written; one of an
++    /// Security-review fixture: a malformed request must not make the VMM zero almost 4 GiB of
++    /// aliased guest descriptors merely to return EINVAL.
++    #[test]
++    fn a_malformed_request_does_not_zero_gigabytes() {
++        const ALIAS: usize = 16 << 20;
++        const COPIES: usize = 255;
++        let store = FakeBackend::default();
++        let notices = Notices::default();
++        let mut header = bytes(u32::MAX, 0, None::<RequestHeader>, &[]);
++        let mut memory = vec![0xa5; ALIAS];
++        let mut buffers = Buffers::new();
++        // SAFETY: Every descriptor aliases the same live allocation, as a malicious guest may make
++        // them; the total is below u32::MAX but far past the request's response.
++        unsafe {
++            buffers.push_readable(header.as_mut_ptr(), header.len());
++            for _ in 0..COPIES {
++                buffers.push_writable(memory.as_mut_ptr(), memory.len()).unwrap();
++            }
++        }
++        let started = std::time::Instant::now();
++        let used = futures::executor::block_on(handle(
++            &store,
++            &notices,
++            CacheType::Writeback,
++            BOUNDS,
++            buffers,
++        ));
++        assert!(
++            used as usize <= RESPONSE,
++            "zeroing took {:?} and wrote {used:#x} bytes",
++            started.elapsed()
++        );
++    }
++
+     /// unknown type, or whose header is short, is refused.
+     #[test]
+     fn bad_requests_are_refused() {
+diff --git a/guest/linux/drivers/virtio_extent/selftest.c b/guest/linux/drivers/virtio_extent/selftest.c
+index 1c7b04c1e..e4374ffbf 100644
+--- a/guest/linux/drivers/virtio_extent/selftest.c
++++ b/guest/linux/drivers/virtio_extent/selftest.c
+@@ -143,7 +143,7 @@ static void run(struct vext_selftest *st)
+ #define CALL(...)                                                       \
+ 	({                                                              \
+ 		memset(req, 0, sizeof(*req));                           \
+-		*req = (struct vext_request) { __VA_ARGS__ };           \
++		*req = (struct vext_request) { __VA_ARGS__ };            \
+ 		virtio_extent_call(vext, req);                          \
+ 	})
+ #define EXTENT(i) ((struct vext_id) { config->cell, next + (i) })
+@@ -276,6 +276,114 @@ out:
+ 	kfree(reqs);
+ }
+ 
++/*
++ * Security-review fixture, not a production interface: a malicious guest kernel's requests through
++ * the real driver, transport and daemon. Every case must be refused without touching another cell
++ * or memory outside the request's buffers. A set bit in the result's mask names a request whose
++ * status was not the required one; the cases run independently so one validation gap hides no other.
++ */
++static void attack(struct vext_selftest *st)
++{
++	struct virtio_extent *vext = st->vext;
++	const struct vext_config *config = virtio_extent_config(vext);
++	struct virtio_extent_info *info = NULL;
++	struct vext_request *req;
++	u64 window_len = 0, failures = 0;
++	struct dax_device *dax;
++	u8 *buf = NULL;
++	unsigned int case_no = 0;
++	int err;
++
++	info = kzalloc(sizeof(*info), GFP_KERNEL);
++	buf = kzalloc(2 * config->block_size, GFP_KERNEL);
++	req = kzalloc(sizeof(*req), GFP_KERNEL);
++	if (!info || !buf || !req)
++		FAIL("no memory");
++
++#define ATTACK_EINVAL(...)                                                        \
++	do {                                                                      \
++		memset(req, 0, sizeof(*req));                                      \
++		*req = (struct vext_request) { __VA_ARGS__ };                        \
++		err = virtio_extent_call(vext, req);                               \
++		if (err != -EINVAL)                                                \
++			failures |= 1ULL << case_no;                                \
++		case_no++;                                                        \
++	} while (0)
++
++	/* Unknown flags are invalid on every request, not silently ignored. */
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_INFO, .flags = 0x80000000,
++		       .data = info, .data_len = sizeof(*info));
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_ROOT, .flags = 0x80000000,
++		       .data = buf,
++		       .data_len = config->max_root + sizeof(struct virtio_extent_root_len));
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_READ, .flags = 0x80000000,
++		       .id = { config->cell, 1 }, .data = buf,
++		       .data_len = config->block_size);
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_COMMIT, .flags = 0x80000000);
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_UNMAP, .flags = 0x80000000,
++		       .len = config->map_alignment);
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_FREEZE, .flags = 0x80000000);
++
++	/* Misaligned, overflowing and out-of-window ranges never reach the store or the second stage. */
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_READ, .id = { config->cell, 1 },
++		       .offset = 1, .data = buf, .data_len = config->block_size);
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_READ, .id = { config->cell, 1 },
++		       .data = buf, .data_len = config->block_size + 1);
++	ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_READ, .id = { config->cell, 1 },
++		       .offset = U64_MAX - config->block_size + 1,
++		       .data = buf, .data_len = 2 * config->block_size);
++
++	dax = virtio_extent_dax(vext, &window_len);
++	if (dax) {
++		ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_MAP,
++			       .flags = VIRTIO_EXTENT_MAP_ZEROS,
++			       .len = config->map_alignment, .window_offset = window_len);
++		ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_MAP,
++			       .flags = VIRTIO_EXTENT_MAP_ZEROS,
++			       .len = config->map_alignment,
++			       .window_offset = U64_MAX - config->map_alignment + 1);
++		ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_MAP,
++			       .flags = VIRTIO_EXTENT_MAP_ZEROS, .len = 1);
++		ATTACK_EINVAL(.type = VIRTIO_EXTENT_T_PRIVATE,
++			       .len = config->map_alignment, .window_offset = window_len);
++	}
++
++	/* Another cell's ID must not be a confused deputy for this connection's store. */
++	memset(buf, 0xa5, config->block_size);
++	memset(req, 0, sizeof(*req));
++	*req = (struct vext_request) {
++		.type = VIRTIO_EXTENT_T_READ,
++		.id = { config->cell ^ 1, 1 },
++		.data = buf,
++		.data_len = config->block_size,
++	};
++	err = virtio_extent_call(vext, req);
++	if (err >= 0 || memchr_inv(buf, 0, config->block_size))
++		failures |= 1ULL << case_no;
++	case_no++;
++	if (dax) {
++		memset(req, 0, sizeof(*req));
++		*req = (struct vext_request) {
++			.type = VIRTIO_EXTENT_T_MAP,
++			.id = { config->cell ^ 1, 1 },
++			.len = config->map_alignment,
++		};
++		err = virtio_extent_call(vext, req);
++		if (err >= 0)
++			failures |= 1ULL << case_no;
++		case_no++;
++	}
++#undef ATTACK_EINVAL
++
++	if (failures)
++		FAIL("unexpected request statuses: mask %#llx", failures);
++	snprintf(st->result, sizeof(st->result), "ok, %u attacks refused", case_no);
++out:
++	kfree(req);
++	kfree(buf);
++	kfree(info);
++}
++
+ static ssize_t selftest_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct vext_selftest *st = dev_get_drvdata(dev);
+@@ -293,7 +401,10 @@ static ssize_t selftest_store(struct device *dev, struct device_attribute *attr,
+ 	struct vext_selftest *st = dev_get_drvdata(dev);
+ 
+ 	mutex_lock(&st->lock);
+-	run(st);
++	if (count == 6 && !memcmp(buf, "attack", 6))
++		attack(st);
++	else
++		run(st);
+ 	mutex_unlock(&st->lock);
+ 	return count;
+ }
+diff --git a/guest/tests/test_cases/src/lib.rs b/guest/tests/test_cases/src/lib.rs
+index d48d45308..5637402f3 100644
+--- a/guest/tests/test_cases/src/lib.rs
++++ b/guest/tests/test_cases/src/lib.rs
+@@ -86,7 +86,7 @@ use test_fxfs_guest_snapshot::{
+     TestFxfsGuestSnapshot, VOLUMES,
+ };
+ mod test_extent_guest;
+-use test_extent_guest::{TestExtentGuest, TestExtentGuestOtherVersion};
++use test_extent_guest::{TestExtentGuest, TestExtentGuestAttack, TestExtentGuestOtherVersion};
+ mod test_runner_deadlock;
+ use test_runner_deadlock::TestRunnerDeadlock;
+ 
+@@ -862,6 +862,7 @@ pub fn test_cases() -> Vec<TestCase> {
+             &[Tag::E2e, Tag::Kernel, Tag::Nightly],
+             Box::new(TestExtentGuestOtherVersion),
+         ),
++        TestCase::new("extent-guest-attack", &[Tag::Manual], Box::new(TestExtentGuestAttack)),
+         #[cfg(any(feature = "host", target_os = "linux"))]
+         TestCase::new(
+             "bench-fs-ext4-guest-kernel",
+diff --git a/guest/tests/test_cases/src/test_extent_guest.rs b/guest/tests/test_cases/src/test_extent_guest.rs
+index 1d34a539c..66b64780e 100644
+--- a/guest/tests/test_cases/src/test_extent_guest.rs
++++ b/guest/tests/test_cases/src/test_extent_guest.rs
+@@ -23,6 +23,9 @@ pub struct TestExtentGuest;
+ /// build served it.
+ pub struct TestExtentGuestOtherVersion;
+ 
++/// Security-review fixture: malformed and cross-cell requests from the guest kernel itself.
++pub struct TestExtentGuestAttack;
++
+ /// The version the driver is told it speaks: the device's, this build's, and one more.
+ const OTHER_VERSION: (u32, u32) = (1, 2);
+ 
+@@ -75,6 +78,32 @@ mod host {
+         }
+     }
+ 
++    impl Test for TestExtentGuestAttack {
++        fn should_run(&self) -> ShouldRun {
++            cladefs_guest_should_run()
++        }
++
++        fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
++            let store = test_setup.tmp_dir.join("extents");
++            let mut vm = Vm::new(2, 512)?;
++            vm.guest_kernel()?;
++            vm.cell("extents", &store, 64 << 20, 64 << 20)?;
++            vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
++        }
++
++        fn check(self: Box<Self>, stdout: Vec<u8>, test_setup: TestSetup) -> TestOutcome {
++            let output = String::from_utf8(stdout).unwrap();
++            if output != "OK\n" {
++                return TestOutcome::Fail(format!("attack probe failed: {output:?}"));
++            }
++            // The daemon and the attacked store still serve after every request.
++            let store = cladefs::OpenCell::open(test_setup.tmp_dir.join("extents"))
++                .expect("open the attacked extent store");
++            store.info().expect("the attacked extent store answers INFO");
++            TestOutcome::Pass
++        }
++    }
++
+     impl Test for TestExtentGuestOtherVersion {
+         fn should_run(&self) -> ShouldRun {
+             cladefs_guest_should_run()
+@@ -126,6 +155,22 @@ mod guest {
+         }
+     }
+ 
++    impl Test for TestExtentGuestAttack {
++        fn in_guest(self: Box<Self>) {
++            let devices: Vec<_> = fs::read_dir(DRIVER)
++                .unwrap()
++                .map(|entry| entry.unwrap().path())
++                .filter(|path| path.join("selftest").exists())
++                .collect();
++            assert_eq!(devices.len(), 1, "{devices:?}");
++            let selftest = devices[0].join("selftest");
++            fs::write(&selftest, "attack").unwrap();
++            let result = fs::read_to_string(&selftest).unwrap();
++            assert_eq!(result, "ok, 15 attacks refused\n", "the attack result: {result:?}");
++            println!("OK");
++        }
++    }
++
+     impl Test for TestExtentGuestOtherVersion {
+         fn in_guest(self: Box<Self>) {
+             let bound: Vec<_> = fs::read_dir(DRIVER)
+diff --git a/guest/tests/test_cases/src/test_fxfs_guest_snapshot.rs b/guest/tests/test_cases/src/test_fxfs_guest_snapshot.rs
+index 62508a9cb..bc8ef3660 100644
+--- a/guest/tests/test_cases/src/test_fxfs_guest_snapshot.rs
++++ b/guest/tests/test_cases/src/test_fxfs_guest_snapshot.rs
+@@ -239,6 +239,30 @@ mod host {
+         dir.join(format!("store-{name}"))
+     }
+ 
++    /// Security-review fixture: a restored VM's real per-thread filters, kept with the run's results.
++    fn assert_filtered(dir: &Path, name: &str, vm: &Firecracker) -> anyhow::Result<()> {
++        let mut tids = Vec::new();
++        for task in std::fs::read_dir(format!("/proc/{}/task", vm.pid()))? {
++            tids.push(task?.file_name().into_string().unwrap());
++        }
++        tids.sort();
++        let mut record = String::new();
++        let mut unfiltered = Vec::new();
++        for tid in tids {
++            let status = std::fs::read_to_string(format!("/proc/{}/task/{tid}/status", vm.pid()))?;
++            let task_name =
++                status.lines().find_map(|line| line.strip_prefix("Name:\t")).unwrap_or("?");
++            let seccomp = status.lines().find_map(|line| line.strip_prefix("Seccomp:\t"));
++            record.push_str(&format!("{tid} {task_name} seccomp={seccomp:?}\n"));
++            if seccomp != Some("2") {
++                unfiltered.push(format!("{tid} ({task_name}): {seccomp:?}"));
++            }
++        }
++        std::fs::write(dir.join(format!("seccomp-{name}.txt")), record)?;
++        anyhow::ensure!(unfiltered.is_empty(), "unfiltered VM threads: {}", unfiltered.join(", "));
++        Ok(())
++    }
++
+     /// Makes the store at `path`, with the default volume, `volumes` others and `RO_VOLUME`, empty.
+     fn format(path: &Path, volumes: usize) -> anyhow::Result<()> {
+         block_on(async {
+@@ -452,7 +476,7 @@ mod host {
+                 });
+                 if self.memory == Memory::Cell {
+                     load["mem_backend"] = serde_json::json!({
+-                        "backend_type": "CellId",
++                        "backend_type": "Cell",
+                         "backend_path": dir.join(format!("memory-{name}")),
+                     });
+                     let version = memory_version.context("the memory cell made no version")?;
+@@ -508,6 +532,7 @@ mod host {
+                     let start = std::time::Instant::now();
+                     firecracker.request("PUT", "/snapshot/load", load)?;
+                     eprintln!("{name}: restored in {:?}", start.elapsed());
++                    assert_filtered(dir, name, &firecracker)?;
+                     let (status, console) = firecracker.wait()?;
+                     stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                     let (pages, private) = sampling.join().expect("the sampling")?;

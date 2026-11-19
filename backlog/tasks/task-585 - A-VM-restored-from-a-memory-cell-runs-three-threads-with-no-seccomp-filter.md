@@ -25,6 +25,8 @@ restore_from_snapshot builds the `Cell` guest memory before it calls builder::bu
 **Why the tests stay green.** TASK-149.28's filter test and the jailed guest runs (TASK-69) only fail when a filter refuses a syscall. A thread with no filter refuses nothing, so fxfs-guest-snapshot-memory-vdisk-dax passes. No test checks that every thread of the VM process is filtered.
 
 **Backlog.** Related to TASK-50.1 (Done), which made sure no extent device thread starts before the filter but predates the memory-cell path, and to TASK-456.3 (In Progress), which owns this restore code.
+
+2026-11-19 security review: dynamically confirmed on ubu1 with the release guest kernel and Cell restore. `/proc/<pid>/task/*/status` showed `Seccomp: 0` for exactly `cladefsd client`, `cladefs-memory-` and `dax faults`, with the VM's other threads filtered. See `target/security-review/kernel-probes/e2e/fxfs-guest-snapshot-memory-cell-dax/fxfs-guest-snapshot-memory-cell-dax/log.txt`.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

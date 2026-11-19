@@ -33,6 +33,12 @@ Window::place first forgets the old mappings in the range and only then checks w
 - [ ] #2 A test in open_cell.rs's tests asserts, through a #[cfg(test)] accessor, that the cached extent's window list has length 1 after the repeated MAPs (1001 today). It goes red with the fix reverted.
 <!-- AC:END -->
 
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19 security review: `open_cell::tests::remapping_one_extent_registers_its_window_once` writes and seals one extent, creates one window and repeats the same MAP 1000 times. The new cfg(test) `CachedExtent::window_count` returned **1001**, not 1 (macOS, checked build). This is AC1's count without needing a larger run; it directly confirms the duplicate-list mechanism.
+<!-- SECTION:NOTES:END -->
+
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
