@@ -793,6 +793,18 @@ async fn opened_version(cell: CellId, version: u64, capacity: u64) -> Result<Pat
     for path in writers {
         sync(path).await?;
     }
+    // A store its connection let go of is none of those, while it closes on a blocking thread,
+    // uploading its last commits, the version's among them: its close waited for, if the version
+    // was made here, before the bucket is read for it (TASK-644).
+    if let Some(of) = crate::host_cell::version_made_of(cell, version) {
+        blocking(move || {
+            local_cell::closed(&of).map_err(|err| {
+                log::warn!("cladefsd: waiting for {} to close: {err}", of.display());
+                Errno::EBUSY
+            })
+        })
+        .await?;
+    }
     let made = dir.clone();
     blocking(move || {
         let _held = held;

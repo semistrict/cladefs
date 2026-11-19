@@ -199,7 +199,7 @@ pub use cell::{
     BucketData, DirHold, Info, LocalCell, NoSpace, NotQuiescent, Opening, Options, Recovering,
     SpentExtent, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
-pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile};
+pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile, closed};
 /// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
 pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
