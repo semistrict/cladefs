@@ -144,6 +144,7 @@ Make a base from a container image's files and fork it. This needs no VM and no 
 
 ```sh
 export CLADEFSD_BUCKET=file:///tmp/cladefs/bucket CLADEFSD_TOKEN=1
+export CLADEFS_MASTER_KEY=$(openssl rand -hex 32)   # cells are always encrypted
 docker export "$(docker create alpine)" > /tmp/alpine.tar
 cargo run --bin cladefsctl -- import /tmp/cladefs/base 1073741824 /tmp/alpine.tar
 cargo run --bin cladefsctl -- fork /tmp/cladefs/base /tmp/cladefs/vm1
