@@ -284,8 +284,21 @@ impl SimBucket {
         self.inner.lock().unwrap().clock += ticks;
     }
 
-    /// The keys of every object: each of a region's bucket but 0's under `@REGION/`.
+    /// The keys of every object, of every region's bucket, as its bucket has it, in order.
     pub fn keys(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        let mut keys: Vec<String> = (inner.objects.keys())
+            .map(|stored| match stored.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
+                Some((_, key)) => key.to_owned(),
+                None => stored.clone(),
+            })
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// cladefs: where every object is kept, a region's bucket but 0's under `@REGION/`.
+    pub fn stored(&self) -> Vec<String> {
         self.inner.lock().unwrap().objects.keys().cloned().collect()
     }
 }
@@ -543,9 +556,28 @@ impl Bucket for SimBucket {
 pub struct Direct(pub Arc<SimBucket>);
 
 impl Direct {
+    /// cladefs: a listing of a prefix of no cell's lists every region's bucket, as one: the
+    /// simulation's view of them all (TASK-633.10).
     fn apply(&self, op: Op) -> Result<Reply, Error> {
         let region = self.0.region_of(op.key());
-        self.0.inner.lock().unwrap().apply(region, op)
+        let mut inner = self.0.inner.lock().unwrap();
+        match op {
+            Op::List(prefix) if self.0.home != 0 && layout::routed_to(&prefix).is_none() => {
+                let regions: BTreeSet<u16> = (inner.objects.keys())
+                    .filter_map(|stored| stored.strip_prefix('@')?.split_once('/')?.0.parse().ok())
+                    .collect();
+                let mut all = Vec::new();
+                for region in regions {
+                    match inner.apply(region, Op::List(prefix.clone()))? {
+                        Reply::List(listed) => all.extend(listed),
+                        _ => unreachable!("a listing"),
+                    }
+                }
+                all.sort_by(|a, b| a.key.cmp(&b.key));
+                Ok(Reply::List(all))
+            }
+            op => inner.apply(region, op),
+        }
     }
 }
 
@@ -1031,7 +1063,7 @@ mod tests {
         let listed = second.served(second.list(&theirs.prefix())).0.unwrap();
         assert_eq!(listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(), [head.clone()]);
         assert_eq!(
-            sim.keys(),
+            sim.stored(),
             [
                 "@1/identity".to_owned(),
                 format!("@1/{}", layout::head(named)),
