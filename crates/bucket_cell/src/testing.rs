@@ -592,6 +592,17 @@ impl crate::mirror::Here for SimBucket {
         })
     }
 
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> futures::future::BoxFuture<'a, ()> {
+        let own = self.own();
+        let theirs: Vec<&str> =
+            keys.iter().copied().filter(|key| self.region_of(key) != self.home).collect();
+        Box::pin(async move {
+            if !theirs.is_empty() {
+                crate::lifecycle::retire(&*own, &theirs).await;
+            }
+        })
+    }
+
     fn learn(&self, cell: CellId) -> futures::future::BoxFuture<'_, ()> {
         let own = self.own();
         let mine = self.region_of(&cell.prefix()) == self.home;

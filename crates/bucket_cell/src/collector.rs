@@ -422,9 +422,10 @@ impl Collector {
     /// children's heads here.
     ///
     /// It reads `cell`'s head first, then lists the copy (`copyRelists`), so that a mirror or fork
-    /// it races either shows in the listing or reads the head this read. A reference whose child is
-    /// gone, deleted, or of another origin, is retired here (its child's own passes retire in
-    /// `cell`'s bucket). The copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a
+    /// it races either shows in the listing or reads the head this read. A reference whose child
+    /// has no head, or one naming another origin, is retired here; one of a child deleted stands,
+    /// as the child's cell may hold its own children's references still, until the child's own
+    /// pass, its cell dead, retires it here and in `cell`'s bucket (rule `references_held`). The copy is kept whole while `cell` lives (`copiesKeptWhileAlive`), a
     /// mirror is under way (a pin), or a child refers here: a live cell cuts versions after this
     /// read, whose mirrors take the objects they share with the copy as copied, and once the cell
     /// is deleted it cuts none. Else its mirrors' holds in `cell`'s bucket go first, then its
@@ -449,11 +450,21 @@ impl Collector {
         let listed = bucket::list(own, &cell.prefix()).await;
         let (mut markers, mut pinned, mut referring) = (Vec::new(), false, Vec::new());
         let mut stale = Vec::new();
+        // The versions of the copy, by what is listed of them: whose mirrors' holds go with it.
+        let mut ats = BTreeSet::new();
         let marks: BTreeSet<&str> = (listed.iter())
             .filter(|meta| matches!(layout::kind(&meta.key), Kind::Retired { .. }))
             .map(|meta| meta.key.as_str())
             .collect();
         for meta in &listed {
+            match layout::kind(&meta.key) {
+                Kind::Mirror { at, .. }
+                | Kind::Pin { at, .. }
+                | Kind::Reference { at, .. }
+                | Kind::Retired { at, .. }
+                | Kind::Checkpoint { segment: at, .. } => drop(ats.insert(at)),
+                _ => {}
+            }
             match layout::kind(&meta.key) {
                 Kind::Mirror { at, .. } => markers.push((at, meta.key.as_str())),
                 Kind::Pin { at, .. } if crate::mirror::stale(own, meta) => stale.push(at),
@@ -467,9 +478,9 @@ impl Collector {
         for (at, child, key) in referring {
             let marked = layout::retired_of(key).is_some_and(|mark| marks.contains(mark.as_str()));
             let lives = !marked
-                && crate::head::get(bucket, child).await?.is_some_and(|head| {
-                    !head.deleted() && head.origin() == Some(Origin { parent: cell, at })
-                });
+                && crate::head::get(bucket, child)
+                    .await?
+                    .is_some_and(|head| head.origin() == Some(Origin { parent: cell, at }));
             match lives {
                 true => standing = true,
                 false => gone.push(key),
@@ -486,10 +497,10 @@ impl Collector {
         if alive || pinned || !stale.is_empty() || standing {
             return Ok(report);
         }
-        // Nothing of it needed: its holds there first, which keep there what it inherits, then its
-        // markers here, then what they named, then the marks.
-        let holds: Vec<String> =
-            markers.iter().map(|&(at, _)| layout::hold(cell, at, number)).collect();
+        // Nothing of it needed: its mirrors' holds there first, which keep there what it inherits,
+        // of every version of it here, a mirror's that marked none too; then its markers here, then
+        // what they named, then the marks.
+        let holds: Vec<String> = ats.iter().map(|&at| layout::hold(cell, at, number)).collect();
         let holds: Vec<&str> = holds.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &holds).await;
         let markers: Vec<&str> = markers.iter().map(|(_, key)| *key).collect();
@@ -661,6 +672,13 @@ impl Collector {
         let (marked, unmarked) = (keys(&marked), keys(&unmarked));
         lifecycle::retire(bucket, &marked.iter().map(String::as_str).collect::<Vec<_>>()).await;
         bucket::delete_all(bucket, &unmarked.iter().map(String::as_str).collect::<Vec<_>>()).await;
+        // cladefs: and here, under cells of other buckets, where a mirror moved them, or forks wrote
+        // them, those cells' versions mirrored here (TASK-633.8): the copy's pass keeps a reference
+        // of a child deleted standing, until this one, its cell dead, retires it.
+        if let Some(here) = bucket.mirrors() {
+            let all: Vec<&str> = marked.iter().chain(&unmarked).map(String::as_str).collect();
+            here.retire(&all).await;
+        }
         let stale: Vec<&str> = pass.recording.stale.iter().map(String::as_str).collect();
         bucket::delete_all(bucket, &stale).await;
         report.retired += marked.len() + unmarked.len() + stale.len();

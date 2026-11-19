@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-19 10:49'
+updated_date: '2026-11-19 11:35'
 labels:
   - bucket
   - multi-region
@@ -79,4 +79,12 @@ Review round 1 (4 dimensions + verifiers, 2026-11-19). Confirmed and fixed:
 - Tests: misleading collector test rewritten; exact counts; duplicated setup now Two; sweeps_pass_over_copies_as_copies covers collect_with_own and Sweep::run_with_own; deletion order asserted (hold, marker, objects, marks).
 Not fixed, documented: a fork retried by the same host can't tell it resumes (identical head bytes), so a reference it left in A stays until the child's deletion; the hold keeps as much. lists_here_too returns B's moves alone when A's listing fails (B holds the version whole).
 Spec update (holds, version additions, split fork check) delegated; TLC on the Mac.
+
+Review round 2 (3 dimensions + verifiers). Confirmed and fixed:
+- B's collector retired a deleted child's B reference while the child's cell still held its own children's references (A keeps it by references_held): now a deleted child's reference stands in B too, and the child's own pass, its cell dead, retires it in B as well as in A (mirror::Here::retire; Counted forwards Bucket::mirrors). Test references_here_hold_while_their_childrens_cells_hold_references.
+- A mirror giving up deleted the shared hold though its pin was taken over: it now writes its pin again first, and deletes the hold only if the pin is still its own.
+- Holds without markers (a mirror that copied and never marked) leaked: B's collector deletes the holds of every version it finds in B (markers, pins, checkpoints, references, marks); a resumed marked mirror that moved nothing and finds the marker gone deletes its hold.
+- Mirrors of versions no longer named come back as Mirrored::Unnamed, cached, so store openings don't retry them.
+- Tests: opening_a_child_mirrors_its_version (mirror_for), mirrors_of_a_version_take_turns, mirrors_failing_let_their_hold_and_pin_go, release's guard in mirrors_hold_their_pins_alone, a marker-less hold in copies_of_other_buckets_versions_are_kept_while_needed, the mark-only sweep touching nothing in A.
+Left as is: mirror_for reads the child's head on each store opening on a routed bucket (one GET); the open wiring itself has no test of its own.
 <!-- SECTION:NOTES:END -->

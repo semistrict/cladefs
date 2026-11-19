@@ -440,6 +440,10 @@ impl<B: Bucket> Bucket for Counted<B> {
     fn known(&self) -> Option<&crate::known::Known> {
         self.bucket.known()
     }
+
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        self.bucket.mirrors()
+    }
 }
 
 #[cfg(test)]

@@ -49,6 +49,7 @@ use crate::recovery::{self, Checkpoints};
 use crate::{Error, head, lifecycle};
 use futures::future::BoxFuture;
 use std::collections::BTreeSet;
+use std::future::Future;
 
 /// What a mirror came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,8 +57,10 @@ pub enum Mirrored {
     /// Marked: the objects it copied (those there already counted too), and the children's
     /// references it moved from the parent's bucket to this one.
     Done { copied: usize, moved: usize },
-    /// Given up, as the reason says: the version dropped, an object of it gone, or its pin taken
-    /// over.
+    /// Given up, its version named no more by its cell's head, or its cell deleted: no mirror of it
+    /// is wanted again.
+    Unnamed,
+    /// Given up, as the reason says: an object of it gone, or its pin taken over.
     GaveUp(String),
     /// Another mirror of the version holds its pin: under way, or its host dead not long enough
     /// ago to tell ([`PIN_STALE`]).
@@ -93,6 +96,11 @@ pub trait Here: Send + Sync {
 
     /// Creates `bytes` at `key` in this bucket, whatever cell `key` is of ([`bucket::create`]).
     fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> BoxFuture<'a, ()>;
+
+    /// Retires the references at `keys` of cells of other buckets in this bucket, marked first
+    /// ([`lifecycle::retire`]): those of children of this bucket a mirror moved here, or forks
+    /// wrote here, their cells dead. Others it leaves.
+    fn retire<'a>(&'a self, keys: &'a [&'a str]) -> BoxFuture<'a, ()>;
 
     /// Learns the epochs of the checkpoints at the versions of `cell`, a cell of another bucket,
     /// whose mirrors here are marked, from their markers ([`crate::known::Known::named`]): a
@@ -147,8 +155,19 @@ impl Pin {
 
     /// Deletes it, if it is still this mirror's: written again first, conditionally, so that a
     /// mirror that took it over since keeps it.
-    async fn release(mut self, own: &impl Bucket) {
+    async fn release(self, own: &impl Bucket) {
+        self.release_with(own, |_| async {}).await;
+    }
+
+    /// [`Pin::release`], doing `first` with the pin written again, its own still: what its mirror
+    /// may do alone of what pins share, such as deleting their hold.
+    async fn release_with<F: Future<Output = ()>>(
+        mut self,
+        own: &impl Bucket,
+        first: impl FnOnce(&Self) -> F,
+    ) {
         if self.refresh(own, true).await {
+            first(&self).await;
             bucket::delete(own, &self.key).await;
         }
     }
@@ -189,6 +208,10 @@ pub async fn mirror(
             Ok(Copied::Whole { .. } | Copied::Taken) => {
                 return Ok(Mirrored::GaveUp(TAKEN.to_owned()));
             }
+            Ok(Copied::Unnamed) => {
+                let_go(bucket, own, pin, &hold).await;
+                return Ok(Mirrored::Unnamed);
+            }
             Ok(Copied::Short(why)) => {
                 let_go(bucket, own, pin, &hold).await;
                 return Ok(Mirrored::GaveUp(why));
@@ -201,14 +224,21 @@ pub async fn mirror(
     };
     let moved = refer_here(bucket, own, number, parent, at).await;
     failpoint!("mirror::referred");
-    pin.release(own).await;
+    // The copy going since its marker was read, B's collector having deleted its hold before this
+    // one wrote it, and no child moved here, whose references would have it delete the hold
+    // again: the hold goes with it. A child moved, the hold keeps the version for it.
+    if moved == 0 && bucket::get(own, &marker).await.is_none() {
+        let_go(bucket, own, pin, &hold).await;
+    } else {
+        pin.release(own).await;
+    }
     Ok(Mirrored::Done { copied, moved })
 }
 
-/// Gives a mirror up: its hold deleted in the parent's bucket, then its pin let go.
+/// Gives a mirror up, its pin its own still, written again first: its hold deleted in the
+/// parent's bucket, then its pin. A pin another mirror took over, the hold is that mirror's too.
 async fn let_go(bucket: &impl Bucket, own: &impl Bucket, pin: Pin, hold: &str) {
-    bucket::delete(bucket, hold).await;
-    pin.release(own).await;
+    pin.release_with(own, |_| bucket::delete(bucket, hold)).await;
 }
 
 /// Why a mirror whose pin is no longer its own gives up.
@@ -220,7 +250,9 @@ enum Copied {
     Whole { count: usize, epoch: u64 },
     /// Its pin taken over, as it refreshed it.
     Taken,
-    /// Short of an object, or of the version, as it says.
+    /// Short of the version, its cell's head naming it no more.
+    Unnamed,
+    /// Short of an object, as it says.
     Short(String),
 }
 
@@ -243,9 +275,7 @@ async fn copy(
     let named = head.as_ref().filter(|head| !head.deleted()).and_then(|head| {
         head.versions.iter().any(|version| version.at == at).then(|| head.epoch_of(at)).flatten()
     });
-    let Some(epoch) = named else {
-        return Ok(Copied::Short(format!("{parent}'s head names no version at {at:x}")));
-    };
+    let Some(epoch) = named else { return Ok(Copied::Unnamed) };
     failpoint!("mirror::checked");
     let checkpoints = Checkpoints::new(bucket, 1);
     let (state, touched) = match recovery::recover_at(&checkpoints, parent, at).await {
