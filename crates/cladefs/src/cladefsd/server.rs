@@ -476,6 +476,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         versions_made: SharedLock::new("connection versions", Mutex::new(Default::default())),
         closing: AtomicBool::new(false),
         ended: AtomicBool::new(false),
+        asking_mappings: Arc::new(tokio::sync::Semaphore::new(1)),
         ending: event_listener::Event::new(),
         requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
         drained: Arc::new(event_listener::Event::new()),
@@ -702,12 +703,19 @@ struct Charge {
     connection: Weak<Connection>,
     tenant: Arc<Tenant>,
     bytes: u64,
+    /// cladefs: a `MAPPINGS`'s turn, the connection's one, until its reply is queued (TASK-546).
+    _mappings: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Charge {
     /// Of nothing: a request that holds nothing besides its header.
     fn none(connection: &Connection) -> Self {
-        Self { connection: connection.this.clone(), tenant: connection.tenant.clone(), bytes: 0 }
+        Self {
+            connection: connection.this.clone(),
+            tenant: connection.tenant.clone(),
+            bytes: 0,
+            _mappings: None,
+        }
     }
 }
 
@@ -1026,6 +1034,8 @@ pub(super) struct Connection {
     closing: AtomicBool,
     /// cladefs: whether its receiving ended, and what says so ([`Connection::end_receiving`]).
     ended: AtomicBool,
+    /// cladefs: its turn at `MAPPINGS`, one at a time ([`Connection::mappings_turn`]).
+    asking_mappings: Arc<tokio::sync::Semaphore>,
     ending: event_listener::Event,
     /// Its requests received and not done (TASK-34), and what says when none is left.
     requests: SharedLock<Mutex<Requests>>,
@@ -1185,6 +1195,13 @@ impl Connection {
             }
             return Ok(Charge::none(&self));
         }
+        // cladefs: one `MAPPINGS` at a time, the next waiting for the last's reply, as the credit
+        // holds one reply of mappings (TASK-546): asked for at once, each of a window's most is
+        // past the credit with another.
+        let mappings = match header.kind {
+            MAPPINGS => Some(self.mappings_turn().await?),
+            _ => None,
+        };
         let bytes = self.held_for(&header);
         {
             let requests = self.requests.with(Mutex::lock);
@@ -1200,7 +1217,24 @@ impl Connection {
             self.take_in_flight(bytes).await?;
         }
         self.requests.with(Mutex::lock).stream_bytes += bytes;
-        Ok(Charge { connection: self.this.clone(), tenant: self.tenant.clone(), bytes })
+        let (connection, tenant) = (self.this.clone(), self.tenant.clone());
+        Ok(Charge { connection, tenant, bytes, _mappings: mappings })
+    }
+
+    /// cladefs: the connection's turn at a `MAPPINGS`, once the last one's reply is queued; or
+    /// fails, the connection ending meanwhile ([`Connection::end_receiving`]).
+    async fn mappings_turn(&self) -> std::io::Result<tokio::sync::OwnedSemaphorePermit> {
+        let ending = self.ending.listen();
+        if !self.ended.load(Ordering::Acquire) {
+            tokio::select! {
+                turn = self.asking_mappings.clone().acquire_owned() => {
+                    return Ok(turn.expect("a connection's MAPPINGS turns are never closed"));
+                }
+                () = ending => {}
+            }
+        }
+        let what = "the connection ended waiting for its turn at MAPPINGS";
+        Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, what))
     }
 
     /// cladefs: what the daemon holds for a request of `header`: its stream data
