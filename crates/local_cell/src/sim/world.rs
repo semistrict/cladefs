@@ -103,9 +103,17 @@ pub struct Profile {
     /// deleted: its host's directory, left unmade, names no child, and deleting it touches nothing
     /// in the bucket (TASK-395.10). None draws nothing of the seed's.
     pub forget: f64,
+    /// cladefs: the cloud regions' buckets (TASK-633.10): none, one bucket, as before; else that
+    /// many, host H's bucket `1 + H % regions`, each cell in the bucket of the host that made it,
+    /// requests routed by their cells' buckets ([`SimBucket::at`]), a region's bucket down for a
+    /// stretch at times. None draws nothing of the seed's.
+    pub regions: u16,
     pub weights: Weights,
     pub options: Options,
 }
+
+/// cladefs: the chance, each step, that a region's bucket goes down, or comes up again.
+const REGION_FLIPS: f64 = 0.02;
 
 impl Default for Profile {
     fn default() -> Self {
@@ -118,6 +126,7 @@ impl Default for Profile {
             restarts: false,
             one_cell: 0.5,
             forget: 0.0,
+            regions: 0,
             weights: Weights {
                 complete: 60,
                 write: 6,
@@ -425,6 +434,8 @@ pub struct World {
     next_id: u64,
     /// Whether requests fail.
     faults: bool,
+    /// cladefs: the regions whose buckets are down (TASK-633.10).
+    down: BTreeSet<u16>,
     /// Whether everything is finishing: then every live cell must open.
     quiescing: bool,
     /// The tasks spawned and not done, aborted or dropped, by number, each with where it was
@@ -456,7 +467,10 @@ impl World {
         let mut world = Self {
             rng: StdRng::seed_from_u64(seed),
             profile,
-            bucket: SimBucket::new(),
+            bucket: match profile.regions {
+                0 => SimBucket::new(),
+                _ => SimBucket::new().at(1),
+            },
             pool,
             spawner,
             events: Rc::default(),
@@ -474,12 +488,13 @@ impl World {
             footers: RefCell::default(),
             next_id: 1,
             faults: true,
+            down: BTreeSet::new(),
             quiescing: false,
             tasks: Rc::default(),
             next_task: 0,
             violations: Vec::new(),
         };
-        let (root, owner) = (world.id(), world.id());
+        let (root, owner) = (world.cell_id(1), world.id());
         block_on(lifecycle::create(&Direct(world.bucket.clone()), sim_cell(root), owner)).unwrap();
         world.cells.insert(root, CellId::forked(None, None));
         world
@@ -504,6 +519,15 @@ impl World {
 
     fn step(&mut self) {
         self.settle_tasks();
+        if self.profile.regions > 0 && self.faults && self.rng.random_bool(REGION_FLIPS) {
+            let region = self.rng.random_range(1..=self.profile.regions);
+            let down = !self.down.remove(&region);
+            if down {
+                self.down.insert(region);
+            }
+            trace!("region {region}'s bucket {}", if down { "down" } else { "up" });
+            self.bucket.down(region, down);
+        }
         let w = self.profile.weights;
         let choices = [
             w.complete,
@@ -1481,7 +1505,7 @@ impl World {
     /// the head read again, the fork made (`lifecycle::fork_version`), as many hosts do at once.
     fn restore_version(&mut self) {
         let Some(restore) = self.new_restore() else { return };
-        let child = self.id();
+        let child = self.cell_id(self.region_of(restore.host));
         self.restores.insert(child, restore);
         self.spawn_restore(child);
     }
@@ -1491,7 +1515,7 @@ impl World {
     /// refused, finding another's (TASK-79.82, TASK-173). Crashes leave them be.
     fn twins(&mut self) {
         let Some(first) = self.new_restore() else { return };
-        let (child, owner) = (self.id(), self.id());
+        let (child, owner) = (self.cell_id(self.region_of(first.host)), self.id());
         let second = Restore { owner, running: None, ..first };
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
@@ -1634,6 +1658,11 @@ impl World {
         let id = self.id();
         let (bucket, events, options) =
             (self.bucket.clone(), self.events.clone(), self.profile.options);
+        // cladefs: a region's collector, of its own bucket (TASK-633.10).
+        let bucket = match self.profile.regions {
+            0 => bucket,
+            regions => bucket.at(self.rng.random_range(1..=regions)),
+        };
         let cells: Vec<u64> = self.cells.keys().copied().collect();
         let one_cell = self.profile.one_cell;
         let cell = (!cells.is_empty() && one_cell > 0.0 && self.rng.random_bool(one_cell))
@@ -1955,6 +1984,24 @@ impl World {
         let seed =
             tag.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ extent.sequence.rotate_left(17) ^ extent.cell;
         (0..len).map(|i| (seed.rotate_left(i as u32 % 64) >> 3) as u8 ^ i as u8).collect()
+    }
+
+    /// cladefs: a new cell's ID, in the bucket of region `region` if the world has regions
+    /// ([`Profile::regions`]).
+    fn cell_id(&mut self, region: u16) -> u64 {
+        let id = self.id();
+        match self.profile.regions {
+            0 => id,
+            _ => u64::from(region) << 48 | id,
+        }
+    }
+
+    /// cladefs: the region of host `host`'s bucket ([`Profile::regions`]).
+    fn region_of(&self, host: usize) -> u16 {
+        match self.profile.regions {
+            0 => 0,
+            regions => 1 + (host % usize::from(regions)) as u16,
+        }
     }
 
     fn id(&mut self) -> u64 {
@@ -2315,12 +2362,35 @@ impl World {
 
     /// Runs a sweep of the collector over every cell, alone, past the grace period, and checks what
     /// it reports it did ([`World::check_report`]): what it reported, if it did.
+    /// cladefs: with regions, a sweep of each region's bucket in turn, by a collector of its own,
+    /// as each region runs its own (TASK-633.10): what they deleted and compacted, all told.
     fn sweep_alone(&mut self) -> Option<collector::Report> {
+        let mut all = collector::Report::default();
+        for bucket in self.region_buckets() {
+            let report = self.sweep_alone_in(bucket)?;
+            all.deleted += report.deleted;
+            all.compacted += report.compacted;
+        }
+        Some(all)
+    }
+
+    /// cladefs: the bucket of each region, as a host of it asks: the one bucket without regions.
+    fn region_buckets(&self) -> Vec<Arc<SimBucket>> {
+        match self.profile.regions {
+            0 => vec![self.bucket.clone()],
+            regions => (1..=regions).map(|region| self.bucket.at(region)).collect(),
+        }
+    }
+
+    /// A sweep of `bucket` alone ([`World::sweep_alone`]), checked against what every region's
+    /// bucket holds before and after.
+    fn sweep_alone_in(&mut self, bucket: Arc<SimBucket>) -> Option<collector::Report> {
         self.bucket.advance(self.profile.options.grace + 1);
         let id = self.id();
-        let (bucket, options) = (self.bucket.clone(), self.profile.options);
+        let options = self.profile.options;
         let reported = Rc::new(RefCell::new(None));
         let report = reported.clone();
+        // Every region's objects ([`Direct`] lists them all).
         let listed = block_on(bucket_cell::Bucket::list(&Direct(self.bucket.clone()), ""));
         let before: BTreeMap<String, u64> =
             listed.unwrap().into_iter().map(|meta| (meta.key, meta.size)).collect();
@@ -2340,6 +2410,9 @@ impl World {
     fn quiesce(&mut self) {
         trace!("quiescing");
         self.faults = false;
+        for region in std::mem::take(&mut self.down) {
+            self.bucket.down(region, false);
+        }
         self.settle();
         // Forks of versions a crash stopped, or a lost disk left with no host: deleted.
         let stopped = self.restores.keys().copied().collect::<Vec<_>>();
