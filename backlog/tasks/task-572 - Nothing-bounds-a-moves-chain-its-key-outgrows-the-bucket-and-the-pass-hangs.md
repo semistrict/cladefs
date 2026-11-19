@@ -1,9 +1,11 @@
 ---
 id: TASK-572
 title: 'Nothing bounds a moves chain: its key outgrows the bucket and the pass hangs'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:27'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: medium

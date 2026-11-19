@@ -1,9 +1,11 @@
 ---
 id: TASK-547
 title: A VM process can grow the daemon's memory without bound through transfer areas
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:24'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: high

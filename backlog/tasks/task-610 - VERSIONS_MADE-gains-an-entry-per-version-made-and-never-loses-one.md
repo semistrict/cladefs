@@ -1,9 +1,11 @@
 ---
 id: TASK-610
 title: VERSIONS_MADE gains an entry per version made and never loses one
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:33'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: low

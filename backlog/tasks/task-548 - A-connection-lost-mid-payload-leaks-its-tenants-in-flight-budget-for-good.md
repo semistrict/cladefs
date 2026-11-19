@@ -1,9 +1,11 @@
 ---
 id: TASK-548
 title: A connection lost mid-payload leaks its tenant's in-flight budget for good
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:24'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: high

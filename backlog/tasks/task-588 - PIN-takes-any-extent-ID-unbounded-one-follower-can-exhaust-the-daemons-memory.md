@@ -3,9 +3,11 @@ id: TASK-588
 title: >-
   PIN takes any extent ID, unbounded: one follower can exhaust the daemon's
   memory
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:29'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: medium
