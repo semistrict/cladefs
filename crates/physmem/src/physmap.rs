@@ -127,7 +127,10 @@ unsafe impl Sync for PhysMemory {}
 /// pages past the new end then faulting this process's own accesses (`SIGBUS`), the extent daemon
 /// and every tenant's VMs with it; and its owner's alone to open anew (0600, where a memfd is
 /// anyone's), so that one handed it read-only, every VM process the default arena, can't reopen
-/// it to write through `/proc/self/fd`. It only grows ([`resize`]).
+/// it to write through `/proc/self/fd`. It only grows ([`resize`]). cladefs: and sealed against
+/// more seals, which one handed it could have the extent daemon add, given back as what it seals
+/// (a transfer area, against writes, TASK-547), the daemon's punching its freed chunks out then
+/// refused.
 #[cfg(target_os = "linux")]
 fn create_shared_memory() -> OwnedFd {
     let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
@@ -138,7 +141,8 @@ fn create_shared_memory() -> OwnedFd {
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     // SAFETY: Seals and modes the object just made.
     unsafe {
-        let sealed = libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK);
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        let sealed = libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals);
         assert_eq!(sealed, 0, "seal an arena against shrinking: {}", errno());
         assert_eq!(libc::fchmod(fd.as_raw_fd(), 0o600), 0, "mode an arena 0600: {}", errno());
     }
