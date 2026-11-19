@@ -17,7 +17,7 @@
     <div id="s2-l1" class="line"><span class="w">First,</span><span class="w">the</span><span class="w">host's</span><span class="w">own</span><span class="w">disk</span></div>
     <div id="s2-l2" class="line"><span class="w">Then</span><span class="w">peers'</span><span class="w">disks,</span><span class="w">if</span><span class="w">replicated</span></div>
     <div id="s2-l3" class="line"><span class="w">Then</span><span class="w">the</span><span class="w">bucket</span></div>
-    <div id="s2-l4" class="line"><span class="w">Wherever</span><span class="w">it</span><span class="w">rests,</span><span class="w">it</span><span class="w">is</span><span class="w">ciphertext</span></div>
+    <div id="s2-l4" class="line"><span class="w">Wherever</span><span class="w">it's</span><span class="w">stored,</span><span class="w">it's</span><span class="w">encrypted</span></div>
     <div id="s2-hostA" class="place"><div class="place-name">host A, cell 9's writer</div></div>
     <div id="s2-mem"><div id="s2-mem-name">host memory</div><div id="s2-mem-note">plain, for the sandbox</div></div>
     <div id="s2-disk" class="disk"><div class="disk-name">host A's disk</div></div>
@@ -41,7 +41,7 @@
       const plain = ["fn main() {", "    serve();", "}"];
       const cipher = ["9f 3a c1 07 e4", "52 b8 0d 6e 91", "a7 13 fc 48 2b"];
       const mk = (id, x, y, show) => E.card(cards, { id, x, y, w: 300, h: 180, name: "main.rs", tint: "#ffb088", plain, cipher, show });
-      // One card in memory, plain; the copies that rest, each at its place.
+      // One card in memory, plain; the stored copies, each at its place.
       const mem = mk("s2-c-mem", 190, 340, "plain");
       const disk = mk("s2-c-disk", 200, 650, "plain");
       const peerB = mk("s2-c-b", 1110, 320, "cipher");
@@ -102,7 +102,7 @@
       tl.fromTo(pail, { rotation: 0 }, { rotation: 6, duration: 0.12, ease: "sine.inOut", yoyo: true, repeat: 3, transformOrigin: "50% 100%", immediateRender: false }, 7.2);
       C.wordsOut(tl, "#s2-l3", 7.9);
 
-      // Wherever it rests, ciphertext; plain only in memory.
+      // Wherever it is stored, ciphertext; plain only in memory.
       C.words(tl, "#s2-l4", 8.1);
       tl.fromTo("#s2-how", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 8.3);
       [lDisk, lB, lC, lBk].forEach((l, i) => {

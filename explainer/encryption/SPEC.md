@@ -29,11 +29,11 @@ MOTION:  the overview's: pops back.out(2.2-2.8) from the feet; hops squash, stre
          the KEK shakes 6 times then breaks in two, falling on power2.in.
 SHOTS:   S1 0-8  "Tenant 42's sandbox saves a file" on screen from frame 0; the sandbox bounces in; a
             `main.rs` card (`fn main() {` / `serve();` / `}`) pops out of it. "Its disk is kept in cell
-            9": cell 9 pops in and the card hops into it. "Where does that file rest?"
+            9": cell 9 pops in and the card hops into it. "Where is that file stored?"
          S2 8-20 "First, the host's own disk": a copy of the card drops from host memory to the host's
             disk and flips to hex as it lands ("encrypted before it is written"). "Then peers' disks, if
             replicated": copies hop to peer B's and peer C's disks ("peers keep it with no key"). "Then
-            the bucket": a copy floats into the pail. "Wherever it rests, it is ciphertext": note
+            the bucket": a copy floats into the pail. "Wherever it's stored, it's encrypted": note
             "AES-256-XTS as written; framed parts GCM, or the XTS sectors tagged". The card in host
             memory stays plain all along ("host memory: plain, for the sandbox").
          S3 20-32 One diagram that grows, left to right. "The cell DEK unlocks main.rs": the encrypted
@@ -61,7 +61,7 @@ SHOTS:   S1 0-8  "Tenant 42's sandbox saves a file" on screen from frame 0; the 
             destroy the KEK there, then `forget-tenant-keys TENANT`". "Tenant 7 reads on, untouched":
             tenant 7's cards flip plain, its cells hop.
          S6 54-62 "One key gone, its cells unreadable" held to the end; ghost cell 9 beside its
-            encrypted `main.rs` and the broken key; notes "at rest: on every host's disk, every peer's,
+            encrypted `main.rs` and the broken key; notes "stored on every host's disk, every peer's,
             and in the bucket" and "except forks into other tenants' cells; under the bucket KMS, expire
             old versions"; tenant 7's critter hops into view at 58.3 s, then beside its plain `app.py`
             card, landing on the last chord (60.0 s).

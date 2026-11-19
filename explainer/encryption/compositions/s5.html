@@ -105,7 +105,7 @@
       cells42.forEach((c) => tl.to(c.smile, { rotation: 180, duration: 0.3, ease: "back.out(2)", transformOrigin: "50% 50%" }, 4.1));
       C.wordsOut(tl, "#s5-l2", 5.0);
 
-      // Its copies stay ciphertext, wherever they rest: nothing opens them.
+      // Its copies stay ciphertext, wherever they are stored: nothing opens them.
       C.words(tl, "#s5-l3", 5.15);
       cards42.forEach((c, i) => {
         tl.to(c.root, { opacity: 0.55, duration: 0.25 }, 5.5 + i * 0.15);
