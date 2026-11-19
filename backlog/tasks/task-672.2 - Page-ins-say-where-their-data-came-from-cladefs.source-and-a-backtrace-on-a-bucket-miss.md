@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-19 22:23'
-updated_date: '2026-11-19 23:35'
+updated_date: '2026-11-19 23:39'
 labels: []
 dependencies: []
 parent_task_id: TASK-672
@@ -33,3 +33,12 @@ To find reads that missed every cache, a page-in must say what served it: the st
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. bucket_cell::trace: Source (memory < part_cache < peer < bucket), a per-context accumulator (sourced(future) -> (output, farthest source noted)), note(source); cladefs.source and cladefs.backtrace attributes; backtrace() capturing frame addresses (backtrace crate), resolved only when shown.
+2. fetch.rs: flights (parts and tails) run sourced, their output carrying where they went, every reader noting it on landing, so a read that joins another's GET says bucket too; a recent part notes memory, the part cache part_cache, a peer peer, a GET or listing bucket.
+3. cache.rs: a page-in sets cladefs.source on cache.page_in (local when the fetcher was not used); the bring_in that started it, woken with its page in, records the backtrace on the current span (the request's) when the source was bucket: captured only on bucket misses, from the request's own poll stack, as the page-in itself is a spawned task.
+4. Tests: fetch notes each source, a joiner notes its flight's; a daemon read through the bucket shows source=bucket and a backtrace naming bring_in.
+<!-- SECTION:PLAN:END -->
