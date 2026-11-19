@@ -18,7 +18,9 @@
 //! Every host named must be a vault's or a Managed HSM's ([`VAULT_DOMAINS`]): its tokens unwrap
 //! every tenant's key the hosts' identity may use, and go nowhere else.
 //!
-//! Its credentials, as Azure's own libraries find them: the access token [`TOKEN_VAR`] holds, for
+//! Its tokens are for each vault's audience (`https://vault.azure.net`,
+//! `https://managedhsm.azure.net`, or a sovereign cloud's), fetched and kept apart. Its credentials,
+//! as Azure's own libraries find them: the access token [`TOKEN_VAR`] holds, for
 //! development alone (`az account get-access-token --resource https://vault.azure.net`), which
 //! expires within the hour; else workload identity's (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
 //! `AZURE_FEDERATED_TOKEN_FILE`: AKS); else a service principal's secret (`AZURE_TENANT_ID`,
@@ -39,6 +41,7 @@ use crate::{KEY_LEN, Secret, Unauthentic, Wrapped};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::path::PathBuf;
@@ -54,10 +57,6 @@ const API_VERSION: &str = "7.4";
 
 /// For development: an access token to call the vault with, in place of the identity's.
 pub const TOKEN_VAR: &str = "CLADEFS_KMS_AZURE_TOKEN";
-
-/// What its tokens are for.
-const SCOPE: &str = "https://vault.azure.net/.default";
-const RESOURCE: &str = "https://vault.azure.net";
 
 /// The authority, unless `AZURE_AUTHORITY_HOST` names another.
 const AUTHORITY: &str = "https://login.microsoftonline.com/";
@@ -95,6 +94,9 @@ pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
 struct Parsed {
     /// Where the template's keys are: `https://VAULT_HOST`, or the endpoint.
     vault: String,
+    /// The audience of the tokens for the URL's vault ([`audience_of`]): those of an endpoint
+    /// on this host's, an emulator's, too.
+    audience: &'static str,
     names: KeyNames,
     alg: &'static str,
 }
@@ -132,30 +134,44 @@ fn parse(url: &str) -> Result<Parsed, String> {
         check_key(name)
             .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
     }
-    Ok(Parsed { vault, names, alg })
+    let audience = audience_of(host).expect("a vault's host, checked");
+    Ok(Parsed { vault, audience, names, alg })
 }
 
 /// The domains of Key Vault's vaults and Managed HSMs, in Azure's public, China and US Government
 /// clouds: the only hosts its tokens are sent to, as Azure's own libraries check, so that a key's
 /// identifier given by a tenant, or a URL recorded in a bucket's registry, takes no token elsewhere.
-const VAULT_DOMAINS: [&str; 6] = [
-    ".vault.azure.net",
-    ".managedhsm.azure.net",
-    ".vault.azure.cn",
-    ".managedhsm.azure.cn",
-    ".vault.usgovcloudapi.net",
-    ".managedhsm.usgovcloudapi.net",
+/// Each with the audience its tokens are for, its resource: a Managed HSM's, and a sovereign
+/// cloud's, take no token for another (TASK-633.6's review).
+const VAULT_DOMAINS: [(&str, &str); 6] = [
+    (".vault.azure.net", "https://vault.azure.net"),
+    (".managedhsm.azure.net", "https://managedhsm.azure.net"),
+    (".vault.azure.cn", "https://vault.azure.cn"),
+    (".managedhsm.azure.cn", "https://managedhsm.azure.cn"),
+    (".vault.usgovcloudapi.net", "https://vault.usgovcloudapi.net"),
+    (".managedhsm.usgovcloudapi.net", "https://managedhsm.usgovcloudapi.net"),
 ];
 
 /// Checks `host` is a vault's or a Managed HSM's: a name of lowercase letters, digits and `-`, in
 /// one of [`VAULT_DOMAINS`].
 fn check_vault(host: &str) -> Result<(), String> {
-    let name = VAULT_DOMAINS.iter().find_map(|domain| host.strip_suffix(domain));
-    let label_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
-    match name {
-        Some(name) if !name.is_empty() && name.chars().all(label_char) => Ok(()),
-        _ => Err(format!("{host:?} is no vault's host: NAME{}", VAULT_DOMAINS.join(", NAME"))),
+    match audience_of(host) {
+        Some(_) => Ok(()),
+        None => {
+            let domains: Vec<&str> = VAULT_DOMAINS.iter().map(|(domain, _)| *domain).collect();
+            Err(format!("{host:?} is no vault's host: NAME{}", domains.join(", NAME")))
+        }
     }
+}
+
+/// The audience of the tokens for `host`, a vault's or a Managed HSM's ([`VAULT_DOMAINS`]); none
+/// for another host.
+fn audience_of(host: &str) -> Option<&'static str> {
+    let label_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    VAULT_DOMAINS.iter().find_map(|(domain, audience)| {
+        let name = host.strip_suffix(domain)?;
+        (!name.is_empty() && name.chars().all(label_char)).then_some(*audience)
+    })
 }
 
 /// Checks `endpoint` is a vault's (`https://VAULT_HOST`, a private endpoint resolving a vault's
@@ -275,12 +291,13 @@ enum Seconds {
 /// Azure Key Vault, its tenants' keys in a vault, or named whole ([`self`]).
 struct AzureKms {
     vault: String,
+    audience: &'static str,
     names: KeyNames,
     alg: &'static str,
     http: reqwest::Client,
     source: Source,
-    /// The token last fetched, and when it expires.
-    held: Mutex<Option<(Zeroizing<String>, Instant)>>,
+    /// The token last fetched for each audience, and when it expires.
+    held: Mutex<HashMap<&'static str, (Zeroizing<String>, Instant)>>,
 }
 
 /// What a call asks of the vault.
@@ -330,8 +347,15 @@ impl AzureKms {
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|err| format!("an HTTP client: {err}"))?;
-        let Parsed { vault, names, alg } = parsed;
-        Ok(Self { vault, names, alg, http, source, held: Mutex::default() })
+        let Parsed { vault, audience, names, alg } = parsed;
+        Ok(Self { vault, audience, names, alg, http, source, held: Mutex::default() })
+    }
+
+    /// The audience of the tokens for the key `id`: its vault's; the URL's vault's for a key of an
+    /// endpoint on this host, an emulator.
+    fn audience(&self, id: &str) -> &'static str {
+        let host = id.strip_prefix("https://").and_then(|rest| rest.split('/').next());
+        host.and_then(audience_of).unwrap_or(self.audience)
     }
 
     async fn wrap_now(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
@@ -417,7 +441,7 @@ impl AzureKms {
             };
             if failure.unauthorized && !refreshed && !matches!(self.source, Source::Static(_)) {
                 refreshed = true;
-                *self.held.lock().unwrap() = None;
+                self.held.lock().unwrap().remove(self.audience(id));
                 continue;
             }
             match (failure.transient, waits.next()) {
@@ -440,8 +464,10 @@ impl AzureKms {
             transient,
             unauthorized: false,
         };
-        let token =
-            self.token().await.map_err(|why| failed(format!("credentials: {why}"), false))?;
+        let token = self
+            .token(self.audience(id))
+            .await
+            .map_err(|why| failed(format!("credentials: {why}"), false))?;
         let response = self
             .http
             .post(format!("{url}?api-version={API_VERSION}"))
@@ -466,16 +492,18 @@ impl AzureKms {
         Err(refused)
     }
 
-    /// A token for the vault: the one held, while it has [`REFRESH_BEFORE`] left, else fetched.
-    async fn token(&self) -> Result<Zeroizing<String>, String> {
+    /// A token for `audience`, a vault's: the one held, while it has [`REFRESH_BEFORE`] left, else
+    /// fetched.
+    async fn token(&self, audience: &'static str) -> Result<Zeroizing<String>, String> {
         if let Source::Static(token) = &self.source {
             return Ok(Zeroizing::new(token.clone()));
         }
-        if let Some((token, expires)) = &*self.held.lock().unwrap()
+        if let Some((token, expires)) = self.held.lock().unwrap().get(audience)
             && Instant::now() + REFRESH_BEFORE < *expires
         {
             return Ok(token.clone());
         }
+        let scope = format!("{audience}/.default");
         let asked = Instant::now();
         let request = match &self.source {
             Source::Static(_) => unreachable!("answered above"),
@@ -492,7 +520,7 @@ impl AzureKms {
                             "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
                         )
                         .append_pair("client_assertion", assertion.trim())
-                        .append_pair("scope", SCOPE)
+                        .append_pair("scope", &scope)
                         .finish(),
                 );
                 self.http
@@ -506,7 +534,7 @@ impl AzureKms {
                         .append_pair("grant_type", "client_credentials")
                         .append_pair("client_id", client_id)
                         .append_pair("client_secret", secret)
-                        .append_pair("scope", SCOPE)
+                        .append_pair("scope", &scope)
                         .finish(),
                 );
                 self.http
@@ -516,7 +544,7 @@ impl AzureKms {
             }
             Source::ManagedIdentity { url, client_id } => {
                 let mut query = url::form_urlencoded::Serializer::new(String::new());
-                query.append_pair("api-version", "2018-02-01").append_pair("resource", RESOURCE);
+                query.append_pair("api-version", "2018-02-01").append_pair("resource", audience);
                 if let Some(client_id) = client_id {
                     query.append_pair("client_id", client_id);
                 }
@@ -541,7 +569,7 @@ impl AzureKms {
         };
         let lifetime = Duration::from_secs(seconds.unwrap_or(0));
         let token = Zeroizing::new(parsed.access_token);
-        *self.held.lock().unwrap() = Some((token.clone(), asked + lifetime));
+        self.held.lock().unwrap().insert(audience, (token.clone(), asked + lifetime));
         Ok(token)
     }
 }

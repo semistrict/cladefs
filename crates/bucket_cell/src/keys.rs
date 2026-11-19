@@ -492,8 +492,16 @@ type Unwrapped = Result<Arc<Secret>, (Error, bool)>;
 type Unwrap = Shared<BoxFuture<'static, Unwrapped>>;
 
 /// A cell's KEKs unwrapped, by the cell and generation, each with the taking it was unwrapped for:
-/// none for a cell this host made and has not taken yet, whose first taking here it serves.
-type Takings = HashMap<(CellId, u32), (Option<(u64, u64)>, Unwrap)>;
+/// none for a cell this host made and has not taken yet, whose first taking here it serves; and,
+/// of one the KMS unwrapped, the revocation epoch it was asked in ([`Epoch`]): none for a KEK this
+/// host made, which is no answer of the KMS.
+type Takings = HashMap<(CellId, u32), (Option<(u64, u64)>, Unwrap, Option<Epoch>)>;
+
+/// cladefs: when a call of a KMS for a tenant was asked (TASK-633.6's review): how many times the
+/// control API had revoked the tenant, and the KMS itself had. An answer counts only if it comes
+/// back in the epoch it was asked in: one asked before a revocation, answering after it, lifts
+/// nothing; a KMS's own refusal discards no other KMS's answers.
+type Epoch = (u64, u64);
 
 /// How a host keeps its pools of new cell KEKs (doc-16, Forks and shared versions; TASK-411.4): a
 /// tenant's refilled in batches, on `handle`, off the paths that take from it, once a take leaves
@@ -517,10 +525,11 @@ impl Pooling {
 /// A refill of a tenant's pool, going, which whoever waits for it shares ([`CachingKms::filled`]).
 type Refill = Shared<BoxFuture<'static, ()>>;
 
-/// A tenant's new cell KEKs, each wrapped by its KEK, and the refill of them going, if one is.
+/// A tenant's new cell KEKs, each wrapped by its KEK in the revocation epoch it carries
+/// ([`Epoch`]), and the refill of them going, if one is.
 #[derive(Default)]
 struct Pool {
-    keks: Vec<(Arc<Secret>, Wrapped)>,
+    keks: Vec<(Arc<Secret>, Wrapped, Epoch)>,
     filling: Option<Refill>,
 }
 
@@ -574,17 +583,56 @@ pub struct CachingKms {
     resolved: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
     /// Each cell's KEKs unwrapped, by generation, and the taking they were unwrapped for: a
     /// taking since unwraps anew, so that a tenant whose KEK was revoked takes none of its cells
-    /// again.
+    /// again. Locked before the [`Ledger`], never after.
     takings: Mutex<Takings>,
-    /// New cell KEKs by their KMSes' tenants, wrapped, for the cells made.
-    pools: Mutex<Pools>,
+    /// Its pools, refusals and the KEKs it gave out ([`Ledger`]).
+    ledger: Mutex<Ledger>,
     /// How the pools are refilled: none, a KEK wrapped when one is wanted and its pool empty.
     pooling: Option<Pooling>,
-    /// The tenants whose KEKs are revoked or destroyed, or none, as last heard, and how it was
-    /// said ([`Refused`]).
-    refused: Mutex<Refused>,
     /// The cells it was told are shredded, whose KEKs it unwraps no more ([`Kms::forget`]).
     shredded: Mutex<BTreeSet<CellId>>,
+}
+
+/// cladefs: what a host keeps of its KMSes' answers, under one lock (TASK-633.6's review): so that a
+/// revocation, which refuses a tenant, moves its epoch and drops its pools at once, and what checks
+/// the refusal or the epoch and then adds to a pool, or gives out or takes back a KEK, are each
+/// one step, none of them landing between a revocation's.
+#[derive(Default)]
+struct Ledger {
+    /// New cell KEKs by their KMSes' tenants, wrapped, for the cells made.
+    pools: Pools,
+    /// The tenants whose KEKs are revoked or destroyed, or none, as last heard, and how it was
+    /// said ([`Refused`]).
+    refused: Refused,
+    /// The new cell KEKs given out, by their wrapped bytes, each with the KMS's tenant it was
+    /// wrapped for and the revocation epoch it was wrapped in: given back, or kept for a made
+    /// cell's first taking, only if no revocation came since, though one lifted since. A
+    /// revocation takes its tenant's off, as no longer to be given back or kept.
+    issued: HashMap<Vec<u8>, (Tenancy, Epoch)>,
+}
+
+impl Ledger {
+    /// Takes the new cell KEK `wrapped` off those given out: the KMS's tenant it was given out for,
+    /// if it was wrapped in the revocation epoch of now and the tenant is not refused there. Every
+    /// KEK made into a cell is given out here first ([`CachingKms::new_kek`], [`CachingKms::wrap`]):
+    /// one not among them, taken off by a revocation since, is neither given back nor kept.
+    fn issued_now(&mut self, wrapped: &Wrapped) -> Option<Tenancy> {
+        let ((key, tenant), epoch) = self.issued.remove(&wrapped.0)?;
+        let current = epoch == self.refused.epoch(&key, tenant)
+            && self.refused.of(Some(&key), tenant).is_none();
+        current.then_some((key, tenant))
+    }
+
+    /// Drops every pool of `tenant`'s, of the KMSes named `keys` and any other, a refill of one
+    /// going adding nothing to the next.
+    fn drop_pools(&mut self, tenant: u64, keys: impl IntoIterator<Item = KmsKey>) {
+        let mut tenancies: BTreeSet<Tenancy> = keys.into_iter().map(|key| (key, tenant)).collect();
+        tenancies.extend(self.pools.pools.keys().filter(|(_, of)| *of == tenant).cloned());
+        for tenancy in tenancies {
+            self.pools.pools.remove(&tenancy);
+            *self.pools.eras.entry(tenancy).or_default() += 1;
+        }
+    }
 }
 
 /// cladefs: the tenants whose KEKs are refused (TASK-633.6): by a KMS, as it said, until it answers
@@ -596,9 +644,23 @@ struct Refused {
     by: HashMap<Tenancy, String>,
     /// The control API's: why, and the KMSes that answered since.
     told: HashMap<u64, (String, BTreeSet<KmsKey>)>,
+    /// How many times the control API revoked each tenant, and each KMS did ([`Epoch`]).
+    told_epochs: HashMap<u64, u64>,
+    by_epochs: HashMap<Tenancy, u64>,
 }
 
 impl Refused {
+    /// The revocation epoch of `tenant` in the KMS named `key` now.
+    fn epoch(&self, key: &KmsKey, tenant: u64) -> Epoch {
+        let told = self.told_epochs.get(&tenant).copied().unwrap_or(0);
+        (told, self.by_epochs.get(&(key.clone(), tenant)).copied().unwrap_or(0))
+    }
+
+    /// Whether `tenant` is refused by any KMS, or as the control API said.
+    fn anywhere(&self, tenant: u64) -> bool {
+        self.told.contains_key(&tenant) || self.by.keys().any(|(_, of)| *of == tenant)
+    }
+
     /// Why `tenant`'s keys are refused by the KMS named `key`, or by one not asked for (none).
     fn of(&self, key: Option<&KmsKey>, tenant: u64) -> Option<String> {
         let by = key.and_then(|key| self.by.get(&(key.clone(), tenant)));
@@ -644,9 +706,8 @@ impl CachingKms {
             kmses,
             resolved: Mutex::default(),
             takings: Mutex::default(),
-            pools: Mutex::default(),
+            ledger: Mutex::default(),
             pooling,
-            refused: Mutex::default(),
             shredded: Mutex::default(),
         })
     }
@@ -683,7 +744,7 @@ impl CachingKms {
     /// Why `tenant`'s keys are refused by the KMS named `key`, or by one not asked for (none), if
     /// they are, as last heard.
     fn refusal(&self, key: Option<&KmsKey>, tenant: u64) -> Option<String> {
-        self.refused.lock().unwrap().of(key, tenant)
+        self.ledger.lock().unwrap().refused.of(key, tenant)
     }
 
     /// What `kms`, named `key`, answered a call for `tenant`: noted, a refusal saying its KEK is
@@ -692,33 +753,37 @@ impl CachingKms {
     fn heard<T>(
         &self,
         (key, kms): (&KmsKey, &kms::Shared),
-        tenant: u64,
+        (tenant, asked): (u64, Epoch),
         answer: Result<T, kms::Error>,
     ) -> Result<T, kms::Error> {
         match &answer {
-            Ok(_) => self.answered(key, tenant),
+            Ok(_) => self.answered(key, tenant, asked),
             Err(error) if revokes(error) => self.revoked_at((key, kms), tenant, error.to_string()),
             Err(_) => {}
         }
         answer
     }
 
-    /// The KMS named `key` answered a call for `tenant`: its KEK is not refused there, whatever
-    /// was heard before. Refused by every KMS, as the control API said, it stays so by every
-    /// other, those not asked for since among them.
-    fn answered(&self, key: &KmsKey, tenant: u64) {
-        let mut refused = self.refused.lock().unwrap();
+    /// The revocation epoch of `tenant` in the KMS named `key` now: what a call of it asked now is
+    /// answered in.
+    fn epoch(&self, key: &KmsKey, tenant: u64) -> Epoch {
+        self.ledger.lock().unwrap().refused.epoch(key, tenant)
+    }
+
+    /// The KMS named `key` answered a call for `tenant`, asked in its revocation epoch `asked`:
+    /// its KEK is not refused there, whatever was heard before; unless it was revoked since the
+    /// call was asked, the answer then of before. Refused by every KMS, as the control API said,
+    /// it stays so by every other, those not asked for since among them.
+    fn answered(&self, key: &KmsKey, tenant: u64, asked: Epoch) {
+        let mut ledger = self.ledger.lock().unwrap();
+        let refused = &mut ledger.refused;
+        if refused.epoch(key, tenant) != asked {
+            return;
+        }
         refused.by.remove(&(key.clone(), tenant));
         if let Some((_, answered)) = refused.told.get_mut(&tenant) {
             answered.insert(key.clone());
         }
-    }
-
-    /// Drops the pool of `tenancy`, a refill of it going adding nothing to the next.
-    fn drop_pool(&self, tenancy: &Tenancy) {
-        let mut pools = self.pools.lock().unwrap();
-        pools.pools.remove(tenancy);
-        *pools.eras.entry(tenancy.clone()).or_default() += 1;
     }
 
     /// `tenant`'s KEK is revoked or destroyed, or none, in `kms`, named `key`, as `why` says: the
@@ -729,7 +794,17 @@ impl CachingKms {
     /// cells ([`inheriting`]), until the KMS answers a call for it again. What other KMSes
     /// answered for the tenant, for other buckets, stands (TASK-633.6).
     fn revoked_at(&self, (key, kms): (&KmsKey, &kms::Shared), tenant: u64, why: String) {
-        self.drop_pool(&(key.clone(), tenant));
+        // Refused, its epoch moved and its pool dropped in one step ([`Ledger`]); then its takings
+        // dropped, what a made cell's keeping checks under their lock first (TASK-633.6's review).
+        {
+            let mut ledger = self.ledger.lock().unwrap();
+            ledger.refused.by.insert((key.clone(), tenant), why);
+            *ledger.refused.by_epochs.entry((key.clone(), tenant)).or_default() += 1;
+            let tenancy = (key.clone(), tenant);
+            ledger.pools.pools.remove(&tenancy);
+            ledger.issued.retain(|_, (of, _)| *of != tenancy);
+            *ledger.pools.eras.entry(tenancy).or_default() += 1;
+        }
         // What the KMS itself keeps of the tenant's KEK: the bucket KMS's (TASK-411.27).
         kms.forget_dyn(tenant);
         let buckets: BTreeSet<u16> = (self.resolved.lock().unwrap().iter())
@@ -739,19 +814,25 @@ impl CachingKms {
         self.takings.lock().unwrap().retain(|(cell, _), _| {
             cell.tenant != tenant || !buckets.contains(&crate::objectid::bucket_of(cell.id))
         });
-        self.refused.lock().unwrap().by.insert((key.clone(), tenant), why);
     }
 
     /// `tenant`'s KEK is revoked or destroyed, or none, as `why` says, in every KMS: the control
     /// API says so (doc-16, Forks and shared versions). As [`CachingKms::revoked_at`], of every
     /// KMS, until one answers a call for it again.
     pub fn revoked(&self, tenant: u64, why: impl Into<String>) {
-        for (key, kms) in self.known() {
-            self.drop_pool(&(key, tenant));
+        let known = self.known();
+        // In one step, then the takings, as by [`CachingKms::revoked_at`].
+        {
+            let mut ledger = self.ledger.lock().unwrap();
+            ledger.refused.told.insert(tenant, (why.into(), BTreeSet::new()));
+            *ledger.refused.told_epochs.entry(tenant).or_default() += 1;
+            ledger.drop_pools(tenant, known.keys().cloned());
+            ledger.issued.retain(|_, ((_, of), _)| *of != tenant);
+        }
+        for kms in known.values() {
             kms.forget_dyn(tenant);
         }
         self.takings.lock().unwrap().retain(|(cell, _), _| cell.tenant != tenant);
-        self.refused.lock().unwrap().told.insert(tenant, (why.into(), BTreeSet::new()));
     }
 
     /// Forgets what it holds of `scope`, as a host told so does (TASK-411.7): a tenant's, its KEK
@@ -774,6 +855,27 @@ impl CachingKms {
         self.refusal(self.key_of(cell).as_ref(), cell.tenant).map(Error::Kms)
     }
 
+    /// cladefs: as [`CachingKms::refuses`], the KMS of `cell`'s bucket looked up first, if it is
+    /// refused at all (TASK-633.6's review): so that what that KMS answered since a revocation the
+    /// control API told counts for the cells of a bucket this host takes no KEK of, whose keys forks
+    /// inherit, as it does for the buckets it does. Nothing is asked of the KMS: a revocation stops
+    /// the fork it exists to stop until the KMS answers another call. Refused by none, nothing is
+    /// looked up, as forks go; a KMS not to be looked up leaves the refusal as it stands.
+    async fn refuses_resolving(&self, cell: CellId) -> Option<Error> {
+        if self.key_of(cell).is_some() {
+            return self.refuses(cell);
+        }
+        // Not looked up: refused by a KMS that may be its bucket's, or as the control API said.
+        if !self.ledger.lock().unwrap().refused.anywhere(cell.tenant) {
+            return None;
+        }
+        match self.kms_of(cell).await {
+            Ok((key, _)) => self.refusal(Some(&key), cell.tenant).map(Error::Kms),
+            // Its KMS not to be looked up: refused as the control API said, if it did.
+            Err(_) => self.refusal(None, cell.tenant).map(Error::Kms),
+        }
+    }
+
     /// A new KEK for `cell`, and it wrapped by its tenant's KEK in the KMS of its bucket, from the
     /// pool, or wrapped by the KMS now. Any refusal fails it, naming the tenant: a tenant whose
     /// KEK is revoked or destroyed, or that the KMS has none of, makes no cell (TASK-411.28: none
@@ -783,33 +885,55 @@ impl CachingKms {
     pub async fn new_kek(self: &Arc<Self>, cell: CellId) -> Result<(Arc<Secret>, Wrapped), Error> {
         let (key, kms) = self.kms_of(cell).await?;
         let tenancy = (key.clone(), cell.tenant);
-        let pooled =
-            (self.pools.lock().unwrap().pools.get_mut(&tenancy)).and_then(|pool| pool.keks.pop());
+        // From the pool, in one step with giving it out: none of a tenant refused there, whose new
+        // KEK the KMS is asked for (TASK-633.6's review).
+        let pooled = {
+            let mut ledger = self.ledger.lock().unwrap();
+            let pooled = match ledger.refused.of(Some(&key), cell.tenant) {
+                Some(_) => None,
+                None => ledger.pools.pools.get_mut(&tenancy).and_then(|pool| pool.keks.pop()),
+            };
+            pooled.map(|(secret, wrapped, epoch)| {
+                ledger.issued.insert(wrapped.0.clone(), (tenancy.clone(), epoch));
+                (secret, wrapped)
+            })
+        };
         if let Some(kek) = pooled {
             self.refill_at((&key, &kms), cell.tenant);
             return Ok(kek);
         }
         let kek = Secret::random();
+        let asked = self.epoch(&key, cell.tenant);
         let answer = kms.wrap_dyn(cell.tenant, &kek).await;
-        let wrapped = self.heard((&key, &kms), cell.tenant, answer).map_err(refused)?;
+        let wrapped = self.heard((&key, &kms), (cell.tenant, asked), answer).map_err(refused)?;
+        self.ledger.lock().unwrap().issued.insert(wrapped.0.clone(), (tenancy, asked));
         self.refill_at((&key, &kms), cell.tenant);
         Ok((Arc::new(kek), wrapped))
     }
 
     /// Gives back `kek`, a new KEK for `cell` that made no cell, to the pool it came from: unless
     /// the pool was dropped since, the tenant's KEK revoked, the KEK then dropped with it.
-    pub fn give_back(&self, cell: CellId, kek: (Arc<Secret>, Wrapped)) {
-        let Some(key) = self.key_of(cell) else { return };
-        if self.refusal(Some(&key), cell.tenant).is_some() {
-            return;
-        }
-        self.pools.lock().unwrap().pools.entry((key, cell.tenant)).or_default().keks.push(kek);
+    ///
+    /// cladefs: nor if it was given out before a revocation, though one lifted since (TASK-633.6's
+    /// review): checked and given back in one step ([`Ledger`]).
+    pub fn give_back(&self, cell: CellId, (secret, wrapped): (Arc<Secret>, Wrapped)) {
+        let _ = cell;
+        let mut ledger = self.ledger.lock().unwrap();
+        let Some(tenancy) = ledger.issued_now(&wrapped) else { return };
+        let epoch = ledger.refused.epoch(&tenancy.0, tenancy.1);
+        ledger.pools.pools.entry(tenancy).or_default().keks.push((secret, wrapped, epoch));
+    }
+
+    /// cladefs: takes `wrapped`, a KEK given out that made no cell and goes back to no pool (a
+    /// rotation's that failed), off those given out.
+    fn abandoned(&self, wrapped: &Wrapped) {
+        self.ledger.lock().unwrap().issued.remove(&wrapped.0);
     }
 
     /// How many new cell KEKs of `tenant`'s its pools hold, of every KMS.
     pub fn in_pool(&self, tenant: u64) -> usize {
-        let pools = self.pools.lock().unwrap();
-        (pools.pools.iter())
+        let ledger = self.ledger.lock().unwrap();
+        (ledger.pools.pools.iter())
             .filter(|((_, of), _)| *of == tenant)
             .map(|(_, pool)| pool.keks.len())
             .sum()
@@ -841,18 +965,22 @@ impl CachingKms {
     /// Refills `tenant`'s pool of `kms`, named `key` ([`CachingKms::refill`]).
     fn refill_at(self: &Arc<Self>, (key, kms): (&KmsKey, &kms::Shared), tenant: u64) {
         let Some(pooling) = &self.pooling else { return };
-        if self.refusal(Some(key), tenant).is_some() {
-            return;
-        }
         let tenancy = (key.clone(), tenant);
         let refill = {
-            let mut pools = self.pools.lock().unwrap();
+            // Checked in one step with the refill's start ([`Ledger`]).
+            let mut ledger = self.ledger.lock().unwrap();
+            if ledger.refused.of(Some(key), tenant).is_some() {
+                return;
+            }
+            let asked = ledger.refused.epoch(key, tenant);
+            let pools = &mut ledger.pools;
             let era = pools.eras.get(&tenancy).copied().unwrap_or(0);
             let pool = pools.pools.entry(tenancy.clone()).or_default();
             if pool.keks.len() >= pooling.low || pool.filling.is_some() {
                 return;
             }
-            let fill = self.clone().fill((key.clone(), kms.clone()), tenant, era, pooling.batch);
+            let fill =
+                self.clone().fill((key.clone(), kms.clone()), (tenant, asked), era, pooling.batch);
             let refill: Refill = fill.boxed().shared();
             pool.filling = Some(refill.clone());
             refill
@@ -862,8 +990,8 @@ impl CachingKms {
 
     /// Returns once the refills of `tenant`'s pools going, of every KMS, are done.
     pub fn filled(&self, tenant: u64) -> impl std::future::Future<Output = ()> + use<> {
-        let pools = self.pools.lock().unwrap();
-        let filling: Vec<Refill> = (pools.pools.iter())
+        let ledger = self.ledger.lock().unwrap();
+        let filling: Vec<Refill> = (ledger.pools.pools.iter())
             .filter(|((_, of), _)| *of == tenant)
             .filter_map(|(_, pool)| pool.filling.clone())
             .collect();
@@ -877,7 +1005,7 @@ impl CachingKms {
     async fn fill(
         self: Arc<Self>,
         (key, kms): (KmsKey, kms::Shared),
-        tenant: u64,
+        (tenant, asked): (u64, Epoch),
         era: u64,
         batch: usize,
     ) {
@@ -902,31 +1030,54 @@ impl CachingKms {
                 self.revoked_at((&key, &kms), tenant, error.to_string())
             }
             Some(error) => log::warn!("cladefs: refilling tenant {tenant}'s pool of KEKs: {error}"),
-            None => self.answered(&key, tenant),
+            None => self.answered(&key, tenant, asked),
         }
+        let mut ledger = self.ledger.lock().unwrap();
+        // Revoked since it was asked, though lifted since: none of them pooled.
+        let current = ledger.refused.epoch(&key, tenant) == asked;
         let tenancy = (key, tenant);
-        let mut pools = self.pools.lock().unwrap();
-        if pools.eras.get(&tenancy).copied().unwrap_or(0) != era {
+        if ledger.pools.eras.get(&tenancy).copied().unwrap_or(0) != era {
             return;
         }
-        let pool = pools.pools.entry(tenancy).or_default();
+        let pool = ledger.pools.pools.entry(tenancy).or_default();
         pool.filling = None;
-        pool.keks.extend(wrapped);
+        if current {
+            pool.keks.extend(wrapped.into_iter().map(|(secret, kek)| (secret, kek, asked)));
+        }
     }
 
     /// `secret` wrapped by the KEK of `cell`'s tenant in the KMS of its bucket: a new generation
     /// of the cell's KEK ([`rotate`]). Refused as the KMS refuses it.
+    ///
+    /// cladefs: recorded as given out in the revocation epoch it was asked in, as a new cell KEK
+    /// is ([`Ledger::issued`]): kept for the cell's first taking only if no revocation came since.
     async fn wrap(&self, cell: CellId, secret: &Secret) -> Result<Wrapped, Error> {
-        let (_, kms) = self.kms_of(cell).await?;
-        kms.wrap_dyn(cell.tenant, secret).await.map_err(refused)
+        let (key, kms) = self.kms_of(cell).await?;
+        let asked = self.epoch(&key, cell.tenant);
+        // Heard as every call of the KMS is: a revocation it says is noted.
+        let answer = kms.wrap_dyn(cell.tenant, secret).await;
+        let wrapped = self.heard((&key, &kms), (cell.tenant, asked), answer).map_err(refused)?;
+        let tenancy = (key, cell.tenant);
+        self.ledger.lock().unwrap().issued.insert(wrapped.0.clone(), (tenancy, asked));
+        Ok(wrapped)
     }
 
     /// KEK generation `kek` of `cell`, made by this host with that KEK, `secret`: kept for the
     /// taking `taking`, its epoch and holder, unwrapped by none; or, none given, for the first
     /// taking of it here.
+    ///
+    /// cladefs: none kept of a tenant refused now (TASK-633.6's review): a revocation landing while
+    /// the cell was made, from a KEK of the pool, unwraps it again at its first taking, asking the
+    /// KMS, rather than taking it on a KEK no KMS was asked for since.
     fn made(&self, cell: CellId, taking: Option<(u64, u64)>, kek: &Kek, secret: Arc<Secret>) {
+        // Under the takings' lock, then the ledger's: a revocation moves the epoch, then drops its
+        // takings, so this either sees it, or keeps what it drops after.
+        let mut takings = self.takings.lock().unwrap();
+        if self.ledger.lock().unwrap().issued_now(&kek.wrapped).is_none() {
+            return;
+        }
         let ready: Unwrap = futures::future::ready(Ok(secret)).boxed().shared();
-        self.takings.lock().unwrap().insert((cell, kek.generation), (taking, ready));
+        takings.insert((cell, kek.generation), (taking, ready, None));
     }
 
     /// KEK generation `generation` of `cell`, of `keks`, its object's: unwrapped by the KMS of its
@@ -942,13 +1093,17 @@ impl CachingKms {
             return Err(shredded(cell));
         }
         let (key, kms) = self.kms_of(cell).await?;
-        let unwrap = {
+        let (unwrap, asked) = {
             let mut takings = self.takings.lock().unwrap();
+            // Under the takings' lock, then the ledger's, as by [`CachingKms::made`]: a revocation
+            // moves the epoch, then drops its takings, so the entry made here either carries the
+            // epoch after it or goes with them.
+            let now = self.ledger.lock().unwrap().refused.epoch(&key, cell.tenant);
             match takings.get_mut(&(cell, generation)) {
-                Some((at, unwrap)) if *at == Some(taking) => unwrap.clone(),
-                Some((at @ None, unwrap)) => {
+                Some((at, unwrap, asked)) if *at == Some(taking) => (unwrap.clone(), *asked),
+                Some((at @ None, unwrap, asked)) => {
                     *at = Some(taking);
-                    unwrap.clone()
+                    (unwrap.clone(), *asked)
                 }
                 _ => {
                     let wrapped = (keks.iter())
@@ -961,6 +1116,7 @@ impl CachingKms {
                         .wrapped
                         .clone();
                     let kms = kms.clone();
+                    let asked = now;
                     let unwrap: Unwrap = async move {
                         match kms.unwrap_dyn(cell.tenant, &wrapped).await {
                             Ok(kek) => Ok(Arc::new(kek)),
@@ -972,20 +1128,23 @@ impl CachingKms {
                     }
                     .boxed()
                     .shared();
-                    takings.insert((cell, generation), (Some(taking), unwrap.clone()));
-                    unwrap
+                    takings.insert((cell, generation), (Some(taking), unwrap.clone(), Some(asked)));
+                    (unwrap, Some(asked))
                 }
             }
         };
         match unwrap.await {
             Ok(kek) => {
-                self.answered(&key, cell.tenant);
+                // A KEK this host made is no answer of the KMS's.
+                if let Some(asked) = asked {
+                    self.answered(&key, cell.tenant, asked);
+                }
                 Ok(kek)
             }
             Err((error, revokes)) => {
                 // Asked anew the next time: a tenant's KEK revoked may be given back.
                 let mut takings = self.takings.lock().unwrap();
-                if takings.get(&(cell, generation)).is_some_and(|(at, _)| *at == Some(taking)) {
+                if takings.get(&(cell, generation)).is_some_and(|(at, ..)| *at == Some(taking)) {
                     takings.remove(&(cell, generation));
                 }
                 drop(takings);
@@ -1307,12 +1466,12 @@ pub async fn rotate(
     };
     let generation = newest + 1;
     let secret = Secret::random();
-    let wrapped = kms.wrap(cell, &secret).await?;
-    let kek = Kek { generation, wrapped };
     // Every generation of the cell's KEK its DEKs may be under, unwrapped first: the update's
     // step, which may run again on what it finds, unwraps nothing.
     let inherited = found.inherited.iter().map(|had| &had.dek);
     let keks = old.keks(found.deks.iter().chain(inherited).map(|dek| dek.kek)).await?;
+    let wrapped = kms.wrap(cell, &secret).await?;
+    let kek = Kek { generation, wrapped };
     let kek_of = |dek: &Dek| {
         keks.get(&dek.kek)
             .ok_or_else(|| Error::Corrupt(format!("cell {cell}'s DEK under a KEK not read")))
@@ -1348,7 +1507,8 @@ pub async fn rotate(
         found.keks.push(kek.clone());
         Ok(Step::Write(found, rewraps))
     })
-    .await?;
+    .await
+    .inspect_err(|_| kms.abandoned(&kek.wrapped))?;
     kms.made(cell, None, &kek, Arc::new(secret));
     Ok((generation, rewrapped))
 }
@@ -1500,8 +1660,9 @@ impl Drop for Inheriting {
 /// What a fork of `parent`, whose store holds `source`, to `child` gives its child ([`Inheriting`]).
 /// Asked for before anything of the fork is made, so that a fork refused makes nothing: refused if
 /// `kms`, the host's, last heard that a tenant of the cells its keys are of has its KEK revoked or
-/// destroyed ([`Kms::revoked`]); or as the KMS refuses a KEK for the child's cell, which comes from
-/// the host's pool, no call made then ([`new_cell_kek`]).
+/// destroyed ([`Kms::revoked`]), by the KMS of that cell's bucket ([`CachingKms::refuses_resolving`]);
+/// or as the KMS refuses a KEK for the child's cell, which comes from the host's pool, no call made
+/// then ([`new_cell_kek`]).
 pub async fn inheriting(
     kms: &Arc<CachingKms>,
     source: &Arc<Ring>,
@@ -1511,7 +1672,7 @@ pub async fn inheriting(
     let outside: BTreeSet<CellId> =
         source.places.values().filter(|&&of| of != child).copied().collect();
     for cell in outside {
-        if let Some(refused) = kms.refuses(cell) {
+        if let Some(refused) = kms.refuses_resolving(cell).await {
             return Err(refused);
         }
     }
@@ -1892,12 +2053,14 @@ mod tests {
 
     /// TASK-633.6 (review): a tenant the control API says is revoked stays refused by every KMS
     /// until each answers for it again: the first answering for a cell of bucket 1 lifts it there
-    /// alone, and a fork inheriting keys of a cell of bucket 2, whose KMS the host has not asked
-    /// since, is refused still. A KMS refusing a tenant itself refuses it for its own cells alone.
+    /// alone. A fork inheriting keys of a cell of bucket 2, whose KMS the host has not asked since,
+    /// is refused, nothing asked of that KMS; once it answers a call for a cell of bucket 2, forks
+    /// go on.
     #[test]
     fn revocations_told_hold_for_every_kms_until_each_answers() {
-        let shared = || -> kms::Shared { Arc::new(extent_keys::testing::MemoryKms::new()) };
-        let kms = CachingKms::over(Arc::new(TwoKmses(shared(), shared())), None);
+        let (_dir, second, _) = kms();
+        let first: kms::Shared = Arc::new(extent_keys::testing::MemoryKms::new());
+        let kms = CachingKms::over(Arc::new(TwoKmses(first, second.clone())), None);
         let tenant = TEST_CELL.tenant;
         let (ours, theirs) =
             (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
@@ -1912,9 +2075,185 @@ mod tests {
         let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
         let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
         let forking = block_on(inheriting(&kms, &source, child)).map(|_| ());
-        assert_eq!(forking, Err(told));
+        assert_eq!((forking, second.wraps()), (Err(told), 0));
         block_on(kms.new_kek(theirs)).unwrap();
         assert!(block_on(inheriting(&kms, &source, child)).is_ok());
+    }
+
+    /// TASK-633.6 (review): what a KMS answered since a revocation the control API told counts for
+    /// the cells of every bucket under it: a fork inheriting keys of a cell of a bucket this host
+    /// never looked up, under the KMS that answered, goes on, nothing asked of it.
+    #[test]
+    fn revocations_told_lift_for_every_bucket_of_a_kms_that_answered() {
+        let (_dir, counted, kms) = kms();
+        let tenant = TEST_CELL.tenant;
+        let (ours, theirs) =
+            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
+        kms.revoked(tenant, "tenant 1: revoked");
+        block_on(kms.new_kek(ours)).unwrap();
+        let wraps = counted.wraps();
+        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
+        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
+        // Tenant 2's new KEK: the one wrap the fork makes.
+        counted.inner().create(2).unwrap();
+        assert!(block_on(inheriting(&kms, &source, child)).is_ok());
+        assert_eq!((counted.wraps(), kms.refuses(theirs)), (wraps + 1, None));
+    }
+
+    /// TASK-633.6 (review): a KMS refusing a tenant refuses forks inheriting keys of the cells of
+    /// every bucket under it, those of a bucket this host never looked up among them.
+    #[test]
+    fn a_kms_refusing_refuses_forks_from_every_bucket_under_it() {
+        let (_dir, counted, kms) = kms();
+        let tenant = TEST_CELL.tenant;
+        let (ours, theirs) =
+            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
+        counted.inner().revoke(tenant).unwrap();
+        let revoked = Error::Kms("tenant 1: its KEK is revoked".into());
+        assert_eq!(block_on(kms.new_kek(ours)).map(drop), Err(revoked.clone()));
+        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
+        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
+        assert_eq!(block_on(inheriting(&kms, &source, child)).map(drop), Err(revoked));
+    }
+
+    /// TASK-633.6 (review): a new cell KEK given out before a revocation goes back to no pool, nor
+    /// is kept for its cell's first taking, though the revocation lifted since.
+    #[test]
+    fn keks_given_out_before_a_revocation_come_back_to_nothing() {
+        let (_dir, counted, kms) = kms();
+        let tenant = TEST_CELL.tenant;
+        let other = CellId { tenant, id: 9 };
+        let (secret, wrapped) = block_on(kms.new_kek(TEST_CELL)).unwrap();
+        let (made, made_wrapped) = block_on(kms.new_kek(other)).unwrap();
+        kms.revoked(tenant, "tenant 1: revoked");
+        // Lifted by an answer of the KMS asked since.
+        block_on(kms.new_kek(CellId { tenant, id: 10 })).unwrap();
+        assert_eq!(kms.refuses(TEST_CELL), None);
+        kms.give_back(TEST_CELL, (secret, wrapped));
+        assert_eq!(kms.in_pool(tenant), 0);
+        let kek = Kek { generation: FIRST, wrapped: made_wrapped };
+        kms.made(other, None, &kek, made.clone());
+        let head = Head { keks: vec![kek], ..Head::of(Made::Root, 4) };
+        let unwraps = counted.unwraps();
+        let keys = CellKeys::to_take(other, &head, kms.clone(), 4);
+        let unwrapped = block_on(keys.kek(FIRST)).unwrap();
+        assert_eq!((unwrapped.expose(), counted.unwraps()), (made.expose(), unwraps + 1));
+    }
+
+    /// TASK-633.6 (review): bucket 2's KMS not to be had (a master key this host has not).
+    struct SecondUnreachable(kms::Shared);
+
+    impl Kmses for SecondUnreachable {
+        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+            let chosen = match bucket {
+                2 => Err("its tenants' KEKs are kept under a master key this host has not".into()),
+                _ => Ok((KmsKey("first".into()), self.0.clone())),
+            };
+            futures::future::ready(chosen).boxed()
+        }
+    }
+
+    /// TASK-633.6 (review): a fork inheriting keys of a cell of a bucket whose KMS can't be looked
+    /// up is refused as the control API said alone: not for another KMS's refusal, nor for the
+    /// lookup's failure.
+    #[test]
+    fn forks_from_buckets_of_kmses_not_to_be_had_are_refused_as_told_alone() {
+        let (_dir, counted, _) = kms();
+        let kms = CachingKms::over(Arc::new(SecondUnreachable(counted.clone())), None);
+        let tenant = TEST_CELL.tenant;
+        let (ours, theirs) =
+            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
+        counted.inner().revoke(tenant).unwrap();
+        assert!(block_on(kms.new_kek(ours)).is_err());
+        counted.inner().unrevoke(tenant).unwrap();
+        counted.inner().create(2).unwrap();
+        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
+        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
+        assert!(block_on(inheriting(&kms, &source, child)).is_ok());
+        kms.revoked(tenant, "tenant 1: revoked");
+        let refused = block_on(inheriting(&kms, &source, child)).map(drop);
+        assert_eq!(refused, Err(Error::Kms("tenant 1: revoked".into())));
+    }
+
+    /// TASK-633.6 (review): a rotation's new KEK generation, wrapped before a revocation that
+    /// lifted since, is not kept for the next taking either.
+    #[test]
+    fn rotated_keks_wrapped_before_a_revocation_are_not_kept() {
+        let (_dir, counted, kms) = kms();
+        let tenant = TEST_CELL.tenant;
+        let secret = Secret::random();
+        let wrapped = block_on(kms.wrap(TEST_CELL, &secret)).unwrap();
+        kms.revoked(tenant, "tenant 1: revoked");
+        block_on(kms.new_kek(CellId { tenant, id: 10 })).unwrap();
+        let kek = Kek { generation: FIRST, wrapped };
+        kms.made(TEST_CELL, None, &kek, Arc::new(Secret::from_bytes(secret.expose())));
+        let head = Head { keks: vec![kek], ..Head::of(Made::Root, 4) };
+        let unwraps = counted.unwraps();
+        let keys = CellKeys::to_take(TEST_CELL, &head, kms.clone(), 4);
+        block_on(keys.kek(FIRST)).unwrap();
+        assert_eq!(counted.unwraps(), unwraps + 1);
+    }
+
+    /// TASK-633.6 (review): a rotation's wrap the KMS refuses as revoked is heard as every call
+    /// is: the tenant refused under that KMS.
+    #[test]
+    fn rotations_refused_as_revoked_refuse_the_tenant() {
+        let (_dir, counted, kms) = kms();
+        counted.inner().revoke(TEST_CELL.tenant).unwrap();
+        let revoked = Error::Kms("tenant 1: its KEK is revoked".into());
+        assert_eq!(block_on(kms.wrap(TEST_CELL, &Secret::random())), Err(revoked.clone()));
+        assert_eq!(kms.refuses(TEST_CELL), Some(revoked));
+    }
+
+    /// TASK-633.6 (review): a KMS refusing a tenant discards no answer of another KMS asked before.
+    #[test]
+    fn a_kms_refusing_discards_no_other_kms_answers() {
+        let shared = || -> kms::Shared { Arc::new(extent_keys::testing::MemoryKms::new()) };
+        let (first, second) = (shared(), shared());
+        let kms = CachingKms::over(Arc::new(TwoKmses(first.clone(), second.clone())), None);
+        let tenant = TEST_CELL.tenant;
+        let (ours, theirs) =
+            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
+        let (one, _) = block_on(kms.kms_of(ours)).unwrap();
+        let (two, _) = block_on(kms.kms_of(theirs)).unwrap();
+        kms.revoked(tenant, "tenant 1: revoked");
+        let asked = kms.epoch(&one, tenant);
+        kms.revoked_at((&two, &second), tenant, "tenant 1: its KEK is revoked".into());
+        kms.answered(&one, tenant, asked);
+        assert_eq!(kms.refuses(ours), None);
+        assert_eq!(kms.refuses(theirs), Some(Error::Kms("tenant 1: its KEK is revoked".into())));
+    }
+
+    /// TASK-633.6 (review): a KEK of the pool a cell was made with, the tenant revoked while it was
+    /// made, is not kept for its first taking, which asks the KMS: no taking goes on unasked, and
+    /// only the KMS's answer lifts the revocation.
+    #[test]
+    fn keks_made_as_their_tenant_is_revoked_are_unwrapped_again() {
+        let (_dir, counted, kms) = kms();
+        let (secret, kek) = block_on(new_cell_kek(&kms, TEST_CELL)).unwrap();
+        kms.revoked(TEST_CELL.tenant, "tenant 1: revoked");
+        kms.made(TEST_CELL, None, &kek, secret.clone());
+        let head = Head { keks: vec![kek], ..Head::of(Made::Root, 4) };
+        let keys = CellKeys::to_take(TEST_CELL, &head, kms.clone(), 4);
+        assert_eq!(counted.unwraps(), 0);
+        let unwrapped = block_on(keys.kek(FIRST)).unwrap();
+        assert_eq!((unwrapped.expose(), counted.unwraps()), (secret.expose(), 1));
+        assert_eq!(kms.refuses(TEST_CELL), None);
+    }
+
+    /// TASK-633.6 (review): an answer of the KMS asked before a revocation, coming back after it,
+    /// lifts nothing; one asked after it does.
+    #[test]
+    fn answers_asked_before_a_revocation_lift_nothing() {
+        let kms = CachingKms::new(Arc::new(extent_keys::testing::MemoryKms::new()));
+        let (key, _) = block_on(kms.kms_of(TEST_CELL)).unwrap();
+        let tenant = TEST_CELL.tenant;
+        let before = kms.epoch(&key, tenant);
+        kms.revoked(tenant, "tenant 1: revoked");
+        kms.answered(&key, tenant, before);
+        assert_eq!(kms.refuses(TEST_CELL), Some(Error::Kms("tenant 1: revoked".into())));
+        kms.answered(&key, tenant, kms.epoch(&key, tenant));
+        assert_eq!(kms.refuses(TEST_CELL), None);
     }
 
     /// A KMS holding tenant 1's KEK, forgetting it once destroyed as a real KMS forgets a deleted
