@@ -7,7 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 03:07'
-updated_date: '2026-11-17 01:04'
+updated_date: '2026-11-19 21:07'
 labels:
   - bug
 dependencies: []
@@ -38,4 +38,6 @@ Found by TASK-417's series check on ubu1: scripts/firecracker-series-check.sh bu
 
 <!-- SECTION:NOTES:BEGIN -->
 Seen again by TASK-503 (2026-11-16), whose move of vendor/firecracker to cladefs-v1.16.1-r9 made CI run the check (run 43974684702): the 8 commits from "the extent-store device" to TASK-364's fail, now on TASK-474's renames too (cladefs::RemoteExtentStore, Commit::Durable, a request tuple's unsized slice; ubu1 ~/src/fxdax-t501-series/1a81da3cf.log, removed after). The tip (TASK-417's device on virtio_extent) and TASK-501's commit after it pass both ways. A duplicate filed for it before this task was found is archived (its ID, TASK-502, also another task's since).
+
+TASK-671 (r11, pinned 2026-11-19) folds the extent commits that no longer built into one cladefs commit at the tip; every r11 commit passed the series check on ubu1 both ways. AC#2 (a cladefs API change can't break the tip unseen) still open.
 <!-- SECTION:NOTES:END -->
