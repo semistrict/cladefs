@@ -16,7 +16,7 @@
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use bucket_cell::bucket_kms::BucketKms;
+use bucket_cell::bucket_kms::{BucketKms, ByBucket};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
 use bucket_cell::identity::{Details, Identity, Registry};
@@ -225,8 +225,8 @@ pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
     }
     let runtime = bucket_runtime()?;
     let kms = POOLED.get_or_init(|| match host_keys() {
-        Ok(keys) => host_kms(keys.kms.clone(), runtime),
-        Err(why) => host_kms(Arc::new(Unreached(why.clone())), runtime),
+        Ok(keys) => host_kms(keys.kmses.clone(), runtime),
+        Err(why) => host_kms(one(Arc::new(Unreached(why.clone()))), runtime),
     });
     Ok(kms.clone())
 }
@@ -251,13 +251,22 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
     KMS.get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
-        Ok(chosen) => Ok(HostKeys { kms: chosen.shared(), bucket: chosen.bucket().cloned() }),
+        Ok(chosen) => {
+            let bucket = chosen.bucket().cloned();
+            // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
+            // host's bucket to reach them by; the host's alone without one.
+            let kmses: Arc<dyn keys::Kmses> = match host_bucket() {
+                Ok(home) => Arc::new(ByBucket::new(home, chosen, std::env::vars())),
+                Err(_) => one(chosen.shared()),
+            };
+            Ok(HostKeys { kmses, bucket })
+        }
         // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
         // tenant's KEK made on its first use, which the tests' readers share
         // (`bucket_cell::keys::testing`, TASK-411.28).
         #[cfg(test)]
         Err(why) if why == bucket_cell::bucket_kms::no_kms() => {
-            Ok(HostKeys { kms: bucket_cell::keys::testing::kms(), bucket: None })
+            Ok(HostKeys { kmses: one(bucket_cell::keys::testing::kms()), bucket: None })
         }
         // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
         // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
@@ -276,25 +285,27 @@ fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
     crate::host_cell::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 
-/// cladefs: the host's KMS, as its environment chose it, and the bucket KMS it is over, if it is
-/// that.
+/// cladefs: the host's KMSes, a bucket's each (TASK-633.6), its own as its environment chose it,
+/// and the bucket KMS that is over its own bucket, if it is that.
 struct HostKeys {
-    kms: extent_keys::kms::Shared,
+    kmses: Arc<dyn keys::Kmses>,
     bucket: Option<Arc<BucketKms<ObjectBucket>>>,
 }
 
-/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on `runtime`, the
-/// uploaders', off the paths of forks, which take from them (TASK-411.4).
-fn host_kms(
-    kms: extent_keys::kms::Shared,
-    runtime: tokio::runtime::Handle,
-) -> Arc<keys::CachingKms> {
-    keys::CachingKms::pooled(kms, keys::Pooling::on(runtime))
+/// cladefs: `kms`, for every bucket's cells.
+fn one(kms: extent_keys::kms::Shared) -> Arc<dyn keys::Kmses> {
+    Arc::new(keys::OneKms(kms))
+}
+
+/// cladefs: the host's over `kmses`: its pools of new cell KEKs refilled in batches on `runtime`,
+/// the uploaders', off the paths of forks, which take from them (TASK-411.4).
+fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc<keys::CachingKms> {
+    keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)))
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Ok(HostKeys { kms, bucket: None }))
+    KMS.set(Ok(HostKeys { kmses: one(kms), bucket: None }))
         .map_err(|_| "the host's KMS is set already".to_owned())
 }
 
@@ -327,7 +338,7 @@ pub mod testing {
     /// The host's keys under the tests' KMS, which every process has alike: a test's, and those it
     /// starts, whatever bucket each keeps its stores in.
     pub(super) fn host_keys() -> HostKeys {
-        HostKeys { kms: Arc::new(extent_keys::testing::KnownKms), bucket: None }
+        HostKeys { kmses: super::one(Arc::new(extent_keys::testing::KnownKms)), bucket: None }
     }
 }
 

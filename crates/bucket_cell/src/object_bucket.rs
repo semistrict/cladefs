@@ -856,6 +856,30 @@ impl Registered {
         crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
         Ok(bucket)
     }
+
+    /// What the registry records of the bucket numbered `number`, as `home` reaches it: its copy
+    /// in `home`'s root, or, for a number that copy lacks, the root bucket's registry, the
+    /// authority. `NoBucket` for a number neither records.
+    pub async fn entry(
+        &self,
+        home: &ObjectBucket,
+        number: u16,
+    ) -> Result<crate::identity::Entry, crate::Error> {
+        use crate::identity::{self, ROOT};
+        let copy = identity::registry(home).await?;
+        if let Some(entry) = copy.as_ref().and_then(|copy| copy.bucket(number)) {
+            return Ok(entry.clone());
+        }
+        let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
+        let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
+        let root = match (ours.number, root) {
+            (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
+            (_, Some(root)) => self.reach(root).await?,
+        };
+        let registry = identity::registry(&root).await?;
+        let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
+        entry.cloned().ok_or(crate::Error::NoBucket(number))
+    }
 }
 
 impl Resolve for Registered {
@@ -864,25 +888,7 @@ impl Resolve for Registered {
         home: &'a ObjectBucket,
         number: u16,
     ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
-        use crate::identity::{self, ROOT};
-        Box::pin(async move {
-            let copy = identity::registry(home).await?;
-            let entry = match copy.as_ref().and_then(|copy| copy.bucket(number)) {
-                Some(entry) => entry.clone(),
-                None => {
-                    let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
-                    let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
-                    let root = match (ours.number, root) {
-                        (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
-                        (_, Some(root)) => self.reach(root).await?,
-                    };
-                    let registry = identity::registry(&root).await?;
-                    let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
-                    entry.cloned().ok_or(crate::Error::NoBucket(number))?
-                }
-            };
-            Ok(Arc::new(self.reach(&entry).await?))
-        })
+        Box::pin(async move { Ok(Arc::new(self.reach(&self.entry(home, number).await?).await?)) })
     }
 }
 
