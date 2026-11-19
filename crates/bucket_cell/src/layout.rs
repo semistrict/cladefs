@@ -185,6 +185,15 @@ pub fn cell_of(key: &str) -> Option<CellId> {
     in_cell(key).map(|(cell, _)| cell)
 }
 
+/// cladefs: the number of the bucket a request of `key`, a key or a prefix, goes to (TASK-633.4):
+/// that of the bucket its cell's ID carries ([`crate::objectid::bucket_of`]); none for a key of no
+/// cell, or of a cell tests name (number [`crate::identity::NAMED`]), whose requests stay in the
+/// bucket asked. What a routed bucket routes by, and the simulation's buckets of regions.
+pub fn routed_to(key: &str) -> Option<u16> {
+    let number = crate::objectid::bucket_of(cell_of(key)?.id);
+    (number != crate::identity::NAMED).then_some(number)
+}
+
 /// cladefs: the cell whose whole prefix `prefix` is, as a listing of every object of the cell's
 /// names it: none for any other prefix.
 pub fn cell_of_prefix(prefix: &str) -> Option<CellId> {
