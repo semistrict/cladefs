@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:31'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: medium
@@ -31,8 +31,8 @@ Every LocalCell has its own Unpacked LRU of up to 32 decompressed or raw parts. 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Once a segment is acknowledged and leaves the store, or its Framed is dropped, the store holds no unpacked parts of it.
-- [ ] #2 governed_bytes() counts every store's unpacked parts, and govern() with a small allowance frees them.
+- [x] #1 Once a segment is acknowledged and leaves the store, or its Framed is dropped, the store holds no unpacked parts of it.
+- [x] #2 governed_bytes() counts every store's unpacked parts, and govern() with a small allowance frees them.
 - [ ] #3 A local_cell test writes and commits about 40 MiB of compressible extents, closes the segment (close_now), reads every extent, acknowledges the segment and asserts none of its parts stay unpacked, plus a daemon-level governed_bytes/govern test; both go red with the fix reverted.
 <!-- AC:END -->
 
@@ -42,3 +42,9 @@ Every LocalCell has its own Unpacked LRU of up to 32 decompressed or raw parts. 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Unpacked parts are one process-wide cache (local_cell::unpacked), 64 MiB at most, counted in cladefsd's governed_bytes and evicted by govern before the page cache; a Framed's parts go when it is dropped. Each store kept 32 parts of its own before. Tests: framed.rs parts_unpacked_are_counted_and_go_with_their_files (a mutant keeping them past their file fails it); cell.rs parts_read_again_are_unpacked_once now of the process's cache. Left: AC3's daemon-level governed_bytes/govern test. The anonymous-memory budget's 32 MiB a writer for them (process.rs FRAMING) is unchanged. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

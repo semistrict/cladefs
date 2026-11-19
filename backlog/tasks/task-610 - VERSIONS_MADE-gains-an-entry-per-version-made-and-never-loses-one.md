@@ -1,11 +1,11 @@
 ---
 id: TASK-610
 title: VERSIONS_MADE gains an entry per version made and never loses one
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:33'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: low
@@ -31,13 +31,25 @@ Audit of 6f4dd56a0 (2026-11-18), cells review; verified against the code by inde
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Once a version is dropped (by DropVersions or by keep_last) or its store or cell is deleted, version_made_of returns None for it. The map never holds more entries than versions the daemon's open heads still name.
-- [ ] #2 A unit test in host_cell or open_cell makes many versions with keep_last 1 and drops one with drop_versions. It asserts no dropped version is still in the map and that its length stays at or under the head's versions, and it goes red with the fix reverted.
+- [x] #1 Once a version is dropped (by DropVersions or by keep_last) or its store or cell is deleted, version_made_of returns None for it. The map never holds more entries than versions the daemon's open heads still name.
+- [x] #2 A unit test in host_cell or open_cell makes many versions with keep_last 1 and drops one with drop_versions. It asserts no dropped version is still in the map and that its length stays at or under the head's versions, and it goes red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+VERSIONS_MADE keeps versions their cells name alone: made_version prunes the cell's entries not in its store's versions (a later version's window dropped them), OpenCell::drop_versions forgets those dropped, a store's deletion those of its path. Test: bucket.rs versions_made_here_are_forgotten_once_dropped (in the crate's tests, not host_cell's: it needs a store with an uploader). macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The map of versions this process made forgets versions dropped by a drop, by a later version's window, or with their store: it holds no more than the versions open heads name. Tested by versions_made_here_are_forgotten_once_dropped; a mutant without the prune fails it.
+<!-- SECTION:FINAL_SUMMARY:END -->

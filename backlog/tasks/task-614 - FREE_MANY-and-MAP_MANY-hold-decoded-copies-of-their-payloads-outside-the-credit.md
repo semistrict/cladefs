@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:33'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: low
@@ -43,3 +43,9 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+stream_bytes counts what decoding holds besides the payload: a FREE_MANY twice its payload, a MAP_MANY MAP_MANY_HELD (4) times, decoded mappings and the window's pieces; paths past PATH_MAX refused (ENAMETOOLONG) before they are copied. The client counts the same, as it shares stream_bytes. Tests: codec many_requests_count_what_they_decode and map_manys_count_what_they_hold (a mutant dropping the counting fails the first). Left: AC1/AC2's heap bursts of 64 MiB FREE_MANY and MAP_MANY in what_requests_hold_is_within_the_credit. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

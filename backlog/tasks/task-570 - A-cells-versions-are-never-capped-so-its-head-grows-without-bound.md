@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:27'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: medium
@@ -29,7 +29,7 @@ layout::MAX_VERSIONS (256) says a version past it is refused unless keep_last dr
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Making a version of a cell that already has 256 versions, with no keep_last, fails with EMLINK on every path: a VM process's VERSION request, the control API's MakeVersion with keep_last 0, and cladefsctl. The head still names 256 versions.
-- [ ] #2 However many versions are asked for, a cell's encoded head, and so each acknowledgement's head PUT, stays at most the size of 256 version records plus the rest of the head.
+- [x] #2 However many versions are asked for, a cell's encoded head, and so each acknowledgement's head PUT, stays at most the size of 256 version records plus the rest of the head.
 - [ ] #3 Regression tests go red with the fix reverted: a bucket_cell writer test on SimBucket that makes 257 versions with keep_last None, and a cladefsd test where the 257th VERSION request on a connection is answered EMLINK.
 <!-- AC:END -->
 
@@ -39,3 +39,9 @@ layout::MAX_VERSIONS (256) says a version past it is refused unless keep_last dr
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+OpenCell::make_version refuses EMLINK (new in fxfs-posix's Errno) once the cell's versions, named and local, reach MAX_VERSIONS, unless keep_last keeps a window within it (within_versions): every path, VM process, control API and cladefsctl, goes through it. Test: bucket.rs cells_make_so_many_versions_at_most (a mutant without the check fails it). Left: AC3's bucket_cell writer test (the refusal is where versions are made, OpenCell, not the writer) and a cladefsd test of the 257th VERSION request. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

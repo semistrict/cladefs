@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:24'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: high
@@ -28,7 +28,7 @@ Connection::within_bounds, the admit callback AsyncReceiver::receive runs before
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 After a connection ends partway through an admitted payload (a WRITE header of any length up to MAX_PAYLOAD, followed by part of its payload and a hang-up or reset), its tenant's in_flight().held() returns to 0 once the connection is gone, and with the budget set to MAX_PAYLOAD a new connection's 1 MiB inline WRITE is answered within a few seconds.
+- [x] #1 After a connection ends partway through an admitted payload (a WRITE header of any length up to MAX_PAYLOAD, followed by part of its payload and a hang-up or reset), its tenant's in_flight().held() returns to 0 once the connection is gone, and with the budget set to MAX_PAYLOAD a new connection's 1 MiB inline WRITE is answered within a few seconds.
 - [ ] #2 A connection whose receive waits for in-flight budget ends when its VM process exits or a SIGTERM drain starts: its store hold is let go (a restarted VM process opens the store without EBUSY) and the drain completes before its bound.
 - [ ] #3 A regression test in cladefsd's hostile.rs, beside a_tenants_in_flight_data_is_bounded, sends a WRITE header with len = MAX_PAYLOAD and 4 KiB of payload, shuts the socket, waits for connections() to drop, and asserts held() == 0 and that a later 1 MiB WRITE succeeds; LastWords::MissingPayload draws lengths within 1..=MAX_PAYLOAD and each hostile case ends by checking every tenant's held() is 0; the test goes red with the fix reverted.
 <!-- AC:END -->
@@ -39,3 +39,9 @@ Connection::within_bounds, the admit callback AsyncReceiver::receive runs before
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Admission gives a Charge, dropped with what holds it: the message, its answer, or the receive that read its payload partway, which a lost connection drops; its bytes go back to the connection's room and the tenant's bytes in flight then. A receive waiting for room ends as its VM process exits or the daemon drains (Connection::end_receiving). Test: hostile.rs connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight (a mutant giving bytes back only as answered fails it). Left: no test of AC2 (exit or drain ending a receive waiting for room), and LastWords::MissingPayload still draws any length, nor does each hostile case check held() is 0. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

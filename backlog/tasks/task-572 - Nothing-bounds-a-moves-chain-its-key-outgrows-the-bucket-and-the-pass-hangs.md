@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:27'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: medium
@@ -32,7 +32,7 @@ Pass::compactable treats every named moves object with no moves of its own as co
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A moves chain's depth stays bounded (within moves::MOVES, 64 hops, and under a bucket's 1024-byte key limit): after 60 passes at --compact-below 1.0, each seeing one co-located extent freed, every pass returns, no moves key exceeds 1024 bytes, and the surviving extent reads through fetch from the oldest location any kept state names.
-- [ ] #2 The collector refuses a --compact-below outside (0, 1] (such as 1.5) when it parses its options.
+- [x] #2 The collector refuses a --compact-below outside (0, 1] (such as 1.5) when it parses its options.
 - [ ] #3 A regression test in bucket_cell's collector tests runs the 60-pass loop on a bucket wrapper that refuses keys over 1024 bytes, plus a parse test for 1.5, and goes red with the fix reverted.
 <!-- AC:END -->
 
@@ -42,3 +42,9 @@ Pass::compactable treats every named moves object with no moves of its own as co
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The collector compacts moves no deeper than MOVES_DEPTH (32), within moves::MOVES and a 1024-byte key (layout::moves_depth); cladefs-gc refuses --compact-below outside [0, 1] (0 compacting nothing). Tests: layout.rs moves_are_as_deep_as_their_chains (32 deep under 1024 bytes), cladefs-gc fractions_past_one_are_refused (a mutant accepting them fails it). Left: AC1/AC3's 60-pass collector run on a bucket refusing long keys. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:29'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: medium
@@ -33,8 +33,8 @@ The PIN request decodes any `ExtentId` (codec `PIN | UNPIN`). `Connection::handl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 PIN of an extent the follower's view does not hold (such as ExtentId{cell, sequence: 999}) fails with EIO (NotHeld) or ENOENT and adds nothing to the view.
-- [ ] #2 A view's pins are bounded: past a fixed count, PIN fails or the connection is let go as past the protocol's bounds, view.pinned().len() stays at that bound, and the daemon's heap stays within the hostile harness's bound.
+- [x] #1 PIN of an extent the follower's view does not hold (such as ExtentId{cell, sequence: 999}) fails with EIO (NotHeld) or ENOENT and adds nothing to the view.
+- [x] #2 A view's pins are bounded: past a fixed count, PIN fails or the connection is let go as past the protocol's bounds, view.pinned().len() stays at that bound, and the daemon's heap stays within the hostile harness's bound.
 - [ ] #3 A regression test in cladefsd's tests follows a store, pins an extent its view does not hold expecting an error, then pins past the bound expecting refusal; it goes red with the fix reverted.
 <!-- AC:END -->
 
@@ -44,3 +44,9 @@ The PIN request decodes any `ExtentId` (codec `PIN | UNPIN`). `Connection::handl
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+OpenCell::pin checks the view holds the extent (LocalCell::view_extent), and View::pin refuses past View::MAX_PINS (65,536, TooManyPins, EMFILE). Tests: cladefsd followers_pin_only_what_their_views_hold (made-up ID ENOENT), views.rs views_pin_so_many_extents_at_most (a mutant without the bound fails it). Left: AC3 asks the bound tested through the daemon; it is tested at the view. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:28'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: medium
@@ -32,7 +32,7 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Eight connections of one tenant each send an ACK header with len = MAX_PAYLOAD and all but the last byte of its payload. The extent daemon's heap peak stays within the tenant's in-flight budget plus slack.
-- [ ] #2 A header with a nonzero length on ACK, STAGE_COUNTS or STAGE_PRIVATE_COUNTS, kinds that carry no payload, ends its connection before any of the payload is held.
+- [x] #2 A header with a nonzero length on ACK, STAGE_COUNTS or STAGE_PRIVATE_COUNTS, kinds that carry no payload, ends its connection before any of the payload is held.
 - [ ] #3 The eight-connection test sits beside a_tenants_in_flight_data_is_bounded in crates/cladefs/src/cladefsd/tests.rs, and `abusing` in crates/cladefs/src/cladefsd/tests/hostile.rs generates these kinds with payloads. Both go red with the fix reverted.
 <!-- AC:END -->
 
@@ -42,3 +42,9 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+A payload on ACK, STAGE_COUNTS or STAGE_PRIVATE_COUNTS ends the connection before any of it is read. Test: hostile.rs payloads_of_kinds_that_carry_none_end_their_connections (a mutant reading them fails it); the hostile proptest's hostiles saying one now have their connection ended (Hostile::ends_its_connection). Left: AC1's eight-connection heap test, and abusing's generating these kinds with payloads. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->

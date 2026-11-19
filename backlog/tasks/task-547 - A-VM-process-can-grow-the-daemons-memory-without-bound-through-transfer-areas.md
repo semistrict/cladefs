@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:24'
-updated_date: '2026-11-19 07:06'
+updated_date: '2026-11-19 16:27'
 labels: []
 dependencies: []
 priority: high
@@ -32,7 +32,7 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Under the trigger, 32 rounds of: a connection gives a fresh, never-touched 64 MiB memfd sealed with F_SEAL_SHRINK, READ_TRANSFERs into all of it, then disconnects while the VM process keeps the memfd. The daemon's cgroup memory.current (or Shmem in /proc/meminfo) grows by less than one area (64 MiB) in total.
-- [ ] #2 Memory charged to the daemon through transfer areas is bounded per tenant and counted by the governor or the tenant's in-flight budget; an area whose connection has ended charges the daemon nothing, however many connections come and go.
+- [x] #2 Memory charged to the daemon through transfer areas is bounded per tenant and counted by the governor or the tenant's in-flight budget; an area whose connection has ended charges the daemon nothing, however many connections come and go.
 - [ ] #3 A Linux test in the daemon's tests runs that 32-round loop and checks the bound; it goes red with the fix reverted.
 <!-- AC:END -->
 
@@ -42,3 +42,9 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The daemon seals a transfer area against future writes once it maps it (F_SEAL_FUTURE_WRITE, GROW, SEAL; the client no longer seals it against more), so no page of it is punched out, and touches only pages resident (mincore, TransferArea::range): those the VM process wrote, charged to it. The client writes a slot's pages as it first takes it (an area written whole up front held 2 MiB a connection, past serves_hundreds_of_forks_of_a_base's bound). Arenas are sealed against more seals (physmem), which a VM process giving one back as its area had the daemon add, its chunks unpunchable then: the hostile proptest found it. Tests: transfer_areas_are_their_vm_processes_memory (unwritten bytes refused, written read, punching refused EPERM; mutants without the check or the seal fail it). Left: AC1/AC3's 32-round measurement of the daemon's cgroup memory. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+<!-- SECTION:NOTES:END -->
