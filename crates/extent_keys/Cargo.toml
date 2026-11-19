@@ -29,7 +29,9 @@ bytes = "1.12.1"
 # base64 (MIT OR Apache-2.0), crc-fast's CRC32C (MIT OR Apache-2.0) for its integrity fields,
 # tokio's timer (MIT) between retries, url's query parsing (MIT OR Apache-2.0); and object_store's
 # (MIT OR Apache-2.0) GCP credentials, Application Default Credentials as cladefs's gs:// buckets
-# have them.
+# have them. Azure Key Vault's REST API (kms/azure.rs, TASK-633.6) uses the same crates, no other:
+# reqwest, serde_json, base64, url and tokio, its tokens fetched from Azure's authority or the
+# instance metadata service by hand.
 crc-fast.workspace = true
 object_store.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }

@@ -254,6 +254,22 @@ metadata server); `CLADEFS_KMS_GCP_TOKEN`, an access token, is for development.
 A tenant that rotates its key keeps its old versions enabled: cells made
 before stay wrapped under them (TASK-411.21).
 
+**Azure Key Vault** (TASK-633.6). With
+`CLADEFS_KMS=azure-kv://myvault.vault.azure.net?key=cladefs-tenant-{tenant}`,
+each tenant's KEK is the key `cladefs-tenant-<tenant in base 32>` in that vault
+(RSA, wrapped with `RSA-OAEP-256`; `&alg=A256KW` for a Managed HSM's AES keys), a
+wrap its `wrapkey` of the tenant's ID and the key, so that no other tenant's
+unwrap gives it. A tenant's own key in its own vault is named in `&keys=FILE`, a
+line `TENANT https://THEIR_VAULT.vault.azure.net/keys/NAME` each. Each tenant
+grants the hosts' identity `wrapKey` and `unwrapKey` on its key alone (`Key
+Vault Crypto Service Encryption User`); taking that away, or disabling the key,
+revokes it; deleting it shreds the tenant. Hosts authenticate as Azure's
+libraries do: workload identity (`AZURE_FEDERATED_TOKEN_FILE`), a service
+principal's secret (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`),
+or the managed identity; `CLADEFS_KMS_AZURE_TOKEN`, an access token, is for
+development. Its refusals are mapped by Key Vault's error codes, not yet checked
+against the service itself (tests run against a fake of the vault).
+
 ## Access to userfaultfd
 
 On Linux, DAX windows take KVM's faults through userfaultfd, which needs
