@@ -290,7 +290,7 @@ fn deleted_bases() -> Profile {
     })
 }
 
-test_holds!(bases_deleted_under_live_forks, deleted_bases());
+test_holds!(bases_deleted_under_live_forks, deleted_bases(), [6496]);
 
 /// cladefs: cells across the buckets of three cloud regions (TASK-633.10): each cell in the bucket of
 /// the host that made it, versions restored by hosts of other regions into their own buckets, bases
@@ -299,7 +299,7 @@ fn regions() -> Profile {
     Profile { regions: 3, ..deleted_bases() }
 }
 
-test_holds!(cells_across_regions, regions());
+test_holds!(cells_across_regions, regions(), [2325]);
 // A child in another region's bucket than its parent's keeps what it reads of the parent by its
 // reference, in the parent's bucket, and the parent's collector keeps its origins.
 test_needs!(references_hold_across_regions, references, regions());
