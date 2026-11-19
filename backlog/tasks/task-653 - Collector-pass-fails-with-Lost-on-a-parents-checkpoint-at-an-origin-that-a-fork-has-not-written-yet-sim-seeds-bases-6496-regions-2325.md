@@ -3,10 +3,10 @@ id: TASK-653
 title: >-
   Collector pass fails with Lost on a parent's checkpoint at an origin that a
   fork has not written yet (sim seeds bases 6496, regions 2325)
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-19 03:17'
-updated_date: '2026-11-19 03:32'
+updated_date: '2026-11-19 08:21'
 labels:
   - collector
   - sim
@@ -26,8 +26,8 @@ A pass erroring deletes nothing (safe) but the violation is a real protocol gap:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Seeds 6496 (bases) and 2325 (regions) pass, with a regression test pinning the race
-- [ ] #2 The rule that handles it is shown needed by a seed search
+- [x] #1 Seeds 6496 (bases) and 2325 (regions) pass, with a regression test pinning the race
+- [x] #2 The rule that handles it is shown needed by a seed search
 <!-- AC:END -->
 
 ## Definition of Done
@@ -48,3 +48,9 @@ Find which Lost exit fires (tagged temporarily: recover_live -> lost_is_ok false
 <!-- SECTION:NOTES:BEGIN -->
 Confirmed pre-existing: seed 6496 (bases) fails at 4784e3c05 and at 82bb2aa37. Cause: recover_live read a restore's record while forking; its origin checkpoint (written by the restore after its reference, before it is made) was not there yet; lost_is_ok read the record again, now made (forking None), and returned false -> Error::Lost. Fixed in d1f84648d (branch, verification pending): lost_is_ok(bucket, cell, read, writes) returns true (decided by the next pass) when the pass's read was forking and the record is made now, and when abandon finds it made. Seeds pinned (test_holds found lists); bases and regions profiles hold over 8000 seeds each (SIM_SOAK=40). bucket_cell 334/334, sim 44/44.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+lost_is_ok (collector.rs) now takes the record the pass read: a fork being made then and made since, its origin checkpoint written before it was made, leaves the cell to the next pass rather than failing with Lost (also when abandon finds it made). Pre-existing on main (seed 6496 of profile bases failed at 4784e3c05). Seeds 6496 (bases) and 2325 (regions) pinned in their profiles' test_holds lists; both profiles hold over 8000 seeds each; without the fix, both seeds fail. Landed on main (456d226f0) after macOS 2728/2728 and Linux all parts green at 018345e26.
+<!-- SECTION:FINAL_SUMMARY:END -->

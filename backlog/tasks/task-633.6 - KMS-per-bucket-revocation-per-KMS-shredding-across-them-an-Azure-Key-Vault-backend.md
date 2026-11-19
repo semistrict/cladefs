@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-19 02:49'
+updated_date: '2026-11-19 08:21'
 labels:
   - bucket
   - multi-region
@@ -30,9 +30,9 @@ One KMS serves a process (`static POOLED`), refusals revoke a tenant everywhere,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each bucket's registry entry names its KMS; a cell's keys are wrapped in its home bucket's; the KMS cache is keyed by tenant and KMS
-- [ ] #2 A KMS refusing revokes the tenant for that KMS's buckets alone; an unwrap across buckets under the bucket KMS is refused, not Destroyed
-- [ ] #3 Shredding a tenant destroys its KEK in every KMS that holds one; doc-16 says so
+- [x] #1 Each bucket's registry entry names its KMS; a cell's keys are wrapped in its home bucket's; the KMS cache is keyed by tenant and KMS
+- [x] #2 A KMS refusing revokes the tenant for that KMS's buckets alone; an unwrap across buckets under the bucket KMS is refused, not Destroyed
+- [x] #3 Shredding a tenant destroys its KEK in every KMS that holds one; doc-16 says so
 - [ ] #4 An azure-kv:// backend (Key Vault or Managed HSM) with doc-16's tests for backends, license checked
 <!-- AC:END -->
 
@@ -71,4 +71,6 @@ Review (verifying-reviewer, 2026-11-18 night) found 4 defects in the unlanded co
 2. kms_vars: a bucket's own CLADEFS_KMS/MASTER_KEY/MASTER_KEY_FILE override the host's as one group (was: host _FILE + bucket key = "both set" refusal; host CLADEFS_KMS beat a bucket's own master key). Test a_buckets_own_kms_variables_override_the_hosts_as_one.
 3. CachingKms: a control-API revocation now holds for every KMS until each answers (Refused{by, told}); it used to be dropped for KMSes not yet asked, letting inheriting() pass for a parent in an unasked bucket. Test revocations_told_hold_for_every_kms_until_each_answers.
 4. ByBucket::of keeps the bucket KMS that won the chosen race in buckets (shred forgot a duplicate instance).
+
+Landed on main 456d226f0 (2026-11-19): ByBucket, shredding across buckets, fxkb v2 Elsewhere, azure-kv:// with per-audience tokens, and the review-round revocation fixes (one ledger lock). AC #1-3 checked by bucket_kms::tests::buckets_cells_are_under_their_own_buckets_kms and the keys::tests revocation tests. AC #4 open: the azure-kv backend is tested against an in-process fake only; doc-16's live backend tests need an Azure vault and identity (Needs the user).
 <!-- SECTION:NOTES:END -->
