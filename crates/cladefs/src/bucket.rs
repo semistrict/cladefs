@@ -100,9 +100,15 @@ pub fn format_bucket(url: &str, details: Details) -> Result<Identity, crate::Err
 /// `root_url` (`cladefsctl add-bucket`, TASK-633.9): the next number, by a conditional write of the
 /// root's registry, which then goes to every bucket's root. Its identity: refused if it is a
 /// bucket already (`EEXIST`), or the root is another bucket (`EINVAL`), or no number is left
-/// (`ENOSPC`).
+/// (`ENOSPC`), or it is a memory bucket, its process's alone (`EINVAL`).
 pub fn add_bucket(root_url: &str, url: &str, details: Details) -> Result<Identity, crate::Error> {
     let (root_details, details) = (located(root_url, Details::default())?, located(url, details)?);
+    // A memory bucket is its process's alone: no other host, nor a later process, reaches it at
+    // its URL, as the registry records it (TASK-633.3).
+    if details.provider.as_deref() == Some("memory") {
+        let refused = anyhow::anyhow!("{url}: a memory bucket is one process's, none to add");
+        return Err(crate::Error::new(refused.context(Errno::EINVAL)));
+    }
     let open = |url: &str| crate::host_cell::bucket(url).map_err(crate::Error::new);
     let (root, new) = (open(root_url)?, open(url)?);
     let (identity, registry) =

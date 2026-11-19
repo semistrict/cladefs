@@ -325,6 +325,9 @@ fn buckets_are_added_in_turn_and_recorded_in_every_root() {
     let refused = run(&["add-bucket", &root, &other]).unwrap_err();
     assert!(refused.contains("the bucket is bucket 1 already"), "{refused}");
     assert!(refused.contains("EEXIST (errno 17)"), "{refused}");
+    let refused = run(&["add-bucket", &root, "memory:///nowhere"]).unwrap_err();
+    assert!(refused.contains("a memory bucket is one process's"), "{refused}");
+    assert!(refused.contains("EINVAL (errno 22)"), "{refused}");
     let refused = run(&["add-bucket", &east, &url("more")]).unwrap_err();
     assert!(refused.contains("bucket 2 is not the root bucket"), "{refused}");
     assert!(refused.contains("EINVAL (errno 22)"), "{refused}");
