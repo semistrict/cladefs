@@ -16,22 +16,36 @@ use std::time::Instant;
 const URL: &str = "memory:///peers";
 
 /// A daemon's peer server on the loopback, serving the parts of `bucket`, named [`URL`], kept in a
-/// cache in `dir`: its address.
+/// cache in `dir`: its address. Of no region, as a bucket of no number yet is.
 fn serving(bucket: &Arc<ObjectBucket>, dir: &std::path::Path) -> String {
+    serving_in(bucket, dir, None)
+}
+
+/// [`serving`], of `region` (TASK-633.4).
+fn serving_in(bucket: &Arc<ObjectBucket>, dir: &std::path::Path, region: Option<Region>) -> String {
     let cache = Arc::new(Cache::open(dir, u64::MAX).unwrap());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket.clone(), cache).unwrap();
-    let server = Server { bucket: URL.to_owned(), serving, replicas: None };
+    let server = Server { bucket: URL.to_owned(), region, serving, replicas: None };
     std::thread::spawn(move || serve(listener, server));
     address
 }
 
-/// Asks the peer at `address`, serving the bucket at `url`, for `asked`.
-fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, String> {
+/// Asks the peer at `address`, as the host whose bucket is at `url`, of no region, for `asked`.
+fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, Refusal> {
+    ask_as(address, (url, None), asked)
+}
+
+/// [`ask`], as a host of `region` (TASK-633.4).
+fn ask_as(
+    address: &str,
+    (url, region): (&str, Option<Region>),
+    asked: Asked,
+) -> Result<Option<Vec<u8>>, Refusal> {
     let runtime = crate::bucket::bucket_runtime().unwrap();
-    runtime.block_on(link(&runtime, address, url).get(asked))
+    runtime.block_on(link(&runtime, address, (url, region)).get(asked))
 }
 
 /// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
@@ -86,12 +100,29 @@ fn peers_asking_wrongly_are_refused() {
 
     let head = layout::head(layout::test_cell(1));
     let not_served = Asked { key: head.clone(), ..asked.clone() };
-    assert_eq!(refused(URL, not_served), format!("InvalidArgument: {head}: no parts served"));
+    let invalid = format!("InvalidArgument: {head}: no parts served");
+    assert_eq!(refused(URL, not_served), Refusal::Failed(invalid));
     let other = "memory:///other";
-    assert_eq!(
-        refused(other, asked),
-        format!("FailedPrecondition: asked of {other}, this host's bucket being {URL}")
-    );
+    let foreign = format!("asked of {other}, this host's bucket being {URL}");
+    assert_eq!(refused(other, asked), Refusal::Foreign(foreign));
+}
+
+/// TASK-633.4: a host of one region serves hosts of its region, and refuses those of another, or of
+/// another system of buckets, as foreign, whatever their buckets' URLs.
+#[test]
+fn peers_of_another_region_are_refused_as_foreign() {
+    let (bucket, location) = holding(&noise(layout::PART));
+    let dir = tempfile::tempdir().unwrap();
+    let east = Region { home: 2, root: 7 };
+    let address = serving_in(&bucket, dir.path(), Some(east));
+    let (asked, bytes) = asked(&bucket, &location, 0);
+    assert_eq!(ask_as(&address, (URL, Some(east)), asked.clone()), Ok(Some(bytes)));
+    let west = Region { home: 3, root: 7 };
+    let refused = ask_as(&address, (URL, Some(west)), asked.clone());
+    assert!(matches!(refused, Err(Refusal::Foreign(_))), "{refused:?}");
+    let elsewhere = Region { home: 2, root: 8 };
+    let refused = ask_as(&address, (URL, Some(elsewhere)), asked);
+    assert!(matches!(refused, Err(Refusal::Foreign(_))), "{refused:?}");
 }
 
 /// A peer out of reach fails within the time to connect, not the request's deadline.
@@ -103,7 +134,7 @@ fn a_peer_out_of_reach_fails_fast() {
     let (bucket, location) = holding(&noise(layout::PART));
     let (asked, _) = asked(&bucket, &location, 0);
     let began = Instant::now();
-    let failed = ask(&address, URL, asked).unwrap_err();
+    let Err(Refusal::Failed(failed)) = ask(&address, URL, asked) else { panic!("not failed") };
     assert!(failed.starts_with("Unavailable: "), "{failed}");
     assert!(began.elapsed() < CONNECT * 2, "took {:?}", began.elapsed());
 }
@@ -134,7 +165,8 @@ fn member(dir: &std::path::Path, with: bool) -> (String, Option<Arc<Replicas<Hos
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let serving = crate::bucket::serving_peers(bucket, cache).unwrap();
-    let server = Server { bucket: URL.to_owned(), serving, replicas: replicas.clone() };
+    let server =
+        Server { bucket: URL.to_owned(), region: None, serving, replicas: replicas.clone() };
     std::thread::spawn(move || serve(listener, server));
     (address, replicas)
 }
