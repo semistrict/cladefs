@@ -210,10 +210,13 @@ impl Drop for Collecting {
 /// A pass of `collector` over `bucket`, as a holder no other pass is: what it did, logged and
 /// returned, or why it failed, logged. Nothing it could not read it deleted: the next pass tries
 /// again.
-fn pass(collector: &mut Collector, bucket: &ObjectBucket) -> Report {
+fn pass(collector: &mut Collector, bucket: &Arc<ObjectBucket>) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
-    let failed = match local_cell::upload::block_on(collector.collect(bucket, rand::random())) {
+    // cladefs: copies of other buckets' cells' versions here, by its own store (TASK-633.8).
+    let own = bucket.own();
+    let collected = collector.collect_with_own(&**bucket, Some(&*own), rand::random());
+    let failed = match local_cell::upload::block_on(collected) {
         Ok(Ok(report)) => {
             let Report {
                 deleted,

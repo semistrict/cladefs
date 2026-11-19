@@ -1393,6 +1393,83 @@ pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
 
+    /// TASK-633.8: a pass over the copy of another bucket's cell's version here keeps it while
+    /// that cell's head names the version, a child refers here, or a mirror is under way (a pin);
+    /// retires here the references of children gone; and, nothing needing it, deletes it, its
+    /// marker with it, nothing in the cell's own bucket touched.
+    #[test]
+    fn copies_of_other_buckets_versions_are_kept_while_needed() {
+        use crate::collector::{Collector, Options};
+        use crate::identity::{self, Details};
+        use crate::layout::{Head, Mirror, Version};
+        use crate::record::Made;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let (home_url, other_url) = (url("home"), url("other"));
+            let (home, other) = (
+                ObjectBucket::from_url(&home_url).unwrap(),
+                ObjectBucket::from_url(&other_url).unwrap(),
+            );
+            identity::format(&home, &Details::default()).await.unwrap();
+            let details = Details { url: Some(other_url.clone()), ..Details::default() };
+            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
+            let routed = Arc::new(ObjectBucket::from_url(&home_url).unwrap().routed(resolve));
+            let own = routed.own();
+            let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 5));
+            async fn put(bucket: &ObjectBucket, key: String, bytes: Vec<u8>) {
+                bucket.store_put(&key, bytes.into(), PutMode::Overwrite).await.unwrap();
+            }
+            async fn listed(bucket: &ObjectBucket, cell: layout::CellId) -> Vec<String> {
+                let listed = bucket.store_list(&cell.prefix()).await.unwrap();
+                listed.into_iter().map(|meta| meta.key).collect()
+            }
+            let named = |versions: Vec<Version>| {
+                layout::encode(&Head { versions, ..Head::of(Made::Root, 4) })
+            };
+            let version = Version { id: 9, at: 3, shared: false };
+            put(&other, layout::head(parent), named(vec![version])).await;
+            let copied = [layout::checkpoint(parent, 3, 1), layout::segment(parent, 1, 2)];
+            for key in &copied {
+                put(&home, key.clone(), b"copied".to_vec()).await;
+            }
+            put(&home, layout::mirror(parent, 3), layout::encode(&Mirror::of(1))).await;
+            let pass = || Collector::new(Options { compact_below: 0.5, grace: 0 });
+            let all = listed(&home, parent).await;
+
+            // The head names the version: kept.
+            let report = pass().collect_copy(&*routed, &*own, parent).await.unwrap();
+            assert_eq!((report.deleted, listed(&home, parent).await), (0, all.clone()));
+            // The version dropped, a child here referring to it: kept.
+            put(&other, layout::head(parent), named(vec![])).await;
+            let origin = Origin { parent, at: 3 };
+            put(&home, layout::head(child), layout::encode(&Head::of(Made::Clone(origin), 4)))
+                .await;
+            let reference = layout::reference(parent, 3, child);
+            put(&home, reference.clone(), b"ref".to_vec()).await;
+            let report = pass().collect_copy(&*routed, &*own, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 0));
+            // A mirror under way, nothing else: kept.
+            let deleted = Head { epoch: Head::FINAL, ..Head::of(Made::Clone(origin), 4) };
+            put(&home, layout::head(child), layout::encode(&deleted)).await;
+            put(&home, layout::pin(parent, 3), b"pin".to_vec()).await;
+            let report = pass().collect_copy(&*routed, &*own, parent).await.unwrap();
+            assert_eq!((report.deleted, report.retired), (0, 1), "the gone child's reference");
+            assert!(home.store_get(&reference).await.is_err(), "a gone child's reference stands");
+            // Nothing needs it: the marker and the copy go, the reference's mark stays.
+            home.store_delete(&layout::pin(parent, 3)).await.unwrap();
+            let report = pass().collect_copy(&*routed, &*own, parent).await.unwrap();
+            assert_eq!(report.deleted, copied.len());
+            assert_eq!(listed(&home, parent).await, [layout::retired(parent, 3, child)]);
+            let untouched = [layout::head(parent)];
+            assert_eq!(listed(&other, parent).await, untouched, "the cell's own bucket touched");
+        });
+    }
+
     /// TASK-633.4: a bucket routing by the registry sends the requests of a cell of another bucket
     /// there, and keeps those of its own cells, of the cells tests name, and of no cell's: reads,
     /// writes, listings, and each bucket's share of a batch of deletions. A number no registry
