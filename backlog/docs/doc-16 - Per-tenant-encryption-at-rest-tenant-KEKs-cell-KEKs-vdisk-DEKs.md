@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-17 02:06'
+updated_date: '2026-11-19 02:33'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs
 
@@ -229,7 +229,11 @@ dropped with its pool, never written out unwrapped.
 
 - **A tenant:** destroy its KEK in the KMS, then tell every host (`ForgetTenantKeys`, TASK-411.7);
   under the bucket KMS, `ShredTenant` on every host, which leaves a tombstone in its KEK object's
-  place (The bucket KMS).
+  place (The bucket KMS). With cells in several buckets (backlog doc-23, TASK-633.6), each bucket's
+  cells are under that bucket's KMS (`bucket_kms::ByBucket`): `ShredTenant` leaves a tombstone in
+  every bucket under a bucket KMS that the registry of buckets records, and names each bucket
+  under a KMS named by URL, whose KEK of the tenant is destroyed there, then `ForgetTenantKeys`;
+  a bucket out of reach is named too, and `ShredTenant` again finishes it.
   Absolute: every cell KEK of it, in every version of every cell object, unwraps no more.
 - **A cell:** remove its wrapped KEK from its object (`ShredCell`, conditional as every cell
   update, TASK-411.7). Only as strong as the bucket keeps no older version of `<C>cell`: with
@@ -680,10 +684,13 @@ refuses to start) and removed plaintext (One sealed mode).
   1, kind 2, the tenant, 14 bytes. Under the tenant's prefix, no cell's: no pass lists it, and the
   collector keeps it (`Kind::Kek`) if one did (`extent_remote` `testing::uncollected`, the fork and
   restore fault tests' tables).
-- **Keys it wraps** (cell KEKs, in cells' objects): `fxkb`, format 1, the tenant, the KEK's ID,
-  then the key wrapped with AES-KW under `HKDF-SHA256(tenant KEK, info = "cladefs bucket kms wrap"
-  || that header)`, 61 bytes, as `LocalKms`'s (`fxkw`) are: the header names whose KEK and which,
-  and is bound to the key.
+- **Keys it wraps** (cell KEKs, in cells' objects): `fxkb`, format 2 (TASK-633.6), the tenant, the
+  identity of the bucket its KEK object is in (`identity` object's ID, 0 for a bucket of none), the
+  KEK's ID, then the key wrapped with AES-KW under `HKDF-SHA256(tenant KEK, info = "cladefs bucket
+  kms wrap" || that header)`, 69 bytes, as `LocalKms`'s (`fxkw`) are: the header names whose KEK,
+  where, and which, and is bound to the key. A key of another bucket's asked of this one's is
+  refused as `Elsewhere`, never as destroyed (a bucket KMS asked by mistake says nothing of the
+  tenant's KEK there), so no revocation follows.
 - **First use.** A wrap for a tenant whose KEK the host holds not reads its object: there, it
   unwraps it under whichever master key its ID names. None there: it reads the tenant's sealed
   marker (TASK-411.19), and if it is there refuses the tenant as destroyed (its KEK object was
