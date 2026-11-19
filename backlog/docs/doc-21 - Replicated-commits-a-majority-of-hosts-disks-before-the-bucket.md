@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-18T16:19:00Z'
+updated_date: '2026-11-19T01:42:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -199,6 +199,21 @@ mode:
 `W` needs no fence of `c`, as no one else appends to it, and `W` itself stops counting it once the
 swap lands.
 
+As built (TASK-537.3.5, `upload::Shared::keep` and `replace`, `replicate::Replicator::replacing`):
+
+- A member refusing the writer (another incarnation, or full: `RESOURCE_EXHAUSTED` refuses rather
+  than retries), or down for 1 s, is replaced. Every member of `c+1` is picked afresh by the
+  rendezvous hash of `(cell, c+1)` over the peers that answer, the refusing aside, and every one of
+  them, a survivor of `c` too, is sent the whole spooled tail into `c+1`'s own logs: no member's
+  copy is shared between configurations.
+- A replacement whose members take not what the guest was told replicated within 60 s is given up
+  before its CAS is sent (`Replicator::abandon`), and `c` alone counts again; picked again later,
+  backing off from 1 s to 30 s. Giving up after the CAS is sent would be unsafe (the spec's
+  `Abandon` action, its rule `abandonUnissued` and its mutation `AbandonIssued`).
+- A take that asks for another f than the configuration it recovers from replicates at the
+  greater f first, and the writer then replaces it with one of the f asked for: to f = 0 by the
+  rule below, after which the store replicates no more.
+
 ### Degraded
 
 If fewer than f peers of the active configuration answer for 1 s, the cell is **degraded**: it says
@@ -213,6 +228,16 @@ landed but not yet learned, a commit told Replicated on the old configuration an
 copy, while a taker that read `f = 0` recovered the bucket alone). That swap waits until
 Uploaded has reached everything the writer acknowledged as Replicated, which is the joint rule
 again. It is safe because, from then on, everything the writer tells durable is Uploaded.
+
+As built (TASK-537.3.5): degraded is judged at once, not after 1 s (a member is down from its first
+failed append), and also covers a configuration of f = 0, a fenced writer, and a broken spool.
+While degraded, the writer asks its uploader to close and upload every 250 ms that commits wait,
+and a waiter for Replicated asks for its upload at once, as it does while a replacement is under
+way. A member down for 1 s starts a replacement; degraded for 1 s and no replacement to be had,
+the writer drops to f = 0, and replaces that with a configuration of the f its head asks for as
+peers answer again. StatCell says `degraded`, `members_up` and `active_replicas` (the active
+configuration's f); `/metrics` says `cladefsd_replication_degraded{cell}` and
+`cladefsd_replication_members_up{cell}`.
 
 ### Choosing members
 
@@ -256,6 +281,7 @@ minutes at 11M states and more.
 | `ReplicationUploads` | uploads and drops, 2 commits, 2 takes | 2,326,920 | 101 s |
 | `ReplicationReplaces` | a replacement, its swap landing and learned, under takes | 3,793,205 | 190 s |
 | `ReplicationZero` | a drop to f = 0 with uploads, under takes | 158,133 | 8 s |
+| `ReplicationAbandons` | replacements given up before their CAS, and made again, under takes | 6,223,898 | 325 s |
 | `ReplicationFailures` | a disk lost and a daemon crashed, 2 commits, 2 takes | 480,946 | 16 s |
 | `ReplicationSweeps` | sweeps of superseded configurations, 3 takes | 238,260 | 11 s |
 | `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
@@ -293,6 +319,7 @@ configuration other than the old writer are up (TASK-537.3 tests them on daemons
 | `ZeroFWithoutUpload`: swap to `f = 0` before Uploaded catches up | an ack lost |
 | `NoIncarnation`: a member is a host, whatever disk it has | an ack lost after a disk loss |
 | `NoZeroQuorum`: an f = 0 configuration counts as a quorum of one | an ack lost during a drop to f = 0 |
+| `AbandonIssued`: give a replacement up after its CAS is sent | an ack lost when the CAS lands after |
 
 ## What each failure keeps (rows for doc-12)
 

@@ -70,6 +70,8 @@
 (*   what it told Replicated (ZeroFWithoutUpload).                         *)
 (* - zeroNoQuorum: an f = 0 configuration holds no quorum, so nothing is   *)
 (*   told Replicated while a drop to it is in flight (NoZeroQuorum).       *)
+(* - abandonUnissued: a writer gives a replacement up (`abandon`) only     *)
+(*   before it sends its CAS (AbandonIssued, TASK-537.3.5).                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -86,7 +88,8 @@ CONSTANTS
     Rules           \* the protocol's rules in force (all, but in a mutation)
 
 AllRules == {"fence", "fenceOthers", "longest", "installFirst", "activate", "joint",
-             "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum"}
+             "dropAcked", "promise", "incarnation", "zeroAfterUpload", "zeroNoQuorum",
+             "abandonUnissued"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME F \in Nat /\ Cardinality(Hosts) >= 2 * F + 1
@@ -97,7 +100,8 @@ ASSUME NoHost \notin Hosts
 \* every replacement is such a drop: replacements keeping f are checked by the models without it). Takes, fences,
 \* commits, deliveries, Replicated acknowledgements, replacements, crashes and losses are always
 \* in (bounded by their Max constants).
-AllCan == {"upload", "drop", "sweep", "zero"}
+\* And replacements given up, their members not taking the tail in time ("abandon", TASK-537.3.5).
+AllCan == {"upload", "drop", "sweep", "zero", "abandon"}
 ASSUME Can \subseteq AllCan
 
 R(rule) == rule \in Rules
@@ -117,7 +121,7 @@ NoCfg == [key |-> <<0, 0>>, f |-> 0, w |-> NoHost, members |-> {}]
 NoReply == [log |-> <<>>, drop |-> 0]
 NoSes == [st |-> "none", ep |-> 0, old |-> NoCfg, fenced |-> {},
           replies |-> [h \in Hosts |-> NoReply], cfg |-> NoCfg, pend |-> NoCfg, issued |-> FALSE,
-          landed |-> 0, replaces |-> 0]
+          cas |-> NoCfg, landed |-> 0, replaces |-> 0]
 
 VARIABLES
     head,       \* the bucket's head: [epoch, cfg, up]
@@ -380,17 +384,18 @@ Issue(h) ==
     /\ IF s.pend.f = 0
        THEN ~R("zeroAfterUpload") \/ Len(head.up) >= need
        ELSE ~R("installFirst") \/ Quorum(s.pend, need)
-    /\ ses' = [ses EXCEPT ![h].issued = TRUE]
+    /\ ses' = [ses EXCEPT ![h].issued = TRUE, ![h].cas = s.pend]
     /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
 
-\* The bucket applies h's CAS, if the head is still h's at its epoch and configuration.
+\* The bucket applies h's CAS, if the head is still h's at its epoch and configuration: the CAS
+\* sent, `cas`, whether or not h gave its replacement up since.
 Lands(h) ==
     LET s == ses[h] IN
     /\ s.st = "serving"
-    /\ s.issued
+    /\ s.cas # NoCfg
     /\ head.epoch = s.ep
     /\ head.cfg = s.cfg
-    /\ head' = [head EXCEPT !.cfg = s.pend]
+    /\ head' = [head EXCEPT !.cfg = s.cas]
     /\ UNCHANGED <<sent, cfgs, mlog, drop, promise, inc, ses, told, next, losses, crashes>>
 
 \* h learns its CAS landed: the replacement is its configuration from now on.
@@ -399,7 +404,20 @@ Learn(h) ==
     /\ s.st = "serving"
     /\ s.issued
     /\ head.cfg = s.pend
-    /\ ses' = [ses EXCEPT ![h].cfg = s.pend, ![h].pend = NoCfg, ![h].issued = FALSE]
+    /\ ses' = [ses EXCEPT ![h].cfg = s.pend, ![h].pend = NoCfg, ![h].issued = FALSE,
+                          ![h].cas = NoCfg]
+    /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
+
+\* h gives its replacement up, its CAS not sent (abandonUnissued), as its members took not the tail
+\* in time (TASK-537.3.5): its configuration alone counts again. Without the rule, a CAS in flight
+\* may land after.
+Abandon(h) ==
+    LET s == ses[h] IN
+    /\ "abandon" \in Can
+    /\ s.st = "serving"
+    /\ s.pend # NoCfg
+    /\ ~s.issued \/ ~R("abandonUnissued")
+    /\ ses' = [ses EXCEPT ![h].pend = NoCfg, ![h].issued = FALSE]
     /\ UNCHANGED <<head, sent, cfgs, mlog, drop, promise, inc, told, next, losses, crashes>>
 
 (***************************************************************************)
@@ -431,7 +449,7 @@ Next ==
         \/ Take(h) \/ Recover(h) \/ Activate(h)
         \/ \E m \in Hosts : Fence(h, m)
         \/ Commit(h) \/ AckReplicated(h) \/ Land(h) \/ Acknowledge(h)
-        \/ Replace(h) \/ Issue(h) \/ Lands(h) \/ Learn(h)
+        \/ Replace(h) \/ Issue(h) \/ Lands(h) \/ Learn(h) \/ Abandon(h)
         \/ \E k \in Keys : Deliver(h, k) \/ Drop(h, k)
         \/ CrashDaemon(h) \/ LoseDisk(h)
 
