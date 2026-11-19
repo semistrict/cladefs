@@ -165,8 +165,6 @@ if part firecracker; then
     tests+=' | test(/device::tests::test_features_/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
-    # A configuration file's old key for the device refused (TASK-503).
-    tests+=' | test(/resources::tests::test_from_json_refuses_the_extent_devices_old_key$/)'
     CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"
     # The API's parsing of the device's configuration, PUT /cladefs/{id} (TASK-503).

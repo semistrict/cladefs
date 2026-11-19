@@ -32,7 +32,8 @@ Names change too, refused the same way, never read under both. Since TASK-503 th
 `cladefs.cladefsd.v1.Cladefsd` (Go: `go/cladefsd/v1`), not `cladefs.extentd.v1.Extentd`, whose
 calls a new daemon answers `UNIMPLEMENTED`; and Firecracker's API says `cladefs`: `PUT
 /cladefs/{id}`, a configuration file's `cladefs` list, `cladefs_overrides` and `cladefsd_socket`.
-A configuration file still saying `extent` is refused, naming `cladefs`; `PUT /extent/{id}` is an
+A configuration file still saying `extent` is ignored, as Firecracker ignores keys it doesn't
+know, and the VM boots without that disk (TASK-671 dropped the check); `PUT /extent/{id}` is an
 unknown path; `extentd_socket` and `extent_overrides` are unknown fields. A VM manager is upgraded
 with the host's build. The guest kernel's filesystem module is `cladefs` too: a guest mounts
 with `mount -t cladefs` (`fxfs` is an unknown type), sets `cladefs.*` parameters and reads the

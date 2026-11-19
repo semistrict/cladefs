@@ -26,3 +26,7 @@ e27792aef7c3a7084bd014469edf0eedd60cc0a0 e103560286ee3e1255ecc93077de118acfa5726
 # cladefs_overrides); then a configuration file's old key refused, on top. (r9, its first cut, was
 # of r8 before TASK-502's commit and never pinned.)
 93ad15103f337a2802ad4aa8404728b3658874af 9bc4a5a8e40996220c4d170552190799dc3cf37f
+# TASK-671: cladefs-v1.16.1-r11 (branch cladefs-v1.16.1-r11), r10's 31 commits as 4, one per upstream
+# submission: the dependency backport, the general fixes, the PCI transport's shared memory regions and
+# device IDs, and the cladefs feature; its tree r10's less bac96b047 (the old `extent` key refused).
+99b3b968ac2a42a141ffe7c769598583cd6e5389 35d9ba276aa564516e90c4a3a5947c816607e0c2

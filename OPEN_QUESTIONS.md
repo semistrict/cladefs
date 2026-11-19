@@ -88,9 +88,9 @@ choices (the extentd names and Firecracker's API; cladefsd everywhere):
   glossary's extent store device, as upstream's `/drives` configures its `block` device. *Instead:*
   every Extent name in the fork Cladefs, the device's too. *Undo:* add the device's names to
   scripts/rename-to-cladefs-api.sh and run its --tree over the series again.
-- **Old names refused, never read under both:** a Firecracker configuration file's `extent`
-  (upstream ignores unknown keys, so a VM would boot without its disk); `extentd_socket` and
-  `extent_overrides` were refused already as unknown fields. Old gRPC calls get `UNIMPLEMENTED`.
+- **Old names refused, never read under both:** `extentd_socket` and `extent_overrides` are
+  refused as unknown fields. A Firecracker configuration file's `extent` was refused too until
+  TASK-671 dropped the check: upstream ignores unknown keys, so such a file boots without its disk. Old gRPC calls get `UNIMPLEMENTED`.
 - **A/B tooling reads a side from before the rename** (its `extentd-stats.txt`, `extentd-*`
   metrics) as the new names (ab-rounds.py, ab-guest-summary.py, bench-report.py), and test-e2e.sh
   names a base tree's run-wide stats and log as that tree's helpers read them, as the nightly's
