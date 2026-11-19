@@ -1,11 +1,12 @@
 ---
 id: TASK-672
 title: >-
-  z-pages for cladefsd: in-process tracez and CPU profiles on the metrics
-  listener
+  z-pages for cladefsd under /z/: in-process tracez and CPU profiles on the
+  metrics listener
 status: To Do
 assignee: []
 created_date: '2026-11-19 22:22'
+updated_date: '2026-11-19 23:31'
 labels: []
 dependencies: []
 ordinal: 1044000
@@ -19,9 +20,10 @@ The user (ex-Google) wants Census-style z-pages: to look at a running daemon and
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GET /tracez on the CLADEFSD_METRICS listener shows, per span name, counts in Census latency buckets and kept sample spans with their attributes, without CLADEFSD_TRACES
-- [ ] #2 GET /pprof/profile?seconds=N returns a CPU profile
-- [ ] #3 docs/tracing.md documents the pages
+- [ ] #1 GET /z/tracez on the CLADEFSD_METRICS listener shows, per span name, counts in Census latency buckets and kept sample spans with their attributes, without CLADEFSD_TRACES
+- [ ] #2 GET /z/pprof/profile?seconds=N returns a CPU profile
+- [ ] #3 GET /z/ lists every z-page
+- [ ] #4 docs/tracing.md documents the pages
 <!-- AC:END -->
 
 ## Definition of Done

@@ -1,9 +1,10 @@
 ---
 id: TASK-672.1
-title: '/tracez: spans kept in-process by latency bucket, always on'
+title: '/z/tracez: spans kept in-process by latency bucket, always on'
 status: To Do
 assignee: []
 created_date: '2026-11-19 22:23'
+updated_date: '2026-11-19 23:31'
 labels: []
 dependencies: []
 parent_task_id: TASK-672
@@ -18,7 +19,7 @@ Every span (request, page-in, bucket request, commit, upload) is recorded in-pro
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 /tracez lists each span name with its count per latency bucket and its running spans
+- [ ] #1 /z/tracez lists each span name with its count per latency bucket and its running spans
 - [ ] #2 A bucket span 5 ms long is kept as a sample of the >1ms bucket with its object key, cell and its ancestors (page-in, request) shown
 - [ ] #3 Recording works with CLADEFSD_TRACES unset, and OTLP export with it set is unchanged (tests/otel.rs passes)
 - [ ] #4 The per-span cost while recording is measured and written in docs/tracing.md

@@ -1,9 +1,10 @@
 ---
 id: TASK-672.3
-title: '/pprof/profile: CPU profiles of the daemon with pprof-rs'
+title: '/z/pprof/profile: CPU profiles of the daemon with pprof-rs'
 status: To Do
 assignee: []
 created_date: '2026-11-19 22:23'
+updated_date: '2026-11-19 23:31'
 labels: []
 dependencies: []
 parent_task_id: TASK-672
@@ -18,8 +19,8 @@ A CPU profile of a running daemon, as Go serves at /debug/pprof/profile, taken o
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 GET /pprof/profile?seconds=N samples the daemon for N seconds and returns pprof protobuf that go tool pprof reads
-- [ ] #2 GET /pprof/flamegraph?seconds=N returns an SVG flamegraph
+- [ ] #1 GET /z/pprof/profile?seconds=N samples the daemon for N seconds and returns pprof protobuf that go tool pprof reads
+- [ ] #2 GET /z/pprof/flamegraph?seconds=N returns an SVG flamegraph
 - [ ] #3 One profile at a time: a second request while one runs is refused with 409
 <!-- AC:END -->
 

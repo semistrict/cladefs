@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-19 22:23'
+updated_date: '2026-11-19 23:31'
 labels: []
 dependencies: []
 parent_task_id: TASK-672
@@ -21,8 +22,8 @@ To find reads that missed every cache, a page-in must say what served it: the st
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 cache.page_in spans carry cladefs.source: local, part_cache, peer or bucket
-- [ ] #2 A page-in served by the bucket carries the backtrace of the thread that started it, shown on /tracez
-- [ ] #3 /tracez can filter its samples to cladefs.source=bucket
+- [ ] #2 A page-in served by the bucket carries the backtrace of the thread that started it, shown on /z/tracez
+- [ ] #3 /z/tracez can filter its samples to cladefs.source=bucket
 <!-- AC:END -->
 
 ## Definition of Done
