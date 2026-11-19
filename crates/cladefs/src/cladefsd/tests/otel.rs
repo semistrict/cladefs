@@ -4,12 +4,17 @@
 
 //! TASK-258: the daemon's spans, exported to OpenTelemetry's in-memory exporter, as a collector
 //! would get them: a request's and a commit's trees, and their attributes; and none while tracing
-//! is off.
+//! is off. cladefs: TASK-672: and recorded for `/z/tracez`, exported or not, a read that went to the
+//! bucket saying so, with the stack that waited for it.
 
 use super::{BLOCK, connect, host, pattern, read, write};
 use crate::ExtentId;
+use crate::cladefsd::otel;
+use crate::cladefsd::zpages::tracez::{self, Export};
 use opentelemetry::Value;
-use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider, SpanData};
+use opentelemetry_sdk::trace::{
+    InMemorySpanExporter, Sampler, SdkTracerProvider, SimpleSpanProcessor, SpanData,
+};
 use std::collections::BTreeSet;
 
 /// A tracer provider keeping every span, at once, in `exporter`.
@@ -73,10 +78,10 @@ fn attribute(span: &SpanData, key: &str) -> Option<Value> {
 fn spans_trace_requests_commits_and_uploads() {
     host();
     let exporter = InMemorySpanExporter::default();
-    let provider = provider(&exporter);
-    super::super::otel::install(provider.clone());
+    let export =
+        Export::new(SimpleSpanProcessor::new(exporter.clone()), Box::new(Sampler::AlwaysOn));
+    otel::install(Some(export));
     let cell = write_read_commit();
-    provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     // cladefs: as `TENANT/CELL`, in base 32 (TASK-364, TASK-504).
     let named = Value::from(cell.to_string());
@@ -138,4 +143,77 @@ fn nothing_is_exported_while_tracing_is_off() {
     provider.force_flush().unwrap();
     assert!(!bucket_cell::trace::enabled());
     assert_eq!(names(exporter.get_finished_spans().unwrap().iter()), Vec::<String>::new());
+}
+
+/// TASK-672.1: spans exported not, as the daemon makes them unless told otherwise, are recorded
+/// for `/z/tracez`: each request counted by its kind, and kept, its trace whole.
+#[test]
+fn spans_are_recorded_unexported() {
+    host();
+    otel::install(None);
+    write_read_commit();
+    let recorder = tracez::recorder();
+    let counts = recorder.counts();
+    let ended = |name: &str| {
+        let counted = counts.iter().find(|counts| counts.name == name);
+        counted.map_or(0, |counts| counts.ended.iter().sum::<u64>())
+    };
+    assert_eq!(
+        [ended("cladefsd.write"), ended("cladefsd.read"), ended("cladefsd.commit")],
+        [1, 1, 1]
+    );
+    let commits = recorder.samples("cladefsd.commit", None);
+    let names: BTreeSet<String> = names(commits[0].trace.spans.iter()).into_iter().collect();
+    assert!(names.contains("store.commit"), "{names:?}");
+}
+
+/// TASK-672.2: a fork restored on another host reads its version's extent from the bucket: its
+/// page-in says it went there, and the read that waited for it carries the stack that did, which
+/// `/z/tracez` shows resolved, its samples filtered to the page-ins that went to the bucket.
+#[test]
+fn reads_from_the_bucket_say_so_with_the_stack_that_waited() {
+    use super::{Opening, UnixStream, default_tenant, serve_connection};
+    host();
+    otel::install(None);
+    let dir = tempfile::tempdir().unwrap();
+    let (store, served) = connect(&dir.path().join("store"), 1 << 24);
+    let extent = ExtentId { cell: store.cell(), sequence: 1 };
+    write(&store, extent, 0, &pattern(4, BLOCK)).unwrap();
+    store.commit(Some(b"root")).unwrap();
+    let version = store.make_version().unwrap();
+    drop(store);
+    served.join().unwrap();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    let served = std::thread::spawn(move || serve_connection(server, default_tenant().unwrap()));
+    let fork = Opening::ForkOf {
+        tenant: version.tenant,
+        cell: version.cell,
+        version: version.version,
+        capacity: 1 << 24,
+    };
+    let restored =
+        crate::cladefsd::CellClient::over(client, &elsewhere.join("store"), fork).unwrap();
+    assert_eq!(read(&restored, extent, 0, BLOCK), Ok(pattern(4, BLOCK)));
+    // Every span of its requests ended once its connection is served.
+    drop(restored);
+    served.join().unwrap();
+
+    let recorder = tracez::recorder();
+    let source = |span: &SpanData| attribute(span, bucket_cell::trace::SOURCE);
+    let page_ins = recorder.samples("cache.page_in", None);
+    let sources: Vec<Option<Value>> = page_ins.iter().map(|sample| source(sample.span())).collect();
+    assert_eq!(sources, [Some(Value::from("bucket"))]);
+    let trace = &page_ins[0].trace;
+    let read = the(&trace.spans, "cladefsd.read");
+    let frames = attribute(read, bucket_cell::trace::BACKTRACE).expect("the read's stack");
+    assert!(frames.as_str().split(' ').count() > 5, "{frames}");
+    assert_eq!(children(&trace.spans, read), BTreeSet::from(["cache.page_in".to_owned()]));
+
+    let page =
+        crate::cladefsd::zpages::serve("/tracez", "name=cache.page_in&tag=cladefs.source%3Dbucket");
+    let html = String::from_utf8(page.body).unwrap();
+    assert!(html.contains("bring_in"), "the stack, resolved: {html}");
+    assert!(html.contains("<i>cladefs.source</i>=bucket"), "{html}");
 }

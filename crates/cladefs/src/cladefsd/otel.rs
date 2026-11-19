@@ -7,25 +7,30 @@
 //! forks, its page-ins, its uploads and their bucket requests, and its relief of memory
 //! (`bucket_cell::trace`, which makes them).
 //!
-//! Off unless `CLADEFSD_TRACES` is `otlp` ([`from_env`]); then, configured by
-//! OpenTelemetry's own variables: `OTEL_EXPORTER_OTLP_ENDPOINT` (or
-//! `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) the collector they go to, over HTTP, protobuf
-//! (`http://localhost:4318` by default), `OTEL_SERVICE_NAME` their service (`cladefsd` by
-//! default), and `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` which are kept. A request, a
-//! commit or an upload starts a trace, and the daemon makes thousands a second: unless
-//! `OTEL_TRACES_SAMPLER` says otherwise, it keeps one in [`DEFAULT_RATIO`] of the traces they
-//! start, and their spans with them (`parentbased_traceidratio`), `OTEL_TRACES_SAMPLER_ARG`, if
-//! given, the ratio.
+//! cladefs: made always, every one, and kept in the daemon's memory for `/z/tracez`
+//! (`super::zpages::tracez`, TASK-672.1); exported only if `CLADEFSD_TRACES` is `otlp`
+//! ([`from_env`]), then configured by OpenTelemetry's own variables:
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` (or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) the collector they go
+//! to, over HTTP, protobuf (`http://localhost:4318` by default), `OTEL_SERVICE_NAME` their service
+//! (`cladefsd` by default), and `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` which traces
+//! are exported. A request, a commit or an upload starts a trace, and the daemon makes thousands a
+//! second: unless `OTEL_TRACES_SAMPLER` says otherwise, it exports one in [`DEFAULT_RATIO`] of the
+//! traces they start, and their spans with them (`parentbased_traceidratio`),
+//! `OTEL_TRACES_SAMPLER_ARG`, if given, the ratio: decided by each trace's ID, as a root's sampler
+//! decides, so that a trace is exported whole (`tracez::Export`).
 
 use super::wire::Header;
+use super::zpages::tracez::{Export, Processor};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+use opentelemetry_sdk::trace::{
+    BatchSpanProcessor, Config, Sampler, SdkTracerProvider, ShouldSample,
+};
 use std::sync::OnceLock;
 
-/// The variable that turns the daemon's spans on: `otlp`, or nothing.
+/// The variable that exports the daemon's spans: `otlp`, or nothing.
 pub const OPTION: &str = "CLADEFSD_TRACES";
 
-/// The ratio of the traces the daemon keeps, unless `OTEL_TRACES_SAMPLER` or
+/// The ratio of the traces the daemon exports, unless `OTEL_TRACES_SAMPLER` or
 /// `OTEL_TRACES_SAMPLER_ARG` says otherwise: one in a hundred.
 pub const DEFAULT_RATIO: f64 = 0.01;
 
@@ -44,34 +49,36 @@ pub const ERRNO: &str = "cladefs.errno";
 /// The tracer provider spans go to, once started ([`install`]): what [`shutdown`] flushes.
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-/// Starts the daemon's spans if `CLADEFSD_TRACES` says to: `otlp`, exported to the collector
-/// OpenTelemetry's variables name. Returns whether it did; an error for another value of it, or
-/// for OpenTelemetry's variables it can't take.
+/// Starts the daemon's spans, recorded for `/z/tracez`, and exported too if `CLADEFSD_TRACES`
+/// says to: `otlp`, to the collector OpenTelemetry's variables name. Returns whether they are
+/// exported; an error for another value of it, or for OpenTelemetry's variables it can't take.
 pub fn from_env() -> Result<bool, String> {
     let option = std::env::var(OPTION).unwrap_or_default();
-    match option.as_str() {
-        "" => Ok(false),
+    let export = match option.as_str() {
+        "" => None,
         "otlp" => {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .build()
                 .map_err(|err| format!("making the OTLP exporter: {err}"))?;
-            let mut provider = SdkTracerProvider::builder()
-                .with_batch_exporter(exporter)
-                .with_resource(resource());
-            if let Some(sampler) = default_sampler()? {
-                provider = provider.with_sampler(sampler);
-            }
-            install(provider.build());
-            Ok(true)
+            Some(Export::new(BatchSpanProcessor::builder(exporter).build(), export_sampler()?))
         }
-        other => Err(format!("{OPTION} must be `otlp` or unset, not `{other}`")),
-    }
+        other => return Err(format!("{OPTION} must be `otlp` or unset, not `{other}`")),
+    };
+    let exported = export.is_some();
+    install(export);
+    Ok(exported)
 }
 
-/// Makes spans from now on, with `provider`, the global tracer provider from now on; the first
-/// installed alone, as the process starts.
-pub fn install(provider: SdkTracerProvider) {
+/// Makes spans from now on, every one, recorded for `/z/tracez` and exported by `export`, if
+/// given: the global tracer provider's from now on; the first installed alone, as the process
+/// starts.
+pub fn install(export: Option<Export>) {
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::AlwaysOn)
+        .with_span_processor(Processor::new(export))
+        .with_resource(resource())
+        .build();
     if PROVIDER.set(provider.clone()).is_err() {
         log::warn!("cladefsd: tracing was started already");
         return;
@@ -99,9 +106,18 @@ fn resource() -> Resource {
     }
 }
 
-/// The sampler of the daemon's traces, unless `OTEL_TRACES_SAMPLER` names one, which the tracer
-/// provider's builder reads then: of the traces requests, commits and uploads start, one in
-/// `OTEL_TRACES_SAMPLER_ARG` (or [`DEFAULT_RATIO`]) kept, and the spans of each with it.
+/// The sampler of the traces exported: the one `OTEL_TRACES_SAMPLER` names, as OpenTelemetry's
+/// configuration reads it, if it names one; else [`default_sampler`]'s.
+fn export_sampler() -> Result<Box<dyn ShouldSample>, String> {
+    Ok(match default_sampler()? {
+        Some(sampler) => Box::new(sampler),
+        None => Config::default().sampler,
+    })
+}
+
+/// The sampler of the traces exported, unless `OTEL_TRACES_SAMPLER` names one: of the traces
+/// requests, commits and uploads start, one in `OTEL_TRACES_SAMPLER_ARG` (or [`DEFAULT_RATIO`])
+/// exported, and the spans of each with it.
 fn default_sampler() -> Result<Option<Sampler>, String> {
     if std::env::var_os("OTEL_TRACES_SAMPLER").is_some_and(|sampler| !sampler.is_empty()) {
         return Ok(None);
@@ -168,16 +184,18 @@ mod tests {
         }
     }
 
+    /// Another value than `otlp` is refused, spans started not; none, spans start, recorded alone.
     #[test]
-    fn tracing_is_off_unless_the_option_says_otlp() {
-        set(OPTION, None);
-        assert_eq!(from_env(), Ok(false));
+    fn spans_are_exported_only_if_the_option_says_otlp() {
         set(OPTION, Some("jaeger"));
         assert_eq!(
             from_env(),
             Err("CLADEFSD_TRACES must be `otlp` or unset, not `jaeger`".to_owned())
         );
         assert!(!bucket_cell::trace::enabled());
+        set(OPTION, None);
+        assert_eq!(from_env(), Ok(false));
+        assert!(bucket_cell::trace::enabled(), "spans are recorded, for /z/tracez");
     }
 
     #[test]

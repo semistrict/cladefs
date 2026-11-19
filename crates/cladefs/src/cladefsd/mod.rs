@@ -99,6 +99,7 @@ pub mod disk;
 pub mod drain;
 pub mod governor;
 mod grants;
+mod http;
 pub mod logging;
 pub mod memory;
 pub mod metrics;
@@ -110,6 +111,7 @@ pub mod process;
 pub(crate) mod server;
 mod stats;
 pub(crate) mod wire;
+pub mod zpages;
 
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -118,7 +120,7 @@ pub use cells::{cache_config, replace_after};
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 pub use device::DaemonDevice;
-pub use metrics::serve_metrics;
+pub use http::serve_http;
 pub use server::{Tenant, serve, serve_tenant};
 
 /// Whether the daemon accepts VM processes' connections ([`serve`]): what the control API's health

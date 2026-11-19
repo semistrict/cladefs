@@ -53,7 +53,7 @@ fn unexpected_cache_read_errors_do_not_issue_gets() {
 
         let fetcher = fresh();
         if warm_tail {
-            assert!(block_on(fetcher.shared.tail(KEY)).unwrap().is_some());
+            assert!(block_on(land(fetcher.shared.tail(KEY))).unwrap().is_some());
         }
         // A directory in place of the object produces EISDIR for a local read.
         let path = cache.path(KEY);

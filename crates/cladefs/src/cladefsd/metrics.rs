@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! The daemon's metrics, in Prometheus' text exposition format, served over HTTP to whoever scrapes
-//! them (TASK-47): `GET /metrics` on the address `CLADEFSD_METRICS` names.
+//! them (TASK-47): `GET /metrics` on the address `CLADEFSD_METRICS` names (`super::http`).
 //!
 //! - `cladefsd_requests_total{kind}`, `cladefsd_request_errors_total{kind}`, and
 //!   `cladefsd_request_duration_seconds{kind}`, a histogram: the VM processes' requests, by
@@ -91,11 +91,9 @@
 
 use super::wire::*;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The kinds of request metrics are kept of, and their names.
 const KINDS: [(u32, &str); 23] = [
@@ -674,148 +672,4 @@ pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {
 /// newlines escaped.
 fn label_value(value: &str) -> String {
     value.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n")
-}
-
-/// How long a client has to send its request and take the response: one deadline for the whole
-/// exchange, as a client sending a byte at a time, or taking nothing, would hold its turn for good
-/// against a timeout of each read or write (TASK-79.27).
-const EXCHANGE: Duration = Duration::from_secs(5);
-
-/// The most bytes of a request's line and headers read: a scraper's are a line and a few headers.
-/// More are refused, unread, as a line read whole would grow without end.
-const HEAD_MAX: u64 = 8 << 10;
-
-/// How many clients are served at once: those after wait to be accepted, holding nothing, so that
-/// clients slow to send or take what they asked for hold up no scrape but past these.
-const AT_ONCE: usize = 4;
-
-/// Serves the metrics to whoever connects to `listener` and asks for `/metrics` over HTTP, until
-/// it listens no more (`EINVAL`): each client on a thread of its own, [`AT_ONCE`] at most, within
-/// [`EXCHANGE`]. An accept that fails otherwise, as with as many files open as the daemon may, is
-/// tried again after a while (`server::ACCEPT_AGAIN`), as the daemon's VM sockets' are: given up
-/// on, the daemon's metrics would be served no more, the daemon serving on (TASK-79.35).
-pub fn serve_metrics(listener: TcpListener) -> std::io::Result<()> {
-    let serving = std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
-    let mut failing = false;
-    loop {
-        {
-            let (count, done) = &*serving;
-            let mut count = count.lock().unwrap();
-            while *count == AT_ONCE {
-                count = done.wait(count).unwrap();
-            }
-            *count += 1;
-        }
-        let accepted = listener.accept();
-        if accepted.is_err() {
-            *serving.0.lock().unwrap() -= 1;
-        }
-        let stream = match accepted {
-            Ok((stream, _)) => stream,
-            Err(err) if err.raw_os_error() == Some(libc::EINVAL) => return Err(err),
-            // That client's, gone before it was accepted.
-            Err(err) if err.kind() == std::io::ErrorKind::ConnectionAborted => continue,
-            Err(err) => {
-                if !failing {
-                    log::error!("cladefsd: accepting a metrics client: {err}: trying again");
-                    failing = true;
-                }
-                std::thread::sleep(super::server::ACCEPT_AGAIN);
-                continue;
-            }
-        };
-        failing = false;
-        let served = serving.clone();
-        let spawned = std::thread::Builder::new().name("cladefsd metric".into()).spawn(move || {
-            if let Err(err) = answer(stream) {
-                log::warn!("cladefsd: serving metrics: {err}");
-            }
-            let (count, done) = &*served;
-            *count.lock().unwrap() -= 1;
-            done.notify_one();
-        });
-        if let Err(err) = spawned {
-            log::warn!("cladefsd: serving metrics: {err}");
-            *serving.0.lock().unwrap() -= 1;
-        }
-    }
-}
-
-/// A client's connection within its exchange's deadline: each read and write waits at most for
-/// what is left of it, and fails with `TimedOut` once nothing is.
-struct Deadlined<'a> {
-    stream: &'a TcpStream,
-    deadline: Instant,
-}
-
-impl Deadlined<'_> {
-    fn left(&self) -> std::io::Result<Duration> {
-        match self.deadline.saturating_duration_since(Instant::now()) {
-            Duration::ZERO => Err(std::io::ErrorKind::TimedOut.into()),
-            left => Ok(left),
-        }
-    }
-}
-
-impl Read for Deadlined<'_> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.left()?))?;
-        (&*self.stream).read(bytes)
-    }
-}
-
-impl Write for Deadlined<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.left()?))?;
-        (&*self.stream).write(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Answers the HTTP request `stream` carries, within [`EXCHANGE`]: the metrics, for `GET
-/// /metrics`; `431`, for a request whose line and headers are more than [`HEAD_MAX`] bytes.
-fn answer(stream: TcpStream) -> std::io::Result<()> {
-    let deadline = Instant::now() + EXCHANGE;
-    let mut reader = BufReader::new(Deadlined { stream: &stream, deadline }.take(HEAD_MAX));
-    let mut request = String::new();
-    let mut whole = read_line(&mut reader, &mut request)?;
-    // The headers, which say nothing it needs.
-    while whole {
-        let mut line = String::new();
-        whole = read_line(&mut reader, &mut line)?;
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-    }
-    let too_large = !whole && reader.get_ref().limit() == 0;
-    let mut parts = request.split_whitespace();
-    let (status, body) = match (parts.next(), parts.next()) {
-        _ if too_large => ("431 Request Header Fields Too Large", "request too large\n".to_owned()),
-        (Some("GET"), Some("/metrics")) => ("200 OK", render()),
-        _ => ("404 Not Found", "not found\n".to_owned()),
-    };
-    let mut connection = Deadlined { stream: &stream, deadline };
-    write!(
-        connection,
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
-        body.len()
-    )?;
-    if too_large {
-        // What it sent past its head is read and dropped, until it is done or its time is: the
-        // connection closed with bytes unread would be reset, and the response lost with it.
-        stream.shutdown(std::net::Shutdown::Write)?;
-        std::io::copy(&mut Deadlined { stream: &stream, deadline }, &mut std::io::sink())?;
-    }
-    Ok(())
-}
-
-/// Reads a line into `line` as `read_line` does: whether it is whole, ended by a newline; not, at
-/// the end of what `reader` reads.
-fn read_line(reader: &mut impl BufRead, line: &mut String) -> std::io::Result<bool> {
-    reader.read_line(line)?;
-    Ok(line.ends_with('\n'))
 }

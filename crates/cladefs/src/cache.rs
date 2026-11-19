@@ -630,6 +630,11 @@ impl Contents for Promoted {
     }
 }
 
+/// cladefs: where a page-in read its part from, which it says once it has, before its pages are
+/// in: none if from the host's stores alone, which go to no fetcher ([`trace::sourced`],
+/// TASK-672.2).
+type Landed = OnceLock<Option<trace::Source>>;
+
 /// A page of a cached extent.
 enum Slot {
     /// Not in memory.
@@ -870,10 +875,24 @@ impl CachedExtent {
     }
 
     /// Reads in the part `pages` of the extent, which a page-in marked filling, into pages of its
-    /// arena, and puts those still filling then in its table.
-    async fn read_part(self: Arc<Self>, pages: Range<u64>) {
+    /// arena, and puts those still filling then in its table: `span` the page-in's, the parent of
+    /// its reads (TASK-258). cladefs: says where it read them from on `span`, `local` if from the
+    /// host's stores alone, and tells `landed`, if a bring-in waits to hear it, before the pages
+    /// are in; `span` ended before those waiting for them are told, so that their spans end after
+    /// it (TASK-672.2).
+    async fn read_part(
+        self: Arc<Self>,
+        pages: Range<u64>,
+        span: trace::Span,
+        landed: Option<Arc<Landed>>,
+    ) {
         let ps = page_size();
-        let read = self.read_pages(pages.clone()).await;
+        let (read, source) = span.around(trace::sourced(self.read_pages(pages.clone()))).await;
+        span.set(trace::SOURCE, source.map_or("local", trace::Source::name));
+        if let Some(landed) = landed {
+            landed.set(source).expect("a page-in lands once");
+        }
+        let entered = span.enter();
         let mut table = self.pages.with(Mutex::lock);
         match read {
             Ok(frames) => {
@@ -903,6 +922,8 @@ impl CachedExtent {
             }
         }
         drop(table);
+        drop(entered);
+        drop(span);
         self.changed.notify(usize::MAX);
     }
 
@@ -996,27 +1017,44 @@ impl Source for CachedExtent {
         Box::pin(async move {
             self.used();
             let mut waited = false;
+            // cladefs: where the page-in it started of its page's part read from, if it started
+            // one (TASK-672.2).
+            let mut landing: Option<Arc<Landed>> = None;
             loop {
                 let listener = {
                     let mut table = self.pages.with(Mutex::lock);
-                    match table.slots.get(page as usize) {
-                        None => return Err(Errno::ENOENT),
-                        Some(Slot::Present(_)) => return Ok(waited),
-                        Some(Slot::Failed(errno)) if waited => return Err(*errno),
-                        Some(Slot::Filling | Slot::Evicting(_)) => {}
+                    let done = match table.slots.get(page as usize) {
+                        None => Some(Err(Errno::ENOENT)),
+                        Some(Slot::Present(_)) => Some(Ok(waited)),
+                        Some(Slot::Failed(errno)) if waited => Some(Err(*errno)),
+                        Some(Slot::Filling | Slot::Evicting(_)) => None,
                         Some(Slot::Absent | Slot::Failed(_)) => {
                             // cladefs: for the guest request that wants it first, if any, which
                             // its reads of object storage log (TASK-260).
                             for part in self.parts_to_read(&mut table, page) {
                                 // cladefs: a child of what faulted, or read, on the page.
                                 let span = self.page_in_span(&part);
-                                let reading = span.instrument(self.clone().read_part(part));
+                                let landed = (part.contains(&page))
+                                    .then(|| landing.insert(Arc::default()).clone());
+                                let reading = self.clone().read_part(part, span, landed);
                                 let request = crate::request::current();
                                 extent_cache()
                                     .pager
                                     .spawn(crate::request::within(request, reading));
                             }
+                            None
                         }
+                    };
+                    if let Some(done) = done {
+                        drop(table);
+                        // cladefs: what waited for the bucket, with the stack that did: this
+                        // future's, polled by every future awaiting it, up to its task's, as the
+                        // page-in, a task of its own, has none of theirs (TASK-672.2).
+                        let landed = landing.as_ref().and_then(|landed| landed.get().copied());
+                        if landed == Some(Some(trace::Source::Bucket)) {
+                            trace::record_backtrace();
+                        }
+                        return done;
                     }
                     // Listened for under the lock, which what changes the page takes.
                     self.changed.listen()

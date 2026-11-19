@@ -14,15 +14,22 @@
 //! span a thread runs in ([`Span::run`]), or a future runs around, on whatever thread polls it
 //! ([`Span::around`]). It ends as it drops, its attributes and its status set on it as it goes
 //! ([`Span::set`], [`Span::fail`]).
+//!
+//! cladefs: and where a read's data came from (TASK-672.2): the nearest of the host's memory, its
+//! part cache, a peer and the bucket that a read went as far as ([`Source`]), each noted where the
+//! fetcher goes there ([`note`]) and gathered by what waits for the read ([`sourced`]); and, of a
+//! read that went to the bucket, the frames of the thread that waited for it ([`record_backtrace`]),
+//! as addresses, resolved only when shown.
 
 use crate::layout::CellId;
 use futures::future::Either;
 use opentelemetry::context::{FutureExt as _, WithContext};
 use opentelemetry::trace::{Status, TraceContextExt as _, Tracer as _};
 use opentelemetry::{Context, KeyValue, Value, global};
+use std::fmt::Write as _;
 use std::future::Future;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// The attribute of the bytes an operation read, wrote or moved.
 pub const BYTES: &str = "cladefs.bytes";
@@ -54,6 +61,13 @@ pub const OBJECTS: &str = "cladefs.objects";
 pub const PREFIXES: &str = "cladefs.prefixes";
 /// The attribute of a segment's sequence number in its cell.
 pub const SEGMENT: &str = "cladefs.segment";
+/// cladefs: the attribute of where a read's data came from: a [`Source`]'s name, or `local`, for a
+/// read of the host's stores, which went to no fetcher (TASK-672.2).
+pub const SOURCE: &str = "cladefs.source";
+/// cladefs: the attribute of the frames of the thread that waited for a read from the bucket: their
+/// addresses in this process, in hexadecimal, innermost first, separated by spaces
+/// ([`record_backtrace`]).
+pub const BACKTRACE: &str = "cladefs.backtrace";
 
 /// Whether spans are made, which [`enable`] says.
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -226,6 +240,90 @@ impl Drop for Span {
     }
 }
 
+/// cladefs: where a fetcher found what a read wanted, nearest first, so that the farthest a read
+/// went is the greatest (TASK-672.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum Source {
+    /// The parts and tails the host's fetchers keep in memory.
+    Memory = 1,
+    /// The host's part cache, on its disk.
+    PartCache = 2,
+    /// Another host sharing the bucket, which owns the part (TASK-406.2).
+    Peer = 3,
+    /// The bucket: a GET, or a listing.
+    Bucket = 4,
+}
+
+impl Source {
+    /// Its name, as [`SOURCE`] says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Memory => "memory",
+            Source::PartCache => "part_cache",
+            Source::Peer => "peer",
+            Source::Bucket => "bucket",
+        }
+    }
+
+    /// The source numbered `number`, if one is: none, for 0, as nothing noted is.
+    fn numbered(number: u8) -> Option<Self> {
+        [Source::Memory, Source::PartCache, Source::Peer, Source::Bucket]
+            .into_iter()
+            .find(|source| *source as u8 == number)
+    }
+}
+
+/// The farthest [`Source`] noted in a context ([`note`]), by number, 0 for none: what [`sourced`]
+/// gathers, in the context of the future it runs.
+#[derive(Clone, Default)]
+struct Sources(Arc<AtomicU8>);
+
+/// cladefs: notes that what the current context reads went as far as `source`, for what gathers
+/// it ([`sourced`]), if anything does; nothing while spans are off, at the cost of a load.
+pub fn note(source: Option<Source>) {
+    let Some(source) = source.filter(|_| enabled()) else { return };
+    if let Some(sources) = Context::current().get::<Sources>() {
+        sources.0.fetch_max(source as u8, Ordering::Relaxed);
+    }
+}
+
+/// cladefs: `future`'s output, and the farthest a read of it went ([`note`]), none if no read noted
+/// anything: as a page-in, whose reads of the host's stores go to no fetcher, gathers where its
+/// fetcher's reads went; or a flight of the fetcher's, whose readers each note where it went, the
+/// first to ask and those that joined it alike. None while spans are off.
+pub async fn sourced<F: Future>(future: F) -> (F::Output, Option<Source>) {
+    if !enabled() {
+        return (future.await, None);
+    }
+    let sources = Sources::default();
+    let output = future.with_context(Context::current_with_value(sources.clone())).await;
+    (output, Source::numbered(sources.0.load(Ordering::Relaxed)))
+}
+
+/// cladefs: sets [`BACKTRACE`] on the span current on this thread, if spans are on and one is: the
+/// frames of where it is called, which are, in a future that waited for a read, those of the poll
+/// of every future awaiting it, up to its task's (TASK-672.2). Captured as addresses alone, as
+/// unwinding the stack costs microseconds and resolving its symbols far more: called where a read
+/// went to the bucket, which took milliseconds.
+pub fn record_backtrace() {
+    if !enabled() {
+        return;
+    }
+    let context = Context::current();
+    let span = context.span();
+    if !span.span_context().is_valid() {
+        return;
+    }
+    let mut frames = String::new();
+    backtrace::trace(|frame| {
+        let separator = if frames.is_empty() { "" } else { " " };
+        write!(frames, "{separator}{:x}", frame.ip() as usize).expect("a String takes writes");
+        true
+    });
+    span.set_attribute(KeyValue::new(BACKTRACE, frames));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +356,44 @@ mod tests {
         };
         let fastest = (0..5).map(|_| round()).min().unwrap();
         println!("a span off costs {fastest:?}");
+    }
+
+    /// Off, nothing is gathered of where reads went, nor a backtrace recorded.
+    #[test]
+    fn sources_off_are_none() {
+        let (output, source) = futures::executor::block_on(sourced(async {
+            note(Some(Source::Bucket));
+            record_backtrace();
+            7
+        }));
+        assert_eq!((output, source), (7, None));
+    }
+
+    /// On, a future's reads gather the farthest source noted, nothing for none; a source noted
+    /// inside a nested gathering is the inner one's alone, as a flight's is until its reader notes
+    /// it on landing.
+    #[test]
+    fn sources_gather_the_farthest_noted() {
+        enable(true);
+        let gathered = |notes: Vec<Source>| {
+            futures::executor::block_on(sourced(async move {
+                for source in notes {
+                    note(Some(source));
+                }
+            }))
+            .1
+        };
+        assert_eq!(gathered(vec![]), None);
+        assert_eq!(gathered(vec![Source::Memory]), Some(Source::Memory));
+        assert_eq!(
+            gathered(vec![Source::Bucket, Source::Memory, Source::PartCache]),
+            Some(Source::Bucket)
+        );
+        let (inner, outer) = futures::executor::block_on(sourced(async {
+            note(Some(Source::Memory));
+            sourced(async { note(Some(Source::Peer)) }).await.1
+        }));
+        assert_eq!((inner, outer), (Some(Source::Peer), Some(Source::Memory)));
+        assert_eq!(Source::PartCache.name(), "part_cache");
     }
 }

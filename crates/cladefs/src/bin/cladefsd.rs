@@ -70,7 +70,9 @@
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics
 //! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::cladefsd::metrics`,
-//! TASK-47).
+//! TASK-47); cladefs: and its z-pages under `/z/`, its spans by latency and CPU profiles
+//! (`cladefs::cladefsd::zpages`, TASK-672): an address to bind to localhost, or a network only
+//! operators reach.
 //!
 //! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
 //! `az://container/prefix`) each store it opens keeps its cell in (backlog doc-7), with
@@ -148,8 +150,9 @@ fn main() -> anyhow::Result<()> {
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
     let drain = cladefs::cladefsd::drain::bound().map_err(anyhow::Error::msg)?;
     drain_on_sigterm(drain).context("handling SIGTERM")?;
-    // cladefs: its spans, over OTLP, if CLADEFSD_TRACES says so (TASK-258): its exporter's
-    // threads made after SIGTERM is blocked, as every thread but the drain's.
+    // cladefs: its spans, recorded for /z/tracez (TASK-672.1), and over OTLP too if
+    // CLADEFSD_TRACES says so (TASK-258): its exporter's threads made after SIGTERM is blocked, as
+    // every thread but the drain's.
     if cladefs::cladefsd::otel::from_env().map_err(anyhow::Error::msg)? {
         log::info!("cladefsd: exporting spans over OTLP");
     }
@@ -229,10 +232,10 @@ fn main() -> anyhow::Result<()> {
     {
         let address = address.to_str().context("CLADEFSD_METRICS must be an address")?;
         let metrics = std::net::TcpListener::bind(address)
-            .with_context(|| format!("serving metrics at {address}"))?;
-        std::thread::Builder::new().name("cladefsd metric".into()).spawn(move || {
-            if let Err(err) = cladefs::cladefsd::serve_metrics(metrics) {
-                log::error!("cladefsd: serving metrics: {err}");
+            .with_context(|| format!("serving metrics and z-pages at {address}"))?;
+        std::thread::Builder::new().name("cladefsd http".into()).spawn(move || {
+            if let Err(err) = cladefs::cladefsd::serve_http(metrics) {
+                log::error!("cladefsd: serving HTTP: {err}");
             }
         })?;
     }

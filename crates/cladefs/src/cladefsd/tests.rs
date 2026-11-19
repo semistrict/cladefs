@@ -3637,7 +3637,7 @@ fn metrics_count_requests_as_they_are_served() {
     host();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || super::serve_metrics(listener));
+    std::thread::spawn(move || super::serve_http(listener));
     let get = |path: &str| {
         let mut stream = std::net::TcpStream::connect(address).unwrap();
         write!(stream, "GET {path} HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
@@ -3712,7 +3712,7 @@ fn metrics_refuse_requests_too_long() {
     use std::io::{Read as _, Write as _};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || super::serve_metrics(listener));
+    std::thread::spawn(move || super::serve_http(listener));
     let mut stream = std::net::TcpStream::connect(address).unwrap();
     let mut writing = stream.try_clone().unwrap();
     // A line of a mebibyte, which a server reading lines whole holds whole.
@@ -3738,7 +3738,7 @@ fn metrics_are_served_beside_slow_clients() {
     use std::io::{Read as _, Write as _};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    std::thread::spawn(move || super::serve_metrics(listener));
+    std::thread::spawn(move || super::serve_http(listener));
     let mut slow = std::net::TcpStream::connect(address).unwrap();
     write!(slow, "GET /metrics HTTP/1.1\r\n").unwrap();
     let scraped = within(std::time::Duration::from_secs(30), move || {
@@ -3753,6 +3753,31 @@ fn metrics_are_served_beside_slow_clients() {
     slow.set_nonblocking(true).unwrap();
     let answered = slow.read(&mut [0; 64]).map_err(|err| err.kind());
     assert_eq!(answered, Err(std::io::ErrorKind::WouldBlock), "the slow client was let go first");
+}
+
+/// TASK-672: the daemon's z-pages are served beside its metrics, under `/z/`: their index, and
+/// `/z/tracez`, its spans by latency, HTML both.
+#[test]
+fn z_pages_are_served_under_z() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || super::serve_http(listener));
+    let get = |path: &str| {
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: cladefsd\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n";
+    let index = get("/z/");
+    assert!(index.starts_with(html), "{index}");
+    assert!(index.contains("<a href=\"/z/tracez\">/z/tracez</a>"), "{index}");
+    let tracez = get("/z/tracez");
+    assert!(tracez.starts_with(html), "{tracez}");
+    assert!(tracez.contains("<h1>tracez</h1>"), "{tracez}");
+    assert!(get("/z/nothing").starts_with("HTTP/1.1 404 Not Found\r\n"));
 }
 
 /// TASK-79.35: the daemon goes on accepting VM processes' connections through a failure to accept
@@ -5422,7 +5447,7 @@ fn metrics_are_served_on_after_failing_to_accept() {
     std::thread::spawn(move || {
         // Dropped as serving stops.
         let _serving = serving;
-        super::serve_metrics(listener)
+        super::serve_http(listener)
     });
     let served = stopped.recv_timeout(std::time::Duration::from_secs(1));
     // SAFETY: As above.

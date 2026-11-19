@@ -47,6 +47,7 @@ use crate::layout::{self, Footer, Kind, Location, Moves, PART};
 use crate::moves::MOVES;
 use crate::object::{self, TAIL};
 use crate::peer::{Peer, Peers};
+use crate::trace::{self, Source};
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::borrow::Cow;
@@ -424,7 +425,7 @@ struct KeptTail {
 
 // Only active callers own a pending GET and its budget slot.
 enum TailState {
-    Reading(futures::future::WeakShared<BoxFuture<'static, Result<Option<Arc<Tail>>, Error>>>),
+    Reading(futures::future::WeakShared<BoxFuture<'static, Sourced<Option<Arc<Tail>>>>>),
     Ready(Arc<Tail>),
 }
 
@@ -439,7 +440,8 @@ impl Tails {
         match &kept.flight {
             TailState::Reading(flight) => flight.upgrade(),
             TailState::Ready(tail) => {
-                Some(futures::future::ready(Ok(Some(tail.clone()))).boxed().shared())
+                let kept = (Ok(Some(tail.clone())), Some(Source::Memory));
+                Some(futures::future::ready(kept).boxed().shared())
             }
         }
     }
@@ -485,8 +487,27 @@ impl Tails {
     }
 }
 
-/// A GET, or what it found, which reads that come while it is in flight share.
-type Flight<T> = Shared<BoxFuture<'static, Result<T, Error>>>;
+/// A GET, or what it found, which reads that come while it is in flight share; cladefs: with where
+/// it went for it, which each of its readers notes as it lands ([`land`], TASK-672.2).
+type Flight<T> = Shared<BoxFuture<'static, Sourced<T>>>;
+
+/// What a flight found, and the farthest it went for it ([`trace::sourced`]).
+type Sourced<T> = (Result<T, Error>, Option<Source>);
+
+/// `read` in flight, gathering where it goes ([`trace::sourced`]), for its readers to share.
+fn fly<T: Clone + 'static>(
+    read: impl Future<Output = Result<T, Error>> + Send + 'static,
+) -> Flight<T> {
+    trace::sourced(read).boxed().shared()
+}
+
+/// What `flight` found, its reader noting where it went for it ([`trace::note`]): the reader that
+/// started it and those that joined it alike, so that each read says it waited for the bucket.
+async fn land<T: Clone>(flight: Flight<T>) -> Result<T, Error> {
+    let (found, source) = flight.await;
+    trace::note(source);
+    found
+}
 
 /// A part of an object, read by its tail.
 #[derive(Clone)]
@@ -719,7 +740,7 @@ impl<B: Bucket> Fetcher<B> {
     ) -> Result<Vec<u8>, Error> {
         let mut key = location.key.clone();
         for _ in 0..MOVES {
-            if let Some(tail) = self.shared.tail(&key).await? {
+            if let Some(tail) = land(self.shared.tail(&key)).await? {
                 let Some(&(at, held)) = tail.extents.get(&extent) else {
                     return Err(Error::Corrupt(format!("{key} holds no {extent:?}, named there")));
                 };
@@ -744,7 +765,7 @@ impl<B: Bucket> Fetcher<B> {
     /// block is read by the parts it is in, as extents' data is, within the budget, and kept in the
     /// cache. One whose parts fail the CRCs its tail gives is corrupt. A checkpoint gone is lost.
     pub async fn lookup(&self, key: &str, extent: ExtentId) -> Result<Option<Location>, Error> {
-        let tail = self.shared.tail(key).await?.ok_or_else(|| Error::Lost(key.to_owned()))?;
+        let tail = land(self.shared.tail(key)).await?.ok_or_else(|| Error::Lost(key.to_owned()))?;
         let Some(table) = &tail.table else {
             return Err(Error::Corrupt(format!("{key} holds no checkpoint")));
         };
@@ -796,8 +817,9 @@ impl<B: Bucket> Fetcher<B> {
     /// TASK-407.1).
     async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
         let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await;
+        trace::note(Some(Source::Bucket));
         for meta in listed.iter().rev() {
-            let tail = self.shared.tail(&meta.key).await?;
+            let tail = land(self.shared.tail(&meta.key)).await?;
             if tail.is_some_and(|tail| tail.extents.contains_key(&extent)) {
                 return Ok(Some(meta.key.clone()));
             }
@@ -841,7 +863,7 @@ impl<B: Bucket> Fetcher<B> {
         let (this, key) = (self.clone(), key.to_owned());
         spawn(Box::pin(async move {
             // None past the object's end.
-            let Ok(Some(tail)) = this.shared.tail(&key).await else { return };
+            let Ok(Some(tail)) = land(this.shared.tail(&key)).await else { return };
             let parts = parts.start..parts.end.min(tail.parts().frame.parts());
             let held = |part: &u64| match (&this.shared.cache, tail.part(&key, *part)) {
                 (Some(cache), Ok(_)) => cache.holds(&key, *part),
@@ -862,11 +884,12 @@ impl<B: Bucket> Fetcher<B> {
     /// GET, however many ask at once, and kept then, never asking another peer. None if the object
     /// is gone, or holds no such part. The asker checks them against the CRC its own tail gives.
     pub async fn stored_part(&self, key: &str, part: u64) -> Result<Option<Arc<[u8]>>, Error> {
-        let Some(tail) = self.shared.tail(key).await? else { return Ok(None) };
+        let Some(tail) = land(self.shared.tail(key)).await? else { return Ok(None) };
         if tail.part(key, part).is_err() {
             return Ok(None);
         }
         if let Some(fetched) = self.shared.recent_part(key, part) {
+            trace::note(Some(Source::Memory));
             return Ok(Some(fetched.bytes.clone()));
         }
         match self.flight(key, part, &tail, Priority::Demand, None).await? {
@@ -887,6 +910,7 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
     ) -> Result<FetchedPart, Error> {
         if let Some(fetched) = self.shared.recent_part(key, part) {
+            trace::note(Some(Source::Memory));
             return Ok(FetchedPart::Data(fetched));
         }
         let owner = self.shared.peers.as_ref().and_then(|peers| peers.owner(key, part));
@@ -915,7 +939,7 @@ impl<B: Bucket> Fetcher<B> {
                 let (ticket, given) = budget.enter(priority, PART);
                 let (shared, tail, key) = (self.shared.clone(), tail.clone(), key.to_owned());
                 let flight = async move { shared.part(&key, part, &tail, given, owner).await };
-                Waited { budget, ticket, readers: 0, flight: flight.boxed().shared() }
+                Waited { budget, ticket, readers: 0, flight: fly(flight) }
             });
             if priority == Priority::Demand {
                 waited.budget.promote(waited.ticket);
@@ -924,7 +948,7 @@ impl<B: Bucket> Fetcher<B> {
             waited.flight.clone()
         };
         let _reading = Reading { parts, id };
-        flight.await
+        land(flight).await
     }
 }
 
@@ -975,10 +999,14 @@ impl<B: Bucket> Fetching<B> {
         let opened = tail.part(key, part)?;
         let stored = opened.stored;
         if let Some(fetched) = self.recent_part(key, part) {
+            trace::note(Some(Source::Memory));
             return Ok(FetchedPart::Data(fetched));
         }
         let bytes = match self.kept(key, part)? {
-            Some(bytes) => bytes,
+            Some(bytes) => {
+                trace::note(Some(Source::PartCache));
+                bytes
+            }
             None => {
                 let slot = given.await;
                 let fetched = self.fetch(key, part, &stored, owner).await;
@@ -1011,12 +1039,14 @@ impl<B: Bucket> Fetching<B> {
             && let Some(bytes) = owner.part(key, part).await
         {
             if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() {
+                trace::note(Some(Source::Peer));
                 return Ok(Some(bytes));
             }
             log::warn!("cladefs: part {part} of {key}, from its owner, fails its CRC");
             owner.failed();
         }
         let range = ByteRange::Bounded(stored.range());
+        trace::note(Some(Source::Bucket));
         match bucket::get_range(&*self.bucket, key, range).await {
             Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(Some(fetched)),
             Ok(None) => Ok(None),
@@ -1085,7 +1115,7 @@ impl<B: Bucket> Fetching<B> {
             }
             fetched.map(|fetched| fetched.map(|(tail, _)| tail))
         };
-        let tail = tail.boxed().shared();
+        let tail = fly(tail);
         tails.insert(key, read, tail.clone());
         tail
     }
@@ -1095,9 +1125,13 @@ impl<B: Bucket> Fetching<B> {
     /// the cache then.
     async fn read_tail(&self, key: &str) -> Result<Option<(Arc<Tail>, u64)>, Error> {
         let tail = match self.kept_tail(key)? {
-            Some(tail) => tail,
+            Some(tail) => {
+                trace::note(Some(Source::PartCache));
+                tail
+            }
             None => {
                 let slot = self.budgets.of(key).enter(Priority::Demand, TAIL).1.await;
+                trace::note(Some(Source::Bucket));
                 let read = object::tail(&*self.bucket, key).await;
                 drop(slot);
                 let Some(tail) = read? else { return Ok(None) };
@@ -1548,6 +1582,48 @@ mod tests {
         assert_eq!(reads.result(read), want);
     }
 
+    /// TASK-672.2: a read says the farthest it went for its data ([`trace::sourced`]): the bucket,
+    /// for the read whose GET it was and for one that joined that GET in flight alike; the host's
+    /// memory, read again; the part cache, read by another host's fetcher sharing it, whose memory
+    /// holds none of it.
+    #[test]
+    fn reads_say_how_far_they_went() {
+        trace::enable(true);
+        let data = noise(PART);
+        let bucket = bucket(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Cache::open(dir.path(), 8 * PART).unwrap());
+        let fetcher = |memory: &Arc<Memory>| {
+            Rc::new(Fetcher::new(bucket.clone(), limits(8), memory.clone(), Some(cache.clone())))
+        };
+        let mut reads = Reads::new();
+        let want = data[5..15].to_vec();
+        let read = |fetcher: &Rc<Fetcher<SimBucket>>, reads: &mut Reads| {
+            let landed = Rc::new(RefCell::new(None));
+            let (fetcher, into, want) = (fetcher.clone(), landed.clone(), want.clone());
+            let read = async move {
+                let at = location(PART);
+                let (read, source) =
+                    trace::sourced(fetcher.read(EXTENT, &at, 5, 10, Priority::Demand)).await;
+                assert_eq!(read, Ok(want));
+                *into.borrow_mut() = Some(source);
+            };
+            reads.pool.spawner().spawn_local(read).unwrap();
+            reads.run();
+            landed
+        };
+        let host = memory();
+        let (first, joined) =
+            (read(&fetcher(&host), &mut reads), read(&fetcher(&host), &mut reads));
+        assert_eq!(complete_all(&bucket, &mut reads).len(), 2, "a tail's GET and a part's");
+        assert_eq!(*first.borrow(), Some(Some(Source::Bucket)));
+        assert_eq!(*joined.borrow(), Some(Some(Source::Bucket)));
+        assert_eq!(*read(&fetcher(&host), &mut reads).borrow(), Some(Some(Source::Memory)));
+        let other = read(&fetcher(&memory()), &mut reads);
+        assert_eq!(bucket.waiting(), 0);
+        assert_eq!(*other.borrow(), Some(Some(Source::PartCache)));
+    }
+
     /// A part kept that fails its CRC is dropped and fetched; fetched failing it too, the read
     /// fails, corrupt. Read by a fetcher with a memory of its own each time, which holds none of
     /// it: the part, and its object's tail, are in the cache only.
@@ -1783,7 +1859,7 @@ mod tests {
         let data = pattern(2 * PART + 100);
         let bucket = bucket(&data);
         let fetcher = Fetcher::new(bucket.clone(), limits(8), memory(), None);
-        let tail = bucket.served(fetcher.shared.tail(KEY)).0.unwrap().unwrap();
+        let tail = bucket.served(land(fetcher.shared.tail(KEY))).0.unwrap().unwrap();
         let read = |range| bucket.served(fetcher.data(KEY, &tail, range, Priority::Demand));
 
         let (read_back, asked) = read(PART - 5..PART + 5);
