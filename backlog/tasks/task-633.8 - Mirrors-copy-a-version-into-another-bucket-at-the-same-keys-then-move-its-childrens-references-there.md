@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-19 08:26'
+updated_date: '2026-11-19 09:34'
 labels:
   - bucket
   - multi-region
@@ -54,3 +54,17 @@ Order (each its own verified commit):
 5. Forks: reference in B when marked, else A; read again after referring in A (forksRecheck, forksLeaveA); the first fork into B starts the mirror in the background.
 6. Tests per AC #4, and the simulation profile with mirrors (TASK-633.10).
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Steps 1-4 (dcd176354, e7bdb0714, 6792b32ee, a17a5a0d4): layout (FORMAT 22: pin, marker), B's collector over a copy (collect_copy), reads served from a marked copy first, the mirror job.
+
+Step 5: forks refer through Bucket::mirrors (mirror::Here): in B when the marker is there, else in A; having referred in A, the marker read again after P's head, and if there, the reference written in B and retired in A (forksRecheck, forksLeaveA). Uploader::forked starts ObjectBucket::mirror_wanted on the bucket runtime; a process runs one mirror of a version at a time.
+
+Pins (beyond the spec, which models one mirror): the pin's bytes are its mirror's own; another's standing, a mirror does nothing (UnderWay). A pin unrefreshed for PIN_STALE (10 min) is stale: the mirror refreshes it each minute and right before its marker by conditional write, giving up if it is no longer its own; a stale pin keeps nothing, the next mirror takes it over; B's collector begins a stale-pinned mirror again. Lease assumption documented in doc-23 (As built).
+
+Simplifications (doc-23): GET+PUT copies only; only P's own prefix copied; a cell's whole copy kept while any version needs it.
+
+Tests: forks_refer_where_their_versions_are_mirrored, mirrors_hold_their_pins_alone (bucket_cell), versions_forked_on_a_host_of_another_bucket_make_children_there (cladefs, the fork starting the mirror). Hand mutants, each failing a test: no recheck, no retirement in A, never referring in B, shared pins, refresh unchecked, stale pins keeping, never stale, the fork starting no mirror.
+<!-- SECTION:NOTES:END -->

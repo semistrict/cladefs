@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-19 05:37'
+updated_date: '2026-11-19 09:34'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -155,6 +155,11 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 - **One mirror serves every child in B of that version,** and later forks of it into B refer to it in B alone.
 - **B's collector** keeps a copy while P's head names its version (read first, in A: `copiesKeptWhileNamed`, `copyRelists`) or a reference in B to it stands; otherwise it deletes the marker, then the objects (`markerGoesFirst`). A mirror has no head, no writer and no KEK of P's, so no compactor ever touches it.
 - **What hydrates, and when:** every version forked into another bucket, at once (the user, 2026-11-18). The first such fork starts the mirror in the background; later forks of the version into that bucket find it under way or done. The mirror's create-only marker is the switch: before it, reads go to A; once it exists, every host reads B.
+- **As built (TASK-633.8):** `bucket_cell::mirror` runs the order above; `ObjectBucket` serves a marked version's keys from B first, and falls back to A for any it lacks; `Collector::collect_copy` is B's pass over a copy; forks refer through `Bucket::mirrors` (`mirror::Here`). A process runs one mirror of a version at a time. Choices the spec leaves open:
+  - **One mirror at a time per version and bucket, by its pin.** The pin's bytes are its mirror's own (a random run ID). A mirror that finds another's pin standing does nothing: the mirror is under way. Two mirrors sharing one pin would break `mirrorPins`: the first to finish drops the pin from under the second.
+  - **A pin goes stale** after `PIN_STALE` (10 minutes) unrefreshed, by B's clock. Its mirror refreshes it every minute while it copies, and right before its marker, with a conditional write: it gives up, unmarked, if the pin is no longer its own. A stale pin keeps nothing from B's collector, and the next mirror takes it over by a conditional write. This is a lease's assumption: a host stopped for longer than `PIN_STALE` between its refresh and its marker, while the version is dropped and its copy collected meanwhile, would mark a copy that is not whole.
+  - **Resuming:** B's collector, finding a stale pin, begins that mirror again in its pass. The next fork of the version into B does too.
+  - **Simplifications:** copies are GET and PUT (server-side copy is not done yet). A mirror copies only the objects under P's own prefix; objects of other cells that the version inherited are read where they are. B's collector keeps a cell's whole copy while any of its versions is needed. A mirror's writes go through B's own store, whose requests are counted apart from `stats_by_bucket`; fetch budgets charge a read that B serves from a copy to A, the cell's bucket.
 - **Prior art:** Fly volumes fork across regions and hydrate behind, usable meanwhile (https://fly.io/docs/volumes/volume-states/). EBS loads a volume lazily from its snapshot. Cloudflare R2's Sippy migrates lazily.
 
 ### What the parent's bucket being out of reach costs

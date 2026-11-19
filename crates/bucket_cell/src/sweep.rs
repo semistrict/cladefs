@@ -298,7 +298,7 @@ impl Sweep {
             let started = Instant::now();
             let collector = Collector::new(self.options);
             let outcome = match self.mode {
-                Mode::Delete => match collector.collect_copy(&counted, &*own, cell).await {
+                Mode::Delete => match collector.collect_copy(&counted, &*own, number, cell).await {
                     Ok(report) => Outcome::Collected(report),
                     Err(error) => Outcome::failed(error),
                 },

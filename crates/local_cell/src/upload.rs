@@ -74,6 +74,23 @@ const SEGMENT: u64 = 32 << 20;
 /// How many segments go between checkpoints, by default ([`Options::checkpoint_every`]).
 pub const CHECKPOINT_EVERY: u64 = 64;
 
+/// cladefs: the mirror in `bucket` of the version `origin` names, begun in the background on the
+/// bucket runtime, a fork of it into `bucket` made (doc-23: the first fork of a version into a
+/// bucket starts its mirror there; TASK-633.8): nothing for a version of a cell of `bucket`'s own,
+/// or one mirrored there already ([`ObjectBucket::mirror_wanted`]). What it came to is logged.
+fn mirror_wanted(bucket: &Arc<ObjectBucket>, origin: Origin) -> Result<(), Failure> {
+    let bucket = bucket.clone();
+    bucket_runtime()?.spawn(async move {
+        let Origin { parent, at } = origin;
+        match bucket.mirror_wanted(parent, at).await {
+            Ok(None) => {}
+            Ok(Some(mirrored)) => log::info!("cladefs: {parent}'s version at {at:x}: {mirrored:?}"),
+            Err(err) => log::warn!("cladefs: mirroring {parent}'s version at {at:x}: {err}"),
+        }
+    });
+    Ok(())
+}
+
 /// The most bytes of objects a host's uploads hold at once: its budget's ([`Runtime::uploads`]).
 pub const UPLOAD_BYTES: u64 = 512 << 20;
 
@@ -798,6 +815,7 @@ impl<D: Dir> Uploader<D> {
                 known.learn(child.cell, Learned { head });
             }
         }
+        mirror_wanted(&self.bucket, at.origin)?;
         Ok(())
     }
 

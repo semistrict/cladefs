@@ -568,6 +568,29 @@ impl Bucket for SimBucket {
     fn known(&self) -> Option<&crate::known::Known> {
         Some(&self.known)
     }
+
+    fn mirrors(&self) -> Option<&dyn crate::mirror::Here> {
+        (self.home != 0 && !self.pinned).then_some(self as &dyn crate::mirror::Here)
+    }
+}
+
+/// cladefs: the mirrors in its host's bucket, in its own store (TASK-633.8), as
+/// `ObjectBucket`'s.
+impl crate::mirror::Here for SimBucket {
+    fn marked(&self, parent: CellId, at: u64) -> futures::future::BoxFuture<'_, bool> {
+        let own = self.own();
+        let mine = self.region_of(&parent.prefix()) == self.home;
+        Box::pin(async move {
+            !mine && crate::bucket::get(&*own, &layout::mirror(parent, at)).await.is_some()
+        })
+    }
+
+    fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> futures::future::BoxFuture<'a, ()> {
+        let own = self.own();
+        Box::pin(async move {
+            crate::bucket::create(&*own, key, bytes).await;
+        })
+    }
 }
 
 /// The same bucket, its requests taking effect at once and never failing: the simulation's view,
