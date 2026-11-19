@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:24'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: high
@@ -28,7 +28,7 @@ Once another placement takes a cell, the old store's uploader stops for good wit
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 After another placement takes the cell and the old store's uploader has failed with Fenced, Stale or Deleted, an ordered commit on the old store (a guest fsync: COMMIT without COMMIT_UPLOADED) returns EROFS. WRITE and FREE to it return EROFS too, as doc-4 says.
+- [x] #1 After another placement takes the cell and the old store's uploader has failed with Fenced, Stale or Deleted, an ordered commit on the old store (a guest fsync: COMMIT without COMMIT_UPLOADED) returns EROFS. WRITE and FREE to it return EROFS too, as doc-4 says.
 - [ ] #2 Regression tests in crates/cladefs/src/bucket.rs, next to later_placements_fence_earlier_ones and durable_commits_fail_once_another_takes_the_cell, wait until failed() is Some(Fenced). They then assert commit_ordered(None) == Err(EROFS) and that a write to a new extent fails with EROFS, with a variant for Stale. A cladefsd test asserts that a COMMIT without COMMIT_UPLOADED after a takeover is answered EROFS. Each goes red with the fix reverted.
 <!-- AC:END -->
 
@@ -38,3 +38,9 @@ Once another placement takes a cell, the old store's uploader stops for good wit
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed two ways: OpenCell::admit refuses WRITE, FREE and every commit once the uploader failed for good; and the uploader's lag wait (Awaited::Lag) fails first once uploading failed, so an ordered commit racing the failure fails too. Tests: bucket.rs fenced_stores_change_nothing and stores_of_deleted_cells_change_nothing (Fenced and Deleted), cladefsd fenced_stores_answer_ordered_commits_erofs (Linux, passed). AC2 left: no Stale variant: a running store's uploader fails Fenced or Deleted; I found no path that fails it Stale. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->

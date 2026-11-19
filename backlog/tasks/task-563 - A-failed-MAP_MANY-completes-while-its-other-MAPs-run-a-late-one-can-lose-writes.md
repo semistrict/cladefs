@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:26'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: high
@@ -33,9 +33,9 @@ The device turns a guest MAP_MANY into one daemon MAP per piece and sends them a
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A MAP_MANY that fails completes to the guest only after every daemon MAP it sent for its pieces has finished, as the daemon's own map_many does; no MAP of a completed MAP_MANY changes the window afterwards.
+- [x] #1 A MAP_MANY that fails completes to the guest only after every daemon MAP it sent for its pieces has finished, as the daemon's own map_many does; no MAP of a completed MAP_MANY changes the window afterwards.
 - [ ] #2 Under the trigger (piece 0 fails EPERM at once, piece 1's MAP is held), the guest's piece-by-piece retry and its later store instruction to P1 survive: P1's private page is not replaced by E1, and no range placed in reused window space shows another file's bytes.
-- [ ] #3 A requests.rs test with a Backend that fails piece 0 with EPERM at once and holds piece 1 on a oneshot polls handle() by hand: it stays Pending after piece 0 fails and is Ready with EPERM only once piece 1's map is recorded. It goes Ready early with the fix reverted.
+- [x] #3 A requests.rs test with a Backend that fails piece 0 with EPERM at once and holds piece 1 on a oneshot polls handle() by hand: it stays Pending after piece 0 fails and is Ready with EPERM only once piece 1's map is recorded. It goes Ready early with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -44,3 +44,9 @@ The device turns a guest MAP_MANY into one daemon MAP per piece and sends them a
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MAP_MANY's pieces are awaited with join_all, then the first error returned: the request completes once every daemon MAP it sent is done. Test: requests.rs failed_map_manys_complete_once_every_piece_is_done (a hand mutant back to try_join_all fails it). AC2 left: no guest-level test of the retry under the trigger. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->

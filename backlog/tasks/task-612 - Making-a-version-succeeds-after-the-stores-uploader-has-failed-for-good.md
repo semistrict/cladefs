@@ -1,11 +1,11 @@
 ---
 id: TASK-612
 title: Making a version succeeds after the store's uploader has failed for good
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:33'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: low
@@ -31,13 +31,25 @@ Once the uploader stops for good (`Uploader::failed()`: Fenced when a later plac
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 MakeVersion on a store whose uploader has failed for good (fenced by a later placement, deleted, corrupt, or out of retries) fails with EROFS, as Commit::Local does, and returns no version ID.
-- [ ] #2 A regression test in open_cell's tests lets another placement take the cell (as stores_take_their_cells_and_are_fenced_with_them does), waits for uploader.failed(), asserts make_version(None) fails with EROFS, and goes red with the fix reverted.
+- [x] #1 MakeVersion on a store whose uploader has failed for good (fenced by a later placement, deleted, corrupt, or out of retries) fails with EROFS, as Commit::Local does, and returns no version ID.
+- [x] #2 A regression test in open_cell's tests lets another placement take the cell (as stores_take_their_cells_and_are_fenced_with_them does), waits for uploader.failed(), asserts make_version(None) fails with EROFS, and goes red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+make_version passes OpenCell::admit through at_rest, which refuses once the uploader failed for good. Its test is bucket.rs's fenced_stores_change_nothing (and stores_of_deleted_cells_change_nothing), not open_cell's: they take the cell from another placement as the AC asks. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+MakeVersion on a store whose uploader failed for good fails with EROFS, through OpenCell::admit. Tested by bucket.rs fenced_stores_change_nothing; a mutant keeping make_version past the gate fails it.
+<!-- SECTION:FINAL_SUMMARY:END -->

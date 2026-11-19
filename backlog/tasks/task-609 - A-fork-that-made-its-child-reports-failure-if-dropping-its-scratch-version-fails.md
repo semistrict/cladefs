@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:32'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: low
@@ -33,7 +33,7 @@ Audit of 6f4dd56a0 (2026-11-18), cells review; verified against the code by inde
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A fork whose child was made (its head is written and its store sits at the path) returns Ok with the child's cell ID even when dropping the scratch version fails afterwards.
+- [x] #1 A fork whose child was made (its head is written and its store sits at the path) returns Ok with the child's cell ID even when dropping the scratch version fails afterwards.
 - [ ] #2 A fork that returns Err while its host is alive leaves nothing at the child's path and no live child in the bucket.
 - [ ] #3 fork_faults (crates/cladefs/src/bucket/fork_faults.rs) gets a failpoint, or a Write mishap, that fails the scratch version's drop in fork_through. World::settle asserts the second criterion for every failed fork on a live host. Both go red with the fix reverted.
 <!-- AC:END -->
@@ -44,3 +44,9 @@ Audit of 6f4dd56a0 (2026-11-18), cells review; verified against the code by inde
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+fork_through returns Ok once the child is made, logging a failed scratch-version drop. FORK_STEPS gains upload::drop_versions (a failpoint in Uploader::drop_versions): forks_failing_at_each_step expects that step alone to leave the fork made, and cladefsd's guests_forks_failing_at_each_step_harm_nothing too. World::settle asserts a fork failed on a live host left nothing at its path. AC2/AC3 left in part: settle does not assert no live child in the bucket, as a failed cleanup legitimately leaves an orphan. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->

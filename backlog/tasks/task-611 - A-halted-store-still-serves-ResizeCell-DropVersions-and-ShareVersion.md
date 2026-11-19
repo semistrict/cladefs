@@ -1,11 +1,11 @@
 ---
 id: TASK-611
 title: 'A halted store still serves ResizeCell, DropVersions and ShareVersion'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:33'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: low
@@ -31,13 +31,25 @@ Audit of 6f4dd56a0 (2026-11-18), cells review; verified against the code by inde
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 On a store halted by a panic (EIO) or a shred or KEK revocation (EACCES), ResizeCell, DropVersions and ShareVersion fail with the halt's errno; the store's last_commit and the cell's head are unchanged, and the guest is told no new capacity.
-- [ ] #2 a_panic_holding_a_lock_halts_the_store and the shred-halt test assert this for set_capacity, drop_versions and share_version, and go red with the fix reverted.
+- [x] #1 On a store halted by a panic (EIO) or a shred or KEK revocation (EACCES), ResizeCell, DropVersions and ShareVersion fail with the halt's errno; the store's last_commit and the cell's head are unchanged, and the guest is told no new capacity.
+- [x] #2 a_panic_holding_a_lock_halts_the_store and the shred-halt test assert this for set_capacity, drop_versions and share_version, and go red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed by one gate: every request that changes a store passes OpenCell::admit first (halt, role, uploader failed), set_capacity, drop_versions and share_version among them. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A halted store refuses ResizeCell, DropVersions and ShareVersion with the halt's errno: they pass OpenCell::admit, the one gate every changing request passes. a_panic_holding_a_lock_halts_the_store and the shred test assert it; a mutant leaving the halt out of the gate fails both.
+<!-- SECTION:FINAL_SUMMARY:END -->

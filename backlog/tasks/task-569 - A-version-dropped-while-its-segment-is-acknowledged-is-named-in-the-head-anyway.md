@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:27'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: medium
@@ -43,9 +43,9 @@ If the drop runs its whole held section between acknowledge's filtering and ackn
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Once DropVersions(X) has returned Ok while X's segment is being acknowledged, the cell's head never names X, whichever of the drop and the acknowledgement takes the head lock first.
-- [ ] #2 The simulation reports a violation for any version marked dropped that the cell's head still names.
-- [ ] #3 A unit test in crates/bucket_cell/src/writer.rs, on SimBucket, holds a ShareVersion PUT pending. It parks acknowledge() and drop_versions({X}) on the head lock with the drop woken first, then completes both and asserts the head names no X. It goes red with the fix reverted.
+- [x] #1 Once DropVersions(X) has returned Ok while X's segment is being acknowledged, the cell's head never names X, whichever of the drop and the acknowledgement takes the head lock first.
+- [x] #2 The simulation reports a violation for any version marked dropped that the cell's head still names.
+- [x] #3 A unit test in crates/bucket_cell/src/writer.rs, on SimBucket, holds a ShareVersion PUT pending. It parks acknowledge() and drop_versions({X}) on the head lock with the drop woken first, then completes both and asserts the head names no X. It goes red with the fix reverted.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -54,3 +54,9 @@ If the drop runs its whole held section between acknowledge's filtering and ackn
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Acknowledge filters dropped versions holding the head lock, under which drops unname. Test: writer.rs acknowledgements_name_no_version_dropped_while_they_wait_for_the_head (holds the head lock itself rather than a ShareVersion PUT; a mutant reading dropped before the lock fails it). The simulation reports a version a live writer dropped, told so, that its head still names (crashed hosts' drops excluded: their late writes may name it, as doc-18 accepts); I have not checked that a seed finds the race with the fix undone. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->

@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:28'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: medium
@@ -42,3 +42,9 @@ create_snapshot makes a version of every extent device's cell first (take_extent
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+create_snapshot now drops the versions its devices made when it fails after them (Vmm::take_extent_snapshots drops those taken on its own failure; Vmm::drop_extent_snapshots after a failed save or file write; Device::take_snapshot drops its version when window_mappings fails). A new daemon request, FORK with FORK_DROP (wire version 11), drops a version the connection made, EPERM for any other. Firecracker commit 99b3b968a on cladefs-v1.16.1-r10. Tests: cladefsd vm_processes_drop_the_versions_they_made_alone, virtio_extent snapshots_dropped_are_gone. AC1-3 left: no Firecracker-level test of a failed two-device snapshot (no VMM test builds a VM with extent devices). macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->

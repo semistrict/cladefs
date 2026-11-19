@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:29'
-updated_date: '2026-11-19 06:43'
+updated_date: '2026-11-19 10:48'
 labels: []
 dependencies: []
 priority: medium
@@ -31,7 +31,7 @@ Audit of 6f4dd56a0 (2026-11-18), durability-end-to-end review; verified against 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 While the bucket is shut, Local commits stall at the lag bound like Ordered ones. This covers COMMIT_LOCAL and every commit the daemon device makes for SQLite and memory cells. Past max_lag commits, or past max_lag_bytes of write-ahead log plus the last commit, the next commit waits until uploads catch up.
+- [x] #1 While the bucket is shut, Local commits stall at the lag bound like Ordered ones. This covers COMMIT_LOCAL and every commit the daemon device makes for SQLite and memory cells. Past max_lag commits, or past max_lag_bytes of write-ahead log plus the last commit, the next commit waits until uploads catch up.
 - [ ] #2 Tests in crates/cladefs/src/bucket.rs add a waits_at_the_lag_bound variant that uses commit_local(None) with max_lag 2 and the gated bucket shut. It asserts the third commit blocks (not finished, uploader.stalls() > 0) and completes once the bucket opens. A max_lag_bytes variant and a sqlite_extents daemon test with a transaction loop against a shut bucket are added too. All go red with the fix reverted.
 <!-- AC:END -->
 
@@ -41,3 +41,9 @@ Audit of 6f4dd56a0 (2026-11-18), durability-end-to-end review; verified against 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Commit levels now build on each other: Local is flush, then within_lag, as Ordered is within_lag. Tests: bucket.rs local_commits_wait_at_the_lag_bound and _in_bytes (waits_at_the_lag_bound now fails at once, not hangs, past the bound). AC2 left: no sqlite_extents daemon test against a shut bucket. doc-21 updated. macOS: clippy, workspace 2712/2712, sim 41/41; Linux (ubu1, 808ed60ca): workspace 3044/3046, the fork-steps test updated since and passing alone (43a0c9ae2), windows_are_where_snapshots_had_them failing once, passing 55 runs after (TASK-655); scripts/upstream-changes.py --check. Hand mutants (target/b2-mutants.py), each caught by its test.
+<!-- SECTION:NOTES:END -->
