@@ -629,8 +629,16 @@ mod guest {
         now.tv_sec as u64 * 1000 + now.tv_nsec as u64 / 1_000_000
     }
 
-    /// Brings the loopback interface up, which marimo's server listens on: the guest's init leaves
-    /// every interface down, and the image has no `ip`.
+    /// The loopback network, as a sandbox's init sets it up: the interface up, which marimo's
+    /// server listens on, and `localhost` named, which the kernel marimo's export starts is
+    /// reached at (the guest's init leaves every interface down, the image has no `ip`, and its
+    /// /etc/hosts, a container runtime's to write, names nothing).
+    fn loopback() {
+        std::fs::write("/etc/hosts", "127.0.0.1 localhost\n::1 localhost\n").unwrap();
+        loopback_up();
+    }
+
+    /// Brings the loopback interface up.
     fn loopback_up() {
         /// Linux's `struct ifreq`, its name and, of its union, the flags.
         #[repr(C)]
@@ -721,7 +729,7 @@ mod guest {
     impl Test for TestFxfsGuestPythonSandbox {
         fn in_guest(self: Box<Self>) {
             println!("{AGENT}{}", since_boot_ms());
-            loopback_up();
+            loopback();
             let log = Path::new("/tmp/marimo-server.log");
             let output = std::fs::File::create(log).unwrap();
             let port = PORT.to_string();
