@@ -127,6 +127,9 @@ struct Inner {
     /// cladefs: the versions dropped, which no acknowledgement names, local ones among them, cut
     /// by segments not yet acknowledged (TASK-476).
     dropped: BTreeSet<u64>,
+    /// cladefs: a replicated cell's configuration its next acknowledgement naming the commit of
+    /// this epoch or a later one names in the same swap ([`Writer::configure_past`], TASK-537.3.6).
+    switch: Option<(u64, layout::Configuration)>,
 }
 
 struct Pending {
@@ -205,6 +208,7 @@ impl<B: Bucket> Writer<B> {
                 checkpoint,
                 stopped: None,
                 dropped: BTreeSet::new(),
+                switch: None,
             }),
             mover: std::sync::OnceLock::new(),
             keys,
@@ -420,6 +424,24 @@ impl<B: Bucket> Writer<B> {
         }
     }
 
+    /// cladefs: has the acknowledgement that first names the commit of epoch `epoch` (by its
+    /// number, `extent_frame::segment::epoch_of`), or a later one, name `configuration` as its
+    /// cell's in the same swap (doc-21, TASK-537.3.6): a take that recovered from the members of
+    /// the configuration the head names, through `epoch`, and could give them to none of its
+    /// own, serves alone, the head naming that configuration, fenced, until the bucket holds what
+    /// it recovered; and no later commit of its own is acknowledged before the head names its own
+    /// configuration, of f = 0, so that a take after reads the bucket, not the configuration
+    /// before, whose members hold another writer's commits past the recovered ones. An
+    /// acknowledgement already past it, none.
+    pub fn configure_past(&self, epoch: u64, configuration: layout::Configuration) {
+        self.inner().switch = Some((epoch, configuration));
+    }
+
+    /// cladefs: whether a switch [`Writer::configure_past`] asked for is yet to land.
+    pub fn switching(&self) -> bool {
+        self.inner().switch.is_some()
+    }
+
     /// cladefs: the head as it last swapped it, or took it.
     pub async fn head(&self) -> layout::Head {
         self.held.lock().await.head.clone()
@@ -435,7 +457,7 @@ impl<B: Bucket> Writer<B> {
     /// the versions cut at the ends of the segments it names too ([`layout::Head::naming`], doc-18,
     /// TASK-476): a version is uploaded once it does.
     pub async fn acknowledge(&self) -> Result<Option<u64>, Error> {
-        let (through, cuts) = {
+        let (through, cuts, switch) = {
             let inner = self.inner();
             if let Some(error) = &inner.stopped {
                 return Err(error.clone());
@@ -462,17 +484,33 @@ impl<B: Bucket> Writer<B> {
             };
             let cuts: Vec<_> =
                 cuts.into_iter().filter(|(_, cut)| !inner.dropped.contains(&cut.id)).collect();
-            (through, cuts)
+            // cladefs: the configuration a switch names, if this acknowledgement names its commit.
+            let last = (inner.pending.range(..=through))
+                .flat_map(|(_, pending)| pending.footer.contents.commits.iter())
+                .map(|&commit| extent_frame::segment::epoch_of(commit))
+                .max();
+            let switch = (inner.switch.as_ref())
+                .filter(|(epoch, _)| last.is_some_and(|last| last >= *epoch))
+                .map(|(_, configuration)| configuration.clone());
+            (through, cuts, switch)
         };
         failpoint!("writer::acknowledge");
         {
             let mut held = self.held.lock().await;
             if held.head.end <= through {
                 let named = cuts.iter().map(|(seq, cut)| (*seq, cut));
-                let next = held.head.clone().holding(self.epoch, through + 1).naming(named);
+                let mut next = held.head.clone().holding(self.epoch, through + 1).naming(named);
+                if let Some(configuration) = &switch
+                    && let Some(replication) = next.replication.as_mut()
+                {
+                    replication.configuration = Some(configuration.clone());
+                }
                 match head::swap(&*self.bucket, self.cell, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
+                }
+                if switch.is_some() {
+                    self.inner().switch = None;
                 }
             }
         }

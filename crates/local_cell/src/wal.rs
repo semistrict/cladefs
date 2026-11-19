@@ -465,8 +465,14 @@ fn framed(record: &LogRecord, at: u64, salt: u64, encryption: &RawEncryption) ->
 /// cladefs: the commits the records of `log`, segment `segment`'s replica log as a member holds it,
 /// name, in order: read holding no key, as a taker restores it before it opens (TASK-537.3.3).
 pub(crate) fn replica_commits(log: &[u8], segment: SegmentId) -> Vec<u64> {
+    replica_records(log, segment).into_iter().flatten().collect()
+}
+
+/// cladefs: the commits each of the records of `log`, as [`replica_commits`] reads it, names:
+/// none, of a record of a commit it does not end (TASK-537.3.6).
+pub(crate) fn replica_records(log: &[u8], segment: SegmentId) -> Vec<Vec<u64>> {
     let records = LogRecord::decode(log, segment, None).unwrap_or_default();
-    records.iter().flat_map(|record| record.contents.commits.iter().copied()).collect()
+    records.into_iter().map(|record| record.contents.commits).collect()
 }
 
 /// cladefs: a segment's log as a replicated cell's members hold it (doc-21, TASK-537.3.3): the

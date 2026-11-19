@@ -464,7 +464,7 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     held: Mutex<Option<RingHold>>,
     /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
     /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
-    keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration)>>,
+    keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration, bool)>>,
 }
 
 /// The holders an uploader's takings of its cell's head after the first take, and the owners of
@@ -1102,8 +1102,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
         let keeping = self.keeping.lock().unwrap().take();
-        if let Some((wish, configuration)) = keeping {
-            tokio::spawn(self.clone().keep(writer.clone(), wish, configuration));
+        if let Some((wish, configuration, stale)) = keeping {
+            tokio::spawn(self.clone().keep(writer.clone(), wish, (configuration, stale)));
         }
         let mut segments = 0;
         let mut in_flight = InFlight::default();
@@ -1303,8 +1303,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             (Some(old), Some(fenced)) => {
                 let logs = self.read_longest(cell, old, &fenced).await?;
                 let last = writer.taken().last_commit;
-                let bucketed = (writer.taken().head.end, last);
-                let seed = crate::replicate::trimmed(cell, &logs, bucketed)?;
+                let seed = crate::replicate::trimmed(cell, &logs, last)?;
                 // Its own write-ahead log, if it holds one, recovered unless the members' go past
                 // it: a later writer's, or this writer's beyond its own sync (TASK-537.3.4's review).
                 let own = recovering.last_commit_held();
@@ -1320,7 +1319,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                             );
                             recovering.drop_wal()?;
                         }
-                        Ok(recovering.restored(&seed, bucketed)?)
+                        Ok(recovering.restored(&seed, last)?)
                     })?,
                 };
                 (seed, recovering)
@@ -1344,8 +1343,9 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let before = old.as_ref().map_or(0, |old| old.f);
             replication.wish.f = replication.wish.f.max(before);
             if replication.wish.f >= 1 {
-                let configuration = self.replicate(&writer, replication, old, seed).await?;
-                *self.keeping.lock().unwrap() = Some((wish, configuration));
+                let (configuration, stale) =
+                    self.replicate(&writer, replication, old, seed).await?;
+                *self.keeping.lock().unwrap() = Some((wish, configuration, stale));
             }
         }
         Ok(Some(writer))
@@ -1364,7 +1364,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         replication: bucket_cell::layout::Replication,
         old: Option<bucket_cell::layout::Configuration>,
         seed: Vec<(u64, Vec<u8>)>,
-    ) -> Result<bucket_cell::layout::Configuration, Failure> {
+    ) -> Result<(bucket_cell::layout::Configuration, bool), Failure> {
+        use bucket_cell::layout::Configuration;
         let bucket_cell::layout::Replication { wish, configuration } = replication;
         let members = self.members()?;
         let store = self.store().clone();
@@ -1378,11 +1379,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         })?;
         let (me, others) = match picked {
             (me, Ok(others)) => (me, others),
-            // cladefs: no members to be had, and none holding what the bucket lacks: the cell
-            // serves degraded, at f = 0, its commits waiting for the bucket, until its keeper
-            // has members (Codex's review of TASK-537.3.5): a take of a cell its writer dropped
-            // to f = 0 needs no peers.
-            (me, Err(err)) if old.is_none() => {
+            // cladefs: no members to be had: the cell serves degraded, at f = 0, its commits
+            // waiting for the bucket, until its keeper has members (Codex's review of
+            // TASK-537.3.5): a take of a cell its writer dropped to f = 0 needs no peers. And a
+            // take that recovered what the configuration before held, which it can give no
+            // configuration of its own, a host of three lost (TASK-537.3.6): the head goes on
+            // naming that configuration, fenced, its members holding what was told, until the
+            // acknowledgement that names all the store recovered names its own, of f = 0, in the
+            // same swap (`Writer::configure_past`; the spec's aloneSwitch).
+            (me, Err(err)) => {
                 log::warn!(
                     "cladefs: {cell:?} degraded: no configuration of f {} to be had, its \
                      commits waiting for the bucket: {err}",
@@ -1397,14 +1402,26 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 let replicator =
                     crate::replicate::Replicator::start(0, base, spool, Vec::new(), waker);
                 store.replicate_to(replicator);
-                return Ok(before.unwrap_or(bucket_cell::layout::Configuration {
-                    number: 0,
-                    epoch: writer.epoch(),
-                    f: 0,
-                    members: vec![me],
-                }));
+                let epoch = writer.epoch();
+                return Ok(match before {
+                    Some(before) if before.f == 0 => (before, false),
+                    // The writer's own, of f = 0, which the head names once it names all the
+                    // store recovered: at once if the bucket holds it all.
+                    Some(before) => {
+                        let number = before.number + 1;
+                        let alone = Configuration { number, epoch, f: 0, members: vec![me] };
+                        let named = writer.taken().last_commit.map(epoch_of);
+                        match named.is_some_and(|named| named >= base) {
+                            true => writer.configure(alone.clone()).await?,
+                            false => writer.configure_past(base, alone.clone()),
+                        }
+                        (alone, true)
+                    }
+                    // A cell the head names no configuration of: its keeper's replacement the
+                    // first.
+                    None => (Configuration { number: 0, epoch, f: 0, members: vec![me] }, false),
+                });
             }
-            (_, Err(err)) => return Err(Failure::msg(err)),
         };
         let mut all = vec![me];
         all.extend(others.iter().cloned());
@@ -1454,7 +1471,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         if let Some(old) = old {
             self.drop_before(cell, &old, &configuration);
         }
-        Ok(configuration)
+        Ok((configuration, false))
     }
 
     /// cladefs: has the members of `old`, but this host, drop what they hold of `cell`'s
@@ -1486,12 +1503,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// - degraded, and no replacement to be had, it drops to f = 0, so that a take of the cell
     ///   needs no member of a configuration lost, and back up as members come back;
     /// - a configuration of another f than `wish`'s, as a taking asking for f = 0 of a cell
-    ///   replicated keeps until the bucket holds what it told, is replaced by one of `wish`'s.
+    ///   replicated keeps until the bucket holds what it told, is replaced by one of `wish`'s;
+    /// - `stale`, the head naming the configuration of the writer before, which the taking could
+    ///   give no configuration of its own (TASK-537.3.6): nothing replaced until the
+    ///   acknowledgement naming what the taking recovered names the writer's own
+    ///   (`Writer::configure_past`).
     async fn keep(
         self: Arc<Self>,
         writer: Arc<Writer<B>>,
         wish: bucket_cell::layout::Wish,
-        mut configuration: bucket_cell::layout::Configuration,
+        (mut configuration, mut stale): (bucket_cell::layout::Configuration, bool),
     ) {
         let cell = writer.cell();
         let mut degraded = None::<std::time::Instant>;
@@ -1525,6 +1546,19 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                 self.eager();
             } else if degraded.take().is_some() {
                 log::info!("cladefs: {cell:?} degraded no more");
+            }
+            // Alone, its own configuration is named once the bucket holds what it recovered: no
+            // replacement before (the spec's aloneSwitch).
+            if stale {
+                match writer.switching() {
+                    true => continue,
+                    false => stale = false,
+                }
+                if configuration.f == 0 && wish.f == 0 {
+                    self.store().unreplicate();
+                    log::info!("cladefs: {cell:?} replicated no more, as its head asks");
+                    return;
+                }
             }
             let replace = configuration.f != wish.f || replicator.lost(REPLACE_AFTER);
             if !replace || std::time::Instant::now() < next {

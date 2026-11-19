@@ -75,35 +75,48 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 }
 
 /// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
-/// goes on from what the cell's head names, the bucket holding its segments to `end` and its
-/// commits to `last` (TASK-537.3.4): the logs of the segments from `end` on. The head acknowledges
-/// whole segments, and a member drops none it does not name, so that a member's copy of a segment
-/// before `end`, whole or partial, is the bucket's already (TASK-537.3.5's review: a member still
-/// holding part of a segment the head named, as its drop never came). Refused if the first commit
-/// they hold does not follow `last`: what is between, on no member, may be commits a guest was
-/// told are replicated.
+/// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): the segments after
+/// the last whose records name a commit through `last`, the head acknowledging whole segments, so
+/// that a member's copy of one it named, whole or cut short, its drop never come, is the bucket's
+/// already (TASK-537.3.5's review); and of those, from the first holding any record. Refused if
+/// the first commit they hold does not follow `last`: what is between, on no member, may be
+/// commits a guest was told are replicated. (Not the head's count of segments: a writer's local
+/// segments are numbered as its own, the bucket's as the cell's.)
 pub fn trimmed(
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
-    (end, last): (u64, Option<u64>),
+    last: Option<u64>,
 ) -> Result<Vec<(u64, Vec<u8>)>, anyhow::Error> {
     use crate::layout::SegmentId;
     use extent_frame::segment::epoch_of;
+    let segment = |number: u64| SegmentId { cell: cell.id, number };
+    let through = |commit: u64| last.is_some_and(|last| epoch_of(commit) <= epoch_of(last));
+    // Each segment's records, by the commits each names.
+    let records: BTreeMap<u64, Vec<Vec<u64>>> = (logs.iter().filter(|(log, _)| log & 1 == 0))
+        .map(|(log, bytes)| (log >> 1, crate::wal::replica_records(bytes, segment(log >> 1))))
+        .collect();
+    let named = (records.iter())
+        .filter(|(_, records)| records.iter().flatten().any(|&commit| through(commit)))
+        .map(|(&number, _)| number)
+        .max();
+    let after = |number: u64| named.is_none_or(|named| number > named);
+    let first = (records.iter())
+        .find(|&(&number, records)| after(number) && !records.is_empty())
+        .map(|(&number, _)| number);
+    let Some(first) = first else { return Ok(Vec::new()) };
     let kept: Vec<(u64, Vec<u8>)> =
-        logs.iter().filter(|(log, _)| log >> 1 >= end).cloned().collect();
-    let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
-    let first = (kept.iter().filter(|(log, _)| log & 1 == 0)).find_map(|(log, bytes)| {
-        crate::wal::replica_commits(bytes, segment(*log)).first().copied()
-    });
-    let follows = match (last, first) {
+        logs.iter().filter(|(log, _)| log >> 1 >= first).cloned().collect();
+    let commits = records.range(first..).flat_map(|(_, records)| records.iter().flatten());
+    let first_commit = commits.copied().next();
+    let follows = match (last, first_commit) {
         (_, None) => true,
-        (None, Some(first)) => epoch_of(first) <= 1,
-        (Some(last), Some(first)) => epoch_of(first) == epoch_of(last) + 1,
+        (None, Some(commit)) => epoch_of(commit) <= 1,
+        (Some(last), Some(commit)) => epoch_of(commit) == epoch_of(last) + 1,
     };
     anyhow::ensure!(
         follows,
-        "the members' logs of {cell:?} from segment {end} begin at commit {first:?}, not going on \
-         from the head's last, {last:?}"
+        "the members' logs of {cell:?} from segment {first} begin at commit {first_commit:?}, not \
+         going on from the head's last, {last:?}"
     );
     Ok(kept)
 }
@@ -148,12 +161,12 @@ pub fn restore<D: crate::Dir>(
     dir: &D,
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
-    (end, last): (u64, Option<u64>),
+    last: Option<u64>,
 ) -> Result<(), anyhow::Error> {
     use crate::layout::{SegmentId, extent_path, log_path, open_segment_path};
     use anyhow::Context as _;
     let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
-    let kept = trimmed(cell, logs, (end, last))?;
+    let kept = trimmed(cell, logs, last)?;
     let write = |path: &str, bytes: &[u8], data: bool| -> Result<(), anyhow::Error> {
         let file = dir.create(path, data).with_context(|| format!("making {path}"))?;
         if !bytes.is_empty() {

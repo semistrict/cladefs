@@ -198,15 +198,14 @@ fn what_a_member_holds_recovers_on_another_host() {
     let mut partial = logs.clone();
     let cut = partial.iter_mut().find(|(log, _)| *log == replicate::log_of(first)).unwrap();
     cut.1.truncate(cut.1.len() * 2 / 3);
-    let kept = replicate::trimmed(cell, &partial, (first + 1, named)).unwrap();
+    let kept = replicate::trimmed(cell, &partial, named).unwrap();
     assert!(kept.iter().all(|(log, _)| log >> 1 > first) && !kept.is_empty());
     let elsewhere = MemDir::new();
     LocalCell::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     // As a take reads it: the last commit the head names, which members' logs go on from, or
     // begin before, having dropped what it names later than it named it.
     let recovered = host.runtime.block_on(bucket_cell::recover(&*host.bucket, cell, None)).unwrap();
-    let end = recovered.head.as_ref().map_or(0, |head| head.end);
-    replicate::restore(&elsewhere, cell, &logs, (end, recovered.state.last_commit)).unwrap();
+    replicate::restore(&elsewhere, cell, &logs, recovered.state.last_commit).unwrap();
     let (taken, uploader) = host.open(LocalCell::recover_unmade(elsewhere).unwrap(), 2);
     taken.made().unwrap();
     assert!(taken.last_commit().unwrap() >= last);
