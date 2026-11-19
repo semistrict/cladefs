@@ -546,10 +546,12 @@ impl local_cell::upload::Members for ReplicaMembers {
         cell: crate::CellId,
         number: u64,
         f: u8,
+        avoid: &[String],
     ) -> Result<Vec<bucket_cell::layout::Member>, String> {
         let peers = crate::bucket::peers().ok_or("the daemon has no peers")?;
         let addresses = peers.addresses();
-        let others = addresses.iter().map(String::as_str).filter(|address| *address != self.me);
+        let others = (addresses.iter().map(String::as_str))
+            .filter(|address| *address != self.me && !avoid.iter().any(|avoid| avoid == address));
         let key = format!("{}.{}", cell.tenant, cell.id);
         let wanted = 2 * usize::from(f);
         let mut picked = Vec::with_capacity(wanted);
@@ -710,7 +712,11 @@ fn link_error(status: &Status) -> local_cell::replicate::LinkError {
     let what = format!("{:?}: {}", status.code(), status.message());
     match status.code() {
         Code::FailedPrecondition if status.message().contains("fenced") => LinkError::Fenced(what),
-        Code::Aborted | Code::FailedPrecondition => LinkError::Refused(what),
+        // A member full for the configuration refuses it until a replacement picks another
+        // (doc-21, Choosing members; TASK-537.3.5), rather than be tried again.
+        Code::Aborted | Code::FailedPrecondition | Code::ResourceExhausted => {
+            LinkError::Refused(what)
+        }
         _ => LinkError::Down(what),
     }
 }

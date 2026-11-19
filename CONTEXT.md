@@ -392,6 +392,14 @@ _Avoid_: seal (a barrier seals extents)
 **Promise**:
 The greatest epoch that fenced a member, on its disk.
 
+**Replacement**:
+A writer's move from its configuration to the next, of its epoch, without a take: its members given the unacknowledged tail, a commit Replicated only on quorums of both until the head's swap lands (the joint rule), then on the new one alone. A drop to f = 0 is one.
+_Avoid_: reconfiguration (a take also reconfigures), view change
+
+**Degraded**:
+A replicated cell whose active configuration holds no quorum: fewer than f members take its writer's commits, or it is of f = 0. Its commits wait for the bucket and are uploaded at once.
+_Avoid_: down, failed (the cell serves)
+
 **Crash bound**:
 How much of what was ordered a crash may lose: at most a second's worth.
 

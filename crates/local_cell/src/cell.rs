@@ -3133,6 +3133,17 @@ impl<D: Dir> LocalCell<D> {
         *self.replicator.lock().unwrap() = Some(replicator);
     }
 
+    /// cladefs: replicates no more, its replicator stopped and its spool emptied: its cell's head
+    /// names a configuration of f = 0, as it asks (TASK-537.3.5).
+    pub fn unreplicate(&self) {
+        let mut logs = self.flushing.with(Mutex::lock);
+        logs.replica.clear();
+        logs.unreplicated.clear();
+        if let Some(replicator) = self.replicator.lock().unwrap().take() {
+            replicator.stop();
+        }
+    }
+
     /// cladefs: an empty spool in its directory, which a replicator of its cell keeps what it sends
     /// its members in until the bucket holds it (doc-21, TASK-537.3.3): `replica-spool/<cell>/`,
     /// what an earlier replicator left there removed.

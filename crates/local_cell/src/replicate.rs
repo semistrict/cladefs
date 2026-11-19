@@ -283,7 +283,6 @@ pub struct Replicator {
 }
 
 struct Shared {
-    f: usize,
     /// The epoch of the last commit on no member: before it started, or recorded in a segment
     /// whose log it started in the middle of.
     base: std::sync::atomic::AtomicU64,
@@ -294,17 +293,31 @@ struct Shared {
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
+/// A configuration's members, among a replicator's: its f, and where they are in
+/// [`State::members`].
+#[derive(Clone, Debug)]
+struct Group {
+    f: usize,
+    members: std::ops::Range<usize>,
+}
+
 #[derive(Default)]
 struct State {
     /// Each log's length in the spool, until its segment is in the bucket.
     logs: BTreeMap<u64, u64>,
     /// The logs dropped, to this one, their segments in the bucket.
     dropped: Option<u64>,
-    /// Each flush's epoch and the ends of the logs it appended to, those not every member holds.
-    marks: VecDeque<(u64, Vec<(u64, u64)>)>,
-    /// The index of the first of `marks` among every flush's.
-    first_mark: usize,
+    /// The epoch of the last flush's last commit.
+    last: u64,
+    /// Every member of the configurations it served, by their order in them, those of a
+    /// configuration gone retired.
     members: Vec<Member>,
+    /// The configuration whose quorum counts, as the head names it.
+    active: Option<Group>,
+    /// The configuration replacing it (TASK-537.3.5), until its swap of the head lands: a commit is
+    /// replicated meanwhile only on quorums of both, as a taker may find either in the head
+    /// (doc-21's joint rule).
+    pending: Option<Group>,
     replicated: u64,
     fenced: Option<String>,
     /// Why the spool failed, if it did: nothing more is sent.
@@ -316,15 +329,17 @@ struct State {
 struct Member {
     /// The ends of its logs it answered, synced.
     ends: BTreeMap<u64, u64>,
-    /// The index among every flush's of the first it holds not.
-    next_mark: usize,
+    /// Each flush's epoch and the ends of the logs it appended to, those it holds not yet.
+    marks: VecDeque<(u64, Vec<(u64, u64)>)>,
     /// The epoch of the last flush it holds whole.
     holds: u64,
     /// The logs dropped on it, to this one.
     dropped: Option<u64>,
-    /// Why it holds nothing more, if it is down or refused.
-    down: Option<String>,
+    /// Why it holds nothing more, if it is down or refused, and since when.
+    down: Option<(String, std::time::Instant)>,
     refused: bool,
+    /// Of a configuration replaced: sent nothing more, counting for nothing.
+    retired: bool,
 }
 
 impl State {
@@ -337,32 +352,37 @@ impl State {
         })
     }
 
-    /// Moves each member past the marks it holds, and drops the marks every member holds: whether
-    /// the replicated epoch moved.
-    fn advance(&mut self, f: usize) -> bool {
+    /// The epoch of the last commit f members of `group` hold, the writer's own copy the f+1-th:
+    /// none, for a configuration of f = 0, which holds no quorum (doc-21; TLC's zeroNoQuorum).
+    fn quorum(&self, group: &Group) -> Option<u64> {
+        if group.f == 0 {
+            return None;
+        }
+        let mut holds: Vec<u64> =
+            self.members[group.members.clone()].iter().map(|member| member.holds).collect();
+        holds.sort_unstable_by(|a, b| b.cmp(a));
+        Some(holds.get(group.f - 1).copied().unwrap_or(0))
+    }
+
+    /// Moves each member past the marks it holds: whether the replicated epoch moved. It moves
+    /// to what the active configuration's quorum holds, and, while one replaces it, the
+    /// replacement's quorum too.
+    fn advance(&mut self) -> bool {
         for m in 0..self.members.len() {
-            loop {
-                let next = self.members[m].next_mark;
-                let Some((epoch, ends)) = self.marks.get(next - self.first_mark) else { break };
+            while let Some((epoch, ends)) = self.members[m].marks.front() {
                 if !self.holds(m, ends) {
                     break;
                 }
                 let epoch = *epoch;
                 let member = &mut self.members[m];
-                member.next_mark += 1;
+                member.marks.pop_front();
                 member.holds = epoch;
             }
         }
-        let all = self.members.iter().map(|member| member.next_mark).min().unwrap_or(0);
-        while self.first_mark < all {
-            self.marks.pop_front();
-            self.first_mark += 1;
-        }
-        let mut holds: Vec<u64> = self.members.iter().map(|member| member.holds).collect();
-        holds.sort_unstable_by(|a, b| b.cmp(a));
-        let replicated = match f {
-            0 => 0,
-            f => holds.get(f - 1).copied().unwrap_or(0),
+        let groups = self.active.iter().chain(&self.pending);
+        let quorums: Option<Vec<u64>> = groups.map(|group| self.quorum(group)).collect();
+        let Some(replicated) = quorums.and_then(|quorums| quorums.into_iter().min()) else {
+            return false;
         };
         let moved = replicated > self.replicated;
         self.replicated = self.replicated.max(replicated);
@@ -372,7 +392,7 @@ impl State {
     /// What member `m` is to be sent next: its logs' drop, or an append from its end.
     fn next(&self, m: usize) -> Option<Sending> {
         let member = &self.members[m];
-        if member.refused || self.fenced.is_some() || self.broken.is_some() {
+        if member.refused || member.retired || self.fenced.is_some() || self.broken.is_some() {
             return None;
         }
         if self.dropped > member.dropped {
@@ -392,6 +412,11 @@ impl State {
             })
         })
     }
+
+    /// The members of the active configuration.
+    fn active(&self) -> &[Member] {
+        self.active.as_ref().map_or(&[], |group| &self.members[group.members.clone()])
+    }
 }
 
 enum Sending {
@@ -410,27 +435,35 @@ impl Replicator {
         links: Vec<Arc<dyn MemberLink>>,
         notify: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let state = State { members: vec![Member::default(); links.len()], ..State::default() };
+        let state = State {
+            members: vec![Member::default(); links.len()],
+            active: Some(Group { f, members: 0..links.len() }),
+            last: base,
+            ..State::default()
+        };
         let shared = Arc::new(Shared {
-            f,
             base: base.into(),
             spool,
             state: Mutex::new(state),
             changed: Condvar::new(),
             notify: Box::new(notify),
         });
-        let threads = links
-            .into_iter()
-            .enumerate()
-            .map(|(m, link)| {
-                let shared = shared.clone();
-                std::thread::Builder::new()
-                    .name("cladefs replicate".into())
-                    .spawn(move || serve(&shared, m, &*link))
-                    .expect("a replicating thread")
-            })
-            .collect();
-        Arc::new(Self { shared, threads: Mutex::new(threads) })
+        let replicator = Arc::new(Self { shared, threads: Mutex::default() });
+        replicator.serve(0, links);
+        replicator
+    }
+
+    /// Starts a thread serving each of `links`, the members from `first` on.
+    fn serve(&self, first: usize, links: Vec<Arc<dyn MemberLink>>) {
+        let mut threads = self.threads.lock().unwrap();
+        for (m, link) in (first..).zip(links) {
+            let shared = self.shared.clone();
+            let thread = std::thread::Builder::new()
+                .name("cladefs replicate".into())
+                .spawn(move || serve(&shared, m, &*link))
+                .expect("a replicating thread");
+            threads.push(thread);
+        }
     }
 
     /// The commits through `flushed`'s epoch are local: spools them, and sends them to the
@@ -453,9 +486,16 @@ impl Replicator {
         for &(log, end) in &ends {
             state.logs.insert(log, end);
         }
-        state.marks.push_back((flushed.epoch, ends));
+        state.last = state.last.max(flushed.epoch);
+        for member in state.members.iter_mut().filter(|member| !member.retired) {
+            member.marks.push_back((flushed.epoch, ends.clone()));
+        }
+        let moved = state.advance();
         drop(state);
         self.shared.changed.notify_all();
+        if moved {
+            (self.shared.notify)();
+        }
         Ok(())
     }
 
@@ -475,12 +515,89 @@ impl Replicator {
                 log::warn!("cladefs: replicating: removing spooled log {log}: {err}");
             }
         }
-        let moved = state.advance(self.shared.f);
+        let moved = state.advance();
         drop(state);
         self.shared.changed.notify_all();
         if moved {
             (self.shared.notify)();
         }
+    }
+
+    /// Starts replacing its configuration with one of `f`, its members reached by `links` (2f of
+    /// them, the writer aside), each sent every log spooled, from its start, and every flush from
+    /// now (doc-21, Replacing a member; TASK-537.3.5). Until [`Replicator::swapped`], a commit is
+    /// replicated only once quorums of both hold it; the replacement may be swapped in once
+    /// [`Replicator::installed`].
+    pub fn replacing(&self, f: usize, links: Vec<Arc<dyn MemberLink>>) {
+        let mut state = self.shared.state.lock().unwrap();
+        assert!(state.pending.is_none(), "one replacement at a time");
+        let first = state.members.len();
+        let tail: Vec<(u64, u64)> = state.logs.iter().map(|(&log, &have)| (log, have)).collect();
+        // Everything flushed it holds once it holds the tail: or now, if nothing is spooled. What
+        // the bucket holds it is never sent: nothing of it was spooled for it.
+        let member = Member {
+            dropped: state.dropped,
+            holds: if tail.is_empty() { state.last } else { 0 },
+            marks: match tail.is_empty() {
+                true => VecDeque::new(),
+                false => VecDeque::from([(state.last, tail)]),
+            },
+            ..Member::default()
+        };
+        state.members.extend(std::iter::repeat_n(member, links.len()));
+        state.pending = Some(Group { f, members: first..first + links.len() });
+        let moved = state.advance();
+        drop(state);
+        self.serve(first, links);
+        if moved {
+            (self.shared.notify)();
+        }
+    }
+
+    /// Whether the replacement may be swapped into the head, the bucket's head acknowledging the
+    /// commits through `uploaded`: once f+1 of its members, the writer's own copy one, hold
+    /// every commit told replicated (installFirst), or the bucket does, as a replacement of f = 0
+    /// waits for (zeroAfterUpload). No replacement, none.
+    pub fn installed(&self, uploaded: u64) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        let Some(pending) = &state.pending else { return false };
+        uploaded >= state.replicated
+            || state.quorum(pending).is_some_and(|holds| holds >= state.replicated)
+    }
+
+    /// The replacement's swap landed: it alone counts from now, the members of the configuration
+    /// it replaced sent nothing more.
+    pub fn swapped(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        let pending = state.pending.take().expect("a replacement swapped");
+        let gone = state.active.replace(pending).expect("an active configuration");
+        retire(&mut state, gone);
+        let moved = state.advance();
+        drop(state);
+        self.shared.changed.notify_all();
+        if moved {
+            (self.shared.notify)();
+        }
+    }
+
+    /// Gives the replacement up, its swap never sent: the active configuration alone counts
+    /// again.
+    pub fn abandon(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(pending) = state.pending.take() {
+            retire(&mut state, pending);
+        }
+        let moved = state.advance();
+        drop(state);
+        self.shared.changed.notify_all();
+        if moved {
+            (self.shared.notify)();
+        }
+    }
+
+    /// Whether a replacement is under way.
+    pub fn replacing_now(&self) -> bool {
+        self.shared.state.lock().unwrap().pending.is_some()
     }
 
     /// The epoch of the last commit on f members besides the writer. It counts only once the
@@ -516,18 +633,47 @@ impl Replicator {
         self.shared.state.lock().unwrap().fenced.clone()
     }
 
-    /// Why each member down or refusing the writer is.
+    /// Why each member of the active configuration down or refusing the writer is.
     pub fn down(&self) -> Vec<String> {
         let state = self.shared.state.lock().unwrap();
-        state.members.iter().filter_map(|member| member.down.clone()).collect()
+        state.active().iter().filter_map(|member| Some(member.down.as_ref()?.0.clone())).collect()
     }
 
-    /// Whether fewer than f members can take what it sends, or the writer is fenced: its commits
-    /// then wait for the bucket.
+    /// The active configuration's f.
+    pub fn f(&self) -> usize {
+        self.shared.state.lock().unwrap().active.as_ref().map_or(0, |group| group.f)
+    }
+
+    /// How many members of the active configuration, the writer aside, take what it sends.
+    pub fn members_up(&self) -> usize {
+        let state = self.shared.state.lock().unwrap();
+        state.active().iter().filter(|member| member.down.is_none()).count()
+    }
+
+    /// Whether a member of the active configuration refuses the writer, or has been down for
+    /// `long` at least: one to replace (doc-21, Replacing a member).
+    pub fn lost(&self, long: Duration) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state.active().iter().any(|member| {
+            member.refused || member.down.as_ref().is_some_and(|(_, since)| since.elapsed() >= long)
+        })
+    }
+
+    /// The indices, in the active configuration's members after the writer, of those refusing
+    /// it: not to be picked again at once.
+    pub fn refusing(&self) -> Vec<usize> {
+        let state = self.shared.state.lock().unwrap();
+        let active = state.active();
+        (0..active.len()).filter(|&m| active[m].refused).collect()
+    }
+
+    /// Whether fewer than f members can take what it sends, its configuration being of f = 0
+    /// (no quorum), or the writer is fenced: its commits then wait for the bucket.
     pub fn degraded(&self) -> bool {
         let state = self.shared.state.lock().unwrap();
-        let up = state.members.iter().filter(|member| member.down.is_none()).count();
-        state.fenced.is_some() || state.broken.is_some() || up < self.shared.f
+        let f = state.active.as_ref().map_or(0, |group| group.f);
+        let up = state.active().iter().filter(|member| member.down.is_none()).count();
+        state.fenced.is_some() || state.broken.is_some() || f == 0 || up < f
     }
 
     /// Breaks it, for `why`: nothing more is sent, its commits waiting for the bucket.
@@ -547,6 +693,27 @@ impl Replicator {
     pub fn spooled(&self) -> u64 {
         self.shared.state.lock().unwrap().logs.values().sum()
     }
+
+    /// Stops it, and empties its spool: its cell replicated no more.
+    pub fn stop(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.stopping = true;
+        for log in std::mem::take(&mut state.logs).into_keys() {
+            if let Err(err) = self.shared.spool.remove(log) {
+                log::warn!("cladefs: replicating: removing spooled log {log}: {err}");
+            }
+        }
+        drop(state);
+        self.shared.changed.notify_all();
+    }
+}
+
+/// Retires the members of `group`, a configuration replaced or given up: their threads stop.
+fn retire(state: &mut State, group: Group) {
+    for member in &mut state.members[group.members] {
+        member.retired = true;
+        member.marks.clear();
+    }
 }
 
 impl Drop for Replicator {
@@ -559,14 +726,14 @@ impl Drop for Replicator {
     }
 }
 
-/// Sends member `m`, through `link`, what it lacks, until the replicator stops.
+/// Sends member `m`, through `link`, what it lacks, until the replicator stops or retires it.
 fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
     let mut wait = Duration::from_millis(50);
     loop {
         let sending = {
             let mut state = shared.state.lock().unwrap();
             loop {
-                if state.stopping {
+                if state.stopping || state.members[m].retired {
                     return;
                 }
                 if let Some(sending) = state.next(m) {
@@ -617,7 +784,7 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
                 state.members[m].ends.insert(log, end);
                 state.members[m].down = None;
                 wait = Duration::from_millis(50);
-                state.advance(shared.f)
+                state.advance()
             }
             (_, Ok(_)) => false,
             (_, Err(LinkError::Fenced(why))) => {
@@ -631,15 +798,19 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
             (_, Err(LinkError::Refused(why))) => {
                 log::warn!("cladefs: replicating: member {m} refuses the writer: {why}");
                 state.members[m].refused = true;
-                state.members[m].down = Some(why);
+                state.members[m].down = Some((why, std::time::Instant::now()));
                 return;
             }
             (_, Err(LinkError::Down(why))) => {
-                if state.members[m].down.is_none() {
-                    log::warn!("cladefs: replicating: member {m} down: {why}");
+                let member = &mut state.members[m];
+                match &mut member.down {
+                    Some((was, _)) => *was = why,
+                    None => {
+                        log::warn!("cladefs: replicating: member {m} down: {why}");
+                        member.down = Some((why, std::time::Instant::now()));
+                    }
                 }
-                state.members[m].down = Some(why);
-                let stopping = state.stopping;
+                let stopping = state.stopping || state.members[m].retired;
                 drop(state);
                 if stopping {
                     return;

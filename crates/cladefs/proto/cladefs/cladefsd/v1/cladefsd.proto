@@ -549,6 +549,13 @@ message StatCellResponse {
   FsyncLevel fsync = 23;
   // The number of its active configuration, 0 if it has none yet.
   uint64 configuration = 24;
+  // Whether it is degraded: fewer than f members of its active configuration take its writer's
+  // commits, or that configuration is of f = 0, its commits waiting for the bucket (doc-21).
+  bool degraded = 25;
+  // How many members of its active configuration, its writer aside, take its writer's commits.
+  uint32 members_up = 26;
+  // The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
+  uint32 active_replicas = 27;
 }
 
 // Asks for the stores the daemon serves.

@@ -103,7 +103,7 @@ fn commits_are_replicated_on_f_members_besides_the_writer() {
     until("one member", || replicator.replicated() == 3);
     assert!(notified.load(Ordering::Relaxed) >= 1);
     assert_eq!(members[0].log(log_of(1)), b"header+record");
-    assert_eq!(replicator.down().len(), 1);
+    until("the other member down", || replicator.down().len() == 1);
 
     members[0].fail(Some(LinkError::Down("out of reach too".into())));
     replicator.flushed(flushed(4, &[(log_of(1), 13, b"+next")])).unwrap();
@@ -280,4 +280,112 @@ fn members_go_past_own_logs_by_writer_then_commit() {
     assert!(!members_ahead(Some(tag(3, 9)), Some(tag(3, 9))), "the same");
     assert!(!members_ahead(Some(tag(3, 12)), Some(tag(3, 9))), "its own Local commits past them");
     assert!(!members_ahead(Some(tag(4, 2)), Some(tag(3, 9))), "an earlier writer's");
+}
+
+fn links(members: &[Arc<Fake>]) -> Vec<Arc<dyn MemberLink>> {
+    members.iter().map(|member| member.clone() as Arc<dyn MemberLink>).collect()
+}
+
+/// TASK-537.3.5 (doc-21, Replacing a member): a replacement's members are sent every log spooled,
+/// from its start; while its swap is in flight a commit is replicated only once quorums of both
+/// configurations hold it (TLC's joint rule); once swapped, the replacement's alone counts.
+#[test]
+fn replacements_get_the_tail_and_count_jointly_until_swapped() {
+    let old = members(2);
+    let (replicator, _) = start(1, 0, &old);
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("the first commit replicated", || replicator.replicated() == 1);
+    old[1].fail(Some(LinkError::Down("lost".into())));
+
+    let new = members(2);
+    for member in &new {
+        member.fail(Some(LinkError::Down("not yet".into())));
+    }
+    replicator.replacing(1, links(&new));
+    assert!(!replicator.installed(0), "installed before a new member held the tail");
+    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    until("the old configuration holds it", || old[0].log(2) == b"onetwo");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(replicator.replicated(), 1, "told on the old configuration alone");
+
+    new[0].fail(None);
+    until("the new member holds the tail", || new[0].log(2) == b"onetwo");
+    until("replicated on both", || replicator.replicated() == 2);
+    assert!(replicator.installed(0));
+
+    replicator.swapped();
+    old[0].fail(Some(LinkError::Down("gone".into())));
+    replicator.flushed(flushed(3, &[(2, 6, b"three")])).unwrap();
+    until("replicated on the new one alone", || replicator.replicated() == 3);
+    assert_eq!(old[0].log(2), b"onetwo", "a retired member is sent nothing more");
+    assert_eq!(replicator.members_up(), 1);
+}
+
+/// TASK-537.3.5: a replacement given up, its swap never sent, counts for nothing after.
+#[test]
+fn abandoned_replacements_count_no_more() {
+    let old = members(2);
+    let (replicator, _) = start(1, 0, &old);
+    let new = members(2);
+    for member in &new {
+        member.fail(Some(LinkError::Down("out of reach".into())));
+    }
+    replicator.replacing(1, links(&new));
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("the old configuration holds it", || old[0].log(2) == b"one");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(replicator.replicated(), 0);
+    replicator.abandon();
+    assert_eq!(replicator.replicated(), 1);
+    assert!(!replicator.replacing_now());
+}
+
+/// TASK-537.3.5 (doc-21, Degraded): a drop to f = 0 holds no quorum, so nothing more is told
+/// replicated from its start (TLC's zeroNoQuorum), and it may be swapped in only once the bucket
+/// holds what was (zeroAfterUpload). Swapped, the replicator is degraded: its commits wait for the
+/// bucket.
+#[test]
+fn drops_to_f_zero_wait_for_the_bucket_and_tell_nothing_replicated() {
+    let old = members(2);
+    let (replicator, _) = start(1, 0, &old);
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("replicated", || replicator.replicated() == 1);
+    replicator.replacing(0, Vec::new());
+    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    until("the old configuration holds it", || old[0].log(2) == b"onetwo");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(replicator.replicated(), 1, "told replicated while dropping to f = 0");
+    assert!(!replicator.installed(0), "dropped before the bucket held what was told");
+    assert!(replicator.installed(1));
+    replicator.swapped();
+    assert!(replicator.degraded());
+    assert_eq!(replicator.f(), 0);
+}
+
+/// TASK-537.3.5: a replacement of a configuration whose spooled logs the bucket all holds is
+/// installed at once, nothing to send its members.
+#[test]
+fn replacements_with_nothing_spooled_are_installed_at_once() {
+    let old = members(2);
+    let (replicator, _) = start(1, 0, &old);
+    replicator.flushed(flushed(1, &[(2, 0, b"one"), (3, 0, b"own")])).unwrap();
+    until("replicated", || replicator.replicated() == 1);
+    replicator.acknowledged(1);
+    let new = members(2);
+    replicator.replacing(1, links(&new));
+    assert!(replicator.installed(0));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(new[0].appends.load(Ordering::Relaxed), 0, "sent what the bucket holds");
+}
+
+/// TASK-537.3.5: a member refusing the writer, or down long enough, is one to replace.
+#[test]
+fn members_refusing_or_down_long_are_lost() {
+    let old = members(2);
+    old[1].fail(Some(LinkError::Refused("full".into())));
+    let (replicator, _) = start(1, 0, &old);
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("refused", || replicator.lost(Duration::from_secs(3600)));
+    assert_eq!(replicator.refusing(), vec![1]);
+    assert!(!replicator.degraded(), "one of two up is a quorum of f = 1");
 }

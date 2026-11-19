@@ -69,6 +69,9 @@ fn stores_through_the_control_api() {
             replicas: 0,
             fsync: FsyncLevel::Ordered.into(),
             configuration: 0,
+            degraded: false,
+            members_up: 0,
+            active_replicas: 0,
         }
     );
 

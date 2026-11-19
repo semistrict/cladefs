@@ -25,6 +25,14 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Replicated cells: replacing members, dropping to f = 0 (TASK-537.3.5, 2026-11-18)
+
+Decided without you:
+- **A member down for 1 s, or refusing the writer, is replaced at once**, every member of the new configuration picked afresh (the rendezvous hash of the new number) and sent the whole unacknowledged tail, survivors too. A peer daemon's restart therefore costs a replacement and a resend of the tail. *Instead:* a longer grace (5-30 s), keeping the configuration through restarts at the cost of running at f-1 meanwhile; or survivors kept, their copy shared between configurations (doc-21 keeps configurations' logs apart). *Undo:* `REPLACE_AFTER` in `upload.rs`.
+- **Degraded for 1 s with no replacement to be had, the writer drops to f = 0** (once the bucket holds all it told replicated), so that a later take needs no member of a lost configuration, and goes back to the f the head asks for as peers answer. *Instead:* stay at the lost configuration until members return, which leaves the cell untakeable while they are gone (a take must fence f+1 of them). *Undo:* drop the fallback in `Shared::keep`.
+- **A full member (`RESOURCE_EXHAUSTED`) refuses rather than is retried**, and the replacement avoids it once.
+- **Degraded is judged at once, not after 1 s**: the stats and metrics say so from the first failed append.
+
 ## Replicated cells: the wish in the head, members by CLADEFSD_REPLICAS (TASK-537.3.1, .3.2, 2026-11-18)
 
 Decided without you:

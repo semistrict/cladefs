@@ -60,6 +60,10 @@
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
 //!   many commits waited for the lag to shrink (TASK-91.3); its cell as `TENANT/CELL`, in
 //!   base 32 (TASK-364).
+//! - cladefs: `cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`:
+//!   for each open store of a replicated cell, 1 while it is degraded (fewer than f members of its
+//!   configuration take its writer's commits, or it dropped to f = 0, its commits waiting for the
+//!   bucket), and how many members do (doc-21, Degraded; TASK-537.3.5).
 //! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
 //!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
 //!   every store's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
@@ -523,6 +527,31 @@ pub fn render() -> String {
         let _ = writeln!(out, "# TYPE cladefsd_{name} {kind}");
         for (cell, status) in &uploads {
             let _ = writeln!(out, "cladefsd_{name}{{cell=\"{cell}\"}} {}", value(status));
+        }
+    }
+
+    // cladefs: each replicated cell's writer's replication (doc-21, Degraded; TASK-537.3.5).
+    let replicated: Vec<_> =
+        (uploads.iter()).filter_map(|(cell, status)| Some((cell, status.replication?))).collect();
+    let series: [(&str, &str, fn(&local_cell::upload::ReplicationStatus) -> String); 2] = [
+        (
+            "replication_degraded",
+            "1 while fewer than f members of a replicated cell's configuration take its writer's \
+             commits, or it dropped to f = 0: its commits wait for the bucket, by its cell.",
+            |replication| u8::from(replication.degraded).to_string(),
+        ),
+        (
+            "replication_members_up",
+            "The members of a replicated cell's configuration, its writer aside, that take its \
+             writer's commits, by its cell.",
+            |replication| replication.members_up.to_string(),
+        ),
+    ];
+    for (name, help, value) in series {
+        let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
+        let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
+        for (cell, replication) in &replicated {
+            let _ = writeln!(out, "cladefsd_{name}{{cell=\"{cell}\"}} {}", value(replication));
         }
     }
 

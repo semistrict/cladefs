@@ -250,6 +250,14 @@ impl From<anyhow::Error> for Failure {
 /// before held, before it fails (doc-21, TASK-537.3.4).
 const SEEDING: Duration = Duration::from_secs(60);
 
+/// cladefs: how long a member of a replicated cell's configuration is down before a replacement
+/// is picked; and how long its cell is degraded, no replacement to be had, before it drops to
+/// f = 0 (doc-21, Degraded; TASK-537.3.5).
+const REPLACE_AFTER: Duration = Duration::from_secs(1);
+
+/// cladefs: how often a replicated cell's configuration is looked at ([`Shared::keep`]).
+const KEEPING: Duration = Duration::from_millis(250);
+
 /// How an uploader uploads.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -293,13 +301,14 @@ pub struct Options {
 pub trait Members: Send + Sync + 'static {
     /// This host as a member: its peer address, and its replica directory's incarnation.
     fn me(&self) -> Result<bucket_cell::layout::Member, String>;
-    /// 2f members for configuration `number` of `cell`, this host aside, each that answered its
-    /// incarnation. Blocks.
+    /// 2f members for configuration `number` of `cell`, this host aside, and those at `avoid`,
+    /// each that answered its incarnation. Blocks.
     fn pick(
         &self,
         cell: CellId,
         number: u64,
         f: u8,
+        avoid: &[String],
     ) -> Result<Vec<bucket_cell::layout::Member>, String>;
     /// A link to `member` of `cell`'s configuration `configuration`.
     fn link(
@@ -453,6 +462,9 @@ pub(crate) struct Shared<D: Dir, B: bucket_cell::Bucket = ObjectBucket> {
     keys: keys::Host,
     /// cladefs: the store's keys, held among the host's for as long as the uploader lives.
     held: Mutex<Option<RingHold>>,
+    /// cladefs: of a replicated cell, what its head asks for and the configuration its taking
+    /// activated, which [`Shared::keep`] keeps from then on (TASK-537.3.5).
+    keeping: Mutex<Option<(bucket_cell::layout::Wish, bucket_cell::layout::Configuration)>>,
 }
 
 /// The holders an uploader's takings of its cell's head after the first take, and the owners of
@@ -591,6 +603,23 @@ pub struct UploadStatus {
     pub oldest_pending: Option<SystemTime>,
     /// How many commits waited for the lag to shrink ([`Uploader::stalls`]).
     pub stalls: u64,
+    /// cladefs: of a replicated cell, its replication now (TASK-537.3.5).
+    pub replication: Option<ReplicationStatus>,
+}
+
+/// cladefs: a replicated cell's writer's replication, as it is now (doc-21, Degraded;
+/// TASK-537.3.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplicationStatus {
+    /// The f of its active configuration: less than its head asks for once it dropped to f = 0.
+    pub f: u8,
+    /// How many members of its active configuration, the writer aside, take what it sends.
+    pub members_up: u32,
+    /// Whether fewer than f of them do, or its configuration is of f = 0: its commits waiting for
+    /// the bucket, uploaded at once.
+    pub degraded: bool,
+    /// Whether a replacement of its configuration is under way.
+    pub replacing: bool,
 }
 
 impl Progress {
@@ -667,7 +696,9 @@ impl<D: Dir> Uploader<D> {
         let Some(replicator) = self.store().replicator() else {
             return self.wait_uploaded(epoch);
         };
-        if replicator.degraded() {
+        // cladefs: and while a replacement is under way, whose members may take long to catch up
+        // (TASK-537.3.5).
+        if replicator.degraded() || replicator.replacing_now() {
             if shared.ask(epoch, false)? {
                 return Ok(());
             }
@@ -693,6 +724,12 @@ impl<D: Dir> Uploader<D> {
         let shared = &self.shared;
         shared.observe()?;
         let pending_bytes = self.store().wal_bytes()?;
+        let replication = self.store().replicator().map(|replicator| ReplicationStatus {
+            f: u8::try_from(replicator.f()).unwrap_or(u8::MAX),
+            members_up: u32::try_from(replicator.members_up()).unwrap_or(u32::MAX),
+            degraded: replicator.degraded(),
+            replacing: replicator.replacing_now(),
+        });
         let progress = shared.progress.lock().unwrap();
         Ok(UploadStatus {
             taking: progress.taking,
@@ -700,6 +737,7 @@ impl<D: Dir> Uploader<D> {
             pending_bytes,
             oldest_pending: progress.seen.front().map(|(_, seen)| *seen),
             stalls: progress.stalls,
+            replication,
         })
     }
 
@@ -907,6 +945,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             holders: Mutex::default(),
             keys,
             held: Mutex::default(),
+            keeping: Mutex::default(),
         })
     }
 
@@ -1061,6 +1100,11 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             }
             return;
         };
+        // cladefs: a replicated cell's configuration kept whole beside (TASK-537.3.5).
+        let keeping = self.keeping.lock().unwrap().take();
+        if let Some((wish, configuration)) = keeping {
+            tokio::spawn(self.clone().keep(writer.clone(), wish, configuration));
+        }
         let mut segments = 0;
         let mut in_flight = InFlight::default();
         // Whether the next gather closes the store's open segment: for a commit waiting for its
@@ -1295,10 +1339,12 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         // members hold what the one before held, until its writer drops it to f = 0 once the
         // bucket holds all it told (TASK-537.3.5; TASK-537.3.4's review).
         if let Some(mut replication) = writer.taken().head.replication.clone() {
+            let wish = replication.wish;
             let before = old.as_ref().map_or(0, |old| old.f);
             replication.wish.f = replication.wish.f.max(before);
             if replication.wish.f >= 1 {
-                self.replicate(&writer, replication, old, seed).await?;
+                let configuration = self.replicate(&writer, replication, old, seed).await?;
+                *self.keeping.lock().unwrap() = Some((wish, configuration));
             }
         }
         Ok(Some(writer))
@@ -1317,7 +1363,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         replication: bucket_cell::layout::Replication,
         old: Option<bucket_cell::layout::Configuration>,
         seed: Vec<(u64, Vec<u8>)>,
-    ) -> Result<(), Failure> {
+    ) -> Result<bucket_cell::layout::Configuration, Failure> {
         let bucket_cell::layout::Replication { wish, configuration } = replication;
         let members = self.members()?;
         let store = self.store().clone();
@@ -1326,7 +1372,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         let picking = members.clone();
         let picked = blocking(move || -> Result<_, Failure> {
             let me = picking.me().map_err(Failure::msg)?;
-            Ok((me, picking.pick(cell, number, wish.f).map_err(Failure::msg)?))
+            Ok((me, picking.pick(cell, number, wish.f, &[]).map_err(Failure::msg)?))
         })?;
         let (me, others) = picked;
         let mut all = vec![me];
@@ -1375,20 +1421,205 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>()
         );
         if let Some(old) = old {
-            let dropping = members.clone();
-            let gone = configuration.clone();
-            blocking(move || {
-                for member in old.members.iter().skip(1) {
-                    if let Err(err) = dropping.drop_before(cell, &gone, member) {
-                        log::info!(
-                            "cladefs: {} keeps {cell:?}'s logs for now: {err}",
-                            member.address
-                        );
+            self.drop_before(cell, &old, &configuration);
+        }
+        Ok(configuration)
+    }
+
+    /// cladefs: has the members of `old`, but this host, drop what they hold of `cell`'s
+    /// configurations before `configuration`, best effort: a member that does not answer sweeps
+    /// them later (doc-21, Sweeping stale replica logs).
+    fn drop_before(
+        &self,
+        cell: CellId,
+        old: &bucket_cell::layout::Configuration,
+        configuration: &bucket_cell::layout::Configuration,
+    ) {
+        let Ok(members) = self.members() else { return };
+        blocking(|| {
+            for member in old.members.iter().skip(1) {
+                if let Err(err) = members.drop_before(cell, configuration, member) {
+                    log::info!("cladefs: {} keeps {cell:?}'s logs for now: {err}", member.address);
+                }
+            }
+        });
+    }
+
+    /// cladefs: keeps the configuration of a replicated cell, `configuration` as its taking
+    /// activated, what its head asks for, `wish`, until the uploader stops, or its writer is fenced
+    /// (doc-21, Replacing a member and Degraded; TASK-537.3.5):
+    /// - a member refusing the writer, or down for [`REPLACE_AFTER`], is replaced, by a
+    ///   configuration of `wish`'s f, picked from the host's peers, the refusing aside;
+    /// - its commits uploaded at once, rather than at the interval, while degraded: fewer than f
+    ///   members take what it sends, their waiters left to the bucket;
+    /// - degraded, and no replacement to be had, it drops to f = 0, so that a take of the cell
+    ///   needs no member of a configuration lost, and back up as members come back;
+    /// - a configuration of another f than `wish`'s, as a taking asking for f = 0 of a cell
+    ///   replicated keeps until the bucket holds what it told, is replaced by one of `wish`'s.
+    async fn keep(
+        self: Arc<Self>,
+        writer: Arc<Writer<B>>,
+        wish: bucket_cell::layout::Wish,
+        mut configuration: bucket_cell::layout::Configuration,
+    ) {
+        let cell = writer.cell();
+        let mut degraded = None::<std::time::Instant>;
+        let (mut backoff, mut next) = (Duration::ZERO, std::time::Instant::now());
+        loop {
+            (self.clock)(KEEPING).await;
+            if self.stopping() {
+                return;
+            }
+            let Some(replicator) = self.store().replicator() else { return };
+            if replicator.fenced().is_some() {
+                return;
+            }
+            if replicator.degraded() {
+                if degraded.is_none() {
+                    log::warn!(
+                        "cladefs: {cell:?} degraded: {} of the {} members of configuration {} \
+                         up, its commits waiting for the bucket: {:?}",
+                        replicator.members_up(),
+                        2 * usize::from(configuration.f),
+                        configuration.number,
+                        replicator.down()
+                    );
+                }
+                degraded.get_or_insert_with(std::time::Instant::now);
+                self.eager();
+            } else if degraded.take().is_some() {
+                log::info!("cladefs: {cell:?} degraded no more");
+            }
+            let replace = configuration.f != wish.f || replicator.lost(REPLACE_AFTER);
+            if !replace || std::time::Instant::now() < next {
+                continue;
+            }
+            let refusing = replicator.refusing().into_iter();
+            let avoid: Vec<String> = refusing
+                .filter_map(|m| Some(configuration.members.get(m + 1)?.address.clone()))
+                .collect();
+            let mut replaced = self.replace(&writer, &replicator, &configuration, wish.f, &avoid);
+            let mut new = replaced.await;
+            // Degraded, and no member to be had: f = 0, once the bucket holds what it told.
+            let long = degraded.is_some_and(|since| since.elapsed() >= REPLACE_AFTER);
+            if matches!(new, Ok(None)) && wish.f >= 1 && configuration.f >= 1 && long {
+                replaced = self.replace(&writer, &replicator, &configuration, 0, &[]);
+                new = replaced.await;
+            }
+            match new {
+                Ok(Some(new)) => {
+                    configuration = new;
+                    backoff = Duration::ZERO;
+                    if configuration.f == 0 && wish.f == 0 {
+                        self.store().unreplicate();
+                        log::info!("cladefs: {cell:?} replicated no more, as its head asks");
+                        return;
                     }
                 }
-            });
+                Ok(None) => {
+                    backoff = (backoff * 2).clamp(Duration::from_secs(1), Duration::from_secs(30));
+                    next = std::time::Instant::now() + backoff;
+                }
+                // Its writer stopped, the uploader with it.
+                Err(err) => {
+                    log::error!("cladefs: {cell:?}: replacing its configuration: {err}");
+                    return;
+                }
+            }
         }
-        Ok(())
+    }
+
+    /// cladefs: whether the uploader stops, or stopped.
+    fn stopping(&self) -> bool {
+        let progress = self.progress.lock().unwrap();
+        progress.stop || progress.failed.is_some()
+    }
+
+    /// cladefs: has the uploader close and upload what the store holds at once, if it holds
+    /// commits not uploaded: as a replicated cell's commits wait for the bucket (doc-21, Degraded).
+    fn eager(&self) {
+        let Ok(last) = self.store().last_commit() else { return };
+        if last > self.last_uploaded() {
+            bucket_cell::host_disk::Urge::urge(self);
+        }
+    }
+
+    /// cladefs: replaces `writer`'s configuration `from` with one of `f` (doc-21, Replacing a
+    /// member; TASK-537.3.5): this host and 2f members picked from its peers, those at `avoid`
+    /// aside, made at its epoch; given every log the replicator spools, and every flush from now,
+    /// its commits counted on both meanwhile (the joint rule); swapped into the head once f of its
+    /// members hold all the guest was told replicated, or, for f = 0, once the bucket does; then
+    /// counted alone. The new configuration, or none if none was to be had, or it took not what
+    /// it needed within [`SEEDING`], given up. Fails if the head's swap does: the writer stops,
+    /// the replacement's joint rule kept, as the head may name either.
+    async fn replace(
+        &self,
+        writer: &Arc<Writer<B>>,
+        replicator: &Arc<crate::replicate::Replicator>,
+        from: &bucket_cell::layout::Configuration,
+        f: u8,
+        avoid: &[String],
+    ) -> Result<Option<bucket_cell::layout::Configuration>, Failure> {
+        let members = self.members()?;
+        let cell = writer.cell();
+        let number = from.number + 1;
+        let picked = blocking(|| -> Result<_, String> {
+            let me = members.me()?;
+            let others = match f {
+                0 => Vec::new(),
+                f => members.pick(cell, number, f, avoid)?,
+            };
+            Ok((me, others))
+        });
+        let (me, others) = match picked {
+            Ok(picked) => picked,
+            Err(err) => {
+                log::warn!(
+                    "cladefs: {cell:?}: no configuration {number} of f {f} to be had: {err}"
+                );
+                return Ok(None);
+            }
+        };
+        let mut all = vec![me];
+        all.extend(others.iter().cloned());
+        let configuration =
+            bucket_cell::layout::Configuration { number, epoch: writer.epoch(), f, members: all };
+        let links = others.iter().map(|member| members.link(cell, &configuration, member));
+        replicator.replacing(usize::from(f), links.collect());
+        let started = std::time::Instant::now();
+        let mut urged = started;
+        while !replicator.installed(self.last_uploaded()) {
+            if self.stopping() || replicator.fenced().is_some() || started.elapsed() > SEEDING {
+                replicator.abandon();
+                log::warn!(
+                    "cladefs: {cell:?}: configuration {number} of f {f} given up: its members \
+                     took not what the guest was told replicated within {SEEDING:?}: {:?}",
+                    replicator.down()
+                );
+                return Ok(None);
+            }
+            // Of f = 0, what was told replicated uploaded at once.
+            if f == 0 && urged.elapsed() >= KEEPING {
+                self.eager();
+                urged = std::time::Instant::now();
+            }
+            (self.clock)(Duration::from_millis(10)).await;
+        }
+        writer.configure(configuration.clone()).await?;
+        replicator.swapped();
+        if let Some(Taking { replication: Some(replicated), .. }) =
+            self.progress.lock().unwrap().taking.as_mut()
+        {
+            replicated.configuration = Some(number);
+        }
+        log::info!(
+            "cladefs: {cell:?} replicated in configuration {number}, of f {f}, with {:?}, \
+             replacing {}",
+            configuration.members.iter().map(|member| &member.address).collect::<Vec<_>>(),
+            from.number
+        );
+        self.drop_before(cell, from, &configuration);
+        Ok(Some(configuration))
     }
 
     /// cladefs: the host's members, which a replicated cell needs.

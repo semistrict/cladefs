@@ -278,6 +278,7 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         pending_bytes: 0,
         oldest_pending: None,
         stalls: 0,
+        replication: None,
     });
     let millis = |time: std::time::SystemTime| {
         time.duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
@@ -310,6 +311,9 @@ fn stat_response(state: cells::CellState) -> StatCellResponse {
         fsync: replicated.map_or(FsyncLevel::Ordered, |replicated| fsync_level(replicated.fsync))
             as i32,
         configuration: replicated.and_then(|replicated| replicated.configuration).unwrap_or(0),
+        degraded: upload.replication.is_some_and(|replication| replication.degraded),
+        members_up: upload.replication.map_or(0, |replication| replication.members_up),
+        active_replicas: upload.replication.map_or(0, |replication| u32::from(replication.f)),
     }
 }
 

@@ -1822,8 +1822,15 @@ type StatCellResponse struct {
 	Fsync FsyncLevel `protobuf:"varint,23,opt,name=fsync,proto3,enum=cladefs.cladefsd.v1.FsyncLevel" json:"fsync,omitempty"`
 	// The number of its active configuration, 0 if it has none yet.
 	Configuration uint64 `protobuf:"varint,24,opt,name=configuration,proto3" json:"configuration,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Whether it is degraded: fewer than f members of its active configuration take its writer's
+	// commits, or that configuration is of f = 0, its commits waiting for the bucket (doc-21).
+	Degraded bool `protobuf:"varint,25,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	// How many members of its active configuration, its writer aside, take its writer's commits.
+	MembersUp uint32 `protobuf:"varint,26,opt,name=members_up,json=membersUp,proto3" json:"members_up,omitempty"`
+	// The f of its active configuration: less than replicas once it dropped to f = 0, degraded.
+	ActiveReplicas uint32 `protobuf:"varint,27,opt,name=active_replicas,json=activeReplicas,proto3" json:"active_replicas,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *StatCellResponse) Reset() {
@@ -2006,6 +2013,27 @@ func (x *StatCellResponse) GetFsync() FsyncLevel {
 func (x *StatCellResponse) GetConfiguration() uint64 {
 	if x != nil {
 		return x.Configuration
+	}
+	return 0
+}
+
+func (x *StatCellResponse) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *StatCellResponse) GetMembersUp() uint32 {
+	if x != nil {
+		return x.MembersUp
+	}
+	return 0
+}
+
+func (x *StatCellResponse) GetActiveReplicas() uint32 {
+	if x != nil {
+		return x.ActiveReplicas
 	}
 	return 0
 }
@@ -4311,7 +4339,7 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x12\n" +
 	"\x10SyncCellResponse\"%\n" +
 	"\x0fStatCellRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xd7\x05\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xbb\x06\n" +
 	"\x10StatCellResponse\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
 	"\x04used\x18\x03 \x01(\x04R\x04used\x12\x1c\n" +
@@ -4338,7 +4366,11 @@ const file_cladefs_cladefsd_v1_cladefsd_proto_rawDesc = "" +
 	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\x12\x1a\n" +
 	"\breplicas\x18\x16 \x01(\rR\breplicas\x125\n" +
 	"\x05fsync\x18\x17 \x01(\x0e2\x1f.cladefs.cladefsd.v1.FsyncLevelR\x05fsync\x12$\n" +
-	"\rconfiguration\x18\x18 \x01(\x04R\rconfigurationJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
+	"\rconfiguration\x18\x18 \x01(\x04R\rconfiguration\x12\x1a\n" +
+	"\bdegraded\x18\x19 \x01(\bR\bdegraded\x12\x1d\n" +
+	"\n" +
+	"members_up\x18\x1a \x01(\rR\tmembersUp\x12'\n" +
+	"\x0factive_replicas\x18\x1b \x01(\rR\x0eactiveReplicasJ\x04\b\x01\x10\x02J\x04\b\x15\x10\x16\"\x12\n" +
 	"\x10ListCellsRequest\"L\n" +
 	"\x11ListCellsResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.cladefsd.v1.ListedCellR\x06stores\"[\n" +
