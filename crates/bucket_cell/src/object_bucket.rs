@@ -1946,28 +1946,30 @@ pub(crate) mod tests {
     /// TASK-633.4: a child in one bucket forked from a version of a parent in another, through
     /// a bucket routing by the registry: the parent's objects, head, reference and checkpoint at
     /// the version in the parent's bucket alone, the child's head in its own; the child recovers
-    /// what it inherited, and reads it, from the parent's bucket.
+    /// what it inherited, and reads it, from the parent's bucket. The two of different kinds: the
+    /// child's a file bucket, the parent's the S3 server's, reached with options of its number's
+    /// alone (`CLADEFSD_BUCKET_2_*`), as another cloud's credentials are.
     #[test]
     fn children_in_one_bucket_read_their_parents_in_another() {
         use crate::identity::{self, Details};
-        futures::executor::block_on(async {
+        runtime().block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let url = |name: &str| {
-                std::fs::create_dir(dir.path().join(name)).unwrap();
-                format!("file://{}", dir.path().join(name).display())
-            };
-            let (home_url, other_url) = (url("home"), url("other"));
+            let home_url = format!("file://{}", dir.path().display());
+            let server = S3Server::start(None);
+            let other_url = format!("s3://{}/other", crate::s3_server::BUCKET);
             let (home, other) = (
                 ObjectBucket::from_url(&home_url).unwrap(),
-                ObjectBucket::from_url(&other_url).unwrap(),
+                s3(&server, "other", &Client::DEFAULT),
             );
             identity::format(&home, &Details::default()).await.unwrap();
             let details = Details { url: Some(other_url.clone()), ..Details::default() };
-            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            identity::add(&home, &Details::default(), &*other, details).await.unwrap();
+            let vars = server
+                .options()
+                .into_iter()
+                .map(|(name, value)| (format!("CLADEFSD_BUCKET_2_{name}"), value));
             let routed = Arc::new(
-                ObjectBucket::from_url(&home_url)
-                    .unwrap()
-                    .routed(Arc::new(Registered::new(Vec::<(String, String)>::new()))),
+                ObjectBucket::from_url(&home_url).unwrap().routed(Arc::new(Registered::new(vars))),
             );
             let (parent, child) = (test_cell(2 << 48 | 1), test_cell(1 << 48 | 2));
 
@@ -2013,6 +2015,29 @@ pub(crate) mod tests {
                 crate::testing::read(&routed, large, location).await.unwrap(),
                 vec![7; 4096]
             );
+
+            // TASK-633.4: a part of the parent's bucket is kept in the host's part cache as its own
+            // bucket's are: fetched from the S3 server once, then read, and served to the region's
+            // peers (`stored_part`), from the cache, by another fetcher of the host's.
+            let cache_dir = tempfile::tempdir().unwrap();
+            let cache = Arc::new(crate::cache::Cache::open(cache_dir.path(), 64 << 20).unwrap());
+            let keys = crate::testing::ring_of(&*routed, child).await.unwrap();
+            let fetcher = |memory: Arc<crate::fetch::Memory>| {
+                std::mem::forget(memory.keys().hold(keys.clone()));
+                let budget = crate::fetch::Budget::new(crate::fetch::Limits::UNBOUNDED);
+                crate::fetch::Fetcher::new(routed.clone(), budget, memory, Some(cache.clone()))
+            };
+            let gets = || server.requests().get("get").copied().unwrap_or(0);
+            let before = gets();
+            let first = fetcher(crate::fetch::Memory::new());
+            let read = first.read(large, location, 0, location.len, crate::fetch::Priority::Demand);
+            assert_eq!(read.await.unwrap(), vec![7; 4096]);
+            assert_eq!(gets() - before, 2, "the tail's GET and the part's");
+            let fetched = gets();
+            let second = fetcher(crate::fetch::Memory::new());
+            let served = second.stored_part(&location.key, 0).await.unwrap().unwrap();
+            assert!(!served.is_empty());
+            assert_eq!(gets() - fetched, 0, "a GET of the parent's bucket for a part cached");
 
             // TASK-633.7: the child deleted, the collector of its bucket retires its reference in
             // its parent's bucket (unmarked: its fork was made by its restore alone).
