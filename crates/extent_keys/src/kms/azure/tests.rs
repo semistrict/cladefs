@@ -186,6 +186,8 @@ struct Fake {
     refuse_first: bool,
     /// Each request: its method and path.
     asked: Vec<String>,
+    /// The scope of each token asked for.
+    scopes: Vec<String>,
 }
 
 /// A response: its status and JSON body.
@@ -203,10 +205,9 @@ fn answer(
     if path.ends_with("/oauth2/v2.0/token") {
         let form: Vec<(String, String)> = url::form_urlencoded::parse(body).into_owned().collect();
         let has = |name: &str, value: &str| form.iter().any(|(n, v)| n == name && v == value);
-        assert!(
-            has("scope", SCOPE) && has("client_secret", "s") && has("client_id", "c"),
-            "{form:?}"
-        );
+        let scope = form.iter().find(|(n, _)| n == "scope").map(|(_, v)| v.clone()).unwrap();
+        fake.scopes.push(scope);
+        assert!(has("client_secret", "s") && has("client_id", "c"), "{form:?}");
         fake.tokens += 1;
         return (
             200,
@@ -312,8 +313,13 @@ fn runtime() -> tokio::runtime::Runtime {
 
 /// A backend over the fake at `base`, its keys named `prefix{tenant}`, overridden by `keys`.
 fn over(base: &str, template: &str, keys: Option<&str>) -> AzureKms {
+    over_for(base, template, keys, "https://vault.azure.net")
+}
+
+/// The same, its URL's vault's tokens for `audience`.
+fn over_for(base: &str, template: &str, keys: Option<&str>, audience: &'static str) -> AzureKms {
     let names = KeyNames::new(template, keys).unwrap();
-    let parsed = Parsed { vault: base.to_owned(), names, alg: ALGORITHMS[0] };
+    let parsed = Parsed { vault: base.to_owned(), audience, names, alg: ALGORITHMS[0] };
     let source = Source::Secret {
         url: format!("{base}/t/oauth2/v2.0/token"),
         client_id: "c".into(),
@@ -376,5 +382,32 @@ fn refusals_reach_their_tenants_and_tokens_are_fetched_again() {
         let tokens = fake.lock().unwrap().tokens;
         kms.wrap(9, &Secret::random()).await.unwrap();
         assert_eq!(fake.lock().unwrap().tokens, tokens + 2, "a token refused not fetched again");
+    });
+}
+
+/// TASK-633.6 (review): each vault's tokens are for its own audience: a Managed HSM's, a sovereign
+/// cloud's, the public vaults'; a key of an emulator on this host takes the URL's vault's.
+#[test]
+fn tokens_are_for_the_audience_of_each_vault() {
+    assert_eq!(audience_of("v.vault.azure.net"), Some("https://vault.azure.net"));
+    assert_eq!(audience_of("h.managedhsm.azure.net"), Some("https://managedhsm.azure.net"));
+    assert_eq!(audience_of("v.vault.azure.cn"), Some("https://vault.azure.cn"));
+    assert_eq!(
+        audience_of("h.managedhsm.usgovcloudapi.net"),
+        Some("https://managedhsm.usgovcloudapi.net")
+    );
+    assert_eq!(audience_of("evil.example"), None);
+    let parsed = parse("azure-kv://h.managedhsm.azure.net?key=t-{tenant}&alg=A256KW").unwrap();
+    assert_eq!(parsed.audience, "https://managedhsm.azure.net");
+    let runtime = runtime();
+    runtime.block_on(async {
+        let fake = Arc::new(Mutex::new(Fake::default()));
+        let base = serve(fake.clone()).await;
+        let keys = "9 https://theirs.vault.azure.cn/keys/k\n";
+        let kms = over_for(&base, "t-{tenant}", Some(keys), "https://managedhsm.azure.net");
+        assert_eq!(kms.audience("https://theirs.vault.azure.cn/keys/k"), "https://vault.azure.cn");
+        assert_eq!(kms.audience(&format!("{base}/keys/t-8")), "https://managedhsm.azure.net");
+        kms.wrap(8, &Secret::random()).await.unwrap();
+        assert_eq!(fake.lock().unwrap().scopes, ["https://managedhsm.azure.net/.default"]);
     });
 }
