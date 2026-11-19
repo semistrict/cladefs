@@ -2013,6 +2013,14 @@ pub(crate) mod tests {
                 crate::testing::read(&routed, large, location).await.unwrap(),
                 vec![7; 4096]
             );
+
+            // TASK-633.7: the child deleted, the collector of its bucket retires its reference in
+            // its parent's bucket (unmarked: its fork was made by its restore alone).
+            lifecycle::delete(&*routed, child, 13, u64::MAX).await.unwrap();
+            let options = collector::Options { compact_below: 0.5, grace: 0 };
+            crate::testing::collect_until_quiet(&*routed, &options).await.unwrap();
+            let reference = layout::reference(parent, fork, child);
+            assert!(!at(&other, reference).await, "the reference stands in the parent's bucket");
         });
     }
 
