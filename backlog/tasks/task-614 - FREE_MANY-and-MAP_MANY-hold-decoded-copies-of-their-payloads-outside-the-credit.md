@@ -3,9 +3,11 @@ id: TASK-614
 title: >-
   FREE_MANY and MAP_MANY hold decoded copies of their payloads outside the
   credit
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:33'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: low

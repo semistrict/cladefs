@@ -225,6 +225,7 @@ fn one() {
         "versioned_wals" => versioned_wals(),
         "late_checkpoints" => late_checkpoints(),
         "versions" => versions(),
+        "regions" => regions(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
@@ -249,6 +250,7 @@ fn seeds_replay() {
         late_checkpoints(),
         recreated(),
         twin_restores(),
+        regions(),
     ];
     for profile in profiles {
         replays(profile, 0..20);
@@ -288,7 +290,20 @@ fn deleted_bases() -> Profile {
     })
 }
 
-test_holds!(bases_deleted_under_live_forks, deleted_bases());
+test_holds!(bases_deleted_under_live_forks, deleted_bases(), [6496]);
+
+/// cladefs: cells across the buckets of three cloud regions (TASK-633.10): each cell in the bucket of
+/// the host that made it, versions restored by hosts of other regions into their own buckets, bases
+/// deleted and collected while their children elsewhere live, a region's bucket down for stretches.
+fn regions() -> Profile {
+    Profile { regions: 3, ..deleted_bases() }
+}
+
+test_holds!(cells_across_regions, regions(), [2325]);
+// A child in another region's bucket than its parent's keeps what it reads of the parent by its
+// reference, in the parent's bucket, and the parent's collector keeps its origins.
+test_needs!(references_hold_across_regions, references, regions());
+test_needs!(origins_are_kept_across_regions, origins_kept, regions());
 
 /// Placements cut off taking cells back, and deleting them, with their earlier fencing tokens,
 /// from the ones after them, while those write and are taken over in turn (TASK-39.7, TASK-45.1).

@@ -16,7 +16,7 @@
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use bucket_cell::bucket_kms::BucketKms;
+use bucket_cell::bucket_kms::{BucketKms, ByBucket};
 use bucket_cell::cache::Cache;
 use bucket_cell::fetch::{self, Budget, Limits, Priority};
 use bucket_cell::identity::{Details, Identity, Registry};
@@ -225,8 +225,8 @@ pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
     }
     let runtime = bucket_runtime()?;
     let kms = POOLED.get_or_init(|| match host_keys() {
-        Ok(keys) => host_kms(keys.kms.clone(), runtime),
-        Err(why) => host_kms(Arc::new(Unreached(why.clone())), runtime),
+        Ok(keys) => host_kms(keys.kmses.clone(), runtime),
+        Err(why) => host_kms(one(Arc::new(Unreached(why.clone()))), runtime),
     });
     Ok(kms.clone())
 }
@@ -251,14 +251,28 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
     KMS.get_or_init(|| match bucket_cell::bucket_kms::from_env(host_bucket) {
-        Ok(chosen) => Ok(HostKeys { kms: chosen.shared(), bucket: chosen.bucket().cloned() }),
+        Ok(chosen) => {
+            let bucket = chosen.bucket().cloned();
+            // cladefs: each other bucket's cells under that bucket's KMS (TASK-633.6), given the
+            // host's bucket to reach them by; the host's alone without one.
+            let (kmses, by_bucket): (Arc<dyn keys::Kmses>, _) = match host_bucket() {
+                Ok(home) => {
+                    let by_bucket = Arc::new(ByBucket::new(home, chosen, std::env::vars()));
+                    (by_bucket.clone(), Some(by_bucket))
+                }
+                Err(_) => (one(chosen.shared()), None),
+            };
+            Ok(HostKeys { kmses, bucket, by_bucket })
+        }
         // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
         // tenant's KEK made on its first use, which the tests' readers share
         // (`bucket_cell::keys::testing`, TASK-411.28).
         #[cfg(test)]
-        Err(why) if why == bucket_cell::bucket_kms::no_kms() => {
-            Ok(HostKeys { kms: bucket_cell::keys::testing::kms(), bucket: None })
-        }
+        Err(why) if why == bucket_cell::bucket_kms::no_kms() => Ok(HostKeys {
+            kmses: one(bucket_cell::keys::testing::kms()),
+            bucket: None,
+            by_bucket: None,
+        }),
         // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
         // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
         #[cfg(all(feature = "tests-kms", not(test)))]
@@ -276,25 +290,29 @@ fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
     crate::host_cell::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 
-/// cladefs: the host's KMS, as its environment chose it, and the bucket KMS it is over, if it is
-/// that.
+/// cladefs: the host's KMSes, a bucket's each (TASK-633.6), its own as its environment chose it,
+/// and the bucket KMS that is over its own bucket, if it is that.
 struct HostKeys {
-    kms: extent_keys::kms::Shared,
+    kmses: Arc<dyn keys::Kmses>,
     bucket: Option<Arc<BucketKms<ObjectBucket>>>,
+    /// Its KMSes, if it has a bucket to reach others by: what shreds a tenant in every bucket.
+    by_bucket: Option<Arc<ByBucket>>,
 }
 
-/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on `runtime`, the
-/// uploaders', off the paths of forks, which take from them (TASK-411.4).
-fn host_kms(
-    kms: extent_keys::kms::Shared,
-    runtime: tokio::runtime::Handle,
-) -> Arc<keys::CachingKms> {
-    keys::CachingKms::pooled(kms, keys::Pooling::on(runtime))
+/// cladefs: `kms`, for every bucket's cells.
+fn one(kms: extent_keys::kms::Shared) -> Arc<dyn keys::Kmses> {
+    Arc::new(keys::OneKms(kms))
+}
+
+/// cladefs: the host's over `kmses`: its pools of new cell KEKs refilled in batches on `runtime`,
+/// the uploaders', off the paths of forks, which take from them (TASK-411.4).
+fn host_kms(kmses: Arc<dyn keys::Kmses>, runtime: tokio::runtime::Handle) -> Arc<keys::CachingKms> {
+    keys::CachingKms::over(kmses, Some(keys::Pooling::on(runtime)))
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Ok(HostKeys { kms, bucket: None }))
+    KMS.set(Ok(HostKeys { kmses: one(kms), bucket: None, by_bucket: None }))
         .map_err(|_| "the host's KMS is set already".to_owned())
 }
 
@@ -327,7 +345,8 @@ pub mod testing {
     /// The host's keys under the tests' KMS, which every process has alike: a test's, and those it
     /// starts, whatever bucket each keeps its stores in.
     pub(super) fn host_keys() -> HostKeys {
-        HostKeys { kms: Arc::new(extent_keys::testing::KnownKms), bucket: None }
+        let kmses = super::one(Arc::new(extent_keys::testing::KnownKms));
+        HostKeys { kmses, bucket: None, by_bucket: None }
     }
 }
 
@@ -389,25 +408,53 @@ pub async fn shred_cell(
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
-/// cladefs: shreds `tenant` under the host's bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
-/// KEK object in the host's bucket replaced by a tombstone, so that no key its KEK wrapped unwraps
-/// anywhere and none is made it again ([`bucket_cell::bucket_kms::destroy`]); then has this host
-/// forget its keys ([`forget`]). Shredded already, it finds it so, and the host forgets them all
-/// the same: what each host told does. Refused, changing nothing, if the host's KMS is not the
-/// bucket KMS: another KMS's tenant is shredded by destroying its KEK there, then
-/// `ForgetTenantKeys`. Only as strong as the bucket keeps no older version of the KEK object.
+/// cladefs: shreds `tenant` under the bucket KMS of every bucket the host reaches (doc-16, The
+/// bucket KMS; TASK-411.27, TASK-633.6): its KEK object in each replaced by a tombstone, so that no
+/// key its KEK wrapped unwraps anywhere and none is made it again
+/// ([`bucket_cell::bucket_kms::ByBucket::shred`]); then has this host forget its keys
+/// ([`forget`]). Shredded already, it finds it so, and the host forgets them all the same: what
+/// each host told does. Refused, changing nothing, if no bucket is under a bucket KMS: another
+/// KMS's tenant is shredded by destroying its KEK there, then `ForgetTenantKeys`. Refused after
+/// shredding where it could, naming them, if a bucket is under another KMS, or out of reach:
+/// shredding again finishes those. Only as strong as the buckets keep no older version of the KEK
+/// objects.
 pub async fn shred_tenant(
     tenant: u64,
 ) -> Result<(bucket_cell::bucket_kms::Destroyed, Forgotten), String> {
-    let Some(kms) = bucket_kms() else {
+    use bucket_cell::bucket_kms::{Destroyed, Shredded};
+    let keys = host_keys().as_ref().ok();
+    let shredded = match (keys.and_then(|keys| keys.by_bucket.as_ref()), bucket_kms()) {
+        (Some(by_bucket), _) => by_bucket.shred(tenant).await,
+        (None, Some(kms)) => {
+            Shredded { destroyed: vec![(0, kms.destroy(tenant).await)], ..Shredded::default() }
+        }
+        (None, None) => Shredded::default(),
+    };
+    if shredded.destroyed.is_empty() && shredded.failed.is_empty() {
         return Err(format!(
             "tenant {tenant}: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no \
              CLADEFS_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
         ));
-    };
-    let destroyed = kms.destroy(tenant).await;
+    }
+    let now = shredded.destroyed.iter().any(|(_, destroyed)| *destroyed == Destroyed::Now);
+    let destroyed = if now { Destroyed::Now } else { Destroyed::Already };
     let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
-    Ok((destroyed, forget(keys::Scope::Tenant(tenant), &why)))
+    let forgotten = forget(keys::Scope::Tenant(tenant), &why);
+    // cladefs: the buckets it did not shred in (TASK-633.6): under another KMS, or out of reach.
+    let left: Vec<String> = (shredded.named.iter())
+        .map(|(number, url)| format!("bucket {number}'s KMS {url} keeps its KEK: destroy it there"))
+        .chain(shredded.failed.iter().map(|(number, why)| format!("bucket {number}: {why}")))
+        .collect();
+    if !left.is_empty() {
+        let done: Vec<String> = shredded.destroyed.iter().map(|(n, _)| n.to_string()).collect();
+        return Err(format!(
+            "tenant {tenant}: shredded in buckets [{}] alone: {}; then have every host forget its \
+             keys",
+            done.join(", "),
+            left.join("; ")
+        ));
+    }
+    Ok((destroyed, forgotten))
 }
 
 /// cladefs: a KMS the environment chose that can't be had (a bad `CLADEFS_KMS`, master keys

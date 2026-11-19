@@ -1,9 +1,11 @@
 ---
 id: TASK-570
 title: 'A cell''s versions are never capped, so its head grows without bound'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:27'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: medium

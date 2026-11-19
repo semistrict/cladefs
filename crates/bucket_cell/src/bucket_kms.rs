@@ -31,16 +31,24 @@
 //!   the tenant's keys are revoked or destroyed calls (`keys::CachingKms::revoked`).
 //! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
 //!   key, this one, over the host's bucket; else none, which every process opening stores refuses
-//!   to start with, naming both (TASK-411.28: every store is encrypted).
+//!   to start with, naming both (TASK-411.28: every store is encrypted). The cells of other
+//!   buckets, of other cloud regions, are each under their own bucket's KMS ([`ByBucket`],
+//!   TASK-633.6): the one the registry of buckets names for it, or its own variables do, or the
+//!   bucket KMS over that bucket, its tenants' KEKs kept there.
 
 use crate::bucket::{self, Bucket, Created, Updated};
+use crate::identity::{self, NAMED};
+use crate::keys::{KmsKey, Kmses};
 use crate::layout;
+use crate::object_bucket::{ObjectBucket, Registered, numbered_options};
 use extent_keys::kms::bucket::{self as formats, KekObject, TenantKek};
 use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
 use extent_keys::kms::{self, Error, Kms};
 use extent_keys::{Secret, Unauthentic, Wrapped};
 use futures::StreamExt as _;
-use std::collections::HashMap;
+use futures::future::BoxFuture;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,6 +68,9 @@ pub struct BucketKms<B> {
     /// Each tenant's KEK as last read, and when.
     held: Mutex<HashMap<u64, Held>>,
     fresh_for: Duration,
+    /// The identity of its bucket (TASK-633.6), which the keys it wraps name, once read: 0 for a
+    /// bucket of none, its keys bound to no bucket.
+    identity: Mutex<Option<u64>>,
 }
 
 /// A tenant's KEK as a host read it.
@@ -71,7 +82,35 @@ struct Held {
 impl<B: Bucket> BucketKms<B> {
     /// The KMS keeping tenants' KEKs in `bucket`, under `keys`, the newest first.
     pub fn new(bucket: Arc<B>, keys: MasterKeys) -> Self {
-        Self { bucket, keys, held: Mutex::default(), fresh_for: FRESH_FOR }
+        Self {
+            bucket,
+            keys,
+            held: Mutex::default(),
+            fresh_for: FRESH_FOR,
+            identity: Mutex::default(),
+        }
+    }
+
+    /// Has it take `identity` as its bucket's, known from elsewhere (the registry of buckets).
+    pub fn identify(&self, identity: u64) {
+        *self.identity.lock().unwrap() = Some(identity);
+    }
+
+    /// The identity of its bucket, which the keys it wraps name, read once (or again if `afresh`):
+    /// 0 for a bucket of none.
+    async fn identity(&self, tenant: u64, afresh: bool) -> Result<u64, Error> {
+        if let Some(identity) = *self.identity.lock().unwrap()
+            && !afresh
+        {
+            return Ok(identity);
+        }
+        let read = crate::identity::get(&*self.bucket).await.map_err(|err| Error::Io {
+            tenant,
+            source: std::io::Error::other(format!("the bucket's identity: {err}")),
+        })?;
+        let identity = read.map_or(0, |identity| identity.id);
+        *self.identity.lock().unwrap() = Some(identity);
+        Ok(identity)
     }
 
     /// The same, reading a tenant's KEK object again once it is `fresh_for` old: tests'.
@@ -153,23 +192,35 @@ impl<B: Bucket> BucketKms<B> {
 
 impl<B: Bucket> Kms for BucketKms<B> {
     async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
+        let identity = self.identity(tenant, false).await?;
         let kek = self.kek(tenant, true).await?;
-        Ok(formats::wrap(tenant, &kek, key))
+        Ok(formats::wrap(tenant, identity, &kek, key))
     }
 
     async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
         let unauthentic = |source| Error::Unauthentic { tenant, source };
-        let (of, id) = formats::kek_of(wrapped).map_err(unauthentic)?;
+        let (of, kept_in, id) = formats::kek_of(wrapped).map_err(unauthentic)?;
         if of != tenant {
             return Err(unauthentic(Unauthentic("a wrapped key, wrapped for another tenant")));
         }
+        // Another bucket's key says nothing of the tenant's KEK here: never read as destroyed. A
+        // key bound to no bucket (0) was wrapped before its bucket had an identity.
+        let mut identity = self.identity(tenant, false).await?;
+        if kept_in != 0 && kept_in != identity && identity == 0 {
+            // Given one since, perhaps.
+            identity = self.identity(tenant, true).await?;
+        }
+        if kept_in != 0 && kept_in != identity {
+            return Err(Error::Elsewhere { tenant, bucket: kept_in });
+        }
+        let identity = kept_in;
         let mut kek = self.kek(tenant, false).await?;
         if kek.id != id {
             // Held from before its object changed, perhaps: read it again.
             self.forget(tenant);
             kek = self.kek(tenant, false).await?;
         }
-        formats::unwrap(tenant, &kek, wrapped).map_err(unauthentic)
+        formats::unwrap(tenant, identity, &kek, wrapped).map_err(unauthentic)
     }
 
     fn forget(&self, tenant: u64) {
@@ -261,8 +312,8 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
 
 /// A host's KMS, as [`from_env`] chose it.
 pub enum HostKms<B> {
-    /// The one `CLADEFS_KMS` names.
-    Named(kms::Shared),
+    /// The one `CLADEFS_KMS` names, by its URL.
+    Named(String, kms::Shared),
     /// The bucket KMS, over the host's bucket.
     Bucket(Arc<BucketKms<B>>),
 }
@@ -271,7 +322,7 @@ impl<B: Bucket> HostKms<B> {
     /// It, as a host holds any KMS.
     pub fn shared(&self) -> kms::Shared {
         match self {
-            Self::Named(kms) => kms.clone(),
+            Self::Named(_, kms) => kms.clone(),
             Self::Bucket(kms) => kms.clone(),
         }
     }
@@ -279,7 +330,7 @@ impl<B: Bucket> HostKms<B> {
     /// The bucket KMS, if it is that.
     pub fn bucket(&self) -> Option<&Arc<BucketKms<B>>> {
         match self {
-            Self::Named(_) => None,
+            Self::Named(..) => None,
             Self::Bucket(kms) => Some(kms),
         }
     }
@@ -305,23 +356,259 @@ pub fn no_kms() -> String {
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
 ) -> Result<HostKms<B>, String> {
-    let named = std::env::var(KMS_VAR).ok().filter(|url| !url.is_empty());
+    choose(&|name| std::env::var_os(name), None, bucket)
+}
+
+/// cladefs: the KMS the variables `var` gives by name choose, as [`from_env`] does, unless
+/// `recorded`, a registry's, names one (TASK-633.6): that one then.
+fn choose<B: Bucket>(
+    var: &dyn Fn(&str) -> Option<OsString>,
+    recorded: Option<&str>,
+    bucket: impl FnOnce() -> Result<Arc<B>, String>,
+) -> Result<HostKms<B>, String> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
     let given = [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR]
         .into_iter()
-        .filter(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+        .filter(|name| set(name).is_some())
         .collect::<Vec<_>>();
-    if let Some(url) = named {
+    let named = match recorded {
+        Some(url) => Some((url.to_owned(), "the registry of buckets".to_owned())),
+        None => set(KMS_VAR).map(|url| (url.to_string_lossy().into_owned(), KMS_VAR.to_owned())),
+    };
+    if let Some((url, source)) = named {
         if let Some(name) = given.first() {
-            log::warn!("cladefs: {name} is set, and unused: {KMS_VAR} names the host's KMS");
+            log::warn!("cladefs: {name} is set, and unused: {source} names the KMS");
         }
-        let kms = kms::from_url(&url).map_err(|why| format!("{KMS_VAR}: {why}"))?;
-        return Ok(HostKms::Named(kms));
+        let kms = kms::from_url(&url).map_err(|why| format!("{source}: {why}"))?;
+        return Ok(HostKms::Named(url, kms));
     }
-    let keys = MasterKeys::from_env()?.ok_or_else(no_kms)?;
+    let keys = MasterKeys::from_vars(var)?.ok_or_else(no_kms)?;
     let bucket = bucket().map_err(|why| {
         format!("{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: {why}")
     })?;
     Ok(HostKms::Bucket(Arc::new(BucketKms::new(bucket, keys))))
+}
+
+/// cladefs: the KMSes of the buckets a host reaches (TASK-633.6; backlog doc-23, KMS per bucket),
+/// each the one its own hosts use:
+///
+/// - the host's own bucket's, and the cells tests name (bucket number 0): the host's, as its
+///   environment chose it ([`from_env`]);
+/// - another bucket's: the KMS its entry in the registry of buckets names (`kms`, as `cladefsctl
+///   add-bucket --kms` records it); else the one its variables name (`CLADEFS_KMS`, as
+///   `CLADEFSD_BUCKET_<N>_CLADEFS_KMS` overrides it: `object_bucket::numbered_options`); else,
+///   given master keys there (`CLADEFS_MASTER_KEY`, or `CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`),
+///   the bucket KMS over that bucket itself, its tenants' KEKs kept in it, refused unless the
+///   master key its entry records (`master_key_id`), if any, is among them; else none, refusing
+///   every call for its cells, never as a revocation.
+///
+/// A KMS is named by its URL, one for every bucket naming it, so that its refusal of a tenant
+/// refuses the tenant in all of them and no other ([`keys::CachingKms`]); a bucket KMS by its
+/// bucket.
+pub struct ByBucket {
+    home: Arc<ObjectBucket>,
+    own: HostKms<ObjectBucket>,
+    registered: Registered,
+    vars: Vec<(String, String)>,
+    /// The home bucket's number, once read: none if it has no identity.
+    own_number: Mutex<Option<Option<u16>>>,
+    chosen: Mutex<HashMap<u16, (KmsKey, kms::Shared)>>,
+    named: Mutex<HashMap<String, kms::Shared>>,
+    buckets: Mutex<BTreeMap<u16, Arc<BucketKms<ObjectBucket>>>>,
+}
+
+impl ByBucket {
+    /// The KMSes of the buckets `home`, the host's routed bucket, reaches, its own `own`, the
+    /// others' chosen from the registry and `vars`, the host's environment.
+    pub fn new(
+        home: Arc<ObjectBucket>,
+        own: HostKms<ObjectBucket>,
+        vars: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let vars: Vec<(String, String)> = vars.into_iter().collect();
+        let named = match &own {
+            HostKms::Named(url, kms) => HashMap::from([(url.clone(), kms.clone())]),
+            HostKms::Bucket(_) => HashMap::new(),
+        };
+        Self {
+            home,
+            own,
+            registered: Registered::new(vars.clone()),
+            vars,
+            own_number: Mutex::default(),
+            chosen: Mutex::default(),
+            named: Mutex::new(named),
+            buckets: Mutex::default(),
+        }
+    }
+
+    /// The bucket KMSes chosen so far, by their buckets' numbers: the host's own bucket's under its
+    /// number, or 0 if it has none.
+    pub fn bucket_kmses(&self) -> Vec<(u16, Arc<BucketKms<ObjectBucket>>)> {
+        let mut all: Vec<_> =
+            self.buckets.lock().unwrap().iter().map(|(n, kms)| (*n, kms.clone())).collect();
+        if let HostKms::Bucket(kms) = &self.own {
+            let own = self.own_number.lock().unwrap().flatten().unwrap_or(NAMED);
+            all.push((own, kms.clone()));
+        }
+        all
+    }
+
+    /// Shreds `tenant` in every bucket it reaches (doc-16, Shredding; TASK-633.6): its KEK object
+    /// replaced by a tombstone in each bucket under a bucket KMS ([`BucketKms::destroy`]), the
+    /// host's own first, then each other bucket the registry records, its copy in the host's
+    /// bucket and the root bucket's, the authority. A bucket under a KMS named by its URL keeps
+    /// the tenant's KEK there, out of reach: destroyed there, out of band (doc-16). Says which.
+    pub async fn shred(&self, tenant: u64) -> Shredded {
+        let mut shredded = Shredded::default();
+        let own = match self.own_number().await {
+            Ok(own) => own,
+            Err(why) => {
+                shredded.failed.push((NAMED, format!("the host's bucket's identity: {why}")));
+                None
+            }
+        };
+        match &self.own {
+            HostKms::Bucket(kms) => {
+                shredded.destroyed.push((own.unwrap_or(NAMED), kms.destroy(tenant).await))
+            }
+            HostKms::Named(url, _) => shredded.named.push((own.unwrap_or(NAMED), url.clone())),
+        }
+        let mut numbers = BTreeSet::new();
+        let mut registries = vec![identity::registry(&*self.home).await];
+        if own.is_some_and(|own| own != identity::ROOT) {
+            match self.home.numbered(identity::ROOT).await {
+                Ok(root) => registries.push(identity::registry(&*root).await),
+                Err(err) => shredded.failed.push((identity::ROOT, err.to_string())),
+            }
+        }
+        for registry in registries {
+            match registry {
+                Ok(registry) => numbers.extend(
+                    (registry.iter())
+                        .flat_map(|registry| registry.buckets.iter().map(|e| e.number)),
+                ),
+                Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
+            }
+        }
+        for number in numbers.into_iter().filter(|&number| Some(number) != own) {
+            match self.of(number).await {
+                Err(why) => shredded.failed.push((number, why)),
+                Ok((key, _)) => {
+                    let kms = self.buckets.lock().unwrap().get(&number).cloned();
+                    match kms {
+                        Some(kms) => shredded.destroyed.push((number, kms.destroy(tenant).await)),
+                        None => shredded.named.push((number, key.0.to_string())),
+                    }
+                }
+            }
+        }
+        shredded
+    }
+
+    /// The home bucket's number, read once: none if it has no identity.
+    async fn own_number(&self) -> Result<Option<u16>, String> {
+        if let Some(own) = *self.own_number.lock().unwrap() {
+            return Ok(own);
+        }
+        let own = identity::get(&*self.home).await.map_err(|err| err.to_string())?;
+        let own = own.map(|identity| identity.number);
+        *self.own_number.lock().unwrap() = Some(own);
+        Ok(own)
+    }
+
+    /// The host's own KMS, and its name.
+    fn own(&self) -> (KmsKey, kms::Shared) {
+        match &self.own {
+            HostKms::Named(url, kms) => (KmsKey(url.as_str().into()), kms.clone()),
+            HostKms::Bucket(kms) => (KmsKey("the host's bucket KMS".into()), kms.clone()),
+        }
+    }
+
+    /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
+    /// Its bucket KMS too, if it is that.
+    async fn other(&self, number: u16) -> Result<Chosen, String> {
+        let entry = self.registered.entry(&self.home, number).await;
+        let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
+        let vars = kms_vars(&self.vars, number);
+        let var = |name: &str| {
+            vars.iter().rev().find(|(of, _)| of == name).map(|(_, value)| OsString::from(value))
+        };
+        let member = self.home.numbered(number).await.map_err(|err| format!("the bucket: {err}"));
+        match choose(&var, entry.details.kms.as_deref(), || member)? {
+            HostKms::Named(url, kms) => {
+                let kms = self.named.lock().unwrap().entry(url.clone()).or_insert(kms).clone();
+                Ok(((KmsKey(url.into()), kms), None))
+            }
+            HostKms::Bucket(kms) => {
+                if let Some(id) = &entry.details.master_key_id
+                    && !kms.keys().ids().iter().any(|held| held.to_string() == *id)
+                {
+                    return Err(format!(
+                        "its tenants' KEKs are kept under master key {id}, which this host has \
+                         not (it has {}): CLADEFSD_BUCKET_{number}_{MASTER_KEY_VAR}",
+                        kms.keys().named_ids()
+                    ));
+                }
+                kms.identify(entry.id);
+                let key = KmsKey(format!("the bucket KMS of bucket {number}").into());
+                Ok(((key, kms.clone()), Some(kms)))
+            }
+        }
+    }
+}
+
+/// What [`ByBucket::other`] chose: the KMS and its name, and the bucket KMS it is, if it is one.
+type Chosen = ((KmsKey, kms::Shared), Option<Arc<BucketKms<ObjectBucket>>>);
+
+/// cladefs: the variables bucket `number`'s KMS is chosen by, of `vars`: its own
+/// (`CLADEFSD_BUCKET_<N>_...`) over the host's, as for its options
+/// (`object_bucket::numbered_options`); the KMS's ([`KMS_VAR`], [`MASTER_KEY_VAR`],
+/// [`MASTER_KEY_FILE_VAR`]) as one, so that a bucket given any of them as its own takes none of the
+/// host's: its own master key and the host's master key file are not both given, nor is the
+/// host's KMS chosen over its own master key.
+fn kms_vars(vars: &[(String, String)], number: u16) -> Vec<(String, String)> {
+    let prefix = format!("CLADEFSD_BUCKET_{number}_");
+    let kms = [KMS_VAR, MASTER_KEY_VAR, MASTER_KEY_FILE_VAR];
+    let own = (vars.iter())
+        .any(|(name, _)| name.strip_prefix(&prefix).is_some_and(|name| kms.contains(&name)));
+    let shared = vars.iter().filter(|(name, _)| !(own && kms.contains(&name.as_str())));
+    numbered_options(shared.cloned(), number)
+}
+
+/// What [`ByBucket::shred`] did, bucket by bucket, each by its number (0: the host's own bucket,
+/// numbered none).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Shredded {
+    /// The buckets under a bucket KMS, and what destroying the tenant's KEK object there did.
+    pub destroyed: Vec<(u16, Destroyed)>,
+    /// The buckets under a KMS named by its URL, which keeps the tenant's KEK: to destroy there.
+    pub named: Vec<(u16, String)>,
+    /// The buckets it could not shred in, and why: shredding again finishes them.
+    pub failed: Vec<(u16, String)>,
+}
+
+impl Kmses for ByBucket {
+    fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+        Box::pin(async move {
+            if bucket == NAMED || self.own_number().await? == Some(bucket) {
+                return Ok(self.own());
+            }
+            if let Some(chosen) = self.chosen.lock().unwrap().get(&bucket) {
+                return Ok(chosen.clone());
+            }
+            let (chosen, bucket_kms) = self.other(bucket).await?;
+            // Chosen at once by another call, perhaps: that one, the one every caller holds.
+            let mut all = self.chosen.lock().unwrap();
+            if let Some(chosen) = all.get(&bucket) {
+                return Ok(chosen.clone());
+            }
+            if let Some(bucket_kms) = bucket_kms {
+                self.buckets.lock().unwrap().insert(bucket, bucket_kms);
+            }
+            Ok(all.entry(bucket).or_insert(chosen).clone())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -380,7 +667,9 @@ mod tests {
         let (wrapped, asked) = sim.served(first.wrap(7, &key));
         let wrapped = wrapped.unwrap();
         let kek = layout::kek(7);
-        assert_eq!(asked, [format!("get {kek}"), format!("put {kek}")]);
+        // Its bucket's identity read once, which what it wraps names (TASK-633.6).
+        let identity = layout::IDENTITY;
+        assert_eq!(asked, [format!("get {identity}"), format!("get {kek}"), format!("put {kek}")]);
         assert_eq!(wrapped.0.len(), formats::WRAPPED_LEN);
         let made = object(&Direct(sim.clone()), 7).unwrap();
         assert_eq!(made.len(), KEK_OBJECT_LEN);
@@ -395,7 +684,7 @@ mod tests {
         let (unwrapped, asked) = sim.served(second.unwrap(7, &wrapped));
         assert_eq!(
             (unwrapped.unwrap().expose(), asked),
-            (key.expose(), vec![format!("get {kek}")])
+            (key.expose(), vec![format!("get {identity}"), format!("get {kek}")])
         );
         assert_eq!(object(&Direct(sim.clone()), 7), Some(made));
         // Each tenant its own KEK: a key wrapped for one is refused to another.
@@ -431,9 +720,11 @@ mod tests {
         let racing = futures::future::join(first.wrap(7, &first_key), second.wrap(7, &second_key));
         let ((first_wrapped, second_wrapped), rounds) = sim.served_in_rounds(racing);
         let kek = layout::kek(7);
+        let identity = layout::IDENTITY;
         assert_eq!(
             rounds,
             [
+                vec![format!("get {identity}"), format!("get {identity}")],
                 vec![format!("get {kek}"), format!("get {kek}")],
                 vec![format!("put {kek}"), format!("put {kek}")],
                 // The second create, finding an object there, reads it: another's.
@@ -699,9 +990,151 @@ mod tests {
         }
         for (tenant, bytes) in (1..=2).zip(&objects) {
             let kek = KekObject::decode(tenant, bytes).unwrap().open(both.keys()).unwrap();
-            let wrapped_again = formats::wrap(tenant, &kek, &key);
+            let wrapped_again = formats::wrap(tenant, 0, &kek, &key);
             assert_eq!(wrapped_again, wrapped[tenant as usize - 1]);
         }
+    }
+
+    /// TASK-633.6 (review): a bucket given a KMS variable of its own takes none of the host's: its
+    /// master key over the host's master key file, not both; its master key over the host's KMS.
+    #[test]
+    fn a_buckets_own_kms_variables_override_the_hosts_as_one() {
+        let vars = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
+        };
+        let host = vars(&[
+            (MASTER_KEY_FILE_VAR, "/etc/cladefs/master"),
+            (KMS_VAR, "local:///kms"),
+            ("AWS_REGION", "us-east-1"),
+            ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY", "22"),
+        ]);
+        let mut two = kms_vars(&host, 2);
+        two.sort();
+        assert_eq!(two, vars(&[("AWS_REGION", "us-east-1"), (MASTER_KEY_VAR, "22")]));
+        let mut three = kms_vars(&host, 3);
+        three.sort();
+        let expected = vars(&[
+            ("AWS_REGION", "us-east-1"),
+            ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY", "22"),
+            (KMS_VAR, "local:///kms"),
+            (MASTER_KEY_FILE_VAR, "/etc/cladefs/master"),
+        ]);
+        assert_eq!(three, expected);
+    }
+
+    /// TASK-633.6: each bucket's cells are under that bucket's KMS, as its entry in the registry
+    /// and its variables choose it: the host's own bucket's under the host's bucket KMS, a second
+    /// bucket's under the bucket KMS over that bucket, by its own master key, a third's under the
+    /// KMS its entry names, none of its KEKs in it. A tenant destroyed in the second is refused
+    /// there alone; a master key the registry records that the host has not refuses that bucket's
+    /// cells, as no revocation; a key one bucket's KMS wrapped is refused by another's as
+    /// another bucket's, not as destroyed. Shredding the tenant destroys its KEK in both buckets under a
+    /// bucket KMS, naming the third's KMS, which keeps its own.
+    #[test]
+    fn buckets_cells_are_under_their_own_buckets_kms() {
+        use crate::identity::Details;
+        use crate::keys::CachingKms;
+        use crate::layout::CellId;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let urls = [url("home"), url("other"), url("third")];
+            let [home, other, third] =
+                urls.clone().map(|url| ObjectBucket::from_url(&url).unwrap());
+            let local = dir.path().join("kms");
+            extent_keys::kms::LocalKms::open(&local).unwrap().create(7).unwrap();
+            let local = format!("local://{}", local.display());
+            let (ours, theirs) = ("11".repeat(32), "22".repeat(32));
+            let parsed = |hex: &str| MasterKeys::parse(hex, "a test's").unwrap();
+            let id = |hex: &str| parsed(hex).newest().id().to_string();
+            identity::format(&home, &Details::default()).await.unwrap();
+            let recorded = |url: &str, kms: Option<&str>, key: Option<String>| Details {
+                url: Some(url.to_owned()),
+                kms: kms.map(str::to_owned),
+                master_key_id: key,
+                ..Details::default()
+            };
+            let added = recorded(&urls[1], None, Some(id(&theirs)));
+            identity::add(&home, &Details::default(), &other, added).await.unwrap();
+            let added = recorded(&urls[2], Some(&local), None);
+            identity::add(&home, &Details::default(), &third, added).await.unwrap();
+            let by_bucket = |key: &str| {
+                let vars =
+                    vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned())];
+                let home = ObjectBucket::from_url(&urls[0]).unwrap();
+                let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
+                let own = HostKms::Bucket(Arc::new(BucketKms::new(home.clone(), parsed(&ours))));
+                Arc::new(ByBucket::new(home, own, vars))
+            };
+            let host = |key: &str| CachingKms::over(by_bucket(key), None);
+            let cells = [1u64, 2, 3].map(|number| CellId { tenant: 7, id: number << 48 | 1 });
+            let kms = host(&theirs);
+            for cell in cells {
+                kms.new_kek(cell).await.unwrap();
+            }
+            async fn kek(bucket: &ObjectBucket) -> Option<Vec<u8>> {
+                bucket::get(bucket, &layout::kek(7)).await.map(|object| object.bytes)
+            }
+            let opens = |bytes: &[u8], hex: &str| {
+                KekObject::decode(7, bytes).unwrap().open(&parsed(hex)).is_ok()
+            };
+            let (home_kek, other_kek) = (kek(&home).await.unwrap(), kek(&other).await.unwrap());
+            assert_eq!((opens(&home_kek, &ours), opens(&home_kek, &theirs)), (true, false));
+            assert_eq!((opens(&other_kek, &theirs), opens(&other_kek, &ours)), (true, false));
+            assert_eq!(kek(&third).await, None, "a KEK object in a bucket under a KMS it names");
+            // A key bucket 2's KMS wrapped, asked of bucket 1's: refused as another bucket's, not
+            // as destroyed, though bucket 1 has no KEK object of tenant 8's.
+            let kmses = by_bucket(&theirs);
+            let (_, second) = kmses.of(2).await.unwrap();
+            let wrapped = second.wrap_dyn(8, &Secret::random()).await.unwrap();
+            let (_, first) = kmses.of(1).await.unwrap();
+            let refused = first.unwrap_dyn(8, &wrapped).await.map(drop).unwrap_err();
+            let other_id = identity::get(&other).await.unwrap().unwrap().id;
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "tenant 8: a key wrapped in the bucket KMS of another bucket ({other_id:016x})"
+                )
+            );
+            assert!(second.unwrap_dyn(8, &wrapped).await.is_ok());
+
+            assert_eq!(destroy(&other, 7).await, Destroyed::Now);
+            let fresh = host(&theirs);
+            let mut made = Vec::new();
+            for cell in cells {
+                made.push(fresh.new_kek(cell).await.map(drop));
+            }
+            let destroyed = crate::Error::Kms("tenant 7: its KEK is destroyed".into());
+            assert_eq!(made, [Ok(()), Err(destroyed.clone()), Ok(())]);
+            assert_eq!(cells.map(|cell| fresh.refuses(cell)), [None, Some(destroyed), None]);
+
+            let wrong = host(&ours);
+            let refused = crate::Error::Kms(format!(
+                "tenant 7: the KMS of bucket 2: its tenants' KEKs are kept under master key {}, \
+                 which this host has not (it has {}): CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY",
+                id(&theirs),
+                id(&ours)
+            ));
+            assert_eq!(wrong.new_kek(cells[1]).await.map(drop), Err(refused));
+            assert_eq!(wrong.refuses(cells[1]), None);
+            assert_eq!(wrong.new_kek(cells[0]).await.map(drop), Ok(()));
+
+            // Shredding reaches every bucket under a bucket KMS, and names those under another.
+            let shredded = by_bucket(&theirs).shred(7).await;
+            let expected = Shredded {
+                destroyed: vec![(1, Destroyed::Now), (2, Destroyed::Already)],
+                named: vec![(3, local.clone())],
+                failed: vec![],
+            };
+            assert_eq!(shredded, expected);
+            for bucket in [&home, &other] {
+                let object = KekObject::decode(7, &kek(bucket).await.unwrap()).unwrap();
+                assert!(matches!(object, KekObject::Tombstone { .. }), "a KEK left");
+            }
+        });
     }
 
     /// The KMS a host's environment chooses: `CLADEFS_KMS`'s if it names one, a master key or not;
@@ -727,7 +1160,7 @@ mod tests {
             from_env(|| bucket.cloned().ok_or_else(|| "CLADEFSD_BUCKET names none".to_owned()))
         };
         let kind = |chosen: &Result<HostKms<Direct>, String>| match chosen {
-            Ok(HostKms::Named(_)) => "named".to_owned(),
+            Ok(HostKms::Named(..)) => "named".to_owned(),
             Ok(HostKms::Bucket(_)) => "bucket".to_owned(),
             Err(why) => why.clone(),
         };
@@ -768,8 +1201,8 @@ mod tests {
         set(KMS_VAR, Some("vault://key"));
         assert_eq!(
             kind(&chosen(None)),
-            "CLADEFS_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or \
-             gcp-kms:// (doc-16)"
+            "CLADEFS_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms://, \
+             gcp-kms:// or azure-kv:// (doc-16)"
         );
     }
 }

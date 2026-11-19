@@ -1,9 +1,11 @@
 ---
 id: TASK-546
 title: Uncounted MAPPINGS replies let one VM process exhaust the daemon's memory
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:24'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: high

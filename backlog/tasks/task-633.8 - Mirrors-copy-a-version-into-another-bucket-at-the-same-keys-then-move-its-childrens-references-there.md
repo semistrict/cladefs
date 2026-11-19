@@ -3,10 +3,10 @@ id: TASK-633.8
 title: >-
   Mirrors: a version forked into another bucket is copied there in the
   background, its children switched once the copy is whole
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-18 20:48'
+updated_date: '2026-11-19 08:26'
 labels:
   - bucket
   - multi-region
@@ -42,3 +42,15 @@ Until its version is in its own bucket, a child across buckets reads its parent'
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Order (each its own verified commit):
+1. Layout: the mirror marker (create-only, under P's prefix, naming at and the checkpoint epoch) and the mirror's pin (a reference of its own under P's prefix); Kinds parsed, kept by no pass but the foreign-cell rule.
+2. B's collector over a foreign cell's prefix (P numbers another bucket): never a dead cell; keeps a copy while P's head in A names its version or a reference in B stands, else deletes the marker first, then the objects (copiesKeptWhileNamed, copyRelists, markerGoesFirst). Before anything is ever written under a foreign prefix.
+3. Reads: a key of a foreign cell read from the own bucket first when it holds a marker of that cell (keys written once: a copy equals its source), else the cell's bucket.
+4. The mirror job: pin, head read in A, copy (GET+PUT create-only; server-side later), marker, list A refs after the marker and refer in B, retire+delete in A, drop pin; resumes from its pin, after the marker goes on to the listing.
+5. Forks: reference in B when marked, else A; read again after referring in A (forksRecheck, forksLeaveA); the first fork into B starts the mirror in the background.
+6. Tests per AC #4, and the simulation profile with mirrors (TASK-633.10).
+<!-- SECTION:PLAN:END -->

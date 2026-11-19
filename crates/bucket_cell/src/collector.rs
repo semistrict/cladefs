@@ -1199,7 +1199,7 @@ async fn recover_live(
         // and what it may yet name ([`Ended::ahead`]).
         let recovered = match recovery::recover_layers(checkpoints, cell, origin).await {
             Ok(recovered) => recovered,
-            Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, writes).await? {
+            Err(Error::Lost(lost)) => match lost_is_ok(bucket, cell, record, writes).await? {
                 // Decided by what it read again, a version's record in another cell among it.
                 true => {
                     live.unsettled = true;
@@ -1227,10 +1227,21 @@ async fn recover_live(
 /// says: deleted since it was read, what it needed may be gone; cladefs: a fork of a version still
 /// being made, its version deleted, given up on (TASK-395.4), unless it was made first, as
 /// [`abandon`] would have (rule `collector_abandons`): writing its record so, if `writes` says
-/// so.
-async fn lost_is_ok(bucket: &impl Bucket, cell: CellId, writes: Writes) -> Result<bool, Error> {
+/// so. cladefs: a fork being made as the pass read it, `read`, made since: what the pass read is
+/// stale, its version checkpointed at its origin before it was made (TASK-653); decided again by
+/// the next pass, as one still being made is. It held nothing of its own when listed.
+async fn lost_is_ok(
+    bucket: &impl Bucket,
+    cell: CellId,
+    read: &Head,
+    writes: Writes,
+) -> Result<bool, Error> {
     let Some(record) = crate::head::get(bucket, cell).await? else { return Ok(true) };
     if record.deleted() {
+        return Ok(true);
+    }
+    let made_since = |head: &Head| read.forking().is_some() && head.forking().is_none();
+    if made_since(&record) {
         return Ok(true);
     }
     let Some(id) = record.forking().filter(|_| rules().collector_abandons) else {
@@ -1247,7 +1258,13 @@ async fn lost_is_ok(bucket: &impl Bucket, cell: CellId, writes: Writes) -> Resul
         return Ok(true);
     }
     match writes {
-        Writes::Some => Ok(lifecycle::abandon(bucket, cell).await?.deleted()),
+        // cladefs: made since, its version checkpointed at its origin before (TASK-653): what this
+        // pass read of it, a fork being made, is stale; decided again by the next pass, as one still
+        // being made is. It held nothing of its own when listed.
+        Writes::Some => {
+            let head = lifecycle::abandon(bucket, cell).await?;
+            Ok(head.deleted() || made_since(&head))
+        }
         Writes::None => Ok(true),
     }
 }

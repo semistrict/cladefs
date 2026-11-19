@@ -3,10 +3,10 @@ id: TASK-633.6
 title: >-
   KMS per bucket, revocation per KMS, shredding across them; an Azure Key Vault
   backend
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-19 01:13'
+updated_date: '2026-11-19 08:21'
 labels:
   - bucket
   - multi-region
@@ -30,9 +30,9 @@ One KMS serves a process (`static POOLED`), refusals revoke a tenant everywhere,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each bucket's registry entry names its KMS; a cell's keys are wrapped in its home bucket's; the KMS cache is keyed by tenant and KMS
-- [ ] #2 A KMS refusing revokes the tenant for that KMS's buckets alone; an unwrap across buckets under the bucket KMS is refused, not Destroyed
-- [ ] #3 Shredding a tenant destroys its KEK in every KMS that holds one; doc-16 says so
+- [x] #1 Each bucket's registry entry names its KMS; a cell's keys are wrapped in its home bucket's; the KMS cache is keyed by tenant and KMS
+- [x] #2 A KMS refusing revokes the tenant for that KMS's buckets alone; an unwrap across buckets under the bucket KMS is refused, not Destroyed
+- [x] #3 Shredding a tenant destroys its KEK in every KMS that holds one; doc-16 says so
 - [ ] #4 An azure-kv:// backend (Key Vault or Managed HSM) with doc-16's tests for backends, license checked
 <!-- AC:END -->
 
@@ -54,3 +54,23 @@ Mapped 2026-11-18 (read-only survey): one KMS per process (cladefs::bucket host_
 5. extent_keys/src/kms/azure.rs (azure-kv://), as gcp.rs: KeyNames, real::wrapped, object_store's Azure credentials, tenant bound into the wrapped bytes; license check of any new crate.
 Tests: two buckets with different bucket-KMS master keys; a cell of each wrapped in its own bucket; a KMS refusing revokes that bucket's tenants alone; an unwrap across buckets is Elsewhere; shredding reaches both.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-18 night (unattended):
+- 82bb2aa37 CachingKms over Kmses (per bucket number), refusals/pools keyed by (KMS, tenant); OneKms = single KMS. On main.
+- 9bbf7f7cd ByBucket: home bucket and NAMED keep the env choice; another bucket: registry kms, else CLADEFSD_BUCKET_<N>_CLADEFS_KMS/CLADEFS_KMS, else bucket KMS over that bucket with its own master keys, master_key_id checked. KMSes keyed by URL (shared refusals). DECISION: the home bucket's registry entry is not consulted (its own env is its config; avoids behaviour change for one-bucket hosts).
+- b8364158c ByBucket::shred: tombstones in every bucket-KMS bucket of the registry (copy + root); named-KMS and unreachable buckets named in an error after shredding where possible.
+- 6bd3a5581 azure-kv:// backend (no new crates; reqwest/serde_json/base64/url already deps, all MIT/Apache). Tested against an in-process fake vault + authority only: refusal codes (403 revoked, 404 KeyNotFound none, 400 unwrap unauthentic) follow Key Vault's error codes, NOT checked against the live service (no Azure credentials; GCP-only exception for live KMS tests).
+- e82da0965 fxkb format 2 binds the bucket identity; cross-bucket unwrap -> kms::Error::Elsewhere (not a revocation). doc-16 updated (format, shredding across buckets).
+Test: bucket_kms::tests::buckets_cells_are_under_their_own_buckets_kms (3 buckets: own bucket KMS, bucket KMS w/ own master key, local KMS by registry), azure tests (7), hand mutants for each step.
+
+Review (verifying-reviewer, 2026-11-18 night) found 4 defects in the unlanded commits; fixed on branch t3/mr-kms with tests and mutants:
+1. SECURITY azure.rs: a tenant override (keys=FILE) or registry-recorded URL could name any https host, which would get the vault bearer token. Now every host must be a Key Vault/Managed HSM domain (public, China, US Gov); endpoint= only https://<vault host> or http loopback (emulators). Tests overrides_naming_no_vault_are_refused, urls_naming_no_vault_or_no_keys_are_refused.
+2. kms_vars: a bucket's own CLADEFS_KMS/MASTER_KEY/MASTER_KEY_FILE override the host's as one group (was: host _FILE + bucket key = "both set" refusal; host CLADEFS_KMS beat a bucket's own master key). Test a_buckets_own_kms_variables_override_the_hosts_as_one.
+3. CachingKms: a control-API revocation now holds for every KMS until each answers (Refused{by, told}); it used to be dropped for KMSes not yet asked, letting inheriting() pass for a parent in an unasked bucket. Test revocations_told_hold_for_every_kms_until_each_answers.
+4. ByBucket::of keeps the bucket KMS that won the chosen race in buckets (shred forgot a duplicate instance).
+
+Landed on main 456d226f0 (2026-11-19): ByBucket, shredding across buckets, fxkb v2 Elsewhere, azure-kv:// with per-audience tokens, and the review-round revocation fixes (one ledger lock). AC #1-3 checked by bucket_kms::tests::buckets_cells_are_under_their_own_buckets_kms and the keys::tests revocation tests. AC #4 open: the azure-kv backend is tested against an in-process fake only; doc-16's live backend tests need an Azure vault and identity (Needs the user).
+<!-- SECTION:NOTES:END -->

@@ -608,9 +608,8 @@ impl ObjectBucket {
     /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
     async fn member(&self, key: &str) -> Result<Option<Arc<ObjectBucket>>, Error> {
         let Some(route) = &self.route else { return Ok(None) };
-        let Some(cell) = layout::cell_of(key) else { return Ok(None) };
-        let number = crate::objectid::bucket_of(cell.id);
-        if number == crate::identity::NAMED || self.own_number(route).await? == Some(number) {
+        let Some(number) = layout::routed_to(key) else { return Ok(None) };
+        if self.own_number(route).await? == Some(number) {
             return Ok(None);
         }
         self.numbered(number).await.map(Some).map_err(|err| {
@@ -856,6 +855,30 @@ impl Registered {
         crate::identity::verified(entry, crate::identity::get(&bucket).await?)?;
         Ok(bucket)
     }
+
+    /// What the registry records of the bucket numbered `number`, as `home` reaches it: its copy
+    /// in `home`'s root, or, for a number that copy lacks, the root bucket's registry, the
+    /// authority. `NoBucket` for a number neither records.
+    pub async fn entry(
+        &self,
+        home: &ObjectBucket,
+        number: u16,
+    ) -> Result<crate::identity::Entry, crate::Error> {
+        use crate::identity::{self, ROOT};
+        let copy = identity::registry(home).await?;
+        if let Some(entry) = copy.as_ref().and_then(|copy| copy.bucket(number)) {
+            return Ok(entry.clone());
+        }
+        let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
+        let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
+        let root = match (ours.number, root) {
+            (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
+            (_, Some(root)) => self.reach(root).await?,
+        };
+        let registry = identity::registry(&root).await?;
+        let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
+        entry.cloned().ok_or(crate::Error::NoBucket(number))
+    }
 }
 
 impl Resolve for Registered {
@@ -864,25 +887,7 @@ impl Resolve for Registered {
         home: &'a ObjectBucket,
         number: u16,
     ) -> futures::future::BoxFuture<'a, Result<Arc<ObjectBucket>, crate::Error>> {
-        use crate::identity::{self, ROOT};
-        Box::pin(async move {
-            let copy = identity::registry(home).await?;
-            let entry = match copy.as_ref().and_then(|copy| copy.bucket(number)) {
-                Some(entry) => entry.clone(),
-                None => {
-                    let ours = identity::get(home).await?.ok_or(crate::Error::NoBucket(number))?;
-                    let root = copy.as_ref().and_then(|copy| copy.bucket(ROOT));
-                    let root = match (ours.number, root) {
-                        (ROOT, _) | (_, None) => return Err(crate::Error::NoBucket(number)),
-                        (_, Some(root)) => self.reach(root).await?,
-                    };
-                    let registry = identity::registry(&root).await?;
-                    let entry = registry.as_ref().and_then(|registry| registry.bucket(number));
-                    entry.cloned().ok_or(crate::Error::NoBucket(number))?
-                }
-            };
-            Ok(Arc::new(self.reach(&entry).await?))
-        })
+        Box::pin(async move { Ok(Arc::new(self.reach(&self.entry(home, number).await?).await?)) })
     }
 }
 

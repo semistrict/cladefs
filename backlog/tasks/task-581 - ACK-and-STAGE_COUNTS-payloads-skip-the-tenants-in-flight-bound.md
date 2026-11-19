@@ -1,9 +1,11 @@
 ---
 id: TASK-581
 title: ACK and STAGE_COUNTS payloads skip the tenant's in-flight bound
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:28'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: medium

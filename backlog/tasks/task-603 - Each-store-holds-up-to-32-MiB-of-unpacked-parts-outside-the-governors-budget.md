@@ -1,9 +1,11 @@
 ---
 id: TASK-603
 title: Each store holds up to 32 MiB of unpacked parts outside the governor's budget
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:31'
+updated_date: '2026-11-19 07:06'
 labels: []
 dependencies: []
 priority: medium

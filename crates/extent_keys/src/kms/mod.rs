@@ -19,6 +19,7 @@ use std::future::Future;
 use std::io;
 
 mod aws;
+mod azure;
 pub mod bucket;
 mod gcp;
 mod local;
@@ -27,6 +28,7 @@ mod names;
 pub mod openbao;
 mod real;
 
+pub use azure::TOKEN_VAR as AZURE_TOKEN_VAR;
 pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
 pub use names::KeyNames;
@@ -96,7 +98,9 @@ pub type Shared = std::sync::Arc<dyn Dyn>;
 /// - `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`: AWS KMS in `REGION`, at
 ///   `endpoint` if given (a VPC endpoint, an emulator) (TASK-411.17);
 /// - `gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`: Google Cloud KMS
-///   (TASK-411.18).
+///   (TASK-411.18);
+/// - `azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]`: Azure Key Vault
+///   (TASK-633.6).
 ///
 /// A real KMS names each tenant's KEK as [`KeyNames`] says, from `key` and `keys`. Any other URL is
 /// refused, naming it.
@@ -106,8 +110,10 @@ pub fn from_url(url: &str) -> Result<Shared, String> {
         Some("openbao" | "openbaos") => openbao::from_url(url),
         Some("aws-kms") => aws::from_url(url),
         Some("gcp-kms") => gcp::from_url(url),
+        Some("azure-kv") => azure::from_url(url),
         _ => Err(format!(
-            "{url:?} names no KMS: local:///DIR, openbao://, aws-kms:// or gcp-kms:// (doc-16)"
+            "{url:?} names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or azure-kv:// \
+             (doc-16)"
         )),
     }
 }
@@ -140,6 +146,11 @@ pub enum Error {
          {held}): CLADEFS_MASTER_KEY"
     )]
     UnknownMasterKey { tenant: u64, id: String, held: String },
+    /// cladefs: the bucket KMS's (TASK-633.6): a key wrapped under the tenant's KEK in another
+    /// bucket, of identity `bucket`, than this KMS's: asked of the wrong bucket's KMS, which says
+    /// nothing of the tenant's KEK. Never a revocation.
+    #[error("tenant {tenant}: a key wrapped in the bucket KMS of another bucket ({bucket:016x})")]
+    Elsewhere { tenant: u64, bucket: u64 },
     /// The KMS failed. What was asked may or may not have taken effect.
     #[error("tenant {tenant}: the KMS failed: {source}")]
     Io { tenant: u64, source: io::Error },
