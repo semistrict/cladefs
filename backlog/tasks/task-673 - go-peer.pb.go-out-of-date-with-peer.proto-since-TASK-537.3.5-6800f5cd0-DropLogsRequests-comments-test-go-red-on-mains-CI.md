@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-19 22:27'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - ci
   - bug
@@ -34,3 +34,9 @@ main's CI job test (go) fails since run 44462208276 (a296e3ee2) and still on 28a
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+go/generate.sh regenerated go/peer/v1/peer.pb.go (DropLogsRequest's two comments); generate.sh --check passes; go build ./... and go vet ./peer/... pass.
+<!-- SECTION:NOTES:END -->

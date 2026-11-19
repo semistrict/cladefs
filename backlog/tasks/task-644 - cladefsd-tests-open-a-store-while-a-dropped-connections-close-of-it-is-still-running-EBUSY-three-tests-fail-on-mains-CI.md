@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - testing
 dependencies: []
@@ -43,3 +43,18 @@ Related, not the same: TASK-443.6 (restores of a point still being opened fail E
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Cause (from the code, then a test): a connection's drop drops its store on a detached blocking thread; OpenCell::drop drops its uploader first, which uploads the last commits (the version's among them), then closes the store. opened_version syncs only stores table().instances() finds, whose Weak no longer upgrades once the drop began: it reads the bucket at once, before the version's upload, and create_at_version fails ENOENT (CI: page_ins_in_flight_are_bounded, hostile.rs:2294, connect_forked).
+2. Fix: OpenCell::drop says the store is closing first (LocalCell::closing, before its uploader's last uploads; close() still says it too); local_cell::closed(path) waits, as an opening does, for a store of the directory at path closing in this process (CLAIMED, CLOSING_WAIT), claim's wait factored into closed_in; opened_version waits so for the store the version was made of here (host_cell::version_made_of), EBUSY if it still closes after CLOSING_WAIT.
+3. Test: cladefsd::tests::forks_of_a_version_wait_for_the_close_of_the_store_that_made_it: the close held at open_cell::closing, the fork seen waiting at dir::claim_waits, then let go; red without the wait (ENOENT, as CI).
+4. Verify: Linux workspace on ubu1; the five tests 50x under load (AC#2); CI.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+ubu1 (fxjob, 4 threads): with the fix, forks_of_a_version_wait_for_the_close_of_the_store_that_made_it, forks_of_a_version_right_after_its_writer_went_sync_the_store_still_closing, restores_over_what_a_failed_cleanup_left_fork_anew, hostile::page_ins_in_flight_are_bounded pass. Mutant (the wait removed): the new test fails left (Err(()), Err(ENOENT)): the fork never waited and failed as CI did. AC#1 settled: the daemon's fault (a fork reading the bucket before a close it can't see uploads), not the tests'.
+<!-- SECTION:NOTES:END -->

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:37'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - docs
   - ci
@@ -35,3 +35,9 @@ CI runs 44353952388 (8111fb784) and 44380042393 (ca72b5814) on main, 2026-11-18:
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Anchors moved to TASK-508.3's names (open_cell.rs OpenCell, CellClient, LocalCell, upload.rs forked, layout.rs Origin; flush_behind's Arc<OpenCell>); keys renamed to match (open_cell, cell_client, local_cell, local_commit, fork_head); layers and invariants say cell where they said branch (glossary: Cell); pagePilot's extents carry their cell; guide tests at open_cell.rs/OpenCell. guide: node tools/check.ts (63 anchors, 12 invariants, 11 traces match), pnpm build, pnpm test 42/42.
+<!-- SECTION:NOTES:END -->

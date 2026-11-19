@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-19 22:27'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - ci
   - bug
@@ -34,3 +34,9 @@ scripts/tests test_license_headers.LicenseHeadersTest.test_the_tree_carries_its_
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Header added before the diff (git apply ignores it): copyright, BSD notice, a line naming the fixture; git apply --check passes on HEAD; scripts/license-headers.py passes.
+<!-- SECTION:NOTES:END -->

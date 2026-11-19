@@ -9,7 +9,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-19 22:27'
-updated_date: '2026-11-19 22:30'
+updated_date: '2026-11-19 23:36'
 labels:
   - ci
   - bug
@@ -36,3 +36,17 @@ test (shuttle) and macos (shuttle) fail on main since 12ed2aad6 (run 44579460439
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. framed::unpacked() (d5133b1cc, TASK-603): a std LazyLock static holding a Shuttle Mutex, shared by every Shuttle execution in the process: an execution taking a lock another made corrupts Shuttle's state (RefCell already borrowed in batch_semaphore), then the store state lock poisons. Under Shuttle, per execution (shuttle::lazy_static), and its lock std's (a leaf lock, as frames.rs's): a framed file's drop, which takes it, is no point of a schedule.
+2. That exposed a determinism hole: round 216 of crashes_recover_prefixes_of_their_commits_concurrently left different first crashes in its two runs. Traced (MemDisk op and dir-change logs, both runs identical; then write order): Uncommitted's open extents (HashMap) and Files' framed files (HashMap) drop in the map's order, which differs run to run; each last holder of a raw file writes its dirty pages back as it drops, so which write a crash's budget cuts off differed. Drop them in a decided order: open extents by opening (as open_extents orders them, TASK-79.79), framed files least lately read first.
+3. Verify: local_cell's shuttle tests, CI's shuttle part, clippy.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Diagnosis: at eabaadd0a the crash test passes, serially too; at d5133b1cc with fix 1 alone it diverges at round 216 (full run, deterministic; alone it passed once: depends on the hash seeds). Experiments: cache disabled, memory of forgotten parts leaked: still diverges; Framed's drop not forgetting: passes (schedule shift only). Op traces of round 216's two runs identical up to two write-backs (inodes 33, 34) swapped; backtrace: HashMap<ExtentId, Open> drop -> RawFile -> CachedFile -> pages::Shared::drop -> flush -> write_runs. With both fixes: local_cell shuttle 37/37 on macOS.
+<!-- SECTION:NOTES:END -->
