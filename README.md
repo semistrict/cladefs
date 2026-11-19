@@ -22,6 +22,17 @@ It has three parts:
 - **In object storage**, a bucket (S3, Google Cloud Storage or Azure Blob Storage), which holds the
   durable copy of every disk. A host's local disk is its write-ahead log and its cache.
 
+## Explainer films
+
+Short animated films, no voice (`explainer/`):
+
+- [How cladefs works](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-overview.mp4), 132 s
+- [Encryption at rest and shredding](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-encryption.mp4), 62 s
+- [Replicated commits: durable before the bucket](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-replication.mp4), 70 s
+- [Many regions: cells across buckets](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-regions.mp4), 72 s
+- [Shared volumes](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-shared-volumes.mp4), 72 s
+- [Container images as bases](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-images.mp4), 62 s
+
 ## Why
 
 A host that runs hundreds of sandboxes from one image wants three things of their storage, and the
@@ -180,7 +191,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 | `go/` | Go clients of the daemon's APIs. |
 | `specs/` | TLA+ specs of the protocols whose bugs are rare interleavings. |
 | `guide/` | An interactive guide to the code: `cd guide && pnpm install && pnpm dev`. |
-| `explainer/` | Explainer films: [the overview](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-overview.mp4) and one per feature (`explainer/README.md`). |
+| `explainer/` | The explainer films' sources (`explainer/README.md`); links above. |
 | `backlog/` | Tasks and design docs, managed with Backlog.md. What remains to do is there. |
 | `dead-ends/` | Approaches tried and given up on, each with why. |
 
