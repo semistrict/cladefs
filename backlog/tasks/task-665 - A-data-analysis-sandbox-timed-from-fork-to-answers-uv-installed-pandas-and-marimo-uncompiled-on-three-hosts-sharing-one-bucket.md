@@ -7,6 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-19 17:28'
+updated_date: '2026-11-19 17:49'
 labels:
   - testing
   - sandbox
@@ -36,3 +37,19 @@ Our sandbox runs (fxfs-guest-sandboxes) time builds, pgbench and git, not what a
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. guest/tests/test_cases/python-sandbox: pyproject.toml (marimo, pandas, pyarrow pinned), uv.lock (uv 0.13.9, py3.14), analysis.py (marimo notebook; answers to ANSWERS JSON). Answers computed on the Mac with the same lock and files.
+2. rootfs::Image gains files of the case's own (ContextFile), hashed into the image tag.
+3. Case fxfs-guest-python-sandbox (Manual): python:3.14.10-slim-trixie + uv 0.13.9, both pinned by digest; uv sync --frozen --no-install-project; 13 downloads by sha256; every .pyc deleted, checked on the host before import. Three daemons (2 GiB, part cache, peers of each other), FaultyS3 at 25 ms over RustFS; base imported on host-a, versioned, synced; rounds x hosts: fork_version, VM (2 vCPU, 2 GiB, root DAX 1 GiB), guest brings lo up, marimo run until /health 200, marimo export html for the answers; host watches the console for phase marks; per-sandbox bucket GETs and peer parts from the stats files.
+4. scripts/python-sandbox-host.sh + scripts/lib/python-sandbox-linux-host.sh: build phase as work, measure under fxjob --bench, RustFS on the work disk.
+5. Verify: harness unit tests on ubu1; the measurement on ubu1; numbers into docs/measurements.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Harness tests (host half) pass on ubu1: test_fxfs_guest_python_sandbox's two and rootfs' three. First measurement run launched (scripts/python-sandbox-host.sh).
+<!-- SECTION:NOTES:END -->
