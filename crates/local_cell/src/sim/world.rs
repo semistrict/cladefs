@@ -115,6 +115,10 @@ pub struct Profile {
 /// cladefs: the chance, each step, that a region's bucket goes down, or comes up again.
 const REGION_FLIPS: f64 = 0.02;
 
+/// cladefs: the chance that a request to another region's bucket than its asker's waits a turn
+/// more, as a request across regions takes longer.
+const CROSSING_WAITS: f64 = 0.5;
+
 impl Default for Profile {
     fn default() -> Self {
         Self {
@@ -842,7 +846,7 @@ impl World {
         let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
         let uploader = Shared::new(options, uploads, intervals.clock(), keys);
         let (started, start) = mpsc::channel();
-        let (running, bucket) = (uploader.clone(), self.bucket.clone());
+        let (running, bucket) = (uploader.clone(), self.host_bucket(host));
         let running = self.spawn_uploader(async move {
             let recovering = (recovering, None);
             running.run(recovering, store_options(), bucket, holder, started).await;
@@ -1392,8 +1396,8 @@ impl World {
 
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
     fn spawn_restore(&mut self, child: u64) {
-        let Restore { version, origin, owner, .. } = self.restores[&child];
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
+        let Restore { version, origin, owner, host, .. } = self.restores[&child];
+        let (bucket, events) = (self.host_bucket(host), self.events.clone());
         let running = self.spawn(async move {
             let child = sim_cell(child);
             let kms = bucket_cell::keys::testing::host_kms();
@@ -1517,7 +1521,7 @@ impl World {
         let Some(first) = self.new_restore() else { return };
         let (child, owner) = (self.cell_id(self.region_of(first.host)), self.id());
         let second = Restore { owner, running: None, ..first };
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
+        let (bucket, events) = (self.host_bucket(first.host), self.events.clone());
         self.spawn(async move {
             let kms = bucket_cell::keys::testing::host_kms();
             let fork = |restore: &Restore| {
@@ -1583,7 +1587,7 @@ impl World {
     /// Deletes `child`, a failed fork's, as its host does.
     fn spawn_unfork(&mut self, child: u64) {
         let (owner, holder) = (self.unforks[&child].owner, self.id());
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
+        let (bucket, events) = (self.cell_bucket(child), self.events.clone());
         let running = self.spawn(async move {
             let deleting = lifecycle::delete_fork(&*bucket, sim_cell(child), owner, (holder, 0));
             let result = deleting.await;
@@ -1641,7 +1645,7 @@ impl World {
     /// Deletes `cell` with the fencing token `token`, a placement cut off's if `stale`.
     fn spawn_delete(&mut self, cell: u64, token: u64, stale: bool) {
         let holder = self.id();
-        let (bucket, events) = (self.bucket.clone(), self.events.clone());
+        let (bucket, events) = (self.cell_bucket(cell), self.events.clone());
         self.spawn(async move {
             let result = lifecycle::delete(&*bucket, sim_cell(cell), holder, token).await;
             events.borrow_mut().push(Event::Deleted { cell, stale, result });
@@ -1946,6 +1950,14 @@ impl World {
             return;
         }
         let index = self.rng.random_range(0..waiting);
+        // cladefs: a request to another region's bucket takes longer than one to its asker's own:
+        // passed over, at times, its turn going by (TASK-633.10).
+        if self.profile.regions > 0
+            && self.bucket.crosses(index)
+            && self.rng.random_bool(CROSSING_WAITS)
+        {
+            return;
+        }
         let roll: f64 = self.rng.random();
         let fault = if !self.faults {
             Fault::None
@@ -1993,6 +2005,22 @@ impl World {
         match self.profile.regions {
             0 => id,
             _ => u64::from(region) << 48 | id,
+        }
+    }
+
+    /// cladefs: the bucket as host `host` asks it, of its region's ([`Profile::regions`]).
+    fn host_bucket(&self, host: usize) -> Arc<SimBucket> {
+        match self.profile.regions {
+            0 => self.bucket.clone(),
+            _ => self.bucket.at(self.region_of(host)),
+        }
+    }
+
+    /// cladefs: the bucket as a host of the region of `cell`'s bucket asks it.
+    fn cell_bucket(&self, cell: u64) -> Arc<SimBucket> {
+        match self.profile.regions {
+            0 => self.bucket.clone(),
+            _ => self.bucket.at(bucket_cell::objectid::bucket_of(cell).max(1)),
         }
     }
 

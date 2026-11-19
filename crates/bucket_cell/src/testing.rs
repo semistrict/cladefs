@@ -49,8 +49,10 @@ struct Stored {
 
 struct Request {
     op: Op,
-    /// cladefs: the bucket it goes to, of the simulation's regions (TASK-633.10): 0 for one bucket.
+    /// cladefs: the bucket it goes to, of the simulation's regions (TASK-633.10): 0 for one bucket;
+    /// and the bucket of the host that asked.
     region: u16,
+    from: u16,
     reply: oneshot::Sender<Result<Reply, Error>>,
 }
 
@@ -134,6 +136,13 @@ impl SimBucket {
         }
     }
 
+    /// cladefs: whether waiting request `index` goes to another region's bucket than its asker's.
+    pub fn crosses(&self, index: usize) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let request = &inner.queue[index];
+        request.from != 0 && request.region != request.from
+    }
+
     /// cladefs: the bucket waiting request `index` goes to.
     pub fn region(&self, index: usize) -> u16 {
         self.inner.lock().unwrap().queue[index].region
@@ -142,7 +151,7 @@ impl SimBucket {
     fn request(&self, op: Op) -> impl Future<Output = Result<Reply, Error>> + Send + use<> {
         let (reply, receiver) = oneshot::channel();
         let region = self.region_of(op.key());
-        self.inner.lock().unwrap().enqueue(Request { op, region, reply });
+        self.inner.lock().unwrap().enqueue(Request { op, region, from: self.home, reply });
         // A request dropped unanswered failed.
         async move { receiver.await.unwrap_or(Err(Error::Unavailable)) }
     }
