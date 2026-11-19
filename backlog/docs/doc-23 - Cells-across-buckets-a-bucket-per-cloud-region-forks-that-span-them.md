@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-19 00:52'
+updated_date: '2026-11-19 05:37'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -212,7 +212,7 @@ Nothing here waits for a measurement (TASK-633.1, archived 2026-11-18): a mirror
 
 ## Where this meets other work
 
-- **doc-21 (TASK-537):** its failure domain is still undecided between zone and cloud region. With a bucket per cloud region, a cell's members belong in its home cloud region, since a member elsewhere keeps the tail but gives no availability. That favours a zone, and should be settled before TASK-537.3. Members, like peers, are kept per bucket.
+- **doc-21 (TASK-537):** no failure-domain rule (the user, 2026-11-19): a commit may be replicated to any other host in the cell's home cloud region, the hosts sharing its bucket. A member elsewhere would keep the tail but give no availability. Members, like peers, are kept per bucket.
 - **TASK-406.2 and TASK-406.3:** the peer network and the warming of a version, which become per bucket. Warming is the model for asking for a mirror.
 - **doc-16:** KMS backends, and shredding, now per bucket.
 - **doc-7:** object IDs, references (TASK-395.1) and the skip pass (TASK-395.6).

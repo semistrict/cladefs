@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T05:17:00Z'
+updated_date: '2026-11-19 05:37'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -33,7 +33,7 @@ tail and drop it as the head acknowledges it.
 | Who waits for Replicated | A per-cell option: fsync waits for Ordered (today's default), Local or Replicated. In a replicated cell, sync, syncfs and unmount wait for Replicated rather than Uploaded. |
 | Copies | A majority quorum: 2f+1 members counting the writer, f+1 acknowledgements (the writer's own Local counts as one), f per cell. |
 | Authority | The bucket. The epoch and the replica set change only by conditional writes of the head. The commit path never touches the bucket, and the peers run no consensus. |
-| Placement | The writer picks its peers itself, from a pool, across failure domains (but see Decisions: the pool is the existing peer list). |
+| Placement | The writer picks its peers itself, from a pool: any other hosts of its cloud region, those sharing the cell's bucket (the user, 2026-11-19: no failure-domain rule; see Decisions: the pool is the existing peer list). |
 | No quorum | Degrade to Uploaded: a commit waiting for Replicated is released by Uploaded too, and the writer replaces its peers in the background. |
 | Wire | The existing peer network (`cladefs.peer.v1`, TASK-406.2): gRPC over TCP between daemons, unauthenticated on the hosts' network. No mTLS for now. |
 | Who recovers | The VM manager's take of the cell on another host, as today. |
@@ -270,8 +270,10 @@ configuration's f); `/metrics` says `cladefsd_replication_degraded{cell}` and
 
 Members are picked from the peer list the daemon already has (`CLADEFSD_PEERS`, replaced by
 `SetPeers`; `bucket/peers.rs`), by rendezvous hashing of (cell, config) over the peers that are up
-(`owner_of`'s hash). Members must come from distinct failure domains, which each entry gains as a
-label (`HOST:PORT` or `HOST:PORT;domain=…`). A peer may refuse an `Open` for capacity
+(`owner_of`'s hash). Any other host of the writer's cloud region may be a member: the hosts sharing
+the cell's bucket, peers of another region refusing (doc-23). No failure-domain rule: the user
+decided on 2026-11-19 that a commit may be replicated to any other host in the region, so zones are
+not tracked and peers carry no domain label. A peer may refuse an `Open` for capacity
 (`RESOURCE_EXHAUSTED`); the writer then takes the next by hash.
 
 ### Sweeping stale replica logs
@@ -402,8 +404,9 @@ For a cell whose fsync waits for Replicated, with f = 1 (3 members):
 
 ## Decisions
 
-- **The pool is the existing peer list** (`CLADEFSD_PEERS`, `SetPeers`), each entry gaining a
-  failure-domain label, rather than hosts registering in the bucket. The interview chose "daemons
+- **The pool is the existing peer list** (`CLADEFSD_PEERS`, `SetPeers`), rather than hosts
+  registering in the bucket; no failure-domain label (the user, 2026-11-19: any other host in the
+  region). The interview chose "daemons
   pick from a pool registered in the bucket". But every daemon already has this list, kept by the
   VM manager for TASK-406.2, and the authority is the head's member list anyway, not the pool. A
   `members/` prefix would be a second membership with its own renewals, costing bucket writes and

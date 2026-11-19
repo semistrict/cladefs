@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18T12:36:00Z'
-updated_date: '2026-11-18T17:02:00Z'
+updated_date: '2026-11-19 05:37'
 labels:
   - durability
   - peers
@@ -44,4 +44,6 @@ The implementation follows the spec and is built on the peer network of TASK-406
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-18, doc-23 (TASK-633): the user chose a bucket per cloud region. doc-21's failure domain (zone or cloud region) is still undecided by the user; doc-23 argues for a zone, as a member outside the cell's home cloud region keeps the tail but gives no availability. Settle it before building the member pool. Members, like peers, are kept per bucket number.
+
+2026-11-19, the user: no failure-domain rule. A commit may be replicated to any other host in the region (the hosts sharing the cell's bucket); peers carry no domain label. doc-21 and doc-23 updated.
 <!-- SECTION:NOTES:END -->
