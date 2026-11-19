@@ -921,7 +921,11 @@ fn main() -> Result<(), String> {
     let Args { url, command } = parse(std::env::args().skip(1))?;
     log::set_logger(&Stderr).map_err(|err| format!("a log: {err}"))?;
     log::set_max_level(log::LevelFilter::Warn);
-    let bucket = Arc::new(ObjectBucket::from_url(&url)?);
+    // cladefs: its passes' requests of other buckets' cells go there (TASK-633.7): a child's pass
+    // retires its reference, under its parent's cell, in its parent's bucket, and a parent's pass
+    // reads its children's heads in theirs.
+    let resolve = Arc::new(bucket_cell::object_bucket::Registered::from_env());
+    let bucket = Arc::new(ObjectBucket::from_url(&url)?.routed(resolve));
     // Of a thread a core: a sweep's passes run on them at once (TASK-395.15).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
