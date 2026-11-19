@@ -1,8 +1,8 @@
 # Open questions
 
-## Run the full ubu1 suite of TASK-537.3's batch 1 where sudo works (2026-11-18)
+## Run the full ubu1 suite of TASK-537.3 where sudo works (2026-11-18, updated 2026-11-19)
 
-Needed: `CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_RUN=t537a scripts/test-host.sh /tmp/t537a-results` at the branch `t3/durable-commit-recovery-protocol` (pushed), from a shell whose sudo works. Why: this session runs under "no new privileges", and the driver needs sudo for the root tests and to hand back ~/.cargo and ~/.rustup; its run here stopped at once. Recommend: run it, or say how agents here should reach a sudo-capable shell. Until answered: batch 1's own tests (bucket_cell, local_cell, cladefs's peers and control) pass under fxjob, clippy is clean, and batch 1 waits on the branch, not on main.
+Needed: `CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_RUN=t537b scripts/test-host.sh /tmp/t537b-results` at main (46dc3412f or later), from a shell whose sudo works. Why: this session runs under "no new privileges", and the driver needs sudo for the root tests and to hand back ~/.cargo and ~/.rustup. It covers all of TASK-537.3 (batches 1 to 6), and the guest-level runs (VMs) none of my runs could make. Recommend: run it; TASK-537.3.3 waits on it, the rest of TASK-537.3 is Done. Until answered: every crate the work touched passes under fxjob (local_cell 360 tests, bucket_cell's writer, head and wal tests, cladefs's replication, peers and control tests, the daemon tests also as uid 0 in a user namespace), clippy is clean, the 23 replication TLA+ models and mutations pass, and the work is on main.
 
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
