@@ -1,9 +1,11 @@
 ---
 id: TASK-582
 title: 'Local commits ignore the lag bound, so the write-ahead log grows without limit'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:29'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: medium

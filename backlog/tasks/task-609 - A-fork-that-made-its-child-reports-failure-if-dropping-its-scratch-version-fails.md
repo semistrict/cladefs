@@ -3,9 +3,11 @@ id: TASK-609
 title: >-
   A fork that made its child reports failure if dropping its scratch version
   fails
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:32'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: low

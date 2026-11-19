@@ -3,9 +3,11 @@ id: TASK-563
 title: >-
   A failed MAP_MANY completes while its other MAPs run; a late one can lose
   writes
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:26'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: high

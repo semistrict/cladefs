@@ -1,9 +1,11 @@
 ---
 id: TASK-612
 title: Making a version succeeds after the store's uploader has failed for good
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:33'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: low

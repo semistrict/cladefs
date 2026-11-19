@@ -1,9 +1,11 @@
 ---
 id: TASK-550
 title: 'A fenced writer''s ordered commits succeed up to the lag bound, and are lost'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:24'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: high

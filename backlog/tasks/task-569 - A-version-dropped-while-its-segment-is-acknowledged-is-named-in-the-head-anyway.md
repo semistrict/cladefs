@@ -3,9 +3,11 @@ id: TASK-569
 title: >-
   A version dropped while its segment is acknowledged is named in the head
   anyway
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18 15:27'
+updated_date: '2026-11-19 06:43'
 labels: []
 dependencies: []
 priority: medium
