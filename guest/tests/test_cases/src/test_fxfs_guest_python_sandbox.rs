@@ -169,8 +169,8 @@ RUN find / -xdev -name '*.pyc' -delete
     type Counts = Vec<BTreeMap<String, u64>>;
 
     /// The counters of the daemon `host`'s stats file in `dir` this case reports: its bucket's
-    /// requests and downloads (`object-store:`), its peers' (`peers:`), and its page-ins' fetches
-    /// (`daemon:`), each named after its line, `LINE.COUNTER`.
+    /// requests and downloads (`object-store:`) and its peers' (`peers:`), each named after its
+    /// line, `LINE.COUNTER`.
     fn host_counts(dir: &Path, host: &str) -> anyhow::Result<BTreeMap<String, u64>> {
         let path = dir.join(format!("{host}-stats.txt"));
         let kept = std::fs::read_to_string(&path)
@@ -183,7 +183,7 @@ RUN find / -xdev -name '*.pyc' -delete
         let mut counts = BTreeMap::new();
         for line in kept.lines() {
             let Some((kind, fields)) = line.split_once(": ") else { continue };
-            if !["object-store", "peers", "daemon"].contains(&kind) {
+            if !["object-store", "peers"].contains(&kind) {
                 continue;
             }
             for field in fields.split(' ') {
@@ -204,15 +204,14 @@ RUN find / -xdev -name '*.pyc' -delete
     }
 
     /// What the hosts did between `before` and `after`, a line of the counters this case reports,
-    /// each host's in turn, `/` between them.
+    /// each host's in turn, `/` between them, bytes in MiB; and each summed over the hosts.
     fn cost(before: &Counts, after: &Counts) -> (String, BTreeMap<&'static str, u64>) {
-        const REPORTED: [(&str, &[&str]); 6] = [
+        const REPORTED: [(&str, &[&str]); 5] = [
             ("bucket_gets", &["object-store.get", "object-store.get-range"]),
             ("bucket_mib", &["object-store.down"]),
             ("peer_asked", &["peers.asked"]),
             ("peer_given", &["peers.given"]),
             ("peer_served", &["peers.served"]),
-            ("fetched_mib", &["daemon.fetched_bytes"]),
         ];
         let mut line = Vec::new();
         let mut summed = BTreeMap::new();
@@ -223,12 +222,16 @@ RUN find / -xdev -name '*.pyc' -delete
                     let at = |counts: &BTreeMap<String, u64>| -> u64 {
                         counters.iter().filter_map(|counter| counts.get(*counter)).sum()
                     };
-                    let done = at(after).saturating_sub(at(before));
-                    if mib { done >> 20 } else { done }
+                    at(after).saturating_sub(at(before))
                 })
                 .collect();
             summed.insert(name, each.iter().sum());
-            let each: Vec<String> = each.iter().map(u64::to_string).collect();
+            let each: Vec<String> = (each.iter())
+                .map(|done| match mib {
+                    true => format!("{:.1}", *done as f64 / (1 << 20) as f64),
+                    false => done.to_string(),
+                })
+                .collect();
             line.push(format!("{name}={}", each.join("/")));
         }
         (line.join(" "), summed)
@@ -571,13 +574,13 @@ RUN find / -xdev -name '*.pyc' -delete
             let kept = "\
 object-store: get=3 get-range=10 head=1 down=4194304 get-ns=7
 peers: asked=5 given=4 missing=1 failed=0 served=2 served-missing=0
-daemon: maps=9 fetched_bytes=2097152 local_lag_p50_ms=1
+daemon: maps=9 local_lag_p50_ms=1
 uploads: held=0 max-held=0 budget=1
 ";
             let counts = counts_of(kept);
             assert_eq!(counts["object-store.get-range"], 10);
             assert_eq!(counts["peers.served"], 2);
-            assert_eq!(counts["daemon.fetched_bytes"], 2 << 20);
+            assert_eq!(counts.get("daemon.maps"), None);
             assert_eq!(counts.get("uploads.held"), None);
             let before = vec![BTreeMap::new(), counts.clone()];
             let mut later = counts.clone();
@@ -587,8 +590,7 @@ uploads: held=0 max-held=0 budget=1
             let (line, summed) = cost(&before, &after);
             assert_eq!(
                 line,
-                "bucket_gets=13/2 bucket_mib=4/0 peer_asked=5/0 peer_given=4/5 peer_served=2/0 \
-                 fetched_mib=2/0"
+                "bucket_gets=13/2 bucket_mib=4.0/0.0 peer_asked=5/0 peer_given=4/5 peer_served=2/0"
             );
             assert_eq!(summed["bucket_gets"], 15);
         }
