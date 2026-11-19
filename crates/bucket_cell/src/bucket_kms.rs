@@ -68,6 +68,9 @@ pub struct BucketKms<B> {
     /// Each tenant's KEK as last read, and when.
     held: Mutex<HashMap<u64, Held>>,
     fresh_for: Duration,
+    /// The identity of its bucket (TASK-633.6), which the keys it wraps name, once read: 0 for a
+    /// bucket of none, its keys bound to no bucket.
+    identity: Mutex<Option<u64>>,
 }
 
 /// A tenant's KEK as a host read it.
@@ -79,7 +82,35 @@ struct Held {
 impl<B: Bucket> BucketKms<B> {
     /// The KMS keeping tenants' KEKs in `bucket`, under `keys`, the newest first.
     pub fn new(bucket: Arc<B>, keys: MasterKeys) -> Self {
-        Self { bucket, keys, held: Mutex::default(), fresh_for: FRESH_FOR }
+        Self {
+            bucket,
+            keys,
+            held: Mutex::default(),
+            fresh_for: FRESH_FOR,
+            identity: Mutex::default(),
+        }
+    }
+
+    /// Has it take `identity` as its bucket's, known from elsewhere (the registry of buckets).
+    pub fn identify(&self, identity: u64) {
+        *self.identity.lock().unwrap() = Some(identity);
+    }
+
+    /// The identity of its bucket, which the keys it wraps name, read once (or again if `afresh`):
+    /// 0 for a bucket of none.
+    async fn identity(&self, tenant: u64, afresh: bool) -> Result<u64, Error> {
+        if let Some(identity) = *self.identity.lock().unwrap()
+            && !afresh
+        {
+            return Ok(identity);
+        }
+        let read = crate::identity::get(&*self.bucket).await.map_err(|err| Error::Io {
+            tenant,
+            source: std::io::Error::other(format!("the bucket's identity: {err}")),
+        })?;
+        let identity = read.map_or(0, |identity| identity.id);
+        *self.identity.lock().unwrap() = Some(identity);
+        Ok(identity)
     }
 
     /// The same, reading a tenant's KEK object again once it is `fresh_for` old: tests'.
@@ -161,23 +192,35 @@ impl<B: Bucket> BucketKms<B> {
 
 impl<B: Bucket> Kms for BucketKms<B> {
     async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
+        let identity = self.identity(tenant, false).await?;
         let kek = self.kek(tenant, true).await?;
-        Ok(formats::wrap(tenant, &kek, key))
+        Ok(formats::wrap(tenant, identity, &kek, key))
     }
 
     async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
         let unauthentic = |source| Error::Unauthentic { tenant, source };
-        let (of, id) = formats::kek_of(wrapped).map_err(unauthentic)?;
+        let (of, kept_in, id) = formats::kek_of(wrapped).map_err(unauthentic)?;
         if of != tenant {
             return Err(unauthentic(Unauthentic("a wrapped key, wrapped for another tenant")));
         }
+        // Another bucket's key says nothing of the tenant's KEK here: never read as destroyed. A
+        // key bound to no bucket (0) was wrapped before its bucket had an identity.
+        let mut identity = self.identity(tenant, false).await?;
+        if kept_in != 0 && kept_in != identity && identity == 0 {
+            // Given one since, perhaps.
+            identity = self.identity(tenant, true).await?;
+        }
+        if kept_in != 0 && kept_in != identity {
+            return Err(Error::Elsewhere { tenant, bucket: kept_in });
+        }
+        let identity = kept_in;
         let mut kek = self.kek(tenant, false).await?;
         if kek.id != id {
             // Held from before its object changed, perhaps: read it again.
             self.forget(tenant);
             kek = self.kek(tenant, false).await?;
         }
-        formats::unwrap(tenant, &kek, wrapped).map_err(unauthentic)
+        formats::unwrap(tenant, identity, &kek, wrapped).map_err(unauthentic)
     }
 
     fn forget(&self, tenant: u64) {
@@ -506,6 +549,7 @@ impl ByBucket {
                         kms.keys().named_ids()
                     ));
                 }
+                kms.identify(entry.id);
                 self.buckets.lock().unwrap().insert(number, kms.clone());
                 Ok((KmsKey(format!("the bucket KMS of bucket {number}").into()), kms))
             }
@@ -596,7 +640,9 @@ mod tests {
         let (wrapped, asked) = sim.served(first.wrap(7, &key));
         let wrapped = wrapped.unwrap();
         let kek = layout::kek(7);
-        assert_eq!(asked, [format!("get {kek}"), format!("put {kek}")]);
+        // Its bucket's identity read once, which what it wraps names (TASK-633.6).
+        let identity = layout::IDENTITY;
+        assert_eq!(asked, [format!("get {identity}"), format!("get {kek}"), format!("put {kek}")]);
         assert_eq!(wrapped.0.len(), formats::WRAPPED_LEN);
         let made = object(&Direct(sim.clone()), 7).unwrap();
         assert_eq!(made.len(), KEK_OBJECT_LEN);
@@ -611,7 +657,7 @@ mod tests {
         let (unwrapped, asked) = sim.served(second.unwrap(7, &wrapped));
         assert_eq!(
             (unwrapped.unwrap().expose(), asked),
-            (key.expose(), vec![format!("get {kek}")])
+            (key.expose(), vec![format!("get {identity}"), format!("get {kek}")])
         );
         assert_eq!(object(&Direct(sim.clone()), 7), Some(made));
         // Each tenant its own KEK: a key wrapped for one is refused to another.
@@ -647,9 +693,11 @@ mod tests {
         let racing = futures::future::join(first.wrap(7, &first_key), second.wrap(7, &second_key));
         let ((first_wrapped, second_wrapped), rounds) = sim.served_in_rounds(racing);
         let kek = layout::kek(7);
+        let identity = layout::IDENTITY;
         assert_eq!(
             rounds,
             [
+                vec![format!("get {identity}"), format!("get {identity}")],
                 vec![format!("get {kek}"), format!("get {kek}")],
                 vec![format!("put {kek}"), format!("put {kek}")],
                 // The second create, finding an object there, reads it: another's.
@@ -915,7 +963,7 @@ mod tests {
         }
         for (tenant, bytes) in (1..=2).zip(&objects) {
             let kek = KekObject::decode(tenant, bytes).unwrap().open(both.keys()).unwrap();
-            let wrapped_again = formats::wrap(tenant, &kek, &key);
+            let wrapped_again = formats::wrap(tenant, 0, &kek, &key);
             assert_eq!(wrapped_again, wrapped[tenant as usize - 1]);
         }
     }
@@ -925,7 +973,8 @@ mod tests {
     /// bucket's under the bucket KMS over that bucket, by its own master key, a third's under the
     /// KMS its entry names, none of its KEKs in it. A tenant destroyed in the second is refused
     /// there alone; a master key the registry records that the host has not refuses that bucket's
-    /// cells, as no revocation. Shredding the tenant destroys its KEK in both buckets under a
+    /// cells, as no revocation; a key one bucket's KMS wrapped is refused by another's as
+    /// another bucket's, not as destroyed. Shredding the tenant destroys its KEK in both buckets under a
     /// bucket KMS, naming the third's KMS, which keeps its own.
     #[test]
     fn buckets_cells_are_under_their_own_buckets_kms() {
@@ -982,6 +1031,21 @@ mod tests {
             assert_eq!((opens(&home_kek, &ours), opens(&home_kek, &theirs)), (true, false));
             assert_eq!((opens(&other_kek, &theirs), opens(&other_kek, &ours)), (true, false));
             assert_eq!(kek(&third).await, None, "a KEK object in a bucket under a KMS it names");
+            // A key bucket 2's KMS wrapped, asked of bucket 1's: refused as another bucket's, not
+            // as destroyed, though bucket 1 has no KEK object of tenant 8's.
+            let kmses = by_bucket(&theirs);
+            let (_, second) = kmses.of(2).await.unwrap();
+            let wrapped = second.wrap_dyn(8, &Secret::random()).await.unwrap();
+            let (_, first) = kmses.of(1).await.unwrap();
+            let refused = first.unwrap_dyn(8, &wrapped).await.map(drop).unwrap_err();
+            let other_id = identity::get(&other).await.unwrap().unwrap().id;
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "tenant 8: a key wrapped in the bucket KMS of another bucket ({other_id:016x})"
+                )
+            );
+            assert!(second.unwrap_dyn(8, &wrapped).await.is_ok());
 
             assert_eq!(destroy(&other, 7).await, Destroyed::Now);
             let fresh = host(&theirs);
