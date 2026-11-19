@@ -1,10 +1,11 @@
 ---
 id: TASK-537.3.6
 title: 'Replicated commits end to end: three daemons on ubu1, doc-12 rows'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-18T17:02:00Z'
-updated_date: '2026-11-18T17:02:00Z'
+updated_date: '2026-11-19T02:44:00Z'
 labels:
   - durability
   - peers
