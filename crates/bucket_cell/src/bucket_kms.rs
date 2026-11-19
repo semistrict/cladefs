@@ -47,7 +47,7 @@ use extent_keys::kms::{self, Error, Kms};
 use extent_keys::{Secret, Unauthentic, Wrapped};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -411,6 +411,58 @@ impl ByBucket {
         all
     }
 
+    /// Shreds `tenant` in every bucket it reaches (doc-16, Shredding; TASK-633.6): its KEK object
+    /// replaced by a tombstone in each bucket under a bucket KMS ([`BucketKms::destroy`]), the
+    /// host's own first, then each other bucket the registry records, its copy in the host's
+    /// bucket and the root bucket's, the authority. A bucket under a KMS named by its URL keeps
+    /// the tenant's KEK there, out of reach: destroyed there, out of band (doc-16). Says which.
+    pub async fn shred(&self, tenant: u64) -> Shredded {
+        let mut shredded = Shredded::default();
+        let own = match self.own_number().await {
+            Ok(own) => own,
+            Err(why) => {
+                shredded.failed.push((NAMED, format!("the host's bucket's identity: {why}")));
+                None
+            }
+        };
+        match &self.own {
+            HostKms::Bucket(kms) => {
+                shredded.destroyed.push((own.unwrap_or(NAMED), kms.destroy(tenant).await))
+            }
+            HostKms::Named(url, _) => shredded.named.push((own.unwrap_or(NAMED), url.clone())),
+        }
+        let mut numbers = BTreeSet::new();
+        let mut registries = vec![identity::registry(&*self.home).await];
+        if own.is_some_and(|own| own != identity::ROOT) {
+            match self.home.numbered(identity::ROOT).await {
+                Ok(root) => registries.push(identity::registry(&*root).await),
+                Err(err) => shredded.failed.push((identity::ROOT, err.to_string())),
+            }
+        }
+        for registry in registries {
+            match registry {
+                Ok(registry) => numbers.extend(
+                    (registry.iter())
+                        .flat_map(|registry| registry.buckets.iter().map(|e| e.number)),
+                ),
+                Err(err) => shredded.failed.push((identity::ROOT, format!("the registry: {err}"))),
+            }
+        }
+        for number in numbers.into_iter().filter(|&number| Some(number) != own) {
+            match self.of(number).await {
+                Err(why) => shredded.failed.push((number, why)),
+                Ok((key, _)) => {
+                    let kms = self.buckets.lock().unwrap().get(&number).cloned();
+                    match kms {
+                        Some(kms) => shredded.destroyed.push((number, kms.destroy(tenant).await)),
+                        None => shredded.named.push((number, key.0.to_string())),
+                    }
+                }
+            }
+        }
+        shredded
+    }
+
     /// The home bucket's number, read once: none if it has no identity.
     async fn own_number(&self) -> Result<Option<u16>, String> {
         if let Some(own) = *self.own_number.lock().unwrap() {
@@ -459,6 +511,18 @@ impl ByBucket {
             }
         }
     }
+}
+
+/// What [`ByBucket::shred`] did, bucket by bucket, each by its number (0: the host's own bucket,
+/// numbered none).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Shredded {
+    /// The buckets under a bucket KMS, and what destroying the tenant's KEK object there did.
+    pub destroyed: Vec<(u16, Destroyed)>,
+    /// The buckets under a KMS named by its URL, which keeps the tenant's KEK: to destroy there.
+    pub named: Vec<(u16, String)>,
+    /// The buckets it could not shred in, and why: shredding again finishes them.
+    pub failed: Vec<(u16, String)>,
 }
 
 impl Kmses for ByBucket {
@@ -861,7 +925,8 @@ mod tests {
     /// bucket's under the bucket KMS over that bucket, by its own master key, a third's under the
     /// KMS its entry names, none of its KEKs in it. A tenant destroyed in the second is refused
     /// there alone; a master key the registry records that the host has not refuses that bucket's
-    /// cells, as no revocation.
+    /// cells, as no revocation. Shredding the tenant destroys its KEK in both buckets under a
+    /// bucket KMS, naming the third's KMS, which keeps its own.
     #[test]
     fn buckets_cells_are_under_their_own_buckets_kms() {
         use crate::identity::Details;
@@ -893,14 +958,15 @@ mod tests {
             identity::add(&home, &Details::default(), &other, added).await.unwrap();
             let added = recorded(&urls[2], Some(&local), None);
             identity::add(&home, &Details::default(), &third, added).await.unwrap();
-            let host = |key: &str| {
+            let by_bucket = |key: &str| {
                 let vars =
                     vec![("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY".to_owned(), key.to_owned())];
                 let home = ObjectBucket::from_url(&urls[0]).unwrap();
                 let home = Arc::new(home.routed(Arc::new(Registered::new(vars.clone()))));
                 let own = HostKms::Bucket(Arc::new(BucketKms::new(home.clone(), parsed(&ours))));
-                CachingKms::over(Arc::new(ByBucket::new(home, own, vars)), None)
+                Arc::new(ByBucket::new(home, own, vars))
             };
+            let host = |key: &str| CachingKms::over(by_bucket(key), None);
             let cells = [1u64, 2, 3].map(|number| CellId { tenant: 7, id: number << 48 | 1 });
             let kms = host(&theirs);
             for cell in cells {
@@ -937,6 +1003,19 @@ mod tests {
             assert_eq!(wrong.new_kek(cells[1]).await.map(drop), Err(refused));
             assert_eq!(wrong.refuses(cells[1]), None);
             assert_eq!(wrong.new_kek(cells[0]).await.map(drop), Ok(()));
+
+            // Shredding reaches every bucket under a bucket KMS, and names those under another.
+            let shredded = by_bucket(&theirs).shred(7).await;
+            let expected = Shredded {
+                destroyed: vec![(1, Destroyed::Now), (2, Destroyed::Already)],
+                named: vec![(3, local.clone())],
+                failed: vec![],
+            };
+            assert_eq!(shredded, expected);
+            for bucket in [&home, &other] {
+                let object = KekObject::decode(7, &kek(bucket).await.unwrap()).unwrap();
+                assert!(matches!(object, KekObject::Tombstone { .. }), "a KEK left");
+            }
         });
     }
 
