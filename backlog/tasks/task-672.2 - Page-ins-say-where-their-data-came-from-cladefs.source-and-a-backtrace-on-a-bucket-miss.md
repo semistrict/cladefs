@@ -3,10 +3,11 @@ id: TASK-672.2
 title: >-
   Page-ins say where their data came from: cladefs.source, and a backtrace on a
   bucket miss
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:23'
-updated_date: '2026-11-19 23:31'
+updated_date: '2026-11-19 23:35'
 labels: []
 dependencies: []
 parent_task_id: TASK-672

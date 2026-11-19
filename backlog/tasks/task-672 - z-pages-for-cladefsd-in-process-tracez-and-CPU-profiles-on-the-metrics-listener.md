@@ -3,10 +3,11 @@ id: TASK-672
 title: >-
   z-pages for cladefsd under /z/: in-process tracez and CPU profiles on the
   metrics listener
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:22'
-updated_date: '2026-11-19 23:31'
+updated_date: '2026-11-19 23:35'
 labels: []
 dependencies: []
 ordinal: 1044000

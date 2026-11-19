@@ -1,10 +1,11 @@
 ---
 id: TASK-672.1
 title: '/z/tracez: spans kept in-process by latency bucket, always on'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-19 22:23'
-updated_date: '2026-11-19 23:31'
+updated_date: '2026-11-19 23:35'
 labels: []
 dependencies: []
 parent_task_id: TASK-672
