@@ -1,0 +1,91 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s3-name1 { left: 268px; top: 858px; }
+    #s3-name2 { left: 1508px; top: 858px; }
+    #s3-disk { left: 1236px; top: 500px; }
+    #s3-id { position: absolute; left: 560px; top: 500px; padding: 10px 26px 12px; border: 5px solid var(--ink); border-radius: 24px; background: var(--face); white-space: nowrap; }
+    .s3-group { display: inline-block; vertical-align: top; margin-right: 22px; text-align: center; }
+    .s3-group:last-child { margin-right: 0; }
+    .s3-digits { font-family: var(--font-mono); font-weight: 600; font-size: 56px; line-height: 72px; }
+    .s3-what { font-weight: 800; font-size: 28px; color: var(--soft); }
+    #s3-g-bucket .s3-digits, #s3-g-bucket .s3-what { color: var(--accent); }
+    #s3-how { left: 120px; top: 916px; }
+    #s3-across { left: 610px; width: 700px; top: 852px; text-align: center; font-size: 36px; font-weight: 900; }
+    #s3-near { left: 1180px; top: 916px; }
+    #s3-pill { width: 52px; height: 34px; margin: -17px 0 0 -26px; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-land"></div>
+    <div id="s3-l1" class="line"><span class="w">Every</span><span class="w">cell's</span><span class="w">ID</span><span class="w">carries</span><span class="w">its</span><span class="w">bucket</span></div>
+    <div id="s3-l2" class="line"><span class="w">Its</span><span class="w">home</span><span class="w">is</span><span class="w">bucket</span><span class="w">2,</span><span class="w">next</span><span class="w">door</span></div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s3-links"></g>
+      <g id="s3-cells"></g>
+    </svg>
+    <div id="s3-vm"></div>
+    <div id="s3-name1" class="label">root bucket <span class="mono dim">s3://ROOT</span></div>
+    <div id="s3-name2" class="label mono dim">gs://OTHER</div>
+    <div id="s3-disk" class="label">its disk, a cell</div>
+    <div id="s3-id">
+      <div class="s3-group" id="s3-g-bucket"><div class="s3-digits">0002</div><div class="s3-what">bucket 2</div></div>
+      <div class="s3-group"><div class="s3-digits">000005</div><div class="s3-what">block 5</div></div>
+      <div class="s3-group"><div class="s3-digits">000009</div><div class="s3-what">n 9</div></div>
+    </div>
+    <div id="s3-how" class="note"><span class="mono">bucket &lt;&lt; 48 | block &lt;&lt; 24 | n</span>: no two buckets give one ID</div>
+    <div id="s3-across" class="label">0 round trips across</div>
+    <div id="s3-near" class="note"><span id="s3-n">0</span> round trips, all in europe-west1</div>
+    <div id="s3-pill" class="pill"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s3-svg");
+      G.world(document.getElementById("s3-land"), svg);
+      const p1 = G.pail(svg, { x: A.pail1.x, y: A.pail1.y, number: 1, id: "s3-pail1" });
+      const p2 = G.pail(svg, { x: A.pail2.x, y: A.pail2.y, number: 2, id: "s3-pail2" });
+      const sb = C.vm(document.getElementById("s3-vm"), A.sandbox);
+      gsap.set(sb.mouth, { rotation: 180, y: 6, transformOrigin: "50% 50%" });
+      const cell = C.critter(document.getElementById("s3-cells"), { x: A.cell.x, y: A.cell.y, r: 70, color: "#ffb088", seed: 909, look: [-0.6, -0.3] });
+      const links = document.getElementById("s3-links");
+      // The ID card hangs from the cell by a string; the bucket digits point at badge 2.
+      const string = C.el("path", { d: "M1230 610 C1250 640 1262 660 1272 676", fill: "none", stroke: C.INK, "stroke-width": 4, "stroke-linecap": "round" }, links);
+      const toBadge = C.el("path", { d: "M640 656 C700 820 1300 880 1600 770", fill: "none", stroke: G.ACCENT, "stroke-width": 6, "stroke-linecap": "round", "stroke-dasharray": "2 16" }, links);
+      const pill = document.getElementById("s3-pill");
+
+      const tl = gsap.timeline({ paused: true });
+      [1.4, 4.9, 8.0].forEach((t) => C.blink(tl, sb.eyes, t));
+      C.words(tl, "#s3-l1", 0.2);
+      C.popIn(tl, cell.pop, 0.5);
+      C.life(tl, cell, 1.0, 9.9, 41);
+      C.tagIn(tl, "#s3-disk", 0.8);
+      // The ID, in its three parts; the top 16 bits are bucket 2's number.
+      C.tagIn(tl, "#s3-id", 1.0, { origin: "100% 50%" });
+      tl.fromTo(string, { opacity: 0 }, { opacity: 1, duration: 0.2 }, 1.1);
+      tl.fromTo("#s3-g-bucket", { scale: 1, transformOrigin: "50% 50%" }, { scale: 1.18, duration: 0.2, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 2.0);
+      tl.fromTo(toBadge, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 2.1);
+      tl.fromTo(p2.badge, { scale: 1, transformOrigin: "50% 50%" }, { scale: 1.3, duration: 0.18, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 2.4);
+      C.tagIn(tl, "#s3-how", 2.4, { origin: "0% 50%" });
+      C.wordsOut(tl, "#s3-l1", 4.4);
+      tl.to([toBadge, "#s3-how"], { opacity: 0, duration: 0.25 }, 6.4);
+
+      // Its home is bucket 2: the restore's eleven trips go next door.
+      C.words(tl, "#s3-l2", 4.6);
+      C.tagIn(tl, "#s3-across", 4.8);
+      const P = 0.28, T0 = 5.2;
+      tl.fromTo(pill, { opacity: 0 }, { opacity: 1, duration: 0.12 }, T0 - 0.12);
+      G.trips(tl, pill, 1440, 420, 1610, 650, T0, 11, P, 30);
+      tl.to(pill, { opacity: 0, duration: 0.15 }, T0 + 11 * P);
+      C.tagIn(tl, "#s3-near", 5.0, { origin: "0% 50%" });
+      G.steps(tl, document.getElementById("s3-n"), 0, 11, T0, 11 * P);
+      C.unfrown(tl, sb.mouth, 8.4);
+      tl.fromTo(sb.root, { y: 0 }, { y: -14, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 8.5);
+
+      // Exit: all but the world and the pails go; the sandbox and its cell come back at the end.
+      C.wordsOut(tl, "#s3-l2", 9.6);
+      tl.to(["#s3-id", string, "#s3-across", "#s3-near", "#s3-disk", sb.root], { opacity: 0, duration: 0.25, ease: "power2.in" }, 9.65);
+      tl.to(cell.pop, { scale: 0, duration: 0.25, ease: "back.in(2)" }, 9.6);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>

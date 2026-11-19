@@ -1,0 +1,63 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s1-name { left: 1480px; top: 820px; background: var(--butter); font-size: 34px; }
+    #s1-note { left: 240px; top: 900px; }
+    #s1-tenant { left: 240px; top: 270px; }
+  </style>
+  <div id="root" data-composition-id="s1" data-width="1920" data-height="1080">
+    <div id="s1-l1" class="line"><span class="w">Tenant</span><span class="w">42's</span><span class="w">sandbox</span><span class="w">saves</span><span class="w">a</span><span class="w">file</span></div>
+    <div id="s1-l2" class="line"><span class="w">Its</span><span class="w">disk</span><span class="w">is</span><span class="w">kept</span><span class="w">in</span><span class="w">cell</span><span class="w">9</span></div>
+    <div id="s1-l3" class="line"><span class="w">Where</span><span class="w">does</span><span class="w">that</span><span class="w">file</span><span class="w">rest?</span></div>
+    <div id="s1-tenant" class="note">tenant 42's sandbox</div>
+    <div id="s1-vms"></div>
+    <div id="s1-cards"></div>
+    <svg id="s1-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s1-name" class="tag">cell 9</div>
+    <div id="s1-note" class="note">a cell: the disk's data, its head and its keys</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, E = window.Enc;
+      const vm = C.vm(document.getElementById("s1-vms"), { x: 240, y: 330, w: 560, h: 410, id: "s1-vm" });
+      const card = E.card(document.getElementById("s1-cards"), {
+        x: 900, y: 440, w: 330, h: 180, name: "main.rs", tint: "#ffb088", id: "s1-card",
+        plain: ["fn main() {", "    serve();", "}"],
+        cipher: ["9f 3a c1 07 e4", "52 b8 0d 6e 91", "a7 13 fc 48 2b"],
+      });
+      const cell = C.critter(document.getElementById("s1-svg"), { x: 1560, y: 650, r: 125, color: "#ffb088", seed: 909, look: [-0.6, 0] });
+
+      const tl = gsap.timeline({ paused: true });
+      // Line 1 is on screen from frame 0: the thumbnail. The sandbox bounces in, then saves a file.
+      tl.fromTo("#s1-vm", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.6, ease: "back.out(2)" }, 0.1);
+      tl.fromTo("#s1-tenant", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 0.5);
+      C.blink(tl, vm.eyes, 0.9);
+      tl.fromTo(card.root, { scale: 0, x: -420, y: 80, rotation: -10 }, { scale: 1, x: 0, y: 0, rotation: 0, duration: 0.6, ease: "back.out(1.8)" }, 1.2);
+      tl.fromTo(vm.root, { scaleY: 1 }, { scaleY: 0.92, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 100%", immediateRender: false }, 1.15);
+      C.wordsOut(tl, "#s1-l1", 2.6);
+      // Its disk is cell 9: the cell pops in, and the file hops into it.
+      C.words(tl, "#s1-l2", 2.8);
+      tl.fromTo(cell.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.55, ease: "back.out(2.4)" }, 3.0);
+      C.life(tl, cell, 3.5, 8.0, 41);
+      tl.fromTo("#s1-name", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.6)" }, 3.3);
+      tl.fromTo("#s1-note", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.5);
+      tl.to(card.root, { x: 495, duration: 0.6, ease: "power1.inOut" }, 4.3);
+      tl.to(card.root, { y: -120, duration: 0.3, ease: "power2.out", yoyo: true, repeat: 1 }, 4.3);
+      tl.to(card.root, { scale: 0.2, opacity: 0, duration: 0.2, ease: "power2.in" }, 4.75);
+      tl.to(cell.body, { scaleX: 1.12, scaleY: 0.9, duration: 0.1, ease: "power2.out", transformOrigin: "50% 100%" }, 4.9);
+      tl.to(cell.body, { scaleX: 1, scaleY: 1, duration: 0.45, ease: "elastic.out(1, 0.4)" }, 5.0);
+      tl.to(cell.smile, { scaleX: 1.4, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 5.0);
+      C.wordsOut(tl, "#s1-l2", 5.4);
+      // The question the film answers.
+      C.words(tl, "#s1-l3", 5.6);
+      tl.to(cell.face, { x: -14, duration: 0.25, ease: "power2.out" }, 6.0);
+      tl.to(cell.face, { x: 14, duration: 0.3, ease: "power2.inOut" }, 6.45);
+      tl.to(cell.face, { x: 0, duration: 0.25, ease: "power2.out" }, 6.9);
+      // Exit.
+      C.wordsOut(tl, "#s1-l3", 7.55);
+      tl.to(["#s1-vm", "#s1-tenant", "#s1-name", "#s1-note"], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.02 }, 7.6);
+      tl.to(cell.pop, { scale: 0, duration: 0.3, ease: "back.in(2)" }, 7.6);
+      window.__timelines["s1"] = tl;
+    })();
+  </script>
+</template>

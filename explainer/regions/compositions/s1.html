@@ -1,0 +1,60 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s1-sb-note { left: 1220px; top: 492px; }
+    #s1-pail-name { left: 345px; top: 858px; }
+    #s1-count { left: 610px; width: 700px; top: 852px; text-align: center; font-size: 40px; font-weight: 900; }
+    #s1-why { left: 610px; width: 700px; top: 912px; text-align: center; }
+    #s1-pill { width: 64px; height: 40px; margin: -20px 0 0 -32px; }
+  </style>
+  <div id="root" data-composition-id="s1" data-width="1920" data-height="1080">
+    <div id="s1-land"></div>
+    <div id="s1-l1" class="line"><span class="w">One</span><span class="w">bucket,</span><span class="w">an</span><span class="w">ocean</span><span class="w">away</span></div>
+    <div id="s1-l2" class="line"><span class="w">Each</span><span class="w">trip</span><span class="w">crosses</span><span class="w">the</span><span class="w">ocean</span></div>
+    <svg id="s1-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s1-vm"></div>
+    <div id="s1-sb-note" class="note">a sandbox, restoring</div>
+    <div id="s1-pail-name" class="label">the bucket</div>
+    <div id="s1-count" class="label"><span id="s1-n">0</span> round trips across</div>
+    <div id="s1-why" class="note">a cold restore: 11, one after another</div>
+    <div id="s1-pill" class="pill"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s1-svg");
+      G.world(document.getElementById("s1-land"), svg);
+      const pail = C.bucket(svg, { x: A.pail1.x, y: A.pail1.y, w: 200, h: 170, id: "s1-pail" });
+      const sb = C.vm(document.getElementById("s1-vm"), A.sandbox);
+      const pill = document.getElementById("s1-pill");
+
+      const tl = gsap.timeline({ paused: true });
+      C.words(tl, "#s1-l1", 0.2);
+      tl.fromTo(pail, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.2)" }, 0.25);
+      C.tagIn(tl, "#s1-pail-name", 0.5);
+      // The sandbox is there from the first frame (the thumbnail), and gives a little hop.
+      tl.fromTo(sb.root, { y: 0 }, { y: -18, duration: 0.18, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 0.45);
+      C.tagIn(tl, "#s1-sb-note", 0.75);
+      [1.3, 3.1, 5.4, 7.6].forEach((t) => C.blink(tl, sb.eyes, t));
+
+      // Eleven round trips, one after another, each across the ocean and back.
+      const P = 0.46, T0 = 1.6;
+      tl.fromTo(pill, { opacity: 0 }, { opacity: 1, duration: 0.15 }, T0 - 0.15);
+      G.trips(tl, pill, 1200, 420, 440, 640, T0, 11, P, 80);
+      tl.to(pill, { opacity: 0, duration: 0.2 }, T0 + 11 * P);
+      C.tagIn(tl, "#s1-count", 1.3);
+      G.steps(tl, document.getElementById("s1-n"), 0, 11, T0, 11 * P);
+      C.tagIn(tl, "#s1-why", 2.2);
+      C.wordsOut(tl, "#s1-l1", 3.0);
+      C.words(tl, "#s1-l2", 3.2);
+      // The sandbox waits, and frowns.
+      C.frown(tl, sb.mouth, 4.6);
+      tl.fromTo(sb.root, { rotation: 0 }, { rotation: -3, duration: 0.1, yoyo: true, repeat: 3, ease: "sine.inOut", immediateRender: false }, 6.75);
+
+      // Exit: the world stays; the words and counter go.
+      C.wordsOut(tl, "#s1-l2", 8.5);
+      tl.to(["#s1-count", "#s1-why", "#s1-sb-note", "#s1-pail-name"], { opacity: 0, duration: 0.25, ease: "power2.in" }, 8.55);
+      window.__timelines["s1"] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,88 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .rp-cam { position: absolute; inset: 0; }
+    #s2-ms { position: absolute; left: 1150px; top: 330px; font-weight: 900; font-size: 140px; line-height: 1; white-space: nowrap; opacity: 0; }
+    #s2-ms-note { left: 1160px; top: 490px; opacity: 0; }
+    #s2-lost { left: 120px; top: 784px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s2" data-width="1920" data-height="1080">
+    <div id="s2-l1" class="line"><span class="w">A</span><span class="w">sync</span><span class="w">waits</span><span class="w">for</span><span class="w">the</span><span class="w">bucket</span></div>
+    <div id="s2-l2" class="line"><span class="w">An</span><span class="w">fsync</span><span class="w">doesn't:</span><span class="w">lost</span><span class="w">with</span><span class="w">the</span><span class="w">host</span></div>
+    <div id="s2-cam" class="rp-cam">
+      <div id="s2-stage"></div>
+      <svg id="s2-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+      <div id="s2-tags"></div>
+    </div>
+    <div id="s2-ms">~<span id="s2-ms-n">0</span> ms</div>
+    <div id="s2-ms-note" class="note">one sync on GCS, measured</div>
+    <div id="s2-lost" class="note">host lost: what wasn't uploaded, with it</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, P = window.Rep;
+      const stage = document.getElementById("s2-stage");
+      const svg = document.getElementById("s2-svg");
+      const tags = document.getElementById("s2-tags");
+      // S1's last frame: host A, its sandbox (its fsync returned), cell 9, the commit on the disk.
+      const hA = P.host(stage, "A", "s2");
+      const sb = P.sandbox(stage, "A", "s2");
+      const pail = P.pail(tags, svg, "s2");
+      const cell = P.cell(svg, "A");
+      const beads = P.OLD.map((c, i) => P.bead(svg, P.slot("A", i), c));
+      beads.push(P.bead(svg, P.slot("A", 3), P.COLORS.accent));
+      const second = P.bead(svg, P.slot("A", 4), P.COLORS.butter);
+      const up = P.bead(svg, P.slot("A", 3), P.COLORS.accent);
+      const kept = P.bead(svg, [944, 846], P.COLORS.accent);
+      const doomed = P.bead(svg, P.slot("A", 4), P.COLORS.butter);
+      gsap.set(doomed, { opacity: 0 });
+      const name = P.tag(tags, "s2-name", "cell 9", P.X.A + 28, P.TOP + 300, "b on");
+      const was = P.tag(tags, "s2-was", "fsync returns", P.X.A + 28, P.TOP + 176, "on");
+      const sy = P.tag(tags, "s2-sync", "sync", P.X.A + 28, P.TOP + 176);
+      const back = P.tag(tags, "s2-back", "sync returns", P.X.A + 28, P.TOP + 176);
+      const fs2 = P.tag(tags, "s2-fsync2", "fsync", P.X.A + 28, P.TOP + 176);
+      const now = P.tag(tags, "s2-now", "returns at once", P.X.A + 28, P.TOP + 176);
+      const keptTag = P.beside(P.tag(tags, "s2-kept", "kept: it was uploaded", 0, 886));
+
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, cell, 0, 8.0, 42);
+      // A sync waits for the bucket: a copy of the commit goes up; the sandbox waits ~130 ms.
+      C.words(tl, "#s2-l1", 0.2);
+      P.swap(tl, was, sy, 0.5);
+      C.frown(tl, sb.mouth, 0.7);
+      tl.fromTo("#s2-cam", { scale: 1.3, transformOrigin: "120px 250px" }, { scale: 1, duration: 0.9, ease: "power2.inOut" }, 0.2);
+      tl.fromTo(pail.g, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.2)" }, 0.3);
+      tl.fromTo(pail.name, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.5);
+      P.fly(tl, up, P.slot("A", 3), P.INTO_PAIL, 40, 0.9, 2.4, "power1.inOut");
+      tl.to(up, { opacity: 0, duration: 0.1 }, 3.3);
+      tl.fromTo("#s2-ms", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(2)" }, 0.9);
+      C.count(tl, document.getElementById("s2-ms-n"), 0, 130, 0.9, 2.4);
+      tl.fromTo("#s2-ms-note", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 1.4);
+      P.wiggle(tl, pail.g, 3.3);
+      tl.fromTo(kept, { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.3, ease: "back.out(3)" }, 3.3);
+      P.swap(tl, sy, back, 3.4);
+      C.unfrown(tl, sb.mouth, 3.5);
+      C.wordsOut(tl, "#s2-l1", 4.4);
+      tl.to(["#s2-ms", "#s2-ms-note"], { opacity: 0, duration: 0.2 }, 4.4);
+      // An fsync, at its default level, returns at once; the host goes before that commit's upload lands.
+      C.words(tl, "#s2-l2", 4.6);
+      P.out(tl, back, 5.0);
+      C.tagIn(tl, fs2, 5.1, { immediateRender: false });
+      P.fly(tl, second, P.fromSandbox("A"), P.slot("A", 4), 80, 5.2, 0.5);
+      P.swap(tl, fs2, now, 5.7);
+      P.drift(tl, doomed, P.slot("A", 4), P.INTO_PAIL, 0, 0.45, 6.2, 1.6);
+      tl.fromTo(doomed, { opacity: 0 }, { opacity: 1, duration: 0.1, immediateRender: false }, 6.2);
+      // Host A is lost, its disk with it.
+      tl.to(cell.eyes, { scaleY: 0.1, duration: 0.2, ease: "power2.in", transformOrigin: "50% 50%" }, 7.4);
+      tl.to([cell.pop, sb.root, ...beads, second, name, now, hA.disk], { scale: 0, opacity: 0, duration: 0.35, ease: "back.in(2)", stagger: 0.04, transformOrigin: "50% 50%" }, 7.7);
+      tl.to(doomed, { scale: 0, opacity: 0, duration: 0.25, ease: "back.in(2)", transformOrigin: "50% 50%" }, 7.8);
+      tl.to(hA.box, { opacity: 0.3, duration: 0.4 }, 7.8);
+      tl.fromTo("#s2-lost", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 8.5);
+      C.tagIn(tl, keptTag, 9.2);
+      // Exit.
+      C.wordsOut(tl, "#s2-l2", 11.6);
+      tl.to([hA.box, "#s2-lost", pail.name, keptTag, svg], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.03 }, 11.7);
+      window.__timelines["s2"] = tl;
+    })();
+  </script>
+</template>

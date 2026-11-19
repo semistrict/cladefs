@@ -1,0 +1,112 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s4-host { left: 100px; top: 690px; width: 1720px; height: 330px; }
+    #s4-host-label { left: 130px; top: 700px; }
+    #s4-card { left: 960px; top: 820px; }
+    #s4-cmd { left: 140px; top: 530px; }
+    #s4-ask { left: 330px; top: 632px; }
+    #s4-mgr { position: absolute; left: 150px; top: 740px; width: 400px; height: 200px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s4-mgr-name { position: absolute; left: 24px; top: 14px; font-weight: 900; font-size: 32px; white-space: nowrap; }
+    #s4-mgr-call { position: absolute; left: 24px; top: 124px; padding: 0 12px; border: 4px solid var(--ink); border-radius: 12px; background: #f6f2ff; font-family: var(--font-mono); font-weight: 500; font-size: 28px; white-space: nowrap; }
+    .s4-eye { position: absolute; top: 68px; width: 14px; height: 20px; border-radius: 50%; background: var(--ink); }
+    #s4-tab { left: 600px; top: 186px; }
+    #s4-vol { left: 600px; top: 226px; width: 560px; height: 420px; }
+    .s4-step { left: 1230px; top: 300px; }
+    #s4-wip { left: 150px; top: 952px; }
+    #s4-n1 { left: 1230px; top: 400px; }
+    #s4-n2 { left: 1180px; top: 790px; }
+    #s4-n3 { left: 1180px; top: 850px; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-l1" class="line"><span class="w">Another</span><span class="w">sandbox</span><span class="w">opens</span><span class="w mono">/repos/linux</span></div>
+    <div id="s4-l2" class="line"><span class="w">It</span><span class="w">attaches</span><span class="w">while</span><span class="w">it</span><span class="w">runs</span></div>
+    <div id="s4-host" class="host"></div>
+    <div id="s4-host-label" class="host-label">host</div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s4-mgr">
+      <div id="s4-mgr-name">sandbox manager</div>
+      <div class="s4-eye" style="left:180px"></div><div class="s4-eye" style="left:214px"></div>
+      <div id="s4-mgr-call">AttachBase</div>
+    </div>
+    <div id="s4-wip" class="wip">not built yet: the tests stand in</div>
+    <div id="s4-vmhost"></div>
+    <div id="s4-cmd" class="cmd">ls /repos/linux</div>
+    <div id="s4-ask" class="ask">attach linux</div>
+    <div id="s4-tab" class="vol-tab"></div>
+    <div id="s4-vol" class="vol" data-layout-allow-overflow>
+      <div class="vol-name">volume "linux"</div>
+      <div class="vol-row" style="top:70px">Makefile</div>
+      <div class="vol-row" style="top:124px">README</div>
+      <div class="vol-row" style="top:178px">kernel/</div>
+      <div class="vol-row" style="top:232px">fs/</div>
+      <div class="vol-row" style="top:286px">mm/</div>
+      <div class="vol-layers" style="top:72px">its layers</div>
+      <div class="layer label" id="s4-own" style="left:290px; top:120px; width:230px; height:50px; background:var(--sky); padding:2px 0 0 12px">its own</div>
+      <div class="layer label" id="s4-base" style="left:290px; top:180px; width:230px; height:56px; background:var(--face); border:5px solid var(--accent); padding:3px 0 0 12px">base 1</div>
+    </div>
+    <div id="s4-card" class="card">manifest</div>
+    <svg id="s4-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div class="chip s4-step" id="s4-import">import</div>
+    <div class="chip s4-step" id="s4-mount">mount</div>
+    <div id="s4-n1" class="note">first open: about 60 ms</div>
+    <div id="s4-n2" class="note">only the sandbox manager attaches</div>
+    <div id="s4-n3" class="note">the guest can only ask</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s4-svg");
+      const cells = document.getElementById("s4-cells");
+      const vm = C.vm(document.getElementById("s4-vmhost"), { x: 140, y: 250, w: 340, h: 250 });
+      vm.bar.style.background = "#8cc8ff";
+      const base = C.critter(cells, { x: 780, y: 900, r: 60, ghost: true, seed: 311, look: [-0.4, -0.3] });
+      const flag = SV.flag(base, "base 1");
+      const ask = SV.thread(svg, "M300 584 C300 650 300 690 300 744", { dots: true });
+      const call = SV.thread(svg, "M556 870 C620 870 650 880 700 890", {});
+      const head = C.el("path", { d: "M684 876 L704 890 L684 904", fill: "none", stroke: "#2e2440", "stroke-width": 5, "stroke-linecap": "round", "stroke-linejoin": "round" }, svg);
+      const under = SV.thread(svg, "M800 820 C800 740 1000 700 1000 652", { stroke: SV.ACCENT, width: 6 });
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      C.life(tl, base, 0, 9.9, 312);
+      // A running sandbox looks in /repos/linux.
+      C.words(tl, "#s4-l1", 0.15);
+      V.pop(vm.root, 0.3);
+      C.blink(tl, vm.eyes, 0.9);
+      V.pop("#s4-cmd", 1.0);
+      // Its automounter asks the sandbox manager; the manager attaches base 1 to its cell.
+      V.pop("#s4-mgr", 1.4);
+      C.tagIn(tl, "#s4-wip", 1.7, { origin: "0% 50%" });
+      V.dots(ask, 1.8);
+      V.pop("#s4-ask", 1.95);
+      tl.fromTo("#s4-mgr", { rotation: 0 }, { rotation: 2, duration: 0.08, ease: "sine.inOut", yoyo: true, repeat: 5, transformOrigin: "50% 100%", immediateRender: false }, 2.5);
+      tl.fromTo("#s4-mgr-call", { backgroundColor: "#f6f2ff", scale: 1 }, { backgroundColor: "#ffd86e", scale: 1.12, duration: 0.2, ease: "power2.out" }, 2.6);
+      tl.to("#s4-mgr-call", { scale: 1, duration: 0.4, ease: "elastic.out(1, 0.4)" }, 2.8);
+      C.draw(tl, [call, head], 2.8);
+      C.blink(tl, base.eyes, 3.2);
+      C.wordsOut(tl, "#s4-l1", 3.5);
+      C.words(tl, "#s4-l2", 3.7);
+      // Base 1 under a new volume; the manifest goes back to the guest.
+      V.pop(["#s4-tab", "#s4-vol"], 3.4);
+      tl.fromTo(["#s4-own", "#s4-base", "#s4-vol .vol-row", "#s4-vol .vol-layers"], { opacity: 0 }, { opacity: 0, duration: 0.01 }, 0);
+      C.draw(tl, under, 3.7);
+      tl.to("#s4-card", { x: -70, duration: 0.7, ease: "power1.inOut" }, 3.9);
+      tl.to("#s4-card", { y: -414, duration: 0.7, ease: "back.out(1.2)" }, 3.9);
+      V.steps(["#s4-import", "#s4-mount"], [4.6, 5.3]);
+      V.fade("#s4-vol .vol-layers", 4.6);
+      tl.to("#s4-card", { opacity: 0, scale: 0.6, duration: 0.2, ease: "power2.in" }, 4.65);
+      tl.fromTo("#s4-base", { opacity: 0, scaleX: 0.4, transformOrigin: "0% 50%" }, { opacity: 1, scaleX: 1, duration: 0.4, ease: "back.out(2.4)", immediateRender: false }, 4.75);
+      tl.fromTo("#s4-own", { opacity: 0, scaleX: 0.4, transformOrigin: "0% 50%" }, { opacity: 1, scaleX: 1, duration: 0.4, ease: "back.out(2.4)", immediateRender: false }, 4.95);
+      tl.fromTo("#s4-vol .vol-row", { opacity: 0, scaleX: 0, transformOrigin: "0% 50%" }, { opacity: 1, scaleX: 1, duration: 0.3, ease: "back.out(2)", stagger: 0.07, immediateRender: false }, 5.4);
+      C.grin(tl, vm.mouth, 5.6);
+      V.fade("#s4-n1", 5.9);
+      V.fade(["#s4-n2", "#s4-n3"], 6.6, 0.3);
+      C.blink(tl, vm.eyes, 7.6);
+      // Hand-off: the sandbox, its volume and base 1 stay; the asking goes.
+      C.wordsOut(tl, "#s4-l2", 9.2);
+      V.out(["#s4-mgr", "#s4-ask", "#s4-cmd", "#s4-mount", "#s4-n1", "#s4-n2", "#s4-n3", "#s4-wip", ask, call, head], 9.3, 0.02);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

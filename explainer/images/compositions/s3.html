@@ -1,0 +1,73 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s3-shell { left: 120px; top: 230px; width: 1100px; height: 510px; }
+    #s3-path { left: 1367px; top: 775px; font-size: 30px; }
+    #s3-fork-path { left: 1300px; top: 930px; font-size: 30px; }
+    #s3-wrote { left: 120px; top: 775px; }
+    #s3-measured { left: 120px; top: 825px; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-l1" class="line"><span class="w">Fork</span><span class="w">it:</span><span class="w">nothing</span><span class="w">is</span><span class="w">copied</span></div>
+    <div id="s3-l2" class="line"><span class="w">The</span><span class="w">fork's</span><span class="w">bytes:</span><span class="w">all</span><span class="w">inherited</span></div>
+    <div id="s3-shell" class="shell">
+      <div class="shell-bar">a shell on the host</div>
+      <div class="shell-body">
+        <div id="s3-c1" class="cmd" data-text="cladefsctl fork /tmp/cladefs/base /tmp/cladefs/sandbox1"></div>
+        <div id="s3-o1" class="out">0/anp7500000</div>
+        <div id="s3-c2" class="cmd" data-text="cladefsctl stat /tmp/cladefs/sandbox1"></div>
+        <div id="s3-o2" class="out">…</div>
+        <div id="s3-o3" class="out own">own 0</div>
+        <div id="s3-o4" class="out shared">inherited 8491008</div>
+        <div id="s3-o5" class="out own">own_extents 0</div>
+        <div id="s3-o6" class="out shared">inherited_extents 153</div>
+        <div id="s3-o7" class="out">public false</div>
+      </div>
+    </div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s3-threads"></g>
+      <g id="s3-cells"></g>
+    </svg>
+    <div id="s3-path" class="label mono">/tmp/cladefs/base</div>
+    <div id="s3-fork-path" class="label mono">/tmp/cladefs/sandbox1</div>
+    <div id="s3-wrote" class="note">it holds the base's extents and wrote none</div>
+    <div id="s3-measured" class="note">measured: alpine 3.24.4, arm64</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const BX = 1520, BY = 640, FX = 1760, FY = 900;
+      const cells = document.getElementById("s3-cells");
+      const base = C.critter(cells, { x: BX, y: BY, r: 110, color: "#8fddc2", seed: 77, look: [-0.7, 0.1] });
+      const fork = C.critter(cells, { x: BX, y: BY, r: 58, ghost: true, seed: 78, look: [-0.6, -0.4] });
+      const thread = I.thread(document.getElementById("s3-threads"), BX + 105, BY, FX, FY - 70, { width: 5, bow: 0.5, vertical: true });
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, base, 0, 8.8, 72);
+      tl.fromTo("#s3-shell", { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, 0.05);
+      C.words(tl, "#s3-l1", 0.2);
+      // The fork: a new cell, which the command prints.
+      const typed = I.type(tl, "#s3-c1", 0.5, 32);
+      I.print(tl, "#s3-o1", typed + 0.1);
+      tl.fromTo(fork.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.6)" }, 2.0);
+      C.hop(tl, fork, FX, FY, 2.25, 0.75, 120);
+      C.draw(tl, thread, 2.4, 0.6);
+      tl.fromTo("#s3-fork-path", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.2);
+      C.life(tl, fork, 3.6, 8.8, 79);
+      // stat: none of its bytes are its own.
+      C.wordsOut(tl, "#s3-l1", 3.9);
+      I.print(tl, "#s3-c2", 3.45);
+      const typed2 = I.type(tl, "#s3-c2", 3.6, 32);
+      C.words(tl, "#s3-l2", 4.1);
+      I.print(tl, ["#s3-o2", "#s3-o3", "#s3-o4", "#s3-o5", "#s3-o6", "#s3-o7"], typed2 + 0.15, 0.2);
+      tl.fromTo("#s3-wrote", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 6.0);
+      tl.fromTo("#s3-measured", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 6.4);
+      tl.fromTo(fork.smile, { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 6.8);
+      // Hand-off: the base hops down to the middle for the hundred forks.
+      C.wordsOut(tl, "#s3-l2", 8.7);
+      tl.to(["#s3-shell", "#s3-wrote", "#s3-measured", "#s3-path", "#s3-fork-path", thread], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.03 }, 8.7);
+      tl.to(fork.pop, { scale: 0, duration: 0.25, ease: "back.in(2)" }, 8.75);
+      C.hop(tl, base, 960, 880, 8.8, 0.55, 90);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>

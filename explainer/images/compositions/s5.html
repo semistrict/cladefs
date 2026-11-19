@@ -1,0 +1,89 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s5-grid { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; }
+    #s5-mem-label { left: 124px; top: 636px; }
+    #s5-mem { position: absolute; left: 124px; top: 686px; width: 1672px; height: 84px; border: 5px solid var(--ink); border-radius: 22px; background: var(--face); }
+    #s5-one { position: absolute; left: 706px; top: 12px; width: 260px; height: 50px; border: 4px solid var(--ink); border-radius: 12px; background: var(--accent); color: var(--face); font-family: var(--font-mono); font-weight: 700; font-size: 28px; text-align: center; padding-top: 2px; }
+    .s5-own { position: absolute; top: 12px; width: 14px; height: 50px; border: 3px solid var(--ink); border-radius: 6px; }
+    #s5-count { position: absolute; left: 124px; top: 812px; font-weight: 900; font-size: 80px; color: var(--accent); }
+    #s5-count-label { left: 190px; top: 836px; font-size: 40px; font-weight: 800; }
+    #s5-shared { left: 124px; top: 922px; font-size: 32px; }
+    #s5-private { left: 124px; top: 922px; font-size: 32px; }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-l1" class="line"><span class="w">A</span><span class="w">hundred</span><span class="w">sandboxes</span><span class="w">boot</span></div>
+    <div id="s5-l2" class="line"><span class="w">What</span><span class="w">they</span><span class="w">read</span><span class="w">is</span><span class="w">one</span><span class="w">copy</span></div>
+    <div id="s5-l3" class="line"><span class="w">What</span><span class="w">each</span><span class="w">writes</span><span class="w">is</span><span class="w">its</span><span class="w">own</span></div>
+    <svg id="s5-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s5-links"></g>
+      <g id="s5-kids"></g>
+    </svg>
+    <div id="s5-grid"></div>
+    <div id="s5-mem-label" class="label">host memory</div>
+    <div id="s5-mem"><div id="s5-one">bin/busybox</div></div>
+    <div id="s5-count">1</div>
+    <div id="s5-count-label" class="label">copy of bin/busybox in this host's memory</div>
+    <div id="s5-shared" class="note">one copy per host, shared by one tenant's sandboxes</div>
+    <div id="s5-private" class="note">its writes stay its own: private pages, then its own extents</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff"];
+      const grid = document.getElementById("s5-grid");
+      const kidsLayer = document.getElementById("s5-kids");
+      const linksLayer = document.getElementById("s5-links");
+      // The hundred forks, where the last shot left them; each becomes a sandbox booted on it.
+      const R = C.rng(100);
+      const kids = [], vms = [], links = [];
+      for (let i = 0; i < 100; i++) {
+        const c = i % 20, r = Math.floor(i / 20);
+        const x = 124 + c * 84, y = 250 + r * 66;
+        kids.push(C.critter(kidsLayer, { x: x + 38, y: y + 26, r: 22, ghost: true, seed: 1000 + i, look: [(960 - x - 38) / 900, 0.8], patchColor: colors[Math.floor(R() * colors.length)] }));
+        vms.push(C.vm(grid, { x, y, w: 76, h: 56 }));
+        links.push(I.thread(linksLayer, x + 38, y + 56, 960, 700, { width: 1.8, opacity: 0.6, bow: 0.6, vertical: true }));
+      }
+      const mem = document.getElementById("s5-mem");
+      const writers = [3, 27, 46, 58, 71, 12, 39, 85, 95];
+      const ownAt = [150, 300, 452, 560, 1050, 1180, 1290, 1420, 1530];
+      const own = ownAt.map((x, i) => C.div("s5-own", mem, { left: x + "px", background: colors[i % colors.length] }));
+
+      const tl = gsap.timeline({ paused: true });
+      const st = { amount: 1.0, grid: [5, 20], from: "center" };
+      tl.to(kids.map((k) => k.pop), { scale: 0, duration: 0.25, ease: "back.in(2)", stagger: st }, 0.15);
+      tl.fromTo(vms.map((v) => v.root), { scale: 0 }, { scale: 1, duration: 0.4, ease: "back.out(2.4)", stagger: st }, 0.3);
+      C.words(tl, "#s5-l1", 0.3);
+      // Host memory: one copy of what they all read.
+      tl.fromTo(["#s5-mem-label", "#s5-mem"], { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", stagger: 0.08 }, 1.8);
+      tl.fromTo("#s5-one", { scale: 0 }, { scale: 1, duration: 0.5, ease: "back.out(3)" }, 2.3);
+      C.draw(tl, links, 2.6, 0.5, { amount: 0.6, grid: [5, 20], from: "center" });
+      tl.fromTo(["#s5-count", "#s5-count-label"], { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)", stagger: 0.08 }, 2.9);
+      C.wordsOut(tl, "#s5-l1", 3.3);
+      C.words(tl, "#s5-l2", 3.5);
+      tl.fromTo("#s5-shared", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.8);
+      tl.fromTo("#s5-one", { scaleY: 1 }, { scaleY: 1.25, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 5.4);
+      vms.forEach((v, i) => {
+        const c = i % 20, r = Math.floor(i / 20);
+        C.blink(tl, v.eyes, 5.4 + Math.hypot(c - 9.5, (r - 2) * 1.6) * 0.035);
+      });
+      // Writers: each one's own pages, in its own colour.
+      C.wordsOut(tl, "#s5-l2", 6.6);
+      C.words(tl, "#s5-l3", 6.8);
+      const write = (k, at) => {
+        tl.fromTo(vms[writers[k]].bar, { backgroundColor: "#b9a4ff" }, { backgroundColor: colors[k % colors.length], duration: 0.2 }, at);
+        tl.fromTo(vms[writers[k]].root, { scale: 1 }, { scale: 1.2, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, at);
+        tl.fromTo(own[k], { scaleY: 0 }, { scaleY: 1, duration: 0.25, ease: "back.out(3)" }, at + 0.1);
+      };
+      [0, 1, 2, 3, 4].forEach((k, j) => write(k, 7.4 + j * 0.15));
+      tl.to("#s5-shared", { opacity: 0, duration: 0.2 }, 7.2);
+      tl.fromTo("#s5-private", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 7.4);
+      [5, 6, 7, 8].forEach((k, j) => write(k, 8.8 + j * 0.15));
+      // Exit.
+      C.wordsOut(tl, "#s5-l3", 11.2);
+      tl.to([vms.map((v) => v.root), "#s5-mem-label", "#s5-mem", "#s5-count", "#s5-count-label", "#s5-private"].flat(), { scale: 0, duration: 0.3, ease: "back.in(2)", stagger: { amount: 0.25, from: "edges" } }, 11.3);
+      tl.to(linksLayer, { opacity: 0, duration: 0.25 }, 11.3);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>

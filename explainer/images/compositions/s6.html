@@ -1,0 +1,59 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s6-box { left: 180px; top: 700px; }
+    #s6-flap-l { transform: rotate(-160deg); transform-origin: 6% 50%; }
+    #s6-flap-r { transform: rotate(160deg); transform-origin: 94% 50%; }
+  </style>
+  <div id="root" data-composition-id="s6" data-width="1920" data-height="1080">
+    <div id="s6-l1" class="line"><span class="w">One</span><span class="w">image,</span><span class="w">one</span><span class="w">base</span></div>
+    <div id="s6-l2" class="line"><span class="w">Import</span><span class="w">once,</span><span class="w">boot</span><span class="w">a</span><span class="w">hundred</span></div>
+    <div id="s6-box" class="box" data-layout-allow-overflow>
+      <div class="box-body">
+        <div class="box-eye" style="left:112px"></div><div class="box-eye" style="left:176px"></div>
+        <div class="box-label">alpine.tar</div>
+      </div>
+      <div id="s6-flap-l" class="box-flap l"></div>
+      <div id="s6-flap-r" class="box-flap r"></div>
+    </div>
+    <svg id="s6-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s6-threads"></g>
+      <g id="s6-kids"></g>
+      <g id="s6-base"></g>
+    </svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#ffd86e", "#8cc8ff"];
+      const BX = 680, BY = 800;
+      const base = C.critter(document.getElementById("s6-base"), { x: BX, y: BY, r: 120, color: "#8fddc2", seed: 77, look: [0.7, -0.2] });
+      const spots = [[1150, 560], [1340, 500], [1540, 480], [1730, 540], [1260, 800], [1450, 770], [1640, 800]];
+      const kidsLayer = document.getElementById("s6-kids");
+      const kids = spots.map(([x, y], i) => C.critter(kidsLayer, { x, y, r: 50, ghost: true, seed: 3000 + i, look: [-0.8, 0.2], patchColor: colors[i % colors.length] }));
+      const threads = spots.map(([x, y]) => I.thread(document.getElementById("s6-threads"), BX + 90, BY - 60, x - 40, y + 10, { width: 4, bow: 0.5 }));
+      const tl = gsap.timeline({ paused: true });
+      C.words(tl, "#s6-l1", 0.3);
+      tl.fromTo("#s6-box", { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(2)" }, 0.1);
+      tl.fromTo(base.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.4)" }, 0.2);
+      C.life(tl, base, 0.6, 7.1, 61);
+      // Its forks, each on a thread back to it.
+      C.draw(tl, threads, 0.9, 0.4, 0.12);
+      tl.fromTo(kids.map((k) => k.pop), { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.6)", stagger: 0.12 }, 1.0);
+      kids.forEach((k, i) => C.life(tl, k, 1.8, 10, 3100 + i));
+      C.wordsOut(tl, "#s6-l1", 3.2);
+      // The one idea, held to the end.
+      C.words(tl, "#s6-l2", 3.4);
+      // Writers gain a patch of their own.
+      const writers = [1, 3, 4, 6];
+      tl.fromTo(writers.map((i) => kids[i].patch), { scale: 0, opacity: 1 }, { scale: 1, opacity: 1, duration: 0.35, ease: "back.out(3)", stagger: 0.25 }, 4.4);
+      tl.fromTo(writers.map((i) => kids[i].smile), { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", stagger: 0.1, transformOrigin: "50% 50%" }, 5.6);
+      // The base hops in among its forks and lands on the music's last chord (60 s).
+      tl.to(threads, { opacity: 0, duration: 0.3 }, 6.8);
+      C.hop(tl, base, 960, 820, 7.1, 0.8, 150);
+      kids.forEach((k, i) => C.blink(tl, k.eyes, 8.1 + i * 0.05));
+      C.life(tl, base, 8.6, 10, 62);
+      window.__timelines["s6"] = tl;
+    })();
+  </script>
+</template>

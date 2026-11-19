@@ -1,0 +1,101 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s4-name1 { left: 268px; top: 858px; }
+    #s4-name2 { left: 1508px; top: 858px; }
+    #s4-pid { left: 392px; top: 552px; }
+    #s4-wip { left: 716px; top: 512px; }
+    #s4-reg { position: absolute; left: 1446px; top: 300px; width: 364px; padding: 8px 20px 12px; border: 5px solid var(--ink); border-radius: 24px; background: var(--face); }
+    .s4-reg-head { font-weight: 900; font-size: 30px; }
+    .s4-reg-row { font-family: var(--font-mono); font-weight: 500; font-size: 28px; line-height: 42px; white-space: pre; border-radius: 10px; }
+    #s4-read { margin: -23px 0 0 -62px; font-family: var(--font-mono); font-weight: 600; }
+    #s4-found { left: 120px; top: 916px; }
+    #s4-cred { left: 1010px; top: 906px; font-family: var(--font-mono); font-weight: 500; }
+    #s4-checked { left: 150px; top: 372px; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-land"></div>
+    <div id="s4-l1" class="line"><span class="w">Another</span><span class="w">cell's</span><span class="w">parent</span><span class="w">is</span><span class="w">in</span><span class="w">bucket</span><span class="w">1</span></div>
+    <div id="s4-l2" class="line"><span class="w">The</span><span class="w">number</span><span class="w">finds</span><span class="w">the</span><span class="w">bucket</span></div>
+    <div id="s4-l3" class="line"><span class="w">With</span><span class="w">this</span><span class="w">host's</span><span class="w">own</span><span class="w">credentials</span></div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s4-links"></g>
+      <g id="s4-cells"></g>
+    </svg>
+    <div id="s4-name1" class="label">root bucket <span class="mono dim">s3://ROOT</span></div>
+    <div id="s4-name2" class="label mono dim">gs://OTHER</div>
+    <div id="s4-pid" class="tag mono"><span class="num">0001</span> 000003 000004</div>
+    <div id="s4-wip" class="tag wip">forks across buckets: in progress</div>
+    <div id="s4-reg">
+      <div class="s4-reg-head">registry copy</div>
+      <div class="s4-reg-row" id="s4-row1"><span class="num">1</span> s3  us-east-1</div>
+      <div class="s4-reg-row"><span class="num">2</span> gcs europe-west1</div>
+    </div>
+    <div id="s4-cred" class="tag">CLADEFSD_BUCKET_1_AWS_ACCESS_KEY_ID=&#8230;</div>
+    <svg id="s4-key-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s4-read" class="pill"><span class="num">0001</span>&#8230;</div>
+    <div id="s4-found" class="note">bucket 1, found in this host's bucket's registry copy</div>
+    <div id="s4-checked" class="tag">identity checked</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s4-svg");
+      G.world(document.getElementById("s4-land"), svg);
+      const p1 = G.pail(svg, { x: A.pail1.x, y: A.pail1.y, number: 1, id: "s4-pail1" });
+      G.pail(svg, { x: A.pail2.x, y: A.pail2.y, number: 2, id: "s4-pail2" });
+      const cells = document.getElementById("s4-cells");
+      const links = document.getElementById("s4-links");
+      const child = C.critter(cells, { x: A.cell.x, y: A.cell.y, r: 70, color: "#8fddc2", seed: 616, look: [-0.6, -0.3] });
+      // A child in bucket 2 of a version in bucket 1. Its parent, in us-east-1, wearing the version it was forked from.
+      const parent = C.critter(cells, { x: 560, y: 460, r: 60, color: "#b9a4ff", seed: 313, look: [0.6, 0.1] });
+      const flag = C.el("g", {}, parent.body);
+      C.el("path", { d: "M14 -62 V-128", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round" }, flag);
+      C.el("path", { d: "M14 -128 L66 -115 L14 -100 Z", fill: "#ffd86e", stroke: C.INK, "stroke-width": 4, "stroke-linejoin": "round" }, flag);
+      C.el("text", { x: 22, y: -108, "font-family": "Nunito", "font-weight": 900, "font-size": 18, fill: C.INK }, flag).textContent = "v1";
+      const thread = C.el("path", { d: "M620 470 C850 380 1100 560 1262 650", fill: "none", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round", "stroke-dasharray": "14 12" }, links);
+      // The read's route over the ocean to bucket 1, in the accent.
+      const route = C.el("path", { d: "M1625 500 C1300 120 700 160 440 640", fill: "none", stroke: G.ACCENT, "stroke-width": 6, "stroke-linecap": "round", pathLength: 100 }, links);
+      const key = C.key(document.getElementById("s4-key-svg"), { x: 920, y: 930, s: 0.7 }).g;
+      const read = document.getElementById("s4-read");
+
+      const tl = gsap.timeline({ paused: true });
+      C.words(tl, "#s4-l1", 0.2);
+      C.popIn(tl, parent.pop, 0.3);
+      C.popIn(tl, child.pop, 0.8);
+      C.life(tl, child, 1.3, 11.5, 51);
+      C.life(tl, parent, 0.9, 11.4, 52);
+      C.tagIn(tl, "#s4-pid", 0.7);
+      tl.fromTo(thread, { opacity: 0 }, { opacity: 1, duration: 0.5, ease: "power2.out" }, 1.0);
+      C.tagIn(tl, "#s4-wip", 1.5);
+      C.wordsOut(tl, "#s4-l1", 3.0);
+
+      // A read of an inherited part: its cell's number finds its bucket in the registry copy.
+      C.words(tl, "#s4-l2", 3.2);
+      C.tagIn(tl, "#s4-reg", 3.2, { from: 0.4, origin: "50% 0%" });
+      tl.fromTo(read, { opacity: 0, x: 1330, y: 590, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.6)" }, 3.5);
+      tl.to(read, { x: 1625, y: 500, duration: 0.5, ease: "power1.inOut" }, 3.9);
+      tl.fromTo("#s4-row1", { backgroundColor: "rgba(255,216,110,0)" }, { backgroundColor: "rgba(255,216,110,1)", duration: 0.25 }, 4.4);
+      C.tagIn(tl, "#s4-found", 4.4, { origin: "0% 50%" });
+      C.wordsOut(tl, "#s4-l2", 6.0);
+
+      // This host's own credentials for bucket 1, then over the ocean.
+      C.words(tl, "#s4-l3", 6.2);
+      tl.fromTo(key, { scale: 0, rotation: -40 }, { scale: 0.7, rotation: 0, duration: 0.4, ease: "back.out(2.6)" }, 6.4);
+      C.tagIn(tl, "#s4-cred", 6.6, { origin: "0% 50%" });
+      tl.fromTo(route, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 1.0, ease: "power1.inOut" }, 7.6);
+      tl.to(read, { x: 440, duration: 1.0, ease: "power1.inOut" }, 7.6);
+      tl.to(read, { y: 250, duration: 0.5, ease: "power2.out" }, 7.6);
+      tl.to(read, { y: 640, duration: 0.5, ease: "power2.in" }, 8.1);
+      tl.to(read, { scale: 0.4, opacity: 0, duration: 0.2, ease: "power2.in" }, 8.6);
+      tl.fromTo(p1.g, { rotation: 0 }, { rotation: 6, duration: 0.12, ease: "sine.inOut", yoyo: true, repeat: 3, transformOrigin: "50% 100%", immediateRender: false }, 8.65);
+      C.tagIn(tl, "#s4-checked", 8.9);
+
+      // Exit: all but the world and the pails go.
+      C.wordsOut(tl, "#s4-l3", 11.4);
+      tl.to([parent.pop, child.pop, key], { scale: 0, duration: 0.25, ease: "back.in(2)" }, 11.5);
+      tl.to([thread, route, "#s4-pid", "#s4-wip", "#s4-reg", "#s4-cred", "#s4-found", "#s4-checked"], { opacity: 0, duration: 0.25, ease: "power2.in" }, 11.55);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

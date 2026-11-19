@@ -1,0 +1,96 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s4-net { left: 560px; top: 396px; opacity: 0; }
+    #s4-keep { left: 120px; top: 196px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-l1" class="line"><span class="w">One</span><span class="w">round</span><span class="w">trip</span><span class="w">on</span><span class="w">the</span><span class="w">hosts'</span><span class="w">network</span></div>
+    <div id="s4-l2" class="line"><span class="w">No</span><span class="w">request</span><span class="w">to</span><span class="w">the</span><span class="w">bucket</span><span class="w">on</span><span class="w">the</span><span class="w">way</span></div>
+    <div id="s4-l3" class="line"><span class="w">The</span><span class="w">upload</span><span class="w">goes</span><span class="w">on</span><span class="w">behind</span></div>
+    <div id="s4-stage"></div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s4-tags"></div>
+    <div id="s4-net" class="note">the hosts' network</div>
+    <div id="s4-keep" class="note">B and C keep it until the head names it uploaded</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, P = window.Rep;
+      const stage = document.getElementById("s4-stage");
+      const svg = document.getElementById("s4-svg");
+      const tags = document.getElementById("s4-tags");
+      // S3's last frame.
+      const hA = P.host(stage, "A", "s4", ["writer"]);
+      const hB = P.host(stage, "B", "s4", ["peer"]);
+      const hC = P.host(stage, "C", "s4", ["peer"]);
+      [hA, hB, hC].forEach((h) => Object.values(h.tags).forEach((t) => t.classList.add("on")));
+      const sb = P.sandbox(stage, "A", "s4");
+      const pail = P.pail(tags, svg, "s4", ["epoch 7 · A B C"]);
+      pail.heads[0].classList.add("on");
+      const A3 = P.slot("A", 3), B0 = P.slot("B", 0), C0 = P.slot("C", 0);
+      const trB = P.trail(svg, A3, B0, 170);
+      const trC = P.trail(svg, A3, C0, 230);
+      const cell = P.cell(svg, "A");
+      P.OLD.forEach((c, i) => P.bead(svg, P.slot("A", i), c));
+      const commit = P.bead(svg, A3, P.COLORS.accent);
+      const toB = P.bead(svg, A3, P.COLORS.accent);
+      const toC = P.bead(svg, A3, P.COLORS.accent);
+      const ackB = P.bead(svg, B0, P.COLORS.butter, 9);
+      const ackC = P.bead(svg, C0, P.COLORS.butter, 9);
+      const up = P.bead(svg, A3, P.COLORS.accent);
+      gsap.set(up, { opacity: 0 });
+      P.tag(tags, "s4-name", "cell 9", P.X.A + 28, P.TOP + 300, "b on");
+      const fs = P.tag(tags, "s4-fsync", "fsync", P.X.A + 28, P.TOP + 176);
+      const back = P.tag(tags, "s4-back", "fsync returns", P.X.A + 28, P.TOP + 176);
+      const counts = [0, 1, 2, 3].map((n) => P.tag(tags, "s4-count" + n, `on disk: ${n} of 3`, P.X.A + 20, 784, n === 0 ? "on" : n === 2 ? "b" : ""));
+      const none = P.tag(tags, "s4-none", "bucket requests: 0", 1070, 856);
+
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, cell, 0, 11.5, 44);
+      C.words(tl, "#s4-l1", 0.2);
+      // fsync: the flush appends the commit to host A's log and sends it to both peers as it
+      // appends, before its own sync: the round trips overlap that sync.
+      C.tagIn(tl, fs, 0.2);
+      C.frown(tl, sb.mouth, 0.3);
+      P.fly(tl, commit, P.fromSandbox("A"), A3, 80, 0.35, 0.5);
+      tl.fromTo([trB, trC], { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.85);
+      P.fly(tl, toB, A3, B0, 170, 0.85, 0.9);
+      P.fly(tl, toC, A3, C0, 230, 0.85, 1.0);
+      P.swap(tl, counts[0], counts[1], 0.9);
+      tl.fromTo("#s4-net", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 1.1);
+      tl.fromTo([toB], { scale: 1.4, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.3, ease: "back.out(3)", immediateRender: false }, 1.75);
+      tl.fromTo([toC], { scale: 1.4, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.3, ease: "back.out(3)", immediateRender: false }, 1.85);
+      // Each peer answers once its disk holds it; B's answer makes two of three, and the fsync
+      // returns without waiting for C, whose disk is slower.
+      P.fly(tl, ackB, B0, A3, 170, 1.8, 0.6);
+      tl.to(ackB, { opacity: 0, duration: 0.1 }, 2.4);
+      P.swap(tl, counts[1], counts[2], 2.4);
+      P.swap(tl, fs, back, 2.45);
+      C.unfrown(tl, sb.mouth, 2.5);
+      tl.to(cell.smile, { scaleX: 1.4, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 2.55);
+      P.fly(tl, ackC, C0, A3, 230, 3.35, 0.6);
+      tl.to(ackC, { opacity: 0, duration: 0.1 }, 3.95);
+      P.swap(tl, counts[2], counts[3], 3.95);
+      C.wordsOut(tl, "#s4-l1", 3.6);
+      tl.to([trB, trC, "#s4-net"], { opacity: 0, duration: 0.3 }, 4.0);
+      // Nothing of it went to the bucket.
+      C.words(tl, "#s4-l2", 3.8);
+      C.tagIn(tl, none, 4.4);
+      C.wordsOut(tl, "#s4-l2", 6.6);
+      P.out(tl, back, 6.6);
+      P.out(tl, counts[3], 6.6);
+      P.out(tl, none, 6.6);
+      // The upload follows at its own pace.
+      C.words(tl, "#s4-l3", 6.8);
+      // B and C keep their copies until the head acknowledges the segment.
+      tl.fromTo("#s4-keep", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 8.0);
+      tl.fromTo([toB, toC], { scale: 1 }, { scale: 1.3, duration: 0.2, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 50%", immediateRender: false }, 8.2);
+      tl.fromTo(up, { opacity: 0 }, { opacity: 1, duration: 0.15, immediateRender: false }, 7.2);
+      P.drift(tl, up, A3, P.INTO_PAIL, 0, 4.3 / 7, 7.2, 4.3);
+      C.wordsOut(tl, "#s4-l3", 11.2);
+      tl.to("#s4-keep", { opacity: 0, duration: 0.2 }, 11.2);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

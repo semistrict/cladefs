@@ -7,11 +7,11 @@ lilac felt, over a ukulele bed, with no voice.
 | Film | What it explains | Length |
 |---|---|---|
 | `overview/` | How cladefs stores sandbox disks: one copy, a hundred sandboxes | 132 s |
-| `encryption/` | Encryption at rest, per-tenant keys, and shredding | 45-75 s |
-| `replication/` | Replicated commits: durable on a majority of hosts before the bucket | 45-75 s |
-| `regions/` | Many regions: cells across buckets | 45-75 s |
-| `shared-volumes/` | Shared volumes: one checkout kept current, attached under writable layers | 45-75 s |
-| `images/` | Container images as bases | 45-75 s |
+| `encryption/` | Encryption at rest, per-tenant keys, and shredding | 62 s |
+| `replication/` | Replicated commits: durable on a majority of hosts before the bucket | 70 s |
+| `regions/` | Many regions: cells across buckets | 72 s |
+| `shared-volumes/` | Shared volumes: one checkout kept current, attached under writable layers | 72 s |
+| `images/` | Container images as bases | 62 s |
 
 Each film is a HyperFrames project of its own: `index.html` mounts one scene per file in
 `compositions/`, `SPEC.md` is its look, shots and timings, and `REVIEW.md` what was checked.

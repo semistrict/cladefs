@@ -1,0 +1,91 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s7-host { left: 100px; top: 690px; width: 1720px; height: 330px; }
+    #s7-host-label { left: 130px; top: 700px; }
+    #s7-pull { left: 140px; top: 500px; }
+    #s7-fetch { left: 1560px; top: 190px; }
+    #s7-stay { left: 1270px; top: 790px; }
+    #s7-wip { left: 124px; top: 184px; }
+    #s7-ask { left: 1560px; top: 190px; }
+    #s7-n1 { left: 1270px; top: 850px; }
+    #s7-n2 { left: 1270px; top: 910px; }
+  </style>
+  <div id="root" data-composition-id="s7" data-width="1920" data-height="1080">
+    <div id="s7-l1" class="line"><span class="w">Pull,</span><span class="w">publish</span><span class="w">again:</span><span class="w">base</span><span class="w">2</span></div>
+    <div id="s7-l2" class="line"><span class="w mono">git</span><span class="w mono">fetch</span><span class="w">reaches</span><span class="w">base</span><span class="w">2's</span><span class="w">objects</span></div>
+    <div id="s7-wip" class="wip">in progress</div>
+    <div id="s7-host" class="host"></div>
+    <div id="s7-host-label" class="host-label">host</div>
+    <svg id="s7-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s7-vms"></div>
+    <div id="s7-pull" class="cmd">git pull</div>
+    <div id="s7-stay" class="note">their volumes stay over base 1</div>
+    <div id="s7-fetch" class="cmd">git fetch</div>
+    <div id="s7-ask" class="ask">newest &lt;url&gt;</div>
+    <svg id="s7-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s7-n1" class="note">its alternates: base 2's objects</div>
+    <div id="s7-n2" class="note">it fetches only what base 2 lacks</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s7-svg");
+      const cells = document.getElementById("s7-cells");
+      const host = document.getElementById("s7-vms");
+      const pub = C.vm(host, { x: 140, y: 250, w: 300, h: 220 });
+      const xs = [1150, 1380, 1610];
+      const sky = ["#8cc8ff", "#8fddc2", "#ff9ec0"];
+      const vms = xs.map((x, i) => {
+        const v = C.vm(host, { x, y: 260, w: 200, h: 146 });
+        v.bar.style.background = sky[i];
+        return v;
+      });
+      const down = SV.thread(svg, "M290 476 C290 640 300 720 300 812", {});
+      const ones = xs.map((x) => SV.thread(svg, `M780 860 C780 640 ${x + 80} 600 ${x + 80} 412`, { stroke: SV.ACCENT, width: 5 }));
+      const two = SV.thread(svg, "M1170 850 C1300 640 1770 640 1770 412", { stroke: SV.ACCENT, width: 6 });
+      const cell = C.critter(cells, { x: 300, y: 900, r: 60, color: "#ffd86e", seed: 301, look: [0.6, 0] });
+      const base1 = C.critter(cells, { x: 780, y: 900, r: 60, ghost: true, seed: 311, look: [0.5, -0.4] });
+      SV.flag(base1, "base 1");
+      const base2 = C.critter(cells, { x: 300, y: 900, r: 60, ghost: true, seed: 321, look: [0.6, -0.2] });
+      const flag2 = SV.flag(base2, "base 2");
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      C.life(tl, base1, 0, 9.9, 315);
+      // The publisher pulls again; sandboxes run on base 1.
+      C.words(tl, "#s7-l1", 0.15);
+      V.pop([pub.root, cell.pop], 0.3, 0.12);
+      C.draw(tl, down, 0.5);
+      C.life(tl, cell, 0.8, 9.3, 316);
+      V.pop(vms.map((v) => v.root), 0.5, 0.1);
+      C.draw(tl, ones, 0.8, 0.45, 0.08);
+      V.pop("#s7-pull", 1.2);
+      C.grin(tl, pub.mouth, 1.3);
+      // The host forks its cell again: base 2, sideways off the same cell.
+      tl.to(cell.body, { scaleX: 1.15, scaleY: 0.85, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 100%" }, 1.95);
+      tl.fromTo(base2.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.6)" }, 2.1);
+      tl.fromTo(flag2, { scale: 0, transformOrigin: "20% 100%" }, { scale: 0, duration: 0.01 }, 0);
+      C.hop(tl, base2, 1120, 900, 2.3, 0.75, 130);
+      tl.to(flag2, { scale: 1, duration: 0.45, ease: "back.out(2.8)" }, 3.2);
+      C.life(tl, base2, 3.6, 9.3, 321);
+      V.fade("#s7-stay", 3.4);
+      C.wordsOut(tl, "#s7-l1", 3.9);
+      // git fetch: the sandbox asks for the newest base; its alternates move to base 2's objects.
+      C.words(tl, "#s7-l2", 4.1);
+      tl.fromTo("#s7-wip", { scale: 0, transformOrigin: "0% 50%" }, { scale: 1, duration: 0.4, ease: "back.out(2.6)" }, 4.6);
+      V.steps(["#s7-fetch", "#s7-ask"], [4.9, 5.6]);
+      C.draw(tl, two, 6.0);
+      C.blink(tl, base2.eyes, 6.2);
+      V.fade("#s7-n1", 6.5);
+      V.fade("#s7-n2", 7.2);
+      C.grin(tl, vms[2].mouth, 7.0);
+      C.blink(tl, vms.map((v) => v.eyes), 8.0);
+      // Exit: all of it.
+      C.wordsOut(tl, "#s7-l2", 9.3);
+      V.out(["#s7-wip", "#s7-vms", "#s7-pull", "#s7-stay", "#s7-fetch", "#s7-ask", "#s7-n1", "#s7-n2", "#s7-host", "#s7-host-label", svg], 9.35, 0.02);
+      tl.to([cell.pop, base1.pop, base2.pop], { scale: 0, duration: 0.25, ease: "back.in(2)", stagger: 0.06 }, 9.4);
+      window.__timelines["s7"] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,125 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .s5-note { left: 120px; top: 196px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-l1" class="line"><span class="w">Host</span><span class="w">A</span><span class="w">is</span><span class="w">lost,</span><span class="w">its</span><span class="w">disk</span><span class="w">with</span><span class="w">it</span></div>
+    <div id="s5-l2" class="line"><span class="w">Host</span><span class="w">D</span><span class="w">takes</span><span class="w">the</span><span class="w">cell</span></div>
+    <div id="s5-l3" class="line"><span class="w">Nothing</span><span class="w">Replicated</span><span class="w">is</span><span class="w">lost</span></div>
+    <div id="s5-l4" class="line"><span class="w">The</span><span class="w">bucket's</span><span class="w">head</span><span class="w">says</span><span class="w">who</span><span class="w">writes</span></div>
+    <div id="s5-n1" class="note s5-note">takes the head at epoch 8, fences B and C</div>
+    <div id="s5-n3" class="note s5-note">then reads the longest log B and C hold</div>
+    <div id="s5-n4" class="note s5-note">the tail to B and C, then the head, then D serves</div>
+    <div id="s5-n5" class="note s5-note">once the head names it uploaded, B and C drop theirs</div>
+    <div id="s5-stage"></div>
+    <svg id="s5-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s5-tags"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, P = window.Rep;
+      const stage = document.getElementById("s5-stage");
+      const svg = document.getElementById("s5-svg");
+      const tags = document.getElementById("s5-tags");
+      // S4's last frame: the commit on A, B and C; its upload on the way.
+      const hA = P.host(stage, "A", "s5", ["writer"]);
+      const hB = P.host(stage, "B", "s5", ["peer"]);
+      const hC = P.host(stage, "C", "s5", ["peer"]);
+      const hD = P.host(stage, "D", "s5", ["writer"]);
+      [hA.tags.writer, hB.tags.peer, hC.tags.peer].forEach((t) => t.classList.add("on"));
+      const sbA = P.sandbox(stage, "A", "s5");
+      const sbD = P.sandbox(stage, "D", "s5");
+      const pail = P.pail(tags, svg, "s5", ["epoch 7 · A B C", "epoch 8 · A B C", "epoch 8 · D B C"]);
+      pail.heads[0].classList.add("on");
+      const fB = P.fence(svg, P.X.B + 44, P.TOP + 280);
+      const fC = P.fence(svg, P.X.C + 44, P.TOP + 280);
+      const cellA = P.cell(svg, "A");
+      const cellD = P.cell(svg, "D", [-0.5, 0.1]);
+      const A3 = P.slot("A", 3), B0 = P.slot("B", 0), C0 = P.slot("C", 0), D3 = P.slot("D", 3);
+      const onA = P.OLD.map((c, i) => P.bead(svg, P.slot("A", i), c));
+      onA.push(P.bead(svg, A3, P.COLORS.accent));
+      const onB = P.bead(svg, B0, P.COLORS.accent);
+      const onC = P.bead(svg, C0, P.COLORS.accent);
+      const doomed = P.bead(svg, A3, P.COLORS.accent);
+      const fromPail = P.OLD.map((c) => P.bead(svg, P.INTO_PAIL, c));
+      const back = P.bead(svg, B0, P.COLORS.accent);
+      const up = P.bead(svg, D3, P.COLORS.accent);
+      const B1 = P.slot("B", 1), C1 = P.slot("C", 1);
+      const newB = P.bead(svg, D3, P.COLORS.accent);
+      const newC = P.bead(svg, D3, P.COLORS.accent);
+      const ackB = P.bead(svg, B1, P.COLORS.butter, 9);
+      const ackC = P.bead(svg, C1, P.COLORS.butter, 9);
+      const nameA = P.tag(tags, "s5-nameA", "cell 9", P.X.A + 28, P.TOP + 300, "b on");
+      const nameD = P.tag(tags, "s5-nameD", "cell 9", P.X.D + 28, P.TOP + 300, "b");
+      const lost = P.tag(tags, "s5-lost", "lost", P.X.A + 290, P.TOP + 8);
+      const fenced = ["B", "C"].map((h) => P.tag(tags, "s5-fenced" + h, "fenced at epoch 8", P.X[h] + 24, P.TOP + 196, "b"));
+
+      const tl = gsap.timeline({ paused: true });
+      const note = (id, at, until) => {
+        tl.fromTo(id, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, at);
+        tl.to(id, { opacity: 0, duration: 0.15 }, until);
+      };
+      // The upload still on its way, as S4 left it.
+      P.drift(tl, doomed, A3, P.INTO_PAIL, 4.3 / 7, 5.2 / 7, 0, 0.9);
+      C.life(tl, cellA, 0, 0.6, 45);
+      // Host A is lost, its disk with it: the upload never lands.
+      C.words(tl, "#s5-l1", 0.2);
+      tl.to(cellA.eyes, { scaleY: 0.1, duration: 0.2, ease: "power2.in", transformOrigin: "50% 50%" }, 0.6);
+      C.frown(tl, sbA.mouth, 0.6);
+      tl.to(doomed, { scale: 0, opacity: 0, duration: 0.25, ease: "back.in(2)", transformOrigin: "50% 50%" }, 0.9);
+      tl.to([cellA.pop, sbA.root, ...onA, nameA, hA.tags.writer, hA.disk], { scale: 0, opacity: 0, duration: 0.35, ease: "back.in(2)", stagger: 0.04, transformOrigin: "50% 50%" }, 0.9);
+      tl.to(hA.box, { opacity: 0.3, duration: 0.4 }, 1.1);
+      C.tagIn(tl, lost, 1.5);
+      C.wordsOut(tl, "#s5-l1", 3.0);
+      // Host D takes the cell: the head first, at the next epoch.
+      C.words(tl, "#s5-l2", 3.2);
+      tl.fromTo(hD.box, { opacity: 0, scale: 0.95 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, 3.4);
+      P.swap(tl, pail.heads[0], pail.heads[1], 3.8);
+      P.wiggle(tl, pail.g, 3.9);
+      note("#s5-n1", 3.5, 6.2);
+      // It fences B and C: each refuses every older epoch from now on.
+      tl.fromTo([fB, fC], { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.6)", stagger: 0.15 }, 4.6);
+      C.tagIn(tl, fenced[0], 4.7);
+      C.tagIn(tl, fenced[1], 4.85);
+      C.wordsOut(tl, "#s5-l2", 6.0);
+      // It reads the bucket's commits, then the longest log the fenced members hold.
+      note("#s5-n3", 6.25, 8.7);
+      fromPail.forEach((b, i) => P.fly(tl, b, P.INTO_PAIL, P.slot("D", i), 60, 6.1 + i * 0.15, 0.8));
+      P.fly(tl, back, B0, D3, 220, 6.5, 0.8);
+      tl.fromTo(back, { scale: 1.4, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.3, ease: "back.out(3)", immediateRender: false }, 7.3);
+      C.words(tl, "#s5-l3", 7.2);
+      tl.fromTo(cellD.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 7.5);
+      C.life(tl, cellD, 7.9, 16, 46);
+      C.tagIn(tl, nameD, 7.7);
+      // Install: D gives the recovered tail to its new configuration's members, B and C (logs of
+      // their own), and waits for it replicated there; then the head names that configuration
+      // (activation), and only then does D serve. B and C then drop the old configuration's logs.
+      note("#s5-n4", 8.8, 12.1);
+      P.fly(tl, newB, D3, B1, 220, 8.9, 0.9);
+      P.fly(tl, newC, D3, C1, 170, 8.9, 0.8);
+      P.fly(tl, ackB, B1, D3, 220, 9.85, 0.5);
+      tl.to(ackB, { opacity: 0, duration: 0.1 }, 10.35);
+      P.fly(tl, ackC, C1, D3, 170, 9.75, 0.5);
+      tl.to(ackC, { opacity: 0, duration: 0.1 }, 10.25);
+      P.swap(tl, pail.heads[1], pail.heads[2], 10.4);
+      P.wiggle(tl, pail.g, 10.5);
+      tl.fromTo(sbD.root, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.4)" }, 10.8);
+      C.tagIn(tl, hD.tags.writer, 10.9);
+      tl.to([onB, onC], { scale: 0, opacity: 0, duration: 0.3, ease: "back.in(2)", stagger: 0.1, transformOrigin: "50% 50%" }, 11.3);
+      C.wordsOut(tl, "#s5-l3", 10.0);
+      // The bucket stays the authority; the upload goes on from D, and once the head names its
+      // segment uploaded, the members drop their copies.
+      C.words(tl, "#s5-l4", 10.2);
+      P.fly(tl, up, D3, P.INTO_PAIL, -10, 12.2, 1.0);
+      tl.to(up, { opacity: 0, duration: 0.1 }, 13.2);
+      P.wiggle(tl, pail.g, 13.2);
+      tl.to([newB, newC], { scale: 0, opacity: 0, duration: 0.3, ease: "back.in(2)", stagger: 0.1, transformOrigin: "50% 50%", immediateRender: false }, 13.6);
+      note("#s5-n5", 12.3, 15.3);
+      // Exit to S6: host A, the fences and their tags go.
+      C.wordsOut(tl, "#s5-l4", 15.3);
+      tl.to([hA.box, lost, fB, fC, ...fenced], { opacity: 0, duration: 0.3, ease: "power2.in" }, 15.4);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>

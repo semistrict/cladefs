@@ -1,0 +1,69 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s1-shell { left: 120px; top: 230px; width: 1340px; height: 268px; }
+    #s1-box { left: 200px; top: 610px; }
+    #s1-oci { left: 160px; top: 890px; }
+  </style>
+  <div id="root" data-composition-id="s1" data-width="1920" data-height="1080">
+    <div id="s1-l1" class="line"><span class="w">Your</span><span class="w">sandboxes</span><span class="w">start</span><span class="w">from</span><span class="w">an</span><span class="w">image</span></div>
+    <div id="s1-l2" class="line"><span class="w">Here,</span><span class="w">alpine:</span><span class="w">one</span><span class="w">tar</span><span class="w">of</span><span class="w">its</span><span class="w">files</span></div>
+    <div id="s1-l3" class="line"><span class="w">Make</span><span class="w">it</span><span class="w">a</span><span class="w">base,</span><span class="w">once</span></div>
+    <div id="s1-shell" class="shell">
+      <div class="shell-bar">a shell on the host</div>
+      <div class="shell-body">
+        <div id="s1-e1" class="cmd">export CLADEFSD_BUCKET=file:///tmp/cladefs/bucket CLADEFSD_TOKEN=1</div>
+        <div id="s1-e2" class="cmd">export CLADEFS_MASTER_KEY=$(openssl rand -hex 32)</div>
+        <div id="s1-c1" class="cmd" data-text='docker export "$(docker create alpine)" > /tmp/alpine.tar'></div>
+        <div id="s1-p2" class="prompt"></div>
+      </div>
+    </div>
+    <div id="s1-chips">
+      <div id="s1-k1" class="chip" style="left:580px; top:630px">bin/busybox</div>
+      <div id="s1-k2" class="chip" style="left:580px; top:710px">bin/sh → /bin/busybox</div>
+      <div id="s1-k3" class="chip" style="left:580px; top:790px">etc/motd</div>
+      <div id="s1-k4" class="chip" style="left:1060px; top:670px">root/ <span class="perm">drwx------</span></div>
+      <div id="s1-k5" class="chip" style="left:1060px; top:750px">tmp/ <span class="perm">drwxrwxrwt</span></div>
+    </div>
+    <div id="s1-box" class="box" data-layout-allow-overflow>
+      <div class="box-body">
+        <div class="box-eye" style="left:112px"></div><div class="box-eye" style="left:176px"></div>
+        <div class="box-label">alpine.tar</div>
+      </div>
+      <div id="s1-flap-l" class="box-flap l"></div>
+      <div id="s1-flap-r" class="box-flap r"></div>
+    </div>
+    <div id="s1-oci" class="note">or an OCI image layout (skopeo copy; docker save, once extracted)</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const tl = gsap.timeline({ paused: true });
+      // Line 1 and the shell are on screen from frame 0: the thumbnail. The export types itself.
+      I.type(tl, "#s1-c1", 0.3, 30);
+      // The tar drops in, a box of alpine's files.
+      tl.fromTo("#s1-box", { y: -860 }, { y: 0, duration: 0.6, ease: "bounce.out" }, 2.0);
+      I.print(tl, "#s1-p2", 2.3);
+      tl.fromTo("#s1-box .box-body", { scaleY: 1 }, { scaleY: 0.9, duration: 0.1, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 100%", immediateRender: false }, 2.22);
+      tl.fromTo("#s1-box .box-eye", { scaleY: 1 }, { scaleY: 0.2, duration: 0.08, ease: "power1.in", yoyo: true, repeat: 1, transformOrigin: "50% 50%", immediateRender: false }, 3.3);
+      // The flaps open and the files peek out.
+      tl.fromTo("#s1-flap-l", { rotation: 0 }, { rotation: -160, duration: 0.4, ease: "back.out(2)", transformOrigin: "6% 50%" }, 4.0);
+      tl.fromTo("#s1-flap-r", { rotation: 0 }, { rotation: 160, duration: 0.4, ease: "back.out(2)", transformOrigin: "94% 50%" }, 4.05);
+      C.wordsOut(tl, "#s1-l1", 4.3);
+      ["#s1-k1", "#s1-k2", "#s1-k3", "#s1-k4", "#s1-k5"].forEach((k, i) => {
+        const node = document.querySelector(k);
+        const dx = 360 - (parseFloat(node.style.left) + 90), dy = 610 - parseFloat(node.style.top);
+        tl.fromTo(k, { x: dx, y: dy, scale: 0.2, opacity: 0 }, { x: 0, y: 0, scale: 1, opacity: 1, duration: 0.5, ease: "back.out(1.8)" }, 4.4 + i * 0.15);
+      });
+      C.words(tl, "#s1-l2", 4.6);
+      tl.fromTo("#s1-oci", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 5.8);
+      tl.fromTo("#s1-box .box-eye", { scaleY: 1 }, { scaleY: 0.2, duration: 0.08, ease: "power1.in", yoyo: true, repeat: 1, transformOrigin: "50% 50%", immediateRender: false }, 6.6);
+      C.wordsOut(tl, "#s1-l2", 7.2);
+      C.words(tl, "#s1-l3", 7.4);
+      // Hand-off: the shell and the note go; the box and its files stay for the import.
+      tl.to(["#s1-shell", "#s1-oci"], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.05 }, 9.2);
+      C.wordsOut(tl, "#s1-l3", 9.5);
+      window.__timelines["s1"] = tl;
+    })();
+  </script>
+</template>
