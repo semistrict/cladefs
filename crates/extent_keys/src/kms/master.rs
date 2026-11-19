@@ -10,6 +10,7 @@
 
 use crate::{KEY_LEN, Secret};
 use aws_lc_rs::digest;
+use std::ffi::OsString;
 use zeroize::Zeroize as _;
 
 /// The variable holding the master keys: each 64 hexadecimal digits, separated by commas or white
@@ -150,7 +151,13 @@ impl MasterKeys {
     /// [`MASTER_KEY_FILE_VAR`] names; none if neither is set (or both are empty). Both set is
     /// refused. What was read of them is zeroed once parsed (the environment's own copy stays).
     pub fn from_env() -> Result<Option<Self>, String> {
-        let var = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+        Self::from_vars(&|name| std::env::var_os(name))
+    }
+
+    /// cladefs: the same, of the variables `var` gives by name (TASK-633.6): a bucket's own
+    /// (`bucket_cell::object_bucket::numbered_options`).
+    pub fn from_vars(var: &dyn Fn(&str) -> Option<OsString>) -> Result<Option<Self>, String> {
+        let var = |name| var(name).filter(|value| !value.is_empty());
         match (var(MASTER_KEY_VAR), var(MASTER_KEY_FILE_VAR)) {
             (None, None) => Ok(None),
             (Some(_), Some(_)) => Err(format!(
