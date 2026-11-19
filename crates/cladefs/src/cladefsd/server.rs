@@ -1809,12 +1809,12 @@ unsafe impl Sync for TransferArea {}
 impl TransferArea {
     /// The `len` bytes of the shared memory `fd`, mapped: `EINVAL` unless it has that many and is
     /// sealed against shrinking, which would fault the daemon's accesses past its new end.
-    /// cladefs: and unless its VM process wrote every page of it first, each charged to the VM
-    /// process's memory, as the kernel charges a page of shared memory to the process that faults
-    /// it in (`mm/shmem.c`): one the daemon faulted would be charged to the daemon, for as long as
-    /// the VM process kept the memory, the connection gone (TASK-547). Sealed here, once mapped,
-    /// against future writes, which takes the VM process's punching holes in it away, no page
-    /// of it the daemon touches is one it faults: the VM process's own mappings write on.
+    /// cladefs: sealed here, once mapped, against future writes, which takes the VM process's
+    /// punching holes in it away, the VM process's own mappings writing on; and accessed only
+    /// where its VM process wrote it first ([`TransferArea::range`]): the kernel charges a page of
+    /// shared memory to the process that faults it in (`mm/shmem.c`), and one the daemon faulted
+    /// would be charged to the daemon, for as long as the VM process kept the memory, the
+    /// connection gone (TASK-547).
     fn map(fd: std::os::fd::BorrowedFd<'_>, len: u64) -> Result<Self, Errno> {
         use std::os::fd::AsRawFd;
         if len == 0 || len > MAX_TRANSFER_AREA {
@@ -1855,20 +1855,19 @@ impl TransferArea {
             log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
             return Err(Errno::EINVAL);
         }
-        if !area.resident()? {
-            log::warn!("cladefsd: a transfer area whose VM process didn't write all of it");
-            return Err(Errno::EINVAL);
-        }
         Ok(area)
     }
 
-    /// cladefs: whether each of its pages is in memory, sealed: its VM process's, which wrote it.
-    fn resident(&self) -> Result<bool, Errno> {
-        let pages = self.len.div_ceil(crate::pages::page_size() as usize);
-        let mut resident = vec![0u8; pages];
-        // SAFETY: Of its mapping, a byte for each of its pages.
-        let done =
-            unsafe { libc::mincore(self.addr.as_ptr().cast(), self.len, resident.as_mut_ptr()) };
+    /// cladefs: whether each page of the `len` bytes at `offset`, within it, is in memory: its VM
+    /// process's, which wrote it, sealed as the area is against its punching it out again.
+    fn resident(&self, offset: usize, len: usize) -> Result<bool, Errno> {
+        let page = crate::pages::page_size() as usize;
+        let (start, end) = (offset / page * page, (offset + len).div_ceil(page) * page);
+        let mut resident = vec![0u8; (end - start) / page];
+        // SAFETY: Of its mapping, page-aligned, a byte for each of its pages.
+        let done = unsafe {
+            libc::mincore(self.addr.as_ptr().add(start).cast(), end - start, resident.as_mut_ptr())
+        };
         if done != 0 {
             log::warn!("cladefsd: a transfer area's pages: {}", std::io::Error::last_os_error());
             return Err(Errno::EINVAL);
@@ -1876,10 +1875,16 @@ impl TransferArea {
         Ok(resident.iter().all(|page| page & 1 == 1))
     }
 
-    /// The `len` bytes at `offset`, checked: `EINVAL` past its end.
+    /// The `len` bytes at `offset`, checked: `EINVAL` past its end; cladefs: and where its VM
+    /// process didn't write it first, which the daemon would fault in itself, charged to it
+    /// (TASK-547).
     fn range(&self, offset: u64, len: u64) -> Result<*mut u8, Errno> {
         let end = offset.checked_add(len).ok_or(Errno::EINVAL)?;
         if end > self.len as u64 {
+            return Err(Errno::EINVAL);
+        }
+        if len > 0 && !self.resident(offset as usize, len as usize)? {
+            log::warn!("cladefsd: a transfer area's bytes its VM process never wrote");
             return Err(Errno::EINVAL);
         }
         // SAFETY: Within the mapping.

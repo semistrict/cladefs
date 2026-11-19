@@ -1214,6 +1214,20 @@ fn area_fd(area: Area, given: &Mutex<Vec<OwnedFd>>) -> Option<OwnedFd> {
                 assert_eq!(libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK), 0);
             }
         }
+        // cladefs: written, as a VM process writes what of its area it uses, which the daemon
+        // accesses only so (TASK-547).
+        if sealed && len > 0 {
+            // SAFETY: Maps it, as large as it is, writes it, and unmaps it.
+            unsafe {
+                let len = len as usize;
+                let shared = libc::MAP_SHARED;
+                let rw = libc::PROT_READ | libc::PROT_WRITE;
+                let addr = libc::mmap(std::ptr::null_mut(), len, rw, shared, fd.as_raw_fd(), 0);
+                assert_ne!(addr, libc::MAP_FAILED);
+                addr.cast::<u8>().write_bytes(0, len);
+                assert_eq!(libc::munmap(addr, len), 0);
+            }
+        }
         fd
     };
     Some(match area {
@@ -2433,8 +2447,9 @@ fn payloads_of_kinds_that_carry_none_end_their_connections() {
 
 /// TASK-546: a reply to `MAPPINGS` is counted as its request is admitted, as many mappings as its
 /// window may hold, within the connection's credit, which holds one: a VM process asking for
-/// them over and over, their replies unread, is let go once they pass it. Before, each was
-/// admitted counted as nothing, thousands of replies of millions of mappings queued at once.
+/// them over and over, their replies unread, holds the daemon to its credit, and is let go once it
+/// passes it. Before, each was admitted counted as nothing, before any reply was made: here
+/// 256 of 32 MiB each, 8 GiB, queued at once.
 #[test]
 fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     host();
@@ -2442,13 +2457,42 @@ fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
     let (stores, socket, _mallory) = served_tenant(dir.path(), "mallory", MALLORY);
     let (sender, mut receiver, stream, _) =
         super::raw_connection(&socket, &stores.join("store"), 1 << 30);
-    // A window whose mappings' reply holds 64 MiB at most, past the credit's room besides in five.
-    let size = (64 << 20) / MAPPING_BYTES * page_size();
+    // A window every other page of which is mapped, zeros: their reply holds 32 MiB.
+    let (ps, count) = (page_size(), (32 << 20) / MAPPING_BYTES);
+    let size = 2 * count * ps;
     let window = Header::new(WINDOW, 2).with_args(&[size, 1]);
     assert_eq!(super::call(&sender, &mut receiver, window, &[]).header.status, 0);
-    let asked = (0..256).map(|n| Header::new(MAPPINGS, 3 + n));
-    super::send_until_let_go(&sender, asked);
-    super::assert_let_go(&sender, &stream);
+    let mapping = |n: u64| crate::WindowMapping {
+        window_offset: 2 * n * ps,
+        len: ps,
+        contents: crate::MappingContents::Zeros,
+    };
+    let most = MAX_PAYLOAD / MAPPING_BYTES;
+    let mut id = 3;
+    for first in (0..count).step_by(most as usize) {
+        let mappings: Vec<_> = (first..count.min(first + most)).map(mapping).collect();
+        let payload = super::super::codec::mappings_payload(&mappings);
+        sender.send(Header::new(MAP_MANY, id), &payload, &[]).unwrap();
+        // Its window's changes acknowledged as they come, then its reply.
+        loop {
+            let message = receiver.receive(|| 0).unwrap().unwrap();
+            if message.header.kind == REPLY {
+                assert_eq!(message.header.status, 0);
+                break;
+            }
+            if message.header.flags & STAGE_ACK != 0 {
+                sender.send(Header::new(ACK, message.header.id), &[], &[]).unwrap();
+            }
+        }
+        id += 1;
+    }
+    let credit = credit(size);
+    let held = peak_while(|| {
+        let asked = (0..256).map(|n| Header::new(MAPPINGS, id + n));
+        super::send_until_let_go(&sender, asked);
+        super::assert_let_go(&sender, &stream);
+    });
+    assert!(held <= credit + SLACK, "{} MiB held, past {} MiB", held >> 20, credit >> 20);
 }
 
 /// TASK-149.35: what the daemon holds of one tenant's VM processes' requests is bounded by the

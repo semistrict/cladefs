@@ -1310,6 +1310,9 @@ struct Transfer {
     free: Mutex<Vec<usize>>,
     /// How many reads and writes took a slot.
     used: AtomicU64,
+    /// cladefs: which slots this process wrote, each page, as it first took them
+    /// ([`Transfer::take`]).
+    written: [std::sync::atomic::AtomicBool; Transfer::SLOTS],
 }
 
 // SAFETY: Shared memory mapped for the area's life; each slot is one request's at a time.
@@ -1379,18 +1382,11 @@ impl Transfer {
         if addr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
-        // cladefs: each page written here first, so that it is this process's memory, the kernel
-        // charging it to whoever faults it in, not the daemon's, which takes none it would fault
-        // (TASK-547). Written, not advised (`MADV_POPULATE_WRITE`): a VM process's seccomp filter
-        // allows no more calls than it needs.
-        for page in (0..len).step_by(crate::pages::page_size() as usize) {
-            // SAFETY: Within the mapping just made, which nothing else uses yet.
-            unsafe { addr.cast::<u8>().add(page).write_volatile(0) };
-        }
         let transfer = Self {
             addr: NonNull::new(addr.cast()).unwrap(),
             free: Mutex::new((0..Self::SLOTS).rev().collect()),
             used: AtomicU64::new(0),
+            written: Default::default(),
         };
         Ok((transfer, file))
     }
@@ -1402,6 +1398,18 @@ impl Transfer {
         }
         let index = transfer.free.lock().unwrap().pop()?;
         transfer.used.fetch_add(1, Ordering::Relaxed);
+        // cladefs: each page of it written here first, as this process's memory, which the
+        // kernel charges to whoever faults it in: the daemon touches none it would fault
+        // (TASK-547). As it is first taken, not as the area is made: a connection that moves no
+        // data through it, as most forks' do, holds none of it. Written, not advised
+        // (`MADV_POPULATE_WRITE`): a VM process's seccomp filter allows no more calls than it
+        // needs.
+        if !transfer.written[index].swap(true, Ordering::Relaxed) {
+            for page in (0..Self::SLOT).step_by(crate::pages::page_size() as usize) {
+                // SAFETY: Within the slot, which this thread alone has, of the area's mapping.
+                unsafe { transfer.addr.as_ptr().add(index * Self::SLOT + page).write_volatile(0) };
+            }
+        }
         Some(Slot(Arc::new(TakenSlot { transfer: transfer.clone(), index })))
     }
 }

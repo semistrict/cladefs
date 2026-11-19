@@ -2797,11 +2797,12 @@ fn followers_pin_only_what_their_views_hold() {
     assert_eq!(follower.pin(made_up), Err(Errno::ENOENT));
 }
 
-/// TASK-547: a transfer area is the VM process's memory, each page of it written by the VM
-/// process before it gives it, which the kernel charges to the VM process; and the daemon seals
-/// it against writes once it has mapped it, so that no page of it is punched out to be faulted in
-/// again by the daemon, charged to the daemon for as long as the VM process keeps it. One whose
-/// pages the VM process never wrote, which the daemon would fault in itself, is refused.
+/// TASK-547: what of a transfer area the daemon accesses is the VM process's memory, each page of
+/// it written by the VM process first, which the kernel charges to the VM process; and the daemon
+/// seals the area against writes once it has mapped it, so that no page of it is punched out to be
+/// faulted in again by the daemon, charged to the daemon for as long as the VM process keeps it.
+/// A read into bytes of it the VM process never wrote, which the daemon would fault in itself, is
+/// refused; one into bytes it wrote is served.
 #[test]
 fn transfer_areas_are_their_vm_processes_memory() {
     use super::wire::*;
@@ -2812,53 +2813,50 @@ fn transfer_areas_are_their_vm_processes_memory() {
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
     let len = 1 << 20;
-    // Shared memory, sealed at its size, and written, if `written`, through a mapping kept.
-    let area = |written: bool| -> std::fs::File {
-        // SAFETY: The name is a C string.
-        let fd = unsafe { libc::memfd_create(c"area".as_ptr(), libc::MFD_ALLOW_SEALING) };
-        assert!(fd >= 0);
-        // SAFETY: Just made, owned here.
-        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-        file.set_len(len as u64).unwrap();
-        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
-        // SAFETY: Seals what this test made.
-        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
-        if written {
-            // SAFETY: Maps it, as large as it is, for the test's life.
-            let addr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    len,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_SHARED,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            assert_ne!(addr, libc::MAP_FAILED);
-            // SAFETY: Within the mapping.
-            unsafe { addr.cast::<u8>().write_bytes(1, len) };
-        }
-        file
+    // SAFETY: The name is a C string.
+    let fd = unsafe { libc::memfd_create(c"area".as_ptr(), libc::MFD_ALLOW_SEALING) };
+    assert!(fd >= 0);
+    // SAFETY: Just made, owned here.
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    file.set_len(len as u64).unwrap();
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+    // SAFETY: Seals what this test made.
+    assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
+    // SAFETY: Maps it, as large as it is, for the test's life.
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
     };
-    let given = |file: &std::fs::File, path: &str| {
-        let (sender, mut receiver, _stream, _) =
-            raw_connection(&socket, &dir.path().join(path), 1 << 24);
-        let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
-        let fds = [file.as_fd()];
-        sender.send(transfer, &[], &fds).unwrap();
-        let reply = receiver.receive(|| 0).unwrap().unwrap();
-        (reply.header.status, sender, receiver)
+    assert_ne!(addr, libc::MAP_FAILED);
+    // Its first half written, as the slots a VM process used.
+    // SAFETY: Within the mapping.
+    unsafe { addr.cast::<u8>().write_bytes(1, len / 2) };
+    let (sender, mut receiver, _stream, cell) =
+        raw_connection(&socket, &dir.path().join("store"), 1 << 24);
+    let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
+    sender.send(transfer, &[], &[file.as_fd()]).unwrap();
+    assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
+    let written = Header::new(WRITE, 3).with_args(&[cell, 1]);
+    assert_eq!(call(&sender, &mut receiver, written, &pattern(2, BLOCK)).header.status, 0);
+    let read_at = |id: u64, at: u64| {
+        Header::new(READ, id).with_args(&[cell, 1, 0, BLOCK as u64, at]).with_flags(READ_TRANSFER)
     };
-    let unwritten = area(false);
-    assert_eq!(given(&unwritten, "unwritten").0, -Errno::EINVAL.raw());
-    let written = area(true);
-    let (status, _sender, _receiver) = given(&written, "written");
-    assert_eq!(status, 0);
+    let unwritten = call(&sender, &mut receiver, read_at(4, len as u64 / 2), &[]);
+    assert_eq!(unwritten.header.status, -Errno::EINVAL.raw());
+    assert_eq!(call(&sender, &mut receiver, read_at(5, 0), &[]).header.status, 0);
+    // SAFETY: Within the mapping, which the daemon wrote and replied of.
+    let read = unsafe { std::slice::from_raw_parts(addr.cast::<u8>(), BLOCK) };
+    assert_eq!(read, &pattern(2, BLOCK)[..]);
     // Sealed against writes: no page of it punched out.
     let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
     // SAFETY: Of what this test made.
-    let punched = unsafe { libc::fallocate(written.as_raw_fd(), mode, 0, 4096) };
+    let punched = unsafe { libc::fallocate(file.as_raw_fd(), mode, 0, 4096) };
     assert_eq!(punched, -1, "a page of the area punched out");
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
 }
