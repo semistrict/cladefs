@@ -5,12 +5,12 @@
 # Killer: cladefsd::tests::hostile::a_tenants_in_flight_data_is_bounded
 --- a/crates/cladefs/src/cladefsd/server.rs
 +++ b/crates/cladefs/src/cladefsd/server.rs
-@@ -1072,7 +1072,7 @@
+@@ -1214,7 +1214,7 @@ impl Connection {
          }
          // Admitted one at a time, as its messages are received, so nothing came in meanwhile.
          if bytes > 0 {
--            self.tenant.in_flight().take(bytes).await;
+-            self.take_in_flight(bytes).await?;
 +            self.tenant.in_flight().add(bytes);
          }
          self.requests.with(Mutex::lock).stream_bytes += bytes;
-         Ok(())
+         let (connection, tenant) = (self.this.clone(), self.tenant.clone());
