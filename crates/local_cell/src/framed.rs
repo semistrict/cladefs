@@ -7,7 +7,6 @@
 
 use crate::dir::File;
 use crate::raw::RawFile;
-use crate::sync::Mutex;
 use anyhow::{Context as _, Error, bail};
 use extent_frame::{ALIGN, Corrupt, Encoding, Frame, Keys, PART, Parts, Stored, TRAILER};
 use std::collections::{BTreeMap, HashMap};
@@ -199,6 +198,19 @@ pub(crate) struct Files<K, F> {
     by_use: BTreeMap<u64, K>,
     clock: u64,
     limit: usize,
+}
+
+/// cladefs: its files let go of least lately read first: the last holder of a file writes its
+/// dirty pages back as it goes, and so in an order the cell's reads decide, not the map's, which
+/// differs from one run to the next (TASK-675).
+impl<K, F> Drop for Files<K, F> {
+    fn drop(&mut self) {
+        let mut files: Vec<(Arc<Framed<F>>, u64)> =
+            std::mem::take(&mut self.files).into_values().collect();
+        files.sort_unstable_by_key(|(_, used)| *used);
+        // A vector's elements drop in order, first to last.
+        drop(files);
+    }
 }
 
 impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
@@ -448,9 +460,13 @@ pub fn unpacks() -> u64 {
 /// host's governor counts and evicts as it does every cache on a data path; and a file's parts
 /// gone with the file, which no read finds after (TASK-603). Each store kept its own before, 32
 /// parts, 32 MiB, for its life, outside any budget, of files long gone.
+///
+/// Its lock is std's under Shuttle too: no thread waits holding it, nor yields, so no schedule is
+/// one of its interleavings; and a framed file's drop, which takes it, is no point of a schedule,
+/// whatever order a map drops its files in (TASK-675).
 #[derive(Default)]
 pub struct Unpacked {
-    kept: Mutex<Recent>,
+    kept: std::sync::Mutex<Recent>,
 }
 
 /// A part unpacked: its file's opening, and its number.
@@ -488,10 +504,23 @@ impl Recent {
 /// cladefs: the most bytes of parts unpacked the process keeps: 64 parts' of a MiB.
 const UNPACKED_BYTES: u64 = 64 << 20;
 
-/// cladefs: the process's parts unpacked lately ([`Unpacked`]).
+/// cladefs: the process's parts unpacked lately ([`Unpacked`]). Under Shuttle, an execution's: each
+/// run of a schedule starts with nothing unpacked, as its replay does, and runs at once evict none
+/// of each other's parts (TASK-675).
 pub fn unpacked() -> &'static Unpacked {
-    static UNPACKED: std::sync::LazyLock<Unpacked> = std::sync::LazyLock::new(Unpacked::default);
-    &UNPACKED
+    #[cfg(not(feature = "shuttle"))]
+    {
+        static UNPACKED: std::sync::LazyLock<Unpacked> =
+            std::sync::LazyLock::new(Unpacked::default);
+        &UNPACKED
+    }
+    #[cfg(feature = "shuttle")]
+    {
+        shuttle::lazy_static! {
+            static ref UNPACKED: Unpacked = Unpacked::default();
+        }
+        &UNPACKED
+    }
 }
 
 impl Unpacked {

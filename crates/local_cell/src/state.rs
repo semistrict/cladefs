@@ -952,7 +952,27 @@ impl<F> Default for Uncommitted<F> {
     }
 }
 
+/// cladefs: the extents open let go of in the order they were opened, as [`Uncommitted::let_go_open`]
+/// lets them go.
+impl<F> Drop for Uncommitted<F> {
+    fn drop(&mut self) {
+        self.let_go_open();
+    }
+}
+
 impl<F> Uncommitted<F> {
+    /// cladefs: lets go of the extents open in the order they were opened: the last holder of an
+    /// open extent's raw file writes its dirty pages back as it goes, and so in an order the cell's
+    /// writes decide, not the map's, which differs from one run to the next, as
+    /// [`Uncommitted::open_extents`] orders them: so that where a crash cuts the writes back off,
+    /// and what it leaves, do not (TASK-675).
+    fn let_go_open(&mut self) {
+        let mut open: Vec<Open<F>> = self.open.drain().map(|(_, open)| open).collect();
+        open.sort_unstable_by_key(|open| open.opening);
+        // A vector's elements drop in order, first to last.
+        drop(open);
+    }
+
     /// Where `extent`'s data goes, if it is open.
     pub fn packing(&self, extent: ExtentId) -> Option<&Packing<F>> {
         self.open.get(&extent).map(|open| &open.packing)
@@ -1065,7 +1085,7 @@ impl<F> Uncommitted<F> {
 
     /// The changes since the last commit, for the commit, which seals the extents open.
     pub fn take(&mut self) -> Vec<Change> {
-        self.open.clear();
+        self.let_go_open();
         self.overwritten = 0;
         self.let_go = 0;
         self.open_bytes = 0;
