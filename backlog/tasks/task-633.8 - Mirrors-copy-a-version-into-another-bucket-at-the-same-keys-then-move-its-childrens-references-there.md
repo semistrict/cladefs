@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-19 14:16'
+updated_date: '2026-11-19 17:22'
 labels:
   - bucket
   - multi-region
@@ -31,16 +31,16 @@ Until its version is in its own bucket, a child across buckets reads its parent'
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 The first fork of a version into another bucket starts its mirror there: every object of its checkpoint and their moves copied (server-side where the clouds allow, GET and PUT otherwise), then the marker; later forks find it under way or done
-- [ ] #2 Children's references move to the mirror's bucket in the order the spec checks; reads of the version come from the mirror once its marker exists
-- [ ] #3 A mirror interrupted by a crash or a bucket down resumes; the mirror goes when no reference to it stands
-- [ ] #4 Tests: a child reads cold and forks with its parent's bucket failing after its mirror; a crash at each step of a mirror leaves nothing needed gone
+- [x] #2 Children's references move to the mirror's bucket in the order the spec checks; reads of the version come from the mirror once its marker exists
+- [x] #3 A mirror interrupted by a crash or a bucket down resumes; the mirror goes when no reference to it stands
+- [x] #4 Tests: a child reads cold and forks with its parent's bucket failing after its mirror; a crash at each step of a mirror leaves nothing needed gone
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -92,4 +92,8 @@ Spec updated (delegated, TLC on the Mac, 24 models in 18 min): versions cut shar
 - mirrorRereadsBeforeRetiring: refer_here retired the children's references in A without reading the head again; after B's pass read P deleted and listed B, a mirror begun again moved a forking child to B and the pass deleted the copy (NothingNeededGone). Fixed: the head read again, references retired in A only if it names the version.
 - mirrorHoldsUnmarked: the hold written before the marker read, a mirror begun again rewrote it after B's pass deleted the holds (HoldsMarked, a leak keeping P's cell for good). Fixed: the hold written only once the marker is read absent.
 Tests: the dying test's per-step references (a mirror resumed after P's deletion leaves the A reference), a marked re-run writing no hold; hand mutants of both fail them. Each spec mutation finds its violation; Reaches* reach; liveness holds.
+
+Landed (2026-11-19) on main: the mirror protocol through three review rounds and the updated spec. Verification at 251bfc560 (rebased on main): macOS clippy + workspace 2748/2748 + sim 44/44; Linux/ubu1 workspace 3082/3082 and every part but the guest suite, whose three failures are main's too: fxfs-guest (TASK-657, EACCES at 348c59327), fxfs-guest-pgbench and -dax (TASK-659, commit latency; main's head 316239/685733 within 50 ms, the branch 275167/666966). TLC: every model and mutation of specs/buckets; scripts/upstream-changes.py --check passes.
+AC #2 (references move in the spec's order; reads from the mirror once marked): forks_refer_where_their_versions_are_mirrored, versions_forked_into_another_bucket_are_mirrored_there, objects_of_versions_mirrored_here_are_read_here_first. AC #3 (resumes; goes when no reference stands): mirrors_hold_their_pins_alone, mirrors_dying_at_each_step_leave_nothing_needed_gone, copies_of_other_buckets_versions_are_kept_while_needed, sweeps_pass_over_copies_as_copies. AC #4: children_of_a_mirrored_version_live_with_its_bucket_out_of_reach, mirrors_dying_at_each_step_leave_nothing_needed_gone.
+Open: AC #1's server-side copies (S3 CopyObject, GCS rewrite, Azure Put Blob From URL): copies are GET+PUT only. Plan step 6's simulation profile with mirrors: TASK-633.10 (its checker must learn copies in B).
 <!-- SECTION:NOTES:END -->
