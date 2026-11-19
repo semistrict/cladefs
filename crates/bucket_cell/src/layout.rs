@@ -324,6 +324,11 @@ pub fn mirror(parent: CellId, at: u64) -> String {
     format!("{}{MIRRORS}{}", parent.prefix(), Padded(at))
 }
 
+/// cladefs: the prefix of the moves of `cell`'s objects ([`moves`]).
+pub fn moves_prefix(cell: CellId) -> String {
+    format!("{}{MOVES}", cell.prefix())
+}
+
 /// cladefs: the prefix of the markers of `parent`'s versions mirrored in a bucket ([`mirror`]).
 pub fn mirrors(parent: CellId) -> String {
     format!("{}{MIRRORS}", parent.prefix())

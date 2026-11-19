@@ -72,7 +72,16 @@ pub struct ObjectBucket {
     route: Option<Route>,
     /// cladefs: its own store, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
     own: std::sync::OnceLock<Arc<ObjectBucket>>,
+    /// cladefs: whether this bucket holds a mirror of a version of each cell of another bucket it
+    /// was asked of, and when it last listed that cell's markers ([`ObjectBucket::mirrored`]).
+    mirrored:
+        std::sync::Mutex<std::collections::HashMap<layout::CellId, (bool, std::time::Instant)>>,
 }
+
+/// cladefs: how long a bucket goes by what it last listed of a cell's mirror markers here before it
+/// lists them again ([`ObjectBucket::mirrored`]): a mirror marked since is read from here at most
+/// this late, its objects from the cell's own bucket meanwhile, which holds them too.
+const MIRRORED_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// cladefs: what opens the bucket numbered `number`, other than `home`, for `home`'s requests of
 /// that bucket's cells (TASK-633.4): [`Registered`] reads it in the registry of buckets.
@@ -563,7 +572,7 @@ impl ObjectBucket {
         let prefix = prefix.trim_matches('/').to_owned();
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        let (route, own) = (None, std::sync::OnceLock::new());
+        let (route, own, mirrored) = (None, std::sync::OnceLock::new(), Default::default());
         Self {
             store,
             pages,
@@ -576,6 +585,7 @@ impl ObjectBucket {
             objectids,
             route,
             own,
+            mirrored,
         }
     }
 
@@ -630,6 +640,61 @@ impl ObjectBucket {
         };
         *route.home.lock().unwrap() = Some(identity.number);
         Ok(Some(identity.number))
+    }
+
+    /// cladefs: whether this bucket holds a mirror of a version of `cell`, a cell of another bucket
+    /// (doc-23, Mirrors; TASK-633.8): any of its markers listed here, at most [`MIRRORED_FOR`]
+    /// ago. Each marker found tells the epoch of the checkpoint at its version ([`Bucket::known`]),
+    /// so that the version's state is found by key here, the cell's head in its own bucket unread.
+    /// A listing failed holds none.
+    async fn mirrored(&self, cell: layout::CellId) -> bool {
+        if let Some(&(held, listed)) = self.mirrored.lock().unwrap().get(&cell)
+            && listed.elapsed() < MIRRORED_FOR
+        {
+            return held;
+        }
+        let listed = std::time::Instant::now();
+        let markers = self.store_list(&layout::mirrors(cell)).await.unwrap_or_default();
+        let mut held = false;
+        for meta in markers {
+            let layout::Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
+            let Ok(object) = self.store_get(&meta.key).await else { continue };
+            let Ok(marker) = layout::decode::<layout::Mirror>(&object.bytes) else { continue };
+            self.known.named(cell, at, marker.epoch);
+            held = true;
+        }
+        self.mirrored.lock().unwrap().insert(cell, (held, listed));
+        held
+    }
+
+    /// cladefs: whether a read of `key`, an object written once of a cell of another bucket, is
+    /// tried here first: this bucket holding a mirror of a version of that cell, which copied it
+    /// here at its key, byte for byte, if it is one of that version's (TASK-633.8).
+    async fn read_here_first(&self, key: &str) -> bool {
+        let Some(route) = &self.route else { return false };
+        let Some(number) = layout::routed_to(key) else { return false };
+        if !crate::peer::served(key) || self.own_number(route).await.ok().flatten() == Some(number)
+        {
+            return false;
+        }
+        let Some(cell) = layout::cell_of(key) else { return false };
+        self.mirrored(cell).await
+    }
+
+    /// cladefs: whether a listing of `prefix`, under a cell of another bucket's moves, takes this
+    /// bucket's too: those of the objects a mirror copied here (TASK-633.8).
+    async fn lists_here_too(&self, prefix: &str) -> bool {
+        let Some(route) = &self.route else { return false };
+        let (Some(number), Some(cell)) = (layout::routed_to(prefix), layout::cell_of(prefix))
+        else {
+            return false;
+        };
+        if !prefix.starts_with(&layout::moves_prefix(cell))
+            || self.own_number(route).await.ok().flatten() == Some(number)
+        {
+            return false;
+        }
+        self.mirrored(cell).await
     }
 
     /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
@@ -1270,7 +1335,13 @@ impl Bucket for ObjectBucket {
         Some(&self.known)
     }
 
+    /// cladefs: an object a mirror copied here read here first (TASK-633.8), else its cell's bucket.
     async fn get(&self, key: &str) -> Result<Object, Error> {
+        if self.read_here_first(key).await
+            && let Ok(object) = self.store_get(key).await
+        {
+            return Ok(object);
+        }
         match self.member(key).await? {
             Some(member) => member.store_get(key).await,
             None => self.store_get(key).await,
@@ -1278,6 +1349,11 @@ impl Bucket for ObjectBucket {
     }
 
     async fn get_range(&self, key: &str, range: ByteRange) -> Result<Vec<u8>, Error> {
+        if self.read_here_first(key).await
+            && let Ok(bytes) = self.store_get_range(key, range.clone()).await
+        {
+            return Ok(bytes);
+        }
         match self.member(key).await? {
             Some(member) => member.store_get_range(key, range).await,
             None => self.store_get_range(key, range).await,
@@ -1285,13 +1361,33 @@ impl Bucket for ObjectBucket {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
+        if self.read_here_first(key).await
+            && let Ok(meta) = self.store_head(key).await
+        {
+            return Ok(meta);
+        }
         match self.member(key).await? {
             Some(member) => member.store_head(key).await,
             None => self.store_head(key).await,
         }
     }
 
+    /// cladefs: the moves of a cell of another bucket a mirror copied here listed with its own
+    /// bucket's, or alone if that bucket is out of reach (TASK-633.8): moves are written once, at
+    /// keys of their own.
     async fn list(&self, prefix: &str) -> Result<Vec<Meta>, Error> {
+        if self.lists_here_too(prefix).await {
+            let mut listed = self.store_list(prefix).await?;
+            let there = match self.member(prefix).await {
+                Ok(Some(member)) => member.store_list(prefix).await.unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let here: std::collections::BTreeSet<String> =
+                listed.iter().map(|meta| meta.key.clone()).collect();
+            listed.extend(there.into_iter().filter(|meta| !here.contains(&meta.key)));
+            listed.sort_by(|a, b| a.key.cmp(&b.key));
+            return Ok(listed);
+        }
         match self.member(prefix).await? {
             Some(member) => member.store_list(prefix).await,
             None => self.store_list(prefix).await,
@@ -1392,6 +1488,63 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
 pub(crate) mod tests {
     use super::*;
     use crate::layout::test_cell;
+
+    /// TASK-633.8: a bucket holding a mirror of a version of another bucket's cell reads that cell's
+    /// objects written once here first, the cell's own bucket for those not copied; learns the
+    /// version's checkpoint epoch from the marker; and lists that cell's moves here and there. A
+    /// bucket holding no marker of the cell reads its bucket alone.
+    #[test]
+    fn objects_of_versions_mirrored_here_are_read_here_first() {
+        use crate::identity::{self, Details};
+        use crate::layout::Mirror;
+        futures::executor::block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let url = |name: &str| {
+                std::fs::create_dir(dir.path().join(name)).unwrap();
+                format!("file://{}", dir.path().join(name).display())
+            };
+            let (home_url, other_url) = (url("home"), url("other"));
+            let (home, other) = (
+                ObjectBucket::from_url(&home_url).unwrap(),
+                ObjectBucket::from_url(&other_url).unwrap(),
+            );
+            identity::format(&home, &Details::default()).await.unwrap();
+            let details = Details { url: Some(other_url.clone()), ..Details::default() };
+            identity::add(&home, &Details::default(), &other, details).await.unwrap();
+            let routed = || {
+                let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
+                ObjectBucket::from_url(&home_url).unwrap().routed(resolve)
+            };
+            let parent = test_cell(2 << 48 | 1);
+            let (copied, only_there) =
+                (layout::segment(parent, 1, 2), layout::segment(parent, 2, 2));
+            let moves_there = layout::moves(&only_there, 7).unwrap();
+            let moves_here = layout::moves(&copied, 6).unwrap();
+            async fn put(bucket: &ObjectBucket, key: &str, bytes: &[u8]) {
+                bucket.store_put(key, bytes.to_vec().into(), PutMode::Overwrite).await.unwrap();
+            }
+            for key in [&copied, &only_there, &moves_there] {
+                put(&other, key, b"there").await;
+            }
+            put(&home, &copied, b"here").await;
+            put(&home, &moves_here, b"here").await;
+            let read = |bucket: ObjectBucket, key: String| async move {
+                bucket.get(&key).await.map(|object| object.bytes).unwrap()
+            };
+            // No marker here: the cell's bucket alone.
+            assert_eq!(read(routed(), copied.clone()).await, b"there");
+            put(&home, &layout::mirror(parent, 2), &layout::encode(&Mirror::of(5))).await;
+            let marked = routed();
+            assert_eq!(marked.get(&copied).await.unwrap().bytes, b"here");
+            assert_eq!(marked.get(&only_there).await.unwrap().bytes, b"there");
+            assert_eq!(marked.known.epoch(parent, 2), Some(5), "the marker's epoch, learned");
+            let moves = marked.list(&layout::moves_prefix(parent)).await.unwrap();
+            let keys: Vec<String> = moves.into_iter().map(|meta| meta.key).collect();
+            let mut expected = vec![moves_here.clone(), moves_there.clone()];
+            expected.sort();
+            assert_eq!(keys, expected);
+        });
+    }
 
     /// TASK-633.8: a pass over the copy of another bucket's cell's version here keeps it while
     /// that cell's head names the version, a child refers here, or a mirror is under way (a pin);
