@@ -73,6 +73,18 @@ Each run keeps what the host and the run spent every 30 s (`resources.log`):
 scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all
 ```
 
+`fxfs-guest-python-sandbox` times a data-analysis sandbox from its fork to its first answers
+(TASK-665). Its base is Python with a uv-installed project (pandas, pyarrow and marimo) and a year
+of New York's taxi trips, none of it compiled to bytecode. It runs on three extent daemons with
+part caches that are each other's peers, and one RustFS bucket 25 ms away. Each sandbox starts
+marimo and runs a notebook whose answers are checked, cold and then warm on each host, timed phase
+by phase, with each host's bucket GETs and peer parts. It runs on ubu1 as a measurement, and its
+first numbers are in `docs/measurements/ubu1-python-sandbox-2026-11-19T1842Z-7786f0b5`:
+
+```sh
+scripts/python-sandbox-host.sh   # CLADEFS_PYSANDBOX_ROUNDS, default 2
+```
+
 ## Before a candidate goes to LangSmith
 
 LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
