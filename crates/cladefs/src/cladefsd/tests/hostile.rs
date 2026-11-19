@@ -304,6 +304,25 @@ struct Hostile {
     last_words: LastWords,
 }
 
+impl Hostile {
+    /// cladefs: whether it says a payload on a kind that carries none, an `ACK`, a
+    /// `STAGE_COUNTS` or a `STAGE_PRIVATE_COUNTS`, which ends its connection there (TASK-581): its
+    /// store commits nothing after.
+    fn ends_its_connection(&self) -> bool {
+        let carries = |payload: &Payload| match payload {
+            Payload::Bytes(bytes) => !bytes.is_empty(),
+            Payload::Filled(_, len) => *len > 0,
+            Payload::Extents(extents) => !extents.is_empty(),
+            Payload::Path(_) => true,
+        };
+        self.acts.iter().any(|act| {
+            matches!(act, Act::Say(said)
+                if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&said.kind)
+                    && carries(&said.payload))
+        })
+    }
+}
+
 /// What alice does, through her one connection, as the protocol allows: each result as her model
 /// says. What it picks among her extents, and where in her window, is reduced to what she has.
 #[derive(Clone, Copy, Debug)]
@@ -1933,8 +1952,8 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 // It has one store at most, however many of its OPENs were at once (TASK-150.5).
                 let opened = seen.opens.iter().filter(|(_, _, status)| *status == 0).count();
                 prop_assert!(opened <= 1, "a connection opened {opened} stores: {:?}", seen.opens);
-                // Its store, if it writes one, commits.
-                if let Some(status) = seen.committed {
+                // Its store, if it writes one, commits: unless it said what ends its connection.
+                if let Some(status) = seen.committed.filter(|_| !hostile.ends_its_connection()) {
                     prop_assert_eq!(
                         status,
                         Some(0),
