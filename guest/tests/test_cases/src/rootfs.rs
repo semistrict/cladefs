@@ -11,7 +11,7 @@
 //!
 //! cladefs: and the files its build takes from the host ([`Download`]), each fetched once into the
 //! host's cache, checked by its sha256, and given to the build in a context directory of its own
-//! (TASK-297).
+//! (TASK-297); and the files it takes from the case itself ([`ContextFile`], TASK-665).
 
 use anyhow::{Context, bail};
 use std::fs;
@@ -20,18 +20,27 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// cladefs: a root filesystem's image: its Containerfile, and the files its build takes from the
-/// host, which it copies in by their names (`COPY NAME ...`).
+/// host and from the case, which it copies in by their names (`COPY NAME ...`).
 #[derive(Clone, Copy)]
 pub struct Image {
     pub containerfile: &'static str,
     pub downloads: &'static [Download],
+    pub files: &'static [ContextFile],
 }
 
 impl Image {
     /// The image `containerfile` builds, taking nothing from the host.
     pub const fn new(containerfile: &'static str) -> Self {
-        Self { containerfile, downloads: &[] }
+        Self { containerfile, downloads: &[], files: &[] }
     }
+}
+
+/// cladefs: a file of the case's own an image's build takes, such as a project's manifest and
+/// lock file, written into its context by its name (TASK-665).
+#[derive(Clone, Copy)]
+pub struct ContextFile {
+    pub name: &'static str,
+    pub contents: &'static str,
 }
 
 /// cladefs: a file an image's build takes from the host, fetched into the host's cache at most once
@@ -135,11 +144,15 @@ impl Download {
     }
 }
 
-/// The tag of `image`: of its Containerfile, and its downloads' names and hashes.
+/// The tag of `image`: of its Containerfile, its downloads' names and hashes, and its own files'
+/// names and hashes.
 fn image_tag(image: &Image) -> anyhow::Result<String> {
     let mut described = image.containerfile.to_owned();
     for download in image.downloads {
         described += &format!("\n{} {}", download.name, download.sha256);
+    }
+    for file in image.files {
+        described += &format!("\n{} {}", file.name, sha256(file.contents.as_bytes())?);
     }
     Ok(format!("cladefs-test-{}", &sha256(described.as_bytes())?[..16]))
 }
@@ -173,6 +186,10 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
         let cached = download.fetched(&cache)?;
         fs::copy(&cached, context.path().join(download.name))
             .with_context(|| format!("{}", cached.display()))?;
+    }
+    for file in image.files {
+        fs::write(context.path().join(file.name), file.contents)
+            .with_context(|| format!("writing {} into the build's context", file.name))?;
     }
 
     // Build image (podman layer cache makes this fast when unchanged)

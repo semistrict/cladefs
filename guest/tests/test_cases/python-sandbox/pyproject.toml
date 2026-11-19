@@ -1,0 +1,15 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# fxfs-guest-python-sandbox's project (TASK-665): what a data-analysis sandbox's base holds,
+# installed by `uv sync`, never compiled to bytecode there.
+[project]
+name = "taxi-analysis"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "marimo==0.25.2",
+    "pandas==3.1.1",
+    "pyarrow==26.0.1",
+]

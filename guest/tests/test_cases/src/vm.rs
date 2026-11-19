@@ -558,6 +558,11 @@ impl Firecracker {
         Ok(())
     }
 
+    /// cladefs: its console's file, which a test may read as the VM runs (TASK-665).
+    pub fn console(&self) -> &Path {
+        &self.console
+    }
+
     /// Whether the VM is running still.
     pub fn running(&mut self) -> anyhow::Result<bool> {
         Ok(self.child.try_wait()?.is_none())
