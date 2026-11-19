@@ -696,6 +696,50 @@ mod tests {
         )
     }
 
+    /// TASK-537.3.6 (doc-21; the spec's aloneSwitch): a configuration a writer asked to name past
+    /// a commit is named by the acknowledgement that first names that commit, in the same swap of
+    /// the head, and by none before it (Codex's review: not a swap of its own after).
+    #[test]
+    fn configurations_switch_with_the_acknowledgement_past_their_commit() {
+        use crate::layout::{Configuration, Fsync, Member, Wish};
+        futures::executor::block_on(async {
+            let bucket = memory();
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let kms = crate::keys::testing::host_kms();
+            let read = head::read(&*bucket, cell).await;
+            let wish = Wish::new(1, Fsync::Replicated);
+            let taking = head::Taking { holder: 10, replication: wish, ..head::Taking::default() };
+            let (held, keys) =
+                crate::keys::taking(&*bucket, &kms, cell, read, taking).await.unwrap();
+            let ring = crate::keys::ring(&*bucket, &keys, cell, &held.head, true).await.unwrap();
+            let writer = Writer::holding(bucket.clone(), cell, held, None, ring).await.unwrap();
+            let alone = Configuration {
+                number: 2,
+                epoch: writer.epoch(),
+                f: 0,
+                members: vec![Member { address: "me:1".into(), incarnation: 7 }],
+            };
+            writer.configure_past(2, alone.clone());
+            let named = || async {
+                let head = head::get(&*bucket, cell).await.unwrap().unwrap();
+                head.replication.unwrap().configuration
+            };
+            let first = add(&writer, Commit { tag: 1, ..Commit::default() }).unwrap();
+            let second = add(&writer, Commit { tag: 2, ..Commit::default() }).unwrap();
+            writer.upload(first).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(named().await, None, "named before its commit was");
+            assert!(writer.switching());
+            writer.upload(second).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            let head = head::get(&*bucket, cell).await.unwrap().unwrap();
+            assert_eq!(head.end, second + 1, "the swap naming the commit");
+            assert_eq!(head.replication.unwrap().configuration, Some(alone));
+            assert!(!writer.switching());
+        });
+    }
+
     /// A writer another took the cell from uploads its segment, at its own key, but its swap of
     /// the head fails: it stops, and says why; it takes no segment more (TASK-407).
     #[test]

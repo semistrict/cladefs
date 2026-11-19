@@ -240,7 +240,12 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let stat = daemons[1].control.stat_cell(&taken).unwrap();
     assert!(stat.degraded && stat.active_replicas == 0, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
-    assert_eq!(configuration(&bucket, cell).2, [addresses[1].clone()]);
+    let (number, _, alone) = configuration(&bucket, cell);
+    assert_eq!(alone, [addresses[1].clone()]);
+    // As StatCell says, the head naming it (Codex's review).
+    until("the configuration said", || {
+        daemons[1].control.stat_cell(&taken).unwrap().configuration == number
+    });
 
     // The lost host back, a disk of its own new: the cell is replicated again, of all three.
     let mut peers = vec![addresses[0].clone()];
@@ -293,11 +298,21 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
     write(&client, 5..=8);
     reachable(&bucket, true);
 
-    // Both members lost: its commits wait for the bucket, uploaded at once.
+    // Both members lost, and the bucket out of reach: a commit told durable waits for the bucket
+    // (Codex's review), and is told so once it holds it.
     for member in &now[1..] {
         daemons[host(member)].kill();
     }
-    write(&client, 9..=12);
+    reachable(&bucket, false);
+    let waiting = std::thread::spawn(move || {
+        write(&client, 9..=9);
+        client
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(!waiting.is_finished(), "told durable on the writer's disk alone");
+    reachable(&bucket, true);
+    let client = waiting.join().unwrap();
+    write(&client, 10..=12);
     let stat = daemons[0].control.stat_cell(&store).unwrap();
     assert!(stat.degraded, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);

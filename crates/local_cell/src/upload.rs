@@ -1554,6 +1554,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     true => continue,
                     false => stale = false,
                 }
+                // What StatCell says of it, the head naming it now (Codex's review).
+                self.configured(configuration.number);
                 if configuration.f == 0 && wish.f == 0 {
                     self.store().unreplicate();
                     log::info!("cladefs: {cell:?} replicated no more, as its head asks");
@@ -1598,6 +1600,15 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return;
                 }
             }
+        }
+    }
+
+    /// cladefs: the head names the writer's configuration `number`, as its status says from now.
+    fn configured(&self, number: u64) {
+        if let Some(Taking { replication: Some(replicated), .. }) =
+            self.progress.lock().unwrap().taking.as_mut()
+        {
+            replicated.configuration = Some(number);
         }
     }
 
@@ -1681,11 +1692,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         }
         writer.configure(configuration.clone()).await?;
         replicator.swapped();
-        if let Some(Taking { replication: Some(replicated), .. }) =
-            self.progress.lock().unwrap().taking.as_mut()
-        {
-            replicated.configuration = Some(number);
-        }
+        self.configured(number);
         log::info!(
             "cladefs: {cell:?} replicated in configuration {number}, of f {f}, with {:?}, \
              replacing {}",
