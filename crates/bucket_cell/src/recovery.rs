@@ -1158,8 +1158,19 @@ fn states_at<'a, B: Bucket>(
         // epoch its head names it by: none, it is lost.
         let known = bucket.known().filter(|_| by_key);
         let mut epochs = Vec::with_capacity(unread.len());
+        // cladefs: a cell of another bucket, its versions' epochs learned first from the markers
+        // of their mirrors in this one, if any (TASK-633.8): its head unread, in its own bucket.
+        let mut learned = false;
         for &at in &unread {
-            let epoch = match known.and_then(|known| known.epoch(cell, at)) {
+            let mut epoch = known.and_then(|known| known.epoch(cell, at));
+            if epoch.is_none()
+                && !learned
+                && let (Some(known), Some(here)) = (known, bucket.mirrors())
+            {
+                here.learn(cell).await;
+                (learned, epoch) = (true, known.epoch(cell, at));
+            }
+            let epoch = match epoch {
                 Some(epoch) => epoch,
                 None => {
                     if head.is_none() {

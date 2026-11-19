@@ -88,6 +88,13 @@ pub trait Here: Send + Sync {
 
     /// Creates `bytes` at `key` in this bucket, whatever cell `key` is of ([`bucket::create`]).
     fn create<'a>(&'a self, key: &'a str, bytes: Vec<u8>) -> BoxFuture<'a, ()>;
+
+    /// Learns the epochs of the checkpoints at the versions of `cell`, a cell of another bucket,
+    /// whose mirrors here are marked, from their markers ([`crate::known::Known::named`]): a
+    /// recovery through one of them then reads its checkpoint by key, here, `cell`'s head, in its
+    /// own bucket, unread, which may be out of reach (doc-23, What the parent's bucket being out
+    /// of reach costs). Nothing for a cell of this bucket's own.
+    fn learn(&self, cell: CellId) -> BoxFuture<'_, ()>;
 }
 
 /// A mirror's pin, held: its bytes, its own, and the version of its last write.
@@ -157,6 +164,7 @@ pub async fn mirror(
     let Some(mut pin) = Pin::take(own, parent, at).await else {
         return Ok(Mirrored::UnderWay);
     };
+    failpoint!("mirror::pinned");
     let marker = layout::mirror(parent, at);
     let copied = match bucket::get(own, &marker).await {
         // Marked already, by a mirror begun before: its copy whole.
@@ -164,6 +172,7 @@ pub async fn mirror(
         None => match copy(bucket, own, &mut pin, parent, at).await? {
             Ok((copied, epoch)) if pin.refresh(own, true).await => {
                 bucket::create(own, &marker, layout::encode(&Mirror::of(epoch))).await;
+                failpoint!("mirror::marked");
                 copied
             }
             Ok(_) => return Ok(Mirrored::GaveUp(TAKEN.to_owned())),
@@ -174,6 +183,7 @@ pub async fn mirror(
         },
     };
     let moved = refer_here(bucket, own, number, parent, at).await;
+    failpoint!("mirror::referred");
     pin.drop(own).await;
     Ok(Mirrored::Done { copied, moved })
 }
@@ -198,6 +208,7 @@ async fn copy(
     let Some(epoch) = named else {
         return Ok(Err(format!("{parent}'s head names no version at {at:x}")));
     };
+    failpoint!("mirror::checked");
     let checkpoints = Checkpoints::new(bucket, 1);
     let (state, touched) = match recovery::recover_at(&checkpoints, parent, at).await {
         Ok(recovered) => recovered,
@@ -232,6 +243,7 @@ async fn copy(
             return Ok(Err(format!("{}: gone from its bucket", gone.0)));
         }
     }
+    failpoint!("mirror::copied");
     Ok(Ok((keys.len(), epoch)))
 }
 
@@ -243,6 +255,8 @@ async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> bool {
     }
     let Some(object) = bucket::get(bucket, key).await else { return false };
     bucket::create(own, key, object.bytes).await;
+    // A crash with some objects copied, others not (a test's).
+    fail::fail_point!("mirror::copying");
     true
 }
 
@@ -267,6 +281,8 @@ async fn refer_here(
         bucket::create(own, &meta.key, object.bytes).await;
         moved.push(meta.key);
     }
+    // A crash with the references written here, still standing there (a test's).
+    fail::fail_point!("mirror::moved");
     let keys: Vec<&str> = moved.iter().map(String::as_str).collect();
     lifecycle::retire(bucket, &keys).await;
     moved.len()

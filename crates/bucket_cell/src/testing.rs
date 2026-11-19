@@ -591,6 +591,23 @@ impl crate::mirror::Here for SimBucket {
             crate::bucket::create(&*own, key, bytes).await;
         })
     }
+
+    fn learn(&self, cell: CellId) -> futures::future::BoxFuture<'_, ()> {
+        let own = self.own();
+        let mine = self.region_of(&cell.prefix()) == self.home;
+        Box::pin(async move {
+            if mine {
+                return;
+            }
+            for meta in crate::bucket::list(&*own, &layout::mirrors(cell)).await {
+                let Kind::Mirror { at, .. } = layout::kind(&meta.key) else { continue };
+                let Some(found) = crate::bucket::get(&*own, &meta.key).await else { continue };
+                if let Ok(marker) = layout::decode::<layout::Mirror>(&found.bytes) {
+                    self.known.named(cell, at, marker.epoch);
+                }
+            }
+        })
+    }
 }
 
 /// The same bucket, its requests taking effect at once and never failing: the simulation's view,
@@ -1051,6 +1068,29 @@ fn cell_of_key(key: &str) -> Option<CellId> {
         Kind::Moves { .. } => cell_of_key(&layout::moved_from(key)?),
         _ => None,
     }
+}
+
+/// cladefs: [`fork_version`], the child's head given its keys, as a host's fork gives them
+/// ([`crate::keys::inheriting`], TASK-411.4): its KEK, its DEK and those it inherits, so that its
+/// ring reads no head of its parent's (TASK-633.5), which may be in a bucket out of reach.
+pub async fn fork_version_given(
+    bucket: &impl Bucket,
+    child: CellId,
+    id: u64,
+    origin: layout::Origin,
+    owner: u64,
+) -> Result<(), crate::Error> {
+    let kms = crate::keys::testing::host_kms();
+    let source = ring_of(bucket, origin.parent).await?;
+    let forked = layout::Child { cell: child, owner };
+    let inheriting = crate::keys::inheriting(&kms, &source, forked).await?;
+    let (given, parents) = (Some(inheriting.given()), crate::keys::Parents::Kms(&kms, None));
+    let lifecycle =
+        crate::lifecycle::fork_version_keyed(bucket, child, id, origin, (owner, given), parents);
+    if lifecycle.await?.is_some() {
+        inheriting.made();
+    }
+    Ok(())
 }
 
 /// cladefs: the ring a reader of `cell`'s store holds, as a host opening it reads it: its head,
