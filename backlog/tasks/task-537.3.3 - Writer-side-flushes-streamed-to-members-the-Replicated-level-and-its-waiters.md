@@ -1,11 +1,11 @@
 ---
 id: TASK-537.3.3
 title: 'Writer side: flushes streamed to members, the Replicated level and its waiters'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18T17:02:00Z'
-updated_date: '2026-11-18T23:20:00Z'
+updated_date: '2026-11-19T13:55:00Z'
 labels:
   - durability
   - peers
@@ -30,17 +30,17 @@ doc-21 step 3. The writer must send each flush records (Held) to its members, ke
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each flush sends its records to every member at once with the local sync; members ends tracked
-- [ ] #2 Replicated waiters woken at f+1 copies (the writers own counting) or at Uploaded; none on f = 0
-- [ ] #3 fsync level per cell honoured in commit_and_wait; sync family waits for Replicated in a replicated cell
-- [ ] #4 Tests: commits released by member acks with the bucket stalled; released by Uploaded with members down
+- [x] #1 Each flush sends its records to every member at once with the local sync; members ends tracked
+- [x] #2 Replicated waiters woken at f+1 copies (the writers own counting) or at Uploaded; none on f = 0
+- [x] #3 fsync level per cell honoured in commit_and_wait; sync family waits for Replicated in a replicated cell
+- [x] #4 Tests: commits released by member acks with the bucket stalled; released by Uploaded with members down
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -62,4 +62,12 @@ doc-21 step 3. The writer must send each flush records (Held) to its members, ke
 Pushed to main as 81a4b0200 (the user: push after compile and unit tests): 86 selected tests pass (the recovery test among them), clippy clean. Not done: the verifying-reviewer and Codex reviews, and the full ubu1 suite.
 
 Reviews done: Codex (aca489437: sends before the local sync, a spool failing breaks replication alone, drops race no reads; waiter wake test) and verifying-reviewer (9f8ae8dbb with 537.3.4's: own extents before records). Blind spots: the waiter test only hit the satisfied path; MemDir never fails a rename over a file in tests. Remaining for Done: the full ubu1 suite (sudo).
+
+Full ubu1 suite at 54adcd5ca, run as root via systemd-run --user (t537c, t537d): 3037 workspace tests pass, all local_cell replicate::tests and local_cell::replicated among them (replicated_waiters_are_woken_by_members_or_the_bucket covers AC 4: released by member acks with the bucket stalled, by Uploaded with members down), cladefs::replicated 2/2, other cladefs suites pass. Guest cases: 14 of 16 pass in t537c; fxfs-guest-pgbench and fxfs-guest-pgbench-dax failed there with ENOSPC on scratch, filled by other agents' runs (TASK-636), and passed when rerun one at a time on scratch after it was grown to 768G (t537d). The results mark the commit -dirty but source.txt records a clean 54adcd5ca, so some tracked file was probably changed during the build; not chased. DoD 1: Linux only, no macOS host here. DoD 2: scripts/upstream-changes.py --check fails on paths in crates outside this task (storage_units, zx*, test_util, storage_xts: not in Fuchsia at 90e54e090), not on anything this task changed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Writers now stream each flush's records to their configuration's members as it syncs locally and track each member's ends. Replicated waiters are released at f+1 copies (the writer's own counts) or at Uploaded, never on f = 0. commit_and_wait honours the per-cell fsync level, and the sync family waits for Replicated in a replicated cell. Two reviews (Codex, verifying-reviewer) found and fixed sends before the local sync, a failing spool breaking only replication, and own extents ordered after their records. Verified by the full ubu1 suite at 54adcd5ca: all workspace and cladefs tests pass, and all guest cases pass, the two pgbench cases on a rerun after a scratch ENOSPC. Open: no macOS run, and upstream-changes --check fails on crates outside this task.
+<!-- SECTION:FINAL_SUMMARY:END -->
