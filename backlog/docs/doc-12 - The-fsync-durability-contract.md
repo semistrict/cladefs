@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: 2026-10-31 22:17
-updated_date: '2026-11-19T05:17:00Z'
+updated_date: '2026-11-19T05:40:00Z'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -101,7 +101,7 @@ as above. With f = 1 (three members):
 | Writer's host lost, its disk with it | kept: a take on another host fences the two members and recovers from them | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` (three daemons, the writer's killed and its directory removed, the bucket out of reach meanwhile); local_cell's `takes_recover_what_a_lost_writers_members_hold` |
 | Writer's host lost, the other two left | kept, as above; the taker has no configuration of its own to be had, so it serves degraded (f = 0), the head naming the configuration before until the acknowledgement naming what it recovered names its own (doc-21), and is replicated again as a third host answers | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` |
 | Writer's host and a member lost | Replicated commits not yet uploaded may go: more than f failures. A take is refused until f+1 of the members other than the old writer answer | as fsync | local_cell's `takes_without_enough_members_to_fence_are_refused` |
-| A member lost, writer up | kept; the writer replaces the member within a second, the new one given the tail, and its commits are Replicated again | kept | cladefs's `lost_members_are_replaced_then_the_bucket_releases_commits` (four daemons, the bucket out of reach after the replacement); local_cell's `lost_members_are_replaced_and_commits_stay_replicated` |
+| A member lost, writer up | kept, Replicated on the other member meanwhile; the writer replaces it after 30 s (`CLADEFSD_REPLACE_AFTER`), the new one given the tail, and its commits are Replicated again | kept | cladefs's `lost_members_are_replaced_then_the_bucket_releases_commits` (four daemons, the bucket out of reach after the replacement); local_cell's `lost_members_are_replaced_and_commits_stay_replicated` |
 | Both members lost, writer up | kept: degraded, its commits wait for Uploaded, uploaded at once; with no replacement to be had it drops to f = 0 once the bucket holds what it told, and comes back as members answer | kept | cladefs's `lost_members_are_replaced_then_the_bucket_releases_commits`; local_cell's `degraded_cells_drop_to_f_zero_and_come_back` |
 | The bucket failing | kept, Replicated as before, waiting at the lag bound | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` (the commits told durable while the bucket is out of reach, its directory moved aside, the head checked unchanged after) |
 | The bucket failing and both members lost | waits, as the bucket failing does above | waits | **no test of both at once** |

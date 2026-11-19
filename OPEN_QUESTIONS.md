@@ -1,9 +1,5 @@
 # Open questions
 
-## Run the full ubu1 suite of TASK-537.3 where sudo works (2026-11-18, updated 2026-11-19)
-
-Needed: `CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_RUN=t537b scripts/test-host.sh /tmp/t537b-results` at main (46dc3412f or later), from a shell whose sudo works. Why: this session runs under "no new privileges", and the driver needs sudo for the root tests and to hand back ~/.cargo and ~/.rustup. It covers all of TASK-537.3 (batches 1 to 6), and the guest-level runs (VMs) none of my runs could make. Recommend: run it; TASK-537.3.3 waits on it, the rest of TASK-537.3 is Done. Until answered: every crate the work touched passes under fxjob (local_cell 360 tests, bucket_cell's writer, head and wal tests, cladefs's replication, peers and control tests, the daemon tests also as uid 0 in a user namespace), clippy is clean, the 23 replication TLA+ models and mutations pass, and the work is on main.
-
 ## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
 
 Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
@@ -38,8 +34,8 @@ Seen, not acted on: /mnt/fxdax-scratch reached 0 bytes free, every fxjob failing
 ## Replicated cells: replacing members, dropping to f = 0 (TASK-537.3.5, 2026-11-18)
 
 Decided without you:
-- **A member down for 1 s, or refusing the writer, is replaced at once**, every member of the new configuration picked afresh (the rendezvous hash of the new number) and sent the whole unacknowledged tail, survivors too. A peer daemon's restart therefore costs a replacement and a resend of the tail. *Instead:* a longer grace (5-30 s), keeping the configuration through restarts at the cost of running at f-1 meanwhile; or survivors kept, their copy shared between configurations (doc-21 keeps configurations' logs apart). *Undo:* `REPLACE_AFTER` in `upload.rs`.
-- **Degraded for 1 s with no replacement to be had, the writer drops to f = 0** (once the bucket holds all it told replicated), so that a later take needs no member of a lost configuration, and goes back to the f the head asks for as peers answer. *Instead:* stay at the lost configuration until members return, which leaves the cell untakeable while they are gone (a take must fence f+1 of them). *Undo:* drop the fallback in `Shared::keep`.
+- **A member down for 30 s, or refusing the writer at once, is replaced** (you, 2026-11-19: 1 s was far too short), every member of the new configuration picked afresh (the rendezvous hash of the new number) and sent the whole unacknowledged tail, survivors too. Meanwhile one member down of f = 1 leaves commits Replicated on the other, and a cell with no quorum uploads at once. Per daemon: `CLADEFSD_REPLACE_AFTER` (seconds). *Undo:* `upload::Options::replace_after`'s default.
+- **Degraded for `CLADEFSD_REPLACE_AFTER` (30 s) with no replacement to be had, the writer drops to f = 0** (once the bucket holds all it told replicated), so that a later take needs no member of a lost configuration, and goes back to the f the head asks for as peers answer. *Instead:* stay at the lost configuration until members return, which leaves the cell untakeable while they are gone (a take must fence f+1 of them). *Undo:* drop the fallback in `Shared::keep`.
 - **A full member (`RESOURCE_EXHAUSTED`) refuses rather than is retried**, and the replacement avoids it once.
 - **Degraded is judged at once, not after 1 s**: the stats and metrics say so from the first failed append.
 

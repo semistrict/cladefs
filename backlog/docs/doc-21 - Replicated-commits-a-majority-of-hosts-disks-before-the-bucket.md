@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19 05:37'
+updated_date: '2026-11-19T05:40:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -226,7 +226,8 @@ swap lands.
 As built (TASK-537.3.5, `upload::Shared::keep` and `replace`, `replicate::Replicator::replacing`):
 
 - A member refusing the writer (another incarnation, or full: `RESOURCE_EXHAUSTED` refuses rather
-  than retries), or down for 1 s, is replaced. Every member of `c+1` is picked afresh by the
+  than retries), or down for 30 s (`CLADEFSD_REPLACE_AFTER`; the user's word, 2026-11-19: 1 s was
+  far too short, a peer daemon's restart costing a resend of the tail), is replaced. Every member of `c+1` is picked afresh by the
   rendezvous hash of `(cell, c+1)` over the peers that answer, the refusing aside, and every one of
   them, a survivor of `c` too, is sent the whole spooled tail into `c+1`'s own logs: no member's
   copy is shared between configurations. A replacement is swapped in once f of its members that
@@ -260,7 +261,8 @@ As built (TASK-537.3.5): degraded is judged at once, not after 1 s (a member is 
 failed append), and also covers a configuration of f = 0, a fenced writer, and a broken spool.
 While degraded, the writer asks its uploader to close and upload every 250 ms that commits wait,
 and a waiter for Replicated asks for its upload at once, as it does while a replacement is under
-way. A member down for 1 s starts a replacement; degraded for 1 s and no replacement to be had,
+way. A member down for 30 s (`CLADEFSD_REPLACE_AFTER`) starts a replacement; degraded that long
+and no replacement to be had,
 the writer drops to f = 0, and replaces that with a configuration of the f its head asks for as
 peers answer again. StatCell says `degraded`, `members_up` and `active_replicas` (the active
 configuration's f); `/metrics` says `cladefsd_replication_degraded{cell}` and

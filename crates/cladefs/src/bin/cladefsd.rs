@@ -107,6 +107,9 @@
 //! their writers' logs there until the bucket does, each cell's to the lag bound in bytes, and
 //! sweeps what their heads name no more every ten minutes. The directory's incarnation, made with
 //! it, names this host in their configurations: one made anew, its disk lost, is another member.
+//! A writer of a replicated cell replaces a member down for `CLADEFSD_REPLACE_AFTER` seconds
+//! (default 30), and, its configuration holding no quorum that long, none to be had, drops it to
+//! f = 0 once the bucket holds what it told.
 //! However far behind the bucket its stores fall, what waits for it is on the host's disk, each
 //! store's write-ahead log, bounded by its lag (backlog doc-7, Uploads); what of it the daemon
 //! holds in memory is what it uploads at once, `CLADEFSD_UPLOAD_MEMORY` bytes at most (512 MiB
@@ -158,6 +161,8 @@ fn main() -> anyhow::Result<()> {
     cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     cladefs::cladefsd::cache_config().map_err(anyhow::Error::msg)?;
+    // cladefs: how long its replicated cells' members are down before they are replaced (doc-21).
+    cladefs::cladefsd::replace_after().map_err(anyhow::Error::msg)?;
     // cladefs: its disks governed, each but a headroom of it its, or as much as CLADEFSD_DISK_BYTES
     // says (doc-22, TASK-539.9).
     let disks = cladefs::cladefsd::disk::DiskConfig::from_env().map_err(anyhow::Error::msg)?;

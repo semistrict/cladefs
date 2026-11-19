@@ -44,7 +44,10 @@ built (`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build in
 refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
 from a cache on the test host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
-number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
+number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). An agent's shell runs under no_new_privs, which stops sudo
+however sudoers reads: run a driver needing root (`CLADEFS_TEST_HOST=local` ones) through
+`systemd-run --user --wait --pipe -- ...`, a service of the user's manager that does not inherit
+it, rather than leave the run to the user (the user's word, 2026-11-19). ubu1's setup is its `~/docs/system-setup.d` steps: what a
 run needs installed goes there as a step, never into a run.
 
 ## Commit in batches, only what compiled and passed its tests

@@ -605,7 +605,35 @@ fn keeping() -> Result<local_cell::upload::Options, Errno> {
     let held = Some(super::memory::held_parts().clone());
     // cladefs: and the hosts its replicated cells' configurations are made of (doc-21).
     let members = crate::bucket::members().map(local_cell::upload::MembersOf);
-    Ok(local_cell::upload::Options { cache, held, token, interval, members, ..Default::default() })
+    let replace_after = replace_after().map_err(|err| {
+        log::error!("cladefsd: {err}");
+        Errno::EINVAL
+    })?;
+    Ok(local_cell::upload::Options {
+        cache,
+        held,
+        token,
+        interval,
+        members,
+        replace_after,
+        ..Default::default()
+    })
+}
+
+/// cladefs: how long a member of a replicated cell's configuration is down before its writer
+/// replaces it, and the cell degraded before it drops to f = 0 (doc-21, TASK-537.3.5): the
+/// seconds `CLADEFSD_REPLACE_AFTER` says, a positive number, or 30. Read at the daemon's start, to
+/// refuse what it can't use, and as each store opens.
+pub fn replace_after() -> Result<std::time::Duration, String> {
+    let Some(set) = std::env::var_os("CLADEFSD_REPLACE_AFTER") else {
+        return Ok(local_cell::upload::Options::default().replace_after);
+    };
+    match set.to_str().and_then(|seconds| seconds.parse::<u64>().ok()) {
+        Some(0) | None => {
+            Err(format!("CLADEFSD_REPLACE_AFTER must be a positive number of seconds: {set:?}"))
+        }
+        Some(seconds) => Ok(std::time::Duration::from_secs(seconds)),
+    }
 }
 
 /// How long the stores' durable commits wait at most before they upload: the uploader's default;

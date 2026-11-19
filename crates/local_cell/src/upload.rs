@@ -250,11 +250,6 @@ impl From<anyhow::Error> for Failure {
 /// before held, before it fails (doc-21, TASK-537.3.4).
 const SEEDING: Duration = Duration::from_secs(60);
 
-/// cladefs: how long a member of a replicated cell's configuration is down before a replacement
-/// is picked; and how long its cell is degraded, no replacement to be had, before it drops to
-/// f = 0 (doc-21, Degraded; TASK-537.3.5).
-const REPLACE_AFTER: Duration = Duration::from_secs(1);
-
 /// cladefs: how often a replicated cell's configuration is looked at ([`Shared::keep`]).
 const KEEPING: Duration = Duration::from_millis(250);
 
@@ -294,6 +289,13 @@ pub struct Options {
     /// cladefs: the hosts a replicated cell's configurations are made of, and how they are reached
     /// (doc-21, TASK-537.3.3): the daemon's peers, if it has them and a replica directory.
     pub members: Option<MembersOf>,
+    /// cladefs: how long a member of a replicated cell's configuration is down before a
+    /// replacement is picked, and how long the cell is degraded, no replacement to be had, before
+    /// it drops to f = 0 (doc-21, Degraded; TASK-537.3.5). 30 s: a replacement sends the whole tail
+    /// not uploaded to 2f members, which a peer daemon's restart should not cost, and meanwhile
+    /// one member down of f = 1 leaves the cell's commits replicated on the other, and a cell with
+    /// no quorum its commits uploaded at once (the user's word, 2026-11-19: 1 s was far too short).
+    pub replace_after: Duration,
 }
 
 /// cladefs: what a host knows of the hosts its replicated cells' configurations are made of
@@ -366,6 +368,7 @@ impl Default for Options {
             filling_wait: Duration::from_secs(30),
             replication: None,
             members: None,
+            replace_after: Duration::from_secs(30),
         }
     }
 }
@@ -1496,7 +1499,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
     /// cladefs: keeps the configuration of a replicated cell, `configuration` as its taking
     /// activated, what its head asks for, `wish`, until the uploader stops, or its writer is fenced
     /// (doc-21, Replacing a member and Degraded; TASK-537.3.5):
-    /// - a member refusing the writer, or down for [`REPLACE_AFTER`], is replaced, by a
+    /// - a member refusing the writer, or down for [`Options::replace_after`], is replaced, by a
     ///   configuration of `wish`'s f, picked from the host's peers, the refusing aside;
     /// - its commits uploaded at once, rather than at the interval, while degraded: fewer than f
     ///   members take what it sends, their waiters left to the bucket;
@@ -1562,7 +1565,8 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
                     return;
                 }
             }
-            let replace = configuration.f != wish.f || replicator.lost(REPLACE_AFTER);
+            let replace_after = self.options.replace_after;
+            let replace = configuration.f != wish.f || replicator.lost(replace_after);
             if !replace || std::time::Instant::now() < next {
                 continue;
             }
@@ -1574,7 +1578,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
             let replacing = (&configuration, &mut number, wish.f);
             let mut new = self.replace(&writer, &replicator, replacing, &mut avoid).await;
             // Degraded, and no member to be had: f = 0, once the bucket holds what it told.
-            let long = degraded.is_some_and(|since| since.elapsed() >= REPLACE_AFTER);
+            let long = degraded.is_some_and(|since| since.elapsed() >= replace_after);
             if matches!(new, Ok(None)) && wish.f >= 1 && configuration.f >= 1 && long {
                 let replacing = (&configuration, &mut number, 0);
                 new = self.replace(&writer, &replicator, replacing, &mut avoid).await;

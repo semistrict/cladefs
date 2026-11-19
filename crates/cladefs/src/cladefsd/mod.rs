@@ -114,7 +114,7 @@ pub(crate) mod wire;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-pub use cells::cache_config;
+pub use cells::{cache_config, replace_after};
 pub use client::{CellClient, DaemonConnection, Unmapped, spawn_on_replies};
 pub use control::serve_control;
 pub use device::DaemonDevice;

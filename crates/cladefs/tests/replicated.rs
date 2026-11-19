@@ -69,6 +69,8 @@ fn daemon(dir: &Path, bucket: &Path, peers: &[String]) -> Daemon {
         .env("CLADEFSD_STATS", dir.join("stats"))
         .env("CLADEFSD_GRPC", &control)
         .env("CLADEFSD_REPLICAS", dir.join("replicas"))
+        // Members replaced within the tests' patience, not the default 30 s.
+        .env("CLADEFSD_REPLACE_AFTER", "1")
         .env("CLADEFSD_PEER_ADDRESS", &peers[0])
         .env("CLADEFSD_PEERS", peers.join(","));
     let process = KillOnDrop(command.spawn().unwrap());

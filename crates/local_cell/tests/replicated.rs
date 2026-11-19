@@ -376,6 +376,8 @@ impl Host {
             interval: Duration::from_secs(3600),
             replication,
             members: Some(upload::MembersOf(Arc::new(peers))),
+            // Members replaced, and cells dropped to f = 0, within the tests' patience.
+            replace_after: Duration::from_secs(1),
             ..upload::Options::default()
         };
         upload::open(recovering, OPTIONS, self.bucket.clone(), (holder, options), &runtime)
