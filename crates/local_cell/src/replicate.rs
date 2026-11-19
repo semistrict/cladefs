@@ -75,57 +75,37 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 }
 
 /// What of `logs`, what members hold of a replicated cell `cell`'s writer's logs by their numbers,
-/// goes on from `last`, the last commit the cell's head names (TASK-537.3.4): those segments,
-/// whole, after the one whose commits end at `last`, a member dropping what the head names after
-/// the head names it; all of them if they begin after `last`. Refused if they neither reach `last`
-/// nor begin right after it: what is between, on no member, may be commits a guest was told are
-/// replicated.
+/// goes on from what the cell's head names, the bucket holding its segments to `end` and its
+/// commits to `last` (TASK-537.3.4): the logs of the segments from `end` on. The head acknowledges
+/// whole segments, and a member drops none it does not name, so that a member's copy of a segment
+/// before `end`, whole or partial, is the bucket's already (TASK-537.3.5's review: a member still
+/// holding part of a segment the head named, as its drop never came). Refused if the first commit
+/// they hold does not follow `last`: what is between, on no member, may be commits a guest was
+/// told are replicated.
 pub fn trimmed(
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
-    last: Option<u64>,
+    (end, last): (u64, Option<u64>),
 ) -> Result<Vec<(u64, Vec<u8>)>, anyhow::Error> {
     use crate::layout::SegmentId;
     use extent_frame::segment::epoch_of;
+    let kept: Vec<(u64, Vec<u8>)> =
+        logs.iter().filter(|(log, _)| log >> 1 >= end).cloned().collect();
     let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
-    // Each segment's commits, in order, and the last commit as of the end of each.
-    let numbers: std::collections::BTreeSet<u64> = logs.iter().map(|(log, _)| log >> 1).collect();
-    let mut heads = Vec::with_capacity(numbers.len());
-    let mut first_commit = None;
-    let mut head = None;
-    for &number in &numbers {
-        let replica = logs.iter().find(|(log, _)| *log == log_of(number));
-        let commits = replica
-            .map(|(_, bytes)| crate::wal::replica_commits(bytes, segment(log_of(number))))
-            .unwrap_or_default();
-        first_commit = first_commit.or(commits.first().copied());
-        head = commits.last().copied().or(head);
-        heads.push((number, head));
-    }
-    let landed = heads.iter().position(|&(_, head)| head.is_some() && head == last);
-    let kept: std::collections::BTreeSet<u64> = match landed {
-        Some(at) => heads[at + 1..].iter().map(|&(number, _)| number).collect(),
-        None => {
-            let follows = match (last, first_commit) {
-                (_, None) => true,
-                (None, Some(first)) => epoch_of(first) <= 1,
-                (Some(last), Some(first)) => epoch_of(first) == epoch_of(last) + 1,
-            };
-            let behind = match (last, head) {
-                (Some(last), Some(head)) => epoch_of(head) <= epoch_of(last),
-                _ => false,
-            };
-            match (follows, behind) {
-                (true, _) => numbers.clone(),
-                (false, true) => Default::default(),
-                (false, false) => anyhow::bail!(
-                    "the members' logs of {cell:?} begin at commit {first_commit:?}, neither reaching \
-                     the head's last, {last:?}, nor going on from it"
-                ),
-            }
-        }
+    let first = (kept.iter().filter(|(log, _)| log & 1 == 0)).find_map(|(log, bytes)| {
+        crate::wal::replica_commits(bytes, segment(*log)).first().copied()
+    });
+    let follows = match (last, first) {
+        (_, None) => true,
+        (None, Some(first)) => epoch_of(first) <= 1,
+        (Some(last), Some(first)) => epoch_of(first) == epoch_of(last) + 1,
     };
-    Ok(logs.iter().filter(|(log, _)| kept.contains(&(log >> 1))).cloned().collect())
+    anyhow::ensure!(
+        follows,
+        "the members' logs of {cell:?} from segment {end} begin at commit {first:?}, not going on \
+         from the head's last, {last:?}"
+    );
+    Ok(kept)
 }
 
 /// The last commit `logs`, what members hold of a replicated cell `cell`'s writer's logs, name.
@@ -168,12 +148,12 @@ pub fn restore<D: crate::Dir>(
     dir: &D,
     cell: extent_frame::segment::CellId,
     logs: &[(u64, Vec<u8>)],
-    last: Option<u64>,
+    (end, last): (u64, Option<u64>),
 ) -> Result<(), anyhow::Error> {
     use crate::layout::{SegmentId, extent_path, log_path, open_segment_path};
     use anyhow::Context as _;
     let segment = |log: u64| SegmentId { cell: cell.id, number: log >> 1 };
-    let kept = trimmed(cell, logs, last)?;
+    let kept = trimmed(cell, logs, (end, last))?;
     let write = |path: &str, bytes: &[u8], data: bool| -> Result<(), anyhow::Error> {
         let file = dir.create(path, data).with_context(|| format!("making {path}"))?;
         if !bytes.is_empty() {
@@ -456,6 +436,14 @@ impl Replicator {
     /// Starts a thread serving each of `links`, the members from `first` on.
     fn serve(&self, first: usize, links: Vec<Arc<dyn MemberLink>>) {
         let mut threads = self.threads.lock().unwrap();
+        // Those of members retired that finished, joined (Codex's review of TASK-537.3.5).
+        let (finished, running) = std::mem::take(&mut *threads)
+            .into_iter()
+            .partition::<Vec<_>, _>(|thread| thread.is_finished());
+        *threads = running;
+        for thread in finished {
+            let _ = thread.join();
+        }
         for (m, link) in (first..).zip(links) {
             let shared = self.shared.clone();
             let thread = std::thread::Builder::new()
@@ -556,13 +544,24 @@ impl Replicator {
 
     /// Whether the replacement may be swapped into the head, the bucket's head acknowledging the
     /// commits through `uploaded`: once f+1 of its members, the writer's own copy one, hold
-    /// every commit told replicated (installFirst), or the bucket does, as a replacement of f = 0
-    /// waits for (zeroAfterUpload). No replacement, none.
+    /// every commit told replicated (installFirst), the bucket's counting as held; or, of f = 0,
+    /// once the bucket holds them (zeroAfterUpload). Of f >= 1, never on the bucket alone, as the
+    /// spec's Issue: its members are to take what the writer sends before they are its
+    /// configuration (TASK-537.3.5's review). No replacement, none.
     pub fn installed(&self, uploaded: u64) -> bool {
         let state = self.shared.state.lock().unwrap();
         let Some(pending) = &state.pending else { return false };
-        uploaded >= state.replicated
-            || state.quorum(pending).is_some_and(|holds| holds >= state.replicated)
+        match pending.f {
+            0 => uploaded >= state.replicated,
+            // Of those up: one that refuses, or failed what it was sent, is no member to swap in,
+            // whatever the bucket holds of what it was to take (the review's: members picked as
+            // they answered, then refusing every append).
+            f => {
+                let members = &state.members[pending.members.clone()];
+                let up = members.iter().filter(|member| member.down.is_none() && !member.refused);
+                up.filter(|member| member.holds >= state.replicated).count() >= f
+            }
+        }
     }
 
     /// The replacement's swap landed: it alone counts from now, the members of the configuration
@@ -581,10 +580,14 @@ impl Replicator {
     }
 
     /// Gives the replacement up, its swap never sent: the active configuration alone counts
-    /// again.
-    pub fn abandon(&self) {
+    /// again. The indices, among its members after the writer, of those that refused the writer.
+    pub fn abandon(&self) -> Vec<usize> {
         let mut state = self.shared.state.lock().unwrap();
+        let mut refusing = Vec::new();
         if let Some(pending) = state.pending.take() {
+            let first = pending.members.start;
+            refusing = (pending.members.clone()).filter(|&m| state.members[m].refused).collect();
+            refusing.iter_mut().for_each(|m| *m -= first);
             retire(&mut state, pending);
         }
         let moved = state.advance();
@@ -593,6 +596,7 @@ impl Replicator {
         if moved {
             (self.shared.notify)();
         }
+        refusing
     }
 
     /// Whether a replacement is under way.
@@ -713,6 +717,7 @@ fn retire(state: &mut State, group: Group) {
     for member in &mut state.members[group.members] {
         member.retired = true;
         member.marks.clear();
+        member.ends.clear();
     }
 }
 
@@ -777,6 +782,10 @@ fn serve(shared: &Shared, m: usize, link: &dyn MemberLink) {
             (Sending::Drop(through), Ok(_)) => {
                 state.members[m].dropped = Some(through);
                 state.members[m].ends.retain(|&log, _| log > through);
+                // Up again, if it was down: its first answer may be a drop, nothing else left to
+                // send it (TASK-537.3.5's review).
+                state.members[m].down = None;
+                wait = Duration::from_millis(50);
                 false
             }
             (Sending::Append { log, .. }, Ok(Some(end))) => {

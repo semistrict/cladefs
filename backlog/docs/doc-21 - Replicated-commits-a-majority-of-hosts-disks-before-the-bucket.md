@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T01:42:00Z'
+updated_date: '2026-11-19T02:17:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -117,6 +117,12 @@ than take them.
 | `ReadLog{cell, config, n, from} → stream bytes` | A log's bytes, for recovery. |
 | `Drop{cell, below_config}` | Removes the logs of configurations older than this one. |
 
+As built (TASK-537.3.5's reviews), `DropLogs` with `through` removes that configuration's logs to
+`through` and nothing of any other, and without it removes every configuration's before the one
+named. A replacement's members are sent the first as the bucket takes segments while the head still
+names the configuration before, whose logs on the same host a take would read; only a writer
+whose head names the new configuration sends the second.
+
 The peer channels today have a 5 s per-request timeout (`cladefsd/peers.rs:187`), which would cut a
 stream. `Append` gets its own endpoint, with keepalives and no request timeout.
 
@@ -168,6 +174,10 @@ The new writer `W'`, at the VM manager's take, on any host:
    `W'`'s chain. Members may have dropped segments the head acknowledged, so the replica tail can
    start *after* `last_commit`. `rebase` must accept a log whose first commit follows `last_commit`
    (today it requires the position of `last_commit` itself, or an empty log).
+   As built (`replicate::trimmed`, TASK-537.3.5's review): the head acknowledges whole segments,
+   and names how many (`end`), so a take keeps the members' logs of segments from `end` on and
+   checks that their first commit follows `last_commit`. A member's copy of a segment before `end`,
+   whole or cut short, is the bucket's already: one whose drop never came is no hole.
 5. **Install** configuration `c+1`, made at `e'`: `W'` and 2f peers picked as below. Stream the
    recovered tail to them, and wait until f of them hold it all (f+1 with `W'`).
 6. **Activate:** a conditional swap of the head to `replicas = c+1`. Only then does `W'` serve.
@@ -205,10 +215,13 @@ As built (TASK-537.3.5, `upload::Shared::keep` and `replace`, `replicate::Replic
   than retries), or down for 1 s, is replaced. Every member of `c+1` is picked afresh by the
   rendezvous hash of `(cell, c+1)` over the peers that answer, the refusing aside, and every one of
   them, a survivor of `c` too, is sent the whole spooled tail into `c+1`'s own logs: no member's
-  copy is shared between configurations.
+  copy is shared between configurations. A replacement is swapped in once f of its members that
+  take what they are sent (none down or refusing) hold all that was told replicated, never on the
+  bucket alone, as the spec's Issue says; a replacement to f = 0 once the bucket holds it.
 - A replacement whose members take not what the guest was told replicated within 60 s is given up
   before its CAS is sent (`Replicator::abandon`), and `c` alone counts again; picked again later,
-  backing off from 1 s to 30 s. Giving up after the CAS is sent would be unsafe (the spec's
+  backing off from 1 s to 30 s, under a configuration number of its own (the one given up is never
+  reused, as the spec's keys are not), its members that refused not picked again at once. Giving up after the CAS is sent would be unsafe (the spec's
   `Abandon` action, its rule `abandonUnissued` and its mutation `AbandonIssued`).
 - A take that asks for another f than the configuration it recovers from replicates at the
   greater f first, and the writer then replaces it with one of the f asked for: to f = 0 by the

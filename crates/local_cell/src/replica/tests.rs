@@ -190,6 +190,10 @@ fn drops_and_sweeps_remove_what_no_take_reads() {
         }
     }
     replicas.drop_logs((CELL, active, ours), Some(2)).unwrap();
+    // Only what the bucket holds of the configuration named: the one before kept, as a
+    // replacement's members drop theirs while the head names the one before (TASK-537.3.5).
+    assert_eq!(replicas.cells().unwrap(), [(CELL, vec![old, active, pending])]);
+    replicas.drop_logs((CELL, active, ours), None).unwrap();
     assert_eq!(replicas.cells().unwrap(), [(CELL, vec![active, pending])]);
     assert_eq!(replicas.fence((CELL, active, ours), 6).unwrap(), [(3, 1)]);
 

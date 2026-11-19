@@ -151,9 +151,10 @@ message ReadLogResponse {
 
 // Drops a cell's logs no take reads.
 message DropLogsRequest {
-  // The cell and configuration: every configuration's before it dropped.
+  // The cell and configuration: without through, every configuration's before it dropped.
   ReplicaOf of = 1;
-  // The last log of the configuration named the bucket holds, if any.
+  // The last log of the configuration named the bucket holds: its logs to it dropped, and
+  // nothing of another configuration.
   optional uint64 through = 2;
 }
 

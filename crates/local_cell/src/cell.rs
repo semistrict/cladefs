@@ -881,12 +881,16 @@ impl<D: Dir> Recovering<D> {
     }
 
     /// cladefs: the store recovered again once what members of its replicated cell's
-    /// configuration hold, `logs`, is written as its write-ahead log after `last`, the last commit
-    /// its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a store
+    /// configuration hold, `logs`, is written as its write-ahead log after `bucketed`, the segments
+    /// and the last commit its cell's head names ([`crate::replicate::restore`], doc-21, TASK-537.3.4): of a store
     /// holding none.
-    pub fn restored(self, logs: &[(u64, Vec<u8>)], last: Option<u64>) -> Result<Self, Error> {
+    pub fn restored(
+        self,
+        logs: &[(u64, Vec<u8>)],
+        bucketed: (u64, Option<u64>),
+    ) -> Result<Self, Error> {
         ensure!(!self.has_wal(), "restoring members' logs into a store holding a write-ahead log");
-        crate::replicate::restore(&*self.dir, self.file.cell, logs, last)?;
+        crate::replicate::restore(&*self.dir, self.file.cell, logs, bucketed)?;
         let Recovering { dir, taken, claim, file, .. } = self;
         let wal = crate::wal::recover(&*dir, file.cell)?;
         Ok(Recovering { dir, taken, claim, file, wal })

@@ -359,9 +359,12 @@ impl<D: Dir> Replicas<D> {
         Ok(bytes)
     }
 
-    /// Drops `cell`'s logs that no take will read: those of the configuration `key` to `through`,
-    /// which the bucket holds, the head naming the segments they wrote; and every configuration's
-    /// before `key`, which the head names no more.
+    /// Drops `cell`'s logs that no take will read: with `through`, those of the configuration
+    /// `key` to it, which the bucket holds, the head naming the segments they wrote, and nothing of
+    /// any other configuration; without, every configuration's before `key`, which the head names
+    /// no more. A writer replacing its configuration drops the new one's logs as the bucket takes
+    /// them while the head still names the one before, whose logs a take would read (Codex's
+    /// review of TASK-537.3.5): only a writer whose head names `key` drops those before.
     pub fn drop_logs(
         &self,
         (cell, key, incarnation): (CellId, Key, u64),
@@ -371,8 +374,9 @@ impl<D: Dir> Replicas<D> {
         let held = self.held(cell)?;
         let mut held = held.lock().unwrap();
         let gone: Vec<(Key, u64)> = (held.logs.keys())
-            .filter(|&&(of, log)| {
-                of < key || (of == key && through.is_some_and(|last| log <= last))
+            .filter(|&&(of, log)| match through {
+                Some(last) => of == key && log <= last,
+                None => of < key,
             })
             .copied()
             .collect();

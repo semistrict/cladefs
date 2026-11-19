@@ -389,3 +389,38 @@ fn members_refusing_or_down_long_are_lost() {
     assert_eq!(replicator.refusing(), vec![1]);
     assert!(!replicator.degraded(), "one of two up is a quorum of f = 1");
 }
+
+/// TASK-537.3.5's review: a replacement whose members refuse every append is no configuration
+/// to swap in, though the bucket holds all that was told.
+#[test]
+fn replacements_whose_members_refuse_are_not_installed() {
+    let old = members(2);
+    let (replicator, _) = start(1, 0, &old);
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("replicated", || replicator.replicated() == 1);
+    let new = members(2);
+    for member in &new {
+        member.fail(Some(LinkError::Refused("full".into())));
+    }
+    replicator.replacing(1, links(&new));
+    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!replicator.installed(2), "installed on the bucket alone");
+    assert_eq!(replicator.abandon(), vec![0, 1]);
+}
+
+/// TASK-537.3.5's review: a member down, whose first answer back is a drop, nothing else left to
+/// send it, is up again.
+#[test]
+fn members_back_with_a_drop_are_up() {
+    let members = members(2);
+    let (replicator, _) = start(1, 0, &members);
+    replicator.flushed(flushed(1, &[(2, 0, b"one")])).unwrap();
+    until("replicated", || replicator.replicated() == 1);
+    members[1].fail(Some(LinkError::Down("out of reach".into())));
+    replicator.flushed(flushed(2, &[(2, 3, b"two")])).unwrap();
+    until("down", || replicator.members_up() == 1);
+    replicator.acknowledged(1);
+    members[1].fail(None);
+    until("up again", || replicator.members_up() == 2);
+}
