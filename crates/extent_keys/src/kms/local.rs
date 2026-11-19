@@ -664,8 +664,8 @@ mod tests {
         let refused = |url: &str| crate::kms::from_url(url).map(|_| ()).unwrap_err();
         assert_eq!(
             refused("vault://key"),
-            "\"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or gcp-kms:// \
-             (doc-16)"
+            "\"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms://, gcp-kms:// or \
+             azure-kv:// (doc-16)"
         );
         assert_eq!(
             refused("local://relative"),
