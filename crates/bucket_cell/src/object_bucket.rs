@@ -608,9 +608,8 @@ impl ObjectBucket {
     /// cladefs: the bucket `key`'s request goes to, if another than this one ([`ObjectBucket::routed`]).
     async fn member(&self, key: &str) -> Result<Option<Arc<ObjectBucket>>, Error> {
         let Some(route) = &self.route else { return Ok(None) };
-        let Some(cell) = layout::cell_of(key) else { return Ok(None) };
-        let number = crate::objectid::bucket_of(cell.id);
-        if number == crate::identity::NAMED || self.own_number(route).await? == Some(number) {
+        let Some(number) = layout::routed_to(key) else { return Ok(None) };
+        if self.own_number(route).await? == Some(number) {
             return Ok(None);
         }
         self.numbered(number).await.map(Some).map_err(|err| {

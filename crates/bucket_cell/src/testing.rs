@@ -49,6 +49,8 @@ struct Stored {
 
 struct Request {
     op: Op,
+    /// cladefs: the bucket it goes to, of the simulation's regions (TASK-633.10): 0 for one bucket.
+    region: u16,
     reply: oneshot::Sender<Result<Reply, Error>>,
 }
 
@@ -65,6 +67,9 @@ struct Inner {
     parked: Vec<Request>,
     /// Each request completed, in order, and what it gave ([`SimBucket::journal`]).
     journal: Vec<String>,
+    /// cladefs: the regions' buckets down, whose requests fail without taking effect
+    /// ([`SimBucket::down`], TASK-633.10).
+    down: BTreeSet<u16>,
 }
 
 /// How a request the simulation completes fails.
@@ -77,13 +82,22 @@ pub enum Fault {
     After,
 }
 
+///
+/// cladefs: it may hold the buckets of several cloud regions (TASK-633.10), one queue of requests
+/// for them all, so that a seed orders them all: a request goes to the bucket its key's cell's ID
+/// numbers ([`layout::routed_to`]), as a routed bucket's do, and a key of no cell, or of a cell tests
+/// name, to the bucket of the host asking ([`SimBucket::at`]); bucket 0 the one bucket of a
+/// simulation of one, which routes nothing, its requests and journal as before regions. A region's bucket may be
+/// down ([`SimBucket::down`]).
 #[derive(Default)]
 pub struct SimBucket {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
     /// What the simulation's hosts know of it without asking it again ([`Bucket::known`]): one for
     /// them all, kept through their crashes, so that what one learned another may use, stale, as
     /// a read from earlier, which the protocol allows for (TASK-449).
-    known: crate::known::Known,
+    known: Arc<crate::known::Known>,
+    /// cladefs: the bucket of the host asking through it: where keys of no cell go.
+    home: u16,
 }
 
 impl SimBucket {
@@ -91,9 +105,44 @@ impl SimBucket {
         Arc::default()
     }
 
+    /// cladefs: the same buckets, as a host whose bucket is `home`'s asks them (TASK-633.10).
+    pub fn at(&self, home: u16) -> Arc<Self> {
+        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home })
+    }
+
+    /// cladefs: its host's bucket's number.
+    pub fn home(&self) -> u16 {
+        self.home
+    }
+
+    /// cladefs: has bucket `region` be down, or up again: a request to it completed then fails
+    /// without taking effect, whatever its completion says.
+    pub fn down(&self, region: u16, down: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        match down {
+            true => inner.down.insert(region),
+            false => inner.down.remove(&region),
+        };
+    }
+
+    /// cladefs: the bucket a request of `key` goes to: its cell's, else the host's; for a
+    /// simulation of one bucket (0, [`SimBucket::new`]), that one, whatever its cells' numbers.
+    fn region_of(&self, key: &str) -> u16 {
+        match self.home {
+            0 => 0,
+            home => layout::routed_to(key).unwrap_or(home),
+        }
+    }
+
+    /// cladefs: the bucket waiting request `index` goes to.
+    pub fn region(&self, index: usize) -> u16 {
+        self.inner.lock().unwrap().queue[index].region
+    }
+
     fn request(&self, op: Op) -> impl Future<Output = Result<Reply, Error>> + Send + use<> {
         let (reply, receiver) = oneshot::channel();
-        self.inner.lock().unwrap().enqueue(Request { op, reply });
+        let region = self.region_of(op.key());
+        self.inner.lock().unwrap().enqueue(Request { op, region, reply });
         // A request dropped unanswered failed.
         async move { receiver.await.unwrap_or(Err(Error::Unavailable)) }
     }
@@ -128,11 +177,12 @@ impl SimBucket {
     pub fn complete(&self, index: usize, fault: Fault) {
         let mut inner = self.inner.lock().unwrap();
         let request = inner.queue.swap_remove(index);
-        let asked = request.op.describe();
+        let (region, asked) = (request.region, in_region(request.region, request.op.describe()));
+        let fault = if inner.down.contains(&region) { Fault::Before } else { fault };
         let result = match fault {
             Fault::Before => Err(Error::Unavailable),
-            Fault::None => inner.apply(request.op),
-            Fault::After => inner.apply(request.op).and(Err(Error::Unavailable)),
+            Fault::None => inner.apply(region, request.op),
+            Fault::After => inner.apply(region, request.op).and(Err(Error::Unavailable)),
         };
         let gave = match &result {
             Ok(_) => "done".to_owned(),
@@ -147,7 +197,9 @@ impl SimBucket {
     /// What waiting request `index` asks: `get KEY START..END` for a ranged read, `get KEY last N`
     /// for its end, and the operation and key for the others.
     pub fn describe(&self, index: usize) -> String {
-        self.inner.lock().unwrap().queue[index].op.describe_key()
+        let inner = self.inner.lock().unwrap();
+        let request = &inner.queue[index];
+        in_region(request.region, request.op.describe_key())
     }
 
     /// Every request completed, in the order they were, each as [`SimBucket::describe`] says,
@@ -232,13 +284,44 @@ impl SimBucket {
         self.inner.lock().unwrap().clock += ticks;
     }
 
-    /// The keys of every object.
+    /// The keys of every object: each of a region's bucket but 0's under `@REGION/`.
     pub fn keys(&self) -> Vec<String> {
         self.inner.lock().unwrap().objects.keys().cloned().collect()
     }
 }
 
+/// cladefs: `described`, a request's description, of the bucket of region `region`: as it is for
+/// bucket 0, else after `@REGION `.
+fn in_region(region: u16, described: String) -> String {
+    match region {
+        0 => described,
+        region => format!("@{region} {described}"),
+    }
+}
+
+/// cladefs: where the object at `key` of the bucket of region `region` is kept: at `key` for bucket
+/// 0, else under `@REGION/`.
+fn stored_at(region: u16, key: &str) -> String {
+    match region {
+        0 => key.to_owned(),
+        region => format!("@{region}/{key}"),
+    }
+}
+
 impl Op {
+    /// cladefs: its key, or its prefix.
+    fn key(&self) -> &str {
+        match self {
+            Op::Get(key)
+            | Op::GetRange(key, _)
+            | Op::Head(key)
+            | Op::List(key)
+            | Op::ListDelimited(key, ..)
+            | Op::Put(key, ..)
+            | Op::Delete(key) => key,
+        }
+    }
+
     /// The operation and its key ([`SimBucket::describe`]).
     fn describe_key(&self) -> String {
         match self {
@@ -285,8 +368,9 @@ impl Inner {
         }
     }
 
-    fn meta(&self, key: &str) -> Option<Meta> {
-        self.objects.get(key).map(|stored| Meta {
+    /// The meta of the object kept at `at`, whose key is `key`.
+    fn meta(&self, at: &str, key: &str) -> Option<Meta> {
+        self.objects.get(at).map(|stored| Meta {
             key: key.to_owned(),
             version: Version { e_tag: Some(stored.version.to_string()), version: None },
             size: stored.bytes.len() as u64,
@@ -294,14 +378,19 @@ impl Inner {
         })
     }
 
-    fn apply(&mut self, op: Op) -> Result<Reply, Error> {
+    /// Applies `op` to the bucket of region `region`.
+    fn apply(&mut self, region: u16, op: Op) -> Result<Reply, Error> {
+        let at = |key: &str| stored_at(region, key);
+        // The key of an object kept at `stored`, under `prefix`, kept at `kept`.
+        let key_of =
+            |prefix: &str, kept: &str, stored: &str| format!("{prefix}{}", &stored[kept.len()..]);
         match op {
             Op::Get(key) => {
-                let meta = self.meta(&key).ok_or(Error::NotFound)?;
-                Ok(Reply::Object(Object { bytes: self.objects[&key].bytes.clone(), meta }))
+                let meta = self.meta(&at(&key), &key).ok_or(Error::NotFound)?;
+                Ok(Reply::Object(Object { bytes: self.objects[&at(&key)].bytes.clone(), meta }))
             }
             Op::GetRange(key, range) => {
-                let bytes = &self.objects.get(&key).ok_or(Error::NotFound)?.bytes;
+                let bytes = &self.objects.get(&at(&key)).ok_or(Error::NotFound)?.bytes;
                 let len = bytes.len() as u64;
                 // Refused as `object_store` refuses it, as though the store were out of reach: of
                 // no bytes, or beginning past the object's end.
@@ -315,19 +404,25 @@ impl Inner {
                 };
                 Ok(Reply::Bytes(bytes[range.start as usize..range.end as usize].to_vec()))
             }
-            Op::Head(key) => self.meta(&key).map(Reply::Meta).ok_or(Error::NotFound),
-            Op::List(prefix) => Ok(Reply::List(
-                self.objects
-                    .range(prefix.clone()..)
-                    .take_while(|(key, _)| key.starts_with(&prefix))
-                    .map(|(key, _)| self.meta(key).unwrap())
-                    .collect(),
-            )),
+            Op::Head(key) => self.meta(&at(&key), &key).map(Reply::Meta).ok_or(Error::NotFound),
+            Op::List(prefix) => {
+                let kept = at(&prefix);
+                Ok(Reply::List(
+                    (self.objects.range(kept.clone()..))
+                        .take_while(|(stored, _)| stored.starts_with(&kept))
+                        .map(|(stored, _)| {
+                            self.meta(stored, &key_of(&prefix, &kept, stored)).unwrap()
+                        })
+                        .collect(),
+                ))
+            }
             Op::ListDelimited(prefix, after, max) => {
                 assert!(prefix.is_empty() || prefix.ends_with('/'), "a prefix of keys: {prefix}");
+                let kept = at(&prefix);
                 let mut listing = Listing::default();
-                let under = self.objects.range(prefix.clone()..);
-                for (key, _) in under.take_while(|(key, _)| key.starts_with(&prefix)) {
+                let under = self.objects.range(kept.clone()..);
+                for (stored, _) in under.take_while(|(stored, _)| stored.starts_with(&kept)) {
+                    let key = key_of(&prefix, &kept, stored);
                     match key[prefix.len()..].find('/') {
                         Some(slash) => {
                             let common = &key[..prefix.len() + slash + 1];
@@ -335,13 +430,13 @@ impl Inner {
                                 listing.prefixes.push(common.to_owned());
                             }
                         }
-                        None => listing.objects.push(self.meta(key).unwrap()),
+                        None => listing.objects.push(self.meta(stored, &key).unwrap()),
                     }
                 }
                 Ok(Reply::Listing(listing.page(Page { after: after.as_deref(), max })))
             }
             Op::Put(key, bytes, mode) => {
-                let existing = self.objects.get(&key).map(|stored| stored.version);
+                let existing = self.objects.get(&at(&key)).map(|stored| stored.version);
                 match (mode, existing) {
                     (PutMode::Create, Some(_)) => return Err(Error::AlreadyExists),
                     (PutMode::Update(_), None) => return Err(Error::Precondition),
@@ -354,7 +449,7 @@ impl Inner {
                 }
                 self.versions += 1;
                 let stored = Stored { bytes, version: self.versions, modified: self.clock };
-                self.objects.insert(key, stored);
+                self.objects.insert(at(&key), stored);
                 Ok(Reply::Version(Version {
                     e_tag: Some(self.versions.to_string()),
                     version: None,
@@ -362,10 +457,12 @@ impl Inner {
             }
             Op::Delete(key) => {
                 // The creates held at its key wait again once an object there is deleted.
-                if self.objects.remove(&key).is_some() {
-                    let (unparked, parked) = std::mem::take(&mut self.parked)
-                        .into_iter()
-                        .partition(|request| matches!(&request.op, Op::Put(at, ..) if *at == key));
+                if self.objects.remove(&at(&key)).is_some() {
+                    let (unparked, parked) =
+                        std::mem::take(&mut self.parked).into_iter().partition(|request| {
+                            request.region == region
+                                && matches!(&request.op, Op::Put(at, ..) if *at == key)
+                        });
                     self.parked = parked;
                     self.queue.extend::<Vec<_>>(unparked);
                 }
@@ -441,12 +538,14 @@ impl Bucket for SimBucket {
 }
 
 /// The same bucket, its requests taking effect at once and never failing: the simulation's view,
-/// to check what the cells hold.
+/// to check what the cells hold. cladefs: routed as its bucket's requests are, a region's bucket
+/// down or not.
 pub struct Direct(pub Arc<SimBucket>);
 
 impl Direct {
     fn apply(&self, op: Op) -> Result<Reply, Error> {
-        self.0.inner.lock().unwrap().apply(op)
+        let region = self.0.region_of(op.key());
+        self.0.inner.lock().unwrap().apply(region, op)
     }
 }
 
@@ -909,6 +1008,58 @@ mod tests {
     use super::*;
     use crate::layout::test_cell;
     use futures::executor::block_on;
+
+    /// TASK-633.10: the simulation's buckets of regions, one queue for all. A request goes to the
+    /// bucket its key's cell numbers, a key of no cell, or of a cell tests name, to the asking
+    /// host's; a region's bucket down fails its requests alone, without effect. A simulation of
+    /// one bucket, 0, routes nothing, as before regions.
+    #[test]
+    fn requests_go_to_the_bucket_of_their_region() {
+        let sim = SimBucket::new();
+        let (first, second) = (sim.at(1), sim.at(2));
+        let theirs = CellId { tenant: 1, id: 2 << 48 | 5 };
+        let named = CellId { tenant: 1, id: 7 };
+        let put = |bucket: &SimBucket, key: &str| {
+            let bytes = bytes::Bytes::from_static(b"x");
+            bucket.served(bucket.put(key, bytes, PutMode::Create)).1
+        };
+        let head = layout::head(theirs);
+        assert_eq!(put(&first, &head), [format!("@2 put {head}")]);
+        assert_eq!(put(&first, layout::IDENTITY), ["@1 put identity"]);
+        assert_eq!(put(&second, layout::IDENTITY), ["@2 put identity"]);
+        assert_eq!(put(&first, &layout::head(named)), [format!("@1 put {}", layout::head(named))]);
+        let listed = second.served(second.list(&theirs.prefix())).0.unwrap();
+        assert_eq!(listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(), [head.clone()]);
+        assert_eq!(
+            sim.keys(),
+            [
+                "@1/identity".to_owned(),
+                format!("@1/{}", layout::head(named)),
+                "@2/identity".into(),
+                format!("@2/{head}"),
+            ]
+        );
+
+        sim.down(2, true);
+        let (got, asked) = first.served(first.get(&head));
+        assert_eq!(
+            (got.map(drop), asked),
+            (Err(Error::Unavailable), vec![format!("@2 get {head}")])
+        );
+        assert!(first.served(first.get(layout::IDENTITY)).0.is_ok(), "bucket 1 down too");
+        assert_eq!(sim.journal().last().unwrap(), "@1 get identity None: done");
+        assert_eq!(
+            sim.journal()[sim.journal().len() - 2],
+            format!("@2 get {head} Before: Unavailable")
+        );
+        sim.down(2, false);
+        assert!(first.served(first.get(&head)).0.is_ok());
+
+        // One bucket: bucket 0's, routing nothing, as before regions.
+        let alone = SimBucket::new();
+        assert_eq!(put(&alone, &head), [format!("put {head}")]);
+        assert_eq!(alone.keys(), [head]);
+    }
 
     /// TASK-79.40: the simulation refuses the ranged reads `object_store` refuses, as it does, as
     /// though the store were out of reach: of no bytes, or starting past the object's end, as its
