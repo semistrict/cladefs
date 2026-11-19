@@ -424,3 +424,56 @@ fn members_back_with_a_drop_are_up() {
     members[1].fail(None);
     until("up again", || replicator.members_up() == 2);
 }
+
+/// A replica log of segment `number` of the cell `trimmed` reads, its records each naming the
+/// commits of `commits`' entries, as a member holds it.
+fn replica_log(number: u64, commits: &[&[u64]]) -> (u64, Vec<u8>) {
+    use crate::wal::{LogRecord, ReplicaLog, Runs};
+    let segment = crate::layout::SegmentId { cell: TRIMMED.id, number };
+    let key = extent_frame::KeyId { cell: TRIMMED.id, generation: 1 };
+    let secret = extent_frame::Secret::from_bytes(&[5; 32]);
+    let encryption = Arc::new(crate::raw::RawEncryption::new(&secret, key));
+    let header = crate::wal::log_header(number + 1, segment, &encryption);
+    let (mut bytes, mut log) = ReplicaLog::new(&header, segment, encryption).unwrap();
+    let records: Vec<LogRecord> = (commits.iter())
+        .map(|commits| LogRecord {
+            contents: extent_frame::segment::Contents {
+                commits: commits.to_vec(),
+                ..Default::default()
+            },
+            runs: Runs::Held(Default::default()),
+        })
+        .collect();
+    bytes.extend(log.append(&records));
+    (log_of(number), bytes)
+}
+
+const TRIMMED: extent_frame::segment::CellId = bucket_cell::layout::test_cell(3);
+
+/// TASK-537.3.5's and TASK-537.3.6's reviews: a take keeps what follows the last segment naming a
+/// commit through the head's last, a member's copy of that segment cut short among them; and
+/// refuses logs no writer makes, as a forged record naming an old commit, at the end of the last
+/// log or in a log of its own after it, which would otherwise make the honest ones look named.
+#[test]
+fn trims_keep_what_follows_the_head_and_refuse_forged_logs() {
+    let kept = |logs: &[(u64, Vec<u8>)], last: u64| -> Result<Vec<u64>, String> {
+        let trimmed = trimmed(TRIMMED, logs, Some(last)).map_err(|err| format!("{err:#}"))?;
+        Ok(trimmed.into_iter().map(|(log, _)| log >> 1).collect())
+    };
+    let honest = [replica_log(1, &[&[1], &[2]]), replica_log(2, &[&[3], &[4]])];
+    assert_eq!(kept(&honest, 2), Ok(vec![2]));
+    assert_eq!(kept(&honest, 4), Ok(vec![]));
+    assert_eq!(kept(&honest, 0), Ok(vec![1, 2]));
+    // Segment 1 named whole by the head, a member's copy of it cut short.
+    let cut = [replica_log(1, &[&[1]]), replica_log(2, &[&[3], &[4]])];
+    assert_eq!(kept(&cut, 2), Ok(vec![2]));
+    // A hole: commit 3 on no member.
+    let hole = [replica_log(2, &[&[4]])];
+    assert!(kept(&hole, 2).is_err());
+    // Forged: an old commit after the honest records, or a log of its own past them.
+    let appended = [replica_log(1, &[&[1], &[2]]), replica_log(2, &[&[3], &[4], &[1]])];
+    assert!(kept(&appended, 2).unwrap_err().contains("not one writer's"));
+    let mut own = honest.to_vec();
+    own.push(replica_log(3, &[&[2]]));
+    assert!(kept(&own, 2).unwrap_err().contains("not one writer's"));
+}

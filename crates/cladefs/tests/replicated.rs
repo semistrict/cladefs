@@ -5,8 +5,8 @@
 //! TASK-537.3.6 (doc-21, doc-12's Replicated rows): replicated cells end to end, on extent daemons
 //! of their own processes sharing a file bucket, as hosts do, each a member with a replica
 //! directory (`CLADEFSD_REPLICAS`) and the others its peers. The bucket out of reach is its
-//! directory made read-only: its writes fail, and are tried again, as a bucket's that does not
-//! answer.
+//! directory moved aside, a file in its place: its writes fail, and are tried again, as a
+//! bucket's that does not answer.
 //!
 //! - The writer's daemon killed and its directory, disk and replica directory, gone, every commit
 //!   its guest was told durable (`COMMIT_UPLOADED`, which a replicated cell's waits for Replicated)
@@ -158,22 +158,36 @@ fn check(store: &CellClient, sequences: std::ops::RangeInclusive<u64>) {
     }
 }
 
-/// Makes the bucket at `bucket` out of reach of its writers, or in reach again: its directories
-/// and files read-only, or not.
-fn reachable(bucket: &Path, writable: bool) {
-    let mode = if writable { "u+w" } else { "a-w" };
-    let status = Command::new("chmod").args(["-R", mode]).arg(bucket).status().unwrap();
-    assert!(status.success());
+/// Makes the bucket at `bucket` out of reach of its writers, or in reach again: its directory
+/// moved aside and a file in its place, which no write goes through, root's neither (the
+/// verifying review of TASK-537.3.6: ubu1's runs are root's, whom a read-only directory stops
+/// not); then back.
+fn reachable(bucket: &Path, reach: bool) {
+    let aside = bucket.with_extension("aside");
+    match reach {
+        false => {
+            std::fs::rename(bucket, &aside).unwrap();
+            std::fs::write(bucket, b"out of reach").unwrap();
+        }
+        true => {
+            std::fs::remove_file(bucket).unwrap();
+            std::fs::rename(&aside, bucket).unwrap();
+        }
+    }
+}
+
+/// The head of `cell` in the bucket at `bucket`.
+fn head(bucket: &Path, cell: CellId) -> bucket_cell::layout::Head {
+    let url = format!("file://{}/", bucket.display());
+    let bucket = Arc::new(bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap());
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(bucket_cell::head::get(&*bucket, cell)).unwrap().unwrap()
 }
 
 /// The configuration the head of `cell` names, in the bucket at `bucket`: its number, f, and its
 /// members' addresses, the writer's first.
 fn configuration(bucket: &Path, cell: CellId) -> (u64, u8, Vec<String>) {
-    let url = format!("file://{}/", bucket.display());
-    let bucket = Arc::new(bucket_cell::object_bucket::ObjectBucket::from_url(&url).unwrap());
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let head = runtime.block_on(bucket_cell::head::get(&*bucket, cell)).unwrap().unwrap();
-    let configuration = head.replication.unwrap().configuration.unwrap();
+    let configuration = head(bucket, cell).replication.unwrap().configuration.unwrap();
     let members = configuration.members.iter().map(|member| member.address.clone()).collect();
     (configuration.number, configuration.f, members)
 }
@@ -220,6 +234,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let client = connect(&daemons[0], &store);
     write(&client, 1..=2);
     // The bucket out of reach: what is told durable from now on is on the members alone.
+    let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 3..=10);
     drop(client);
@@ -228,6 +243,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     daemons[0].kill();
     std::fs::remove_dir_all(&daemons[0].dir).unwrap();
     reachable(&bucket, true);
+    assert_eq!(head(&bucket, cell).end, before, "commits 3 to 10 uploaded: nothing to recover");
 
     let taken = daemons[1].dir.join("taken");
     daemons[1].control.create_cell(&taken, CAPACITY, cell, Some(2)).unwrap();
@@ -257,9 +273,11 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     assert_eq!(members[0], addresses[1]);
     assert_eq!(members.len(), 3);
     until("degraded no more", || !daemons[1].control.stat_cell(&taken).unwrap().degraded);
+    let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 15..=16);
     reachable(&bucket, true);
+    assert_eq!(head(&bucket, cell).end, before, "told durable by the bucket, not the members");
     check(&client, 1..=16);
 }
 
@@ -294,9 +312,11 @@ fn lost_members_are_replaced_then_the_bucket_releases_commits() {
         let stat = daemons[0].control.stat_cell(&store).unwrap();
         !stat.degraded && stat.members_up == 2 && stat.configuration > first
     });
+    let before = head(&bucket, cell).end;
     reachable(&bucket, false);
     write(&client, 5..=8);
     reachable(&bucket, true);
+    assert_eq!(head(&bucket, cell).end, before, "told durable by the bucket, not the members");
 
     // Both members lost, and the bucket out of reach: a commit told durable waits for the bucket
     // (Codex's review), and is told so once it holds it.

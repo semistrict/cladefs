@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T04:35:00Z'
+updated_date: '2026-11-19T05:17:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -180,6 +180,9 @@ The new writer `W'`, at the VM manager's take, on any host:
    commit follows `last_commit`. A member's copy of a segment the head named, whole or cut short,
    is the bucket's already: one whose drop never came is no hole. (Not the head's count of
    segments, `end`: a writer's local segments are numbered as its own, the bucket's as the cell's.)
+   What members send is read here holding no key, so a segment at or before the last named one
+   naming a commit past `last` is refused (no writer's logs do; a forged record may, which would
+   otherwise make honest logs after it look named, and drop them before any MAC is checked).
    *As built (TASK-537.3.6),* **no members for `c+1`** (one host of three lost, say): the take
    serves alone, at f = 0, its commits waiting for Uploaded. The head goes on naming `c`, fenced,
    whose members hold what it recovered, until the acknowledgement that first names the last commit

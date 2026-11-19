@@ -80,7 +80,8 @@ pub fn own_frames(mut bytes: &[u8]) -> Vec<(u64, Vec<u8>)> {
 /// that a member's copy of one it named, whole or cut short, its drop never come, is the bucket's
 /// already (TASK-537.3.5's review); and of those, from the first holding any record. Refused if
 /// the first commit they hold does not follow `last`: what is between, on no member, may be
-/// commits a guest was told are replicated. (Not the head's count of segments: a writer's local
+/// commits a guest was told are replicated; and if a segment at or before the last naming a
+/// commit through `last` names one past it, as no writer's logs do, but forged ones may. (Not the head's count of segments: a writer's local
 /// segments are numbered as its own, the bucket's as the cell's.)
 pub fn trimmed(
     cell: extent_frame::segment::CellId,
@@ -99,6 +100,23 @@ pub fn trimmed(
         .filter(|(_, records)| records.iter().flatten().any(|&commit| through(commit)))
         .map(|(&number, _)| number)
         .max();
+    // What a member sends is read here holding no key, unauthenticated (doc-21): a forged record
+    // naming an old commit must not make honest logs after it look named (the verifying review
+    // of TASK-537.3.6). Honest, every commit of a segment named is through `last`, the head
+    // acknowledging whole segments; else refused, as recovery refuses a forged record it would
+    // restore, failing its MAC.
+    if let Some(named) = named {
+        let past = (records.range(..=named))
+            .flat_map(|(&number, records)| records.iter().flatten().map(move |c| (number, *c)))
+            .find(|&(_, commit)| !through(commit));
+        if let Some((number, commit)) = past {
+            anyhow::bail!(
+                "the members' logs of {cell:?} name commit {commit} in segment {number}, past \
+                 the head's last, {last:?}, at or before segment {named}, which names a commit \
+                 through it: not one writer's logs"
+            );
+        }
+    }
     let after = |number: u64| named.is_none_or(|named| number > named);
     let first = (records.iter())
         .find(|&(&number, records)| after(number) && !records.is_empty())
