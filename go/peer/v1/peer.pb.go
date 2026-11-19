@@ -662,9 +662,10 @@ func (x *ReadLogResponse) GetBytes() []byte {
 // Drops a cell's logs no take reads.
 type DropLogsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The cell and configuration: every configuration's before it dropped.
+	// The cell and configuration: without through, every configuration's before it dropped.
 	Of *ReplicaOf `protobuf:"bytes,1,opt,name=of,proto3" json:"of,omitempty"`
-	// The last log of the configuration named the bucket holds, if any.
+	// The last log of the configuration named the bucket holds: its logs to it dropped, and
+	// nothing of another configuration.
 	Through       *uint64 `protobuf:"varint,2,opt,name=through,proto3,oneof" json:"through,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

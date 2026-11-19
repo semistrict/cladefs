@@ -1,3 +1,9 @@
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+#
+# The kernel sandbox security review's fixture (2026-11-19): see README.md beside it.
+
 diff --git a/crates/cladefs/src/cache.rs b/crates/cladefs/src/cache.rs
 index b269955c5..a2860a29d 100644
 --- a/crates/cladefs/src/cache.rs
