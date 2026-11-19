@@ -14,7 +14,9 @@
 //! identifier, `https://THEIR_VAULT/keys/NAME`, in a vault of the tenant's own (BYOK). `alg` is the
 //! wrapping algorithm, `RSA-OAEP-256` (the default, for RSA keys), `A256KW` or `CKM_AES_KEY_WRAP`
 //! (a Managed HSM's AES keys). `endpoint` replaces `https://VAULT_HOST` for the template's keys:
-//! a private endpoint, an emulator.
+//! a private endpoint (a vault's name), or an emulator on this host (`http://127.0.0.1:PORT`).
+//! Every host named must be a vault's or a Managed HSM's ([`VAULT_DOMAINS`]): its tokens unwrap
+//! every tenant's key the hosts' identity may use, and go nowhere else.
 //!
 //! Its credentials, as Azure's own libraries find them: the access token [`TOKEN_VAR`] holds, for
 //! development alone (`az account get-access-token --resource https://vault.azure.net`), which
@@ -102,11 +104,7 @@ fn parse(url: &str) -> Result<Parsed, String> {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
     let rest = url.strip_prefix("azure-kv://").expect("an azure-kv:// URL");
     let (host, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let host_char =
-        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-');
-    if host.is_empty() || !host.chars().all(host_char) {
-        return Err(format!("{url:?} names no vault: {usage}"));
-    }
+    check_vault(host).map_err(|why| format!("{url:?} names no vault: {why}: {usage}"))?;
     let query: Vec<(String, String)> =
         url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
     if let Some((name, _)) = query.iter().find(|(name, _)| !QUERY.contains(&&name[..])) {
@@ -121,10 +119,10 @@ fn parse(url: &str) -> Result<Parsed, String> {
             .ok_or_else(|| format!("{url:?}: no algorithm {alg:?}: {}", ALGORITHMS.join(", ")))?,
     };
     let vault = match value("endpoint") {
-        Some(endpoint) if endpoint.starts_with("https://") || endpoint.starts_with("http://") => {
+        Some(endpoint) => {
+            check_endpoint(endpoint).map_err(|why| format!("{url:?}: the endpoint, {why}"))?;
             endpoint.trim_end_matches('/').to_owned()
         }
-        Some(endpoint) => return Err(format!("{url:?}: the endpoint {endpoint:?} is no URL")),
         None => format!("https://{host}"),
     };
     let names = KeyNames::of_query(query.iter().map(|(name, value)| (&name[..], &value[..])))
@@ -135,6 +133,47 @@ fn parse(url: &str) -> Result<Parsed, String> {
             .map_err(|why| format!("{url:?}: tenant {}'s key, {why}", base32_id::Short(tenant)))?;
     }
     Ok(Parsed { vault, names, alg })
+}
+
+/// The domains of Key Vault's vaults and Managed HSMs, in Azure's public, China and US Government
+/// clouds: the only hosts its tokens are sent to, as Azure's own libraries check, so that a key's
+/// identifier given by a tenant, or a URL recorded in a bucket's registry, takes no token elsewhere.
+const VAULT_DOMAINS: [&str; 6] = [
+    ".vault.azure.net",
+    ".managedhsm.azure.net",
+    ".vault.azure.cn",
+    ".managedhsm.azure.cn",
+    ".vault.usgovcloudapi.net",
+    ".managedhsm.usgovcloudapi.net",
+];
+
+/// Checks `host` is a vault's or a Managed HSM's: a name of lowercase letters, digits and `-`, in
+/// one of [`VAULT_DOMAINS`].
+fn check_vault(host: &str) -> Result<(), String> {
+    let name = VAULT_DOMAINS.iter().find_map(|domain| host.strip_suffix(domain));
+    let label_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    match name {
+        Some(name) if !name.is_empty() && name.chars().all(label_char) => Ok(()),
+        _ => Err(format!("{host:?} is no vault's host: NAME{}", VAULT_DOMAINS.join(", NAME"))),
+    }
+}
+
+/// Checks `endpoint` is a vault's (`https://VAULT_HOST`, a private endpoint resolving a vault's
+/// name), or an emulator's on this host (`http://127.0.0.1:PORT`, `http://localhost:PORT`):
+/// nowhere else is a token sent, nor in the clear but to this host.
+fn check_endpoint(endpoint: &str) -> Result<(), String> {
+    let endpoint = endpoint.trim_end_matches('/');
+    if let Some(host) = endpoint.strip_prefix("https://") {
+        return check_vault(host);
+    }
+    let local = endpoint.strip_prefix("http://").and_then(|rest| {
+        let (host, port) = rest.rsplit_once(':').unwrap_or((rest, "80"));
+        let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
+        (loopback && port.parse::<u16>().is_ok()).then_some(())
+    });
+    local.ok_or_else(|| {
+        format!("{endpoint:?} is neither a vault's (https://VAULT_HOST) nor this host's (http://127.0.0.1:PORT)")
+    })
 }
 
 /// Checks `name` is a key's name, 1 to 127 letters, digits and `-`.
@@ -153,14 +192,10 @@ fn check_key(name: &str) -> Result<(), String> {
         return check_name(name).map_err(refused);
     };
     let (host, path) = rest.split_once('/').ok_or_else(|| refused("https://VAULT/keys/NAME"))?;
-    let host_char =
-        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-');
     let Some(key) = path.strip_prefix("keys/") else {
         return Err(refused("https://VAULT/keys/NAME"));
     };
-    if host.is_empty() || !host.chars().all(host_char) {
-        return Err(refused("https://VAULT/keys/NAME"));
-    }
+    check_vault(host).map_err(|why| refused(&why))?;
     check_name(key).map_err(refused)
 }
 
