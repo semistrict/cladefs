@@ -25,6 +25,22 @@ fn urls_name_a_vault_and_its_tenants_keys() {
     assert_eq!(private.unwrap().vault, "http://127.0.0.1:9");
 }
 
+/// A tenant's key named whole names a vault: never another host, which its tokens would go to.
+#[test]
+fn overrides_naming_no_vault_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
+    std::fs::write(&keys, "7 https://evil.example/keys/x\n").unwrap();
+    let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&keys={}", keys.display());
+    let refused = parse(&url).unwrap_err();
+    assert!(
+        refused.starts_with(&format!(
+            "{url:?}: tenant 7's key, \"https://evil.example/keys/x\", names no key: \"evil.example\" is no vault's host"
+        )),
+        "{refused}"
+    );
+}
+
 #[test]
 fn overrides_name_keys_in_the_vault_or_in_other_vaults() {
     let dir = tempfile::tempdir().unwrap();
@@ -40,10 +56,25 @@ fn overrides_name_keys_in_the_vault_or_in_other_vaults() {
 fn urls_naming_no_vault_or_no_keys_are_refused() {
     let usage = "azure-kv://VAULT_HOST?key=TEMPLATE[&keys=FILE][&alg=ALG][&endpoint=URL]";
     let refused = |url: &str| parse(url).unwrap_err();
-    let url = "azure-kv://?key=t-{tenant}";
-    assert_eq!(refused(url), format!("{url:?} names no vault: {usage}"));
-    let url = "azure-kv://V.vault.azure.net?key=t-{tenant}";
-    assert_eq!(refused(url), format!("{url:?} names no vault: {usage}"));
+    let domains = "NAME.vault.azure.net, NAME.managedhsm.azure.net, NAME.vault.azure.cn, \
+                   NAME.managedhsm.azure.cn, NAME.vault.usgovcloudapi.net, \
+                   NAME.managedhsm.usgovcloudapi.net";
+    for host in ["", "V.vault.azure.net", "evil.example", ".vault.azure.net", "a.b.vault.azure.net"]
+    {
+        let url = format!("azure-kv://{host}?key=t-{{tenant}}");
+        assert_eq!(
+            refused(&url),
+            format!("{url:?} names no vault: {host:?} is no vault's host: {domains}: {usage}")
+        );
+    }
+    // Its tokens go to vaults alone, and in the clear to this host alone.
+    for endpoint in ["https://evil.example", "http://10.0.0.1:80", "http://localhost.evil.example"]
+    {
+        let url = format!("azure-kv://v.vault.azure.net?key=t-{{tenant}}&endpoint={endpoint}");
+        assert!(refused(&url).contains("the endpoint, "), "{url}: {}", refused(&url));
+    }
+    let local = "azure-kv://v.vault.azure.net?key=t-{tenant}&endpoint=http://localhost:8443";
+    assert_eq!(parse(local).unwrap().vault, "http://localhost:8443");
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&region=x";
     assert_eq!(refused(url), format!("{url:?}: no parameter \"region\": {usage}"));
     let url = "azure-kv://v.vault.azure.net?key=t-{tenant}&alg=RSA1_5";
