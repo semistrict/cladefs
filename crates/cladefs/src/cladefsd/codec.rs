@@ -69,6 +69,8 @@ pub(crate) enum Request<'a> {
     Fork { path: PathBuf },
     /// [`FORK`] with [`FORK_QUIESCENT`]: a version of the store's cell, a VM snapshot's.
     Version,
+    /// cladefs: [`FORK`] with [`FORK_DROP`]: drops the version `version`, one the connection made.
+    DropVersion { version: u64 },
     /// [`RESIZED`]: the guest's answer to a shrink to `capacity` bytes.
     Resized { capacity: u64, took: bool },
     /// [`MAPPINGS`].
@@ -205,7 +207,7 @@ fn known_flags(kind: u32) -> Result<u32, Errno> {
         MAP => MAP_ZEROS,
         COMMIT => COMMIT_ROOT | COMMIT_UPLOADED | COMMIT_LOCAL,
         FAULT => FAULT_WRITE | FAULT_PAGE | FAULT_PROBE,
-        FORK => FORK_QUIESCENT,
+        FORK => FORK_QUIESCENT | FORK_DROP,
         STATS => STATS_GUEST,
         FREE | FREE_MANY | UNMAP | ROOT | INFO | WINDOW | RESIZED | MAPPINGS | ADVANCE | LET_GO
         | PIN | UNPIN | TRANSFER | BUILD | PRIVATE | MAP_MANY => 0,
@@ -230,7 +232,7 @@ impl<'a> Request<'a> {
             Request::Info => INFO,
             Request::Window { .. } => WINDOW,
             Request::Fault(_) => FAULT,
-            Request::Fork { .. } | Request::Version => FORK,
+            Request::Fork { .. } | Request::Version | Request::DropVersion { .. } => FORK,
             Request::Resized { .. } => RESIZED,
             Request::Mappings => MAPPINGS,
             Request::Advance => ADVANCE,
@@ -343,6 +345,7 @@ impl<'a> Request<'a> {
             }
             Request::Fork { path } => message(0, [0; 5]).carrying(path.as_os_str().as_bytes()),
             Request::Version => message(FORK_QUIESCENT, [0; 5]),
+            Request::DropVersion { version } => message(FORK_DROP, [*version, 0, 0, 0, 0]),
             Request::Resized { capacity, took } => {
                 message(0, [*capacity, u64::from(*took), 0, 0, 0])
             }
@@ -524,9 +527,14 @@ impl<'a> Request<'a> {
                 }
                 Request::Fault(Fault { offset: args[0], access, page: has(FAULT_PAGE), probe })
             }
+            FORK if has(FORK_QUIESCENT) && has(FORK_DROP) => return Err(Errno::EINVAL),
             FORK if has(FORK_QUIESCENT) => {
                 nothing()?;
                 Request::Version
+            }
+            FORK if has(FORK_DROP) => {
+                nothing()?;
+                Request::DropVersion { version: args[0] }
             }
             FORK => Request::Fork { path: path(payload)? },
             RESIZED => {
@@ -1077,6 +1085,7 @@ mod tests {
             Request::Fault(Fault { offset: a, access: Access::Read, page: true, probe: true }),
             Request::Fork { path: path.clone() },
             Request::Version,
+            Request::DropVersion { version: a },
             Request::Resized { capacity: a, took: one },
             Request::Mappings,
             Request::Advance,
@@ -1440,6 +1449,7 @@ mod tests {
                 vec![],
             ),
             (Request::Version, header(FORK, FORK_QUIESCENT, &[]), vec![]),
+            (Request::DropVersion { version: 5 }, header(FORK, FORK_DROP, &[5]), vec![]),
             (
                 Request::Resized { capacity: 4096, took: true },
                 header(RESIZED, 0, &[4096, 1]),

@@ -524,6 +524,17 @@ fn stalled(pending: u64, max: u64, commits: u64, oldest: Option<Duration>) -> St
     )
 }
 
+/// What a wait on the uploader waits for ([`Shared::ask`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Awaited {
+    /// The commits up to an epoch uploaded and acknowledged: a commit's durability, which uploading
+    /// failing later takes nothing from.
+    Uploaded,
+    /// The lag within its bounds (`Options::max_lag`, `Options::max_lag_bytes`), for a commit made
+    /// since: refused once uploading failed, as no commit made since is its cell's (TASK-550).
+    Lag,
+}
+
 #[derive(Default)]
 struct Progress {
     /// The last epoch uploaded.
@@ -644,10 +655,10 @@ impl<D: Dir> Uploader<D> {
     /// Waits until the commits up to `epoch` are uploaded and acknowledged.
     pub fn wait_uploaded(&self, epoch: u64) -> Result<(), Failure> {
         let shared = &self.shared;
-        if shared.ask(epoch, false)? {
+        if shared.ask(epoch, Awaited::Uploaded)? {
             return Ok(());
         }
-        shared.wait(|progress| shared.reached(progress, epoch, false))
+        shared.wait(|progress| shared.reached(progress, epoch, Awaited::Uploaded))
     }
 
     /// Returns once the commits up to `epoch` are uploaded and acknowledged, as
@@ -659,13 +670,13 @@ impl<D: Dir> Uploader<D> {
     ) -> impl std::future::Future<Output = Result<(), Failure>> + Send + use<D> {
         let shared = self.shared.clone();
         async move {
-            if shared.ask(epoch, false)? {
+            if shared.ask(epoch, Awaited::Uploaded)? {
                 return Ok(());
             }
             loop {
                 let changed = {
                     let progress = shared.progress.lock().unwrap();
-                    if let Some(reached) = shared.reached(&progress, epoch, false) {
+                    if let Some(reached) = shared.reached(&progress, epoch, Awaited::Uploaded) {
                         return reached;
                     }
                     shared.changed.listen()
@@ -702,7 +713,7 @@ impl<D: Dir> Uploader<D> {
         // cladefs: and while a replacement is under way, whose members may take long to catch up
         // (TASK-537.3.5).
         if replicator.degraded() || replicator.replacing_now() {
-            if shared.ask(epoch, false)? {
+            if shared.ask(epoch, Awaited::Uploaded)? {
                 return Ok(());
             }
         } else {
@@ -748,10 +759,10 @@ impl<D: Dir> Uploader<D> {
     /// write-ahead log holds more than `Options::max_lag_bytes`, until they no longer do.
     pub fn wait_lag(&self, epoch: u64) -> Result<(), Failure> {
         let (shared, epoch) = (&self.shared, epoch.saturating_sub(self.shared.options.max_lag));
-        if shared.ask(epoch, true)? {
+        if shared.ask(epoch, Awaited::Lag)? {
             return Ok(());
         }
-        shared.wait(|progress| shared.reached(progress, epoch, true))
+        shared.wait(|progress| shared.reached(progress, epoch, Awaited::Lag))
     }
 
     /// Makes the fork of the version the store is at to `child` (`lifecycle::fork_version`): its
@@ -839,6 +850,7 @@ impl<D: Dir> Uploader<D> {
     /// no more, and no acknowledgement naming those local (`Writer::drop_versions`, TASK-476).
     /// Fails with no writer, of a version's or a store at a version.
     pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Failure> {
+        failing!("upload::drop_versions");
         let writer = self.shared.writer().ok_or_else(|| Failure::msg("no writer: no versions"))?;
         self.store().forget_versions(ids);
         Ok(block_on(writer.drop_versions(ids))??)
@@ -1013,17 +1025,16 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         Ok(())
     }
 
-    /// Whether the commits up to `epoch` are uploaded and acknowledged, and, if `stall`, the bytes
-    /// waiting within `Options::max_lag_bytes`: if not, asks the uploader for them, counting a
-    /// stall if `stall`.
-    pub(crate) fn ask(&self, epoch: u64, stall: bool) -> Result<bool, Failure> {
+    /// Whether what `awaited` waits for, up to `epoch`, is there ([`Shared::reached`]): if not,
+    /// asks the uploader for it, counting a stall if it is the lag.
+    pub(crate) fn ask(&self, epoch: u64, awaited: Awaited) -> Result<bool, Failure> {
         self.observe()?;
         let mut progress = self.progress.lock().unwrap();
-        if self.within(progress.uploaded, epoch, stall)? {
+        if self.reached(&progress, epoch, awaited).transpose()?.is_some() {
             return Ok(true);
         }
         progress.wanted = true;
-        if stall {
+        if awaited == Awaited::Lag {
             progress.stalls += 1;
             let pending = self.store().wal_bytes()?;
             let commits = epoch.saturating_sub(progress.uploaded);
@@ -1036,22 +1047,34 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         Ok(false)
     }
 
-    /// What waiting for `epoch` as [`Shared::ask`] says finds in `progress`: done, or failed, or,
-    /// if nothing yet, `None`.
-    fn reached(&self, progress: &Progress, epoch: u64, stall: bool) -> Option<Result<(), Failure>> {
-        match self.within(progress.uploaded, epoch, stall) {
-            Ok(true) => Some(Ok(())),
-            Ok(false) => progress.failed.clone().map(Err),
-            Err(err) => Some(Err(err)),
+    /// What waiting for `awaited` up to `epoch` finds in `progress`: done, or failed, or, if
+    /// nothing yet, `None`. The commits up to `epoch` uploaded are done, whether or not uploading
+    /// failed since; the lag, which a commit made since waits for, is never done once it failed,
+    /// that commit its cell's no more (TASK-550).
+    fn reached(
+        &self,
+        progress: &Progress,
+        epoch: u64,
+        awaited: Awaited,
+    ) -> Option<Result<(), Failure>> {
+        let failed = || progress.failed.clone().map(Err);
+        match awaited {
+            Awaited::Lag => failed().or_else(|| match self.within_lag(progress.uploaded, epoch) {
+                Ok(true) => Some(Ok(())),
+                Ok(false) => None,
+                Err(err) => Some(Err(err)),
+            }),
+            Awaited::Uploaded if progress.uploaded >= epoch => Some(Ok(())),
+            Awaited::Uploaded => failed(),
         }
     }
 
-    /// Whether, `uploaded` up to, the commits up to `epoch` are, and, if `stall`, the bytes of the
-    /// write-ahead log within `Options::max_lag_bytes`: bytes only bound how far commits go ahead,
-    /// not when one is durable.
-    fn within(&self, uploaded: u64, epoch: u64, stall: bool) -> Result<bool, Failure> {
+    /// Whether, `uploaded` up to, the commits up to `epoch` are, and the bytes of the write-ahead
+    /// log within `Options::max_lag_bytes`: bytes only bound how far commits go ahead, not when one
+    /// is durable.
+    fn within_lag(&self, uploaded: u64, epoch: u64) -> Result<bool, Failure> {
         let max_bytes = self.options.max_lag_bytes;
-        Ok(uploaded >= epoch && (!stall || self.store().wal_bytes()? <= max_bytes))
+        Ok(uploaded >= epoch && self.store().wal_bytes()? <= max_bytes)
     }
 
     /// Waits, blocking, until `reached` finds in the progress what it waits for, done or failed.
@@ -2584,7 +2607,7 @@ mod shuttle_tests {
 
         /// Asks the uploader for what the store committed.
         fn ask(&self) {
-            self.uploader.ask(self.store.last_commit().unwrap(), false).unwrap();
+            self.uploader.ask(self.store.last_commit().unwrap(), Awaited::Uploaded).unwrap();
         }
 
         /// The uploader uploads all the store made durable, and stops; and the store closes.

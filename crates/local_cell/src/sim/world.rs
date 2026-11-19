@@ -10,7 +10,7 @@
 //! runs out. After every step it checks every live cell against what its guests did and were
 //! told (TASK-88: the segments, their footers and the logs are the store's, as a host's are).
 
-use crate::upload::{self, Clock, Failure, Shared};
+use crate::upload::{self, Awaited, Clock, Failure, Shared};
 use crate::{Description, LocalCell, MemDir, Place, Recovering};
 use base32_id::Short;
 use bucket_cell::collector::{self, Options};
@@ -382,12 +382,14 @@ struct Restore {
 }
 
 /// cladefs: a version a guest cut (TASK-476): of which cell, as of which of its commits, whether
-/// its writer drops it, asked, and whether it dropped it, told so.
+/// its writer drops it, asked, and whether it dropped it, told so; and the epoch of the writer that
+/// dropped it, whose head names it no more from then on (TASK-569).
 struct Cut {
     cell: u64,
     tag: u64,
     dropping: bool,
     dropped: bool,
+    dropped_by: u64,
 }
 
 /// What a segment's footer says of the cell's history: its commits' tags.
@@ -1039,7 +1041,7 @@ impl World {
             for (&cell, session) in &host.sessions {
                 let Some(store) = &session.store else { continue };
                 let epoch = store.last_commit().unwrap();
-                let _ = session.uploader.ask(epoch, false);
+                let _ = session.uploader.ask(epoch, Awaited::Uploaded);
                 asked.push((cell, Arc::downgrade(&session.uploader), epoch));
             }
         }
@@ -1230,8 +1232,10 @@ impl World {
             return session.intervals.run_out();
         }
         let (store, uploader) = (session.store.clone().unwrap(), session.uploader.clone());
-        let asked =
-            store.last_commit().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
+        let asked = store
+            .last_commit()
+            .map_err(Failure::from)
+            .and_then(|epoch| uploader.ask(epoch, Awaited::Uploaded));
         if let Err(failure) = asked {
             drop(uploader);
             self.store_failed(host, cell, store, anyhow::Error::new(failure));
@@ -1412,13 +1416,14 @@ impl World {
             capacity: None,
         };
         self.made(host, cell, tag, epoch, made);
-        self.versions.insert(id, Cut { cell, tag, dropping: false, dropped: false });
+        let cut = Cut { cell, tag, dropping: false, dropped: false, dropped_by: 0 };
+        self.versions.insert(id, cut);
         trace!(
             "host {host}: {cell} cuts version {id} as commit {tag} at epoch {epoch}",
             cell = Short(cell),
             id = Short(id)
         );
-        let _ = uploader.ask(epoch, false);
+        let _ = uploader.ask(epoch, Awaited::Uploaded);
     }
 
     /// cladefs: a cell's writer drops one of its versions, uploaded or local, which its store
@@ -1433,12 +1438,13 @@ impl World {
             return;
         }
         let id = ids[self.rng.random_range(0..ids.len())];
-        // Gone from the head as soon as its swap lands, which its writer may be told of later.
-        self.versions.get_mut(&id).unwrap().dropping = true;
         let session = &self.hosts[host].sessions[&cell];
+        let (writer, events) = (session.uploader.writer().unwrap(), self.events.clone());
+        // Gone from the head as soon as its swap lands, which its writer may be told of later.
+        let cut = self.versions.get_mut(&id).unwrap();
+        (cut.dropping, cut.dropped_by) = (true, writer.epoch());
         let ids = BTreeSet::from([id]);
         session.store.as_ref().unwrap().forget_versions(&ids);
-        let (writer, events) = (session.uploader.writer().unwrap(), self.events.clone());
         self.spawn(async move {
             let result = writer.drop_versions(&ids).await;
             events.borrow_mut().push(Event::VersionDropped { id, result });
@@ -2243,6 +2249,21 @@ impl World {
                         "cell {id} names version {version} no more, its commit {} told \
                          durable: its head {head:?}",
                         cut.tag,
+                        id = Short(id),
+                        version = Short(version)
+                    ));
+                }
+                // cladefs: nor one its writer dropped, told so, which no acknowledgement of that
+                // writer's names after (TASK-569): a later writer may, from a log that cut it.
+                if cut.cell == id
+                    && cut.dropped
+                    && head.epoch == cut.dropped_by
+                    && head.version(version).is_some()
+                {
+                    violations.push(format!(
+                        "cell {id} names version {version}, which its writer of epoch {} \
+                         dropped: its head {head:?}",
+                        cut.dropped_by,
                         id = Short(id),
                         version = Short(version)
                     ));

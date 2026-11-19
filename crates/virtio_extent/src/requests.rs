@@ -210,8 +210,10 @@ async fn serve<S: Backend>(
             }
             // Sent to the daemon at once, each as it would be alone: the first error fails the
             // request, whichever others it mapped (`F_MAP_MANY`). cladefs: what the guest reads
-            // next (`F_MAP_PREFAULT`) is then mapped for it (TASK-112.1).
-            futures::future::try_join_all(maps.iter().map(|(args, flags)| async move {
+            // next (`F_MAP_PREFAULT`) is then mapped for it (TASK-112.1). cladefs: answered once
+            // every one is done, failed or not, as the daemon's own `MAP_MANY` is: none changes the
+            // window after the guest, told of the failure, maps the pieces again (TASK-563).
+            let mapped = futures::future::join_all(maps.iter().map(|(args, flags)| async move {
                 let (window_offset, len) =
                     (u64::from_le(args.window_offset), u64::from_le(args.len));
                 if flags & VIRTIO_EXTENT_MAP_ZEROS != 0 {
@@ -225,7 +227,8 @@ async fn serve<S: Backend>(
                 }
                 Ok::<_, Errno>(())
             }))
-            .await?;
+            .await;
+            mapped.into_iter().collect::<Result<(), Errno>>()?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_UNMAP => {
@@ -509,6 +512,11 @@ mod tests {
     struct FakeBackend {
         copies_on_write: bool,
         state: Mutex<FakeState>,
+        /// cladefs TASK-563: the extent whose MAPs fail at once (`EPERM`), as an open extent's do.
+        refused: Option<u64>,
+        /// cladefs TASK-563: an extent whose MAP waits for its gate to open, as one behind others in
+        /// the daemon does, and the gate.
+        held: Mutex<Option<(u64, futures::channel::oneshot::Receiver<()>)>>,
     }
 
     /// A map of the window: an extent and the offset in it, or zeros; its length; and where in the
@@ -672,6 +680,14 @@ mod tests {
             len: u64,
             window_offset: u64,
         ) -> Result<(), Errno> {
+            if self.refused == Some(extent.sequence) {
+                return Err(Errno::EPERM);
+            }
+            let held = self.held.lock().unwrap_or_else(PoisonError::into_inner).take();
+            match held {
+                Some((sequence, gate)) if sequence == extent.sequence => gate.await.unwrap(),
+                held => *self.held.lock().unwrap_or_else(PoisonError::into_inner) = held,
+            }
             let mut state = self.state();
             state.window_range("MAP", window_offset, len)?;
             // An extent's range, as cladefs's map checks it: aligned, its end within a u64.
@@ -1007,6 +1023,52 @@ mod tests {
             piece.as_bytes(),
         );
         assert_eq!(request(&store, &many, RESPONSE).1, errno(Errno::EINVAL));
+    }
+
+    /// cladefs TASK-563: a MAP_MANY one of whose pieces fails completes only once every piece it
+    /// sent is done, as the daemon's own MAP_MANY does: none changes the window after the guest,
+    /// told of the failure, maps the pieces again one at a time and stores to them.
+    #[test]
+    fn failed_map_manys_complete_once_every_piece_is_done() {
+        use futures::FutureExt;
+        let (open, gate) = futures::channel::oneshot::channel();
+        let store = FakeBackend {
+            copies_on_write: true,
+            refused: Some(1),
+            held: Mutex::new(Some((2, gate))),
+            ..FakeBackend::default()
+        };
+        let map = |sequence: u64, window_offset: u64| MapArgs {
+            id: ExtentIdLe { cell: CELL.to_le(), sequence: sequence.to_le() },
+            offset: 0,
+            len: BLOCK.to_le(),
+            window_offset: window_offset.to_le(),
+        };
+        let piece = MapEntry { map: map(2, 2 * BLOCK), flags: 0, reserved: 0 };
+        let flags = VIRTIO_EXTENT_MAP_MANY;
+        let mut readable = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(map(1, 0)), piece.as_bytes());
+        let mut written = vec![0xa5; RESPONSE];
+        let mut buffers = Buffers::new();
+        // SAFETY: The test's memory, which outlives the request, and nothing else accesses
+        // meanwhile.
+        unsafe { buffers.push_readable(readable.as_mut_ptr(), readable.len()) };
+        // SAFETY: As above.
+        unsafe { buffers.push_writable(written.as_mut_ptr(), written.len()) }.unwrap();
+        let notices = Notices::default();
+        let mut handling =
+            Box::pin(handle(&store, &notices, CacheType::Writeback, BOUNDS, buffers));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        let polled = handling.poll_unpin(&mut context);
+        assert!(polled.is_pending(), "completed with a piece's MAP still to run: {polled:?}");
+        assert_eq!(store.state().maps, vec![]);
+        open.send(()).unwrap();
+        let polled = handling.poll_unpin(&mut context);
+        assert_eq!(polled, std::task::Poll::Ready(RESPONSE as u32));
+        drop(handling);
+        let response: Response = read_obj(&written);
+        assert_eq!(u32::from_le(response.status), errno(Errno::EPERM));
+        assert_eq!(store.state().maps, vec![(Some((id(2), 0)), BLOCK, 2 * BLOCK)]);
     }
 
     /// cladefs: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the

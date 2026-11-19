@@ -550,9 +550,20 @@ pub(crate) fn fork_through(
         .and_then(|()| open(&at, uploader.options().clone()).map_err(Error::from))
         .and_then(|at| fork(&at.store, &at.uploader, path, child, prepare));
     discard(&at);
+    // The version, the fork's alone, dropped whether or not it forked. The child made is the
+    // fork's last step that can fail it: past it, a drop failing leaves the version named, which
+    // the cell's versions list for dropping again, and a fork reported failed would leave a live
+    // child, its store whole at `path`, that its caller never learns of (TASK-609).
     let dropped = uploader.drop_versions(&std::collections::BTreeSet::from([version]));
     forked?;
-    Ok(dropped?)
+    if let Err(failure) = dropped {
+        log::error!(
+            "cladefs: forked {:?} to {:?}, its version {version:x} not dropped: {failure}",
+            store.description().cell,
+            child.cell,
+        );
+    }
+    Ok(())
 }
 
 /// The error of a fork to `cell`, whose ID another cell has in the bucket.

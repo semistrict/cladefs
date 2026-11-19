@@ -2750,6 +2750,58 @@ fn earlier_placements_open_no_stores() {
     assert_eq!(later.root().unwrap(), b"placed at 5");
 }
 
+/// TASK-550: a store whose cell a later placement took, its uploader fenced, changes nothing more:
+/// a `COMMIT` without `COMMIT_UPLOADED`, a guest's fsync, is answered `EROFS`, as `WRITE` and
+/// `FREE` are (doc-4), rather than acknowledged and lost.
+#[test]
+fn fenced_stores_answer_ordered_commits_erofs() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = |name: &str| dir.path().join(name);
+    let cell = OpenCell::create(path("first"), 1 << 24).unwrap().cell();
+    OpenCell::place(path("first"), 5).unwrap();
+    let first = CellClient::connect(&socket, path("first"), 1 << 24).unwrap();
+    let extent = |sequence| ExtentId { cell: cell.id, sequence };
+    write(&first, extent(1), 0, &pattern(1, BLOCK)).unwrap();
+    first.commit(None).unwrap();
+    OpenCell::take(path("second"), 1 << 24, cell, Some(6)).unwrap();
+    // The first's uploader finds itself fenced at its next upload, which a durable commit waits
+    // for, or has found it already.
+    assert_eq!(first.commit(None), Err(Errno::EROFS));
+    assert_eq!(first.commit_ordered(None), Err(Errno::EROFS));
+    assert_eq!(write(&first, extent(2), 0, &pattern(2, BLOCK)), Err(Errno::EROFS));
+    assert_eq!(first.free(extent(1)), Err(Errno::EROFS));
+}
+
+/// TASK-575: a VM process drops a version it made, as its VM snapshot failing after it does, and
+/// no other (`EPERM`): its VM manager's, made through the control API, are the manager's.
+#[test]
+fn vm_processes_drop_the_versions_they_made_alone() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let store = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    write(&store, ExtentId { cell: store.cell(), sequence: 1 }, 0, &pattern(1, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    let managers = control(super::cells::make_version(path.clone(), None)).unwrap();
+    let made = store.make_version().unwrap().version;
+    let versions = || -> std::collections::BTreeSet<u64> {
+        let versions = control(super::cells::versions(path.clone())).unwrap();
+        versions.into_iter().map(|version| version.id).collect()
+    };
+    assert_eq!(versions(), [managers, made].into());
+    assert_eq!(store.drop_version(managers), Err(Errno::EPERM));
+    assert_eq!(store.drop_version(made), Ok(()));
+    assert_eq!(store.drop_version(made), Err(Errno::EPERM));
+    assert_eq!(versions(), [managers].into());
+}
+
 /// TASK-266: a store the control API makes of a cell, at a placement (`CreateCell`, as
 /// `cladefsctl take` through the daemon's), takes the cell, and so its head, with that
 /// placement's token as it is made, not the daemon's: a copy placed later than the one that took

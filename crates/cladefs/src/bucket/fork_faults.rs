@@ -322,7 +322,10 @@ impl World {
 
         // What the host left at the fork's path goes, or is the fork, as its caller was told, or
         // finds: a store of the child's, or a directory its making left unmade.
-        let made = forked.is_ok() && !self.dead.load(Ordering::SeqCst);
+        let (dead, made) = (self.dead.load(Ordering::SeqCst), forked.is_ok());
+        let made = made && !dead;
+        // A fork that failed on a host alive left nothing here (TASK-609).
+        assert!(made || dead || !path.exists(), "{case}: a failed fork left its child's store");
         if path.exists() {
             if made {
                 children.push(path.clone());
@@ -532,14 +535,15 @@ fn forks_take_their_steps_in_order() {
     assert_eq!(cleaned, ["lifecycle::head_ended"]);
 }
 
-/// A step of a fork that fails fails the fork, and what must hold holds.
+/// A step of a fork that fails fails the fork, and what must hold holds: but its version's drop,
+/// past its child made, which the fork's caller is told of (TASK-609).
 #[test]
 fn forks_failing_at_each_step() {
     host();
     let forked = all(FORK_STEPS.map(|step| (vec![Fault::Fails(step)], Leftover::Deleted)));
     let made = (FORK_STEPS.iter().zip(forked)).filter(|(_, forked)| forked.is_ok());
     let made: Vec<_> = made.map(|(step, _)| *step).collect();
-    assert_eq!(made, Vec::<&str>::new(), "forks made though these steps failed");
+    assert_eq!(made, ["upload::drop_versions"], "forks made though these steps failed");
 }
 
 /// What a host dying at a step of a fork leaves, deleted or opened, breaks nothing.

@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T05:40:00Z'
+updated_date: '2026-11-19 06:59'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -141,8 +141,8 @@ stream. `Append` gets its own endpoint, with keepalives and no request timeout.
    (`acknowledged`, `upload.rs:1207`), the writer sends `Acknowledged{n}` on the streams, and members
    drop their logs up to and including `n`.
 5. The lag bound (`upload::Options`, 4,096 commits and 1 GiB) bounds a member's disk for each cell
-   too. Today it applies only to Ordered commits (`wait_lag`); it now applies to every commit of a
-   replicated cell, so that a member's disk never holds more than the bound.
+   too. It applies to every commit level, Local and Ordered alike (`OpenCell::within_lag`,
+   TASK-582), so a member's disk never holds more than the bound.
 
 A member that falls behind, or whose stream breaks, is caught up from the writer's local logs, which
 hold everything unacknowledged.

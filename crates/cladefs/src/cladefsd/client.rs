@@ -455,6 +455,14 @@ impl CellClient {
         Ok(CellVersion { tenant, cell, version })
     }
 
+    /// cladefs: drops the version `version`, which [`CellClient::make_version`] made on this
+    /// connection, `EPERM` for any other: what a VM snapshot that failed past making it names
+    /// nowhere, which its cell would keep for good otherwise (TASK-575).
+    pub fn drop_version(&self, version: u64) -> Result<()> {
+        self.client.request_blocking(&Request::DropVersion { version })?;
+        Ok(())
+    }
+
     /// The window's mappings, which a snapshot of the VM records (`MAPPINGS`).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
         let payload = self.client.request_blocking(&Request::Mappings)?.payload;

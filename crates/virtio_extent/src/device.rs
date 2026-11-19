@@ -432,10 +432,36 @@ impl Device {
             .store()
             .make_version()
             .map_err(|errno| SnapshotError::Version(id.clone(), errno))?;
-        let mappings =
-            self.store().window_mappings().map_err(|errno| SnapshotError::Mappings(id, errno))?;
+        let mappings = match self.store().window_mappings() {
+            Ok(mappings) => mappings,
+            Err(errno) => {
+                self.drop_version(version.version);
+                return Err(SnapshotError::Mappings(id, errno));
+            }
+        };
         self.snapshot = Some(Snapshot { version, mappings });
         Ok(())
+    }
+
+    /// cladefs: drops the snapshot [`Device::take_snapshot`] took, as the VMM does when the VM's
+    /// snapshot fails after it: no snapshot file names its version then, which its cell would keep,
+    /// and all it holds, for good (TASK-575). The device has no snapshot then. Only a snapshot this
+    /// device took: one restored from is the VM manager's (the daemon refuses it, `EPERM`).
+    pub fn drop_snapshot(&mut self) {
+        let Some(snapshot) = self.snapshot.take() else { return };
+        self.drop_version(snapshot.version.version);
+    }
+
+    /// cladefs: drops the version `version` of the store's cell, which this device made, logging a
+    /// drop that fails: the VM's snapshot has failed already, and the version is its cell's to
+    /// list and drop.
+    fn drop_version(&self, version: u64) {
+        if let Err(errno) = self.store().drop_version(version) {
+            error!(
+                "extent device {}: dropping version {version:x} of a failed snapshot: {errno}",
+                self.config.id
+            );
+        }
     }
 
     /// The snapshot taken of the device's store ([`Device::take_snapshot`]), or restored from.

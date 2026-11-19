@@ -175,6 +175,18 @@ impl CellAccess {
     }
 }
 
+/// cladefs: what a request changes of a store, which [`OpenCell::admit`] admits it to change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Changing {
+    /// What it holds: its extents and commits ([`CellAccess::may_write`]).
+    Contents,
+    /// Its capacity ([`CellAccess::may_resize`]).
+    Capacity,
+    /// Its cell, not what it holds: its versions, forks, publicity and bases
+    /// ([`CellAccess::may_manage`]).
+    Cell,
+}
+
 /// An extent store a guest's filesystem lives on. See the module docs.
 pub struct OpenCell {
     store: Arc<LocalCell<HostDir>>,
@@ -820,7 +832,7 @@ impl OpenCell {
     /// its new writer's filesystem doesn't know of. The window goes, which was the writer's that
     /// went: the new one creates its own.
     pub fn take_over(&self) -> Result<()> {
-        self.access().may_write()?;
+        self.admit(Changing::Contents)?;
         if !self.is_quiescent()? {
             return Err(Errno::EBUSY);
         }
@@ -1014,6 +1026,7 @@ impl OpenCell {
     /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_cell::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     fn new_child(&self, tenant: u64) -> Result<CellId, Error> {
+        self.admit(Changing::Cell)?;
         let uploader = self.uploader.as_ref().ok_or(Errno::EROFS)?;
         host_cell::may_fork_into(self.cell(), uploader, tenant)?;
         Ok(host_cell::new_cell(uploader.bucket(), tenant).map_err(upload_errno)?)
@@ -1024,7 +1037,7 @@ impl OpenCell {
     /// never are, to show a fork refuses it (`EEXIST`) and harms no other cell (TASK-79.82).
     pub(crate) fn fork_to(&self, path: impl AsRef<Path>, cell: CellId) -> Result<(), Error> {
         self.fork_span(cell).run(|| {
-            self.access().may_manage()?;
+            self.admit(Changing::Cell)?;
             self.fork_at_version(path.as_ref(), cell, false)
         })
     }
@@ -1252,7 +1265,7 @@ impl OpenCell {
     /// shrinks it no lower than what its extents hold (`ENOSPC`). The guest's filesystem, which may
     /// hold more, agrees to a shrink first (the extent daemon's `RESIZE` asks it).
     pub fn set_capacity(&self, capacity: u64) -> Result<()> {
-        self.access().may_resize()?;
+        self.admit(Changing::Capacity)?;
         self.store.set_capacity(capacity).map_err(errno)
     }
 
@@ -1386,17 +1399,14 @@ impl OpenCell {
         self.write(extent, offset, buffers)?;
         match barriers.after {
             None => Ok(()),
-            Some(commit) => {
-                self.access().may_write()?;
-                self.commit_with(barriers.root, commit)
-            }
+            Some(commit) => self.commit_with(barriers.root, commit),
         }
     }
 
     /// Writes the bytes of `buffers`, in order, at `offset` in `extent`, which must be the store's
     /// cell's, and open (`WRITE`).
     pub fn write(&self, extent: ExtentId, offset: u64, buffers: &[VolatileSlice]) -> Result<()> {
-        self.access().may_write()?;
+        self.admit(Changing::Contents)?;
         let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
         let _opening = self.opening.read(&self.halt)?;
         // cladefs: from `buffers` to the store's file, a piece at a time, as the extent daemon's
@@ -1410,9 +1420,7 @@ impl OpenCell {
 
     /// Frees `extent`, if the store holds it (`FREE`).
     pub fn free(&self, extent: ExtentId) -> Result<()> {
-        self.access().may_write()?;
-        // cladefs: nothing a panic went through is changed (`crate::halt`).
-        self.halt.check()?;
+        self.admit(Changing::Contents)?;
         self.store.free(extent).map_err(errno)?;
         // cladefs: its pages, unless another store that asked for them holds it still, which reads
         // them through itself (TASK-79.7): one that holds it reads them anew.
@@ -1437,14 +1445,12 @@ impl OpenCell {
     /// (`COMMIT` with `COMMIT_UPLOADED`). It seals the extents written before it; cladefs: no
     /// window maps any of them, and nothing in a window changes.
     pub fn commit(&self, root: Option<&[u8]>) -> Result<()> {
-        self.access().may_write()?;
         self.commit_with(root, Commit::Uploaded)
     }
 
     /// cladefs: commits as [`OpenCell::commit`] does, completing once local, synced to the
     /// host's disk, not waiting for the bucket (`COMMIT_LOCAL`, TASK-301).
     pub fn commit_local(&self, root: Option<&[u8]>) -> Result<()> {
-        self.access().may_write()?;
         self.commit_with(root, Commit::Local)
     }
 
@@ -1452,7 +1458,6 @@ impl OpenCell {
     /// barrier, ordering what came before before what comes after (`COMMIT` without
     /// `COMMIT_UPLOADED`). [`OpenCell::flush`] makes the commits ordered so far local.
     pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
-        self.access().may_write()?;
         self.commit_with(root, Commit::Ordered)
     }
 
@@ -1470,10 +1475,28 @@ impl OpenCell {
         self.store.flush().map_err(errno)
     }
 
+    /// cladefs: `Ok` if the store takes a request changing `what` of it: the one gate every such
+    /// request passes first, each refused for the same reasons, the first that holds: the store
+    /// halted ([`crate::halt`]), which serves nothing more; its role ([`CellAccess`]); or its
+    /// uploader failed for good ([`OpenCell::uploading`]), whose store's commits, and what they
+    /// would hold, are its cell's no more (doc-4: `EROFS` on `WRITE`, `FREE` and `COMMIT` once
+    /// another host took the head). Requests passing their own checks, each its own, let a halted
+    /// store resize (TASK-611), a fenced one commit (TASK-550) and make versions (TASK-612).
+    fn admit(&self, what: Changing) -> Result<()> {
+        self.halt.check()?;
+        let access = self.access();
+        match what {
+            Changing::Contents => access.may_write(),
+            Changing::Capacity => access.may_resize(),
+            Changing::Cell => access.may_manage(),
+        }?;
+        self.uploading()
+    }
+
     /// cladefs: `Ok` unless the store's uploader stopped, failed: the store's commits are its
-    /// cell's no more, as once a later placement took its cell (`EROFS`, TASK-364), so a commit
-    /// local alone fails rather than be taken for one a bucket will hold, as
-    /// a kept image's does (`storage::kept`).
+    /// cell's no more, as once a later placement took its cell (`EROFS`, TASK-364), so nothing
+    /// changes it from then on ([`OpenCell::admit`]), as a kept image's commits fail
+    /// (`storage::kept`).
     fn uploading(&self) -> Result<()> {
         match self.uploader.as_ref().and_then(|uploader| uploader.failed()) {
             Some(failure) => Err(upload_errno(failure)),
@@ -1559,8 +1582,7 @@ impl OpenCell {
         span.set_cell(self.cell());
         span.set(trace::LEVEL, commit.level());
         span.run(|| {
-            // cladefs: nothing a panic went through is committed (`crate::halt`).
-            self.halt.check()?;
+            self.admit(Changing::Contents)?;
             let started = std::time::Instant::now();
             let committed = self.commit_and_wait(root, commit);
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
@@ -1596,19 +1618,24 @@ impl OpenCell {
         };
         let waited = match commit {
             Waiting::Replicated => self.make_replicated(),
+            // cladefs: each level including the one before (doc-12): local, as ordered, within the
+            // lag; uploaded, past it.
             Waiting::Commit(Commit::Uploaded) => self.make_uploaded(),
-            Waiting::Commit(Commit::Local) => self.flush().and_then(|()| self.uploading()),
-            Waiting::Commit(Commit::Ordered) => match self.uploader.as_ref() {
-                // Within the lag the uploader allows.
-                Some(uploader) => {
-                    let epoch = self.store.last_commit().map_err(errno)?;
-                    upload_wait(epoch).run(|| uploader.wait_lag(epoch).map_err(upload_errno))
-                }
-                None => Ok(()),
-            },
+            Waiting::Commit(Commit::Local) => self.flush().and_then(|()| self.within_lag()),
+            Waiting::Commit(Commit::Ordered) => self.within_lag(),
         };
         stats::add_since(Counter::CommitWaitNs, waiting);
         waited
+    }
+
+    /// cladefs: returns once the store's commits are within the lag its uploader allows (doc-12),
+    /// which every commit level waits for: a lost host costs what is past the bucket, no more, and
+    /// the host's disk holds no more (doc-14). Fails once the uploader failed for good, as no commit
+    /// made since is its cell's (TASK-550, TASK-582).
+    fn within_lag(&self) -> Result<()> {
+        let Some(uploader) = self.uploader.as_ref() else { return Ok(()) };
+        let epoch = self.store.last_commit().map_err(errno)?;
+        upload_wait(epoch).run(|| uploader.wait_lag(epoch).map_err(upload_errno))
     }
 
     /// cladefs: makes the store's commits so far replicated (doc-21): local, then on f members
@@ -1657,7 +1684,7 @@ impl OpenCell {
         second_stage: Option<Arc<dyn SecondStage>>,
         private_max: u64,
     ) -> Result<DaxWindow, Error> {
-        self.access().may_write()?;
+        self.admit(Changing::Contents)?;
         let copying = crate::dax::CopyOnWrite::at_most(private_max);
         self.install_dax(|| Ok(Dax::copying(size, second_stage, Some(copying))?))
     }
@@ -1995,7 +2022,7 @@ impl OpenCell {
     /// cladefs: drops the versions `ids` names: the head names them no more, those not uploaded yet
     /// never. Forks of one keep what they inherited of it until they go.
     pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
         Ok(uploader.drop_versions(ids).map_err(upload_errno)?)
     }
@@ -2003,7 +2030,7 @@ impl OpenCell {
     /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: forks of it into other
     /// tenants' cells are made while it is shared (`EACCES` otherwise), those made living on.
     pub fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
         Ok(uploader.share_version(id, shared).map_err(upload_errno)?)
     }
@@ -2068,7 +2095,7 @@ impl OpenCell {
             );
             return Err(Error::new(anyhow::Error::new(Errno::EBUSY).context(refused)));
         }
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         let _opening = self.opening.write(&self.halt)?;
         if !self.is_quiescent()? {
             let open = "an extent written since the last commit is open";
@@ -2150,7 +2177,7 @@ impl OpenCell {
     /// arena of physical memory, which every tenant's VM processes hold read-only.
     /// Stores opened since take it so; a tenant opens no public store itself, only forks of it.
     pub fn make_public(&self) -> Result<()> {
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         self.mark_public(&self.ancestry())
     }
 
@@ -2159,7 +2186,7 @@ impl OpenCell {
     /// being forked by them (backlog doc-10). Its pages are of the default arena through it
     /// ([`OpenCell::open_base`]).
     pub fn make_public_attach_only(&self) -> Result<()> {
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         self.mark_public(&[self.cell().id])
     }
 
@@ -2178,7 +2205,7 @@ impl OpenCell {
     /// its extents read through to it from now on, and in forks of this store, which a VM restored
     /// is. Attached already, it does nothing. The guest has no part in this (backlog doc-10).
     pub fn attach_base(&self, base: &Path, cells: &[u64]) -> Result<()> {
-        self.access().may_manage()?;
+        self.admit(Changing::Cell)?;
         cell_dir::attach(&self.path, base, cells)?;
         self.bases.add(self.routed(cells), base);
         Ok(())
@@ -3139,6 +3166,14 @@ mod tests {
         // Not quiescent, as far as anyone knows: its connection's end retires it.
         assert_eq!(store.is_quiescent(), Err(Errno::EIO));
         assert_eq!(store.take_over(), Err(Errno::EIO));
+        // Nor what the control API changes of it: its capacity, its versions (TASK-611).
+        let committed = store.store.last_commit().unwrap();
+        assert_eq!(store.set_capacity(1 << 27), Err(Errno::EIO));
+        let dropped = store.drop_versions(&[1].into()).map_err(|err| err.errno());
+        assert_eq!(dropped, Err(Some(Errno::EIO)));
+        let shared = store.share_version(1, true).map_err(|err| err.errno());
+        assert_eq!(shared, Err(Some(Errno::EIO)));
+        assert_eq!(store.store.last_commit().unwrap(), committed, "the halted store committed");
         drop((window, store));
 
         let store = OpenCell::open(dir.path().join("store")).unwrap();

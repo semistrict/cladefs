@@ -679,6 +679,26 @@ fn devices_are_snapshotted_and_restored() {
     assert!(restored.state().frozen);
 }
 
+/// TASK-575: a snapshot a device took, dropped as the VMM drops it when the VM's snapshot fails
+/// after it, is gone: the device has none, and takes the next, of another version. (The daemon's
+/// side, the version dropped, is cladefsd's `vm_processes_drop_the_versions_they_made_alone`.)
+#[test]
+fn snapshots_dropped_are_gone() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm: Arc<dyn WindowVm> = Arc::new(FakeVm::default());
+    let mut device = Device::new(config(&dir, "store"), 2, vm, lost).unwrap();
+    device.activate(device.features() | (1 << 32), Arc::new(Counted::default())).unwrap();
+    let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);
+    assert_eq!(serve_with(&device, &freeze, RESPONSE), (RESPONSE as u32, 0));
+    device.take_snapshot(|| {}).unwrap();
+    let dropped = device.snapshot().unwrap().version;
+    device.drop_snapshot();
+    assert!(device.snapshot().is_none());
+    device.take_snapshot(|| {}).unwrap();
+    assert_ne!(device.snapshot().unwrap().version, dropped);
+}
+
 /// A device with a window reserves it of its VM, its private pages at most in its configuration,
 /// creates it as the driver activates the device, and, restored from a snapshot, reserves it where
 /// the snapshot had it; dropped, it removes its slot before releasing its addresses.

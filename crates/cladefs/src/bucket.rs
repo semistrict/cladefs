@@ -1942,6 +1942,63 @@ mod tests {
         assert_eq!(later.root(), Ok(b"first".to_vec()));
     }
 
+    /// TASK-550, TASK-612, doc-4: a store whose uploader failed for good, as a later placement
+    /// took its cell, changes nothing more: neither an ordered commit (a guest's fsync) nor a local
+    /// one, nor a write, a free, a version or a resize, each `EROFS` as its durable commits are,
+    /// rather than taken for what its cell will hold.
+    #[test]
+    fn fenced_stores_change_nothing() {
+        changes_nothing_once_lost(|bucket, dir, cell| {
+            let second = dir.join("second");
+            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).unwrap());
+            OpenCell::place(&second, 2).unwrap();
+            drop(reopened(&second, idle()).unwrap());
+        });
+    }
+
+    /// TASK-550: as [`fenced_stores_change_nothing`], a store whose cell a later placement
+    /// deleted.
+    #[test]
+    fn stores_of_deleted_cells_change_nothing() {
+        changes_nothing_once_lost(|bucket, dir, cell| {
+            let second = dir.join("second");
+            drop(kept_in(&second, (1 << 30, Some(cell)), bucket, idle()).unwrap());
+            OpenCell::place(&second, 2).unwrap();
+            OpenCell::delete(&second, Some(bucket)).unwrap();
+        });
+    }
+
+    /// A store, placed, its cell then lost to it as `lose` loses it, in `dir`, changes nothing
+    /// more once its uploader finds it lost.
+    fn changes_nothing_once_lost(
+        lose: impl FnOnce(&Arc<ObjectBucket>, &std::path::Path, crate::CellId),
+    ) {
+        const EROFS: crate::Errno = crate::Errno::EROFS;
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let path = dir.path().join("first");
+        let store = kept_in(&path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        let cell = store.cell();
+        OpenCell::place(&path, 1).unwrap();
+        let kept = write(&store, 1, &pattern(1, BLOCK));
+        store.commit(None).unwrap();
+        lose(&bucket, dir.path(), cell);
+        // Ordered before its uploader finds the cell lost, which its next upload does: a loss
+        // doc-4 accepts.
+        write(&store, 2, &pattern(2, BLOCK));
+        store.commit_ordered(None).unwrap();
+        assert_eq!(store.wait_uploaded(), Err(EROFS));
+        assert!(store.uploader().unwrap().failed().is_some());
+        let extent = ExtentId { cell: cell.id, sequence: 3 };
+        let data = pattern(3, BLOCK);
+        assert_eq!(store.write(extent, 0, &[VolatileSlice::from(&data[..])]), Err(EROFS));
+        assert_eq!(store.free(kept), Err(EROFS));
+        assert_eq!(store.commit_ordered(None), Err(EROFS));
+        assert_eq!(store.commit_local(None), Err(EROFS));
+        assert_eq!(store.make_version(None).err().and_then(|err| err.errno()), Some(EROFS));
+        assert_eq!(store.set_capacity(2 << 30), Err(EROFS));
+    }
+
     /// TASK-45.1: a placement cut off deletes no cell from under a later one: its delete fails
     /// (`ESTALE`), leaving the cell in the bucket, which the later placement goes on writing; the
     /// later placement's delete deletes it.
@@ -2372,6 +2429,7 @@ mod tests {
     fn waits_at_the_lag_bound(
         options: local_cell::upload::Options,
         failing: fn(&Gated) -> &std::sync::atomic::AtomicBool,
+        commit: fn(&OpenCell) -> crate::error::Result<()>,
     ) {
         use bucket_cell::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
@@ -2384,13 +2442,13 @@ mod tests {
         failing(&gated).store(true, std::sync::atomic::Ordering::Relaxed);
         for sequence in 1..=2 {
             write(&store, sequence, &pattern(sequence as u8, BLOCK));
-            store.commit_ordered(None).unwrap();
+            commit(&store).unwrap();
         }
         let third = {
             let store = store.clone();
             std::thread::spawn(move || {
                 write(&store, 3, &pattern(3, 2 * BLOCK));
-                store.commit_ordered(None)
+                commit(&store)
             })
         };
         let uploader = store.uploader().unwrap();
@@ -2870,7 +2928,31 @@ mod tests {
     fn commits_wait_at_the_lag_bound() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
-        waits_at_the_lag_bound(options, |gated| &gated.shut);
+        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_ordered(None));
+    }
+
+    /// TASK-582: a local commit, synced to the host's disk, waits at the lag bound as an ordered
+    /// one does, each level including the one before (doc-12): what a lost host costs, and what
+    /// its disk holds, stays within the bound, as SQLite's and memory cells' commits, all local,
+    /// go on while the bucket is out of reach.
+    #[test]
+    fn local_commits_wait_at_the_lag_bound() {
+        let interval = Duration::from_millis(1);
+        let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
+        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_local(None));
+    }
+
+    /// TASK-582: as [`local_commits_wait_at_the_lag_bound`], at a bound in bytes, as
+    /// [`commits_wait_at_the_lag_bound_in_bytes`] sets it.
+    #[test]
+    fn local_commits_wait_at_the_lag_bound_in_bytes() {
+        let interval = Duration::from_millis(1);
+        let options = local_cell::upload::Options {
+            interval,
+            max_lag_bytes: 3 * BLOCK as u64,
+            ..Default::default()
+        };
+        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_local(None));
     }
 
     #[test]
@@ -2886,7 +2968,7 @@ mod tests {
             max_lag_bytes: 3 * BLOCK as u64,
             ..Default::default()
         };
-        waits_at_the_lag_bound(options, |gated| &gated.shut);
+        waits_at_the_lag_bound(options, |gated| &gated.shut, |store| store.commit_ordered(None));
     }
 
     /// TASK-314: a bucket that keeps failing its writes, its disk full, holds its stores' commits
@@ -2896,7 +2978,7 @@ mod tests {
     fn commits_wait_at_the_lag_bound_while_the_bucket_is_full() {
         let interval = Duration::from_millis(1);
         let options = local_cell::upload::Options { interval, max_lag: 2, ..Default::default() };
-        waits_at_the_lag_bound(options, |gated| &gated.full);
+        waits_at_the_lag_bound(options, |gated| &gated.full, |store| store.commit_ordered(None));
     }
 
     /// A cell opens on a host without it: an empty store of it takes what the cell holds, and
@@ -3364,6 +3446,13 @@ mod tests {
         );
         assert_eq!(cached(), [false, true, true]);
         assert_eq!(stores[0].0.commit(None), Err(crate::Errno::EACCES));
+        // Nor what the control API changes of it: its capacity, its versions (TASK-611).
+        let ours = &stores[0].0;
+        assert_eq!(ours.set_capacity(2 << 30), Err(crate::Errno::EACCES));
+        let dropped = ours.drop_versions(&[1].into()).map_err(|err| err.errno());
+        assert_eq!(dropped, Err(Some(crate::Errno::EACCES)));
+        let shared = ours.share_version(1, true).map_err(|err| err.errno());
+        assert_eq!(shared, Err(Some(crate::Errno::EACCES)));
 
         kms.destroy(1).unwrap();
         let why = "tenant 1: its KEK is destroyed";

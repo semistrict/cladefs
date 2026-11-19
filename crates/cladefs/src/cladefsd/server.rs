@@ -473,6 +473,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         behind: SharedLock::new("connection behind", Mutex::new(None)),
         shrinking: Shrinking::new(),
         transfer: OnceLock::new(),
+        versions_made: SharedLock::new("connection versions", Mutex::new(Default::default())),
         closing: AtomicBool::new(false),
         requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
         drained: Arc::new(event_listener::Event::new()),
@@ -985,6 +986,9 @@ pub(super) struct Connection {
     shrinking: Shrinking,
     /// Its transfer area, once its VM process gives it one ([`TRANSFER`]).
     transfer: OnceLock<TransferArea>,
+    /// cladefs: the versions its VM process made ([`FORK_QUIESCENT`]), which alone it drops
+    /// ([`FORK_DROP`], TASK-575).
+    versions_made: SharedLock<Mutex<std::collections::BTreeSet<u64>>>,
     /// Whether its VM process is gone, and its store goes once durable.
     closing: AtomicBool,
     /// Its requests received and not done (TASK-34), and what says when none is left.
@@ -1389,8 +1393,22 @@ impl Connection {
                     }
                     cells::errno_of(format_args!("making a version"), err)
                 })?;
+                self.versions_made.with(Mutex::lock).insert(version);
                 let cell = store.cell();
                 reply.args = Forked { cell: cell.id, version, tenant: cell.tenant }.args();
+                Ok(())
+            }
+            // cladefs: a version it made, which a VM snapshot failing past it names nowhere
+            // (TASK-575): no other, which its VM manager's are (`EPERM`).
+            Request::DropVersion { version } => {
+                if !self.versions_made.with(Mutex::lock).contains(version) {
+                    return Err(Errno::EPERM);
+                }
+                let ids = std::collections::BTreeSet::from([*version]);
+                store.drop_versions(&ids).map_err(|err| {
+                    cells::errno_of(format_args!("dropping version {version:x}"), err)
+                })?;
+                self.versions_made.with(Mutex::lock).remove(version);
                 Ok(())
             }
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).

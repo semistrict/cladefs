@@ -153,7 +153,8 @@ pub(crate) const ACK: u32 = 12;
 /// [`FORK_QUIESCENT`], no payload, it makes a version of the store's cell instead, a VM
 /// snapshot's, which any number of hosts fork at once and none writes: `EBUSY` unless nothing is
 /// open ([`OpenCell::is_quiescent`](crate::OpenCell::is_quiescent)); the reply's `args[1]`
-/// is its ID.
+/// is its ID. cladefs: with [`FORK_DROP`], no payload, it drops the version `args[0]`, one this
+/// connection made: what a VM snapshot that failed past making its versions made (TASK-575).
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.
@@ -272,6 +273,8 @@ pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
 /// process prefaults by itself.
 pub(crate) const MAP_ZEROS: u32 = 1 << 3;
 pub(crate) const FORK_QUIESCENT: u32 = 1 << 0;
+/// cladefs: a [`FORK`] that drops a version the connection made (TASK-575).
+pub(crate) const FORK_DROP: u32 = 1 << 1;
 pub(crate) const MAPPING_ZEROS: u64 = 1 << 1;
 /// cladefs: a `COMMIT` that completes once uploaded, not once ordered: doc-4's `COMMIT_UPLOADED`,
 /// at its bit, as every flag doc-4 has too is here.

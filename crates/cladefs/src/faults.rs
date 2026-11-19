@@ -28,8 +28,9 @@ pub(crate) use failpoint;
 /// The steps of a fork of a store with a writer, in the order it takes them, those that fail: a
 /// version of its last commit made, then, on the uploader's side, its segment's upload and
 /// acknowledgement, which names the version in the head; then the fork of the version, as a
-/// restore's steps (TASK-508.3).
-pub const FORK_STEPS: [&str; 17] = [
+/// restore's steps (TASK-508.3); then the version dropped, its child made, which fails the fork no
+/// more (TASK-609).
+pub const FORK_STEPS: [&str; 18] = [
     "version::committed",
     "upload::gather",
     "writer::upload",
@@ -47,6 +48,7 @@ pub const FORK_STEPS: [&str; 17] = [
     "version::made",
     "fork::recorded",
     "fork::made",
+    "upload::drop_versions",
 ];
 
 /// The steps of a restore: a fork of a version, in the order it takes them, on any host holding a

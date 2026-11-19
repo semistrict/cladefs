@@ -482,8 +482,6 @@ impl<B: Bucket> Writer<B> {
                 true => inner.pending.range(..=through).flat_map(cut).collect(),
                 false => inner.pending.iter().flat_map(cut).collect(),
             };
-            let cuts: Vec<_> =
-                cuts.into_iter().filter(|(_, cut)| !inner.dropped.contains(&cut.id)).collect();
             // cladefs: the configuration a switch names, if this acknowledgement names its commit.
             let last = (inner.pending.range(..=through))
                 .flat_map(|(_, pending)| pending.footer.contents.commits.iter())
@@ -498,7 +496,13 @@ impl<B: Bucket> Writer<B> {
         {
             let mut held = self.held.lock().await;
             if held.head.end <= through {
-                let named = cuts.iter().map(|(seq, cut)| (*seq, cut));
+                // cladefs: those not dropped, as of now, holding the head: a drop that took it
+                // first, between, found no version of these to unname (TASK-569).
+                let named: Vec<_> = {
+                    let inner = self.inner();
+                    let kept = cuts.iter().filter(|(_, cut)| !inner.dropped.contains(&cut.id));
+                    kept.map(|(seq, cut)| (*seq, cut)).collect()
+                };
                 let mut next = held.head.clone().holding(self.epoch, through + 1).naming(named);
                 if let Some(configuration) = &switch
                     && let Some(replication) = next.replication.as_mut()
@@ -817,6 +821,37 @@ mod tests {
             lifecycle::delete(&*bucket, cell, 12, 0).await.unwrap();
             let ended = head::get(&*bucket, cell).await.unwrap().unwrap();
             assert_eq!((ended.epoch, named(Some(ended))), (layout::Head::FINAL, vec![]));
+        });
+    }
+
+    /// TASK-569: an acknowledgement that read the versions to name before a drop of one, then
+    /// waited for the head, which the drop took first and found naming none of them, names no
+    /// version dropped: the drop, told done, is not undone.
+    #[test]
+    fn acknowledgements_name_no_version_dropped_while_they_wait_for_the_head() {
+        use futures::FutureExt;
+        futures::executor::block_on(async {
+            let bucket = memory();
+            let cell = test_cell(1);
+            lifecycle::create(&*bucket, cell, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), cell, 10, 0).await.unwrap();
+            let a = cut(&writer, 1, version(0xa, None)).unwrap();
+            writer.upload(a).await.unwrap();
+            let waker = futures::task::noop_waker();
+            let mut context = std::task::Context::from_waker(&waker);
+            // The head held, as a control call's swap holds it across its write.
+            let held = writer.held.lock().await;
+            let mut acknowledging = Box::pin(writer.acknowledge());
+            assert!(acknowledging.poll_unpin(&mut context).is_pending());
+            let dropped = BTreeSet::from([0xa]);
+            let mut dropping = Box::pin(writer.drop_versions(&dropped));
+            assert!(dropping.poll_unpin(&mut context).is_pending());
+            drop(held);
+            // The drop takes the head first, which names no version yet.
+            dropping.await.unwrap();
+            acknowledging.await.unwrap();
+            let head = head::get(&*bucket, cell).await.unwrap().unwrap();
+            assert_eq!((head.end, named(Some(head))), (a + 1, vec![]));
         });
     }
 
