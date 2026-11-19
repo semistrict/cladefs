@@ -4,14 +4,14 @@ Explainer films of cladefs, made with [HyperFrames](https://github.com/heygen-co
 (Apache-2.0): HTML and GSAP rendered to video, frame by frame. The cells are fuzzy critters on
 lilac felt, over a ukulele bed, with no voice.
 
-| Film | What it explains | Length |
-|---|---|---|
-| `overview/` | How cladefs stores sandbox disks: one copy, a hundred sandboxes | 132 s |
-| `encryption/` | Encryption at rest, per-tenant keys, and shredding | 62 s |
-| `replication/` | Replicated commits: durable on a majority of hosts before the bucket | 70 s |
-| `regions/` | Many regions: cells across buckets | 72 s |
-| `shared-volumes/` | Shared volumes: one checkout kept current, attached under writable layers | 72 s |
-| `images/` | Container images as bases | 62 s |
+| Film | What it explains | Length | Watch |
+|---|---|---|---|
+| `overview/` | How cladefs stores sandbox disks: one copy, a hundred sandboxes | 132 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-overview.mp4) |
+| `encryption/` | Encryption at rest, per-tenant keys, and shredding | 62 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-encryption.mp4) |
+| `replication/` | Replicated commits: durable on a majority of hosts before the bucket | 70 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-replication.mp4) |
+| `regions/` | Many regions: cells across buckets | 72 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-regions.mp4) |
+| `shared-volumes/` | Shared volumes: one checkout kept current, attached under writable layers | 72 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-shared-volumes.mp4) |
+| `images/` | Container images as bases | 62 s | [MP4](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-images.mp4) |
 
 Each film is a HyperFrames project of its own: `index.html` mounts one scene per file in
 `compositions/`, `SPEC.md` is its look, shots and timings, and `REVIEW.md` what was checked.
@@ -31,11 +31,22 @@ From this directory, naming the film:
 ```sh
 npm run dev -- encryption      # the Studio preview
 npm run check -- encryption    # lint, layout, contrast and timing checks
-npm run render -- encryption   # writes encryption/renders/<name>.mp4
+npm run render -- encryption -o encryption/renders/cladefs-encryption.mp4
 ```
 
 `render` passes `--include-outside-files`, since a film's `assets/cuddly.js` links outside the
 film's directory into `shared/`, and the renderer leaves out scripts outside the project otherwise.
+
+## Publishing
+
+The renders are public in the bucket `gs://echophase-cladefs-explainers` (project
+`echophase-connectome-test`, readable by anyone), one object per film, named as `render` names
+them. After rendering a film again, upload it over the old one:
+
+```sh
+gcloud storage cp encryption/renders/cladefs-encryption.mp4 gs://echophase-cladefs-explainers/ \
+  --content-type=video/mp4 --cache-control="public, max-age=3600"
+```
 
 ## Audio, not committed
 

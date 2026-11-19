@@ -180,6 +180,7 @@ To run it under a VM manager of your own, read `docs/integrator-guide.md`.
 | `go/` | Go clients of the daemon's APIs. |
 | `specs/` | TLA+ specs of the protocols whose bugs are rare interleavings. |
 | `guide/` | An interactive guide to the code: `cd guide && pnpm install && pnpm dev`. |
+| `explainer/` | Explainer films: [the overview](https://storage.googleapis.com/echophase-cladefs-explainers/cladefs-overview.mp4) and one per feature (`explainer/README.md`). |
 | `backlog/` | Tasks and design docs, managed with Backlog.md. What remains to do is there. |
 | `dead-ends/` | Approaches tried and given up on, each with why. |
 
