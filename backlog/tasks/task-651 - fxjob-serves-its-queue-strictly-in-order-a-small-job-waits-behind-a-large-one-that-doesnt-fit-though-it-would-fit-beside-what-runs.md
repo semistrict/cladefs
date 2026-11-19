@@ -6,14 +6,14 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18T19:13:00Z'
-updated_date: '2026-11-18 21:53'
+updated_date: '2026-11-19 06:41'
 labels:
   - fxjob
   - ubu1
 dependencies: []
 references:
   - scripts/fxjob
-  - TASK-650
+  - TASK-652
 priority: medium
 type: enhancement
 ordinal: 938000
