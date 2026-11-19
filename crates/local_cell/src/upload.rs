@@ -88,12 +88,12 @@ fn mirror_wanted(bucket: &Arc<ObjectBucket>, origin: Origin) -> Result<(), Failu
 }
 
 /// cladefs: the mirror in `bucket` of the version `cell` was forked from, if of another bucket's
-/// cell, begun in the background as `cell`'s store opens ([`ObjectBucket::mirror_for`]): the host
-/// that forked it may have died before it began it.
-fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId) -> Result<(), Failure> {
+/// cell, begun in the background on `runtime`, the store's uploader's, as `cell`'s store opens
+/// ([`ObjectBucket::mirror_for`]): the host that forked it may have died before it began it. A
+/// process that opens stores on a runtime of its own, as a VM's does, makes no other.
+fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
     let mirroring = bucket.clone().mirror_for(cell);
-    bucket_runtime()?.spawn(async move { logged(mirroring.await, cell, 0) });
-    Ok(())
+    runtime.spawn(async move { logged(mirroring.await, cell, 0) });
 }
 
 /// cladefs: logs what a mirror of `parent`'s version at `at` came to, if one ran.
@@ -453,7 +453,7 @@ pub fn open<D: Dir>(
         Err(_) => return Err(Failure::msg("the uploader stopped")),
     };
     let dir = opened.hold_dir()?;
-    mirror_for(&bucket, cell)?;
+    mirror_for(&bucket, cell, &runtime.handle);
     let uploader = Uploader { shared, bucket, stopped: Mutex::new(Some(stopped)), _dir: dir };
     Ok((opened, uploader))
 }
