@@ -526,10 +526,11 @@ impl ByBucket {
     }
 
     /// The KMS of the bucket numbered `number`, another than the host's, chosen (see the type).
-    async fn other(&self, number: u16) -> Result<(KmsKey, kms::Shared), String> {
+    /// Its bucket KMS too, if it is that.
+    async fn other(&self, number: u16) -> Result<Chosen, String> {
         let entry = self.registered.entry(&self.home, number).await;
         let entry = entry.map_err(|err| format!("its entry in the registry: {err}"))?;
-        let vars = numbered_options(self.vars.iter().cloned(), number);
+        let vars = kms_vars(&self.vars, number);
         let var = |name: &str| {
             vars.iter().rev().find(|(of, _)| of == name).map(|(_, value)| OsString::from(value))
         };
@@ -537,7 +538,7 @@ impl ByBucket {
         match choose(&var, entry.details.kms.as_deref(), || member)? {
             HostKms::Named(url, kms) => {
                 let kms = self.named.lock().unwrap().entry(url.clone()).or_insert(kms).clone();
-                Ok((KmsKey(url.into()), kms))
+                Ok(((KmsKey(url.into()), kms), None))
             }
             HostKms::Bucket(kms) => {
                 if let Some(id) = &entry.details.master_key_id
@@ -550,11 +551,29 @@ impl ByBucket {
                     ));
                 }
                 kms.identify(entry.id);
-                self.buckets.lock().unwrap().insert(number, kms.clone());
-                Ok((KmsKey(format!("the bucket KMS of bucket {number}").into()), kms))
+                let key = KmsKey(format!("the bucket KMS of bucket {number}").into());
+                Ok(((key, kms.clone()), Some(kms)))
             }
         }
     }
+}
+
+/// What [`ByBucket::other`] chose: the KMS and its name, and the bucket KMS it is, if it is one.
+type Chosen = ((KmsKey, kms::Shared), Option<Arc<BucketKms<ObjectBucket>>>);
+
+/// cladefs: the variables bucket `number`'s KMS is chosen by, of `vars`: its own
+/// (`CLADEFSD_BUCKET_<N>_...`) over the host's, as for its options
+/// (`object_bucket::numbered_options`); the KMS's ([`KMS_VAR`], [`MASTER_KEY_VAR`],
+/// [`MASTER_KEY_FILE_VAR`]) as one, so that a bucket given any of them as its own takes none of the
+/// host's: its own master key and the host's master key file are not both given, nor is the
+/// host's KMS chosen over its own master key.
+fn kms_vars(vars: &[(String, String)], number: u16) -> Vec<(String, String)> {
+    let prefix = format!("CLADEFSD_BUCKET_{number}_");
+    let kms = [KMS_VAR, MASTER_KEY_VAR, MASTER_KEY_FILE_VAR];
+    let own = (vars.iter())
+        .any(|(name, _)| name.strip_prefix(&prefix).is_some_and(|name| kms.contains(&name)));
+    let shared = vars.iter().filter(|(name, _)| !(own && kms.contains(&name.as_str())));
+    numbered_options(shared.cloned(), number)
 }
 
 /// What [`ByBucket::shred`] did, bucket by bucket, each by its number (0: the host's own bucket,
@@ -578,8 +597,16 @@ impl Kmses for ByBucket {
             if let Some(chosen) = self.chosen.lock().unwrap().get(&bucket) {
                 return Ok(chosen.clone());
             }
-            let chosen = self.other(bucket).await?;
-            Ok(self.chosen.lock().unwrap().entry(bucket).or_insert(chosen).clone())
+            let (chosen, bucket_kms) = self.other(bucket).await?;
+            // Chosen at once by another call, perhaps: that one, the one every caller holds.
+            let mut all = self.chosen.lock().unwrap();
+            if let Some(chosen) = all.get(&bucket) {
+                return Ok(chosen.clone());
+            }
+            if let Some(bucket_kms) = bucket_kms {
+                self.buckets.lock().unwrap().insert(bucket, bucket_kms);
+            }
+            Ok(all.entry(bucket).or_insert(chosen).clone())
         })
     }
 }
@@ -966,6 +993,33 @@ mod tests {
             let wrapped_again = formats::wrap(tenant, 0, &kek, &key);
             assert_eq!(wrapped_again, wrapped[tenant as usize - 1]);
         }
+    }
+
+    /// TASK-633.6 (review): a bucket given a KMS variable of its own takes none of the host's: its
+    /// master key over the host's master key file, not both; its master key over the host's KMS.
+    #[test]
+    fn a_buckets_own_kms_variables_override_the_hosts_as_one() {
+        let vars = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
+        };
+        let host = vars(&[
+            (MASTER_KEY_FILE_VAR, "/etc/cladefs/master"),
+            (KMS_VAR, "local:///kms"),
+            ("AWS_REGION", "us-east-1"),
+            ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY", "22"),
+        ]);
+        let mut two = kms_vars(&host, 2);
+        two.sort();
+        assert_eq!(two, vars(&[("AWS_REGION", "us-east-1"), (MASTER_KEY_VAR, "22")]));
+        let mut three = kms_vars(&host, 3);
+        three.sort();
+        let expected = vars(&[
+            ("AWS_REGION", "us-east-1"),
+            ("CLADEFSD_BUCKET_2_CLADEFS_MASTER_KEY", "22"),
+            (KMS_VAR, "local:///kms"),
+            (MASTER_KEY_FILE_VAR, "/etc/cladefs/master"),
+        ]);
+        assert_eq!(three, expected);
     }
 
     /// TASK-633.6: each bucket's cells are under that bucket's KMS, as its entry in the registry

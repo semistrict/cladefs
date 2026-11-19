@@ -159,7 +159,9 @@ CLADEFSD_BUCKET_3_GOOGLE_SERVICE_ACCOUNT=/etc/cladefs/gcs-3.json
 The cells of another bucket are under that bucket's KMS (TASK-633.6): the one its record names
 (`--kms`), else the one its variables name (`CLADEFSD_BUCKET_<N>_CLADEFS_KMS`, or `CLADEFS_KMS`),
 else, given a master key (`CLADEFSD_BUCKET_<N>_CLADEFS_MASTER_KEY`, or `CLADEFS_MASTER_KEY`), the
-bucket KMS over that bucket, its tenants' KEKs kept in it. A master key's ID recorded with
+bucket KMS over that bucket, its tenants' KEKs kept in it. A bucket given any of `CLADEFS_KMS`,
+`CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE` as its own takes none of the host's three. A
+master key's ID recorded with
 `--master-key-id` must be among those given, or the bucket's cells are refused (`EACCES`). A KMS
 refusing a tenant refuses it in the buckets under that KMS alone. The host's own bucket's cells are
 under the KMS its own environment names, as below.
@@ -260,7 +262,10 @@ each tenant's KEK is the key `cladefs-tenant-<tenant in base 32>` in that vault
 (RSA, wrapped with `RSA-OAEP-256`; `&alg=A256KW` for a Managed HSM's AES keys), a
 wrap its `wrapkey` of the tenant's ID and the key, so that no other tenant's
 unwrap gives it. A tenant's own key in its own vault is named in `&keys=FILE`, a
-line `TENANT https://THEIR_VAULT.vault.azure.net/keys/NAME` each. Each tenant
+line `TENANT https://THEIR_VAULT.vault.azure.net/keys/NAME` each. Every host named
+must be a vault's or a Managed HSM's (`*.vault.azure.net`, `*.managedhsm.azure.net`, and
+the China and US Government clouds'), as the hosts' token goes to it; `&endpoint=` takes
+`https://VAULT_HOST` or, for an emulator, `http://127.0.0.1:PORT`. Each tenant
 grants the hosts' identity `wrapKey` and `unwrapKey` on its key alone (`Key
 Vault Crypto Service Encryption User`); taking that away, or disabling the key,
 revokes it; deleting it shreds the tenant. Hosts authenticate as Azure's
