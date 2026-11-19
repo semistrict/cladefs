@@ -146,6 +146,11 @@ pub enum Error {
          {held}): CLADEFS_MASTER_KEY"
     )]
     UnknownMasterKey { tenant: u64, id: String, held: String },
+    /// cladefs: the bucket KMS's (TASK-633.6): a key wrapped under the tenant's KEK in another
+    /// bucket, of identity `bucket`, than this KMS's: asked of the wrong bucket's KMS, which says
+    /// nothing of the tenant's KEK. Never a revocation.
+    #[error("tenant {tenant}: a key wrapped in the bucket KMS of another bucket ({bucket:016x})")]
+    Elsewhere { tenant: u64, bucket: u64 },
     /// The KMS failed. What was asked may or may not have taken effect.
     #[error("tenant {tenant}: the KMS failed: {source}")]
     Io { tenant: u64, source: io::Error },
