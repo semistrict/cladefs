@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-18 20:38'
-updated_date: '2026-11-19 00:16'
+updated_date: '2026-11-19 22:27'
 labels:
   - cladefsd
   - fork
@@ -50,6 +50,8 @@ Seen on ubu1 (2026-11-18, TASK-633.9's runs) under full-suite load, never alone:
 
 <!-- SECTION:NOTES:BEGIN -->
 Paused 2026-11-18 for TASK-633.2, at the user's word; nothing changed yet.
+
+2026-11-19: page_ins_in_flight_are_bounded failed again on main's CI (run 44615661631, 28a38a315, test (workspace)), now ENOENT, not EBUSY: hostile.rs:2294 'opening the extent store at …/elsewhere/store: ENOENT' (the raw_connection right after connect_forked's drop). Not reopened: whoever picks this up decides whether it is the same race.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

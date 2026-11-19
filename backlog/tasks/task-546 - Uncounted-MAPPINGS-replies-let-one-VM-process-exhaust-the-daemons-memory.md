@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-18 15:24'
-updated_date: '2026-11-19 16:27'
+updated_date: '2026-11-19 22:27'
 labels: []
 dependencies: []
 priority: high
@@ -47,4 +47,6 @@ Audit of 6f4dd56a0 (2026-11-18), daemon-protocol review; verified against the co
 
 <!-- SECTION:NOTES:BEGIN -->
 A MAPPINGS is counted as admitted, as many mappings as its window holds (Connection::held_for), and one at a time on a connection, the next waiting for the last's reply (mappings_turn): two at once of a 64 GiB window were past the credit, letting a VM process go that the protocol allows. Test: hostile.rs mappings_asked_for_past_the_credit_let_their_vm_process_go: a window of 700k mappings, 32 MiB a reply, 256 MAPPINGS unread, the heap within the credit plus slack, the VM process let go (a mutant counting MAPPINGS as nothing fails it). Left: AC2's 64-connection tenant burst. macOS: clippy, workspace 2718/2718, sim 41/41; Linux (ubu1, 9cca798f0): workspace 3081/3081, scripts 528 tests; hostile proptest 5 rounds passing; hand mutants (target/b3-linux-mutants.py on Linux, target/b2-mutants.py on macOS) each caught by its test. Wire version 12.
+
+2026-11-19: on main's CI, test (workspace) fails hostile::mappings_asked_for_past_the_credit_let_their_vm_process_go (runs 44597568780 at 57321d675, 44615661631 at 28a38a315): tests.rs:4092 'the daemon holds what the VM process leaves unread' left 0, right 1; WARN 'sending to a VM process: Broken pipe'.
 <!-- SECTION:NOTES:END -->
