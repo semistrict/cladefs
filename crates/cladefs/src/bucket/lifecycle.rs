@@ -789,3 +789,66 @@ fn restores_connect_to_the_bucket_no_more() {
     let connected: Vec<_> = ["first", "second", "third"].map(restore).into();
     assert_eq!(connected, [(0, 0); 3]);
 }
+
+/// TASK-633.7: a version of a cell of one bucket, forked on a host of another: its child is a cell
+/// of the host's bucket, its ID that bucket's, its head there, and its reference in the parent's
+/// bucket; it reads what it inherited from there. A host forks into its own region's bucket, as a
+/// host of that region: forks across buckets need no more than the routing (doc-23).
+#[test]
+fn versions_forked_on_a_host_of_another_bucket_make_children_there() {
+    use bucket_cell::identity::Details;
+    let dir = tempfile::tempdir().unwrap();
+    let url = |name: &str| {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+        format!("file://{}", dir.path().join(name).display())
+    };
+    let (url_a, url_b) = (url("a"), url("b"));
+    crate::bucket::format_bucket(&url_a, Details::default()).unwrap();
+    assert_eq!(crate::bucket::add_bucket(&url_a, &url_b, Details::default()).unwrap().number, 2);
+    let (bucket_a, bucket_b) =
+        (host_cell::bucket(&url_a).unwrap(), host_cell::bucket(&url_b).unwrap());
+    let capacity = 1 << 30;
+
+    // The base, a cell of bucket A, and its version, made on a host of A.
+    let cell = host_cell::new_cell(&bucket_a, DEFAULT_TENANT).unwrap();
+    assert_eq!(cell.id >> 48, 1);
+    let base_path = dir.path().join("base");
+    let base = kept_in(&base_path, (capacity, Some(cell)), &bucket_a, idle()).unwrap();
+    let extent = ExtentId { cell: cell.id, sequence: base.info().unwrap().sequence_floor };
+    let data = pattern(3, BLOCK);
+    base.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
+    base.commit(None).unwrap();
+    drop(base);
+    let base = open(&base_path);
+    let version = base.uploaded_version_at(dir.path().join("version-a")).unwrap();
+    drop(base);
+
+    // On a host of B: the version opened there, then forked.
+    let at = dir.path().join("version-b");
+    let description = local_cell::Description { block_size: BLOCK as u32, capacity, cell };
+    let kind = bucket_cell::cell::Kind::Fxfs;
+    OpenCell::create_at_version(&at, (&url_of(&bucket_b), kind), description, version).unwrap();
+    let opened = OpenCell::take_with(&at, (capacity, cell, None), opening()).unwrap();
+    let child_path = dir.path().join("child");
+    let child = opened.fork(&child_path, DEFAULT_TENANT).unwrap();
+    assert_eq!(child.id >> 48, 2, "the child is not a cell of the host's bucket");
+
+    let raw = |url: &str| ObjectBucket::from_url(url).unwrap();
+    let head = |bucket: &ObjectBucket, cell| {
+        local_cell::upload::block_on(bucket_cell::head::get(bucket, cell)).unwrap().unwrap()
+    };
+    let childs = head(&raw(&url_b), child).expect("the child's head is not in B");
+    assert!(head(&raw(&url_a), child).is_none(), "the child's head is in A");
+    let origin = childs.origin().expect("the child names no origin");
+    let reference = bucket_cell::layout::reference(cell, origin.at, child);
+    let got = |url: &str, key: &str| {
+        local_cell::upload::block_on(bucket_cell::bucket::get(&raw(url), key)).unwrap().is_some()
+    };
+    assert_eq!((got(&url_a, &reference), got(&url_b, &reference)), (true, false));
+    drop(opened);
+
+    let child = open(&child_path);
+    let mut read = vec![0; BLOCK];
+    child.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]).unwrap();
+    assert!(read == data, "the child reads another than its parent's data");
+}
