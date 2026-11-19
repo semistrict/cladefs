@@ -3588,34 +3588,40 @@ fn logs_failing_in_their_flushes_fail_the_store() {
     assert_eq!(failure(store.flush()), failed);
 }
 
-/// Parts stored compressed are unpacked once while they are kept unpacked, the 32 read last.
+/// Parts stored compressed are unpacked once while they are kept unpacked, those read last.
+/// cladefs: as many as the process keeps, 64 MiB of them, every store's together, which it counts
+/// (TASK-603).
 #[test]
 fn parts_read_again_are_unpacked_once() {
-    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, cell: CELL };
-    let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
     const PART: usize = 1 << 20;
-    store.write(extent(1), 0, &pattern(1, 0, 34 * PART)).unwrap();
+    const PARTS: usize = 80;
+    let description = Description { block_size: BLOCK as u32, capacity: 128 << 20, cell: CELL };
+    let store = LocalCell::create(MemDir::new(), description, OPTIONS).unwrap();
+    // Two extents of half of them each, as an extent holds 64 MiB at most.
+    const HALF: usize = PARTS / 2;
+    store.write(extent(1), 0, &pattern(1, 0, HALF * PART)).unwrap();
+    store.write(extent(2), 0, &pattern(1, HALF * PART, HALF * PART)).unwrap();
     store.commit(None).unwrap();
-    let read_part = |part: usize| read(&store, extent(1), (part * PART) as u64, BLOCK);
+    let read_part = |part: usize| {
+        let (sequence, within) = (1 + (part / HALF) as u64, part % HALF);
+        read(&store, extent(sequence), (within * PART) as u64, BLOCK)
+    };
     let unpacks = || local_cell::unpacks();
     let before = unpacks();
-    for part in 0..32 {
+    for part in 0..PARTS {
         assert_eq!(read_part(part), pattern(1, part * PART, BLOCK));
     }
-    assert_eq!(unpacks() - before, 32);
-    // All 32 kept: none unpacked again.
-    for part in 0..32 {
+    assert_eq!(unpacks() - before, PARTS as u64);
+    let kept = local_cell::unpacked().bytes();
+    assert!((60 << 20..=64 << 20).contains(&kept), "{kept} bytes kept unpacked");
+    // The 32 read last kept: none unpacked again.
+    for part in PARTS - 32..PARTS {
         read_part(part);
     }
-    assert_eq!(unpacks() - before, 32);
-    // Two more: the two read least recently go.
-    read_part(32);
-    read_part(33);
-    assert_eq!(unpacks() - before, 34);
-    read_part(5);
-    assert_eq!(unpacks() - before, 34);
+    assert_eq!(unpacks() - before, PARTS as u64);
+    // The first, long gone, again.
     read_part(0);
-    assert_eq!(unpacks() - before, 35);
+    assert_eq!(unpacks() - before, PARTS as u64 + 1);
 }
 
 /// cladefs: a store's bytes, and its extents, are its cell's own, of the extents it wrote, or
