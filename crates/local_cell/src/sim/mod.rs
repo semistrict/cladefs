@@ -300,6 +300,10 @@ fn regions() -> Profile {
 }
 
 test_holds!(cells_across_regions, regions());
+// A child in another region's bucket than its parent's keeps what it reads of the parent by its
+// reference, in the parent's bucket, and the parent's collector keeps its origins.
+test_needs!(references_hold_across_regions, references, regions());
+test_needs!(origins_are_kept_across_regions, origins_kept, regions());
 
 /// Placements cut off taking cells back, and deleting them, with their earlier fencing tokens,
 /// from the ones after them, while those write and are taken over in turn (TASK-39.7, TASK-45.1).
