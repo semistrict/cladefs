@@ -100,6 +100,9 @@ pub struct SimBucket {
     known: Arc<crate::known::Known>,
     /// cladefs: the bucket of the host asking through it: where keys of no cell go.
     home: u16,
+    /// cladefs: whether every request goes to `home`, whatever cell its key is of: the bucket's own
+    /// store ([`SimBucket::own`], TASK-633.8).
+    pinned: bool,
 }
 
 impl SimBucket {
@@ -109,7 +112,14 @@ impl SimBucket {
 
     /// cladefs: the same buckets, as a host whose bucket is `home`'s asks them (TASK-633.10).
     pub fn at(&self, home: u16) -> Arc<Self> {
-        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home })
+        Arc::new(Self { inner: self.inner.clone(), known: self.known.clone(), home, pinned: false })
+    }
+
+    /// cladefs: its host's bucket's own store, every request there whatever cell its key is of, as
+    /// `ObjectBucket::own` is (TASK-633.8).
+    pub fn own(&self) -> Arc<Self> {
+        let (inner, known) = (self.inner.clone(), self.known.clone());
+        Arc::new(Self { inner, known, home: self.home, pinned: true })
     }
 
     /// cladefs: its host's bucket's number.
@@ -132,6 +142,7 @@ impl SimBucket {
     fn region_of(&self, key: &str) -> u16 {
         match self.home {
             0 => 0,
+            home if self.pinned => home,
             home => layout::routed_to(key).unwrap_or(home),
         }
     }
@@ -1080,6 +1091,11 @@ mod tests {
                 format!("@2/{head}"),
             ]
         );
+
+        // TASK-633.8: a host's own store takes a key of another bucket's cell in its bucket.
+        let own = first.own();
+        let pin = layout::pin(theirs, 3);
+        assert_eq!(put(&own, &pin), [format!("@1 put {pin}")]);
 
         sim.down(2, true);
         let (got, asked) = first.served(first.get(&head));

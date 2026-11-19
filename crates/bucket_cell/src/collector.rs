@@ -1938,6 +1938,10 @@ impl Pass {
                 | Kind::Marking
                 | Kind::Reference { .. }
                 | Kind::Retired { .. }
+                // cladefs: a mirror's pin and marker, under another bucket's cell's prefix, which a
+                // pass over that cell's copy decides ([`Collector::collect_copy`], TASK-633.8).
+                | Kind::Pin { .. }
+                | Kind::Mirror { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Identity
                 | Kind::Buckets

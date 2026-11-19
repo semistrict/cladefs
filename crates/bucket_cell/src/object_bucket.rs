@@ -70,6 +70,8 @@ pub struct ObjectBucket {
     /// cladefs: the other buckets its requests go to, by the bucket of their keys' cells
     /// ([`ObjectBucket::routed`], TASK-633.4): none for a bucket whose requests all stay in it.
     route: Option<Route>,
+    /// cladefs: its own store, unrouted, once asked for ([`ObjectBucket::own`], TASK-633.8).
+    own: std::sync::OnceLock<Arc<ObjectBucket>>,
 }
 
 /// cladefs: what opens the bucket numbered `number`, other than `home`, for `home`'s requests of
@@ -561,8 +563,33 @@ impl ObjectBucket {
         let prefix = prefix.trim_matches('/').to_owned();
         let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        let route = None;
-        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids, route }
+        let (route, own) = (None, std::sync::OnceLock::new());
+        Self {
+            store,
+            pages,
+            prefix,
+            counts,
+            honoured,
+            decoded,
+            known,
+            marks,
+            objectids,
+            route,
+            own,
+        }
+    }
+
+    /// cladefs: its own store, every request of it there whatever cell its keys are of, unrouted
+    /// (TASK-633.8): what a mirror of another bucket's cell's version writes and reads in this
+    /// bucket at that cell's keys, and what this bucket's collector keeps or deletes of it. Itself,
+    /// if it routes nothing; else the same store, made once, its requests counted apart.
+    pub fn own(self: &Arc<Self>) -> Arc<ObjectBucket> {
+        if self.route.is_none() {
+            return self.clone();
+        }
+        let own =
+            || Arc::new(ObjectBucket::paged(self.store.clone(), self.pages.clone(), &self.prefix));
+        self.own.get_or_init(own).clone()
     }
 
     /// cladefs: this bucket, its requests of the objects of cells of other buckets sent there
@@ -1410,6 +1437,15 @@ pub(crate) mod tests {
                 listed.iter().map(|meta| meta.key.clone()).collect::<Vec<_>>(),
                 [layout::head(theirs)]
             );
+
+            // TASK-633.8: its own store, unrouted, takes a key of another bucket's cell here.
+            let pin = layout::pin(theirs, 3);
+            let resolve = Arc::new(Registered::new(Vec::<(String, String)>::new()));
+            let own = Arc::new(ObjectBucket::from_url(&home_url).unwrap().routed(resolve)).own();
+            own.put(&pin, b"pin".to_vec().into(), PutMode::Create).await.unwrap();
+            let (here, there) = (home.store_get(&pin).await, other.store_get(&pin).await);
+            assert_eq!((here.is_ok(), there.is_ok()), (true, false));
+            assert!(Arc::ptr_eq(&own, &own.own()), "an unrouted bucket's own is itself");
 
             let (theirs_key, ours_key) = (layout::head(theirs), layout::head(ours));
             routed.delete_batch(&[&theirs_key, &ours_key]).await.unwrap();
