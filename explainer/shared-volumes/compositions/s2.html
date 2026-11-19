@@ -1,0 +1,64 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s2-tab { left: 600px; top: 186px; }
+    #s2-vol { left: 600px; top: 226px; width: 560px; height: 420px; }
+    #s2-cmd { left: 140px; top: 530px; }
+    #s2-note { left: 140px; top: 700px; }
+    #s2-note2 { left: 1220px; top: 520px; }
+  </style>
+  <div id="root" data-composition-id="s2" data-width="1920" data-height="1080">
+    <div id="s2-l1" class="line"><span class="w">One</span><span class="w">sandbox</span><span class="w">keeps</span><span class="w">it</span><span class="w">current</span></div>
+    <div id="s2-l2" class="line"><span class="w">With</span><span class="w">plain</span><span class="w">git,</span><span class="w">as</span><span class="w">usual</span></div>
+    <svg id="s2-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s2-pub"></div>
+    <div id="s2-tab" class="vol-tab"></div>
+    <div id="s2-vol" class="vol" data-layout-allow-overflow>
+      <div class="vol-name">volume "linux"</div>
+      <div class="vol-row" style="top:70px">Makefile</div>
+      <div class="vol-row" style="top:124px">README</div>
+      <div class="vol-row s2-new" style="top:178px">kernel/</div>
+      <div class="vol-row s2-new" style="top:232px">fs/</div>
+      <div class="vol-row" style="top:286px">mm/</div>
+      <div class="vol-layers" style="top:72px">its layers</div>
+      <div class="layer s2-layer" style="left:290px; top:120px; width:230px; height:34px; background:var(--butter)"></div>
+      <div class="layer s2-layer" style="left:290px; top:164px; width:230px; height:34px; background:var(--butter)"></div>
+      <div class="layer" id="s2-layer3" style="left:290px; top:208px; width:230px; height:34px; background:var(--mint)"></div>
+    </div>
+    <div id="s2-cmd" class="cmd">git pull</div>
+    <div id="s2-note" class="note">Fxfs and the daemon know nothing of Git</div>
+    <div id="s2-note2" class="note">its own volume, in its own Fxfs</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s2-svg");
+      const pub = C.vm(document.getElementById("s2-pub"), { x: 140, y: 250, w: 340, h: 250 });
+      const link = SV.thread(svg, "M486 375 C530 375 550 400 594 400", {});
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      // The sandbox carried over from the last scene; its volume opens beside it.
+      C.words(tl, "#s2-l1", 0.15);
+      C.draw(tl, link, 0.3);
+      V.pop(["#s2-tab", "#s2-vol"], 0.4);
+      tl.fromTo("#s2-vol .vol-row", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.3, ease: "back.out(2)", stagger: 0.07 }, 0.7);
+      tl.fromTo(["#s2-vol .vol-layers", ".s2-layer"], { opacity: 0, x: -10 }, { opacity: 1, x: 0, duration: 0.3, ease: "back.out(2)", stagger: 0.1 }, 1.0);
+      tl.fromTo("#s2-layer3", { scaleX: 0 }, { scaleX: 0, duration: 0.01 }, 0);
+      V.fade("#s2-note2", 1.5);
+      C.blink(tl, pub.eyes, 1.9);
+      C.wordsOut(tl, "#s2-l1", 3.1);
+      // git pull: what changed is written into its volume.
+      C.words(tl, "#s2-l2", 3.3);
+      V.pop("#s2-cmd", 3.6);
+      C.grin(tl, pub.mouth, 3.7);
+      V.flash(".s2-new", "#8fddc2", 4.1, 0.12);
+      tl.fromTo("#s2-layer3", { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.35, ease: "back.out(2.4)", immediateRender: false }, 4.4);
+      V.fade("#s2-note", 3.9);
+      // Hand-off: the sandbox and its volume stay for the next scene; the rest go.
+      C.wordsOut(tl, "#s2-l2", 6.3);
+      V.out(["#s2-cmd", "#s2-note", "#s2-note2"], 6.4, 0.04);
+      tl.to(".s2-new", { backgroundColor: "#f6f2ff", duration: 0.3, ease: "power2.out" }, 6.4);
+      window.__timelines["s2"] = tl;
+    })();
+  </script>
+</template>

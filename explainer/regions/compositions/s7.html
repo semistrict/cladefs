@@ -1,0 +1,65 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s7-name1 { left: 268px; top: 858px; }
+    #s7-name2 { left: 1508px; top: 858px; }
+    #s7-count { left: 610px; width: 700px; top: 852px; text-align: center; font-size: 40px; font-weight: 900; }
+    #s7-pill { width: 64px; height: 40px; margin: -20px 0 0 -32px; }
+  </style>
+  <div id="root" data-composition-id="s7" data-width="1920" data-height="1080">
+    <div id="s7-land"></div>
+    <div id="s7-l1" class="line"><span class="w">Remember</span><span class="w">the</span><span class="w">ocean?</span></div>
+    <div id="s7-l2" class="line"><span class="w">Each</span><span class="w">cloud</span><span class="w">region,</span><span class="w">its</span><span class="w">own</span><span class="w">bucket</span></div>
+    <svg id="s7-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s7-cells"></g>
+    </svg>
+    <div id="s7-vm"></div>
+    <div id="s7-name1" class="label">root bucket <span class="mono dim">s3://ROOT</span></div>
+    <div id="s7-name2" class="label mono dim">gs://OTHER</div>
+    <div id="s7-count" class="label"><span id="s7-n">11</span> round trips across</div>
+    <div id="s7-pill" class="pill"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s7-svg");
+      G.world(document.getElementById("s7-land"), svg);
+      G.pail(svg, { x: A.pail1.x, y: A.pail1.y, number: 1, id: "s7-pail1" });
+      const p2 = G.pail(svg, { x: A.pail2.x, y: A.pail2.y, number: 2, id: "s7-pail2" });
+      const sb = C.vm(document.getElementById("s7-vm"), A.sandbox);
+      gsap.set(sb.mouth, { rotation: 180, y: 6, transformOrigin: "50% 50%" });
+      const cell = C.critter(document.getElementById("s7-cells"), { x: A.cell.x, y: A.cell.y, r: 70, color: "#ffb088", seed: 909, look: [0.6, -0.2] });
+      const pill = document.getElementById("s7-pill");
+
+      const tl = gsap.timeline({ paused: true });
+      // The hook again: the sandbox frowning, eleven trips across.
+      C.words(tl, "#s7-l1", 0.2);
+      tl.fromTo(sb.root, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 0.05);
+      C.tagIn(tl, "#s7-count", 0.3);
+      tl.fromTo(pill, { opacity: 0 }, { opacity: 1, duration: 0.1 }, 0.5);
+      G.trips(tl, pill, 1200, 420, 440, 640, 0.5, 1, 0.9, 80);
+      tl.to(pill, { opacity: 0, duration: 0.1 }, 1.4);
+      [1.0, 4.4].forEach((t) => C.blink(tl, sb.eyes, t));
+      C.wordsOut(tl, "#s7-l1", 1.9);
+
+      // Its own bucket pops in next door; the trips stay home; the sandbox smiles.
+      tl.fromTo(p2.g, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.2)" }, 2.0);
+      C.tagIn(tl, "#s7-name2", 2.3);
+      C.words(tl, "#s7-l2", 2.2);
+      tl.fromTo(pill, { opacity: 0 }, { opacity: 1, duration: 0.1, immediateRender: false }, 2.5);
+      G.trips(tl, pill, 1440, 420, 1610, 650, 2.6, 4, 0.3, 30);
+      tl.to(pill, { opacity: 0, duration: 0.1 }, 3.8);
+      G.steps(tl, document.getElementById("s7-n"), 11, 0, 2.6, 1.1);
+      C.unfrown(tl, sb.mouth, 3.9);
+      tl.fromTo(sb.root, { y: 0 }, { y: -14, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 4.0);
+
+      // The cell pops up and hops home onto bucket 2, landing on the last chord (70.0 s).
+      C.popIn(tl, cell.pop, 4.4);
+      C.life(tl, cell, 4.9, 7.9, 71);
+      C.hop(tl, cell, A.pail2.x, A.pail2.y - 228, 5.2, 0.7, 170);
+      tl.fromTo(p2.g, { rotation: 0 }, { rotation: 5, duration: 0.12, ease: "sine.inOut", yoyo: true, repeat: 3, transformOrigin: "50% 100%", immediateRender: false }, 6.0);
+      tl.to(cell.smile, { scaleX: 1.45, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 6.1);
+      window.__timelines["s7"] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,101 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s3-tab { left: 600px; top: 186px; }
+    #s3-vol { left: 600px; top: 226px; width: 560px; height: 420px; }
+    #s3-host { left: 100px; top: 690px; width: 1720px; height: 330px; }
+    #s3-host-label { left: 130px; top: 700px; }
+    .s3-step { left: 1230px; top: 300px; }
+    #s3-card { left: 890px; top: 346px; }
+    #s3-n1 { left: 1180px; top: 790px; }
+    #s3-n2 { left: 1180px; top: 850px; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-l1" class="line"><span class="w">It</span><span class="w">publishes</span><span class="w">a</span><span class="w">base</span></div>
+    <div id="s3-l2" class="line"><span class="w">The</span><span class="w">host</span><span class="w">forks</span><span class="w">its</span><span class="w">cell</span></div>
+    <div id="s3-l3" class="line"><span class="w">Then</span><span class="w">it</span><span class="w">thaws</span><span class="w">and</span><span class="w">goes</span><span class="w">on</span></div>
+    <div id="s3-host" class="host"></div>
+    <div id="s3-host-label" class="host-label">host</div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s3-pub"></div>
+    <div id="s3-tab" class="vol-tab"></div>
+    <div id="s3-vol" class="vol" data-layout-allow-overflow>
+      <div class="vol-name">volume "linux"</div>
+      <div class="vol-row" style="top:70px">Makefile</div>
+      <div class="vol-row" style="top:124px">README</div>
+      <div class="vol-row" style="top:178px">kernel/</div>
+      <div class="vol-row" style="top:232px">fs/</div>
+      <div class="vol-row" style="top:286px">mm/</div>
+      <div class="vol-layers" style="top:72px">its layers</div>
+      <div class="layer s3-layer" style="left:290px; top:120px; width:230px; height:34px; background:var(--butter)"></div>
+      <div class="layer s3-layer" style="left:290px; top:164px; width:230px; height:34px; background:var(--butter)"></div>
+      <div class="layer s3-layer" style="left:290px; top:208px; width:230px; height:34px; background:var(--mint)"></div>
+      <div class="layer" id="s3-one" style="left:290px; top:120px; width:230px; height:122px; background:var(--butter)"></div>
+    </div>
+    <div class="chip s3-step" id="s3-sync">sync</div>
+    <div class="chip s3-step" id="s3-freeze">freeze</div>
+    <div class="chip s3-step" id="s3-flush">flush to one layer</div>
+    <div class="chip s3-step" id="s3-manifest">describe it: manifest</div>
+    <div class="chip s3-step" id="s3-thaw">thaw</div>
+    <div id="s3-card" class="card">manifest</div>
+    <svg id="s3-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s3-n1" class="note">a fork of its cell: nothing copied</div>
+    <div id="s3-n2" class="note">base 1: read-only, as of now</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s3-svg");
+      const cells = document.getElementById("s3-cells");
+      const pub = C.vm(document.getElementById("s3-pub"), { x: 140, y: 250, w: 340, h: 250 });
+      const link = SV.thread(svg, "M486 375 C530 375 550 400 594 400", {});
+      const down = SV.thread(svg, "M310 506 C310 640 440 700 440 812", {});
+      const cell = C.critter(cells, { x: 440, y: 900, r: 60, color: "#ffd86e", seed: 301, look: [0.6, 0] });
+      const base = C.critter(cells, { x: 440, y: 900, r: 60, ghost: true, seed: 311, look: [-0.4, -0.3] });
+      const flag = SV.flag(base, "base 1");
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      // The publisher and its volume, as the last scene left them; under them, the host and its cell.
+      tl.fromTo("#s3-one", { opacity: 0 }, { opacity: 0, duration: 0.01 }, 0);
+      C.words(tl, "#s3-l1", 0.15);
+      tl.fromTo(["#s3-host", "#s3-host-label"], { opacity: 0 }, { opacity: 1, duration: 0.35, ease: "power2.out", stagger: 0.1 }, 0.3);
+      V.pop(cell.pop, 0.5);
+      C.life(tl, cell, 0.9, 9.4, 301);
+      C.draw(tl, down, 0.7);
+      // Publishing: sync, freeze, flush, manifest; one chip says each step.
+      V.steps(["#s3-sync", "#s3-freeze", "#s3-flush", "#s3-manifest"], [0.8, 1.4, 2.1, 3.6]);
+      tl.to("#s3-vol", { backgroundColor: "#e3f1ff", duration: 0.3, ease: "power2.out" }, 1.5);
+      C.blink(tl, pub.eyes, 1.55);
+      tl.to(".s3-layer", { y: (i) => -44 * i, opacity: 0, duration: 0.35, ease: "power2.in", stagger: 0.05 }, 2.3);
+      tl.fromTo("#s3-one", { opacity: 0, scaleY: 0.3, transformOrigin: "50% 0%" }, { opacity: 1, scaleY: 1, duration: 0.4, ease: "back.out(2.2)", immediateRender: false }, 2.55);
+      // The manifest leaves the volume and goes to the host.
+      tl.fromTo("#s3-card", { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.35, ease: "back.out(2.6)" }, 3.75);
+      tl.to("#s3-card", { x: 70, duration: 0.7, ease: "power1.inOut" }, 4.2);
+      tl.to("#s3-card", { y: 474, duration: 0.7, ease: "back.out(1.4)" }, 4.2);
+      tl.to("#s3-manifest", { scale: 0, duration: 0.15, ease: "back.in(2)" }, 5.0);
+      C.wordsOut(tl, "#s3-l1", 3.9);
+      // The host forks the publisher's cell: a ghost, still its parent's data.
+      C.words(tl, "#s3-l2", 4.1);
+      tl.to(cell.body, { scaleX: 1.15, scaleY: 0.85, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 100%" }, 4.85);
+      tl.fromTo(base.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.6)" }, 5.0);
+      tl.fromTo(flag, { scale: 0, transformOrigin: "20% 100%" }, { scale: 0, duration: 0.01 }, 0);
+      C.hop(tl, base, 780, 900, 5.25, 0.7, 120);
+      C.life(tl, base, 6.6, 9.9, 311);
+      tl.to(flag, { scale: 1, duration: 0.45, ease: "back.out(2.8)" }, 6.1);
+      V.fade(["#s3-n1", "#s3-n2"], 6.3, 0.25);
+      // Thaw: the publisher goes on.
+      C.wordsOut(tl, "#s3-l2", 6.8);
+      C.words(tl, "#s3-l3", 7.0);
+      tl.fromTo("#s3-thaw", { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.35, ease: "back.out(2.6)" }, 7.1);
+      tl.to("#s3-vol", { backgroundColor: "#ffffff", duration: 0.4, ease: "power2.out" }, 7.2);
+      C.grin(tl, pub.mouth, 7.4);
+      C.blink(tl, pub.eyes, 8.0);
+      // Hand-off: the host, base 1 and its manifest stay; the publisher steps away.
+      C.wordsOut(tl, "#s3-l3", 9.2);
+      V.out(["#s3-pub", "#s3-tab", "#s3-vol", "#s3-thaw", "#s3-n1", "#s3-n2", link, down], 9.3, 0.02);
+      tl.to(cell.pop, { scale: 0, duration: 0.25, ease: "back.in(2)" }, 9.35);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>

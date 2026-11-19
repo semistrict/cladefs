@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19 06:59'
+updated_date: '2026-11-19T16:04:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -196,6 +196,12 @@ The new writer `W'`, at the VM manager's take, on any host:
    recovered tail to them, and wait until f of them hold it all (f+1 with `W'`).
 6. **Activate:** a conditional swap of the head to `replicas = c+1`. Only then does `W'` serve.
    Then `Drop{cell, c+1}` to `M`, best effort (stale logs are also swept, below).
+   *As built (`Replicator::base`, TASK-537.3.3):* the store's replicator starts after the last
+   commit the take opened with, its own write-ahead log's included (a reopen on the same disk may
+   hold more than the members did), which no member of `c+1` need hold. So no commit after a take
+   is told Replicated before the bucket holds every commit through that one; until then its commits
+   wait for Uploaded. A take while the bucket is out of reach serves, but its commits wait for the
+   bucket (cladefs's `replicated_commits_survive_their_daemon_killed_and_reopened`).
 
 A crash anywhere in 1–6 leaves the head naming `c`, whose fenced logs nothing changed. The next take
 fences `c` again, at a greater epoch, and finds the same commits or more. Configuration `c+1`'s logs

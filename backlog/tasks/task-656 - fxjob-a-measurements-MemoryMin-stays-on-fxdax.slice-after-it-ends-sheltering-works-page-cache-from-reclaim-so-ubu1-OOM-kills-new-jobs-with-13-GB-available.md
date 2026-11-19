@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-19 10:47'
+updated_date: '2026-11-19 13:41'
 labels:
   - fxjob
   - ubu1
@@ -35,3 +36,9 @@ Seen 2026-11-19 on ubu1, no job running: fxdax.slice, its bench slice, user@1000
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19: memory.reclaim alone did not hold: a job's own build refilled work's cache (13.6 GiB) and was OOM-killed linking. With no measurement running, reset at runtime (systemctl set-property --runtime ... MemoryMin=0) on fxdax-bench.slice, fxdax.slice (user manager) and user@1000.service, user-1000.slice, user.slice (sudo): all 0 now. The next measurement sets its own again, which this task's fix must take back when it ends.
+<!-- SECTION:NOTES:END -->

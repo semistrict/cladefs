@@ -1,0 +1,74 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s6-n1 { left: 120px; top: 196px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s6" data-width="1920" data-height="1080">
+    <div id="s6-l1" class="line"><span class="w">No</span><span class="w">majority?</span><span class="w">It</span><span class="w">waits</span><span class="w">for</span><span class="w">the</span><span class="w">bucket</span></div>
+    <div id="s6-l2" class="line"><span class="w">Replicated</span><span class="w">again</span><span class="w">once</span><span class="w">members</span><span class="w">answer</span></div>
+    <div id="s6-n1" class="note">degraded: its commits wait for the bucket, uploaded at once</div>
+    <div id="s6-stage"></div>
+    <svg id="s6-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s6-tags"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, P = window.Rep;
+      const stage = document.getElementById("s6-stage");
+      const svg = document.getElementById("s6-svg");
+      const tags = document.getElementById("s6-tags");
+      // S5's last frame: host D writes cell 9; B and C are its peers.
+      const hB = P.host(stage, "B", "s6", ["peer"]);
+      const hC = P.host(stage, "C", "s6", ["peer"]);
+      const hD = P.host(stage, "D", "s6", ["writer"]);
+      [hB.tags.peer, hC.tags.peer, hD.tags.writer].forEach((t) => t.classList.add("on"));
+      const sb = P.sandbox(stage, "D", "s6");
+      const pail = P.pail(tags, svg, "s6", ["epoch 8 · D B C"]);
+      pail.heads[0].classList.add("on");
+      const cell = P.cell(svg, "D", [-0.5, 0.1]);
+      P.OLD.forEach((c, i) => P.bead(svg, P.slot("D", i), c));
+      P.bead(svg, P.slot("D", 3), P.COLORS.accent);
+      const D4 = P.slot("D", 4);
+      const commit = P.bead(svg, D4, P.COLORS.rose);
+      const up = P.bead(svg, D4, P.COLORS.rose);
+      P.tag(tags, "s6-name", "cell 9", P.X.D + 28, P.TOP + 300, "b on");
+      const fs = P.tag(tags, "s6-fsync", "fsync", P.X.D + 28, P.TOP + 176);
+      const back = P.tag(tags, "s6-back", "fsync returns", P.X.D + 28, P.TOP + 176);
+      const degraded = P.tag(tags, "s6-degraded", "degraded", P.X.D + 20, 784, "b");
+      const lost = ["B", "C"].map((h) => P.tag(tags, "s6-lost" + h, "lost", P.X[h] + 290, P.TOP + 8));
+
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, cell, 0, 7.5, 47);
+      // B and C are lost: no majority is left.
+      C.words(tl, "#s6-l1", 0.2);
+      tl.to([hB.box, hC.box], { opacity: 0.3, duration: 0.4, stagger: 0.1 }, 0.6);
+      P.out(tl, [hB.tags.peer, hC.tags.peer], 0.65);
+      C.tagIn(tl, lost[0], 0.8);
+      C.tagIn(tl, lost[1], 0.95);
+      C.tagIn(tl, degraded, 1.4);
+      tl.fromTo("#s6-n1", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 1.4);
+      // The next commit goes to the bucket at once, and its fsync waits for it there.
+      C.tagIn(tl, fs, 1.9);
+      P.fly(tl, commit, P.fromSandbox("D"), D4, 80, 2.0, 0.5);
+      C.frown(tl, sb.mouth, 2.6);
+      P.fly(tl, up, D4, P.INTO_PAIL, -10, 2.7, 1.0);
+      tl.to(up, { opacity: 0, duration: 0.1 }, 3.7);
+      P.wiggle(tl, pail.g, 3.7);
+      P.swap(tl, fs, back, 3.85);
+      C.unfrown(tl, sb.mouth, 3.9);
+      C.wordsOut(tl, "#s6-l1", 4.6);
+      tl.to("#s6-n1", { opacity: 0, duration: 0.2 }, 4.6);
+      // Members answer again: replicated again.
+      C.words(tl, "#s6-l2", 4.8);
+      tl.to([hB.box, hC.box], { opacity: 1, duration: 0.3, stagger: 0.15 }, 5.3);
+      P.out(tl, lost[0], 5.3);
+      P.out(tl, lost[1], 5.45);
+      C.tagIn(tl, hB.tags.peer, 5.45, { immediateRender: false });
+      C.tagIn(tl, hC.tags.peer, 5.6, { immediateRender: false });
+      P.out(tl, degraded, 5.7);
+      C.wordsOut(tl, "#s6-l2", 7.2);
+      P.out(tl, back, 7.1);
+      window.__timelines["s6"] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,97 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s5-name1 { left: 268px; top: 858px; }
+    #s5-name2 { left: 1508px; top: 858px; }
+    .s5-host { position: absolute; top: 310px; width: 180px; height: 180px; border: 4px dashed var(--grey); border-radius: 30px; }
+    .s5-host-name { position: absolute; left: 18px; top: 6px; font-weight: 900; font-size: 28px; color: var(--soft); white-space: nowrap; }
+    .s5-shelf { position: absolute; left: 16px; bottom: 16px; width: 140px; height: 64px; border: 4px solid var(--ink); border-radius: 14px; background: var(--face); }
+    #s5-hD { left: 140px; }
+    #s5-cache-name { left: 1420px; top: 500px; }
+    .s5-part { position: absolute; left: 0; top: 0; width: 44px; height: 40px; margin: -20px 0 0 -22px; border: 4px solid var(--ink); border-radius: 10px; background: var(--butter); }
+    .s5-ask { position: absolute; left: 0; top: 0; width: 40px; height: 30px; margin: -15px 0 0 -20px; border: 4px solid var(--ink); border-radius: 15px; background: var(--face); }
+    #s5-count { left: 610px; width: 700px; top: 852px; text-align: center; font-size: 36px; font-weight: 900; }
+    #s5-owner, #s5-names { left: 120px; top: 916px; }
+    #s5-foreign { margin: -23px 0 0 -110px; }
+    #s5-refused { left: 1196px; top: 520px; }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-land"></div>
+    <div id="s5-l1" class="line"><span class="w">A</span><span class="w">part</span><span class="w">crosses</span><span class="w">once,</span><span class="w">not</span><span class="w">once</span><span class="w">per</span><span class="w">host</span></div>
+    <div id="s5-l2" class="line"><span class="w">Peers</span><span class="w">share</span><span class="w">it</span><span class="w">inside</span><span class="w">the</span><span class="w">cloud</span><span class="w">region</span></div>
+    <div id="s5-l3" class="line"><span class="w">Peers</span><span class="w">never</span><span class="w">cross</span><span class="w">a</span><span class="w">cloud</span><span class="w">region</span></div>
+    <svg id="s5-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s5-name1" class="label">root bucket <span class="mono dim">s3://ROOT</span></div>
+    <div id="s5-name2" class="label mono dim">gs://OTHER</div>
+    <div class="s5-host" id="s5-hA" style="left:1210px"><div class="s5-host-name">host A</div><div class="s5-shelf"></div></div>
+    <div class="s5-host" id="s5-hB" style="left:1405px"><div class="s5-host-name">host B</div><div class="s5-shelf"></div></div>
+    <div class="s5-host" id="s5-hC" style="left:1600px"><div class="s5-host-name">host C</div><div class="s5-shelf"></div></div>
+    <div class="s5-host" id="s5-hD"><div class="s5-host-name">host D</div><div class="s5-shelf"></div></div>
+    <div id="s5-cache-name" class="note">part cache</div>
+    <div id="s5-askA" class="s5-ask"></div>
+    <div id="s5-askC" class="s5-ask"></div>
+    <div id="s5-part" class="s5-part"></div>
+    <div id="s5-partA" class="s5-part"></div>
+    <div id="s5-partC" class="s5-part"></div>
+    <div id="s5-count" class="label">fetched across the ocean: <span id="s5-n">0</span></div>
+    <div id="s5-owner" class="note">its owner fetches it into its part cache</div>
+    <div id="s5-names" class="note">a peer refuses another home bucket's request</div>
+    <div id="s5-foreign" class="pill">home bucket <span class="num">1</span></div>
+    <div id="s5-refused" class="tag wip">refused</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s5-svg");
+      G.world(document.getElementById("s5-land"), svg);
+      G.pail(svg, { x: A.pail1.x, y: A.pail1.y, number: 1, id: "s5-pail1" });
+      G.pail(svg, { x: A.pail2.x, y: A.pail2.y, number: 2, id: "s5-pail2" });
+      // Shelf centres: host left + 2 + 16 + 70, host top + 180 - 4 - 16 - 32.
+      const shelf = (left) => [left + 88, 438];
+      const [bx, by] = shelf(1405), [ax, ay] = shelf(1210), [cx, cy] = shelf(1600);
+
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo(["#s5-hA", "#s5-hB", "#s5-hC"], { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", stagger: 0.12 }, 0.1);
+      C.words(tl, "#s5-l1", 0.2);
+      // One fetch over the ocean, by the part's owner, host B, into its part cache.
+      tl.fromTo("#s5-part", { opacity: 0, x: 420, y: 650, scale: 0.4 }, { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(2.6)" }, 0.7);
+      G.travel(tl, "#s5-part", 420, 650, bx, by, 0.9, 1.0, 260);
+      tl.fromTo("#s5-hB", { y: 0 }, { y: 8, duration: 0.1, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 1.9);
+      C.tagIn(tl, "#s5-count", 1.2);
+      G.steps(tl, document.getElementById("s5-n"), 0, 1, 1.9, 0.05);
+      C.tagIn(tl, "#s5-cache-name", 2.0);
+      C.tagIn(tl, "#s5-owner", 2.1, { origin: "0% 50%" });
+      C.wordsOut(tl, "#s5-l1", 3.4);
+
+      // Its peers in europe-west1 ask host B, and get it from its part cache.
+      C.words(tl, "#s5-l2", 3.6);
+      tl.to("#s5-owner", { opacity: 0, duration: 0.2 }, 5.6);
+      [["#s5-askA", ax, "#s5-partA"], ["#s5-askC", cx, "#s5-partC"]].forEach(([ask, x, part], i) => {
+        const at = 4.0 + i * 0.35;
+        tl.fromTo(ask, { opacity: 0 }, { opacity: 1, duration: 0.1 }, at);
+        G.travel(tl, ask, x, 380, bx, 380, at, 0.4, 50);
+        tl.to(ask, { opacity: 0, duration: 0.1 }, at + 0.4);
+        tl.fromTo(part, { opacity: 0, x: bx, y: by, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.15 }, at + 0.45);
+        G.travel(tl, part, bx, by, x, by, at + 0.45, 0.5, 70);
+      });
+      tl.fromTo("#s5-count", { scale: 1 }, { scale: 1.08, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 5.4);
+      C.wordsOut(tl, "#s5-l2", 6.6);
+
+      // A host of us-east-1 asks a peer in europe-west1: refused.
+      C.words(tl, "#s5-l3", 6.8);
+      tl.fromTo("#s5-hD", { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, 6.9);
+      tl.fromTo("#s5-foreign", { opacity: 0, x: 330, y: 400, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.25, ease: "back.out(2.6)" }, 7.2);
+      tl.to("#s5-foreign", { x: 1090, duration: 0.6, ease: "power1.in" }, 7.5);
+      tl.to("#s5-foreign", { x: 820, y: 560, rotation: -160, duration: 0.55, ease: "power2.out" }, 8.1);
+      tl.to("#s5-foreign", { opacity: 0, duration: 0.2 }, 8.55);
+      tl.fromTo("#s5-hA", { x: 0 }, { x: 6, duration: 0.06, yoyo: true, repeat: 3, immediateRender: false }, 8.1);
+      C.tagIn(tl, "#s5-refused", 8.15);
+      C.tagIn(tl, "#s5-names", 8.0, { origin: "0% 50%" });
+
+      // Exit: hosts and parts go; the pails stay.
+      C.wordsOut(tl, "#s5-l3", 10.7);
+      tl.to(["#s5-hA", "#s5-hB", "#s5-hC", "#s5-hD", "#s5-part", "#s5-partA", "#s5-partC", "#s5-count", "#s5-cache-name", "#s5-names", "#s5-refused"], { opacity: 0, duration: 0.25, ease: "power2.in" }, 10.75);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>

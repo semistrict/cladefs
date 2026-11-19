@@ -1,0 +1,68 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    .s8-disk { position: absolute; top: 650px; width: 400px; height: 76px; border: 5px solid var(--ink); border-radius: 22px; background: var(--face); overflow: hidden; }
+    .s8-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; background: var(--butter); }
+    .s8-disk-label { position: absolute; left: 20px; top: 14px; font-weight: 900; font-size: 32px; }
+    .s8-size { position: absolute; top: 666px; width: 230px; text-align: right; font-weight: 900; font-size: 32px; white-space: nowrap; }
+    #s8-base { position: absolute; left: 560px; top: 880px; width: 800px; height: 84px; border: 5px solid var(--ink); border-radius: 22px; background: var(--accent); color: #ffffff; font-weight: 900; font-size: 36px; line-height: 72px; padding-left: 26px; white-space: nowrap; }
+  </style>
+  <div id="root" data-composition-id="s8" data-width="1920" data-height="1080">
+    <div id="s8-l1" class="line"><span class="w">Three</span><span class="w">clones</span><span class="w">became</span><span class="w">one</span><span class="w">base</span></div>
+    <div id="s8-l2" class="line"><span class="w">And</span><span class="w">a</span><span class="w">layer</span><span class="w">each</span></div>
+    <svg id="s8-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s8-vms"></div>
+    <div class="s8-disk" style="left:180px"><div class="s8-fill"></div><div class="s8-disk-label">its disk</div></div>
+    <div class="s8-disk" style="left:760px"><div class="s8-fill"></div><div class="s8-disk-label">its disk</div></div>
+    <div class="s8-disk" style="left:1340px"><div class="s8-fill"></div><div class="s8-disk-label">its disk</div></div>
+    <div class="s8-size s8-big" style="left:340px">1.83 GB</div>
+    <div class="s8-size s8-big" style="left:920px">1.83 GB</div>
+    <div class="s8-size s8-big" style="left:1500px">1.83 GB</div>
+    <div class="s8-size s8-small" style="left:340px">from 1.7 MiB</div>
+    <div class="s8-size s8-small" style="left:920px">from 1.7 MiB</div>
+    <div class="s8-size s8-small" style="left:1500px">from 1.7 MiB</div>
+    <div id="s8-base">base 1: the 1.83 GB checkout, once</div>
+    <svg id="s8-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s8-svg");
+      const host = document.getElementById("s8-vms");
+      const colors = ["#ffb088", "#8cc8ff", "#b9a4ff"];
+      const vms = [180, 760, 1340].map((x) => C.vm(host, { x, y: 300, w: 400, h: 290 }));
+      const threads = [380, 960, 1540].map((x) => SV.thread(svg, `M960 876 C960 800 ${x} 810 ${x} 732`, { stroke: SV.ACCENT, width: 6 }));
+      const base = C.critter(document.getElementById("s8-cells"), { x: 2080, y: 930, r: 56, ghost: true, seed: 311, look: [-0.7, -0.2] });
+      SV.flag(base, "base 1");
+      const fills = Array.from(document.querySelectorAll(".s8-fill"));
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      // Back to the three sandboxes, each with its own 1.83 GB clone.
+      C.words(tl, "#s8-l1", 0.15);
+      V.pop(vms.map((v) => v.root), 0.0, 0.08);
+      tl.fromTo([".s8-disk", ".s8-big"], { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power2.out" }, 0.2);
+      tl.fromTo(vms.map((v) => v.mouth), { rotation: 180, y: 6 }, { rotation: 180, y: 6, duration: 0.01 }, 0);
+      // The three clones squeeze into one base; each keeps a sliver of its own.
+      tl.to(fills, { scaleX: 0.05, transformOrigin: "0% 50%", duration: 0.7, ease: "power3.inOut", stagger: 0.12 }, 1.3);
+      tl.to(fills, { backgroundColor: (i) => colors[i], duration: 0.3, stagger: 0.12 }, 1.6);
+      tl.to(".s8-big", { opacity: 0, y: -10, duration: 0.2, ease: "power2.in", stagger: 0.12 }, 1.5);
+      tl.fromTo(".s8-small", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)", stagger: 0.12 }, 1.8);
+      tl.fromTo("#s8-base", { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.5, ease: "back.out(2.6)" }, 2.1);
+      C.draw(tl, threads, 2.5, 0.45, 0.1);
+      C.unfrown(tl, vms.map((v) => v.mouth), 2.9, 0.12);
+      tl.fromTo(vms.map((v) => v.mouth), { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", stagger: 0.1, immediateRender: false }, 3.4);
+      C.wordsOut(tl, "#s8-l1", 3.8);
+      // The one idea, held to the end.
+      C.words(tl, "#s8-l2", 4.0);
+      vms.forEach((v, i) => C.blink(tl, v.eyes, 4.8 + i * 0.2));
+      // Base 1 hops in and lands on the music's last chord (70 s); the sandboxes blink back.
+      C.life(tl, base, 0, 6.0, 317);
+      C.hop(tl, base, 1530, 930, 6.05, 0.8, 140);
+      vms.forEach((v, i) => C.blink(tl, v.eyes, 7.0 + i * 0.08));
+      tl.fromTo("#s8-base", { scaleY: 1 }, { scaleY: 1.18, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 7.0);
+      C.life(tl, base, 7.5, 9.0, 318);
+      window.__timelines["s8"] = tl;
+    })();
+  </script>
+</template>

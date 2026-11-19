@@ -1,0 +1,83 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s4-kms { position: absolute; left: 120px; top: 270px; width: 880px; height: 470px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s4-kms-name { position: absolute; left: 24px; top: 12px; font-weight: 900; font-size: 34px; }
+    #s4-kms-cap { position: absolute; left: 210px; top: 76px; font-weight: 800; font-size: 30px; }
+    .s4-row { position: absolute; left: 160px; height: 52px; }
+    .s4-row-name { position: absolute; left: 0; top: 0; font-weight: 900; font-size: 40px; white-space: nowrap; line-height: 52px; }
+    .s4-row-env { position: absolute; left: 400px; top: 8px; font-family: var(--font-mono); font-weight: 500; font-size: 28px; color: var(--soft); white-space: nowrap; }
+    #s4-o1 { top: 410px; }
+    #s4-o2 { top: 468px; }
+    #s4-o3 { top: 526px; }
+    #s4-wip { left: 790px; top: 466px; background: var(--butter); }
+    #s4-o4 { position: absolute; left: 160px; top: 610px; }
+    #s4-o4-cap { position: absolute; left: 0; top: 60px; font-weight: 700; font-size: 28px; color: var(--soft); white-space: nowrap; }
+    #s4-host { left: 1060px; top: 270px; width: 740px; height: 470px; }
+    #s4-term { position: absolute; left: 1100px; top: 340px; width: 660px; height: 216px; border: 5px solid var(--ink); border-radius: 20px; background: var(--face); }
+    .s4-tty { position: absolute; left: 1125px; font-family: var(--font-mono); font-weight: 500; font-size: 28px; line-height: 1.4; white-space: pre; }
+    #s4-cmd { top: 361px; }
+    #s4-err { top: 439px; }
+    #s4-refused { left: 1100px; top: 600px; background: var(--rose); }
+    #s4-always { left: 120px; top: 900px; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-l1" class="line"><span class="w">The</span><span class="w">tenant</span><span class="w">KEK</span><span class="w">lives</span><span class="w">in</span><span class="w">a</span><span class="w">KMS</span></div>
+    <div id="s4-l2" class="line"><span class="w">Without</span><span class="w">one,</span><span class="w">a</span><span class="w">host</span><span class="w">refuses</span><span class="w">to</span><span class="w">start</span></div>
+    <div id="s4-kms">
+      <div id="s4-kms-name">KMS</div>
+      <div id="s4-kms-cap">tenant 42's KEK</div>
+    </div>
+    <div id="s4-o1" class="s4-row"><div class="s4-row-name">OpenBao</div><div class="s4-row-env">openbao://…</div></div>
+    <div id="s4-o2" class="s4-row"><div class="s4-row-name">AWS KMS</div><div class="s4-row-env">aws-kms://…</div></div>
+    <div id="s4-o3" class="s4-row"><div class="s4-row-name">Google Cloud KMS</div><div class="s4-row-env">gcp-kms://…</div></div>
+    <div id="s4-wip" class="tag">in progress</div>
+    <div id="s4-o4"><div class="s4-row-name">or the bucket KMS</div><div class="s4-row-env">CLADEFS_MASTER_KEY</div><div id="s4-o4-cap">the default: tenants' KEKs in the bucket, under a master key</div></div>
+    <div id="s4-host" class="place"><div class="place-name">a host given neither</div></div>
+    <div id="s4-term"></div>
+    <div id="s4-cmd" class="s4-tty">$ CLADEFSD_BUCKET=s3://b \
+  CLADEFSD_TOKEN=8 cladefsd</div>
+    <div id="s4-err" class="s4-tty">Error: the host's KMS: no KMS:
+CLADEFS_KMS names none, …</div>
+    <div id="s4-vms"></div>
+    <div id="s4-refused" class="tag">refuses to start</div>
+    <div id="s4-always" class="note">there is no plaintext mode</div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, E = window.Enc;
+      const tk = C.key(document.getElementById("s4-svg"), { x: 190, y: 366, color: C.ACCENT, s: 1.1 });
+      const vm = C.vm(document.getElementById("s4-vms"), { x: 1580, y: 584, w: 160, h: 120, id: "s4-vm" });
+      gsap.set(vm.mouth, { rotation: 180, y: 6 });
+
+      const tl = gsap.timeline({ paused: true });
+      // The KMS, and which: three named by URL (in progress), or the bucket KMS, the default.
+      C.words(tl, "#s4-l1", 0.2);
+      tl.fromTo("#s4-kms", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 0.2);
+      tl.fromTo(tk.g, { scale: 0, rotation: -40 }, { scale: 1.1, rotation: 0, duration: 0.4, ease: "back.out(2.6)" }, 0.5);
+      tl.fromTo("#s4-kms-cap", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.6);
+      ["#s4-o1", "#s4-o2", "#s4-o3"].forEach((o, i) => {
+        tl.fromTo(o, { opacity: 0, x: -24 }, { opacity: 1, x: 0, duration: 0.3, ease: "back.out(2.6)" }, 0.7 + i * 0.3);
+      });
+      C.tagIn(tl, "#s4-wip", 1.7);
+      tl.fromTo("#s4-o4", { opacity: 0, scale: 0.7, transformOrigin: "0% 50%" }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2.6)" }, 2.7);
+      C.wordsOut(tl, "#s4-l1", 3.4);
+
+      // A host given neither refuses to start, in the daemon's own words.
+      C.words(tl, "#s4-l2", 3.6);
+      tl.fromTo("#s4-host", { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, 3.6);
+      tl.fromTo(["#s4-term", "#s4-cmd"], { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2.2)" }, 3.7);
+      tl.fromTo("#s4-err", { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.25, ease: "power2.out" }, 4.3);
+      tl.fromTo("#s4-vm", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.4)" }, 4.6);
+      tl.fromTo("#s4-refused", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.6)" }, 4.9);
+      tl.fromTo("#s4-refused", { rotation: 0 }, { rotation: -4, duration: 0.07, yoyo: true, repeat: 3, immediateRender: false }, 5.2);
+      tl.fromTo("#s4-always", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 5.4);
+
+      // Exit.
+      C.wordsOut(tl, "#s4-l2", 7.45);
+      tl.to(["#s4-kms", "#s4-o1", "#s4-o2", "#s4-o3", "#s4-wip", "#s4-o4", "#s4-host", "#s4-term", "#s4-cmd", "#s4-err", "#s4-vm", "#s4-refused", "#s4-always", "#s4-svg"], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.015 }, 7.5);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

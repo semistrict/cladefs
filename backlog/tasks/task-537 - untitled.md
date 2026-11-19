@@ -3,10 +3,10 @@ id: TASK-537
 title: >-
   Replicated commits: durable on a majority of peers' disks without waiting for
   the bucket, and their recovery
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-18T12:36:00Z'
-updated_date: '2026-11-18T12:36:00Z'
+updated_date: '2026-11-19T16:05:00Z'
 labels:
   - durability
   - bucket
@@ -50,10 +50,10 @@ Supersedes TASK-96's "Peer log" (one peer named in the lease) for the replicatio
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cell can be made replicated with f and an fsync level; its commits reach Replicated with f+1 of 2f+1 copies on disk, and the waiters for that level are woken then without any bucket request on the path
-- [ ] #2 Losing the writer's host loses no commit that reached Replicated: a take on another host recovers it (tested with real daemons)
-- [ ] #3 Protocol modelled in TLA+ and model-checked, with mutations that break it
-- [ ] #4 doc-12 gains the Replicated level, its failure table rows and their tests
+- [x] #1 A cell can be made replicated with f and an fsync level; its commits reach Replicated with f+1 of 2f+1 copies on disk, and the waiters for that level are woken then without any bucket request on the path
+- [x] #2 Losing the writer's host loses no commit that reached Replicated: a take on another host recovers it (tested with real daemons)
+- [x] #3 Protocol modelled in TLA+ and model-checked, with mutations that break it
+- [x] #4 doc-12 gains the Replicated level, its failure table rows and their tests
 <!-- AC:END -->
 
 ## Definition of Done
@@ -62,3 +62,17 @@ Supersedes TASK-96's "Peer log" (one peer named in the lease) for the replicatio
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19: TASK-537.1, .2, .3 Done. AC 4 left open: doc-12 has the Replicated level and its rows, all tested except 'cladefsd killed, or the host rebooted, disk kept' for a replicated cell (no test kills its daemon and reopens on the same disk).
+
+2026-11-19: doc-12's last untested replicated row covered: cladefs's replicated_commits_survive_their_daemon_killed_and_reopened (writer's daemon killed mid-workload with the bucket out of reach, restarted on its directory, the store reopened; all three daemon tests pass 3x under fxjob on ubu1, clippy clean). Found writing it: a take's commits wait for the bucket until it holds what the take recovered (Replicator::base), by design; now said in doc-21. DoD 1 and 2 unchecked: no macOS host or Fuchsia checkout on ubu1.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Replicated commits are built and verified: a cell can be made replicated with f and an fsync level, its commits reach Replicated on f+1 of 2f+1 copies without a bucket request on the path, a take on another host or the same disk recovers everything told durable (real-daemon tests), the protocol is modelled in TLA+ with mutations, and doc-12 has the Replicated level with every row tested. Full ubu1 suite passes at 54adcd5ca. Not run: macOS, and upstream-changes --check (no Fuchsia checkout on ubu1).
+<!-- SECTION:FINAL_SUMMARY:END -->

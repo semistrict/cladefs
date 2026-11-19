@@ -1,0 +1,141 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s5-kms { position: absolute; left: 120px; top: 250px; width: 500px; height: 330px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s5-kms-name { position: absolute; left: 24px; top: 12px; font-weight: 900; font-size: 34px; }
+    .s5-kname { position: absolute; left: 230px; font-weight: 800; font-size: 30px; white-space: nowrap; }
+    #s5-k42 { top: 106px; }
+    #s5-k7 { top: 216px; }
+    #s5-destroyed { left: 150px; top: 336px; background: var(--rose); }
+    #s5-c42 { left: 680px; top: 260px; }
+    #s5-c7 { left: 680px; top: 750px; }
+    .s5-place { left: 1100px; width: 720px; height: 200px; }
+    #s5-pA { top: 250px; }
+    #s5-pP { top: 465px; }
+    #s5-pB { top: 680px; }
+    #s5-n1 { left: 120px; top: 940px; }
+    #s5-n2 { left: 120px; top: 892px; }
+    #s5-n3 { left: 120px; top: 942px; }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-l1" class="line"><span class="w">Tenant</span><span class="w">7</span><span class="w">lives</span><span class="w">on</span><span class="w">the</span><span class="w">same</span><span class="w">hosts</span></div>
+    <div id="s5-l2" class="line"><span class="w">To</span><span class="w">shred</span><span class="w">tenant</span><span class="w">42,</span><span class="w">destroy</span><span class="w">its</span><span class="w">KEK</span></div>
+    <div id="s5-l3" class="line"><span class="w">Its</span><span class="w">cells'</span><span class="w">copies</span><span class="w">stay</span><span class="w">ciphertext</span></div>
+    <div id="s5-l4" class="line"><span class="w">Every</span><span class="w">host</span><span class="w">told</span><span class="w">forgets</span><span class="w">them</span></div>
+    <div id="s5-l5" class="line"><span class="w">Tenant</span><span class="w">7</span><span class="w">reads</span><span class="w">on,</span><span class="w">untouched</span></div>
+    <div id="s5-kms">
+      <div id="s5-kms-name">KMS</div>
+      <div id="s5-k42" class="s5-kname">tenant 42's KEK</div>
+      <div id="s5-k7" class="s5-kname">tenant 7's KEK</div>
+    </div>
+    <div id="s5-c42" class="note">tenant 42's cells</div>
+    <div id="s5-c7" class="note">tenant 7's cells</div>
+    <div id="s5-pA" class="place s5-place"><div class="place-name">host A's disk</div></div>
+    <div id="s5-pP" class="place s5-place"><div class="place-name">peers' disks</div></div>
+    <div id="s5-pB" class="place s5-place"><div class="place-name">bucket</div></div>
+    <div id="s5-cards"></div>
+    <svg id="s5-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s5-links"></g>
+      <g id="s5-ghosts"></g>
+      <g id="s5-cells"></g>
+      <g id="s5-poofs"></g>
+      <g id="s5-crosses"></g>
+      <g id="s5-keys"></g>
+    </svg>
+    <div id="s5-destroyed" class="tag">destroyed</div>
+    <div id="s5-n1" class="note">its cell KEKs unwrap no more, once old versions expire</div>
+    <div id="s5-n2" class="note">the bucket KMS: <span class="mono">cladefsctl shred-tenant TENANT</span>, on every host</div>
+    <div id="s5-n3" class="note">a KMS by URL: destroy the KEK there, then <span class="mono">forget-tenant-keys TENANT</span></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, E = window.Enc;
+      const $ = (id) => document.getElementById(id);
+      const keysG = $("s5-keys"), linksG = $("s5-links");
+      const k42 = C.key(keysG, { x: 190, y: 380, color: C.ACCENT, s: 1.2 });
+      const k7 = C.key(keysG, { x: 190, y: 490, color: "#8fddc2", s: 1.2 });
+      // Tenant 42's cells (cell 9 first) and tenant 7's.
+      const seats42 = [[750, 410, "#ffb088", 909], [880, 410, "#ff9ec0", 921], [1010, 410, "#b9a4ff", 922]];
+      const seats7 = [[750, 670, "#8fddc2", 931], [880, 670, "#8cc8ff", 932]];
+      const cells42 = [], ghosts42 = [], poofs42 = [], cells7 = [];
+      seats42.forEach(([x, y, color, seed], i) => {
+        ghosts42.push(C.critter($("s5-ghosts"), { x, y, r: 46, ghost: true, seed: seed + 100 }));
+        cells42.push(C.critter($("s5-cells"), { x, y, r: 46, color, seed, look: [-0.6, -0.2] }));
+        poofs42.push(E.poof($("s5-poofs"), x, y, 1));
+      });
+      seats7.forEach(([x, y, color, seed]) => cells7.push(C.critter($("s5-cells"), { x, y, r: 46, color, seed, look: [-0.6, -0.2] })));
+      const links42 = seats42.map(([x, y]) => E.link(linksG, 620, 380, x - 50, y - 10, "#c89a1c", 30));
+      const links7 = seats7.map(([x, y]) => E.link(linksG, 620, 490, x - 50, y - 10, "#c89a1c", 30));
+      // One card of each tenant at every place, encrypted.
+      const cipher = ["9f 3a c1 07 e4", "52 b8 0d 6e 91"];
+      const cards42 = [], cards7 = [], crosses = [];
+      [250, 465, 680].forEach((top, i) => {
+        cards42.push(E.card($("s5-cards"), { id: "s5-a" + i, x: 1130, y: top + 52, w: 300, h: 136, name: "main.rs", tint: "#ffb088", show: "cipher", plain: ["fn main() {", "  serve(); }"], cipher }));
+        cards7.push(E.card($("s5-cards"), { id: "s5-b" + i, x: 1470, y: top + 52, w: 300, h: 136, name: "app.py", tint: "#8fddc2", show: "cipher", plain: ["def main():", "    run()"], cipher: ["c4 0b 7e 19 d2", "38 f1 a6 5c 0e"] }));
+        const x0 = 1150, y0 = top + 64, x1 = 1410, y1 = top + 176;
+        crosses.push(C.el("path", { d: `M${x0} ${y0} L${x1} ${y1} M${x1} ${y0} L${x0} ${y1}`, stroke: "#2e2440", "stroke-width": 7, "stroke-linecap": "round", fill: "none", pathLength: 100 }, $("s5-crosses")));
+      });
+
+      const tl = gsap.timeline({ paused: true });
+      const pop = (t, at, st) => tl.fromTo(t, { opacity: 0, scale: 0.92 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", stagger: st || 0 }, at);
+      tl.fromTo(ghosts42.map((g) => g.pop), { scale: 0 }, { scale: 0, duration: 0.01 }, 0);
+      tl.fromTo(crosses, { opacity: 0 }, { opacity: 0, duration: 0.01 }, 0);
+
+      // Two tenants: their KEKs in the KMS, their cells, a copy of each at every place, all encrypted.
+      C.words(tl, "#s5-l1", 0.2);
+      tl.fromTo("#s5-kms", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 0.2);
+      [k42, k7].forEach((k, i) => tl.fromTo(k.g, { scale: 0, rotation: -40 }, { scale: 1.2, rotation: 0, duration: 0.4, ease: "back.out(2.6)" }, 0.45 + i * 0.15));
+      tl.fromTo(["#s5-c42", "#s5-c7"], { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.1 }, 0.5);
+      tl.fromTo(cells42.concat(cells7).map((c) => c.pop), { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)", stagger: 0.08 }, 0.55);
+      cells42.forEach((c, i) => C.life(tl, c, 1.2, 8.3, 500 + i));
+      cells7.forEach((c, i) => C.life(tl, c, 1.2, 10.6, 510 + i));
+      pop(["#s5-pA", "#s5-pP", "#s5-pB"], 0.7, 0.12);
+      pop(cards42.concat(cards7).map((c) => c.root), 1.0, 0.06);
+      tl.fromTo(links42.concat(links7), { opacity: 0 }, { opacity: 1, duration: 0.3, stagger: 0.05 }, 1.5);
+      C.wordsOut(tl, "#s5-l1", 2.6);
+
+      // Shred: tenant 42's KEK is destroyed; its links fall.
+      C.words(tl, "#s5-l2", 2.8);
+      tl.fromTo(k42.g, { rotation: 0 }, { rotation: 8, duration: 0.07, yoyo: true, repeat: 5, transformOrigin: "50% 50%", immediateRender: false }, 3.1);
+      tl.to(k42.ring, { x: -30, y: 140, rotation: -70, opacity: 0, duration: 0.6, ease: "power2.in" }, 3.6);
+      tl.to(k42.shaft, { x: 40, y: 150, rotation: 80, opacity: 0, duration: 0.6, ease: "power2.in" }, 3.6);
+      tl.to(links42, { opacity: 0, duration: 0.2 }, 3.7);
+      tl.to("#s5-k42", { opacity: 0.4, duration: 0.3 }, 3.8);
+      tl.fromTo("#s5-destroyed", { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.6)" }, 3.9);
+      cells42.forEach((c) => tl.to(c.smile, { rotation: 180, duration: 0.3, ease: "back.out(2)", transformOrigin: "50% 50%" }, 4.1));
+      C.wordsOut(tl, "#s5-l2", 5.0);
+
+      // Its copies stay ciphertext, wherever they rest: nothing opens them.
+      C.words(tl, "#s5-l3", 5.15);
+      cards42.forEach((c, i) => {
+        tl.to(c.root, { opacity: 0.55, duration: 0.25 }, 5.5 + i * 0.15);
+        tl.fromTo(crosses[i], { opacity: 1, strokeDasharray: "0 100" }, { opacity: 1, strokeDasharray: "100 0", duration: 0.25, ease: "power2.out", immediateRender: false }, 5.55 + i * 0.15);
+      });
+      tl.fromTo("#s5-n1", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 5.25);
+      C.wordsOut(tl, "#s5-l3", 7.6);
+
+      // Every host forgets tenant 42's keys: its cells go poof.
+      C.words(tl, "#s5-l4", 7.8);
+      tl.to("#s5-n1", { opacity: 0, duration: 0.15 }, 7.95);
+      tl.fromTo(["#s5-n2", "#s5-n3"], { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)", stagger: 0.15 }, 8.1);
+      cells42.forEach((c, i) => E.goPoof(tl, c, ghosts42[i], poofs42[i], 8.3 + i * 0.12));
+      C.wordsOut(tl, "#s5-l4", 10.0);
+
+      // Tenant 7 reads on, untouched.
+      C.words(tl, "#s5-l5", 10.2);
+      cards7.forEach((c, i) => E.flip(tl, c, false, 10.5 + i * 0.2));
+      cells7.forEach((c, i) => {
+        const [x, y] = seats7[i];
+        C.hop(tl, c, x, y, 10.6 + i * 0.15, 0.5, 70);
+        tl.to(c.smile, { scaleX: 1.4, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 11.3);
+      });
+      cells7.forEach((c, i) => C.life(tl, c, 11.6, 13.6, 520 + i));
+      tl.fromTo(k7.g, { rotation: 0 }, { rotation: -12, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "20% 50%", immediateRender: false }, 10.5);
+
+      // Exit.
+      C.wordsOut(tl, "#s5-l5", 13.45);
+      tl.to(["#s5-kms", "#s5-c42", "#s5-c7", "#s5-pA", "#s5-pP", "#s5-pB", "#s5-cards", "#s5-svg", "#s5-destroyed", "#s5-n2", "#s5-n3"], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.015 }, 13.5);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>

@@ -1,0 +1,55 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s4-count { position: absolute; left: 124px; top: 740px; font-weight: 900; font-size: 80px; }
+    #s4-count-label { left: 124px; top: 850px; }
+    #s4-own { left: 1240px; top: 850px; }
+  </style>
+  <div id="root" data-composition-id="s4" data-width="1920" data-height="1080">
+    <div id="s4-l1" class="line"><span class="w">Fork</span><span class="w">it</span><span class="w">a</span><span class="w">hundred</span><span class="w">times</span></div>
+    <div id="s4-l2" class="line"><span class="w">Each</span><span class="w">boots</span><span class="w">a</span><span class="w">sandbox</span></div>
+    <svg id="s4-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s4-threads"></g>
+      <g id="s4-kids"></g>
+      <g id="s4-base"></g>
+    </svg>
+    <div id="s4-count">0</div>
+    <div id="s4-count-label" class="label">forks, each copying nothing</div>
+    <div id="s4-own" class="note">each one: own 0, inherited all</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff"];
+      const base = C.critter(document.getElementById("s4-base"), { x: 960, y: 880, r: 110, color: "#8fddc2", seed: 77, look: [0, -0.8] });
+      const threadsLayer = document.getElementById("s4-threads");
+      const kidsLayer = document.getElementById("s4-kids");
+      // A hundred forks on the overview's sandbox grid (20 x 5), each on a thread from the base.
+      const R = C.rng(100);
+      const kids = [], threads = [];
+      for (let i = 0; i < 100; i++) {
+        const c = i % 20, r = Math.floor(i / 20);
+        const x = 124 + c * 84 + 38, y = 250 + r * 66 + 26;
+        kids.push(C.critter(kidsLayer, { x, y, r: 22, ghost: true, seed: 1000 + i, look: [(960 - x) / 900, 0.8], patchColor: colors[Math.floor(R() * colors.length)] }));
+        threads.push(I.thread(threadsLayer, 960, 770, x, y + 24, { width: 1.8, opacity: 0.6, bow: 0.55, vertical: true }));
+      }
+      const tl = gsap.timeline({ paused: true });
+      C.life(tl, base, 0, 7.3, 41);
+      C.words(tl, "#s4-l1", 0.2);
+      const st = { amount: 1.6, grid: [5, 20], from: [0.5, 1] };
+      tl.fromTo(threads, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: 0.35, ease: "power2.out", stagger: st }, 0.7);
+      tl.fromTo(kids.map((k) => k.pop), { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(2.8)", stagger: st }, 0.9);
+      tl.fromTo(["#s4-count", "#s4-count-label"], { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)", stagger: 0.08 }, 0.9);
+      C.count(tl, document.getElementById("s4-count"), 0, 100, 0.9, 1.9);
+      kids.forEach((k, i) => C.life(tl, k, 2.9, 7.3, 2000 + i));
+      C.wordsOut(tl, "#s4-l1", 3.6);
+      C.words(tl, "#s4-l2", 3.8);
+      tl.fromTo("#s4-own", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 4.6);
+      // Hand-off: the threads, the count and the base go; the forks stay for their sandboxes.
+      C.wordsOut(tl, "#s4-l2", 7.2);
+      tl.to([threadsLayer, "#s4-count", "#s4-count-label", "#s4-own"], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.04 }, 7.25);
+      tl.to(base.pop, { scale: 0, duration: 0.3, ease: "back.in(2)" }, 7.3);
+      window.__timelines["s4"] = tl;
+    })();
+  </script>
+</template>

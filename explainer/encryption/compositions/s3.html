@@ -1,0 +1,110 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s3-head { left: 540px; top: 390px; width: 640px; height: 420px; }
+    #s3-kms { position: absolute; left: 1300px; top: 420px; width: 500px; height: 330px; border: 5px solid var(--ink); border-radius: 30px; background: var(--face); }
+    #s3-kms-name { position: absolute; left: 24px; top: 12px; font-weight: 900; font-size: 34px; }
+    #s3-kms-cap { position: absolute; left: 24px; top: 262px; font-weight: 800; font-size: 30px; }
+    #s3-t-dek { left: 610px; top: 700px; background: var(--butter); }
+    #s3-t-kek { left: 920px; top: 700px; background: var(--sky); }
+    #s3-file-note { left: 120px; top: 760px; }
+    #s3-once { left: 120px; top: 900px; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-l1" class="line"><span class="w">The</span><span class="w">cell</span><span class="w">DEK</span><span class="w">unlocks</span><span class="w">main.rs</span></div>
+    <div id="s3-l2" class="line"><span class="w">The</span><span class="w">cell</span><span class="w">KEK</span><span class="w">locks</span><span class="w">the</span><span class="w">DEK</span></div>
+    <div id="s3-l3" class="line"><span class="w">Tenant</span><span class="w">42's</span><span class="w">KEK</span><span class="w">locks</span><span class="w">the</span><span class="w">cell</span><span class="w">KEK</span></div>
+    <div id="s3-l4" class="line"><span class="w">Every</span><span class="w">key</span><span class="w">below</span><span class="w">hangs</span><span class="w">on</span><span class="w">that</span><span class="w">one</span></div>
+    <div id="s3-head" class="place"><div class="place-name">cell 9's head keeps both, locked</div></div>
+    <div id="s3-kms"><div id="s3-kms-name">KMS</div><div id="s3-kms-cap">tenant 42's KEK</div></div>
+    <div id="s3-cards"></div>
+    <div id="s3-file-note" class="note">each object under its own subkey of the DEK</div>
+    <div id="s3-t-dek" class="tag">cell DEK</div>
+    <div id="s3-t-kek" class="tag">cell KEK</div>
+    <div id="s3-once" class="note">taking cell 9 asks the KMS once</div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s3-links"></g>
+      <g id="s3-keys"></g>
+      <g id="s3-locks"></g>
+    </svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, E = window.Enc;
+      const keysG = document.getElementById("s3-keys");
+      const locksG = document.getElementById("s3-locks");
+      const linksG = document.getElementById("s3-links");
+      const card = E.card(document.getElementById("s3-cards"), {
+        id: "s3-card", x: 120, y: 510, w: 330, h: 180, name: "main.rs", tint: "#ffb088", show: "cipher",
+        plain: ["fn main() {", "    serve();", "}"],
+        cipher: ["9f 3a c1 07 e4", "52 b8 0d 6e 91", "a7 13 fc 48 2b"],
+      });
+      // The chain, left to right: the file's lock, the DEK, the cell KEK, tenant 42's KEK in the KMS.
+      const fileLock = E.padlock(locksG, { x: 440, y: 510, color: "#ffd86e", s: 1.2 });
+      const dek = C.key(keysG, { x: 640, y: 620, color: "#ffd86e", s: 1.5 });
+      const dekLock = E.padlock(locksG, { x: 790, y: 580, color: "#8cc8ff", s: 1.2 });
+      const kek = C.key(keysG, { x: 950, y: 620, color: "#8cc8ff", s: 1.5 });
+      const kekLock = E.padlock(locksG, { x: 1100, y: 580, color: C.ACCENT, s: 1.2 });
+      const tk = C.key(keysG, { x: 1470, y: 560, color: C.ACCENT, s: 1.8 });
+      const lTk = E.link(linksG, 1420, 580, 1120, 590, "#c89a1c", 60);
+      const lKek = E.link(linksG, 920, 620, 810, 590, "#c89a1c", 40);
+      const lDek = E.link(linksG, 610, 620, 460, 530, "#c89a1c", 40);
+      const links = [lTk, lKek, lDek];
+      links.forEach((l) => l.setAttribute("pathLength", "100"));
+
+      const tl = gsap.timeline({ paused: true });
+      const pop = (t, at) => tl.fromTo(t, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2.6)" }, at);
+      const keyIn = (k, at) => tl.fromTo(k.g, { scale: 0, rotation: -40 }, { scale: k.s, rotation: 0, duration: 0.4, ease: "back.out(2.6)" }, at);
+
+      // The cell DEK opens main.rs, then locks it again.
+      C.words(tl, "#s3-l1", 0.2);
+      tl.fromTo(card.root, { scale: 0, rotation: -8 }, { scale: 1, rotation: 0, duration: 0.5, ease: "back.out(2.2)" }, 0.2);
+      E.lockOn(tl, fileLock, 0.5);
+      keyIn(dek, 0.8);
+      pop("#s3-t-dek", 0.95);
+      tl.fromTo(dek.g, { x: 640 }, { x: 470, duration: 0.45, ease: "power2.inOut", immediateRender: false }, 1.3);
+      tl.fromTo(dek.g, { y: 620 }, { y: 530, duration: 0.45, ease: "power2.inOut", immediateRender: false }, 1.3);
+      tl.fromTo(fileLock.shackle, { y: 0 }, { y: -12, duration: 0.15, ease: "back.out(3)", immediateRender: false }, 1.75);
+      E.flip(tl, card, false, 1.8);
+      tl.fromTo("#s3-file-note", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 2.0);
+      E.flip(tl, card, true, 2.6);
+      tl.fromTo(fileLock.shackle, { y: -12 }, { y: 0, duration: 0.12, ease: "power2.in", immediateRender: false }, 2.8);
+      tl.fromTo(dek.g, { x: 470, y: 530 }, { x: 640, y: 620, duration: 0.45, ease: "power2.inOut", immediateRender: false }, 2.85);
+      C.wordsOut(tl, "#s3-l1", 3.0);
+
+      // The cell KEK locks the DEK; the head keeps both.
+      C.words(tl, "#s3-l2", 3.2);
+      keyIn(kek, 3.4);
+      pop("#s3-t-kek", 3.55);
+      E.lockOn(tl, dekLock, 3.9);
+      tl.fromTo(lDek, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 3.9);
+      tl.fromTo(lKek, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 4.1);
+      tl.fromTo("#s3-head", { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)" }, 4.4);
+      C.wordsOut(tl, "#s3-l2", 5.8);
+
+      // Tenant 42's KEK, in the KMS, locks the cell KEK.
+      C.words(tl, "#s3-l3", 6.0);
+      tl.fromTo("#s3-kms", { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 6.1);
+      keyIn(tk, 6.45);
+      E.lockOn(tl, kekLock, 6.9);
+      tl.fromTo(lTk, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 7.1);
+      C.wordsOut(tl, "#s3-l3", 8.4);
+
+      // Every key below hangs on that one: the links pulse from the top down.
+      C.words(tl, "#s3-l4", 8.6);
+      tl.fromTo(tk.g, { rotation: 0 }, { rotation: -12, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "20% 50%", immediateRender: false }, 9.0);
+      links.forEach((l, i) => {
+        tl.fromTo(l, { strokeWidth: 4 }, { strokeWidth: 9, duration: 0.18, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 9.15 + i * 0.25);
+      });
+      [kekLock, dekLock, fileLock].forEach((l, i) => {
+        tl.fromTo(l.g, { scale: 1.2 }, { scale: 1.5, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, 9.3 + i * 0.25);
+      });
+      tl.fromTo("#s3-once", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 8.8);
+
+      // Exit.
+      C.wordsOut(tl, "#s3-l4", 11.45);
+      tl.to(["#s3-head", "#s3-kms", "#s3-cards", "#s3-file-note", "#s3-t-dek", "#s3-t-kek", "#s3-once", "#s3-svg"], { opacity: 0, duration: 0.25, ease: "power2.in", stagger: 0.015 }, 11.5);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>

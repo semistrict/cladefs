@@ -1,0 +1,60 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s3-members, #s3-option { left: 120px; top: 196px; opacity: 0; }
+  </style>
+  <div id="root" data-composition-id="s3" data-width="1920" data-height="1080">
+    <div id="s3-l1" class="line"><span class="w">Replicated:</span><span class="w">on</span><span class="w">2</span><span class="w">of</span><span class="w">3</span><span class="w">hosts'</span><span class="w">disks</span></div>
+    <div id="s3-l2" class="line"><span class="w">The</span><span class="w">writer's</span><span class="w">own</span><span class="w">copy</span><span class="w">counts</span><span class="w">as</span><span class="w">one</span></div>
+    <div id="s3-option" class="note">an option per cell: cell 9's fsync waits for Replicated</div>
+    <div id="s3-members" class="note">members: the writer and 2 peers, f = 1</div>
+    <div id="s3-stage"></div>
+    <svg id="s3-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s3-tags"></div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, P = window.Rep;
+      const stage = document.getElementById("s3-stage");
+      const svg = document.getElementById("s3-svg");
+      const tags = document.getElementById("s3-tags");
+      const hA = P.host(stage, "A", "s3", ["writer"]);
+      const hB = P.host(stage, "B", "s3", ["peer"]);
+      const hC = P.host(stage, "C", "s3", ["peer"]);
+      const sb = P.sandbox(stage, "A", "s3");
+      const pail = P.pail(tags, svg, "s3", ["epoch 7 · A B C"]);
+      const cell = P.cell(svg, "A");
+      const old = P.OLD.map((c, i) => P.bead(svg, P.slot("A", i), c));
+      const name = P.tag(tags, "s3-name", "cell 9", P.X.A + 28, P.TOP + 300, "b");
+      const count = P.tag(tags, "s3-count0", "on disk: 0 of 3", P.X.A + 20, 784);
+
+      const tl = gsap.timeline({ paused: true });
+      // Three hosts: cell 9's writer and two peers, the members of its configuration.
+      tl.fromTo([hA.box, hB.box, hC.box], { opacity: 0, scale: 0.95 }, { opacity: 1, scale: 1, duration: 0.35, ease: "back.out(2)", stagger: 0.15 }, 0.1);
+      C.words(tl, "#s3-l1", 0.2);
+      tl.fromTo(sb.root, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 0.3);
+      tl.fromTo(cell.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.4)" }, 0.45);
+      C.life(tl, cell, 0.9, 6.5, 43);
+      tl.fromTo(old, { scale: 0, transformOrigin: "50% 50%" }, { scale: 1, duration: 0.25, ease: "back.out(3)", stagger: 0.06 }, 0.6);
+      C.tagIn(tl, name, 0.7);
+      tl.fromTo(pail.g, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.45, ease: "back.out(2.2)" }, 0.5);
+      tl.fromTo(pail.name, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 0.7);
+      tl.fromTo("#s3-option", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 0.8);
+      C.tagIn(tl, hA.tags.writer, 1.4);
+      C.tagIn(tl, hB.tags.peer, 1.55);
+      C.tagIn(tl, hC.tags.peer, 1.7);
+      // The bucket's head names them, its writer first.
+      C.tagIn(tl, pail.heads[0], 2.3);
+      C.wordsOut(tl, "#s3-l1", 3.7);
+      tl.to("#s3-option", { opacity: 0, duration: 0.2 }, 3.7);
+      // The writer's own disk is one of the copies.
+      C.words(tl, "#s3-l2", 3.9);
+      tl.fromTo("#s3-members", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 3.9);
+      tl.to("#s3-members", { opacity: 0, duration: 0.2 }, 6.2);
+      tl.fromTo(hA.disk, { scale: 1 }, { scale: 1.05, duration: 0.18, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 50%" }, 4.4);
+      C.tagIn(tl, count, 4.5);
+      C.wordsOut(tl, "#s3-l2", 6.2);
+      window.__timelines["s3"] = tl;
+    })();
+  </script>
+</template>

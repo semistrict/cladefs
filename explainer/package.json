@@ -1,11 +1,11 @@
 {
-  "name": "cladefs-explainer",
+  "name": "cladefs-explainers",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npx --yes hyperframes@0.9.65 preview",
-    "check": "npx --yes hyperframes@0.9.65 check",
-    "render": "npx --yes hyperframes@0.9.65 render",
-    "publish": "npx --yes hyperframes@0.9.65 publish"
+    "dev": "npx --yes hyperframes@0.9.70 preview",
+    "check": "npx --yes hyperframes@0.9.70 check",
+    "snapshot": "npx --yes hyperframes@0.9.70 snapshot",
+    "render": "npx --yes hyperframes@0.9.70 render --include-outside-files"
   }
 }

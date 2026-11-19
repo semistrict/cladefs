@@ -1,0 +1,57 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s6-t42 { left: 200px; top: 270px; }
+    #s6-t7 { left: 1150px; top: 270px; }
+    #s6-where { left: 120px; top: 890px; }
+    #s6-except { left: 120px; top: 940px; }
+  </style>
+  <div id="root" data-composition-id="s6" data-width="1920" data-height="1080">
+    <div id="s6-l1" class="line" data-hold><span class="w">One</span><span class="w">key</span><span class="w">gone,</span><span class="w">its</span><span class="w">cells</span><span class="w">unreadable</span></div>
+    <div id="s6-t42" class="note">tenant 42, shredded</div>
+    <div id="s6-t7" class="note">tenant 7, reading on</div>
+    <div id="s6-cards"></div>
+    <svg id="s6-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s6-keys"></g>
+      <g id="s6-cells"></g>
+    </svg>
+    <div id="s6-where" class="note">at rest: on every host's disk, every peer's, and in the bucket</div>
+    <div id="s6-except" class="note">except forks into other tenants' cells; under the bucket KMS, expire old versions</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, E = window.Enc;
+      const $ = (id) => document.getElementById(id);
+      // Tenant 42: cell 9 a ghost, its main.rs ciphertext, its KEK in two pieces on the felt.
+      const ghost = C.critter($("s6-cells"), { x: 360, y: 660, r: 110, ghost: true, seed: 1009 });
+      const broken = C.key($("s6-keys"), { x: 610, y: 760, color: C.ACCENT, s: 1.4 });
+      gsap.set(broken.ring, { x: -20, y: 10, rotation: -30 });
+      gsap.set(broken.shaft, { x: 30, y: 4, rotation: 24 });
+      const c42 = E.card($("s6-cards"), { id: "s6-c42", x: 560, y: 390, w: 330, h: 180, name: "main.rs", tint: "#ffb088", show: "cipher", plain: ["fn main() {", "    serve();", "}"], cipher: ["9f 3a c1 07 e4", "52 b8 0d 6e 91", "a7 13 fc 48 2b"] });
+      // Tenant 7: its app.py plain, its cell hopping in to land on the last chord.
+      const c7 = E.card($("s6-cards"), { id: "s6-c7", x: 1150, y: 390, w: 330, h: 180, name: "app.py", tint: "#8fddc2", show: "plain", plain: ["def main():", "    run()", ""], cipher: [] });
+      const seven = C.critter($("s6-cells"), { x: 2100, y: 660, r: 110, color: "#8fddc2", seed: 931, look: [-0.7, -0.2] });
+
+      const tl = gsap.timeline({ paused: true });
+      C.words(tl, "#s6-l1", 0.2);
+      tl.fromTo(ghost.pop, { scale: 0, opacity: 0.5, transformOrigin: "50% 100%" }, { scale: 1, opacity: 0.5, duration: 0.45, ease: "back.out(2)" }, 0.3);
+      tl.fromTo(broken.g, { opacity: 0, scale: 1 }, { opacity: 1, scale: 1.4, duration: 0.35, ease: "back.out(2.4)" }, 0.45);
+      tl.fromTo(c42.root, { opacity: 0, scale: 0.6 }, { opacity: 0.6, scale: 1, duration: 0.4, ease: "back.out(2.2)" }, 0.55);
+      tl.fromTo("#s6-t42", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 0.7);
+      tl.fromTo(c7.root, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2.2)" }, 0.9);
+      tl.fromTo("#s6-t7", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 1.05);
+      tl.fromTo(["#s6-where", "#s6-except"], { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.35, ease: "back.out(2)", stagger: 0.4 }, 1.4);
+      C.blink(tl, ghost.eyes, 2.6);
+      C.blink(tl, ghost.eyes, 5.2);
+      // Tenant 7's cell hops in and lands on the music's last chord (60.0 s, here 6.0).
+      C.life(tl, seven, 0, 3.3, 61);
+      C.hop(tl, seven, 1750, 660, 3.4, 0.8, 120);
+      C.life(tl, seven, 4.6, 5.0, 63);
+      C.hop(tl, seven, 1650, 660, 5.1, 0.8, 150);
+      tl.fromTo(c7.root, { scaleY: 1 }, { scaleY: 1.08, duration: 0.12, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 100%", immediateRender: false }, 6.0);
+      tl.to(seven.smile, { scaleX: 1.4, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 6.1);
+      C.life(tl, seven, 6.6, 8.0, 62);
+      window.__timelines["s6"] = tl;
+    })();
+  </script>
+</template>

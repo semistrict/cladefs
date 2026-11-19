@@ -1,0 +1,73 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s6-host { left: 100px; top: 690px; width: 1720px; height: 330px; }
+    #s6-host-label { left: 130px; top: 700px; }
+    .s6-own { position: absolute; top: 440px; width: 240px; height: 26px; border: 4px solid var(--ink); border-radius: 9px; }
+    #s6-n1 { left: 150px; top: 192px; }
+    #s6-mem-label { left: 1000px; top: 730px; }
+    #s6-mem { position: absolute; left: 1000px; top: 780px; width: 760px; height: 96px; border: 5px solid var(--ink); border-radius: 22px; background: var(--face); }
+    #s6-pages { position: absolute; left: 16px; top: 12px; width: 360px; height: 62px; border: 4px solid var(--ink); border-radius: 12px; background: var(--accent); color: #ffffff; font-weight: 900; font-size: 30px; line-height: 52px; padding-left: 16px; white-space: nowrap; }
+    .s6-sliver { position: absolute; top: 12px; width: 16px; height: 62px; border: 3px solid var(--ink); border-radius: 6px; }
+    #s6-n2 { left: 1000px; top: 896px; }
+    #s6-n3 { left: 1000px; top: 950px; }
+  </style>
+  <div id="root" data-composition-id="s6" data-width="1920" data-height="1080">
+    <div id="s6-l1" class="line"><span class="w">Six</span><span class="w">sandboxes,</span><span class="w">one</span><span class="w">base</span></div>
+    <div id="s6-l2" class="line"><span class="w">Kept</span><span class="w">once,</span><span class="w">one</span><span class="w">copy</span><span class="w">per</span><span class="w">host</span></div>
+    <div id="s6-host" class="host"></div>
+    <div id="s6-host-label" class="host-label">host</div>
+    <svg id="s6-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s6-vms"></div>
+    <div id="s6-n1" class="note">each added checkout: 1.7 MiB of disk</div>
+    <div id="s6-mem-label" class="label">the host's extent cache</div>
+    <div id="s6-mem"><div id="s6-pages">base 1's file data</div></div>
+    <div id="s6-n2" class="note">one copy, however many sandboxes attach</div>
+    <div id="s6-n3" class="note">each guest still copies the metadata it reads</div>
+    <svg id="s6-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s6-svg");
+      const colors = ["#ffb088", "#8cc8ff", "#b9a4ff", "#8fddc2", "#ff9ec0", "#ffd86e"];
+      const xs = [150, 430, 710, 990, 1270, 1550];
+      const host = document.getElementById("s6-vms");
+      const vms = xs.map((x, i) => {
+        const v = C.vm(host, { x, y: 250, w: 240, h: 175 });
+        v.bar.style.background = colors[i];
+        return v;
+      });
+      const owns = xs.map((x, i) => C.div("s6-own", host, { left: x + "px", background: colors[i] }));
+      const threads = xs.map((x) => SV.thread(svg, `M780 860 C780 640 ${x + 120} 620 ${x + 120} 472`, { stroke: SV.ACCENT, width: 5 }));
+      const mem = document.getElementById("s6-mem");
+      const slivers = [410, 440, 470, 500, 530, 560].map((x, i) => C.div("s6-sliver", mem, { left: x + "px", background: colors[i] }));
+      const base = C.critter(document.getElementById("s6-cells"), { x: 780, y: 900, r: 60, ghost: true, seed: 311, look: [0, -0.6] });
+      SV.flag(base, "base 1");
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      C.life(tl, base, 0, 7.9, 314);
+      // Six sandboxes attach base 1, each over a layer of its own.
+      C.words(tl, "#s6-l1", 0.15);
+      V.pop(vms.map((v) => v.root), 0.3, 0.1);
+      C.draw(tl, threads, 0.9, 0.45, 0.08);
+      tl.fromTo(owns, { scaleX: 0, transformOrigin: "0% 50%" }, { scaleX: 1, duration: 0.35, ease: "back.out(2.4)", stagger: 0.1 }, 1.6);
+      V.fade("#s6-n1", 2.3);
+      C.wordsOut(tl, "#s6-l1", 3.2);
+      // Its pages: once in the host's memory.
+      C.words(tl, "#s6-l2", 3.4);
+      tl.fromTo(["#s6-mem-label", "#s6-mem"], { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)", stagger: 0.06 }, 3.6);
+      tl.fromTo("#s6-pages", { scale: 0, transformOrigin: "0% 50%" }, { scale: 1, duration: 0.5, ease: "back.out(3)" }, 4.0);
+      tl.fromTo(slivers, { scaleY: 0 }, { scaleY: 1, duration: 0.25, ease: "back.out(3)", stagger: 0.07 }, 4.5);
+      V.fade("#s6-n2", 4.9);
+      V.fade("#s6-n3", 5.5);
+      tl.fromTo(vms.map((v) => v.mouth), { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", stagger: 0.08 }, 5.4);
+      vms.forEach((v, i) => C.blink(tl, v.eyes, 6.1 + i * 0.13));
+      // Hand-off: the host and base 1 stay.
+      C.wordsOut(tl, "#s6-l2", 7.3);
+      V.out(["#s6-vms", "#s6-n1", "#s6-mem-label", "#s6-mem", "#s6-n2", "#s6-n3"].concat(threads), 7.4, 0.02);
+      window.__timelines["s6"] = tl;
+    })();
+  </script>
+</template>

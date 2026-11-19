@@ -1,0 +1,87 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s2-shell { left: 120px; top: 230px; width: 1260px; height: 205px; }
+    #s2-box { left: 200px; top: 610px; }
+    #s2-flap-l { transform: rotate(-160deg); transform-origin: 6% 50%; }
+    #s2-flap-r { transform: rotate(160deg); transform-origin: 94% 50%; }
+    #s2-path { left: 1367px; top: 775px; font-size: 30px; }
+    #s2-stamp { position: absolute; left: 1640px; top: 470px; padding: 2px 18px; border: 5px solid var(--ink); border-radius: 16px; background: var(--mint); font-weight: 900; font-size: 32px; }
+    #s2-kept { left: 160px; top: 860px; }
+    #s2-checked { left: 160px; top: 905px; }
+    #s2-cell { left: 160px; top: 950px; }
+  </style>
+  <div id="root" data-composition-id="s2" data-width="1920" data-height="1080">
+    <div id="s2-l1" class="line"><span class="w mono" style="font-weight:800">cladefsctl</span><span class="w">import</span><span class="w">makes</span><span class="w">the</span><span class="w">base</span></div>
+    <div id="s2-l2" class="line"><span class="w">Every</span><span class="w">file,</span><span class="w">as</span><span class="w">the</span><span class="w">image</span><span class="w">has</span><span class="w">it</span></div>
+    <div id="s2-l3" class="line"><span class="w">No</span><span class="w">sandbox,</span><span class="w">no</span><span class="w">daemon</span><span class="w">needed</span></div>
+    <div id="s2-shell" class="shell">
+      <div class="shell-bar">a shell on the host</div>
+      <div class="shell-body">
+        <div id="s2-c1" class="cmd" data-text="cladefsctl import /tmp/cladefs/base 1073741824 /tmp/alpine.tar"></div>
+        <div id="s2-p2" class="prompt"></div>
+      </div>
+    </div>
+    <div id="s2-box" class="box" data-layout-allow-overflow>
+      <div class="box-body">
+        <div class="box-eye" style="left:112px"></div><div class="box-eye" style="left:176px"></div>
+        <div class="box-label">alpine.tar</div>
+      </div>
+      <div id="s2-flap-l" class="box-flap l"></div>
+      <div id="s2-flap-r" class="box-flap r"></div>
+    </div>
+    <svg id="s2-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s2-chips">
+      <div id="s2-k1" class="chip" style="left:580px; top:630px">bin/busybox</div>
+      <div id="s2-k2" class="chip" style="left:580px; top:710px">bin/sh → /bin/busybox</div>
+      <div id="s2-k3" class="chip" style="left:580px; top:790px">etc/motd</div>
+      <div id="s2-k4" class="chip" style="left:1060px; top:670px">root/ <span class="perm">drwx------</span></div>
+      <div id="s2-k5" class="chip" style="left:1060px; top:750px">tmp/ <span class="perm">drwxrwxrwt</span></div>
+    </div>
+    <div id="s2-path" class="label mono">/tmp/cladefs/base</div>
+    <div id="s2-stamp">checked</div>
+    <div id="s2-kept" class="note">owners, permissions, times, links and xattrs kept</div>
+    <div id="s2-checked" class="note">then the filesystem is checked</div>
+    <div id="s2-cell" class="note">an Fxfs filesystem, 1 GiB, in a cell of its own</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, I = window.Images;
+      const BX = 1520, BY = 640;
+      const base = C.critter(document.getElementById("s2-svg"), { x: BX, y: BY, r: 110, color: "#8fddc2", seed: 77, look: [-0.7, 0.1] });
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo("#s2-shell", { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, 0.05);
+      C.words(tl, "#s2-l1", 0.2);
+      I.type(tl, "#s2-c1", 0.5, 32);
+      // The base: a new store, empty, made by the import.
+      tl.fromTo(base.pop, { scale: 0, transformOrigin: "50% 100%" }, { scale: 1, duration: 0.5, ease: "back.out(2.4)" }, 2.6);
+      tl.fromTo("#s2-path", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 2.9);
+      C.life(tl, base, 3.0, 12, 71);
+      // Alpine's files hop out of the box into the base, one by one.
+      ["#s2-k1", "#s2-k2", "#s2-k3", "#s2-k4", "#s2-k5"].forEach((k, i) => {
+        const node = document.querySelector(k);
+        const at = 3.3 + i * 0.45;
+        const dx = BX - (parseFloat(node.style.left) + 120), dy = BY - 30 - parseFloat(node.style.top);
+        tl.to(k, { x: dx, duration: 0.6, ease: "power1.inOut" }, at);
+        tl.to(k, { y: dy - 140, duration: 0.3, ease: "power2.out" }, at);
+        tl.to(k, { y: dy, duration: 0.3, ease: "power2.in" }, at + 0.3);
+        tl.to(k, { scale: 0.25, opacity: 0, duration: 0.2, ease: "power2.in" }, at + 0.42);
+        tl.fromTo(base.pop, { scaleY: 1 }, { scaleY: 0.9, duration: 0.08, ease: "power2.out", yoyo: true, repeat: 1, immediateRender: false }, at + 0.58);
+      });
+      C.wordsOut(tl, "#s2-l1", 3.6);
+      C.words(tl, "#s2-l2", 3.8);
+      tl.fromTo("#s2-kept", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 4.4);
+      // Then the import checks what it made, and returns to the prompt.
+      tl.fromTo("#s2-stamp", { scale: 0, rotation: -24 }, { scale: 1, rotation: -8, duration: 0.45, ease: "back.out(2.8)" }, 6.3);
+      tl.fromTo("#s2-checked", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 6.5);
+      I.print(tl, "#s2-p2", 6.7);
+      C.wordsOut(tl, "#s2-l2", 7.6);
+      C.words(tl, "#s2-l3", 7.8);
+      tl.fromTo("#s2-cell", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, ease: "back.out(2)" }, 8.5);
+      // Hand-off: all but the base and its path go.
+      C.wordsOut(tl, "#s2-l3", 11.2);
+      tl.to(["#s2-shell", "#s2-box", "#s2-stamp", "#s2-kept", "#s2-checked", "#s2-cell"], { opacity: 0, duration: 0.3, ease: "power2.in", stagger: 0.04 }, 11.25);
+      window.__timelines["s2"] = tl;
+    })();
+  </script>
+</template>

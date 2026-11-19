@@ -1,0 +1,103 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s6-name1 { left: 268px; top: 858px; }
+    #s6-name2 { left: 1508px; top: 858px; }
+    #s6-stamp { left: 1500px; top: 182px; font-size: 40px; padding: 2px 20px; border-width: 5px; }
+    #s6-reads1 { left: 836px; top: 700px; }
+    #s6-reads2 { left: 1236px; top: 792px; }
+    #s6-marker { left: 1700px; top: 560px; }
+    #s6-how, #s6-one { left: 120px; top: 916px; }
+    .s6-obj { position: absolute; left: 0; top: 0; width: 44px; height: 40px; margin: -20px 0 0 -22px; border: 4px solid var(--ink); border-radius: 10px; background: var(--lilac); }
+  </style>
+  <div id="root" data-composition-id="s6" data-width="1920" data-height="1080">
+    <div id="s6-land"></div>
+    <div id="s6-l1" class="line"><span class="w">In</span><span class="w">progress:</span><span class="w">the</span><span class="w">version</span><span class="w">copied</span><span class="w">over</span></div>
+    <div id="s6-l2" class="line"><span class="w">Then</span><span class="w">its</span><span class="w">reads</span><span class="w">stay</span><span class="w">at</span><span class="w">home</span></div>
+    <svg id="s6-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore>
+      <g id="s6-links"></g>
+      <g id="s6-cells"></g>
+    </svg>
+    <div id="s6-name1" class="label">root bucket <span class="mono dim">s3://ROOT</span></div>
+    <div id="s6-name2" class="label mono dim">gs://OTHER</div>
+    <div id="s6-o1" class="s6-obj"></div>
+    <div id="s6-o2" class="s6-obj"></div>
+    <div id="s6-o3" class="s6-obj"></div>
+    <div id="s6-o4" class="s6-obj"></div>
+    <div id="s6-reads1" class="tag">reads: bucket <span class="num">1</span></div>
+    <div id="s6-reads2" class="tag">reads: bucket <span class="num">2</span></div>
+    <div id="s6-marker" class="tag">marker</div>
+    <div id="s6-how" class="note">copied in the background, byte for byte, at the same keys</div>
+    <div id="s6-one" class="note">one copy for every child of the version there</div>
+    <div id="s6-stamp" class="tag wip">in progress</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly, G = window.Regions, A = G.AT;
+      const svg = document.getElementById("s6-svg");
+      G.world(document.getElementById("s6-land"), svg);
+      const p1 = G.pail(svg, { x: A.pail1.x, y: A.pail1.y, number: 1, id: "s6-pail1" });
+      const p2 = G.pail(svg, { x: A.pail2.x, y: A.pail2.y, number: 2, id: "s6-pail2" });
+      const cells = document.getElementById("s6-cells");
+      const links = document.getElementById("s6-links");
+      const parent = C.critter(cells, { x: 560, y: 460, r: 60, color: "#b9a4ff", seed: 313, look: [0.6, 0.1] });
+      const flag = C.el("g", {}, parent.body);
+      C.el("path", { d: "M14 -62 V-128", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round" }, flag);
+      C.el("path", { d: "M14 -128 L66 -115 L14 -100 Z", fill: "#ffd86e", stroke: C.INK, "stroke-width": 4, "stroke-linejoin": "round" }, flag);
+      C.el("text", { x: 22, y: -108, "font-family": "Nunito", "font-weight": 900, "font-size": 18, fill: C.INK }, flag).textContent = "v1";
+      const child = C.critter(cells, { x: A.cell.x, y: A.cell.y, r: 70, color: "#8fddc2", seed: 616, look: [-0.6, 0.2] });
+      // Where the child's cold reads go: bucket 1 over the ocean, then bucket 2 next door.
+      const far = C.el("path", { d: "M1262 700 C1100 780 700 780 500 690", fill: "none", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round", "stroke-dasharray": "14 12" }, links);
+      const near = C.el("path", { d: "M1398 700 C1450 730 1500 720 1545 700", fill: "none", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round", "stroke-dasharray": "14 12" }, links);
+      // A later child of the version in bucket 2 reads the same copy.
+      const second = C.critter(cells, { x: 1500, y: 470, r: 46, color: "#8cc8ff", seed: 717, look: [0.5, 0.5] });
+      const near2 = C.el("path", { d: "M1530 520 C1580 560 1610 590 1620 625", fill: "none", stroke: C.INK, "stroke-width": 5, "stroke-linecap": "round", "stroke-dasharray": "14 12" }, links);
+      // The marker: a little flag on bucket 2's rim.
+      const marker = C.el("g", {}, svg);
+      gsap.set(marker, { x: A.pail2.x + 70, y: A.pail2.y - 60 });
+      C.el("path", { d: "M0 0 V-80", stroke: C.INK, "stroke-width": 6, "stroke-linecap": "round" }, marker);
+      C.el("path", { d: "M0 -80 L56 -66 L0 -50 Z", fill: "#ffd86e", stroke: C.INK, "stroke-width": 5, "stroke-linejoin": "round" }, marker);
+
+      const tl = gsap.timeline({ paused: true });
+      C.words(tl, "#s6-l1", 0.2);
+      C.tagIn(tl, "#s6-stamp", 0.3, { from: 1.6 });
+      tl.fromTo("#s6-stamp", { rotation: 0 }, { rotation: -6, duration: 0.35, ease: "back.out(3)" }, 0.3);
+      C.popIn(tl, [parent.pop, child.pop], 0.2, { stagger: 0.15 });
+      C.life(tl, parent, 0.7, 8.6, 61);
+      C.life(tl, child, 0.8, 8.6, 62);
+      tl.fromTo(far, { opacity: 0 }, { opacity: 1, duration: 0.4 }, 0.7);
+      C.tagIn(tl, "#s6-reads1", 0.9);
+
+      // The version's objects hop over the ocean into bucket 2, in the background.
+      ["#s6-o1", "#s6-o2", "#s6-o3", "#s6-o4"].forEach((o, i) => {
+        const at = 1.4 + i * 0.45;
+        tl.fromTo(o, { opacity: 0, x: 420, y: 650 }, { opacity: 1, duration: 0.12 }, at);
+        G.travel(tl, o, 420, 650, 1630, 660, at, 0.9, 330);
+        tl.to(o, { opacity: 0, scale: 0.5, duration: 0.12 }, at + 0.9);
+      });
+      C.tagIn(tl, "#s6-how", 1.6, { origin: "0% 50%" });
+      // Once every object is there, the marker lands, and the child's reads switch to bucket 2.
+      tl.fromTo(marker, { scale: 0, transformOrigin: "0% 100%" }, { scale: 1, duration: 0.4, ease: "back.out(3)" }, 3.75);
+      C.tagIn(tl, "#s6-marker", 3.9);
+      C.wordsOut(tl, "#s6-l1", 4.1);
+      tl.to([far, "#s6-reads1"], { opacity: 0, duration: 0.25 }, 4.3);
+      tl.fromTo(near, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 4.45);
+      C.tagIn(tl, "#s6-reads2", 4.55);
+      C.words(tl, "#s6-l2", 4.3);
+      tl.fromTo(child.smile, { scaleX: 1 }, { scaleX: 1.45, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%" }, 4.9);
+
+      // One copy serves every child of the version in bucket 2.
+      C.popIn(tl, second.pop, 5.4);
+      C.life(tl, second, 5.9, 8.6, 63);
+      tl.fromTo(near2, { opacity: 0 }, { opacity: 1, duration: 0.3 }, 5.8);
+      C.tagIn(tl, "#s6-one", 5.5, { origin: "0% 50%" });
+      tl.to("#s6-how", { opacity: 0, duration: 0.2 }, 5.3);
+
+      // Exit: everything but the world and bucket 1 goes.
+      C.wordsOut(tl, "#s6-l2", 8.6);
+      tl.to([parent.pop, child.pop, second.pop, p2.g, marker], { scale: 0, duration: 0.25, ease: "back.in(2)", transformOrigin: "50% 100%" }, 8.6);
+      tl.to([near, near2, "#s6-one", "#s6-reads2", "#s6-marker", "#s6-how", "#s6-stamp", "#s6-name2"], { opacity: 0, duration: 0.25, ease: "power2.in" }, 8.65);
+      window.__timelines["s6"] = tl;
+    })();
+  </script>
+</template>

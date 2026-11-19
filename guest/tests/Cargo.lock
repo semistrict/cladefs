@@ -3655,6 +3655,7 @@ dependencies = [
  "fprint",
  "fuchsia-sync",
  "futures",
+ "libc",
  "log",
  "num",
  "rand 0.10.3",

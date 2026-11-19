@@ -1,0 +1,102 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; }
+    #s5-host { left: 100px; top: 690px; width: 1720px; height: 330px; }
+    #s5-host-label { left: 130px; top: 700px; }
+    #s5-tab { left: 600px; top: 186px; }
+    #s5-vol { left: 600px; top: 226px; width: 560px; height: 420px; }
+    .s5-cmd { left: 140px; top: 530px; }
+    .s5-big { position: absolute; left: 1220px; width: 580px; height: 150px; border: 5px solid var(--ink); border-radius: 22px; }
+    #s5-own-big { top: 290px; background: #e6f3ff; }
+    #s5-base-big { top: 474px; background: var(--face); border: 6px solid var(--accent); }
+    .s5-big-label { position: absolute; left: 18px; top: 8px; font-weight: 900; font-size: 30px; white-space: nowrap; }
+    .s5-blk { position: absolute; top: 72px; width: 164px; height: 52px; border: 4px solid var(--ink); border-radius: 10px; background: #f6f2ff; font-family: var(--font-mono); font-weight: 500; font-size: 28px; line-height: 44px; padding-left: 12px; white-space: nowrap; }
+    #s5-mine { left: 20px; background: var(--sky); }
+    #s5-tomb { left: 200px; border-radius: 30px 30px 8px 8px; background: #ddd7ea; }
+    #s5-tomb-label { position: absolute; left: 384px; top: 82px; font-weight: 800; font-size: 28px; color: var(--soft); white-space: nowrap; }
+    #s5-n1 { left: 1000px; top: 790px; }
+    #s5-n2 { left: 1000px; top: 850px; }
+    .s5-strike { position: absolute; left: 8px; top: 18px; width: 0; height: 5px; border-radius: 3px; background: var(--ink); }
+  </style>
+  <div id="root" data-composition-id="s5" data-width="1920" data-height="1080">
+    <div id="s5-l1" class="line"><span class="w">Its</span><span class="w">writes</span><span class="w">go</span><span class="w">in</span><span class="w">a</span><span class="w">layer</span><span class="w">of</span><span class="w">its</span><span class="w">own</span></div>
+    <div id="s5-l2" class="line"><span class="w">The</span><span class="w">base</span><span class="w">never</span><span class="w">changes</span></div>
+    <div id="s5-host" class="host"></div>
+    <div id="s5-host-label" class="host-label">host</div>
+    <svg id="s5-svg" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s5-vmhost"></div>
+    <div class="cmd s5-cmd" id="s5-vim">vim Makefile</div>
+    <div class="cmd s5-cmd" id="s5-rm">rm README</div>
+    <div id="s5-tab" class="vol-tab"></div>
+    <div id="s5-vol" class="vol" data-layout-allow-overflow>
+      <div class="vol-name">volume "linux"</div>
+      <div class="vol-row" id="s5-make" style="top:70px">Makefile</div>
+      <div class="vol-row" id="s5-readme" style="top:124px">README<div class="s5-strike"></div></div>
+      <div class="vol-row" style="top:178px">kernel/</div>
+      <div class="vol-row" style="top:232px">fs/</div>
+      <div class="vol-row" style="top:286px">mm/</div>
+      <div class="vol-layers" style="top:72px">its layers</div>
+      <div class="layer label" style="left:290px; top:120px; width:230px; height:50px; background:var(--sky); padding:2px 0 0 12px">its own</div>
+      <div class="layer label" style="left:290px; top:180px; width:230px; height:56px; background:var(--face); border:5px solid var(--accent); padding:3px 0 0 12px">base 1</div>
+    </div>
+    <div id="s5-own-big" class="s5-big" data-layout-allow-overflow>
+      <div class="s5-big-label">its own layer, in its own cell</div>
+      <div class="s5-blk" id="s5-mine">Makefile</div>
+      <div class="s5-blk" id="s5-tomb">README</div>
+      <div id="s5-tomb-label">a tombstone</div>
+    </div>
+    <div id="s5-base-big" class="s5-big">
+      <div class="s5-big-label">base 1's layer: read-only</div>
+      <div class="s5-blk" style="left:20px">Makefile</div>
+      <div class="s5-blk" style="left:200px">README</div>
+      <div class="s5-blk" style="left:380px">kernel/</div>
+    </div>
+    <svg id="s5-cells" class="scene-svg" width="1920" height="1080" data-layout-ignore></svg>
+    <div id="s5-n1" class="note">only the blocks it writes: no copy of the file</div>
+    <div id="s5-n2" class="note">README stays in the base, hidden here</div>
+  </div>
+  <script>
+    (function () {
+      const C = window.Cuddly;
+      const svg = document.getElementById("s5-svg");
+      const vm = C.vm(document.getElementById("s5-vmhost"), { x: 140, y: 250, w: 340, h: 250 });
+      vm.bar.style.background = "#8cc8ff";
+      const base = C.critter(document.getElementById("s5-cells"), { x: 780, y: 900, r: 60, ghost: true, seed: 311, look: [0.6, -0.4] });
+      SV.flag(base, "base 1");
+      const under = SV.thread(svg, "M800 820 C800 740 1000 700 1000 652", { stroke: SV.ACCENT, width: 6 });
+      // The volume's layers, close up.
+      const zoom = [SV.thread(svg, "M1124 352 C1170 330 1180 300 1214 296", { dots: true }), SV.thread(svg, "M1124 462 C1170 520 1180 600 1214 620", { dots: true })];
+
+      const tl = gsap.timeline({ paused: true });
+      const V = SV.verbs(tl);
+      C.life(tl, base, 0, 9.9, 313);
+      C.words(tl, "#s5-l1", 0.15);
+      V.dots(zoom, 0.3, 0.1);
+      tl.fromTo(["#s5-own-big", "#s5-base-big"], { opacity: 0, scale: 0.85, transformOrigin: "0% 50%" }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)", stagger: 0.15 }, 0.4);
+      // vim Makefile: new blocks in its own layer; the base's Makefile stays.
+      V.pop("#s5-vim", 1.0);
+      V.flash("#s5-make", "#8cc8ff", 1.4);
+      tl.fromTo("#s5-mine", { opacity: 0, y: -70 }, { opacity: 1, y: 0, duration: 0.45, ease: "bounce.out" }, 1.7);
+      C.blink(tl, vm.eyes, 2.4);
+      // rm README: a tombstone in its own layer hides the base's README.
+      tl.to("#s5-vim", { scale: 0, duration: 0.15, ease: "back.in(2)" }, 2.85);
+      V.pop("#s5-rm", 3.0);
+      tl.fromTo("#s5-readme .s5-strike", { width: 0 }, { width: 140, duration: 0.3, ease: "power2.out" }, 3.4);
+      tl.to("#s5-readme", { opacity: 0.35, duration: 0.3 }, 3.7);
+      tl.fromTo("#s5-tomb", { opacity: 0, y: -70 }, { opacity: 1, y: 0, duration: 0.45, ease: "bounce.out" }, 3.6);
+      V.fade("#s5-tomb-label", 4.1);
+      C.wordsOut(tl, "#s5-l1", 4.6);
+      // The base never changes.
+      C.words(tl, "#s5-l2", 4.8);
+      tl.fromTo("#s5-base-big", { scale: 1 }, { scale: 1.03, duration: 0.15, ease: "power2.out", yoyo: true, repeat: 1, transformOrigin: "50% 50%", immediateRender: false }, 5.3);
+      C.blink(tl, base.eyes, 5.4);
+      V.fade("#s5-n1", 5.8);
+      V.fade("#s5-n2", 6.6);
+      C.grin(tl, vm.mouth, 7.2);
+      // Hand-off: the host and base 1 stay.
+      C.wordsOut(tl, "#s5-l2", 9.2);
+      V.out(["#s5-vmhost", "#s5-rm", "#s5-tab", "#s5-vol", "#s5-own-big", "#s5-base-big", "#s5-n1", "#s5-n2", under].concat(zoom), 9.3, 0.02);
+      window.__timelines["s5"] = tl;
+    })();
+  </script>
+</template>
