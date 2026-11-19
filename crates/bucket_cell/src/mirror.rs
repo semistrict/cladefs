@@ -40,8 +40,9 @@
 //!
 //! Every step is create-only, idempotent, or a deletion: a mirror stopped anywhere is begun again
 //! from the start, its pin taken over once stale, what it wrote kept. B's collector begins it
-//! again, finding its pin stale; the next fork of the version into B, and the next opening of a
-//! child of it in B, do too.
+//! again, finding its pin stale. The next fork of the version into B, and the next opening of a
+//! child of it in B, begin one stopped before its marker, once its pin is stale: one stopped after
+//! it, they find marked, and leave to B's collector, the children not yet moved referring in A.
 //!
 //! A fork into B refers in B once the marker is there ([`Here`], [`crate::lifecycle`]).
 
@@ -57,9 +58,10 @@ use std::future::Future;
 /// What a mirror came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mirrored {
-    /// Marked: the objects it copied (those there already counted too), and the children's
-    /// references it moved from the parent's bucket to this one.
-    Done { copied: usize, moved: usize },
+    /// Marked: the objects it copied (those there already counted too), and the references of
+    /// this bucket's children it wrote here, retired in the parent's bucket if its head named the
+    /// version still.
+    Done { copied: usize, referred: usize },
     /// Given up, its version named no more by its cell's head, or its cell deleted: no mirror of it
     /// is wanted again.
     Unnamed,
@@ -225,10 +227,12 @@ pub async fn mirror(
             }
         },
     };
-    let moved = refer_here(bucket, own, number, parent, at).await?;
+    // Its pin let go whatever the listing came to: the marker, and the references written here,
+    // stand, and a mirror begun again lists them again.
+    let referred = refer_here(bucket, own, number, parent, at).await;
     failpoint!("mirror::referred");
     pin.release(own).await;
-    Ok(Mirrored::Done { copied, moved })
+    Ok(Mirrored::Done { copied, referred: referred? })
 }
 
 /// Writes `hold`, then copies (`mirrorHolds`).

@@ -3,7 +3,7 @@ id: doc-23
 title: 'Cells across buckets: a bucket per cloud region, forks that span them'
 type: specification
 created_date: '2026-11-18 17:01'
-updated_date: '2026-11-19 14:15'
+updated_date: '2026-11-19 14:31'
 ---
 # Cells across buckets: a bucket per cloud region, forks that span them
 
@@ -159,7 +159,7 @@ A **mirror** is a copy of a version's state in another bucket, at the same keys:
 - **As built (TASK-633.8):** `bucket_cell::mirror` runs the order above; `ObjectBucket` serves a marked version's keys from B first, and falls back to A for any it lacks; `Collector::collect_copy` is B's pass over a copy; forks refer through `Bucket::mirrors` (`mirror::Here`). A process runs one mirror of a version at a time. Choices the spec leaves open:
   - **One mirror at a time per version and bucket, by its pin.** The pin's bytes are its mirror's own (a random run ID). A mirror that finds another's pin standing does nothing: the mirror is under way. Two mirrors sharing one pin would break `mirrorPins`: the first to finish drops the pin from under the second.
   - **A pin goes stale** after `PIN_STALE` (10 minutes) unrefreshed, by B's clock. Its mirror refreshes it every minute while it copies, and right before its marker, with a conditional write: it gives up, unmarked, if the pin is no longer its own. A stale pin keeps nothing from B's collector, and the next mirror takes it over by a conditional write. This is a lease's assumption: a host stopped for longer than `PIN_STALE` between its refresh and its marker, while the version is dropped and its copy collected meanwhile, would mark a copy that is not whole.
-  - **Resuming:** B's collector, finding a stale pin, begins that mirror again in its pass. The next fork of the version into B, and the next opening of a child's store in B (`ObjectBucket::mirror_for`), do too: the forking host may die before it begins the mirror. A version found no longer named is not mirrored again (`Mirrored::Unnamed`, remembered by the host).
+  - **Resuming:** B's collector, finding a stale pin, begins that mirror again in its pass. The next fork of the version into B, and the next opening of a child's store in B (`ObjectBucket::mirror_for`), begin one stopped before its marker, once its pin is stale (the forking host may die before it begins the mirror); one stopped after its marker they find marked, and leave to B's collector, its children not yet moved referring in A, which keeps the version for them. A version found no longer named is not mirrored again (`Mirrored::Unnamed`, remembered by the host).
   - **A deleted child's reference in B** stands while its head names the version, as in one bucket (`references_held`): its cell may hold its own children's references. The child's own pass, its cell dead, retires its origin's reference in both buckets (`mirror::Here::retire`); B's collector retires one whose child has no head, or a head naming another origin.
   - **Copies follow moves:** an extent's object compacted away in A before the version was cut, its state naming it where it was sealed, is copied through its moves, the moves objects with it; readers in B follow them there.
   - **A mirror gives up its hold only with its own pin**, written again first: a mirror whose pin another took over leaves the hold to it. B's collector deletes the holds of every version it finds of the cell in B (markers, pins, checkpoints, references and their marks), so a mirror that copied and never marked leaves none behind.

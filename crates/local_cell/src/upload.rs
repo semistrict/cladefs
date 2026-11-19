@@ -93,7 +93,13 @@ fn mirror_wanted(bucket: &Arc<ObjectBucket>, origin: Origin) -> Result<(), Failu
 /// process that opens stores on a runtime of its own, as a VM's does, makes no other.
 fn mirror_for(bucket: &Arc<ObjectBucket>, cell: CellId, runtime: &tokio::runtime::Handle) {
     let mirroring = bucket.clone().mirror_for(cell);
-    runtime.spawn(async move { logged(mirroring.await, cell, 0) });
+    runtime.spawn(async move {
+        match mirroring.await {
+            Ok(None) => {}
+            Ok(Some((Origin { parent, at }, mirrored))) => logged(Ok(Some(mirrored)), parent, at),
+            Err(err) => log::warn!("cladefs: mirroring the version {cell} was forked from: {err}"),
+        }
+    });
 }
 
 /// cladefs: logs what a mirror of `parent`'s version at `at` came to, if one ran.
