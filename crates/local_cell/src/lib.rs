@@ -202,7 +202,7 @@ pub use cell::{
 pub use dir::{Dir, DirFile, DiskDir, DiskFile, File, HostDir, HostFile};
 /// cladefs: where a store's cell is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::CellId;
-pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
+pub use framed::{Aligned, Located, Packed, Unpacked, read_object, read_whole, unpacked, unpacks};
 pub use host::{
     create_host, create_host_at_version, delete_host, host_bucket, host_cell, host_token,
     host_version, made_host, place_host, remove_store_dir, unmade_host,
@@ -220,4 +220,4 @@ pub use sync::Rules;
 #[cfg(feature = "shuttle")]
 pub use sync::{rules, set_rules};
 pub use uploads::Closed;
-pub use views::{CutOff, NotHeld, View, ViewStats};
+pub use views::{CutOff, NotHeld, TooManyPins, View, ViewStats};

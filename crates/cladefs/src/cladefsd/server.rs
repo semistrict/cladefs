@@ -475,6 +475,8 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         transfer: OnceLock::new(),
         versions_made: SharedLock::new("connection versions", Mutex::new(Default::default())),
         closing: AtomicBool::new(false),
+        ended: AtomicBool::new(false),
+        ending: event_listener::Event::new(),
         requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
         drained: Arc::new(event_listener::Event::new()),
         report: stats::Report::new(&peer.sender),
@@ -497,10 +499,12 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
                         Ok(()) => peer.sender.shutdown(),
                         Err(err) => log::error!("cladefsd: waiting for a VM process to exit: {err}"),
                     }
+                    connection.end_receiving();
                     went.await
                 }
                 () = super::drain::started() => {
                     peer.sender.shutdown();
+                    connection.end_receiving();
                     went.await
                 }
             };
@@ -581,7 +585,7 @@ fn receive(
                 // cladefs: what the stage operations cost, counted before what waits for them goes
                 // on (TASK-91.16). What says so malformed, nothing replies to: it is dropped, as
                 // what isn't said (TASK-160.9).
-                Ok(Some(message))
+                Ok(Some((message, _)))
                     if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&message.header.kind) =>
                 {
                     match Made::decode(&message) {
@@ -604,14 +608,14 @@ fn receive(
                         ),
                     }
                 }
-                Ok(Some(message)) => {
-                    let Some(message) = connection.admit(message) else { continue };
+                Ok(Some(admitted)) => {
+                    let Some((message, charge)) = connection.admit(admitted) else { continue };
                     IO.spawn(receive(connection.clone(), receiver, gone));
                     #[allow(
                         clippy::disallowed_methods,
                         reason = "the task does nothing more: its receiving goes on in another"
                     )]
-                    tokio::task::block_in_place(move || connection.serve_in_turn(message));
+                    tokio::task::block_in_place(move || connection.serve_in_turn(message, charge));
                     return;
                 }
                 Ok(None) => break,
@@ -672,7 +676,7 @@ fn finish_connection(connection: Arc<Connection>) {
 /// of those received whose replies are not queued yet ([`Answer`], TASK-79.16).
 #[derive(Default)]
 struct Requests {
-    waiting: std::collections::VecDeque<Message>,
+    waiting: std::collections::VecDeque<(Message, Charge)>,
     running: usize,
     deferred: usize,
     stream_bytes: u64,
@@ -687,6 +691,36 @@ impl Requests {
     /// How many were received and not answered.
     fn in_flight(&self) -> usize {
         self.running + self.deferred + self.waiting.len()
+    }
+}
+
+/// cladefs: what the daemon holds for a request, as its connection's room and its tenant's bytes in
+/// flight count it ([`Connection::within_bounds`]): counted no more once dropped, however the
+/// request goes: answered ([`Answer`]), refused, or never read whole, its connection lost
+/// partway through its payload, which made no request to answer (TASK-548).
+struct Charge {
+    connection: Weak<Connection>,
+    tenant: Arc<Tenant>,
+    bytes: u64,
+}
+
+impl Charge {
+    /// Of nothing: a request that holds nothing besides its header.
+    fn none(connection: &Connection) -> Self {
+        Self { connection: connection.this.clone(), tenant: connection.tenant.clone(), bytes: 0 }
+    }
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        // Its connection's room, while it is there to count it.
+        if let Some(connection) = self.connection.upgrade() {
+            connection.requests.with(Mutex::lock).stream_bytes -= self.bytes;
+        }
+        self.tenant.in_flight().sub(self.bytes);
     }
 }
 
@@ -743,6 +777,8 @@ struct Answer {
     started: std::time::Instant,
     sent: bool,
     span: trace::Span,
+    /// cladefs: what the daemon holds for the request, counted until its reply is queued.
+    charge: Option<Charge>,
 }
 
 impl Answer {
@@ -752,11 +788,12 @@ impl Answer {
         connection: &Arc<Connection>,
         request: Header,
         guest: Option<&crate::request::RequestId>,
+        charge: Option<Charge>,
     ) -> Self {
         let started = std::time::Instant::now();
         let cell = connection.store().map(|store| store.cell());
         let span = super::otel::request_span(&request, cell, guest);
-        Self { connection: connection.clone(), request, started, sent: false, span }
+        Self { connection: connection.clone(), request, started, sent: false, span, charge }
     }
 
     /// The header of its reply, before what the reply says.
@@ -821,12 +858,8 @@ impl Answer {
         }
         // Counted before its reply, which its VM process may then count on.
         super::metrics::served(header.kind, self.started.elapsed(), reply.status != 0);
-        let bytes = stream_bytes(&header);
-        if bytes > 0 {
-            self.connection.requests.with(Mutex::lock).stream_bytes -= bytes;
-            // cladefs: and its tenant's, which its reply's bytes are counted in as they're queued.
-            self.connection.tenant.in_flight().sub(bytes);
-        }
+        // cladefs: and its tenant's, which its reply's bytes are counted in as they're queued.
+        drop(self.charge.take());
         if let Err(err) = self.connection.peer.sender.send(reply, payload, &fds) {
             log::warn!("cladefsd: replying to a VM process: {err}");
         }
@@ -991,6 +1024,9 @@ pub(super) struct Connection {
     versions_made: SharedLock<Mutex<std::collections::BTreeSet<u64>>>,
     /// Whether its VM process is gone, and its store goes once durable.
     closing: AtomicBool,
+    /// cladefs: whether its receiving ended, and what says so ([`Connection::end_receiving`]).
+    ended: AtomicBool,
+    ending: event_listener::Event,
     /// Its requests received and not done (TASK-34), and what says when none is left.
     requests: SharedLock<Mutex<Requests>>,
     drained: Arc<event_listener::Event>,
@@ -1139,12 +1175,17 @@ impl Connection {
     /// stream data in the bytes in flight its tenant's connections share, waiting, before its
     /// payload is read, until what they hold leaves enough for it (TASK-149.35,
     /// [`super::memory::InFlight`]).
-    async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<()> {
-        // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16).
+    async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<Charge> {
+        // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16): of no
+        // payload, which one past their kinds' would have the daemon hold uncounted (TASK-581).
         if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
-            return Ok(());
+            if header.len > 0 {
+                let what = format!("a payload of {} bytes on a {}", header.len, header.kind);
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, what));
+            }
+            return Ok(Charge::none(&self));
         }
-        let bytes = stream_bytes(&header);
+        let bytes = self.held_for(&header);
         {
             let requests = self.requests.with(Mutex::lock);
             let in_flight = requests.in_flight();
@@ -1156,22 +1197,57 @@ impl Connection {
         }
         // Admitted one at a time, as its messages are received, so nothing came in meanwhile.
         if bytes > 0 {
-            self.tenant.in_flight().take(bytes).await;
+            self.take_in_flight(bytes).await?;
         }
         self.requests.with(Mutex::lock).stream_bytes += bytes;
-        Ok(())
+        Ok(Charge { connection: self.this.clone(), tenant: self.tenant.clone(), bytes })
     }
 
-    /// `message`, a request, to serve now, unless [`WORKERS`] of the connection's run, when it
-    /// waits for one of them to be done, which serves it then ([`Connection::serve_in_turn`]).
-    fn admit(&self, message: Message) -> Option<Message> {
+    /// cladefs: what the daemon holds for a request of `header`: its stream data
+    /// ([`stream_bytes`]); and a `MAPPINGS`'s reply, which holds as many mappings as its window
+    /// may (TASK-546), each counted as it is admitted, not once it is made, when it would be held
+    /// whatever.
+    fn held_for(&self, header: &Header) -> u64 {
+        match header.kind {
+            MAPPINGS => stream_bytes(header) + self.peer.mappings.load(Ordering::Relaxed),
+            _ => stream_bytes(header),
+        }
+    }
+
+    /// cladefs: holds `bytes` of its tenant's bytes in flight once they leave enough room
+    /// ([`super::memory::InFlight::take`]); or fails, the connection ending meanwhile, its VM
+    /// process gone or the daemon draining, as a receive waiting for room ends with it
+    /// (TASK-548).
+    async fn take_in_flight(&self, bytes: u64) -> std::io::Result<()> {
+        let ending = self.ending.listen();
+        if !self.ended.load(Ordering::Acquire) {
+            tokio::select! {
+                () = self.tenant.in_flight().take(bytes) => return Ok(()),
+                () = ending => {}
+            }
+        }
+        let what = "the connection ended waiting for its tenant's bytes in flight";
+        Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, what))
+    }
+
+    /// cladefs: ends its receiving: one waiting for room in its tenant's bytes in flight fails
+    /// ([`Connection::take_in_flight`]), as its VM process went or the daemon drains.
+    fn end_receiving(&self) {
+        self.ended.store(true, Ordering::Release);
+        self.ending.notify(usize::MAX);
+    }
+
+    /// `message`, a request, with what the daemon holds for it counted, to serve now, unless
+    /// [`WORKERS`] of the connection's run, when it waits for one of them to be done, which serves
+    /// it then ([`Connection::serve_in_turn`]).
+    fn admit(&self, admitted: (Message, Charge)) -> Option<(Message, Charge)> {
         let mut requests = self.requests.with(Mutex::lock);
         if requests.running == WORKERS {
-            requests.waiting.push_back(message);
+            requests.waiting.push_back(admitted);
             return None;
         }
         requests.running += 1;
-        Some(message)
+        Some(admitted)
     }
 
     /// Serves `message`, admitted ([`Connection::admit`]); then the next waiting, if any, on the
@@ -1182,7 +1258,7 @@ impl Connection {
     /// (TASK-92.5). A request its kind gives no meaning ([`Request::decode`]), or naming a store
     /// its tenant's VM processes don't ([`Connection::authorize`]), is refused, whatever it is, in
     /// one place (TASK-160.9).
-    fn serve_in_turn(self: Arc<Self>, message: Message) {
+    fn serve_in_turn(self: Arc<Self>, message: Message, charge: Charge) {
         // cladefs: served with the guest request it is a call for current, if any, as its futures
         // are polled too, wherever: what its log records and its span name (`crate::request`,
         // TASK-260).
@@ -1193,7 +1269,7 @@ impl Connection {
             // Refused as it is decoded, if it says one it doesn't hold.
             Ok((None, _)) | Err(_) => None,
         };
-        let answer = Answer::new(&self, message.header, guest.as_ref());
+        let answer = Answer::new(&self, message.header, guest.as_ref(), Some(charge));
         let turn = Turn::new(self.clone());
         let refuse = |answer: Answer, errno| {
             let reply = answer.reply_header();
@@ -1247,14 +1323,15 @@ impl Connection {
     fn next_turn(self: Arc<Self>) {
         loop {
             let mut requests = self.requests.with(Mutex::lock);
-            if let Some(next) = requests.waiting.pop_front() {
+            if let Some((next, charge)) = requests.waiting.pop_front() {
                 drop(requests);
                 let header = next.header;
                 let connection = self.clone();
-                if Pool::get().run(Box::new(move || connection.serve_in_turn(next))) {
+                // Its charge, refused, dropped with what would have served it.
+                if Pool::get().run(Box::new(move || connection.serve_in_turn(next, charge))) {
                     return;
                 }
-                let answer = Answer::new(&self, header, None);
+                let answer = Answer::new(&self, header, None, None);
                 let reply = answer.reply_header();
                 answer.send(Err(Errno::EAGAIN), reply, Vec::new(), Vec::new());
                 continue;
@@ -1732,6 +1809,12 @@ unsafe impl Sync for TransferArea {}
 impl TransferArea {
     /// The `len` bytes of the shared memory `fd`, mapped: `EINVAL` unless it has that many and is
     /// sealed against shrinking, which would fault the daemon's accesses past its new end.
+    /// cladefs: and unless its VM process wrote every page of it first, each charged to the VM
+    /// process's memory, as the kernel charges a page of shared memory to the process that faults
+    /// it in (`mm/shmem.c`): one the daemon faulted would be charged to the daemon, for as long as
+    /// the VM process kept the memory, the connection gone (TASK-547). Sealed here, once mapped,
+    /// against future writes, which takes the VM process's punching holes in it away, no page
+    /// of it the daemon touches is one it faults: the VM process's own mappings write on.
     fn map(fd: std::os::fd::BorrowedFd<'_>, len: u64) -> Result<Self, Errno> {
         use std::os::fd::AsRawFd;
         if len == 0 || len > MAX_TRANSFER_AREA {
@@ -1764,7 +1847,33 @@ impl TransferArea {
             log::warn!("cladefsd: mapping a transfer area: {}", std::io::Error::last_os_error());
             return Err(Errno::ENOMEM);
         }
-        Ok(Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len })
+        let area = Self { addr: std::ptr::NonNull::new(addr.cast()).unwrap(), len };
+        let seals = libc::F_SEAL_FUTURE_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+        // SAFETY: Seals a descriptor the message carried, mapped above.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+            let err = std::io::Error::last_os_error();
+            log::warn!("cladefsd: a transfer area not to be sealed against writes: {err}");
+            return Err(Errno::EINVAL);
+        }
+        if !area.resident()? {
+            log::warn!("cladefsd: a transfer area whose VM process didn't write all of it");
+            return Err(Errno::EINVAL);
+        }
+        Ok(area)
+    }
+
+    /// cladefs: whether each of its pages is in memory, sealed: its VM process's, which wrote it.
+    fn resident(&self) -> Result<bool, Errno> {
+        let pages = self.len.div_ceil(crate::pages::page_size() as usize);
+        let mut resident = vec![0u8; pages];
+        // SAFETY: Of its mapping, a byte for each of its pages.
+        let done =
+            unsafe { libc::mincore(self.addr.as_ptr().cast(), self.len, resident.as_mut_ptr()) };
+        if done != 0 {
+            log::warn!("cladefsd: a transfer area's pages: {}", std::io::Error::last_os_error());
+            return Err(Errno::EINVAL);
+        }
+        Ok(resident.iter().all(|page| page & 1 == 1))
     }
 
     /// The `len` bytes at `offset`, checked: `EINVAL` past its end.

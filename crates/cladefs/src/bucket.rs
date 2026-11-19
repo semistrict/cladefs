@@ -2046,6 +2046,50 @@ mod tests {
         assert_eq!(store.set_capacity(2 << 30), Err(EROFS));
     }
 
+    /// TASK-570: a cell names [`bucket_cell::layout::MAX_VERSIONS`] versions at most (doc-18):
+    /// one more, with no window, fails with `EMLINK`, making none, as every acknowledgement after
+    /// would write it into the head; one with a window, which drops the oldest, is made.
+    #[test]
+    fn cells_make_so_many_versions_at_most() {
+        let most = bucket_cell::layout::MAX_VERSIONS;
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let store =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        write(&store, 1, &pattern(1, BLOCK));
+        store.commit(None).unwrap();
+        for _ in 0..most {
+            store.make_version(None).unwrap();
+        }
+        let refused = store.make_version(None).err().and_then(|err| err.errno());
+        assert_eq!(refused, Some(crate::Errno::EMLINK));
+        assert_eq!(store.versions().len(), most);
+        store.make_version(Some(1)).unwrap();
+    }
+
+    /// TASK-610: what this process made versions of it keeps for versions their cells name alone:
+    /// those a later version's window dropped, and those dropped, it forgets, rather than one more
+    /// for every version it ever made.
+    #[test]
+    fn versions_made_here_are_forgotten_once_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let store =
+            kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
+        write(&store, 1, &pattern(1, BLOCK));
+        store.commit(None).unwrap();
+        for _ in 0..20 {
+            store.make_version(Some(1)).unwrap();
+        }
+        store.wait_uploaded().unwrap();
+        let last = store.make_version(Some(1)).unwrap();
+        let named = store.versions().len();
+        assert!(named <= 2, "{named} versions named");
+        assert_eq!(crate::host_cell::versions_made(), named);
+        store.drop_versions(&[last].into()).unwrap();
+        assert_eq!(crate::host_cell::versions_made(), named - 1);
+    }
+
     /// TASK-45.1: a placement cut off deletes no cell from under a later one: its delete fails
     /// (`ESTALE`), leaving the cell in the bucket, which the later placement goes on writing; the
     /// later placement's delete deletes it.

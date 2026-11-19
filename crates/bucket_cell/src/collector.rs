@@ -1458,6 +1458,12 @@ impl Live {
     }
 }
 
+/// cladefs: how deep a chain of moves of moves the collector makes: the deepest it compacts no more,
+/// what it holds staying there. Each is in its key, 20 bytes or so more each, which buckets take
+/// 1024 of (S3, GCS, Azure), a segment's at 78 bytes, and each a hop that a read of an extent moved
+/// that many times follows, `moves::MOVES` at most (TASK-572).
+pub(crate) const MOVES_DEPTH: usize = 32;
+
 /// Whether `extents`, live in an object of `len` bytes of data, take less than `options`' fraction
 /// of it.
 fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) -> bool {
@@ -1756,7 +1762,10 @@ impl Pass {
         for (key, extents) in &self.named {
             let collectable = match layout::kind(key) {
                 kind @ Kind::Segment { .. } => !self.touched.contains(key) && !self.ahead(kind),
-                Kind::Moves { .. } => true,
+                // cladefs: but moves as deep as a chain goes, whose moves' key would be longer
+                // still, past what buckets take, and its extents past the hops a read follows
+                // (TASK-572).
+                Kind::Moves { .. } => layout::moves_depth(key) < MOVES_DEPTH,
                 _ => false,
             };
             if collectable && moves_listed(&self.objects, key)?.is_empty() {

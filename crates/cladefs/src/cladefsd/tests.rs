@@ -2776,6 +2776,93 @@ fn fenced_stores_answer_ordered_commits_erofs() {
     assert_eq!(first.free(extent(1)), Err(Errno::EROFS));
 }
 
+/// TASK-588: a follower pins what its view holds, as doc-4 has it, and nothing else: an ID its VM
+/// process made up is refused, which the daemon held for the view's life before, as many as it
+/// was asked.
+#[test]
+fn followers_pin_only_what_their_views_hold() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let path = dir.path().join("store");
+    let writer = CellClient::connect(&socket, &path, 1 << 24).unwrap();
+    let held = ExtentId { cell: writer.cell(), sequence: 1 };
+    write(&writer, held, 0, &pattern(1, BLOCK)).unwrap();
+    writer.commit(None).unwrap();
+    let follower = CellClient::connect_read_only(&socket, &path).unwrap();
+    assert_eq!(follower.pin(held), Ok(()));
+    let made_up = ExtentId { cell: writer.cell(), sequence: 999 };
+    assert_eq!(follower.pin(made_up), Err(Errno::ENOENT));
+}
+
+/// TASK-547: a transfer area is the VM process's memory, each page of it written by the VM
+/// process before it gives it, which the kernel charges to the VM process; and the daemon seals
+/// it against writes once it has mapped it, so that no page of it is punched out to be faulted in
+/// again by the daemon, charged to the daemon for as long as the VM process keeps it. One whose
+/// pages the VM process never wrote, which the daemon would fault in itself, is refused.
+#[test]
+fn transfer_areas_are_their_vm_processes_memory() {
+    use super::wire::*;
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cladefsd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    let len = 1 << 20;
+    // Shared memory, sealed at its size, and written, if `written`, through a mapping kept.
+    let area = |written: bool| -> std::fs::File {
+        // SAFETY: The name is a C string.
+        let fd = unsafe { libc::memfd_create(c"area".as_ptr(), libc::MFD_ALLOW_SEALING) };
+        assert!(fd >= 0);
+        // SAFETY: Just made, owned here.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        file.set_len(len as u64).unwrap();
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
+        // SAFETY: Seals what this test made.
+        assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) }, 0);
+        if written {
+            // SAFETY: Maps it, as large as it is, for the test's life.
+            let addr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            assert_ne!(addr, libc::MAP_FAILED);
+            // SAFETY: Within the mapping.
+            unsafe { addr.cast::<u8>().write_bytes(1, len) };
+        }
+        file
+    };
+    let given = |file: &std::fs::File, path: &str| {
+        let (sender, mut receiver, _stream, _) =
+            raw_connection(&socket, &dir.path().join(path), 1 << 24);
+        let transfer = Header::new(TRANSFER, 2).with_args(&[len as u64]);
+        let fds = [file.as_fd()];
+        sender.send(transfer, &[], &fds).unwrap();
+        let reply = receiver.receive(|| 0).unwrap().unwrap();
+        (reply.header.status, sender, receiver)
+    };
+    let unwritten = area(false);
+    assert_eq!(given(&unwritten, "unwritten").0, -Errno::EINVAL.raw());
+    let written = area(true);
+    let (status, _sender, _receiver) = given(&written, "written");
+    assert_eq!(status, 0);
+    // Sealed against writes: no page of it punched out.
+    let mode = libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE;
+    // SAFETY: Of what this test made.
+    let punched = unsafe { libc::fallocate(written.as_raw_fd(), mode, 0, 4096) };
+    assert_eq!(punched, -1, "a page of the area punched out");
+    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM));
+}
+
 /// TASK-575: a VM process drops a version it made, as its VM snapshot failing after it does, and
 /// no other (`EPERM`): its VM manager's, made through the control API, are the manager's.
 #[test]

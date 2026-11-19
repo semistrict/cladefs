@@ -1356,7 +1356,9 @@ impl Transfer {
         let file = std::fs::File::from(fd);
         file.set_len(len as u64)?;
         // Sealed at its size: the daemon maps it only so, as it would fault past a new end.
-        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+        // cladefs: not against more seals, as the daemon seals it against writes once it mapped it
+        // (TASK-547).
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW;
         // SAFETY: Seals the descriptor's memory, which this process made.
         if unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&file), libc::F_ADD_SEALS, seals) }
             != 0
@@ -1376,6 +1378,14 @@ impl Transfer {
         };
         if addr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
+        }
+        // cladefs: each page written here first, so that it is this process's memory, the kernel
+        // charging it to whoever faults it in, not the daemon's, which takes none it would fault
+        // (TASK-547). Written, not advised (`MADV_POPULATE_WRITE`): a VM process's seccomp filter
+        // allows no more calls than it needs.
+        for page in (0..len).step_by(crate::pages::page_size() as usize) {
+            // SAFETY: Within the mapping just made, which nothing else uses yet.
+            unsafe { addr.cast::<u8>().add(page).write_volatile(0) };
         }
         let transfer = Self {
             addr: NonNull::new(addr.cast()).unwrap(),

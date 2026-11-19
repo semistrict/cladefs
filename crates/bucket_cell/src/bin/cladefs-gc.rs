@@ -278,6 +278,11 @@ fn parse_collect(flags: &[&str]) -> Result<Command, String> {
     if mode == Mode::DryRun && (every.is_some() || run != Run::default()) {
         return Err(usage());
     }
+    // cladefs: a fraction of an object's data, which a fraction past 1 would have every pass
+    // compact anew whatever is whole, without end (TASK-572); 0 compacts nothing.
+    if !(0.0..=1.0).contains(&compact_below) {
+        return Err(usage());
+    }
     let options = Options { compact_below, grace: (grace * 1000.0) as u64 };
     Ok(Command::Collect { every, options, mode, cell, run })
 }
@@ -975,6 +980,17 @@ mod tests {
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| arg.to_string()))
+    }
+
+    /// TASK-572: a fraction to compact below past 1, which would have every pass compact anew
+    /// whatever is whole, or below 0, is refused.
+    #[test]
+    fn fractions_past_one_are_refused() {
+        for fraction in ["1.5", "-0.1", "NaN"] {
+            let refused = parsed(&["s3://bucket", "--compact-below", fraction]);
+            assert!(refused.is_err(), "{fraction}: {refused:?}");
+        }
+        assert!(parsed(&["s3://bucket", "--compact-below", "1"]).is_ok());
     }
 
     /// It collects once, with a grace period of a minute, compacting objects less than half live,

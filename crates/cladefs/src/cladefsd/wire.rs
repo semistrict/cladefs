@@ -82,8 +82,12 @@ impl Header {
 /// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
 /// version of a cell it names ([`OPEN_FORK`]), and a [`FORK`] of a VM snapshot's makes a version,
 /// which its reply names (doc-20). Version 11: a [`FORK`] with [`FORK_DROP`] drops a version its
-/// connection made, as a VM snapshot failing after it does (TASK-575).
-pub(crate) const VERSION: u64 = 11;
+/// connection made, as a VM snapshot failing after it does (TASK-575). Version 12: a `FREE_MANY`'s
+/// and a `MAP_MANY`'s stream bytes count what the daemon decodes of them (TASK-614); a transfer
+/// area is written whole by its VM process, which seals it against no more, before it gives it
+/// (TASK-547); a payload on an `ACK`, `STAGE_COUNTS` or `STAGE_PRIVATE_COUNTS` ends its connection
+/// (TASK-581).
+pub(crate) const VERSION: u64 = 12;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -1021,11 +1025,13 @@ impl AsyncReceiver {
 
     /// The next message, or `None` once the other end has closed the connection, as
     /// [`Receiver::receive`] gives it, a payload of [`MAX_PAYLOAD`] at most: if `admit`, given its
-    /// header, admits it, before its payload is read (TASK-79.16).
-    pub async fn receive<F: std::future::Future<Output = io::Result<()>>>(
+    /// header, admits it, before its payload is read (TASK-79.16), with what admitting it gave, as
+    /// what the daemon holds for it counted: which, its payload never read whole, is dropped
+    /// with it (TASK-548).
+    pub async fn receive<A, F: std::future::Future<Output = io::Result<A>>>(
         &mut self,
         admit: impl FnOnce(&Header) -> F,
-    ) -> io::Result<Option<Message>> {
+    ) -> io::Result<Option<(Message, A)>> {
         let mut header = Header::default();
         let mut fds = Vec::new();
         {
@@ -1047,7 +1053,7 @@ impl AsyncReceiver {
         if header.len > MAX_PAYLOAD + size_of::<Header>() as u64 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "a message too large"));
         }
-        admit(&header).await?;
+        let admitted = admit(&header).await?;
         let mut payload = vec![0; header.len as usize];
         let mut at = 0;
         while at < payload.len() {
@@ -1056,7 +1062,7 @@ impl AsyncReceiver {
                 (received, _) => at += received,
             }
         }
-        Ok(Some(Message { header, payload, fds }))
+        Ok(Some((Message { header, payload, fds }, admitted)))
     }
 
     /// Reads what of `bytes` the socket has, once it has any: with the descriptors that came with

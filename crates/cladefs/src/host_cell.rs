@@ -29,7 +29,7 @@ use bucket_cell::layout::{CellId, Child};
 use bucket_cell::object_bucket::ObjectBucket;
 use local_cell::upload::{self, Failure, Uploader};
 use local_cell::{Description, HostDir, LocalCell, Options, Recovering};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -500,12 +500,28 @@ pub(crate) fn fork(
 /// cladefs: the stores this process made versions of, by the version (cell and ID): what a store at
 /// the version made here inherits of what cladefs keeps beside its store, what is attached to it
 /// ([`cell_dir::inherit_attached`]), as a fork of the store does. In memory alone: a restore on
-/// another host, or after the process went, inherits none.
+/// another host, or after the process went, inherits none. cladefs: of versions their cells
+/// name, made here or uploaded, alone: one dropped, by a drop or a later version's window, or whose
+/// store was deleted, goes (TASK-610).
 static VERSIONS_MADE: Mutex<BTreeMap<(CellId, u64), PathBuf>> = Mutex::new(BTreeMap::new());
 
-/// cladefs: the store at `path`, of `cell`, made the version `version` here.
-pub(crate) fn made_version(cell: CellId, version: u64, path: &Path) {
-    VERSIONS_MADE.lock().unwrap().insert((cell, version), path.to_owned());
+/// cladefs: the store at `path`, of `cell`, made the version `version` here, `cell`'s versions now
+/// those of `named`, and it: those of `cell`'s it names no more, dropped since, go.
+pub(crate) fn made_version(cell: CellId, version: u64, path: &Path, named: &BTreeSet<u64>) {
+    let mut made = VERSIONS_MADE.lock().unwrap();
+    made.retain(|&(of, id), _| of != cell || named.contains(&id));
+    made.insert((cell, version), path.to_owned());
+}
+
+/// cladefs: the versions `ids` of `cell` were dropped.
+pub(crate) fn dropped_versions(cell: CellId, ids: &BTreeSet<u64>) {
+    VERSIONS_MADE.lock().unwrap().retain(|&(of, id), _| of != cell || !ids.contains(&id));
+}
+
+/// cladefs: how many versions it says this process made, which the tests bound.
+#[cfg(test)]
+pub(crate) fn versions_made() -> usize {
+    VERSIONS_MADE.lock().unwrap().len()
 }
 
 /// cladefs: where the store this process made the version `version` of `cell` of is, if it did.
@@ -648,7 +664,10 @@ pub(crate) fn delete_with(
             Some(errno) => Error::new(err.context(errno)),
             None => Error::new(err),
         }
-    })
+    })?;
+    // cladefs: what it made versions of is gone (TASK-610).
+    VERSIONS_MADE.lock().unwrap().retain(|_, of| of != path);
+    Ok(())
 }
 
 #[cfg(test)]

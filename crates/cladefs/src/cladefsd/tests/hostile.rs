@@ -2355,6 +2355,102 @@ fn page_ins_in_flight_are_bounded() {
     );
 }
 
+/// A tenant of the test's, `id`, its stores in `dir`, served at a socket of its own.
+fn served_tenant(dir: &std::path::Path, name: &str, id: u64) -> (PathBuf, PathBuf, Arc<Tenant>) {
+    let stores = dir.join(name);
+    std::fs::create_dir(&stores).unwrap();
+    let tenant = Tenant::new(id, &stores).unwrap();
+    let socket = dir.join(format!("{name}.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    let served = tenant.clone();
+    std::thread::spawn(move || serve_tenant(listener, served));
+    (stores, socket, tenant)
+}
+
+/// TASK-548: a connection lost partway through a payload the daemon admitted, which made no request
+/// to answer, gives back what admitting it took of its tenant's bytes in flight: before, it held
+/// them for the tenant's life, and a tenant whose bytes in flight such losses filled had every
+/// later stream request of every VM process of its wait for good. Here with the budget a payload's
+/// size, a `WRITE` of the most a payload holds, a page of it sent before the connection goes; a
+/// new connection's write is answered after.
+#[test]
+fn connections_lost_mid_payload_hold_none_of_their_tenants_bytes_in_flight() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (stores, socket, mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    super::super::memory::set_in_flight(Some(MALLORY), Some(MAX_PAYLOAD)).unwrap();
+    {
+        let (sender, receiver, stream, cell) =
+            super::raw_connection(&socket, &stores.join("store"), 1 << 30);
+        let mut written = Header::new(WRITE, 2).with_args(&[cell, 1]);
+        written.len = MAX_PAYLOAD;
+        let mut sent = &stream;
+        std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&written)).unwrap();
+        std::io::Write::write_all(&mut sent, &[7; 4096]).unwrap();
+        // Admitted, its bytes taken, before the connection goes.
+        let deadline = std::time::Instant::now() + WAIT;
+        while mallory.in_flight().held() == 0 && std::time::Instant::now() < deadline {
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        assert_eq!(mallory.in_flight().held(), MAX_PAYLOAD, "admitted");
+        stream.shutdown(std::net::Shutdown::Both).unwrap();
+        drop((sender, receiver, stream));
+    }
+    let deadline = std::time::Instant::now() + WAIT;
+    while mallory.in_flight().held() > 0 && std::time::Instant::now() < deadline {
+        std::thread::park_timeout(Duration::from_millis(10));
+    }
+    assert_eq!(mallory.in_flight().held(), 0, "the lost connection's bytes in flight");
+    let (sender, mut receiver, _stream, cell) =
+        super::raw_connection(&socket, &stores.join("other"), 1 << 30);
+    let written = Header::new(WRITE, 2).with_args(&[cell, 1]);
+    let data = super::pattern(1, 1 << 20);
+    let answered = within(WAIT, move || super::call(&sender, &mut receiver, written, &data))
+        .expect("the write answered");
+    assert_eq!(answered.header.status, 0);
+}
+
+/// TASK-581: a payload on a kind that carries none, an `ACK`, a `STAGE_COUNTS` or a
+/// `STAGE_PRIVATE_COUNTS`, which the daemon counts in no bytes in flight, ends its connection
+/// before any of it is held: before, it was read whole, 64 MiB of it at most a connection,
+/// uncounted, and held for as long as the VM process sent all but its last byte.
+#[test]
+fn payloads_of_kinds_that_carry_none_end_their_connections() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (stores, socket, _mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    for (n, kind) in [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].into_iter().enumerate() {
+        let (sender, _receiver, stream, _) =
+            super::raw_connection(&socket, &stores.join(format!("store-{n}")), 1 << 30);
+        let mut said = Header::new(kind, 1);
+        said.len = MAX_PAYLOAD;
+        let mut sent = &stream;
+        std::io::Write::write_all(&mut sent, zerocopy::IntoBytes::as_bytes(&said)).unwrap();
+        std::io::Write::write_all(&mut sent, &[7; 4096]).unwrap();
+        super::assert_let_go(&sender, &stream);
+    }
+}
+
+/// TASK-546: a reply to `MAPPINGS` is counted as its request is admitted, as many mappings as its
+/// window may hold, within the connection's credit, which holds one: a VM process asking for
+/// them over and over, their replies unread, is let go once they pass it. Before, each was
+/// admitted counted as nothing, thousands of replies of millions of mappings queued at once.
+#[test]
+fn mappings_asked_for_past_the_credit_let_their_vm_process_go() {
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let (stores, socket, _mallory) = served_tenant(dir.path(), "mallory", MALLORY);
+    let (sender, mut receiver, stream, _) =
+        super::raw_connection(&socket, &stores.join("store"), 1 << 30);
+    // A window whose mappings' reply holds 64 MiB at most, past the credit's room besides in five.
+    let size = (64 << 20) / MAPPING_BYTES * page_size();
+    let window = Header::new(WINDOW, 2).with_args(&[size, 1]);
+    assert_eq!(super::call(&sender, &mut receiver, window, &[]).header.status, 0);
+    let asked = (0..256).map(|n| Header::new(MAPPINGS, 3 + n));
+    super::send_until_let_go(&sender, asked);
+    super::assert_let_go(&sender, &stream);
+}
+
 /// TASK-149.35: what the daemon holds of one tenant's VM processes' requests is bounded by the
 /// bytes in flight its connections share, not by how many connections it has: each connection has
 /// a credit of its own (272 MiB without a window), and a tenant as many as 1,024, so one tenant,

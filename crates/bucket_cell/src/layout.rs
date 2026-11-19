@@ -233,6 +233,17 @@ pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
     Ok(format!("{}{MOVES}{rest}", cell.prefix()))
 }
 
+/// cladefs: how many times the object at `key` is moves of moves: 0 for one not moves, 1 for
+/// an object's moves, 2 for their moves, and so on, each in its key once more ([`moves`]).
+pub fn moves_depth(key: &str) -> usize {
+    let Some((_, mut rest)) = in_cell(key) else { return 0 };
+    let mut depth = 0;
+    while let Some(under) = rest.strip_prefix(MOVES) {
+        (rest, depth) = (under, depth + 1);
+    }
+    depth
+}
+
 /// cladefs: the key of the object the moves at `key` are of, if they are moves: the inverse of
 /// [`moves`].
 pub fn moved_from(key: &str) -> Option<String> {
@@ -1060,6 +1071,22 @@ mod tests {
         assert_eq!(moved_from(&once), Some(sealed.clone()));
         assert_eq!(moved_from(&twice), Some(once.clone()));
         assert_eq!(moved_from(&sealed), None);
+    }
+
+    /// TASK-572: how deep moves of moves are, each a level more, at the key the collector would
+    /// make for the deepest it compacts within the 1024 bytes buckets take, its hops within those
+    /// a read follows.
+    #[test]
+    fn moves_are_as_deep_as_their_chains() {
+        let sealed = segment(CellId { tenant: 0xa, id: 3 }, 7, 2);
+        assert_eq!(moves_depth(&sealed), 0);
+        let mut key = sealed;
+        for depth in 1..=crate::collector::MOVES_DEPTH {
+            key = super::moves(&key, u64::MAX).unwrap();
+            assert_eq!(moves_depth(&key), depth);
+        }
+        assert!(key.len() <= 1024, "{} bytes: {key}", key.len());
+        assert!(crate::collector::MOVES_DEPTH < crate::moves::MOVES);
     }
 
     /// TASK-407.1: two passes' moves of one object are at keys of their own, under the object's

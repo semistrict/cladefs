@@ -582,13 +582,23 @@ impl<'a> Request<'a> {
 /// a `READ`'s, its reply's: [`MAX_PAYLOAD`] at most, as one asking for more is refused (`EINVAL`),
 /// its reply's payload empty, whatever the VM process asks for: so a word that would overflow the
 /// bytes counted is counted as no more (TASK-79.16). Of the header alone, as the daemon admits a
-/// request before it reads its payload, and decodes it.
+/// request before it reads its payload, and decodes it. cladefs: and what the daemon makes of a
+/// payload besides, as long as it holds the payload, counted too (TASK-614): a `FREE_MANY`'s
+/// extents, decoded, as many bytes again; a `MAP_MANY`'s mappings, and the window's pieces mapping
+/// them makes, [`MAP_MANY_HELD`] times its payload in all.
 pub(crate) fn stream_bytes(header: &Header) -> u64 {
     match header.kind {
         READ if header.flags & READ_TRANSFER == 0 => header.len + header.args[3].min(MAX_PAYLOAD),
+        FREE_MANY => header.len.saturating_mul(2),
+        MAP_MANY => header.len.saturating_mul(MAP_MANY_HELD),
         _ => header.len,
     }
 }
+
+/// cladefs: what the daemon holds of a `MAP_MANY`, in times its payload: the payload; a
+/// [`WindowMapping`] for each of its mappings, decoded; and the window's pieces mapping each makes,
+/// two at most (TASK-614).
+pub(crate) const MAP_MANY_HELD: u64 = 4;
 
 /// cladefs: the guest request the request `message` is a call for, if it says one ([`REQUEST`]),
 /// and the rest of its payload, its kind's: `EINVAL` if it says one it doesn't hold, or 0
@@ -612,6 +622,11 @@ pub(crate) fn request_bytes(guest: NonZeroU64) -> [u8; REQUEST_BYTES] {
 fn path(bytes: &[u8]) -> Result<PathBuf, Errno> {
     if bytes.is_empty() || bytes.contains(&0) {
         return Err(Errno::EINVAL);
+    }
+    // cladefs: no longer than a path is, before it is copied: a payload of up to MAX_PAYLOAD
+    // bytes would be held twice, its copy uncounted (TASK-614).
+    if bytes.len() >= libc::PATH_MAX as usize {
+        return Err(Errno::ENAMETOOLONG);
     }
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
@@ -996,6 +1011,25 @@ pub(crate) fn mappings(payload: &[u8]) -> Result<Vec<WindowMapping>, Errno> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TASK-614: a `FREE_MANY`'s and a `MAP_MANY`'s stream bytes count what the daemon decodes of
+    /// their payloads besides them; every other request's, its payload alone, a `READ`'s reply
+    /// apart.
+    #[test]
+    fn many_requests_count_what_they_decode() {
+        let of = |kind| Header { len: 4800, ..Header::new(kind, 1) };
+        assert_eq!(stream_bytes(&of(FREE_MANY)), 2 * 4800);
+        assert_eq!(stream_bytes(&of(MAP_MANY)), MAP_MANY_HELD * 4800);
+        assert_eq!(stream_bytes(&of(WRITE)), 4800);
+    }
+
+    /// TASK-614: what a `MAP_MANY`'s stream bytes count holds what the daemon makes of its
+    /// payload: a decoded mapping, and two pieces of the window, for each mapping it carries.
+    #[test]
+    fn map_manys_count_what_they_hold() {
+        let made = size_of::<WindowMapping>() + 2 * size_of::<crate::dax::DaxMapping>();
+        assert!(made as u64 <= (MAP_MANY_HELD - 1) * MAPPING_BYTES, "{made} bytes a mapping");
+    }
     use proptest::prelude::*;
     use std::os::fd::OwnedFd;
 
@@ -1649,7 +1683,7 @@ mod tests {
     fn the_wire_is_its_version() {
         /// The version, and the fingerprint of the wire it is. A change to the wire is a new
         /// version, both changed together, never the fingerprint alone.
-        const WIRE: (u64, u64) = (11, 0x9115_7b66_7fe5_a552);
+        const WIRE: (u64, u64) = (12, 0x3d4d_1919_38a4_795f);
         let fingerprint = fingerprint();
         assert_eq!(
             (VERSION, fingerprint),

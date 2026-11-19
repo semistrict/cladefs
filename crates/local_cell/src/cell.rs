@@ -7,7 +7,7 @@
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Due, Durability, FileSyncs, Syncs};
 use crate::extents::{Entry, Extents};
-use crate::framed::{Aligned, Framed, Located, Packed, Source, Unpacked, read_aligned};
+use crate::framed::{Aligned, Framed, Located, Packed, Source, read_aligned};
 use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
@@ -226,8 +226,6 @@ pub struct LocalCell<D: Dir> {
     /// ([`Dir::claim`]): closing it lets go of both, but of the taking what holds it still
     /// ([`LocalCell::hold_dir`]).
     opened: SharedLock<Mutex<Opened<D>>>,
-    /// The parts of its files read lately, unpacked.
-    unpacked: Unpacked,
     options: Options,
     /// cladefs: shared with the framings of its segments, each of which ends itself in it, on a
     /// thread of its own (TASK-153.8).
@@ -1143,7 +1141,6 @@ impl<D: Dir> Recovering<D> {
             version,
             cuts: Mutex::new(cuts),
             opened: SharedLock::new("store opening", Mutex::new(Some((claim, taken)))),
-            unpacked: Unpacked::default(),
             options,
             state: Arc::new(SharedLock::new(
                 "store state",
@@ -2001,7 +1998,7 @@ impl<D: Dir> LocalCell<D> {
     ) -> Result<Vec<Located<D::File>>, Error> {
         let end = offset + len;
         let held_end = end.min(entry.len).max(offset);
-        let unpacked = &self.unpacked;
+        let unpacked = crate::framed::unpacked();
         let mut parts = Vec::new();
         match &entry.data {
             Data::Own => {
@@ -2064,7 +2061,7 @@ impl<D: Dir> LocalCell<D> {
     /// A part of a framed file, unpacked from `stored`, its stored bytes and any after them, read
     /// from its file, checked against its CRC; reads of it find it unpacked for a while.
     pub fn unpack(&self, part: &Packed<D::File>, stored: Aligned) -> Result<Arc<Aligned>, Error> {
-        part.unpack(stored, &self.unpacked)
+        part.unpack(stored, crate::framed::unpacked())
     }
 
     /// Frees `extent`, which may be open, if the store holds it.

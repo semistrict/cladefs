@@ -63,12 +63,16 @@ errnos! {
     EISDIR = 21,
     /// Invalid argument.
     EINVAL = 22,
+    /// Too many open files: cladefs, a follower pinning more than it may (TASK-588).
+    EMFILE = 24,
     /// File too large.
     EFBIG = 27,
     /// No space left on device.
     ENOSPC = 28,
     /// Read-only file system.
     EROFS = 30,
+    /// Too many links: cladefs, a cell's versions past the most it names (doc-18, TASK-570).
+    EMLINK = 31,
     /// Broken pipe.
     EPIPE = 32,
     /// Math result not representable: a buffer too small for what it is to hold.

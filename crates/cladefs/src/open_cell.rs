@@ -492,6 +492,9 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         // pin: a bug of its guest's follower, never a stale read (doc-8, testing 1).
         log::error!("cladefs: a follower's request for {extent:?}, outside its view: {error:#}");
         Errno::EIO
+    } else if error.is::<local_cell::TooManyPins>() {
+        // cladefs: a follower pinning more than it may hold open (TASK-588).
+        Errno::EMFILE
     } else if error.is::<NoExtent>() {
         // A follower's too, of one written after its view's commit: as Fxfs's journal replay
         // finds the end of the commit.
@@ -900,7 +903,11 @@ impl OpenCell {
         if self.bases.routes(extent.cell) {
             return Ok(());
         }
-        self.view()?.pin(extent).map_err(errno)
+        // cladefs: one its view holds, as doc-4 has it, not any ID a VM process makes up, each of
+        // which the daemon would hold for as long as the view (TASK-588).
+        let view = self.view()?;
+        self.store.view_extent(&view, extent).map_err(errno)?;
+        view.pin(extent).map_err(errno)
     }
 
     /// cladefs: lets go of `extent`, pinned.
@@ -1981,9 +1988,32 @@ impl OpenCell {
     /// the newest `keep_last` are kept then, if given, the rest dropped. Returns its ID.
     /// `ENOTSUP` without an uploader, which names versions.
     pub fn make_version(&self, keep_last: Option<u32>) -> Result<u64, Error> {
-        let id = self.at_rest(|| self.commit_version(keep_last, true))?;
-        host_cell::made_version(self.cell(), id, &self.path);
+        let id = self.at_rest(|| {
+            self.within_versions(keep_last)?;
+            self.commit_version(keep_last, true)
+        })?;
+        let named = self.versions().into_iter().map(|version| version.id).collect();
+        host_cell::made_version(self.cell(), id, &self.path, &named);
         Ok(id)
+    }
+
+    /// cladefs: `Ok` if a version, keeping the newest `keep_last` if given, leaves the cell within
+    /// the most versions its head names (`layout::MAX_VERSIONS`, doc-18): a window of them does,
+    /// dropping the oldest; or fewer named, and made here, than the most. `EMLINK` otherwise, as
+    /// a version made would be named, past it, by every acknowledgement after, whose head swaps
+    /// write them all (TASK-570). Checked where versions are made, not named: a version made is
+    /// told made, and named once uploaded, whatever.
+    fn within_versions(&self, keep_last: Option<u32>) -> Result<(), Error> {
+        let most = bucket_cell::layout::MAX_VERSIONS;
+        if keep_last.is_some_and(|keep| (keep as usize) <= most) {
+            return Ok(());
+        }
+        let versions = self.versions().len();
+        if versions >= most {
+            let why = format!("the cell has {versions} versions, the most it may: drop some");
+            return Err(Error::new(anyhow::Error::new(Errno::EMLINK).context(why)));
+        }
+        Ok(())
     }
 
     /// cladefs: commits a version as [`OpenCell::make_version`] does, of the store quiescent if
@@ -2024,7 +2054,12 @@ impl OpenCell {
     pub fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
         self.admit(Changing::Cell)?;
         let uploader = self.uploader.as_ref().ok_or(Errno::ENOTSUP)?;
-        Ok(uploader.drop_versions(ids).map_err(upload_errno)?)
+        let dropped = uploader.drop_versions(ids).map_err(upload_errno);
+        // cladefs: forgotten as made here, dropped or not: a drop that failed may have taken
+        // effect, and one that didn't is the caller's to retry, which needs no store made here
+        // (TASK-610).
+        host_cell::dropped_versions(self.cell(), ids);
+        Ok(dropped?)
     }
 
     /// cladefs: shares the uploaded version `id`, if `shared`, or no longer: forks of it into other

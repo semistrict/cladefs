@@ -43,6 +43,11 @@ impl Aligned {
         &mut self.bytes[self.start..self.start + self.len]
     }
 
+    /// cladefs: the bytes it holds of memory, its alignment's among them.
+    fn held(&self) -> u64 {
+        self.bytes.capacity() as u64
+    }
+
     /// Its `len` bytes from `skip`, in the buffer still.
     fn within(mut self, skip: usize, len: usize) -> Self {
         assert!(skip + len <= self.len, "{len} bytes from {skip} of {}", self.len);
@@ -174,6 +179,14 @@ impl<F: File> Framed<F> {
     /// Whether no read uses it: only what keeps it open holds it.
     fn is_idle(self: &Arc<Self>) -> bool {
         Arc::strong_count(self) == 1 && Arc::strong_count(&self.file) == 1
+    }
+}
+
+/// cladefs: its parts unpacked go with it, which no read finds once it is gone, its opening's
+/// number never another's (TASK-603).
+impl<F> Drop for Framed<F> {
+    fn drop(&mut self) {
+        unpacked().forget(self.id);
     }
 }
 
@@ -430,9 +443,13 @@ pub fn unpacks() -> u64 {
 }
 
 /// The parts of framed files unpacked lately, by their files' openings and their numbers: most
-/// reads of extents are of neighbouring blocks, which a part holds.
+/// reads of extents are of neighbouring blocks, which a part holds. cladefs: the process's, every
+/// store's reads sharing it ([`unpacked`]), its bytes counted, [`UNPACKED_BYTES`] at most, which a
+/// host's governor counts and evicts as it does every cache on a data path; and a file's parts
+/// gone with the file, which no read finds after (TASK-603). Each store kept its own before, 32
+/// parts, 32 MiB, for its life, outside any budget, of files long gone.
 #[derive(Default)]
-pub(crate) struct Unpacked {
+pub struct Unpacked {
     kept: Mutex<Recent>,
 }
 
@@ -442,16 +459,62 @@ type Key = (u64, u64);
 /// The parts [`Unpacked`] keeps, by when they were last read.
 #[derive(Default)]
 struct Recent {
-    /// Each part, and when it was last read.
-    parts: HashMap<Key, (Arc<Aligned>, u64)>,
+    /// Each part, and when it was last read, by its file's opening first, as a file's go at once.
+    parts: BTreeMap<Key, (Arc<Aligned>, u64)>,
     by_use: BTreeMap<u64, Key>,
     clock: u64,
+    /// The bytes of the parts.
+    bytes: u64,
 }
 
-/// How many parts are kept unpacked.
-const UNPACKED: usize = 32;
+impl Recent {
+    /// Lets go of the part `key`, if kept.
+    fn remove(&mut self, key: Key) {
+        if let Some((part, used)) = self.parts.remove(&key) {
+            self.by_use.remove(&used);
+            self.bytes -= part.held();
+        }
+    }
+
+    /// Lets go of the parts least lately read until it holds `bytes` at most.
+    fn evict_to(&mut self, bytes: u64) {
+        while self.bytes > bytes {
+            let Some((_, oldest)) = self.by_use.first_key_value() else { break };
+            self.remove(*oldest);
+        }
+    }
+}
+
+/// cladefs: the most bytes of parts unpacked the process keeps: 64 parts' of a MiB.
+const UNPACKED_BYTES: u64 = 64 << 20;
+
+/// cladefs: the process's parts unpacked lately ([`Unpacked`]).
+pub fn unpacked() -> &'static Unpacked {
+    static UNPACKED: std::sync::LazyLock<Unpacked> = std::sync::LazyLock::new(Unpacked::default);
+    &UNPACKED
+}
 
 impl Unpacked {
+    /// cladefs: the bytes of the parts it keeps.
+    pub fn bytes(&self) -> u64 {
+        self.kept.lock().unwrap().bytes
+    }
+
+    /// cladefs: lets go of the parts least lately read until it keeps `bytes` at most.
+    pub fn evict_to(&self, bytes: u64) {
+        self.kept.lock().unwrap().evict_to(bytes);
+    }
+
+    /// cladefs: lets go of the parts of the file of the opening `file`.
+    fn forget(&self, file: u64) {
+        let mut kept = self.kept.lock().unwrap();
+        let keys: Vec<Key> =
+            kept.parts.range((file, 0)..=(file, u64::MAX)).map(|(k, _)| *k).collect();
+        for key in keys {
+            kept.remove(key);
+        }
+    }
+
     fn get(&self, key: Key) -> Option<Arc<Aligned>> {
         let mut kept = self.kept.lock().unwrap();
         let kept = &mut *kept;
@@ -466,15 +529,12 @@ impl Unpacked {
     fn put(&self, key: Key, bytes: Arc<Aligned>) {
         let mut kept = self.kept.lock().unwrap();
         let kept = &mut *kept;
+        kept.remove(key);
         kept.clock += 1;
-        if let Some((_, used)) = kept.parts.insert(key, (bytes, kept.clock)) {
-            kept.by_use.remove(&used);
-        }
+        kept.bytes += bytes.held();
+        kept.parts.insert(key, (bytes, kept.clock));
         kept.by_use.insert(kept.clock, key);
-        while kept.parts.len() > UNPACKED {
-            let (_, oldest) = kept.by_use.pop_first().unwrap();
-            kept.parts.remove(&oldest);
-        }
+        kept.evict_to(UNPACKED_BYTES);
     }
 }
 
@@ -482,6 +542,32 @@ impl Unpacked {
 mod tests {
     use super::*;
     use crate::{Dir as _, MemDir};
+
+    /// cladefs TASK-603: what is kept unpacked is counted, evicted to what it is asked, and a
+    /// framed file's parts go with the file, which no read finds after.
+    #[test]
+    fn parts_unpacked_are_counted_and_go_with_their_files() {
+        let dir = MemDir::new();
+        let file = dir.create("framed", true).unwrap();
+        let bytes = extent_frame::framed(
+            &[7; 4096],
+            &[],
+            bucket_cell::testing::encrypting(bucket_cell::layout::test_cell(1)),
+        );
+        file.write_at(&bytes, 0).unwrap();
+        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
+        let before = unpacked().bytes();
+        let part = || Arc::new(Aligned::new(4096));
+        let held = part().held();
+        unpacked().put((framed.id, 0), part());
+        unpacked().put((framed.id, 1), part());
+        assert_eq!(unpacked().bytes(), before + 2 * held);
+        drop(framed);
+        assert_eq!(unpacked().bytes(), before);
+        unpacked().put((u64::MAX, 0), part());
+        unpacked().evict_to(before);
+        assert_eq!(unpacked().bytes(), before);
+    }
 
     /// cladefs: bytes past a framed file's data are located nowhere in it: an index naming them, as
     /// one of a file gone and made anew would, is corrupt, which reads fail on, and the store's

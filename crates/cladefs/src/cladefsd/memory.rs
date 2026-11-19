@@ -146,7 +146,10 @@ pub fn held_parts() -> &'static Arc<local_cell::HeldParts> {
 /// cladefs: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena holds,
 /// and the parts held ([`held_parts`]).
 pub fn governed_bytes() -> u64 {
-    physmem::arenas_bytes() + held_parts().bytes() + local_cell::pages::shared().bytes()
+    physmem::arenas_bytes()
+        + held_parts().bytes()
+        + local_cell::unpacked().bytes()
+        + local_cell::pages::shared().bytes()
 }
 
 /// cladefs: the governor's look at the host's memory (TASK-358): every tenant's memory together, and
@@ -167,8 +170,15 @@ pub fn govern(allowance: u64) {
     if parts.bytes() > room {
         parts.evict_to(room);
     }
-    let pages = local_cell::pages::shared();
+    // cladefs: the parts of the stores' files unpacked lately, a cache as the pages are, which
+    // reads unpack again (TASK-603).
+    let unpacked = local_cell::unpacked();
     let room = room.saturating_sub(parts.bytes());
+    if unpacked.bytes() > room {
+        unpacked.evict_to(room);
+    }
+    let room = room.saturating_sub(unpacked.bytes());
+    let pages = local_cell::pages::shared();
     // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8).
     pages.size_to(room);
     if pages.bytes() > room {

@@ -42,6 +42,11 @@ pub struct CutOff;
 #[error("the view let go of {0:?}, freed before the commit it holds since")]
 pub struct NotHeld(pub ExtentId);
 
+/// cladefs: a view's pin past the most it pins ([`View::MAX_PINS`], TASK-588).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the view pins {} extents, the most it pins", View::MAX_PINS)]
+pub struct TooManyPins;
+
 /// A view of a cell as of a commit (see the module docs). Dropping it lets go of what it keeps.
 ///
 /// It holds what its commit holds; and, advanced keeping ([`View::advance_keeping`]), what the
@@ -106,13 +111,23 @@ impl View {
         self.since = since;
     }
 
+    /// cladefs: the most extents a view pins: what a follower holds open of what its writer
+    /// deleted, a few, which no follower comes near, and bounds what one that pins without end
+    /// has the daemon hold (TASK-588).
+    pub const MAX_PINS: usize = 1 << 16;
+
     /// Keeps `extent`, which it holds, until [`unpin`](Self::unpin)ned or the view goes, whatever
     /// commit the view advances to: what a follower holds open that its writer deletes.
+    /// cladefs: [`View::MAX_PINS`] at most ([`TooManyPins`]); its caller checks it holds `extent`
+    /// ([`crate::LocalCell::view_extent`], TASK-588).
     pub fn pin(&self, extent: ExtentId) -> Result<(), Error> {
         let mut views = self.views.inner.lock().unwrap();
         let follower = views.live.get_mut(&self.id).unwrap();
         if follower.cut {
             bail!(CutOff);
+        }
+        if follower.pins.len() >= Self::MAX_PINS && !follower.pins.contains(&extent) {
+            bail!(TooManyPins);
         }
         follower.pins.insert(extent);
         Ok(())
@@ -427,6 +442,20 @@ impl Views {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cladefs TASK-588: a view pins [`View::MAX_PINS`] extents at most, whatever IDs it is asked
+    /// to: past them, [`TooManyPins`], pinning nothing more; an extent pinned already pins again.
+    #[test]
+    fn views_pin_so_many_extents_at_most() {
+        let view = Views::new(1, b"").open();
+        for sequence in 0..View::MAX_PINS as u64 {
+            view.pin(ExtentId::new(1, sequence)).unwrap();
+        }
+        let refused = view.pin(ExtentId::new(1, View::MAX_PINS as u64)).unwrap_err();
+        assert!(refused.is::<TooManyPins>(), "{refused:#}");
+        assert_eq!(view.pinned().len(), View::MAX_PINS);
+        view.pin(ExtentId::new(1, 0)).unwrap();
+    }
 
     /// What a commit sealed, views as of earlier commits refuse, until every view is as of it or
     /// later; an extent forgotten, freed, and sealed again since, as of its later seal
