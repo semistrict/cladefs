@@ -236,23 +236,40 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     // The bucket out of reach: what is told durable from now on is on the members alone.
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
-    write(&client, 3..=10);
-    drop(client);
+    // A guest committing all the while: the last extent each commit told durable.
+    let acked = Arc::new(std::sync::atomic::AtomicU64::new(2));
+    let committing = {
+        let acked = acked.clone();
+        std::thread::spawn(move || {
+            for sequence in 3.. {
+                let extent = ExtentId { cell: client.cell(), sequence };
+                let written = client.write(extent, 0, &[VolatileSlice::from(&data(sequence)[..])]);
+                let root = format!("root {sequence}");
+                if written.and_then(|()| client.commit(Some(root.as_bytes()))).is_err() {
+                    return;
+                }
+                acked.store(sequence, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+    };
+    until("commits told durable", || acked.load(std::sync::atomic::Ordering::SeqCst) >= 10);
 
-    // The writer's host lost, its disk with it.
+    // The writer's host lost mid-workload, its disk with it.
     daemons[0].kill();
+    let acked = acked.load(std::sync::atomic::Ordering::SeqCst);
+    committing.join().unwrap();
     std::fs::remove_dir_all(&daemons[0].dir).unwrap();
     reachable(&bucket, true);
-    assert_eq!(head(&bucket, cell).end, before, "commits 3 to 10 uploaded: nothing to recover");
+    assert_eq!(head(&bucket, cell).end, before, "commits after 2 uploaded: nothing to recover");
 
     let taken = daemons[1].dir.join("taken");
     daemons[1].control.create_cell(&taken, CAPACITY, cell, Some(2)).unwrap();
     let client = connect(&daemons[1], &taken);
-    check(&client, 1..=10);
+    check(&client, 1..=acked);
     // One host of three lost, no configuration of f = 1 is to be had: the taker serves degraded,
     // its commits told durable once the bucket holds them, and, the bucket holding all it
     // recovered, drops to f = 0.
-    write(&client, 11..=12);
+    write(&client, 101..=102);
     let stat = daemons[1].control.stat_cell(&taken).unwrap();
     assert!(stat.degraded && stat.active_replicas == 0, "{stat:?}");
     until("dropped to f = 0", || configuration(&bucket, cell).1 == 0);
@@ -267,7 +284,7 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     let mut peers = vec![addresses[0].clone()];
     peers.extend(addresses[1..].iter().cloned());
     daemons[0] = daemon(&daemons[0].dir.clone(), &bucket, &peers);
-    write(&client, 13..=14);
+    write(&client, 103..=104);
     until("replicated again", || configuration(&bucket, cell).1 == 1);
     let (_, _, members) = configuration(&bucket, cell);
     assert_eq!(members[0], addresses[1]);
@@ -275,10 +292,11 @@ fn replicated_commits_survive_their_writer_and_its_disk() {
     until("degraded no more", || !daemons[1].control.stat_cell(&taken).unwrap().degraded);
     let before = head(&bucket, cell).end;
     reachable(&bucket, false);
-    write(&client, 15..=16);
+    write(&client, 105..=106);
     reachable(&bucket, true);
     assert_eq!(head(&bucket, cell).end, before, "told durable by the bucket, not the members");
-    check(&client, 1..=16);
+    check(&client, 1..=acked);
+    check(&client, 101..=106);
 }
 
 /// TASK-537.3.6's AC 2: a member's daemon killed, the writer replaces it with the spare host, and
