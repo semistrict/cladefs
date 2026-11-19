@@ -81,8 +81,9 @@ impl Header {
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
 /// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474). Version 10: an [`OPEN`] forks a
 /// version of a cell it names ([`OPEN_FORK`]), and a [`FORK`] of a VM snapshot's makes a version,
-/// which its reply names (doc-20).
-pub(crate) const VERSION: u64 = 10;
+/// which its reply names (doc-20). Version 11: a [`FORK`] with [`FORK_DROP`] drops a version its
+/// connection made, as a VM snapshot failing after it does (TASK-575).
+pub(crate) const VERSION: u64 = 11;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
