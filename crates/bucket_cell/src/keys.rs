@@ -581,11 +581,33 @@ pub struct CachingKms {
     /// How the pools are refilled: none, a KEK wrapped when one is wanted and its pool empty.
     pooling: Option<Pooling>,
     /// The tenants whose KEKs are revoked or destroyed, or none, as last heard, and how it was
-    /// said: of a KMS, until it answers a call for one again; or of every KMS (no key), as the
-    /// control API says, until one of them does ([`CachingKms::revoked`]).
-    refused: Mutex<HashMap<(Option<KmsKey>, u64), String>>,
+    /// said ([`Refused`]).
+    refused: Mutex<Refused>,
     /// The cells it was told are shredded, whose KEKs it unwraps no more ([`Kms::forget`]).
     shredded: Mutex<BTreeSet<CellId>>,
+}
+
+/// cladefs: the tenants whose KEKs are refused (TASK-633.6): by a KMS, as it said, until it answers
+/// a call for one again; and by every KMS, as the control API said ([`CachingKms::revoked`]), until
+/// each answers a call for one again: so that a KMS the host has not asked since, whose cells'
+/// keys a fork would inherit, still refuses it.
+#[derive(Default)]
+struct Refused {
+    by: HashMap<Tenancy, String>,
+    /// The control API's: why, and the KMSes that answered since.
+    told: HashMap<u64, (String, BTreeSet<KmsKey>)>,
+}
+
+impl Refused {
+    /// Why `tenant`'s keys are refused by the KMS named `key`, or by one not asked for (none).
+    fn of(&self, key: Option<&KmsKey>, tenant: u64) -> Option<String> {
+        let by = key.and_then(|key| self.by.get(&(key.clone(), tenant)));
+        let told = self
+            .told
+            .get(&tenant)
+            .filter(|(_, answered)| key.is_none_or(|key| !answered.contains(key)));
+        by.or(told.map(|(why, _)| why)).cloned()
+    }
 }
 
 /// The error of a KMS's refusal, naming its tenant.
@@ -658,11 +680,10 @@ impl CachingKms {
         self.resolved.lock().unwrap().values().cloned().collect()
     }
 
-    /// Why `tenant`'s keys are refused by the KMS named `key`, if they are, as last heard.
+    /// Why `tenant`'s keys are refused by the KMS named `key`, or by one not asked for (none), if
+    /// they are, as last heard.
     fn refusal(&self, key: Option<&KmsKey>, tenant: u64) -> Option<String> {
-        let refused = self.refused.lock().unwrap();
-        let of = key.and_then(|key| refused.get(&(Some(key.clone()), tenant)));
-        of.or_else(|| refused.get(&(None, tenant))).cloned()
+        self.refused.lock().unwrap().of(key, tenant)
     }
 
     /// What `kms`, named `key`, answered a call for `tenant`: noted, a refusal saying its KEK is
@@ -683,16 +704,13 @@ impl CachingKms {
     }
 
     /// The KMS named `key` answered a call for `tenant`: its KEK is not refused there, whatever
-    /// was heard before. Refused by every KMS, as the control API said, it stays so by the others
-    /// asked for.
+    /// was heard before. Refused by every KMS, as the control API said, it stays so by every
+    /// other, those not asked for since among them.
     fn answered(&self, key: &KmsKey, tenant: u64) {
-        let others: Vec<KmsKey> = self.known().into_keys().filter(|other| other != key).collect();
         let mut refused = self.refused.lock().unwrap();
-        refused.remove(&(Some(key.clone()), tenant));
-        if let Some(why) = refused.remove(&(None, tenant)) {
-            for other in others {
-                refused.entry((Some(other), tenant)).or_insert_with(|| why.clone());
-            }
+        refused.by.remove(&(key.clone(), tenant));
+        if let Some((_, answered)) = refused.told.get_mut(&tenant) {
+            answered.insert(key.clone());
         }
     }
 
@@ -721,7 +739,7 @@ impl CachingKms {
         self.takings.lock().unwrap().retain(|(cell, _), _| {
             cell.tenant != tenant || !buckets.contains(&crate::objectid::bucket_of(cell.id))
         });
-        self.refused.lock().unwrap().insert((Some(key.clone()), tenant), why);
+        self.refused.lock().unwrap().by.insert((key.clone(), tenant), why);
     }
 
     /// `tenant`'s KEK is revoked or destroyed, or none, as `why` says, in every KMS: the control
@@ -733,7 +751,7 @@ impl CachingKms {
             kms.forget_dyn(tenant);
         }
         self.takings.lock().unwrap().retain(|(cell, _), _| cell.tenant != tenant);
-        self.refused.lock().unwrap().insert((None, tenant), why.into());
+        self.refused.lock().unwrap().told.insert(tenant, (why.into(), BTreeSet::new()));
     }
 
     /// Forgets what it holds of `scope`, as a host told so does (TASK-411.7): a tenant's, its KEK
@@ -1856,6 +1874,47 @@ mod tests {
         let taken = runtime.block_on(inheriting(&kms, &source, child));
         assert_eq!(kms.in_pool(2), 0);
         drop(taken);
+    }
+
+    /// TASK-633.6: a host's KMSes, a bucket's each: bucket 2's cells under the second, every other
+    /// bucket's under the first.
+    struct TwoKmses(kms::Shared, kms::Shared);
+
+    impl Kmses for TwoKmses {
+        fn of(&self, bucket: u16) -> BoxFuture<'_, Result<(KmsKey, kms::Shared), String>> {
+            let chosen = match bucket {
+                2 => (KmsKey("second".into()), self.1.clone()),
+                _ => (KmsKey("first".into()), self.0.clone()),
+            };
+            futures::future::ready(Ok(chosen)).boxed()
+        }
+    }
+
+    /// TASK-633.6 (review): a tenant the control API says is revoked stays refused by every KMS
+    /// until each answers for it again: the first answering for a cell of bucket 1 lifts it there
+    /// alone, and a fork inheriting keys of a cell of bucket 2, whose KMS the host has not asked
+    /// since, is refused still. A KMS refusing a tenant itself refuses it for its own cells alone.
+    #[test]
+    fn revocations_told_hold_for_every_kms_until_each_answers() {
+        let shared = || -> kms::Shared { Arc::new(extent_keys::testing::MemoryKms::new()) };
+        let kms = CachingKms::over(Arc::new(TwoKmses(shared(), shared())), None);
+        let tenant = TEST_CELL.tenant;
+        let (ours, theirs) =
+            (CellId { tenant, id: 1 << 48 | 1 }, CellId { tenant, id: 2 << 48 | 1 });
+        let told = Error::Kms("tenant 1: revoked".into());
+        kms.revoked(tenant, "tenant 1: revoked");
+        assert_eq!(
+            (kms.refuses(ours), kms.refuses(theirs)),
+            (Some(told.clone()), Some(told.clone()))
+        );
+        block_on(kms.new_kek(ours)).unwrap();
+        assert_eq!((kms.refuses(ours), kms.refuses(theirs)), (None, Some(told.clone())));
+        let source = Ring::encrypting_for_tests(theirs.id, 1, Secret::random(), []);
+        let child = crate::layout::Child { cell: CellId { tenant: 2, id: 1 << 48 | 8 }, owner: 1 };
+        let forking = block_on(inheriting(&kms, &source, child)).map(|_| ());
+        assert_eq!(forking, Err(told));
+        block_on(kms.new_kek(theirs)).unwrap();
+        assert!(block_on(inheriting(&kms, &source, child)).is_ok());
     }
 
     /// A KMS holding tenant 1's KEK, forgetting it once destroyed as a real KMS forgets a deleted
