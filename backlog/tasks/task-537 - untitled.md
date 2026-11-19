@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18T12:36:00Z'
-updated_date: '2026-11-18T12:36:00Z'
+updated_date: '2026-11-19T13:56:00Z'
 labels:
   - durability
   - bucket
@@ -50,9 +50,9 @@ Supersedes TASK-96's "Peer log" (one peer named in the lease) for the replicatio
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A cell can be made replicated with f and an fsync level; its commits reach Replicated with f+1 of 2f+1 copies on disk, and the waiters for that level are woken then without any bucket request on the path
-- [ ] #2 Losing the writer's host loses no commit that reached Replicated: a take on another host recovers it (tested with real daemons)
-- [ ] #3 Protocol modelled in TLA+ and model-checked, with mutations that break it
+- [x] #1 A cell can be made replicated with f and an fsync level; its commits reach Replicated with f+1 of 2f+1 copies on disk, and the waiters for that level are woken then without any bucket request on the path
+- [x] #2 Losing the writer's host loses no commit that reached Replicated: a take on another host recovers it (tested with real daemons)
+- [x] #3 Protocol modelled in TLA+ and model-checked, with mutations that break it
 - [ ] #4 doc-12 gains the Replicated level, its failure table rows and their tests
 <!-- AC:END -->
 
@@ -62,3 +62,9 @@ Supersedes TASK-96's "Peer log" (one peer named in the lease) for the replicatio
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19: TASK-537.1, .2, .3 Done. AC 4 left open: doc-12 has the Replicated level and its rows, all tested except 'cladefsd killed, or the host rebooted, disk kept' for a replicated cell (no test kills its daemon and reopens on the same disk).
+<!-- SECTION:NOTES:END -->
