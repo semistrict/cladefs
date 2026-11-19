@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-18 17:03'
+updated_date: '2026-11-19 01:13'
 labels:
   - bucket
   - multi-region
@@ -41,3 +42,15 @@ One KMS serves a process (`static POOLED`), refusals revoke a tenant everywhere,
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Mapped 2026-11-18 (read-only survey): one KMS per process (cladefs::bucket host_keys/POOLED), the bucket KMS keeps tenants/<t>/kek in the host bucket (no cell, so the router keeps it home), CachingKms refusals/pools keyed by tenant alone, registry kms/master_key_id unread.
+1. bucket_cell::bucket_kms::Kmses replaces HostKms: per bucket number (objectid::bucket_of(cell.id)), from the registry entry: details.kms -> kms::from_url (shared by URI); none + master keys -> BucketKms over that bucket's member (unrouted, so its KEK objects stay in it), checking master_key_id; NAMED and unregistered -> today's from_env; set_kms overrides all (tests).
+2. CachingKms holds Kmses; refused, pools, eras keyed by (KmsKey, tenant); new_kek/give_back/refill/fill/refuses take a CellId; revoked(kms, tenant) touches that KMS alone; inner() goes (rotate, collector take the resolver).
+3. kms::Error::Elsewhere (not a revocation) for an unresolvable bucket and a bucket KMS wrap of another bucket (fxkb header gains the bucket: format bump).
+4. shred_tenant walks the registry: destroys each bucket KMS's KEK object; named KMSes reported for out-of-band destruction; forget(Tenant) clears every KMS.
+5. extent_keys/src/kms/azure.rs (azure-kv://), as gcp.rs: KeyNames, real::wrapped, object_store's Azure credentials, tenant bound into the wrapped bytes; license check of any new crate.
+Tests: two buckets with different bucket-KMS master keys; a cell of each wrapped in its own bucket; a KMS refusing revokes that bucket's tenants alone; an unwrap across buckets is Elsewhere; shredding reaches both.
+<!-- SECTION:PLAN:END -->
