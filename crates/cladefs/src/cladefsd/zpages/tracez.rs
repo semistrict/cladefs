@@ -22,10 +22,10 @@ mod page;
 pub(super) use page::page;
 
 use opentelemetry::Context;
-use opentelemetry::trace::{SamplingDecision, SpanId, Status, TraceId};
+use opentelemetry::trace::{SpanId, Status, TraceId};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
-use opentelemetry_sdk::trace::{ShouldSample, Span, SpanData, SpanProcessor};
+use opentelemetry_sdk::trace::{SamplingDecision, ShouldSample, Span, SpanData, SpanProcessor};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -241,7 +241,7 @@ impl Recorder {
             let latency = span.end_time.duration_since(span.start_time).unwrap_or_default();
             let named = self.named(&span.name);
             let mut samples = named.samples.lock().unwrap();
-            let mut push = |kept: &mut VecDeque<Sample>| {
+            let push = |kept: &mut VecDeque<Sample>| {
                 kept.push_front(sample.clone());
                 kept.truncate(SAMPLES);
             };

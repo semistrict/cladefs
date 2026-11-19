@@ -9,7 +9,10 @@
 //! - `/z/tracez`: the daemon's spans by latency, kept in its memory whatever OTLP does, with
 //!   samples of each, whole traces, a page-in's saying where its data came from and, if from the
 //!   bucket, the stack that waited for it ([`tracez`]).
+//! - `/z/pprof/profile?seconds=N` and `/z/pprof/flamegraph?seconds=N`: the daemon's CPU, sampled
+//!   for N seconds, as pprof's protobuf or an SVG flamegraph ([`pprof`]).
 
+pub mod pprof;
 pub mod tracez;
 
 use super::http::Response;
@@ -18,17 +21,25 @@ use super::http::Response;
 const HTML: &str = "text/html; charset=utf-8";
 
 /// The z-pages: each one's path under `/z/` and what it shows.
-const PAGES: [(&str, &str); 1] = [(
-    "tracez",
-    "Spans by latency, wall clock, with samples of each: whole traces, their attributes, and the \
-     stacks that waited for the bucket.",
-)];
+const PAGES: [(&str, &str); 3] = [
+    (
+        "tracez",
+        "Spans by latency, wall clock, with samples of each: whole traces, their attributes, and \
+         the stacks that waited for the bucket.",
+    ),
+    (
+        "pprof/profile?seconds=30",
+        "The daemon's CPU, sampled for 30 seconds, as pprof's protobuf: go tool pprof URL.",
+    ),
+    ("pprof/flamegraph?seconds=30", "The same, as an SVG flamegraph."),
+];
 
 /// The page at `/z{page}`, asked with `query`.
 pub(super) fn serve(page: &str, query: &str) -> Response {
     match page {
         "" | "/" => Response::ok(HTML, index()),
         "/tracez" => tracez::page(query),
+        page if let Some(page) = page.strip_prefix("/pprof") => pprof::serve(page, query),
         _ => Response::not_found(),
     }
 }

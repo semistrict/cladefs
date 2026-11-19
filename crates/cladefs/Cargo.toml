@@ -102,6 +102,7 @@ workspace = true
 async-task = "4.7.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 io-uring = "0.7.15"
+pprof = { version = "0.15.0", default-features = false, features = ["prost-codec", "flamegraph", "frame-pointer"] }
 prost = "0.14.4"
 tokio-stream = { version = "0.1.19", features = ["net"] }
 tonic = "0.14.6"
