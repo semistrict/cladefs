@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:03'
-updated_date: '2026-11-19 02:34'
+updated_date: '2026-11-19 02:49'
 labels:
   - bucket
   - multi-region
@@ -65,4 +65,10 @@ Tests: two buckets with different bucket-KMS master keys; a cell of each wrapped
 - 6bd3a5581 azure-kv:// backend (no new crates; reqwest/serde_json/base64/url already deps, all MIT/Apache). Tested against an in-process fake vault + authority only: refusal codes (403 revoked, 404 KeyNotFound none, 400 unwrap unauthentic) follow Key Vault's error codes, NOT checked against the live service (no Azure credentials; GCP-only exception for live KMS tests).
 - e82da0965 fxkb format 2 binds the bucket identity; cross-bucket unwrap -> kms::Error::Elsewhere (not a revocation). doc-16 updated (format, shredding across buckets).
 Test: bucket_kms::tests::buckets_cells_are_under_their_own_buckets_kms (3 buckets: own bucket KMS, bucket KMS w/ own master key, local KMS by registry), azure tests (7), hand mutants for each step.
+
+Review (verifying-reviewer, 2026-11-18 night) found 4 defects in the unlanded commits; fixed on branch t3/mr-kms with tests and mutants:
+1. SECURITY azure.rs: a tenant override (keys=FILE) or registry-recorded URL could name any https host, which would get the vault bearer token. Now every host must be a Key Vault/Managed HSM domain (public, China, US Gov); endpoint= only https://<vault host> or http loopback (emulators). Tests overrides_naming_no_vault_are_refused, urls_naming_no_vault_or_no_keys_are_refused.
+2. kms_vars: a bucket's own CLADEFS_KMS/MASTER_KEY/MASTER_KEY_FILE override the host's as one group (was: host _FILE + bucket key = "both set" refusal; host CLADEFS_KMS beat a bucket's own master key). Test a_buckets_own_kms_variables_override_the_hosts_as_one.
+3. CachingKms: a control-API revocation now holds for every KMS until each answers (Refused{by, told}); it used to be dropped for KMSes not yet asked, letting inheriting() pass for a parent in an unasked bucket. Test revocations_told_hold_for_every_kms_until_each_answers.
+4. ByBucket::of keeps the bucket KMS that won the chosen race in buckets (shred forgot a duplicate instance).
 <!-- SECTION:NOTES:END -->
