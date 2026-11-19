@@ -2,8 +2,8 @@
 id: doc-12
 title: The fsync durability contract
 type: other
-created_date: '2026-10-31 22:17'
-updated_date: '2026-11-16 22:52'
+created_date: 2026-10-31 22:17
+updated_date: '2026-11-19T03:40:00Z'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -23,6 +23,7 @@ recovery.
 |---|---|---|
 | Ordered | `COMMIT` returned: cladefsd has it, in order: its data in the store's files, its commit record in cladefsd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
 | Local | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
+| Replicated | of a replicated cell (doc-21): on the disks of f+1 of its configuration's 2f+1 members, the writer's own Local copy one, each synced; or Uploaded | a member's round trip and sync, overlapping the writer's own (TASK-537.3.3) |
 | Uploaded | in the bucket, a contiguous prefix, acknowledged by the head's swap while the writer holds it | the lag (below) |
 
 *Revised 2026-11-08 (TASK-221, the user's decision: the window is what main achieves):* "within
@@ -84,6 +85,30 @@ it stays within the bound.
 Every row keeps ordering: what survives is a prefix of the commits, never a later commit without an
 earlier one. Filesystems recover by replaying their journal to that prefix. Open-but-unnamed files
 are freed as the store is next mounted.
+
+### A replicated cell's (doc-21, TASK-537.3.6)
+
+*Added 2026-11-19 (TASK-537.3.6):* a cell made or taken with `replicas` f >= 1 (CreateCell) waits
+for *replicated* where the table above says *uploaded*: its sync family's `COMMIT_UPLOADED`
+returns once f+1 copies hold the commit, or the bucket does, whichever first. Its fsync waits for
+the level its `fsync` asks (`FsyncLevel`: Ordered, Local, or Replicated). Every row keeps ordering,
+as above. With f = 1 (three members):
+
+| Failure | fsync (Replicated) acknowledged | sync acknowledged | Tested by |
+|---|---|---|---|
+| Guest crash, VMM killed | kept | kept | the rows above |
+| cladefsd killed, or the host rebooted, disk kept | kept: the reopen is a take, which recovers from the members and its own write-ahead log, whichever goes further | kept | local_cell's `members_go_past_own_logs_by_writer_then_commit` (the choice alone); **no test kills a replicated cell's daemon and reopens it on the same disk** |
+| Writer's host lost, its disk with it | kept: a take on another host fences the two members and recovers from them | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` (three daemons, the writer's killed and its directory removed, the bucket out of reach meanwhile); local_cell's `takes_recover_what_a_lost_writers_members_hold` |
+| Writer's host lost, the other two left | kept, as above; the taker has no configuration of its own to be had, so it serves degraded (f = 0), the head naming the configuration before until the acknowledgement naming what it recovered names its own (doc-21), and is replicated again as a third host answers | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` |
+| Writer's host and a member lost | Replicated commits not yet uploaded may go: more than f failures. A take is refused until f+1 of the members other than the old writer answer | as fsync | local_cell's `takes_without_enough_members_to_fence_are_refused` |
+| A member lost, writer up | kept; the writer replaces the member within a second, the new one given the tail, and its commits are Replicated again | kept | cladefs's `lost_members_are_replaced_then_the_bucket_releases_commits` (four daemons, the bucket out of reach after the replacement); local_cell's `lost_members_are_replaced_and_commits_stay_replicated` |
+| Both members lost, writer up | kept: degraded, its commits wait for Uploaded, uploaded at once; with no replacement to be had it drops to f = 0 once the bucket holds what it told, and comes back as members answer | kept | cladefs's `lost_members_are_replaced_then_the_bucket_releases_commits`; local_cell's `degraded_cells_drop_to_f_zero_and_come_back` |
+| The bucket failing | kept, Replicated as before, waiting at the lag bound | kept | cladefs's `replicated_commits_survive_their_writer_and_its_disk` (the commits told durable while the bucket is read-only) |
+| The bucket failing and both members lost | waits, as the bucket failing does above | waits | **no test of both at once** |
+
+StatCell says `degraded`, `members_up` and `active_replicas`; `/metrics` says
+`cladefsd_replication_degraded{cell}` and `cladefsd_replication_members_up{cell}`, and the daemon
+logs a warning as a cell is degraded and as it is no more.
 
 ## What a guest sees meanwhile
 

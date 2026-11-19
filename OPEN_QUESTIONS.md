@@ -25,6 +25,16 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Replicated cells: a take with no members to be had serves alone (TASK-537.3.6, 2026-11-19)
+
+Decided without you:
+- **A take that recovers from the members but can make no configuration of its own** (one host of three lost) **serves degraded at f = 0 rather than fails**, its commits waiting for the bucket. The head keeps naming the old, fenced configuration until the acknowledgement that names the last recovered commit names the writer's own f = 0 configuration in the same swap (`Writer::configure_past`), and nothing of the writer's own is acknowledged before that. The spec checks it (`RecoverAlone`, rule `aloneSwitch`, models ReplicationAlone and ReplicationAloneRetake); without the rule TLC loses an Uploaded commit in 4 s (mutation `AloneNoSwitch`). *Instead:* refuse the take until 2f peers answer, leaving the cell unavailable while a host is down. *Undo:* make that branch of `Shared::replicate` fail again.
+- The take-and-retake models are bounded small to stay under 15 minutes: ReplicationAloneRetake keeps peers' copies empty (`CONSTRAINT OwnCopiesOnly`), and ReplicationAlone runs on three hosts.
+
+## The scratch disk filled (2026-11-19, about 03:40 UTC)
+
+Seen, not acted on: /mnt/fxdax-scratch reached 0 bytes free, every fxjob failing at its `mkdir`. It held 205 GB under `fxdax-host/`, of which 82 GB was `run-t474e-20261116T122505Z-d250ae63` (from Nov 16, no job running it) and 82 GB the run then in progress. I removed only my own stale run (`run-t537a`, 139 MB) and waited; it freed itself within the hour. Recommend: check whether `run-t474e` is still needed. Until answered: my runs put their temp files on /home (`TMPDIR`).
+
 ## Replicated cells: replacing members, dropping to f = 0 (TASK-537.3.5, 2026-11-18)
 
 Decided without you:

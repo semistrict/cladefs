@@ -3,7 +3,7 @@ id: doc-21
 title: 'Replicated commits: a majority of hosts'' disks before the bucket'
 type: specification
 created_date: '2026-11-18T12:27:00Z'
-updated_date: '2026-11-19T02:17:00Z'
+updated_date: '2026-11-19T04:35:00Z'
 ---
 # Replicated commits: a majority of hosts' disks before the bucket
 
@@ -175,9 +175,20 @@ The new writer `W'`, at the VM manager's take, on any host:
    start *after* `last_commit`. `rebase` must accept a log whose first commit follows `last_commit`
    (today it requires the position of `last_commit` itself, or an empty log).
    As built (`replicate::trimmed`, TASK-537.3.5's review): the head acknowledges whole segments,
-   and names how many (`end`), so a take keeps the members' logs of segments from `end` on and
-   checks that their first commit follows `last_commit`. A member's copy of a segment before `end`,
-   whole or cut short, is the bucket's already: one whose drop never came is no hole.
+   so a take keeps the members' logs of the segments after the last whose records name a commit
+   through `last_commit`, from the first of them holding a record, and checks that their first
+   commit follows `last_commit`. A member's copy of a segment the head named, whole or cut short,
+   is the bucket's already: one whose drop never came is no hole. (Not the head's count of
+   segments, `end`: a writer's local segments are numbered as its own, the bucket's as the cell's.)
+   *As built (TASK-537.3.6),* **no members for `c+1`** (one host of three lost, say): the take
+   serves alone, at f = 0, its commits waiting for Uploaded. The head goes on naming `c`, fenced,
+   whose members hold what it recovered, until the acknowledgement that first names the last commit
+   it recovered names the writer's own configuration (f = 0, number `c+1`) in the same swap
+   (`Writer::configure_past`). Nothing of the writer's own is acknowledged before that swap: else a
+   later take, reading `c` with the head naming it, could prefer a longer log of `c` (the old
+   writer's own, on its host) over the bucket's, and lose a commit told Uploaded (the spec's
+   `RecoverAlone`, rule `aloneSwitch`, mutation `AloneNoSwitch`). Its keeper replaces nothing
+   before, then brings it to the f its head asks as members answer.
 5. **Install** configuration `c+1`, made at `e'`: `W'` and 2f peers picked as below. Stream the
    recovered tail to them, and wait until f of them hold it all (f+1 with `W'`).
 6. **Activate:** a conditional swap of the head to `replicas = c+1`. Only then does `W'` serve.
@@ -295,6 +306,8 @@ minutes at 11M states and more.
 | `ReplicationReplaces` | a replacement, its swap landing and learned, under takes | 3,793,205 | 190 s |
 | `ReplicationZero` | a drop to f = 0 with uploads, under takes | 158,133 | 8 s |
 | `ReplicationAbandons` | replacements given up before their CAS, and made again, under takes | 6,223,898 | 325 s |
+| `ReplicationAlone` | a take serving alone, its acknowledgement naming its own configuration, three takes and a crash, on three hosts | 11,848,705 | 238 s |
+| `ReplicationAloneRetake` | `AloneNoSwitch`'s model with every rule: the old writer's host retaking, peers' copies empty (`OwnCopiesOnly`) | 508,209 | 10 s |
 | `ReplicationFailures` | a disk lost and a daemon crashed, 2 commits, 2 takes | 480,946 | 16 s |
 | `ReplicationSweeps` | sweeps of superseded configurations, 3 takes | 238,260 | 11 s |
 | `ReplicationDeep` (deep) | 2 commits, 3 takes | 5,544,379 | 200 s |
@@ -333,6 +346,7 @@ configuration other than the old writer are up (TASK-537.3 tests them on daemons
 | `NoIncarnation`: a member is a host, whatever disk it has | an ack lost after a disk loss |
 | `NoZeroQuorum`: an f = 0 configuration counts as a quorum of one | an ack lost during a drop to f = 0 |
 | `AbandonIssued`: give a replacement up after its CAS is sent | an ack lost when the CAS lands after |
+| `AloneNoSwitch`: a take serving alone acknowledges its own commits with the head naming `c` | an Uploaded commit lost as the old writer's host retakes, counting its longer log |
 
 ## What each failure keeps (rows for doc-12)
 
