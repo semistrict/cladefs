@@ -28,15 +28,7 @@
     (function () {
       const C = window.Cuddly;
       const colors = ["#ffb088", "#ff9ec0", "#b9a4ff", "#8fddc2", "#ffd86e", "#8cc8ff", "#ff9ec0", "#8fddc2"];
-      const key = (parent, x, y, s) => {
-        const g = C.el("g", {}, parent);
-        gsap.set(g, { x, y, scale: s });
-        const ring = C.el("g", {}, g);
-        C.el("circle", { cx: 0, cy: 0, r: 22, fill: "#ffd86e", stroke: "#2e2440", "stroke-width": 6 }, ring);
-        C.el("circle", { cx: 0, cy: 0, r: 8, fill: "#efeaf8", stroke: "#2e2440", "stroke-width": 4 }, ring);
-        const shaft = C.el("path", { d: "M22 0 H84 M62 0 V18 M78 0 V14", fill: "none", stroke: "#2e2440", "stroke-width": 8, "stroke-linecap": "round" }, g);
-        return { g, ring, shaft };
-      };
+      const key = (parent, x, y, s) => C.key(parent, { x, y, s });
       const seats = [[300, 520], [460, 520], [620, 520], [780, 520], [380, 700], [540, 700], [700, 700], [860, 700]];
       const cells = [], ghosts = [], keys = [], lines = [], poofs = [];
       const tk = key(document.getElementById("s13-big"), 1470, 420, 1.6);

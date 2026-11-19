@@ -196,5 +196,40 @@ window.Cuddly = (function () {
     tl.fromTo(c, { n: from }, { n: to, duration: dur, ease: "none", onUpdate: () => { node.textContent = Math.round(c.n); } }, at);
   }
 
-  return { NS, INK, rng, el, div, shade, critter, life, blink, popIn, hop, vm, bucket, words, wordsOut, count };
+  // A key: a ring and a toothed shaft, pointing right from (x, y), the ring's centre.
+  // o: { x, y, s (scale), color, id }
+  function key(parent, o) {
+    const g = el("g", {}, parent);
+    if (o.id) g.id = o.id;
+    gsap.set(g, { x: o.x, y: o.y, scale: o.s || 1 });
+    const ring = el("g", {}, g);
+    el("circle", { cx: 0, cy: 0, r: 22, fill: o.color || "#ffd86e", stroke: INK, "stroke-width": 6 }, ring);
+    el("circle", { cx: 0, cy: 0, r: 8, fill: "#efeaf8", stroke: INK, "stroke-width": 4 }, ring);
+    const shaft = el("path", { d: "M22 0 H84 M62 0 V18 M78 0 V14", fill: "none", stroke: INK, "stroke-width": 8, "stroke-linecap": "round" }, g);
+    return { g, ring, shaft, x: o.x, y: o.y, s: o.s || 1 };
+  }
+
+  // A sandbox's mouth turns down (frown) or back up (unfrown); a critter's or sandbox's smile widens (grin).
+  function frown(tl, mouths, at, stagger) {
+    tl.fromTo(mouths, { rotation: 0, y: 0 }, { rotation: 180, y: 6, duration: 0.3, ease: "back.out(2.5)", transformOrigin: "50% 50%", stagger: stagger || 0 }, at);
+  }
+  function unfrown(tl, mouths, at, stagger) {
+    tl.to(mouths, { rotation: 0, y: 0, duration: 0.3, ease: "back.out(2.5)", transformOrigin: "50% 50%", stagger: stagger || 0 }, at);
+  }
+  function grin(tl, smiles, at, stagger) {
+    tl.fromTo(smiles, { scaleX: 1 }, { scaleX: 1.5, duration: 0.3, ease: "back.out(3)", transformOrigin: "50% 50%", stagger: stagger || 0 }, at);
+  }
+
+  // A path drawn in by its dash; the path has pathLength 100.
+  function draw(tl, paths, at, dur, stagger) {
+    tl.fromTo(paths, { strokeDasharray: "100 120", strokeDashoffset: 110 }, { strokeDashoffset: 0, duration: dur || 0.45, ease: "power2.out", stagger: stagger || 0 }, at);
+  }
+
+  // A tag or label pops in from small. o: { from (scale), origin, duration, stagger, immediateRender }
+  function tagIn(tl, targets, at, opts) {
+    const o = Object.assign({ duration: 0.3, from: 0.6, origin: "50% 50%", stagger: 0, immediateRender: true }, opts || {});
+    tl.fromTo(targets, { opacity: 0, scale: o.from, transformOrigin: o.origin }, { opacity: 1, scale: 1, duration: o.duration, ease: "back.out(2.6)", stagger: o.stagger, immediateRender: o.immediateRender }, at);
+  }
+
+  return { NS, INK, ACCENT: "#e2177e", rng, el, div, shade, critter, life, blink, popIn, hop, vm, bucket, words, wordsOut, count, key, frown, unfrown, grin, draw, tagIn };
 })();
