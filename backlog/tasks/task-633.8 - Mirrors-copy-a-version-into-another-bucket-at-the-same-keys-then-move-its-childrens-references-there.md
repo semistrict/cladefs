@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-18 17:04'
-updated_date: '2026-11-19 11:35'
+updated_date: '2026-11-19 14:16'
 labels:
   - bucket
   - multi-region
@@ -87,4 +87,9 @@ Review round 2 (3 dimensions + verifiers). Confirmed and fixed:
 - Mirrors of versions no longer named come back as Mirrored::Unnamed, cached, so store openings don't retry them.
 - Tests: opening_a_child_mirrors_its_version (mirror_for), mirrors_of_a_version_take_turns, mirrors_failing_let_their_hold_and_pin_go, release's guard in mirrors_hold_their_pins_alone, a marker-less hold in copies_of_other_buckets_versions_are_kept_while_needed, the mark-only sweep touching nothing in A.
 Left as is: mirror_for reads the child's head on each store opening on a routed bucket (one GET); the open wiring itself has no test of its own.
+
+Spec updated (delegated, TLC on the Mac, 24 models in 18 min): versions cut sharing objects, P deleted, the fork's check split into single-bucket steps, holds, a mirror begun again once done. Rules added: copiesKeptWhileAlive (replaces copiesKeptWhileNamed), forksRereadBeforeLeaving, mirrorHolds (justified outside the model), and two TLC found in the code with a mirror begun again:
+- mirrorRereadsBeforeRetiring: refer_here retired the children's references in A without reading the head again; after B's pass read P deleted and listed B, a mirror begun again moved a forking child to B and the pass deleted the copy (NothingNeededGone). Fixed: the head read again, references retired in A only if it names the version.
+- mirrorHoldsUnmarked: the hold written before the marker read, a mirror begun again rewrote it after B's pass deleted the holds (HoldsMarked, a leak keeping P's cell for good). Fixed: the hold written only once the marker is read absent.
+Tests: the dying test's per-step references (a mirror resumed after P's deletion leaves the A reference), a marked re-run writing no hold; hand mutants of both fail them. Each spec mutation finds its violation; Reaches* reach; liveness holds.
 <!-- SECTION:NOTES:END -->

@@ -15,25 +15,28 @@
 //!    One mirror of a version holds it at a time, its bytes its own: another's standing, the
 //!    mirror is under way, and this one does nothing ([`Mirrored::UnderWay`]). A pin unrefreshed
 //!    for [`PIN_STALE`] is its mirror's no longer, its host dead: the next mirror takes it over.
-//! 2. In A, its **hold** ([`layout::hold`]), a reference of its own under the parent's prefix
+//! 2. Its **marker read in B**: there already, marked by a mirror begun before, on to step 7
+//!    (`mirrorResumesMarked`), with no hold: the marking mirror's stands until B's collector
+//!    deletes it, with the marker, and one written again after that would stand for good
+//!    (`mirrorHoldsUnmarked`).
+//! 3. In A, its **hold** ([`layout::hold`]), a reference of its own under the parent's prefix
 //!    there (`mirrorHolds`), before it reads the head: it keeps the version whole in A, and the
 //!    parent's cell from being removed with what the version inherits from other cells, which the
 //!    mirror does not copy, while the copy stands. B's collector deletes it as the copy goes.
-//! 3. The parent's **head read in A**, naming the version, or the mirror is given up, its hold and
-//!    pin dropped (`mirrorChecks`). A marker already in B goes straight to step 6
-//!    (`mirrorResumesMarked`): read again, the head may have dropped the version since, its
-//!    children left referring in A.
-//! 4. **Every object of the version under the parent's prefix copied** into B, create-only: the
+//! 4. The parent's **head read in A**, naming the version, or the mirror is given up, its hold and
+//!    pin dropped (`mirrorChecks`): [`Mirrored::Unnamed`].
+//! 5. **Every object of the version under the parent's prefix copied** into B, create-only: the
 //!    checkpoint at the version, the objects its extents are in, along their moves, and the moves
 //!    objects, read where the router sends them. An object needed gone from A gives the mirror
 //!    up. Its pin refreshed as it goes, the mirror given up if it is no longer its own.
-//! 5. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
+//! 6. In B, the create-only **marker** ([`layout::mirror`]), once every object is copied
 //!    (`markerAfterCopy`), its pin refreshed right before, naming the epoch of the checkpoint it
 //!    copied: from then on, reads of the version in B are served there
 //!    ([`crate::object_bucket::ObjectBucket`]).
-//! 6. **The children of B referring in A listed**, after the marker (`mirrorListsAfterMark`), and
-//!    their references written in B, then retired in A.
-//! 7. The pin dropped, if still its own.
+//! 7. **The children of B referring in A listed**, after the marker (`mirrorListsAfterMark`), and
+//!    their references written in B; then, the head read again in A naming the version still
+//!    (`mirrorRereadsBeforeRetiring`), retired in A.
+//! 8. The pin dropped, if still its own.
 //!
 //! Every step is create-only, idempotent, or a deletion: a mirror stopped anywhere is begun again
 //! from the start, its pin taken over once stale, what it wrote kept. B's collector begins it
@@ -190,15 +193,15 @@ pub async fn mirror(
         return Ok(Mirrored::UnderWay);
     };
     failpoint!("mirror::pinned");
-    // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
-    let hold = layout::hold(parent, at, number);
-    bucket::create(bucket, &hold, layout::encode(&Reference::of(0))).await;
-    failpoint!("mirror::held");
-    let marker = layout::mirror(parent, at);
+    let (marker, hold) = (layout::mirror(parent, at), layout::hold(parent, at, number));
     let copied = match bucket::get(own, &marker).await {
-        // Marked already, by a mirror begun before: its copy whole.
+        // Marked already, by a mirror begun before: its copy whole, and the hold that mirror wrote
+        // standing until B's collector deletes it, with the marker (`mirrorHoldsUnmarked`). One
+        // written again here, after that collector listed the copy before this pin and deleted
+        // the holds, would stand for good.
         Some(_) => 0,
-        None => match copy(bucket, own, &mut pin, parent, at).await {
+        // Its hold in the parent's bucket, before it reads the head there (`mirrorHolds`).
+        None => match hold_then_copy(bucket, own, &mut pin, (parent, at), &hold).await {
             Ok(Copied::Whole { count, epoch }) if pin.refresh(own, true).await => {
                 bucket::create(own, &marker, layout::encode(&Mirror::of(epoch))).await;
                 failpoint!("mirror::marked");
@@ -222,17 +225,23 @@ pub async fn mirror(
             }
         },
     };
-    let moved = refer_here(bucket, own, number, parent, at).await;
+    let moved = refer_here(bucket, own, number, parent, at).await?;
     failpoint!("mirror::referred");
-    // The copy going since its marker was read, B's collector having deleted its hold before this
-    // one wrote it, and no child moved here, whose references would have it delete the hold
-    // again: the hold goes with it. A child moved, the hold keeps the version for it.
-    if moved == 0 && bucket::get(own, &marker).await.is_none() {
-        let_go(bucket, own, pin, &hold).await;
-    } else {
-        pin.release(own).await;
-    }
+    pin.release(own).await;
     Ok(Mirrored::Done { copied, moved })
+}
+
+/// Writes `hold`, then copies (`mirrorHolds`).
+async fn hold_then_copy(
+    bucket: &impl Bucket,
+    own: &impl Bucket,
+    pin: &mut Pin,
+    (parent, at): (CellId, u64),
+    hold: &str,
+) -> Result<Copied, Error> {
+    bucket::create(bucket, hold, layout::encode(&Reference::of(0))).await;
+    failpoint!("mirror::held");
+    copy(bucket, own, pin, parent, at).await
 }
 
 /// Gives a mirror up, its pin its own still, written again first: its hold deleted in the
@@ -342,15 +351,18 @@ async fn copy_one(bucket: &impl Bucket, own: &impl Bucket, key: &str) -> bool {
 }
 
 /// Moves the references of the children of this bucket, numbered `number`, to `parent`'s version
-/// at `at` from the parent's bucket to `own` (`mirrorListsAfterMark`): each written here, then
-/// retired there. How many.
+/// at `at` from the parent's bucket to `own` (`mirrorListsAfterMark`): each written here; then, the
+/// parent's head read again naming the version still (`mirrorRereadsBeforeRetiring`), retired
+/// there. A version dropped by then, they stay there too: B's collector, which reads the head
+/// before it lists the copy, may have listed it before they were written here, and goes on to
+/// delete it, its hold with it. How many it wrote here.
 async fn refer_here(
     bucket: &impl Bucket,
     own: &impl Bucket,
     number: u16,
     parent: CellId,
     at: u64,
-) -> usize {
+) -> Result<usize, Error> {
     let listed = bucket::list(bucket, &layout::origin(parent, at)).await;
     let mut moved = Vec::new();
     for meta in listed {
@@ -364,7 +376,14 @@ async fn refer_here(
     }
     // A crash with the references written here, still standing there (a test's).
     fail::fail_point!("mirror::moved");
-    let keys: Vec<&str> = moved.iter().map(String::as_str).collect();
-    lifecycle::retire(bucket, &keys).await;
-    moved.len()
+    if moved.is_empty() {
+        return Ok(0);
+    }
+    let head = head::get(bucket, parent).await?;
+    let named = head.as_ref().filter(|head| !head.deleted());
+    if named.is_some_and(|head| head.versions.iter().any(|version| version.at == at)) {
+        let keys: Vec<&str> = moved.iter().map(String::as_str).collect();
+        lifecycle::retire(bucket, &keys).await;
+    }
+    Ok(moved.len())
 }

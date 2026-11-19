@@ -1701,6 +1701,20 @@ pub(crate) mod tests {
             assert_eq!(two.refers(origin, child).await, (false, true, true));
             let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
             assert_eq!(again, Mirrored::Done { copied: 0, moved: 0 });
+            // Its hold deleted, as B's collector deletes it with the copy, the marker read before:
+            // a mirror begun again, finding the marker, writes none (`mirrorHoldsUnmarked`).
+            two.other.store_delete(&hold).await.unwrap();
+            let again = mirror(&*bucket, &*own, 1, parent, at).await.unwrap();
+            assert_eq!(again, Mirrored::Done { copied: 0, moved: 0 });
+            assert!(two.other.store_get(&hold).await.is_err(), "a hold written again");
+            two.other
+                .store_put(
+                    &hold,
+                    layout::encode(&layout::Reference::of(0)).into(),
+                    PutMode::Overwrite,
+                )
+                .await
+                .unwrap();
             let unnamed = at + 7;
             let dropped = mirror(&*bucket, &*own, 1, parent, unnamed).await.unwrap();
             assert_eq!(dropped, Mirrored::Unnamed);
@@ -2312,20 +2326,22 @@ pub(crate) mod tests {
         use crate::mirror::{Mirrored, PIN_STALE, mirror};
         use crate::testing::{VERSION, fork_version, read};
         use futures::executor::block_on;
-        // Each step, and whether the mirror was marked by then; none, the mirror done.
+        // Each step; whether the mirror was marked by then; and whether it retired the child's
+        // reference in the parent's bucket, before the version went: one begun again after,
+        // reading the head again, leaves it (`mirrorRereadsBeforeRetiring`). None, the mirror done.
         let steps = [
-            ("mirror::pinned", false),
-            ("mirror::held", false),
-            ("mirror::checked", false),
-            ("mirror::copying", false),
-            ("mirror::copied", false),
-            ("mirror::marked", true),
-            ("mirror::moved", true),
-            ("mirror::referred", true),
-            ("", true),
+            ("mirror::pinned", false, false),
+            ("mirror::held", false, false),
+            ("mirror::checked", false, false),
+            ("mirror::copying", false, false),
+            ("mirror::copied", false, false),
+            ("mirror::marked", true, false),
+            ("mirror::moved", true, false),
+            ("mirror::referred", true, true),
+            ("", true, true),
         ];
         let scenario = fail::FailScenario::setup();
-        for (step, marked) in steps {
+        for (step, marked, left) in steps {
             let dir = tempfile::tempdir().unwrap();
             let two = block_on(Two::new(dir.path()));
             let bucket = two.routed();
@@ -2372,12 +2388,13 @@ pub(crate) mod tests {
                 let held = two.other.store_get(&layout::hold(parent, at, 1)).await.is_ok();
                 assert_eq!(held, marked, "{step}: the hold");
                 let reference = two.refers(origin, child).await;
-                assert_eq!((reference.0, reference.1), (!marked, marked), "{step}: references");
+                assert_eq!((reference.0, reference.1), (!left, marked), "{step}: references");
                 assert!(two.home.store_get(&layout::pin(parent, at)).await.is_err(), "{step}");
             });
             let again = block_on(mirror(&*bucket, &*own, 1, parent, at)).unwrap();
+            // Its reference left there written here again, there still.
             let expected = match marked {
-                true => Mirrored::Done { copied: 0, moved: 0 },
+                true => Mirrored::Done { copied: 0, moved: usize::from(marked && !left) },
                 false => Mirrored::Unnamed,
             };
             assert_eq!(again, expected, "{step}: begun again");
