@@ -57,7 +57,7 @@ fn pace() -> Pace {
 /// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime its
 /// pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
 fn new_collector(options: Options) -> Collector {
-    Collector::new(options).kms(crate::bucket::kms().ok().map(|kms| kms.inner().clone()))
+    Collector::new(options).kmses(crate::bucket::kms().ok().map(|kms| kms.kmses().clone()))
 }
 
 /// The collectors of the buckets this process has images of open, by their URLs.

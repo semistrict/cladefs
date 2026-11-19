@@ -611,7 +611,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     let a = ExtentId::new(7, 1);
     written(&store, &uploader, a, &noise(1, 4096));
     // The host serves the other tenant too: its pool filled, as a store of its opening fills it.
-    kms.refill(OTHER);
+    kms.refill(CellId { tenant: OTHER, id: 1 });
     world.runtime.block_on(kms.filled(OTHER));
     world.runtime.block_on(kms.filled(TENANT));
     assert_eq!(kms.in_pool(OTHER), 4);
@@ -719,7 +719,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     let forker = world.pooled_host(7);
     let kms = forker.runtime.keys.kms.clone();
     let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
-    kms.refill(OTHER);
+    kms.refill(CellId { tenant: OTHER, id: 1 });
     world.runtime.block_on(kms.filled(OTHER));
     kms.revoked(TENANT, "tenant 1: its KEK is revoked");
     let clone = child_in(OTHER, 10);
@@ -737,7 +737,7 @@ fn versions_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refuse
     world.kms.reset();
     let (copy, version_uploader) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
     assert_eq!(world.calls(), (0, 1));
-    kms.refill(OTHER);
+    kms.refill(CellId { tenant: OTHER, id: 1 });
     world.runtime.block_on(kms.filled(OTHER));
     world.kms.reset();
     forked((&world, &forker), &copy, &version_uploader, clone).unwrap();
@@ -772,7 +772,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let kms = host.runtime.keys.kms.clone();
     let (store, uploader) = open_on(&world, &host, &made(test_cell(7))).unwrap();
     written(&store, &uploader, ExtentId::new(7, 1), &noise(1, 4096));
-    kms.refill(OTHER);
+    kms.refill(CellId { tenant: OTHER, id: 1 });
     world.runtime.block_on(kms.filled(OTHER));
     assert_eq!(kms.in_pool(OTHER), 4);
 
@@ -803,7 +803,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let refused = forked((&world, &host), &store, &uploader, last).unwrap_err();
     let destroyed = bucket_cell::Error::Kms("tenant 2: its KEK is destroyed".into());
     assert_eq!(refused, Failure::Bucket(destroyed.clone()));
-    assert_eq!(kms.refuses(OTHER), Some(destroyed));
+    assert_eq!(kms.refuses(CellId { tenant: OTHER, id: 1 }), Some(destroyed));
     assert_eq!(world.head_of(last.cell), None);
 }
 
@@ -1468,7 +1468,7 @@ fn shredded_tenants_leave_none_of_their_cells_readable_on_any_host() {
         assert_eq!(host.runtime.keys.forget(keys::Scope::Tenant(TENANT), why), 1);
         host.memory.forget_kept(keys::Scope::Tenant(TENANT));
         let kms = &host.runtime.keys.kms;
-        assert_eq!(kms.refuses(TENANT), Some(bucket_cell::Error::Kms(why.into())));
+        assert_eq!(kms.refuses(CELL), Some(bucket_cell::Error::Kms(why.into())));
         assert_eq!(kms.in_pool(TENANT), 0);
     }
     // Host 5's fetchers keep the fork's ring, which holds the DEK it inherited of cell 7.

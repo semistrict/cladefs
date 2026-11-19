@@ -1247,7 +1247,7 @@ impl<D: Dir, B: bucket_cell::Bucket> Shared<D, B> {
         };
         // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
         // its stores into new cells take, filled off this path (TASK-411.4).
-        kms.refill(cell.tenant);
+        kms.refill(cell);
         let keys = keys::ring(&**bucket, &cell_keys, cell, &held.head, true).await?;
         let writer = Writer::holding(bucket.clone(), cell, held, before, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));

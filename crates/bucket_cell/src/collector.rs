@@ -285,7 +285,7 @@ pub struct Collector {
     /// (TASK-411.6): each pass by a [`keys::CachingKms`] of its own, so that nothing unwrapped
     /// outlives the pass, and a tenant's KEK revoked stops the next. None: they compact only what
     /// is in the clear.
-    kms: Option<kms::Shared>,
+    kms: Option<Arc<dyn keys::Kmses>>,
     /// cladefs: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
     /// its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
     /// [`Collector::collect`] (TASK-411.13).
@@ -304,7 +304,7 @@ pub struct Collector {
 /// Without a KMS, none is: the cell is skipped, asking nothing.
 #[derive(Default)]
 pub struct Heard {
-    asked: std::sync::Mutex<BTreeMap<u64, Shared<BoxFuture<'static, bool>>>>,
+    asked: std::sync::Mutex<BTreeMap<(u16, u64), Shared<BoxFuture<'static, bool>>>>,
 }
 
 impl Heard {
@@ -312,15 +312,20 @@ impl Heard {
         Arc::default()
     }
 
-    /// Whether `tenant`'s KEK is to be had, as `kms` says, asked once.
-    async fn to_be_had(&self, kms: Option<&kms::Shared>, tenant: u64) -> bool {
-        let Some(kms) = kms else { return false };
-        let asking = (self.asked.lock().unwrap().entry(tenant))
+    /// Whether the KEK of `cell`'s tenant is to be had, as the KMS of its bucket of `kmses` says,
+    /// asked once a bucket's tenant (TASK-633.6): no KMS to be had for the bucket, it is not.
+    async fn to_be_had(&self, kmses: Option<&Arc<dyn keys::Kmses>>, cell: CellId) -> bool {
+        let Some(kmses) = kmses else { return false };
+        let (bucket, tenant) = (crate::objectid::bucket_of(cell.id), cell.tenant);
+        let asking = (self.asked.lock().unwrap().entry((bucket, tenant)))
             .or_insert_with(|| {
-                let kms = kms.clone();
-                async move { kms.wrap_dyn(tenant, &Secret::random()).await.is_ok() }
-                    .boxed()
-                    .shared()
+                let kmses = kmses.clone();
+                async move {
+                    let Ok((_, kms)) = kmses.of(bucket).await else { return false };
+                    kms.wrap_dyn(tenant, &Secret::random()).await.is_ok()
+                }
+                .boxed()
+                .shared()
             })
             .clone();
         asking.await
@@ -350,6 +355,11 @@ impl Collector {
     /// object encrypted, once for all of them; marking, dry runs and passes compacting nothing
     /// encrypted ask it nothing.
     pub fn kms(self, kms: Option<kms::Shared>) -> Self {
+        self.kmses(kms.map(|kms| Arc::new(keys::OneKms(kms)) as Arc<dyn keys::Kmses>))
+    }
+
+    /// cladefs: the same, through `kmses`, the KMS of each bucket's cells (TASK-633.6).
+    pub fn kmses(self, kms: Option<Arc<dyn keys::Kmses>>) -> Self {
         Self { kms, ..self }
     }
 
@@ -465,7 +475,7 @@ impl Collector {
             return Ok(Looked::Changed(listed, epoch));
         }
         let uncompacted = passed.uncompacted as usize;
-        if uncompacted > 0 && heard.to_be_had(self.kms.as_ref(), cell.tenant).await {
+        if uncompacted > 0 && heard.to_be_had(self.kms.as_ref(), cell).await {
             return Ok(Looked::Changed(listed, epoch));
         }
         let locked = usize::from(uncompacted > 0);
@@ -487,7 +497,7 @@ impl Collector {
     ) -> Result<(Report, Option<Passed>), Error> {
         if let Some(listed) = &listed
             && let Some(passed) = recorded.filter(|passed| passed.holds_for(listed, &self.options))
-            && (passed.uncompacted == 0 || !heard.to_be_had(self.kms.as_ref(), cell.tenant).await)
+            && (passed.uncompacted == 0 || !heard.to_be_had(self.kms.as_ref(), cell).await)
         {
             return self.skip(bucket, cell, taken, passed, listed).await;
         }
@@ -1760,7 +1770,7 @@ impl Pass {
         bucket: &impl Bucket,
         options: &Options,
         trailers: &mut Trailers,
-        kms: Option<&kms::Shared>,
+        kms: Option<&Arc<dyn keys::Kmses>>,
         report: &mut Report,
     ) -> Result<Vec<(String, u64)>, Error> {
         let mut compactable = self.compactable(bucket, options, trailers).await?;
@@ -1792,7 +1802,7 @@ impl Pass {
     /// uncompacted, counted in `report` and warned of, and the pass goes on marking and deleting.
     async fn compacting(
         &self,
-        kms: Option<&kms::Shared>,
+        kms: Option<&Arc<dyn keys::Kmses>>,
         compactable: &mut Vec<Compactable<'_>>,
         report: &mut Report,
     ) -> Result<Arc<Ring>, Error> {
@@ -1806,7 +1816,7 @@ impl Pass {
             }
             (Some(_), None) => Ok(Ring::keyless()),
             (Some(kms), Some(head)) => {
-                let keys = CellKeys::of(cell, head, keys::CachingKms::new(kms.clone()));
+                let keys = CellKeys::of(cell, head, keys::CachingKms::over(kms.clone(), None));
                 keys::compacting(cell, head, &keys).await
             }
         };
@@ -5414,15 +5424,15 @@ mod tests {
         local.create(2).unwrap();
         local.revoke(2).unwrap();
         let counted = Arc::new(Counted::new(local));
-        let kms: kms::Shared = counted.clone();
+        let kmses: Arc<dyn keys::Kmses> = Arc::new(keys::OneKms(counted.clone()));
         let heard = Heard::new();
-        let asked = |tenant| block_on(heard.to_be_had(Some(&kms), tenant));
+        let asked = |tenant| block_on(heard.to_be_had(Some(&kmses), CellId { tenant, id: 1 }));
         assert_eq!(
             [asked(1), asked(1), asked(2), asked(2), asked(3)],
             [true, true, false, false, false]
         );
         assert_eq!((counted.wraps(), counted.unwraps()), (3, 0));
-        assert!(!block_on(Heard::new().to_be_had(None, 1)));
+        assert!(!block_on(Heard::new().to_be_had(None, CellId { tenant: 1, id: 1 })));
         assert_eq!(counted.wraps(), 3);
     }
 
