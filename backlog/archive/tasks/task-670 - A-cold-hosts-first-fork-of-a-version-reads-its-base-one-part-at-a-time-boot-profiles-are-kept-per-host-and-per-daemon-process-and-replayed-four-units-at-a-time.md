@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-19 19:28'
+updated_date: '2026-11-20 19:47'
 labels:
   - performance
   - sandbox
@@ -36,3 +37,9 @@ fxfs-guest-python-sandbox (TASK-665, docs/measurements/ubu1-python-sandbox-2026-
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Superseded 2026-11-20 by TASK-702 (round 11): the prediction of a version's reads is built from recent evidence objects written once beside the version (TASK-702.2) and prefetched into the part cache at open (TASK-702.3), not one profile written once and kept forever. Archived.
+<!-- SECTION:NOTES:END -->

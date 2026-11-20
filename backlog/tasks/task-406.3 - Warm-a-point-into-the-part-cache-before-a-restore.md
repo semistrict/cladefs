@@ -4,6 +4,7 @@ title: Warm a point into the part cache before a restore
 status: To Do
 assignee: []
 created_date: '2026-11-14 12:17'
+updated_date: '2026-11-20 19:47'
 labels:
   - sandbox
   - cache
@@ -31,3 +32,9 @@ The sandbox team asks, for later, once memory snapshots exist: a control call th
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-702.3 (2026-11-20) prefetches a version's predicted reads into the part cache at open, which covers the cold-restore case this asks for if the restore's cells have evidence.
+<!-- SECTION:NOTES:END -->
